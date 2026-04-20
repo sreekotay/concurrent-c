@@ -79,19 +79,6 @@ typedef struct CCUdpPacket {
     CCSlice from_addr;
 } CCUdpPacket;
 
-#ifdef CC_PARSER_MODE
-/* Parser-mode UFCS stubs for raw socket/listener method syntax before lowering. */
-static void create_signal();
-static CCSlice read();
-static size_t read_into();
-static size_t try_read_into();
-static size_t write();
-static void shutdown();
-static void close();
-static CCSlice peer_addr();
-static CCSlice local_addr();
-static CCSocket accept();
-#endif
 
 /* IP address (v4 or v6) */
 typedef struct CCIpAddr {
@@ -222,13 +209,7 @@ CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
-    (void)cc_type_register("CCSocket", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
     (void)cc_type_register("CCSocket*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-    (void)cc_type_register("CCListener", (CCTypeHooks){
         .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCListener*", (CCTypeHooks){

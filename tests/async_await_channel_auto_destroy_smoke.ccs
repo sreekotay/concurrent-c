@@ -1,15 +1,16 @@
 /*
- * Recipe: Async/Await with Channels
+ * Smoke: @await + channel auto-destroy
  *
- *   @async functions can suspend with await.
- *   @await can drive an async function even from synchronous code (like main).
- *   Channel operations (send/recv) are suspension points inside @async.
+ *   - @async fn suspends on channel send/recv.
+ *   - @await runs it from synchronous main (lowered to cc_block_on).
+ *   - `CCChan* ch = cc_channel_pair(&tx, &rx) !>(e) { ... } @destroy;`
+ *     relies on the builtin-owned destroy action registered for CCChan*
+ *     (cc_channel_free) to free the channel at scope exit.
  */
 
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-/* Simple async function that sends a value and waits for it back */
 @async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
     if (await tx.send(value) != 0)
         return -1;
@@ -22,15 +23,12 @@
 }
 
 int main(void) {
-    /* Create a small 1-slot buffered channel */
     int[~1 >] tx;
     int[~1 <] rx;
-    /* CCChan* is a builtin-owned type: @destroy auto-calls cc_channel_free(ch). */
     CCChan* ch = cc_channel_pair(&tx, &rx)
         !>(e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
         @destroy;
 
-    /* Call the async function from synchronous main using @await */
     int result = @await echo_through_channel(tx, rx, 42);
 
     printf("echo result: %d (expected 42)\n", result);

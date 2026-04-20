@@ -1,100 +1,81 @@
 /*
  * Recipe: Ordered Parallel Processing
  *
- * Demonstrates:
- *   - Processing items in parallel while preserving output order
- *   - Using task handles through a channel (spawn → send handle → await in order)
- *   - No reorder buffer needed - FIFO await gives natural ordering
+ * Work completes out of order; output must come out in order.
  *
- * Pattern:
- *   1. Reader spawns a task for each item, sends task HANDLE (not result)
- *   2. Writer receives handles in order, awaits each → results come out ordered
+ *   producer: for each item → spawn task → send the HANDLE on tasks_ch
+ *   consumer: recv handles in order → await each → FIFO naturally
  *
- * Key insight: The channel carries task handles, not results. Since we send
- * handles in input order and await them in FIFO order, outputs are ordered
- * even though work completes out-of-order.
+ * The channel carries task handles, not results. Sending handles in
+ * input order and awaiting them in FIFO order yields ordered output
+ * without any reorder buffer, even though tasks finish out of order.
  */
-#include <ccc/cc_nursery.cch>
-#include <ccc/cc_runtime.cch>
-#include <ccc/cc_sched.cch>
-#include <ccc/std/task.cch>
-#include <stdio.h>
-#include <stdlib.h>
+#include <ccc/std/prelude.cch>
 #include <unistd.h>
 
 #define NUM_ITEMS 8
-#define CHAN_CAP 4
+#define CHAN_CAP  4
 
 typedef struct {
     int id;
     int result;
 } Item;
 
-/* Simulate variable-time work (items complete out of order). */
+/* Simulate variable-time work: odd ids take longer. */
 void* process_item(void* arg) {
     Item* item = (Item*)arg;
-    
-    /* Odd items take longer - simulates out-of-order completion. */
     int delay_us = (item->id % 2 == 1) ? 50000 : 10000;
     usleep(delay_us);
-    
-    item->result = item->id * item->id;  /* Square the ID */
-    printf("  [worker] completed item %d (delay=%dms)\n", item->id, delay_us/1000);
+    item->result = item->id * item->id;
+    printf("  [worker] completed item %d (delay=%dms)\n", item->id, delay_us / 1000);
     return item;
 }
 
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
     CCTask[~CHAN_CAP >] tasks_tx;
     CCTask[~CHAN_CAP <] tasks_rx;
-    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx);
-    if (!tasks_ch) {
-        return 1;
-    }
+
+    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx) !> @destroy;
 
     printf("=== Ordered Parallel Processing ===\n");
     printf("Processing %d items with variable delays...\n\n", NUM_ITEMS);
 
     {
-        CCNursery* consumer = @create(NULL, () => [tasks_rx] {
+        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+
+        consumer->spawn(() => [tasks_rx] {
             printf("\n[consumer] receiving results in order:\n");
             CCTask task;
-            while (cc_io_avail(chan_recv(tasks_rx, &task))) {
-                /* cc_block_on_intptr waits for completion and returns result */
+            while (cc_io_avail(tasks_rx.recv(&task))) {
+                /* cc_block_on_intptr: wait for task completion, return its result. */
                 void* result = (void*)cc_block_on_intptr(task);
-                
                 Item* item = (Item*)result;
                 printf("[consumer] item %d: %d^2 = %d\n",
                        item->id, item->id, item->result);
                 free(item);
             }
-        }) @destroy;
-        if (!consumer) {
-            cc_chan_free(tasks_ch);
-            return 1;
-        }
-
-        CCNursery* producer = @create(consumer) @destroy {
-            chan_close(tasks_tx);
-        };
-        if (!producer) {
-            chan_close(tasks_tx);
-            cc_chan_free(tasks_ch);
-            return 1;
-        }
-
-        producer->spawn(() => [tasks_tx] {
-            for (int i = 1; i <= NUM_ITEMS; i++) {
-                Item* item = malloc(sizeof(Item));
-                item->id = i;
-                
-                CCTask task = cc_thread_spawn(process_item, item);
-                (void)chan_send(tasks_tx, task);
-                printf("[producer] spawned task for item %d\n", i);
-            }
         });
+
+        /* Producer in an inner nursery: its @destroy closes tasks_tx once
+         * producer returns, so the consumer sees EOF and drains. */
+        {
+            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
+            (void)producer->close_on(tasks_tx);
+
+            producer->spawn(() => [tasks_tx] {
+                for (int i = 1; i <= NUM_ITEMS; i++) {
+                    Item* item = malloc(sizeof(Item));
+                    item->id = i;
+                    CCTask task = cc_thread_spawn(process_item, item);
+                    (void)tasks_tx.send(task);
+                    printf("[producer] spawned task for item %d\n", i);
+                }
+            });
+        }
     }
 
-    cc_chan_free(tasks_ch);
     printf("\nDone! Results printed in order despite out-of-order completion.\n");
     return 0;
 }

@@ -1,31 +1,52 @@
 /*
- * Recipe: Timeout / Deadline
+ * Recipe: Deadlines with @with_deadline
  *
- * Demonstrates:
- *   - @with_deadline(duration) { } sets a deadline on a scope
- *   - Duration helpers: seconds(n), millis(n), micros(n)
- *   - cc_deadline_expired() checks if time limit passed
- *   - Tasks exit gracefully when deadline expires
+ * @with_deadline(duration) { ... } establishes a deadline for the block.
+ * Every suspension point (await, cancellation-aware op) inside the scope
+ * observes the deadline cooperatively.
  *
- * Key insight: cc_is_cancelled() checks explicit cancellation,
- * cc_deadline_expired() checks if deadline time passed.
- * For time-based exits, use cc_deadline_expired().
+ * Two forms:
+ *
+ *   @with_deadline(d) { ... }
+ *       Sets an ambient deadline. Tasks use cancellation-aware ops (or
+ *       cc_deadline_expired(cc_current_deadline())) to exit gracefully.
+ *
+ *   @with_deadline(d) as dl { ... }
+ *       Same, but binds CCDeadline* dl for direct inspection in the block
+ *       (remaining time, explicit expiry checks, logging, etc.).
+ *
+ * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
+ *
+ * See spec §8.5.9 for complete semantics.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-int work_completed = 0;
-
 int main(void) {
-    /* Worker does work until deadline expires */
+    /* --- form 1: ambient deadline, polled via cc_current_deadline() --- */
+    int work_done = 0;
     @with_deadline(millis(50)) {
-        CCDeadline* dl = cc_current_deadline();
-        while (!cc_deadline_expired(dl)) {
-            work_completed++;
-            cc_sleep_ms(10);  /* simulate work */
+        while (!cc_deadline_expired(cc_current_deadline())) {
+            work_done++;
+            cc_sleep_ms(10);
         }
     }
-    printf("deadline expired after %d iterations\n", work_completed);
+    printf("form 1: %d iterations before deadline\n", work_done);
 
-    return (work_completed >= 1 && work_completed <= 10) ? 0 : 1;
+    /* --- form 2: `as dl` binds a handle for inspection --- */
+    int checkpoints = 0;
+    @with_deadline(millis(50)) as dl {
+        while (!cc_deadline_expired(dl)) {
+            checkpoints++;
+            cc_sleep_ms(10);
+        }
+    }
+    printf("form 2: %d checkpoints against handle\n", checkpoints);
+
+    /* Both forms exit cleanly when the deadline expires; the scope's
+     * pushed deadline is popped automatically on block exit. */
+
+    int ok = (work_done  >= 1 && work_done  <= 10)
+          && (checkpoints >= 1 && checkpoints <= 10);
+    return ok ? 0 : 1;
 }

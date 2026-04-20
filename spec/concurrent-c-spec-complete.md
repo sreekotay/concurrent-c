@@ -390,30 +390,30 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 ### Block Forms (1)
 
 
-| Form                   | Purpose                         | Example                                     |
-| ---------------------- | ------------------------------- | ------------------------------------------- |
-| `with_deadline(d) { }` | Apply timeout/deadline to block | `with_deadline(seconds(5)) { await op(); }` |
+| Form                              | Purpose                                                  | Example                                                         |
+| --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| `@with_deadline(d) { }`           | Apply deadline to block; `await` inside is cancel-aware. | `@with_deadline(seconds(5)) { await op(); }`                    |
+| `@with_deadline(d) as handle { }` | Same, with inspectable `CCDeadline` handle inside block. | `@with_deadline(seconds(5)) as dl { if (dl.remaining() < …) …}` |
 
 
-### Library Functions (6)
+### Library Functions
 
-These are normal functions in `concurrent_c.h` with `cc`_ prefix to avoid naming conflicts:
+These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming conflicts:
 
 
-| Function                     | Purpose                                  | Example                                   |
-| ---------------------------- | ---------------------------------------- | ----------------------------------------- |
-| `cc_ok(value)`               | Construct T!>(E) success (inferred)      | `return cc_ok(42);`                       |
-| `cc_err(error)`              | Construct T!>(E) error (inferred)        | `return cc_err(MyError_NotFound);`        |
-| `cc_ok(void)`                | Construct void!>(E) success (inferred)   | `return cc_ok(void);`                     |
-| `cc_err(CC_ERR_*, "msg")`    | CCError shorthand                        | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
-| `cc_ok(T, value)`            | T!>(CCError) success (explicit)          | `return cc_ok(int, 42);`                  |
-| `cc_ok(T, E, value)`         | T!>(E) success (explicit)                | `return cc_ok(int, MyError, 42);`         |
-| `cc_err(T, error)`           | T!>(CCError) error (explicit)            | `return cc_err(int, CC_ERROR(...));`      |
-| `cc_err(T, E, error)`        | T!>(E) error (explicit)                  | `return cc_err(int, MyError, err);`       |
-| `cc_move(x)`                 | Explicit move of move-only value         | `ch.send_take(arr, cc_move(arr));`        |
-| `cc_cancel()`                | Cancel current task or nursery           | `if (timeout) cc_cancel();`               |
-| `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }`       |
-| `cc_is_cancelled()`          | Check if current task is cancelled       | `if (cc_is_cancelled()) return;`          |
+| Function                  | Purpose                                | Example                                   |
+| ------------------------- | -------------------------------------- | ----------------------------------------- |
+| `cc_ok(value)`            | Construct T!>(E) success (inferred)    | `return cc_ok(42);`                       |
+| `cc_err(error)`           | Construct T!>(E) error (inferred)      | `return cc_err(MyError_NotFound);`        |
+| `cc_ok(void)`             | Construct void!>(E) success (inferred) | `return cc_ok(void);`                     |
+| `cc_err(CC_ERR_*, "msg")` | CCError shorthand                      | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
+| `cc_ok(T, value)`         | T!>(CCError) success (explicit)        | `return cc_ok(int, 42);`                  |
+| `cc_ok(T, E, value)`      | T!>(E) success (explicit)              | `return cc_ok(int, MyError, 42);`         |
+| `cc_err(T, error)`        | T!>(CCError) error (explicit)          | `return cc_err(int, CC_ERROR(...));`      |
+| `cc_err(T, E, error)`     | T!>(E) error (explicit)                | `return cc_err(int, MyError, err);`       |
+| `cc_move(x)`              | Explicit move of move-only value       | `ch.send_take(arr, cc_move(arr));`        |
+| `cc_cancel()`             | Cancel current task or nursery         | `if (timeout) cc_cancel();`               |
+| `cc_is_cancelled()`       | Check if current task is cancelled     | `if (cc_is_cancelled()) return;`          |
 
 
 ### Result Methods (UFCS)
@@ -1215,7 +1215,7 @@ A **suspension point** is any program point at which execution of the current ta
 
 #### 4.2.2 Cancellation Observation at Suspension Points (Normative)
 
-When a suspension point is executed inside an active `with_deadline(...)` scope, the suspension point MUST be treated as **cancellation-aware**.
+When a suspension point is executed inside an active `@with_deadline(...)` scope, the suspension point MUST be treated as **cancellation-aware**.
 
 **Rule:**
 
@@ -1328,7 +1328,7 @@ All suspension points (both `await` and `@async` function calls) are implicitly 
 
 ```c
 @async void handler(Duration timeout) {
-    with_deadline(timeout) {
+    @with_deadline(timeout) {
         await fetch_data();    // ✅ Suspension point: cancellation-aware
         result = compute();    // Non-suspension: safe, CPU work only
         spawn (worker());        // ✅ If worker is @async: suspension point, cancellation-aware
@@ -3098,7 +3098,7 @@ If any child returns an error or panics:
 2. The nursery's `@destroy` blocks until every child has terminated (including cancellation observation and cleanup).
 3. `@destroy` forwards the error through the error-handling context established at construction (either the enclosing `@errhandler` or an explicit `!>` consumer on the `@destroy` clause).
 
-Cancellation is cooperative. Children observe cancellation via `cc_is_cancelled()` or by using cancellation-aware operation variants (§8.5). Cancellation observation is defined in §4.2.2 and may be deferred by `with_shield` regions (§8.5.10).
+Cancellation is cooperative. Children observe cancellation via `cc_is_cancelled()` or by using cancellation-aware operation variants (§8.5). Cancellation observation is defined in §4.2.2 and may be deferred by `@with_shield` regions (§8.5.10).
 
 ```c
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -3798,7 +3798,7 @@ Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get impl
 
 For operations **outside `@match`** (single await, channel recv/send, sleep), use explicit cancellation-aware variants.
 
-**Guidance:** Inside an active `with_deadline(...)` scope, suspension points are already cancellation-aware per **§4.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
+**Guidance:** Inside an active `@with_deadline(...)` scope, suspension points are already cancellation-aware per **§4.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
 
 ```c
 // Channels
@@ -3872,11 +3872,11 @@ This is still supported but should be rare—most code uses `@match` or variants
   - `recv_cancellable()` / `send_cancellable()` (immediate)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
-- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `with_shield`, **§8.5.10**).
+- Outside an active `@with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `@with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `@with_shield`, **§8.5.10**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
-**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
+**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `@with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
 
 ---
 
@@ -4034,30 +4034,31 @@ Duration deadline_remaining(Deadline d);
     Deadline deadline = deadline_after(seconds(5));
     
     // Wrap deadline-sensitive operations
-    with_deadline(deadline) {
+    @with_deadline(deadline) {
         char[:] parsed = parse(req.body);
         DbResult result = try await db_query(parsed);
         Response resp = build_response(result, req_arena);
         try await send_response(req.fd, &resp);
     }
-    // On deadline exceeded: with_deadline propagates cancellation
+    // On deadline exceeded: @with_deadline propagates cancellation
 }
 
 // Or on individual operations:
 // (Optional) A standard-library helper MAY provide per-operation timeout sugar,
 // but it is not part of the core language surface. The canonical form is
-// `with_deadline(...) { ... }` around the relevant region.
+// `@with_deadline(...) { ... }` around the relevant region.
 ```
 
 **Semantics:**
 
-- `with_deadline(d) { ... }` executes the block; if deadline exceeded, propagates cancellation
-- Deadline exceeded triggers same cancellation mechanism as explicit cancellation
-- Cancellation is **cooperative** (tasks exit at awaitable points)
+- `@with_deadline(d) { ... }` executes the block; if deadline exceeded, propagates cancellation.
+- `@with_deadline(d) as handle { ... }` is the same form with an inspectable `CCDeadline` handle bound in the block (mirrors `@lock (m) as g`). Use when code inside the block wants to query `handle.remaining()`, `handle.expired()`, etc.
+- Deadline exceeded triggers same cancellation mechanism as explicit cancellation.
+- Cancellation is **cooperative** (tasks exit at awaitable points).
 
 **Deadline propagation (clarification):**
 
-- A `with_deadline(d)` scope establishes a deadline that applies to all **descendant tasks created within the scope**.
+- A `@with_deadline(d)` scope establishes a deadline that applies to all **descendant tasks created within the scope**.
 - If the deadline expires, cancellation is requested for all tasks within the scope (and descendants).
 - Cancellation is observed according to **§4.2.2** (and may be deferred by shielded regions; see **§8.5.10**).
 
@@ -4070,32 +4071,32 @@ Duration deadline_remaining(Deadline d);
 
 ---
 
-### 8.5.10 Shielded Regions (`with_shield`)
+### 8.5.10 Shielded Regions (`@with_shield`)
 
 A **shielded region** temporarily suppresses observation of cancellation originating from enclosing deadline scopes for the duration of the region.
 
 **Syntax:**
 
 ```c
-with_shield {
+@with_shield {
     /* statements */
 }
 ```
 
 **Semantics:**
 
-- While executing inside a `with_shield` region, suspension points MUST NOT observe cancellation requested by enclosing `with_deadline(...)` scopes.
+- While executing inside a `@with_shield` region, suspension points MUST NOT observe cancellation requested by enclosing `@with_deadline(...)` scopes.
 - Explicit cancellation requests originating inside the shielded region (e.g., calling `cc_cancel()` from within the region) MUST still be observable.
 
 **Exit rule:**
 
-- Upon exiting a `with_shield` region, if cancellation has been requested, the next suspension point MUST observe it immediately (per **§4.2.2**).
+- Upon exiting a `@with_shield` region, if cancellation has been requested, the next suspension point MUST observe it immediately (per **§4.2.2**).
 
 **Constraints:**
 
 - Shielded regions MUST NOT be unbounded.
 - Shielded regions are intended for short, bounded cleanup operations (e.g., protocol shutdown, flushing buffers).
-- Long-running or unbounded loops inside `with_shield` are ill-formed and SHOULD be rejected by static analysis.
+- Long-running or unbounded loops inside `@with_shield` are ill-formed and SHOULD be rejected by static analysis.
 
 ---
 
@@ -4131,7 +4132,7 @@ If an API is `@cancel_unsafe`, its documentation MUST specify:
 
 **Lint rule (recommended):**
 
-Tooling SHOULD warn/error when a `@cancel_unsafe` operation is awaited inside an active `with_deadline(...)` scope unless it is awaited within a `with_shield { ... }` region (or the API’s documented recovery action is performed on cancellation).
+Tooling SHOULD warn/error when a `@cancel_unsafe` operation is awaited inside an active `@with_deadline(...)` scope unless it is awaited within a `@with_shield { ... }` region (or the API’s documented recovery action is performed on cancellation).
 
 ### 8.6 Streaming
 
@@ -6912,7 +6913,7 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 
 - Accept connections
 - Create per-request arena
-- Apply deadline (via `with_deadline`)
+- Apply deadline (via `@with_deadline`)
 - Spawn N workers (nursery)
 - Graceful shutdown
 
@@ -6933,7 +6934,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 ```c
 @async void!>(IoError) handle_conn(Duplex* conn, Arena* conn_arena) {
     // 1) Handshake (short deadline)
-    with_deadline(deadline_after(seconds(3))) {
+    @with_deadline(deadline_after(seconds(3))) {
         try await protocol_handshake(conn, conn_arena);
     }
 
@@ -6944,7 +6945,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
     serve->spawn(() => writer_task(conn, conn_arena));
 
     // 3) Teardown (bounded, shielded)
-    with_shield {
+    @with_shield {
         try await protocol_close(conn);              // best-effort protocol close
         try await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
     }
@@ -6968,13 +6969,13 @@ This avoids “both sides race to close” bugs and makes shutdown reviewable.
 
 ### Pattern 6: Deadline Layering for Long-Lived Connections
 
-**Strong recommendation:** Avoid wrapping an entire long-lived serve loop in one large `with_deadline(...)` unless you are intentionally enforcing an end-to-end SLA.
+**Strong recommendation:** Avoid wrapping an entire long-lived serve loop in one large `@with_deadline(...)` unless you are intentionally enforcing an end-to-end SLA.
 
 Prefer layered deadlines:
 
-- **Handshake deadlines:** short `with_deadline` around negotiation (TLS/WS upgrade/initial headers)
+- **Handshake deadlines:** short `@with_deadline` around negotiation (TLS/WS upgrade/initial headers)
 - **Idle/heartbeat deadlines:** renewed on activity (timer task + cancellation, or per-iteration short deadline)
-- **Teardown deadlines:** short, bounded shutdown/drain inside `with_shield`
+- **Teardown deadlines:** short, bounded shutdown/drain inside `@with_shield`
 
 This keeps deadlines precise and prevents “everything is always under a deadline” from becoming the default mental model.
 
@@ -6996,8 +6997,8 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `defer`              | Defer cleanup                              | Guarantee execution         |
 | `await`              | Suspend on async                           | Call @async functions       |
 | `CCNursery`          | Structured concurrency                     | Scope with tasks            |
-| `with_deadline`      | Apply timeout                              | Enforce deadline            |
-| `with_shield`        | Suppress deadline cancellation observation | Bounded teardown/cleanup    |
+| `@with_deadline`      | Apply timeout                              | Enforce deadline            |
+| `@with_shield`        | Suppress deadline cancellation observation | Bounded teardown/cleanup    |
 
 
 ### Type Sugar
@@ -7077,7 +7078,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 
 ```c
 @async void!>(IoError) connection_handler(Duplex* conn, Arena* conn_arena) {
-    with_deadline(deadline_after(seconds(30))) {
+    @with_deadline(deadline_after(seconds(30))) {
         while (true) {
             char[:] msg = try await conn.read(conn_arena);
             if (msg.len == 0) break;       // EOF
@@ -7087,9 +7088,9 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 }
 ```
 
-**Current behavior (§8.5, §4.2):** Inside an active `with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
+**Current behavior (§8.5, §4.2):** Inside an active `@with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
 
-**Possible direction:** Inside an active `with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
+**Possible direction:** Inside an active `@with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
 
 **Motivation:**
 
@@ -7293,15 +7294,15 @@ Task_T fn(Args... args) {
 
 ### J.2 Cancellation Check Lowering (Cheap & Optimizable)
 
-**Normative rule:** Inside an active `with_deadline()` scope, all suspension points must check for cancellation before and after suspension. Checks must be cheap (single branch).
+**Normative rule:** Inside an active `@with_deadline()` scope, all suspension points must check for cancellation before and after suspension. Checks must be cheap (single branch).
 
 For full deadline semantics and cancellation behavior, see **language spec §8.5 (Cancellation & Deadline)**. This section describes how the compiler lowers these semantics to portable C using single-branch checks.
 
 **Lowering:**
 
 ```c
-// with_deadline pushes a cancel token into scope context
-with_deadline(deadline_after(seconds(5))) {
+// @with_deadline pushes a cancel token into scope context
+@with_deadline(deadline_after(seconds(5))) {
     // Token is now active; compiler pushes pointer to token into frame context
     
     while (try await conn.read(...)) {

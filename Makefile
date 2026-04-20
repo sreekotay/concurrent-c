@@ -86,8 +86,33 @@ tools:
 	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
-test: cc tools
+test: cc tools out-of-tree-smoke
 	@./tools/cc_test
+
+# Smoke: verify `ccc` can compile a source file that lives outside the repo
+# tree.  Regression guard for `cc_path_find_repo_root` -> header include
+# path resolution.  Without this, `!>` on pointer-returning runtime funcs
+# (e.g. `cc_nursery_create`) silently falls back to Result-style lowering
+# because the function isn't registered as pointer-returning.
+out-of-tree-smoke: cc
+	@tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	cp tests/unwrap_destroy_closure_smoke.ccs "$$tmpdir/out_of_tree.ccs"; \
+	expected=$$(cat tests/unwrap_destroy_closure_smoke.stdout); \
+	actual=$$($(CC_DIR)/bin/ccc run "$$tmpdir/out_of_tree.ccs" 2>&1); \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "FAIL out-of-tree-smoke: ccc run exited $$status"; \
+		echo "----- output -----"; echo "$$actual"; \
+		exit 1; \
+	fi; \
+	if [ "$$actual" != "$$expected" ]; then \
+		echo "FAIL out-of-tree-smoke: stdout mismatch"; \
+		echo "--- expected ---"; echo "$$expected"; \
+		echo "--- actual -----"; echo "$$actual"; \
+		exit 1; \
+	fi; \
+	echo "OK out-of-tree-smoke"
 
 # Verify all examples compile (CI smoke test for example rot).
 examples-check: cc

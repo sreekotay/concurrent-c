@@ -1,60 +1,53 @@
 /*
- * Recipe: Fan-Out with Capture
+ * Recipe: Fan-Out with Per-Task Capture
  *
- * Demonstrates:
- *   - Spawning N tasks with different captured data
- *   - Value capture pattern: copy loop var before spawning
- *   - Aggregating results (using result array, one slot per task)
+ * Spawns N tasks, each with its own captured data, then aggregates.
  *
- * Key insight: Copy loop variable to a local before the closure.
- * Each iteration's local is captured by value, giving each task
- * its own copy that won't change when the loop advances.
+ * Key idiom: copy the loop variable to a local BEFORE the closure.
+ * A closure value-captures the outer locals visible at its point of
+ * creation, so each iteration must introduce a fresh local for the
+ * closure to copy; otherwise every closure would share the single
+ * outer `i` at its final value.
+ *
+ * Result aggregation: each task writes to a disjoint slot in a shared
+ * array. No mutex is needed because the tasks' writes never overlap.
+ *
+ * See spec §1.2 for capture semantics.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_TASKS 5
 
-/* Results array - each task writes to its own slot (no races). */
-int results[NUM_TASKS] = {0};
-
-/* Simulate work: compute square of input. */
-int compute(int x) {
-    return x * x;
-}
+static int results[NUM_TASKS];
+static int compute(int x) { return x * x; }
 
 int main(void) {
-    printf("=== Fan-Out: spawn %d tasks ===\n", NUM_TASKS);
+    /* Any bare `!>` in this scope (see the nursery below) forwards its
+     * error here. Omit @errhandler and the bare `!>` fails to compile. */
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
 
+    printf("=== fan-out: spawn %d tasks ===\n", NUM_TASKS);
     {
-        CCNursery* __cc_nursery102 = @create(NULL) @destroy;
-        if (!__cc_nursery102) abort();
-
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
         for (int i = 0; i < NUM_TASKS; i++) {
-            /*
-             * Copy loop variable to a local before capture.
-             * Each iteration gets a fresh 'task_id' that the closure captures.
-             * This ensures each task sees its own value, not the final i.
-             */
-            int task_id = i;
-            __cc_nursery102->spawn(() => {
-                int result = compute(task_id);
-                printf("task %d: compute(%d) = %d\n", task_id, task_id, result);
-                results[task_id] = result;  /* safe: each task owns its slot */
+            int task_id = i;               /* fresh local per iteration */
+            n->spawn(() => {
+                int r = compute(task_id);
+                printf("  task %d: compute(%d) = %d\n", task_id, task_id, r);
+                results[task_id] = r;      /* disjoint slot: no race */
             });
         }
-    
     }
-    /* All tasks complete here. */
 
-    printf("\n=== Results ===\n");
+    printf("\n=== results ===\n");
     int sum = 0;
     for (int i = 0; i < NUM_TASKS; i++) {
-        printf("results[%d] = %d\n", i, results[i]);
+        printf("  results[%d] = %d\n", i, results[i]);
         sum += results[i];
     }
     printf("sum = %d\n", sum);
 
-    /* Verify: 0^2 + 1^2 + 2^2 + 3^2 + 4^2 = 0 + 1 + 4 + 9 + 16 = 30 */
+    /* sanity: 0 + 1 + 4 + 9 + 16 = 30 */
     return (sum == 30) ? 0 : 1;
 }

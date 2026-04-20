@@ -1,0 +1,176 @@
+/*
+ * Smoke: the full matrix of `!>`, `?>`, `@errhandler`, `@destroy`, and
+ * `() => [caps] {body}` closure forms in a single TU.
+ *
+ * Regressions in any of the text rewrites (pass_err_syntax,
+ * pass_unwrap_destroy, pass_result_unwrap) or in the stub-AST the
+ * closure-literal pass consumes can silently break *just one* of these
+ * combinations; keep every combination alive here so a failure surfaces
+ * as a clean stdout diff rather than sneaking through the individual
+ * per-form tests.
+ *
+ * Forms covered (each numbered in the output):
+ *
+ *   Multi-line `@errhandler { ... }` body (regression trigger for the
+ *   subsequent closure-literal pass).
+ *
+ *   !> on T* (NULL check):
+ *     A. bare `!>` dispatching to the @errhandler
+ *     B. `!> { early-return-body }` (no binder)
+ *     C. `!>(e) { single-line body }`
+ *     D. `!>(e) { multi-line body }`
+ *
+ *   ?> forms:
+ *     E. `?> fallback-expr` on T* (NULL path, uses fallback)
+ *     F. `?> fallback-expr` on T* (non-NULL, keeps value)
+ *     G. `?> fallback @destroy { body }`
+ *
+ *   @destroy combinations:
+ *     H. `!> @destroy;` bodyless on builtin-owned CCChan*
+ *     I. `!>(e) { body } @destroy;` split form on builtin-owned CCNursery*
+ *     J. `!> @destroy { user-body };` on builtin-owned CCNursery*
+ *     K. `!> { handler } @destroy { user-body };` on T* (one line)
+ *     L. `!>(e) { handler } @destroy { user-body };` on T* (multi-line)
+ *
+ *   Closures spawned via `nursery->spawn(...)` UFCS:
+ *     M. `() => [] { ... }`            empty capture
+ *     N. `() => [v] { ... }`           single value capture
+ *     O. `() => [&ref] { ... }`        single ref capture
+ *     P. `() => [&ref, v] { ... }`     mixed captures (ref + value)
+ *
+ *   Closures appear immediately after the multi-line `@errhandler` and
+ *   adjacent to `!> @destroy` bindings — the arrangement that previously
+ *   shifted stub-AST line/col so the first closure was silently dropped.
+ */
+#include <ccc/std/prelude.cch>
+
+static char* maybe_null(int want_null) {
+    static char buf[] = "hello";
+    return want_null ? NULL : buf;
+}
+
+int main(void) {
+    /* Multi-line @errhandler — must stay multi-line to guard the
+     * stub-AST regression that affects the closure-literal pass. */
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        abort();
+    }
+
+    /* A. bare `!>` on pointer-returning fn (NULL check via @errhandler). */
+    char* a = maybe_null(0) !>;
+    printf("A=%s\n", a);
+
+    /* B. `!> { body }` no binder. */
+    char* b = maybe_null(0) !> { fprintf(stderr, "unexpected\n"); return 1; };
+    printf("B=%s\n", b);
+
+    /* C. inline one-line `!>(e) { body }`. */
+    char* c = maybe_null(0) !>(e) { fprintf(stderr, "c: %s\n", e.message); return 1; };
+    printf("C=%s\n", c);
+
+    /* D. multi-line `!>(e) { body }`. */
+    char* d = maybe_null(0)
+        !>(e) {
+            fprintf(stderr, "d: %s\n", e.message);
+            return 1;
+        };
+    printf("D=%s\n", d);
+
+    /* E. `?>` fallback on NULL path. */
+    char* e_val = maybe_null(1) ?> "E-fb";
+    printf("E=%s\n", e_val);
+
+    /* F. `?>` fallback on non-NULL path (fallback ignored). */
+    char* f = maybe_null(0) ?> "F-fb";
+    printf("F=%s\n", f);
+
+    /* G. `?>` + `@destroy { body }`. */
+    char* g = maybe_null(0) ?> "g-fb" @destroy { printf("G-destroy\n"); };
+    printf("G=%s\n", g);
+
+    /* H. bodyless `@destroy;` on builtin-owned CCChan*. */
+    int[~4 >] tx_h;
+    int[~4 <] rx_h;
+    CCChan* h_ch = cc_channel_pair(&tx_h, &rx_h) !> @destroy;
+    (void)h_ch;
+    printf("H=ok\n");
+
+    /* I. split `!>(e) {body} @destroy;` on builtin-owned CCNursery*. */
+    CCNursery* i_n = cc_nursery_create(NULL)
+        !>(e) { fprintf(stderr, "i: %s\n", e.message); return 1; }
+        @destroy;
+    (void)i_n;
+    printf("I=ok\n");
+
+    /* J. `!> @destroy { user-body };` (no handler) on CCNursery*. */
+    CCNursery* j_n = cc_nursery_create(NULL) !> @destroy { printf("J-destroy\n"); };
+    (void)j_n;
+    printf("J=ok\n");
+
+    /* K. `!> { handler } @destroy { body };` both on one line on T*. */
+    char* k = maybe_null(0) !> { abort(); } @destroy { printf("K-destroy\n"); };
+    printf("K=%s\n", k);
+
+    /* L. `!>(e) { handler } @destroy { body };` multi-line on T*. */
+    char* l = maybe_null(0)
+        !>(e) {
+            fprintf(stderr, "l: %s\n", e.message);
+            return 1;
+        }
+        @destroy {
+            printf("L-destroy\n");
+        };
+    printf("L=%s\n", l);
+
+    /* M-P. closure literals — the critical interaction case.
+     *       All preceding bindings use `!> @destroy` patterns and are
+     *       preceded by the multi-line @errhandler.  If the closure-
+     *       literal pass drops any of these, `cc_nursery_spawn_closure0`
+     *       will appear un-lowered in the emitted C and the compile
+     *       fails (or the spawned task never runs and SUM is wrong). */
+    cc_atomic_int sum = 0;
+
+    int[~8 >] tx_p;
+    int[~8 <] rx_p;
+    CCChan* p_ch = cc_channel_pair(&tx_p, &rx_p) !> @destroy;
+    (void)p_ch;
+
+    {
+        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+
+        /* P. mixed capture [&ref, value]. */
+        consumer->spawn(() => [&sum, rx_p] {
+            int v;
+            while (cc_io_avail(rx_p.recv(&v))) {
+                cc_atomic_fetch_add(&sum, v);
+            }
+        });
+
+        {
+            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
+            (void)producer->close_on(tx_p);
+
+            /* N. single value capture. */
+            producer->spawn(() => [tx_p] {
+                for (int x = 1; x <= 3; x++) (void)tx_p.send(x);
+            });
+
+            /* M. empty capture list. */
+            producer->spawn(() => [] {
+                /* no-op */
+            });
+
+            /* O. single ref capture. */
+            producer->spawn(() => [&sum] {
+                cc_atomic_fetch_add(&sum, 100);
+            });
+        }
+    }
+
+    int total = cc_atomic_load(&sum);
+    printf("SUM=%d\n", total);
+
+    printf("done\n");
+    return 0;
+}

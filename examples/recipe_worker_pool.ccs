@@ -1,75 +1,69 @@
 /*
  * Recipe: Worker Pool
  *
- * Demonstrates:
- *   - N workers consuming from shared job queue
- *   - feeder-owned channel close signals "no more jobs" when submission ends
- *   - Workers report results via separate channel (no shared counter)
- *   - Channel handles captured in closures
- *   - Macro in channel capacity
+ *   jobs_ch: feeder → N workers (bounded queue)
+ *   done_ch: workers → main (completion ledger, no shared counter)
  *
- * Key insight: Workers live in outer nursery, jobs fed via inner nursery.
- * Use channels for coordination, not shared mutable state.
+ * Nested nurseries drive the close protocol:
+ *   feeder nursery @destroy → closes jobs_tx when the feeder finishes,
+ *                             causing workers to drain jobs_rx and exit.
+ *   worker nursery @destroy → joins all workers before main drains done_rx.
  */
-#include <ccc/cc_nursery.cch>
-#include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/std/prelude.cch>
 
 #define NUM_WORKERS 3
-#define NUM_JOBS 9
+#define NUM_JOBS    9
 
 int main(void) {
-    int[~4 >] jobs_tx;
-    int[~4 <] jobs_rx;
-    int[~NUM_JOBS >] done_tx;  /* capacity >= NUM_JOBS to avoid deadlock */
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
+    int[~4 >]        jobs_tx;
+    int[~4 <]        jobs_rx;
+    int[~NUM_JOBS >] done_tx;   /* capacity >= NUM_JOBS to avoid deadlock */
     int[~NUM_JOBS <] done_rx;
 
-    CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx);
-    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
+    CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx) !> @destroy;
+    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx) !> @destroy;
 
     {
-        CCNursery* __cc_nursery105 = @create(NULL) @destroy;
-        if (!__cc_nursery105) abort();
+        CCNursery* workers = cc_nursery_create(NULL) !> @destroy;
 
-        /* Workers: pull jobs, send completion to done channel. */
+        /* Workers: pull jobs, report each completion on done_tx. */
         for (int w = 0; w < NUM_WORKERS; w++) {
-            __cc_nursery105->spawn(() => {
+            workers->spawn(() => [jobs_rx, done_tx] {
                 int job;
-                while (cc_io_avail(chan_recv(jobs_rx, &job))) {
+                while (cc_io_avail(jobs_rx.recv(&job))) {
                     printf("worker: processed job %d\n", job);
-                    (void)chan_send(done_tx, job);  /* report done */
+                    (void)done_tx.send(job);
                 }
             });
         }
 
-        /* Feeder: sends all jobs, then inner nursery closes jobs channel. */
+        /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
         {
-            CCNursery* __cc_nursery106 = @create(NULL) @destroy;
-            if (!__cc_nursery106) abort();
-            (void)__cc_nursery106->close_on(jobs_tx);
+            CCNursery* feeder = cc_nursery_create(workers) !> @destroy;
+            (void)feeder->close_on(jobs_tx);
 
-            __cc_nursery106->spawn(() => {
+            feeder->spawn(() => [jobs_tx] {
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    (void)chan_send(jobs_tx, j);
+                    (void)jobs_tx.send(j);
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
-        
         }
-        /* jobs closed -> workers drain and exit. */
-    
+        /* feeder @destroy: jobs_tx closed → workers drain and exit. */
     }
+    /* workers @destroy: all workers joined. */
 
-    /* Count completed jobs by draining done channel. */
-    chan_close(done_tx);
+    /* Close done_tx so the drain loop terminates. */
+    done_tx.close();
+
     int jobs_done = 0;
     int v;
-    while (cc_io_avail(chan_recv(done_rx, &v))) {
+    while (cc_io_avail(done_rx.recv(&v))) {
         jobs_done++;
     }
 
-    cc_chan_free(jobs_ch);
-    cc_chan_free(done_ch);
     printf("done, jobs_done = %d\n", jobs_done);
     return (jobs_done == NUM_JOBS) ? 0 : 1;
 }

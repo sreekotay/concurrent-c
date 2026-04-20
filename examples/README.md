@@ -15,13 +15,13 @@ New to Concurrent-C? Work through these in order:
 
 | # | File | Concept | What you'll learn |
 |---|------|---------|-------------------|
-| 1 | `hello.ccs` | First nursery | `@create`, `n->spawn()`, basic structured concurrency |
+| 1 | `hello.ccs` | First nursery | `cc_nursery_create`, `n->spawn()`, basic structured concurrency |
 | 2 | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, closure captures |
 | 3 | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
 | 4 | `recipe_async_await.ccs` | Async/Await | `@async` functions, `await`, `cc_block_on` |
 | 5 | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 6 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 7 | `recipe_arena_scope.ccs` | Memory | `@create`, scoped allocation |
+| 7 | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
 | 8 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
 
 After these, explore the remaining recipes and build system examples.

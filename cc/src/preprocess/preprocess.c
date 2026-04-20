@@ -160,6 +160,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
                                              const char* input_path);
 static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                                                  const char* input_path);
+char* cc__rewrite_at_await(const char* src, size_t n); /* defined later */
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
 static inline void cc_pass_chain_init(CCPassChain* c, const char* src, size_t len) {
@@ -255,6 +256,7 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
                                        int* out_pass_address) {
     int saw_nursery = 0;
     int saw_arena = 0;
+    int saw_chan = 0;
     int saw_star = 0;
     size_t i = 0;
     if (out_pre_callee) *out_pre_callee = NULL;
@@ -280,23 +282,33 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
             } else if (len == sizeof("CCNursery") - 1 &&
                        memcmp(declared_type + start, "CCNursery", len) == 0) {
                 saw_nursery = 1;
+            } else if (len == sizeof("CCChan") - 1 &&
+                       memcmp(declared_type + start, "CCChan", len) == 0) {
+                saw_chan = 1;
             }
             continue;
         }
         i++;
     }
-    if (saw_arena && !saw_nursery && !saw_star) {
+    if (saw_arena && !saw_nursery && !saw_chan && !saw_star) {
         if (out_callee) *out_callee = "cc_arena_destroy";
         if (out_pass_address) *out_pass_address = 1;
         return 1;
     }
-    if (saw_nursery && saw_star && !saw_arena) {
+    if (saw_nursery && saw_star && !saw_arena && !saw_chan) {
         /* Nurseries must wait for outstanding tasks before the handle is
          * freed, so the full lifecycle is wait -> user body -> free.  This
          * mirrors the hook sequence registered for the `@create(CCNursery)
          * @destroy { body }` primary path in pass_create.c. */
         if (out_pre_callee) *out_pre_callee = "cc_nursery_wait";
         if (out_callee) *out_callee = "cc_nursery_free";
+        if (out_pass_address) *out_pass_address = 0;
+        return 1;
+    }
+    if (saw_chan && saw_star && !saw_nursery && !saw_arena) {
+        /* Channels auto-free on scope exit via `cc_channel_free`, which is a
+         * _Generic macro that dispatches to cc_chan_free for `CCChan*`. */
+        if (out_callee) *out_callee = "cc_channel_free";
         if (out_pass_address) *out_pass_address = 0;
         return 1;
     }
@@ -1093,6 +1105,26 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
             size_t expr_r = k; /* points at ')' */
             size_t after_paren = expr_r + 1;
             while (after_paren < n && (src[after_paren] == ' ' || src[after_paren] == '\t' || src[after_paren] == '\r' || src[after_paren] == '\n')) after_paren++;
+
+            /* Optional "as <ident>" clause: binds CCDeadline* <ident> inside
+               the block so user code can inspect the active deadline. */
+            const char* as_ident = NULL;
+            size_t as_ident_len = 0;
+            if (after_paren + 2 < n && src[after_paren] == 'a' && src[after_paren + 1] == 's' &&
+                (after_paren + 2 >= n || !cc_is_ident_char(src[after_paren + 2]))) {
+                size_t cur = after_paren + 2;
+                while (cur < n && (src[cur] == ' ' || src[cur] == '\t' || src[cur] == '\r' || src[cur] == '\n')) cur++;
+                if (cur < n && cc_is_ident_start(src[cur])) {
+                    size_t id_s = cur;
+                    cur++;
+                    while (cur < n && cc_is_ident_char(src[cur])) cur++;
+                    as_ident = src + id_s;
+                    as_ident_len = cur - id_s;
+                    while (cur < n && (src[cur] == ' ' || src[cur] == '\t' || src[cur] == '\r' || src[cur] == '\n')) cur++;
+                    after_paren = cur;
+                }
+            }
+
             if (after_paren >= n || src[after_paren] != '{') {
                 /* Not a block form; emit original token sequence. */
                 cc_sb_append(&out, &out_len, &out_cap, src + s0, sl);
@@ -1131,14 +1163,28 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
             size_t body_e = m; /* points just after '}' */
 
             counter++;
-            char hdr[512];
-            snprintf(hdr, sizeof(hdr),
-                     "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
-                     "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
-                     "@defer cc_deadline_pop(__cc_prev%lu); ",
-                     counter,
-                     (int)(expr_r - expr_l), src + expr_l,
-                     counter, counter, counter);
+            char hdr[768];
+            if (as_ident) {
+                snprintf(hdr, sizeof(hdr),
+                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
+                         "CCDeadline* %.*s = &__cc_dl%lu; "
+                         "CCDeadline* __cc_prev%lu = cc_deadline_push(%.*s); "
+                         "@defer cc_deadline_pop(__cc_prev%lu); ",
+                         counter,
+                         (int)(expr_r - expr_l), src + expr_l,
+                         (int)as_ident_len, as_ident, counter,
+                         counter,
+                         (int)as_ident_len, as_ident,
+                         counter);
+            } else {
+                snprintf(hdr, sizeof(hdr),
+                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
+                         "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
+                         "@defer cc_deadline_pop(__cc_prev%lu); ",
+                         counter,
+                         (int)(expr_r - expr_l), src + expr_l,
+                         counter, counter, counter);
+            }
             cc_sb_append_cstr(&out, &out_len, &out_cap, hdr);
             cc_sb_append(&out, &out_len, &out_cap, src + body_s, body_e - body_s);
             cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
@@ -5228,6 +5274,174 @@ static char* cc__rewrite_defer_syntax(const char* src, size_t n) {
     return out;
 }
 
+/* ---- @await lowering ---------------------------------------------------- */
+/* Rewrites  @await fname(args...)  ->  cc_block_on(ReturnType, fname(args...))
+ * where ReturnType is taken from the @async declaration of fname.
+ * For unknown callees the @await prefix is stripped and the expression is kept
+ * as-is (channel ops are already blocking in synchronous context).
+ * This pass runs in phase-1 so @async return types have already been through
+ * cc__rewrite_result_types (e.g. void !>(CCError) -> CCResult_void_CCError). */
+
+#define CC__AT_AWAIT_MAX_FNS 256
+typedef struct { char name[128]; char ret[128]; } CCAtAwaitFn;
+static CCAtAwaitFn  cc__at_await_fns[CC__AT_AWAIT_MAX_FNS];
+static int          cc__at_await_fn_count = 0;
+
+static void cc__collect_async_ret_types(const char* src, size_t n) {
+    cc__at_await_fn_count = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    for (size_t i = 0; i < n; ) {
+        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c=='*' && c2=='/') { in_bc = 0; i++; } i++; continue; }
+        if (in_str) { if (c=='\\' && i+1<n) { i+=2; continue; } if (c=='"') in_str=0; i++; continue; }
+        if (in_chr) { if (c=='\\' && i+1<n) { i+=2; continue; } if (c=='\'') in_chr=0; i++; continue; }
+        if (c=='/' && c2=='/') { in_lc=1; i+=2; continue; }
+        if (c=='/' && c2=='*') { in_bc=1; i+=2; continue; }
+        if (c=='"') { in_str=1; i++; continue; }
+        if (c=='\'') { in_chr=1; i++; continue; }
+
+        /* Detect '@async' keyword */
+        if (c == '@' && i+6 <= n && memcmp(src+i+1,"async",5) == 0
+                     && (i+6 >= n || (!cc_is_ident_char(src[i+6])))) {
+            size_t j = i + 6;
+            while (j < n && (src[j]==' '||src[j]=='\t'||src[j]=='\n'||src[j]=='\r')) j++;
+            size_t rt_start = j;
+
+            /* Walk forward to find  <fname> (  – last ident before '(' */
+            size_t fname_s = (size_t)-1, fname_e = (size_t)-1;
+            size_t k = j;
+            while (k < n && src[k] != '{' && src[k] != ';') {
+                if (src[k] == '(' && fname_e != (size_t)-1) break;
+                if (cc_is_ident_start(src[k]) || (k > 0 && cc_is_ident_char(src[k]))) {
+                    fname_s = k;
+                    while (k < n && cc_is_ident_char(src[k])) k++;
+                    fname_e = k;
+                } else { k++; }
+            }
+            if (fname_s != (size_t)-1 && fname_e > fname_s
+                    && k < n && src[k] == '('
+                    && cc__at_await_fn_count < CC__AT_AWAIT_MAX_FNS) {
+                CCAtAwaitFn* f = &cc__at_await_fns[cc__at_await_fn_count];
+                /* function name */
+                size_t nl = fname_e - fname_s;
+                if (nl >= sizeof(f->name)) nl = sizeof(f->name)-1;
+                memcpy(f->name, src+fname_s, nl); f->name[nl] = '\0';
+                /* return type: from rt_start to fname_s, trim trailing whitespace */
+                size_t re = fname_s;
+                while (re > rt_start && (src[re-1]==' '||src[re-1]=='\t'||src[re-1]=='\n')) re--;
+                size_t rl = re - rt_start;
+                if (rl >= sizeof(f->ret)) rl = sizeof(f->ret)-1;
+                if (rl > 0) { memcpy(f->ret, src+rt_start, rl); f->ret[rl] = '\0'; }
+                else         { strcpy(f->ret, "int"); }
+                cc__at_await_fn_count++;
+            }
+            i = (j > i+6) ? j : i+1;
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Rewrite @await <expr> in any context.
+ * If <expr> is a call to a known @async function, emit cc_block_on(T, expr).
+ * Otherwise strip @await and keep the expression (channel ops etc. are
+ * already blocking in synchronous context). */
+char* cc__rewrite_at_await(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    if (!strstr(src, "@await")) return NULL;
+
+    cc__collect_async_ret_types(src, n);
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+
+    for (size_t i = 0; i < n; ) {
+        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
+        if (in_lc) { if (c=='\n') in_lc=0; i++; continue; }
+        if (in_bc) { if (c=='*'&&c2=='/') { in_bc=0; i++; } i++; continue; }
+        if (in_str) { if (c=='\\'&&i+1<n){i+=2;continue;} if(c=='"') in_str=0; i++;continue; }
+        if (in_chr) { if (c=='\\'&&i+1<n){i+=2;continue;} if(c=='\'') in_chr=0; i++;continue; }
+        if (c=='/'&&c2=='/') { in_lc=1; i+=2; continue; }
+        if (c=='/'&&c2=='*') { in_bc=1; i+=2; continue; }
+        if (c=='"') { in_str=1; i++; continue; }
+        if (c=='\'') { in_chr=1; i++; continue; }
+
+        /* Detect '@await' token */
+        if (c == '@' && i+6 <= n && memcmp(src+i+1,"await",5) == 0
+                     && (i+6 >= n || !cc_is_ident_char(src[i+6]))) {
+            size_t j = i + 6;
+            while (j < n && (src[j]==' '||src[j]=='\t')) j++;
+
+            /* Flush source up to (not including) '@await' */
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+
+            /* Check if next token is an identifier (potential function name) */
+            const char* ret_type = NULL;
+            size_t call_start = j, call_end = j;
+            if (j < n && cc_is_ident_start(src[j])) {
+                size_t id_s = j;
+                while (j < n && cc_is_ident_char(src[j])) j++;
+                size_t id_e = j;
+                while (j < n && (src[j]==' '||src[j]=='\t')) j++;
+
+                if (j < n && src[j] == '(') {
+                    /* It's a function call – look up the return type */
+                    char fname[128];
+                    size_t fl = id_e - id_s;
+                    if (fl >= sizeof(fname)) fl = sizeof(fname)-1;
+                    memcpy(fname, src+id_s, fl); fname[fl] = '\0';
+                    for (int fi = 0; fi < cc__at_await_fn_count; fi++) {
+                        if (strcmp(cc__at_await_fns[fi].name, fname) == 0) {
+                            ret_type = cc__at_await_fns[fi].ret; break;
+                        }
+                    }
+                    /* Find matching ')' of the call */
+                    size_t m = j; int depth = 0;
+                    while (m < n) {
+                        char mc = src[m];
+                        if (mc=='"') { m++; while(m<n&&src[m]!='"'){if(src[m]=='\\')m++;m++;} }
+                        else if (mc=='(') depth++;
+                        else if (mc==')') { depth--; if(depth==0){m++;break;} }
+                        m++;
+                    }
+                    call_start = id_s; call_end = m;
+                } else {
+                    /* Identifier but not a call – keep from id_s onward */
+                    call_start = id_s; call_end = id_e;
+                }
+            } else {
+                /* Not an identifier – keep everything from j onward as-is;
+                 * we'll just strip the '@await' prefix. */
+                call_start = j; call_end = j;
+            }
+
+            if (ret_type && call_end > call_start) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_block_on(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ret_type);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append(&out, &out_len, &out_cap, src+call_start, call_end-call_start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            } else if (call_end > call_start) {
+                /* Unknown async fn or non-call – keep expr, strip @await */
+                cc_sb_append(&out, &out_len, &out_cap, src+call_start, call_end-call_start);
+            }
+            last_emit = call_end;
+            changed = 1;
+            i = call_end;
+            continue;
+        }
+        i++;
+    }
+
+    if (!changed) { free(out); return NULL; }
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src+last_emit, n-last_emit);
+    return out;
+}
+
 /* Rewrite try expressions: try expr -> cc_try(expr) */
 static char* cc__rewrite_try_exprs(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
@@ -7162,6 +7376,9 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
+    /* @await fname(...) -> cc_block_on(ReturnType, fname(...)).  Runs after
+     * result-type rewriting so the return types are already in canonical form. */
+    if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__normalize_if_try_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_try_binding(chain->src, chain->len)) < 0) return -1;
     return 0;
@@ -7202,7 +7419,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                 char* ud_out = NULL;
                 size_t ud_out_len = 0;
                 int ud_r = cc__rewrite_unwrap_destroy_suffix(
-                    chain->src, chain->len, &ud_out, &ud_out_len);
+                    chain->src, chain->len, input_path, &ud_out, &ud_out_len);
                 (void)ud_out_len;
                 if (ud_r < 0) return -1;
                 if (ud_r > 0 && ud_out && cc_pass_chain_apply(chain, ud_out) < 0) return -1;

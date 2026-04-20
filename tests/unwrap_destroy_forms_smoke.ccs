@@ -1,0 +1,91 @@
+/*
+ * Smoke: every form of !> / ?> / @errhandler / @destroy in one file.
+ *
+ * Mirror of examples/recipe_unwrap_destroy_forms.ccs. The test exercises
+ * each combination (inline, multi-line, same line, bodyless, builtin-
+ * owned types) so we catch regressions in any of the unwrap/destroy
+ * rewrite passes.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+static char* maybe_null(int want_null) {
+    static char buf[] = "hello";
+    return want_null ? NULL : buf;
+}
+
+int run(void) {
+    @errhandler(CCError e) { fprintf(stderr, "[eh] %s\n", e.message); abort(); }
+
+    /* 2. Inline single-line `!> { ... }` */
+    char* ok_short = maybe_null(0) !> { fprintf(stderr, "unexpected null\n"); return 1; };
+    printf("ok_short=%s\n", ok_short);
+
+    /* 3. Multi-line `!>(e) { ... }` */
+    char* ok_multi = maybe_null(0)
+        !>(e) {
+            fprintf(stderr, "multi: %s\n", e.message);
+            return 2;
+        };
+    printf("ok_multi=%s\n", ok_multi);
+
+    /* 4. !>(e) {...} @destroy {...} on one line */
+    char* one_line = maybe_null(0) !>(e) { fprintf(stderr, "oneline: %s\n", e.message); return 3; } @destroy { printf("destroy oneline\n"); };
+    printf("one_line=%s\n", one_line);
+
+    /* 5. Multi-line handler + multi-line @destroy */
+    char* multi_dest = maybe_null(0)
+        !>(e) {
+            fprintf(stderr, "multidest: %s\n", e.message);
+            return 4;
+        }
+        @destroy {
+            printf("destroy multidest\n");
+        };
+    printf("multi_dest=%s\n", multi_dest);
+
+    /* 6. `!> @destroy` — no handler body, defaults to @errhandler */
+    char* default_eh = maybe_null(0) !> @destroy { printf("destroy default_eh\n"); };
+    printf("default_eh=%s\n", default_eh);
+
+    /* 7. ?> fallback expression */
+    char* with_default = maybe_null(1) ?> "fallback";
+    printf("with_default=%s\n", with_default);
+
+    /* 8. ?> + @destroy on one line */
+    char* qmark_dest = maybe_null(0) ?> "fallback" @destroy { printf("destroy qmark_dest\n"); };
+    printf("qmark_dest=%s\n", qmark_dest);
+
+    /* 9. Bodyless `@destroy;` on builtin-owned types */
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n;
+
+    int[~1 >] tx;
+    int[~1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx)
+        !>(e) { fprintf(stderr, "chan: %s\n", e.message); return 5; }
+        @destroy;
+    (void)ch;
+
+    /* 10. `!> { ... } @destroy { ... }` on a builtin-owned type (one line) */
+    CCNursery* n2 = cc_nursery_create(NULL) !> { abort(); } @destroy { printf("destroy n2 (user)\n"); };
+    (void)n2;
+
+    /* 11. Same as 10 but split across lines */
+    CCNursery* n3 = cc_nursery_create(NULL)
+        !>(e) {
+            fprintf(stderr, "n3: %s\n", e.message);
+            return 8;
+        }
+        @destroy {
+            printf("destroy n3 (user)\n");
+        };
+    (void)n3;
+
+    printf("done\n");
+    return 0;
+}
+
+int main(void) {
+    return run();
+}
