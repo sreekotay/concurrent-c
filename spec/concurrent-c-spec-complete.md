@@ -33,9 +33,331 @@ Editorial principles governing modifications to this specification, including th
 
 ---
 
-## 1. Foundations
+## 1. Primitives
 
-This section defines rules about values, closures, lexing, and parsing that apply throughout the specification.
+Concurrent-C extends C with six primitives. Everything else in this
+specification is either sugar over these, an attribute on them, or a
+library type defined in terms of them.
+
+This section gives you the **shape** of each primitive with a minimal
+example. Normative rules live in the sections referenced under each
+entry; the Quick Reference that follows collects the full surface at a
+glance. The rules each primitive obeys — value categories, moves,
+closure captures, lexing — are in §2 Foundations.
+
+### 1.1 UFCS — receiver-typed dispatch
+
+Method-call syntax `x.f(...)` / `p->f(...)` dispatches on the resolved
+type of the receiver expression. Any function registered against a type
+is callable as a method on values of that type.
+
+```c
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+n->spawn(() => printf("hi\n"));   // lowers to cc_nursery_spawn(n, ...)
+```
+
+UFCS is orthogonal to ownership: the same method works on a value, a
+pointer, or a Result carrying either. Normative rules in §9.0.
+
+### 1.2 Result types and unwrapping
+
+A function that can fail returns `T!>(E)`. Three unwrap forms cover the
+full error space — each answers a different question at the call site:
+
+| Form                | Question                         | Body                |
+| ------------------- | -------------------------------- | ------------------- |
+| `expr ?> default`   | "what if it fails?"              | value               |
+| `expr !>(e) { … }`  | "handle it here"                 | diverging statement |
+| `expr !>;`          | "forward to the scope's policy"  | —                   |
+
+```c
+int !>(CCError) read_timeout(void);
+
+@errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+
+int t1 = read_timeout() ?> 30;                   // default on error
+int t2 = read_timeout() !>(e) return 2;          // inline (must diverge)
+int t3 = read_timeout() !>;                      // forward to @errhandler
+```
+
+Normative rules in §3.1.
+
+### 1.3 `@defer` — scope-exit actions
+
+`@defer stmt;` schedules `stmt` to run on scope exit in reverse
+declaration order, regardless of how the scope exits. `@defer(ok)` and
+`@defer(err)` are conditional variants. `@destroy` is the declaration-
+attached form: `T x = make() !> @destroy { cleanup; };` reads as "on
+scope exit, run `cleanup` — and if `make()` failed, never construct `x`
+in the first place."
+
+```c
+FILE* f = fopen(path, "r");
+@defer      fclose(f);                  // always runs
+@defer(ok)  printf("committed\n");
+@defer(err) printf("rolled back\n");
+```
+
+Normative rules in §5.1.
+
+### 1.4 `@async` / `await` — cooperative suspension
+
+`@async` marks functions that may suspend; `await` marks the suspension
+point inside them. The compiler lowers `@async` to an explicit state
+machine, and every `await` is a point where the scheduler may resume a
+different task.
+
+```c
+@async int echo(CCChanTx tx, CCChanRx rx, int v) {
+    if (await tx.send(v) != 0)       return -1;
+    int reply;
+    if (await rx.recv(&reply) != 0)  return -2;
+    return reply;
+}
+```
+
+`await` is only legal inside `@async`. Synchronous code drives an async
+function with `@await f(...)` or `cc_block_on(f(...))`. Normative rules
+in §8; lowering in Appendix J.
+
+### 1.5 Provenance — arenas, slices, strings
+
+Every value remembers where it came from. A slice `T[:]` carries
+provenance metadata alongside its pointer and length: arena, stack,
+static, or unique (received or adopted). The compiler uses provenance to
+reject escapes (a stack slice captured into a task closure) and to
+decide whether a slice is copyable or must move.
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+CCString greeting = @string(`hello ${now()}`, &a);   // arena provenance
+// greeting is copyable while `a` is live; captured into a task only if
+// `a` provably outlives the task.
+```
+
+Strings and vectors build on slices and arenas; see §§3.4–3.5, §5, §9.1.
+
+### 1.6 `comptime` — compile-time evaluation
+
+`comptime` admits a restricted evaluation mode at compile time — enough
+for generic dispatch, specialization, and static-assertion-style checks,
+without opening the door to a general compile-time interpreter.
+
+```c
+comptime int LANES = 4;
+
+@comptime if (sizeof(void*) == 8) {
+    typedef long long word;
+} else {
+    typedef int       word;
+}
+```
+
+Normative rules in §14.
+
+---
+
+Everything else in this specification is one of:
+
+- **Sugar** over these primitives (e.g., `CALL() !> @destroy { D };` schedules `D` on scope exit — it is `@defer` at a declaration with error-checked construction; `@lock (m) as g` is `@defer`-shaped).
+- **Attributes** (e.g., `@noblock`, `@latency_sensitive`, `@nonblocking`).
+- **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
+
+---
+
+## Quick Reference: Keywords and Constructs
+
+Syntax inventory, grouped by purpose. See §1 for the primitive taxonomy and individual sections for normative rules.
+
+### Core Keywords (6)
+
+
+| Keyword      | Purpose                                                                 | Example                         |
+| ------------ | ----------------------------------------------------------------------- | ------------------------------- |
+| `await`      | Suspend and wait for async operation to complete                        | `data = await read_file(path);` |
+| `defer`      | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();`             |
+| `defer(err)` | Cleanup only if returning error (with `@defer(err)`)                    | `@defer(err) free(ptr);`        |
+| `defer(ok)`  | Cleanup only if returning success (with `@defer(ok)`)                   | `@defer(ok) commit();`          |
+| `unsafe`     | Disable safety checks in a block (e.g., for raw pointer casts)          | `unsafe { ptr_cast(); }`        |
+| `comptime`   | Mark code for compile-time evaluation (with `@comptime if`)             | `@comptime if (DEBUG) { }`      |
+
+
+### Contextual Keywords (3)
+
+These are only reserved in specific contexts, so they can be used as identifiers elsewhere:
+
+
+| Keyword   | Context                           | Purpose                                |
+| --------- | --------------------------------- | -------------------------------------- |
+| `async`   | After `@` (in `@async fn`)        | Mark function as asynchronous          |
+| `lock`    | After `@` (in `@lock (m) as var`) | Acquire mutex guard                    |
+| `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
+
+
+### Special Block Forms (10)
+
+
+| Form                        | Purpose                                                  | Example                                                  |
+| --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
+| `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
+| `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
+| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                                 |
+| `CALL() !> @destroy { D };` | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`       |
+| `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
+| `@match { case T x = ... }` | Multiplex on channel events                              | `@match { case int x = await ch: ... }`                  |
+| `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
+| `@for await (T x : ch) { }` | Async iteration (consume channel)                        | `@for await (int x : ch) { process(x); }`                |
+| `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
+| `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+
+
+### Result unwrap operators (2)
+
+Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cleanly separated roles cover every consumption path:
+
+
+| Form                      | Context                | Purpose                                                                           | Example                                        |
+| ------------------------- | ---------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `expr ?> default`         | expression             | Unwrap value or substitute a default value                                        | `int x = parse(s) ?> 0;`                       |
+| `expr ?>(e) default_expr` | expression             | Unwrap value, or evaluate `default_expr` with `e` bound to the error              | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
+| `call !> body`            | statement / expression | Unwrap, or execute `body` on error. At expression position the body must diverge. | `int x = parse(s) !>(e) return cc_err(e);`     |
+| `call !>;`                | statement / expression | Unwrap, or invoke the enclosing `@errhandler`                                     | `flush() !>;`                                  |
+
+
+**See §3.1** for full semantics (divergence rules at expression position, `@errhandler` registration, `@err(e);` forwards, bare-statement consumption rule), grammar, and lowering.
+
+### Type Constructors (6)
+
+
+| Constructor               | Meaning                                               | Example                         |
+| ------------------------- | ----------------------------------------------------- | ------------------------------- |
+| `T!>(E)`                  | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
+| `char[:]`                 | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
+| `char[4:]`                | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
+| `char[:!]`                | Unique slice refinement (type-level ownership demand) | `void take(char[:!] buf);`      |
+| `char[:0]`                | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
+| `char[:0!]`               | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
+| `T[~... >]` / `T[~... <]` | Channel handle type (tx / rx; topology in `~...`)     | `int[~n 1:1 >] tx;`             |
+
+
+### Expression Forms (3)
+
+
+| Form                                                     | Purpose                                                               | Example                                   |
+| -------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
+| `await expr`                                             | Suspend until task completes, unwrap result                           | `int result = await fetch();`             |
+| `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
+| `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
+
+
+### Block Forms (1)
+
+
+| Form                              | Purpose                                                  | Example                                                         |
+| --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| `@with_deadline(d) { }`           | Apply deadline to block; `await` inside is cancel-aware. | `@with_deadline(seconds(5)) { await op(); }`                    |
+| `@with_deadline(d) as handle { }` | Same, with inspectable `CCDeadline` handle inside block. | `@with_deadline(seconds(5)) as dl { if (dl.remaining() < …) …}` |
+
+
+### Library Functions
+
+These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming conflicts:
+
+
+| Function                  | Purpose                                | Example                                   |
+| ------------------------- | -------------------------------------- | ----------------------------------------- |
+| `cc_ok(value)`            | Construct T!>(E) success (inferred)    | `return cc_ok(42);`                       |
+| `cc_err(error)`           | Construct T!>(E) error (inferred)      | `return cc_err(MyError_NotFound);`        |
+| `cc_ok(void)`             | Construct void!>(E) success (inferred) | `return cc_ok(void);`                     |
+| `cc_err(CC_ERR_*, "msg")` | CCError shorthand                      | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
+| `cc_ok(T, value)`         | T!>(CCError) success (explicit)        | `return cc_ok(int, 42);`                  |
+| `cc_ok(T, E, value)`      | T!>(E) success (explicit)              | `return cc_ok(int, MyError, 42);`         |
+| `cc_err(T, error)`        | T!>(CCError) error (explicit)          | `return cc_err(int, CC_ERROR(...));`      |
+| `cc_err(T, E, error)`     | T!>(E) error (explicit)                | `return cc_err(int, MyError, err);`       |
+| `cc_move(x)`              | Explicit move of move-only value       | `ch.send_take(arr, cc_move(arr));`        |
+| `cc_current_deadline()`   | Handle of current `@with_deadline` scope | `CCDeadline* dl = cc_current_deadline();` |
+| `cc_deadline_expired(dl)` | Polling check on a deadline handle     | `if (cc_deadline_expired(dl)) break;`     |
+| `cc_cancel()` / `cc_is_cancelled()` | §8.5.3 fallback: target the bare current deadline scope | `while (!cc_is_cancelled()) { ... }` |
+
+
+### Result Methods (UFCS)
+
+Result types (`T!>(E)`) support these methods via UFCS:
+
+
+| Method             | Purpose              | Example                                |
+| ------------------ | -------------------- | -------------------------------------- |
+| `r.is_ok()`        | Check if success     | `if (r.is_ok()) { ... }`               |
+| `r.is_err()`       | Check if error       | `if (r.is_err()) handle(cc_error(r));` |
+| `r.value()`        | Get value or abort   | `int v = r.value();`                   |
+| `r.error()`        | Get error or abort   | `CCIoError e = r.error();`             |
+| `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);`              |
+
+
+**Macro helpers (for C interop/generated code):**
+
+
+| Macro                      | Purpose                | Example                                           |
+| -------------------------- | ---------------------- | ------------------------------------------------- |
+| `cc_is_ok(res)`            | Check if success       | `if (cc_is_ok(res)) { ... }`                      |
+| `cc_is_err(res)`           | Check if error         | `if (cc_is_err(res)) handle_err();`               |
+| `cc_unwrap(res)`           | Get value (primitives) | `int v = cc_unwrap(res);`                         |
+| `cc_unwrap_as(res, T)`     | Get value (structs)    | `MyStruct v = cc_unwrap_as(res, MyStruct);`       |
+| `cc_unwrap_err(res)`       | Get error (primitives) | `CCError e = cc_unwrap_err(res);`                 |
+| `cc_unwrap_err_as(res, E)` | Get error (structs)    | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
+
+
+**C ABI naming:** All runtime/stdlib symbols use `CC`*/`cc_`* prefixes to avoid collisions with user code. The compiler automatically resolves short aliases (`String`, `Arena`, etc.) to their prefixed forms (`CCString`, `CCArena`, etc.) during compilation.
+
+---
+
+## Style Guide
+
+This section documents recommended style for Concurrent-C code.
+
+### Type Annotation Spacing
+
+**Rule:** Type constructors are written **without spaces**. This applies to all compound type syntax.
+
+
+| Type                  | Correct                  | Incorrect                                                   |
+| --------------------- | ------------------------ | ----------------------------------------------------------- |
+| Result                | `T!>(E)`                 | `T ! E` or `T! E`                                           |
+| Slice                 | `char[:]`                | `char [:]` or `char[ : ]`                                   |
+| Nested slice          | `char[::]`, `char[:::]`  | `char[:: ]` or C-array spellings                            |
+| Fixed-length slice    | `char[n:]`               | `char[:n]`                                                  |
+| Unique slice          | `char[:!]`               | `char[: !]`                                                 |
+| Sentinel slice        | `char[:0]`               | `char[: 0 ]`                                                |
+| Unique sentinel slice | `char[:0!]`              | `char[: 0 !]`                                               |
+| Generic type          | `CCVec::[int]`           | `CCVec :: [ int ]`                                          |
+| Nested generic        | `Map::[K, CCVec::[int]]` | `Map :: [ K, CCVec :: [ int ] ]` (standard bracket nesting) |
+
+
+**Examples:**
+
+**Nested slice note:** `T[::]`, `T[:::]`, and deeper forms mean nested slice ranks (`T[:]`, `T[:][:]`, `T[:][:][:]`, etc.). These are slice/view types, not C arrays. Refinements compose on the innermost rank (`T[:0:]`, `T[4::]`, etc.) and still lower to the same slice ABI family.
+
+```c
+// Correct
+int!>(IoError) read_int(char[:] data) {
+    char[:] trimmed = data.trim();
+    return cc_ok(parse_int(trimmed));
+}
+
+Vec::[int] numbers = vec_new::[int](&arena);
+Map::[char[:], int] registry = map_new::[char[:], int](&arena);
+
+// Incorrect (visual noise, harder to parse)
+int ! IoError read_int (char [ : ] data) {
+    // ...
+}
+```
+
+---
+
+## 2. Foundations
+
+This section defines the rules about values, closures, lexing, and parsing that every primitive in §1 and every library type in later sections obeys.
 
 **Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task::[T]`, `Mutex::[T]`, `Atomic::[T]`) are always initialized on declaration. Plain C types follow C initialization rules.
 
@@ -68,7 +390,7 @@ use(y);                   // ERROR: y may be uninitialized
 
 ---
 
-### 1.1 Value Categories & Moves
+### 2.1 Value Categories & Moves
 
 Concurrent-C distinguishes **copyable** and **move-only** values:
 
@@ -164,7 +486,7 @@ void borrow(char[:]* buf);            // borrows, caller retains
 
 ---
 
-### 1.2 Closure Captures and Thread Safety
+### 2.2 Closure Captures and Thread Safety
 
 When a closure is captured for use in another thread or task, the captured values are copied into the closure. This creates constraints on what can be captured.
 
@@ -249,7 +571,7 @@ void bad_pattern() {
 
 ---
 
-### 1.3 Lexing & Parsing
+### 2.3 Lexing & Parsing
 
 Concurrent-C extends C syntax with new operators and keywords in specific contexts:
 
@@ -262,232 +584,6 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 | `T[:]`                        | Slice type            | Distinct from C array `T[]`   |
 | `T[~... >]` / `T[~... <]`     | Channel handle type   | `~` is not bitwise-not here   |
 | `T[~n N:M >]` / `T[~n N:M <]` | Channel with topology | `N:M` is topology, not label  |
-
----
-
-## 2. Primitives
-
-Concurrent-C extends C with six primitives. All other surface forms are either sugar over these, attributes on them, or library types defined in terms of them.
-
-### 2.1 UFCS — receiver-typed dispatch
-
-Defined normatively in §9.0. Method-call syntax `x.f(...)` / `p->f(...)` dispatches on the resolved type of the receiver expression.
-
-### 2.2 Result types and unwrapping
-
-Defined normatively in §3.1. Type constructor `T!>(E)`; operators `?>` (default value), `!>` (error handler); forms `@err(e);` and `@errhandler(E e) { ... }`.
-
-### 2.3 `@defer` — scope-exit actions
-
-Defined normatively in §5.1. Schedules an action at scope exit in reverse-declaration order. `@destroy` and `@defer(err)` / `@defer(ok)` are positional and conditional forms of the same primitive.
-
-### 2.4 `@async` / `await` — cooperative suspension
-
-Defined normatively in §8. `@async` marks functions that may suspend; `await` marks suspension points. Lowers to state-machine frames (Appendix J).
-
-### 2.5 Provenance — arenas, slices, strings
-
-Defined normatively in §§3.4–3.5 (slice ABI and ownership) and §5 (arenas). Values track their origin at the value level; the slice type `T[:]` carries provenance metadata that enables scope-escape detection, safe channel transfer, and runtime observability. Strings build on slices and arenas; see §9.1.
-
-### 2.6 `comptime` — compile-time evaluation
-
-Defined normatively in §14. `@comptime if`, `comptime {}` blocks, and `comptime` declarations admit a restricted evaluation mode at compile time.
-
----
-
-Everything else in this specification is one of:
-
-- **Sugar** over these primitives (e.g., `CALL() !> @destroy { D };` schedules `D` on scope exit — it is `@defer` at a declaration with error-checked construction; `@lock (m) as g` is `@defer`-shaped).
-- **Attributes** (e.g., `@noblock`, `@latency_sensitive`, `@nonblocking`).
-- **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
-
----
-
-## Quick Reference: Keywords and Constructs
-
-Syntax inventory, grouped by purpose. See §2 for the primitive taxonomy and individual sections for normative rules.
-
-### Core Keywords (6)
-
-
-| Keyword      | Purpose                                                                 | Example                         |
-| ------------ | ----------------------------------------------------------------------- | ------------------------------- |
-| `await`      | Suspend and wait for async operation to complete                        | `data = await read_file(path);` |
-| `defer`      | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();`             |
-| `defer(err)` | Cleanup only if returning error (with `@defer(err)`)                    | `@defer(err) free(ptr);`        |
-| `defer(ok)`  | Cleanup only if returning success (with `@defer(ok)`)                   | `@defer(ok) commit();`          |
-| `unsafe`     | Disable safety checks in a block (e.g., for raw pointer casts)          | `unsafe { ptr_cast(); }`        |
-| `comptime`   | Mark code for compile-time evaluation (with `@comptime if`)             | `@comptime if (DEBUG) { }`      |
-
-
-### Contextual Keywords (3)
-
-These are only reserved in specific contexts, so they can be used as identifiers elsewhere:
-
-
-| Keyword   | Context                           | Purpose                                |
-| --------- | --------------------------------- | -------------------------------------- |
-| `async`   | After `@` (in `@async fn`)        | Mark function as asynchronous          |
-| `lock`    | After `@` (in `@lock (m) as var`) | Acquire mutex guard                    |
-| `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
-
-
-### Special Block Forms (10)
-
-
-| Form                        | Purpose                                                  | Example                                                  |
-| --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
-| `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
-| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                                 |
-| `CALL() !> @destroy { D };` | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`       |
-| `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
-| `@match { case T x = ... }` | Multiplex on channel events                              | `@match { case int x = await ch: ... }`                  |
-| `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
-| `@for await (T x : ch) { }` | Async iteration (consume channel)                        | `@for await (int x : ch) { process(x); }`                |
-| `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
-| `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
-
-
-### Result unwrap operators (2)
-
-Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cleanly separated roles cover every consumption path:
-
-
-| Form                      | Context                | Purpose                                                                           | Example                                        |
-| ------------------------- | ---------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `expr ?> default`         | expression             | Unwrap value or substitute a default value                                        | `int x = parse(s) ?> 0;`                       |
-| `expr ?>(e) default_expr` | expression             | Unwrap value, or evaluate `default_expr` with `e` bound to the error              | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
-| `call !> body`            | statement / expression | Unwrap, or execute `body` on error. At expression position the body must diverge. | `int x = parse(s) !>(e) return cc_err(e);`     |
-| `call !>;`                | statement / expression | Unwrap, or invoke the enclosing `@errhandler`                                     | `flush() !>;`                                  |
-
-
-**See §3.1** for full semantics (divergence rules at expression position, `@errhandler` registration, `@err(e);` forwards, bare-statement consumption rule), grammar, and lowering.
-
-### Type Constructors (6)
-
-
-| Constructor               | Meaning                                               | Example                         |
-| ------------------------- | ----------------------------------------------------- | ------------------------------- |
-| `T!>(E)`                  | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
-| `char[:]`                 | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
-| `char[4:]`                | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
-| `char[:0]`                | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
-| `char[:0!]`               | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
-| `T[~... >]` / `T[~... <]` | Channel handle type (tx / rx; topology in `~...`)     | `int[~n 1:1 >] tx;`             |
-
-
-### Expression Forms (3)
-
-
-| Form                                                     | Purpose                                                               | Example                                   |
-| -------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
-| `await expr`                                             | Suspend until task completes, unwrap result                           | `int result = await fetch();`             |
-| `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
-| `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
-
-
-### Block Forms (1)
-
-
-| Form                              | Purpose                                                  | Example                                                         |
-| --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
-| `@with_deadline(d) { }`           | Apply deadline to block; `await` inside is cancel-aware. | `@with_deadline(seconds(5)) { await op(); }`                    |
-| `@with_deadline(d) as handle { }` | Same, with inspectable `CCDeadline` handle inside block. | `@with_deadline(seconds(5)) as dl { if (dl.remaining() < …) …}` |
-
-
-### Library Functions
-
-These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming conflicts:
-
-
-| Function                  | Purpose                                | Example                                   |
-| ------------------------- | -------------------------------------- | ----------------------------------------- |
-| `cc_ok(value)`            | Construct T!>(E) success (inferred)    | `return cc_ok(42);`                       |
-| `cc_err(error)`           | Construct T!>(E) error (inferred)      | `return cc_err(MyError_NotFound);`        |
-| `cc_ok(void)`             | Construct void!>(E) success (inferred) | `return cc_ok(void);`                     |
-| `cc_err(CC_ERR_*, "msg")` | CCError shorthand                      | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
-| `cc_ok(T, value)`         | T!>(CCError) success (explicit)        | `return cc_ok(int, 42);`                  |
-| `cc_ok(T, E, value)`      | T!>(E) success (explicit)              | `return cc_ok(int, MyError, 42);`         |
-| `cc_err(T, error)`        | T!>(CCError) error (explicit)          | `return cc_err(int, CC_ERROR(...));`      |
-| `cc_err(T, E, error)`     | T!>(E) error (explicit)                | `return cc_err(int, MyError, err);`       |
-| `cc_move(x)`              | Explicit move of move-only value       | `ch.send_take(arr, cc_move(arr));`        |
-| `cc_cancel()`             | Cancel current task or nursery         | `if (timeout) cc_cancel();`               |
-| `cc_is_cancelled()`       | Check if current task is cancelled     | `if (cc_is_cancelled()) return;`          |
-
-
-### Result Methods (UFCS)
-
-Result types (`T!>(E)`) support these methods via UFCS:
-
-
-| Method             | Purpose              | Example                                |
-| ------------------ | -------------------- | -------------------------------------- |
-| `r.is_ok()`        | Check if success     | `if (r.is_ok()) { ... }`               |
-| `r.is_err()`       | Check if error       | `if (r.is_err()) handle(cc_error(r));` |
-| `r.value()`        | Get value or abort   | `int v = r.value();`                   |
-| `r.error()`        | Get error or abort   | `CCIoError e = r.error();`             |
-| `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);`              |
-
-
-**Macro helpers (for C interop/generated code):**
-
-
-| Macro                      | Purpose                | Example                                           |
-| -------------------------- | ---------------------- | ------------------------------------------------- |
-| `cc_is_ok(res)`            | Check if success       | `if (cc_is_ok(res)) { ... }`                      |
-| `cc_is_err(res)`           | Check if error         | `if (cc_is_err(res)) handle_err();`               |
-| `cc_unwrap(res)`           | Get value (primitives) | `int v = cc_unwrap(res);`                         |
-| `cc_unwrap_as(res, T)`     | Get value (structs)    | `MyStruct v = cc_unwrap_as(res, MyStruct);`       |
-| `cc_unwrap_err(res)`       | Get error (primitives) | `CCError e = cc_unwrap_err(res);`                 |
-| `cc_unwrap_err_as(res, E)` | Get error (structs)    | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
-
-
-**C ABI naming:** All runtime/stdlib symbols use `CC`*/`cc_`* prefixes to avoid collisions with user code. The compiler automatically resolves short aliases (`String`, `Arena`, etc.) to their prefixed forms (`CCString`, `CCArena`, etc.) during compilation.
-
----
-
-## Style Guide
-
-This section documents recommended style for Concurrent-C code.
-
-### Type Annotation Spacing
-
-**Rule:** Type constructors are written **without spaces**. This applies to all compound type syntax.
-
-
-| Type                  | Correct                  | Incorrect                                                   |
-| --------------------- | ------------------------ | ----------------------------------------------------------- |
-| Result                | `T!>(E)`                 | `T ! E` or `T! E`                                           |
-| Slice                 | `char[:]`                | `char [:]` or `char[ : ]`                                   |
-| Nested slice          | `char[::]`, `char[:::]`  | `char[:: ]` or C-array spellings                            |
-| Fixed-length slice    | `char[n:]`               | `char[:n]`                                                  |
-| Sentinel slice        | `char[:0]`               | `char[: 0 ]`                                                |
-| Unique sentinel slice | `char[:0!]`              | `char[: 0 !]`                                               |
-| Generic type          | `CCVec::[int]`           | `CCVec :: [ int ]`                                          |
-| Nested generic        | `Map::[K, CCVec::[int]]` | `Map :: [ K, CCVec :: [ int ] ]` (standard bracket nesting) |
-| Function return       | `fn() -> T!>(E)`         | `fn ( ) -> T !> (E)`                                        |
-
-
-**Examples:**
-
-**Nested slice note:** `T[::]`, `T[:::]`, and deeper forms mean nested slice ranks (`T[:]`, `T[:][:]`, `T[:][:][:]`, etc.). These are slice/view types, not C arrays. Refinements compose on the innermost rank (`T[:0:]`, `T[4::]`, etc.) and still lower to the same slice ABI family.
-
-```c
-// Correct
-int!>(IoError) read_int(char[:] data) {
-    char[:] trimmed = data.trim();
-    return cc_ok(parse_int(trimmed));
-}
-
-Vec::[int] numbers = vec_new::[int](&arena);
-Map::[char[:], int] registry = map_new<char[:], int>(&arena);
-
-// Incorrect (visual noise, harder to parse)
-int ! IoError read_int (char [ : ] data) {
-    // ...
-}
-```
 
 ---
 
@@ -911,6 +1007,7 @@ int!>(Error)[~10 >] results_tx;          // sender for channel of results
 | `T[n]`   | fixed array | inline                 | compile-time                |
 | `T[:]`   | slice       | ptr + len + provenance | runtime                     |
 | `T[n:]`  | slice       | ptr + len + provenance | compile-time length         |
+| `T[:!]`  | slice       | ptr + len + provenance | runtime + unique            |
 | `T[:k]`  | slice       | ptr + len + provenance | runtime + sentinel          |
 | `T[:k!]` | slice       | ptr + len + provenance | runtime + sentinel + unique |
 
@@ -919,16 +1016,20 @@ Slices are *views*; they do not own memory.
 
 **Rule (`T[n:]` semantics):** `T[n:]` is a slice type with a compile-time known length `n`. It has the same ABI as `T[:]` (32 bytes), but the type system statically guarantees `len == n`. This enables bounds-checked indexing to elide runtime checks. `T[n:]` implicitly converts to `T[:]` (information is erased, not lost).
 
-**Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are also ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view. `T[:k!]` additionally carries unique / move-only semantics on the slice value.
+**Rule (`!` marker semantics):** The `!` suffix on a slice type is a **type-level uniqueness guarantee**. A value typed `T[:!]` or `T[:k!]` is statically required to carry `id.is_unique=1` at the ABI level (§3.4) — i.e., the compiler rejects any assignment, copy, or parameter pass that would duplicate it outside a move context (`cc_move()`, `return`, `send_take`). Use `T[:!]` in function signatures to **demand** that callers hand over ownership. `T[:]` by contrast says nothing about uniqueness at the type level — the value may or may not be unique; the compiler relies on the runtime `is_unique` bit to enforce copy rules at the call site.
+
+**Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view (typically `k = 0` to guarantee NUL-termination for C interop). Applying `!` composes the two guarantees: `T[:k!]` demands both the sentinel and type-level uniqueness.
 
 **Implicit conversions:**
 
 - `T[n]` → `T[:]`
 - `T[n]` → `T[n:]`
 - `T[n:]` → `T[:]`
+- `T[:!]` → `T[:]` *(move context; drops type-level uniqueness, value's `is_unique` bit persists)*
 - `T[:k]` → `T[:]`
-- `T[:k!]` → `T[:k]`
-- `T[:k!]` → `T[:]`
+- `T[:k!]` → `T[:k]` *(move context; drops type-level uniqueness, keeps sentinel)*
+- `T[:k!]` → `T[:!]` *(drops sentinel, keeps type-level uniqueness)*
+- `T[:k!]` → `T[:]` *(move context; drops both)*
 
 **Explicit conversions:**
 
@@ -1005,6 +1106,8 @@ Slices are either **views** (copyable, no destructor) or **unique** (move-only, 
 
 
 *Stack slices cannot escape their stack frame (compile-time enforced).
+
+**Type-level vs value-level uniqueness:** Uniqueness is always carried on the value via the `id.is_unique` ABI bit (§3.4). A source declaration can **additionally** assert it at the type level with the `!` marker (`T[:!]`, `T[:k!]`), which moves the check from "when the compiler sees a value" to "when the compiler sees the signature." Use `T[:!]` / `T[:k!]` in function parameters and return types when the contract is ownership transfer; use plain `T[:]` / `T[:k]` when the callee only borrows and doesn't care about uniqueness. See §3.3 for the conversion lattice between type-level forms.
 
 **View slices:**
 
@@ -1088,7 +1191,7 @@ This guarantees that full-range subslices remain eligible for transfer (if the s
 
 **Rule (ptr invariant):** For tracked allocations (unique slices from `recv()` or `adopt()`), the `ptr` field of the owning unique slice is always the allocation base pointer. Subslicing adjusts `ptr` (and `len`) but preserves `alen`. This invariant, combined with `is_subslice`, ensures `send_take` eligibility is decidable without runtime lookup: `is_subslice == 0` implies `ptr` equals the allocation base and `len == alen`.
 
-**Slice capture rules:** Stack slices cannot be captured in thread/task closures (compile-time enforced). Arena slices can be captured if the arena provably outlives the thread/task. Unique slices (from `recv()`) can always be captured. See §1.2 for complete capture rules.
+**Slice capture rules:** Stack slices cannot be captured in thread/task closures (compile-time enforced). Arena slices can be captured if the arena provably outlives the thread/task. Unique slices (from `recv()`) can always be captured. See §2.2 for complete capture rules.
 
 ---
 
@@ -1556,7 +1659,7 @@ d.block_max = 0;  // unbounded growth beyond the initial user buffer
 
 **Rule:** `cc_arena_alloc_local` and `cc_arena_alloc_local_grow` use a non-atomic fast path on the current slab; they MUST only be used when **one** thread or fiber exclusively holds the arena during those calls. The “grow” half of `cc_arena_alloc_local_grow` delegates to `cc_arena_alloc`. `cc_arena_would_fit` reports whether the **current** slab can satisfy an allocation without growing (atomic load of offset).
 
-**Rule:** Arena-allocated slices can be sent through channels or captured in thread closures when lifetime rules (§1.2) are satisfied.
+**Rule:** Arena-allocated slices can be sent through channels or captured in thread closures when lifetime rules (§2.2) are satisfied.
 
 **Rule (arena lifetime obligation):** `arena_reset` and `arena_free` must not be called while any slice derived from that arena may still be used on any thread. This is a programmer obligation. Debug builds may detect some violations; in release builds, violating this rule is undefined behavior.
 
@@ -1829,7 +1932,7 @@ void   Thread.join();                    // wait for completion
 
 **Rule (captures in thread closures):** Capturing a variable `v` into a thread closure is allowed iff:
 
-1. `v` is capturable (see §1.2), AND
+1. `v` is capturable (see §2.2), AND
 2. `v` is not assigned after the capture point, AND
 3. No address of `v` is taken in a way that escapes the closure's scope
 
@@ -5540,7 +5643,7 @@ spawn(@unsafe () => [&counter] { counter++; });
 | `y = x`, `f(x)`, `x.field`           | Read (OK)               |
 
 
-For thread/task closures, captured values must also be capturable (see §1.2).
+For thread/task closures, captured values must also be capturable (see §2.2).
 
 **Type inference:**
 
@@ -6014,7 +6117,7 @@ comptime bool is_sendable(type T);
 comptime bool is_copyable(type T);
 ```
 
-**Rule (`is_sendable` / `is_copyable`):** These are defined by the same structural rules as §1.1 and §1.2. They are compile-time predicates over types.
+**Rule (`is_sendable` / `is_copyable`):** These are defined by the same structural rules as §2.1 and §2.2. They are compile-time predicates over types.
 
 ---
 
@@ -6271,8 +6374,8 @@ The following must be diagnosed at compile time:
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------ |
 | Type errors                                                   | Optional/result field access on wrong branch                                                                         | §3.1   |
 | Provenance errors                                             | Slice outlives arena (statically provable)                                                                           | §3.3–2.6    |
-| Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | §1.2, §8.3 |
-| Ownership errors                                              | Copy of unique slice, use after move                                                                                 | §1.1, §3.5 |
+| Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | §2.2, §8.3 |
+| Ownership errors                                              | Copy of unique slice, use after move                                                                                 | §2.1, §3.5 |
 | Borrow errors                                                 | Borrow outlives owner (statically provable)                                                                          | §4.2        |
 | Async errors                                                  | Missing `await`, invalid suspension point                                                                            | §8.2        |
 | Blocking context errors                                       | Blocking call in @async where auto-wrap unavailable                                                                  | §8.8        |
@@ -6281,7 +6384,7 @@ The following must be diagnosed at compile time:
 | Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | §11         |
 | Optional unwrap                                               | `*x` without proven Some branch                                                                                      | §3.1        |
 | Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | §3.1        |
-| Use after move                                                | Accessing move-only value after transfer                                                                             | §1.1        |
+| Use after move                                                | Accessing move-only value after transfer                                                                             | §2.1        |
 | Guard across suspension                                       | Guard held across `await` or `run_blocking`                                                                          | §8.8        |
 | Unsafe adoption                                               | `adopt()` outside `unsafe {}`                                                                                        | § G.2        |
 | Result unwrap — missing default                               | `expr ?>` / `expr ?>(e)` with nothing on RHS                                                                         | §3.1        |
