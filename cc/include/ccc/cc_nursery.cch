@@ -75,11 +75,7 @@ int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an async closure on the hybrid/V2 path.
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
-#if defined(CC_PARSER_MODE)
-#define cc_nursery_spawn_async(n, task_expr) (0)
-#else
 int cc_nursery_spawn_async(CCNursery* n, CCTask task);
-#endif
 // Lowered helpers for future explicit nursery-handle syntax:
 // create a child nursery, spawn the root closure into it, and return the child handle.
 CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c);

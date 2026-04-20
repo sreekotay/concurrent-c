@@ -80,6 +80,26 @@ struct CCArenaPool {
     uint32_t _flags;
 };
 
+#ifdef CC_PARSER_MODE
+/* Parser-mode UFCS method stubs so raw arena.method(...) syntax can type-check
+   before AST UFCS lowering rewrites it. TCC's cc_ext_parser recognises most
+   method-call shapes directly, but a handful of .ccs programs still need a
+   declared identifier after `.` when the receiver is a CCArena/CCArenaPool
+   local — the type-stub pass doesn't synthesize these. */
+static void reset();
+static size_t remaining();
+static CCArena detach();
+static CCArenaCheckpoint checkpoint();
+
+/* CCArenaCheckpoint stubs */
+static void restore();
+
+/* CCArenaPool stubs */
+static void* alloc();
+static CCArena detach_arena();
+static void destroy();
+#endif
+
 // Global provenance counter (defined in runtime).
 extern cc_atomic_u64 cc_arena_prov_counter;
 

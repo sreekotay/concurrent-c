@@ -115,7 +115,10 @@ typedef cc_task_poll_fn cc_task_intptr_poll_fn;
 #endif /* !CC_PARSER_MODE */
 
 #if !defined(CC_PARSER_MODE)
-/* Typed convenience wrapper: `T` is the desired result type (e.g. `int`, `intptr_t`, `void*`). */
+/* Typed convenience wrapper: `T` is the desired result type (e.g. `int`, `intptr_t`, `void*`).
+   Guarded because the parser-mode stub block above already defines
+   both macros to zero-return variants so struct-by-value CCTask never
+   appears in an expression TCC might try to type-check. */
 #define cc_block_on(T, task_expr) ((T)(intptr_t)cc_block_on_intptr((task_expr)))
 /* Temporary ergonomic alias until we have first-class `await` lowering for all expressions. */
 #define cc_await(T, task_expr) cc_block_on(T, (task_expr))
