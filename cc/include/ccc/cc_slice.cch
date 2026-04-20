@@ -265,17 +265,6 @@ static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
 
 /* ---- UFCS methods (receiver is CCSlice*) ---- */
 
-#ifdef CC_PARSER_MODE
-static CCSlice trim();
-static CCSlice trim_left();
-static CCSlice trim_right();
-static CCSlice sub();
-static char at();
-static bool starts_with();
-static bool ends_with();
-static bool eq_cstr();
-#endif
-
 static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
 
 static inline CCSlice CCSlice_trim(CCSlice* s) {

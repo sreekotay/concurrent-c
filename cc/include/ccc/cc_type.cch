@@ -17,13 +17,8 @@ typedef struct {
     const char* callee;
 } CCTypeDestroyHook;
 
-#ifdef CC_PARSER_MODE
-typedef CCSlice (*CCTypeCreateHandler)();
-typedef CCSlice (*CCTypeUfcsHandler)();
-#else
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
-#endif
 
 typedef struct {
     CCTypeCreateHook create;

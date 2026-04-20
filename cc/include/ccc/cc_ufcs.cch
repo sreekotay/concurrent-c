@@ -5,11 +5,7 @@
 
 #include <ccc/cc_arena.cch>
 
-#ifdef CC_PARSER_MODE
-typedef CCSlice (*CCUfcsRewriteFn)();
-#else
 typedef CCSlice (*CCUfcsRewriteFn)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena);
-#endif
 
 typedef struct {
     CCSlice pattern;
@@ -76,23 +72,10 @@ static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRew
     return reg;
 }
 
-#ifdef CC_PARSER_MODE
- static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {
-    (void)reg;
-    (void)recv_type;
-    (void)method;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    (void)arena;
-    return cc_slice_empty();
-}
-#else
 static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {
     if (!reg.rewrite) return cc_slice_empty();
     return reg.rewrite(recv_type, method, mode, argv, arg_types, arena);
 }
-#endif
 
 /* Default UFCS dispatch is wired up globally in cc_arena.cch via two
  * wildcard `cc_type_register(...)` entries:
