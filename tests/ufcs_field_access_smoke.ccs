@@ -22,8 +22,8 @@ int main(void) {
         return 1;
     }
     
-    int? val = c.items.get(1);
-    if (!val.has || *val != 20) {
+    int* val = c.items.get(1);
+    if (!val || *val != 20) {
         printf("FAIL: get(1) expected 20\n");
         return 1;
     }

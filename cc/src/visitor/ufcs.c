@@ -502,8 +502,7 @@ static int cc__is_family_recv_type(const char* type_name) {
             strncmp(type_name, "Map_", 4) == 0 ||
             strncmp(type_name, "__CC_VEC(", 9) == 0 ||
             strncmp(type_name, "__CC_MAP(", 9) == 0 ||
-            strncmp(type_name, "CCResult_", 9) == 0 ||
-            strncmp(type_name, "CCOptional_", 11) == 0);
+            strncmp(type_name, "CCResult_", 9) == 0);
 }
 
 static const char* cc__canonicalize_parser_family_macro(const char* type_name,
@@ -995,8 +994,7 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
             const char* local_type_name = cc__ufcs_lookup_scoped_local_var_type(
                 g_ufcs_source_text, g_ufcs_source_offset, recv, local_type_buf, sizeof(local_type_buf));
             if (local_type_name &&
-                (strncmp(local_type_name, "CCResult_", 9) == 0 ||
-                 strncmp(local_type_name, "CCOptional_", 11) == 0)) {
+                strncmp(local_type_name, "CCResult_", 9) == 0) {
                 reg_type_name = local_type_name;
             }
         }
@@ -1198,8 +1196,7 @@ static int cc__emit_type_driven_dispatch(char* out,
         char family_type_buf[256];
         const char* family_type_name =
             cc__canonicalize_family_recv_type(family_recv_type, family_type_buf, sizeof(family_type_buf));
-        int by_value = (strncmp(family_type_name, "CCResult_", 9) == 0 ||
-                        strncmp(family_type_name, "CCOptional_", 11) == 0);
+        int by_value = (strncmp(family_type_name, "CCResult_", 9) == 0);
         const char* family_method = method;
         if (strncmp(family_type_name, "CCResult_", 9) == 0) {
             if (!has_args && strcmp(method, "value") == 0) {

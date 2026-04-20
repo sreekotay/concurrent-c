@@ -65,11 +65,6 @@ struct CCTypeRegistry {
     size_t map_count;
     size_t map_capacity;
 
-    /* Optional instantiations */
-    CCTypeInstEntry* optionals;
-    size_t opt_count;
-    size_t opt_capacity;
-
     /* Channel typed-wrapper instantiations */
     CCTypeInstEntry* channels;
     size_t chan_count;
@@ -136,8 +131,6 @@ void cc_type_registry_free(CCTypeRegistry* reg) {
     free(reg->vecs);
     free_inst_entries(reg->maps, reg->map_count);
     free(reg->maps);
-    free_inst_entries(reg->optionals, reg->opt_count);
-    free(reg->optionals);
     free_inst_entries(reg->channels, reg->chan_count);
     free(reg->channels);
     free(reg);
@@ -155,8 +148,6 @@ void cc_type_registry_clear(CCTypeRegistry* reg) {
     reg->vec_count = 0;
     free_inst_entries(reg->maps, reg->map_count);
     reg->map_count = 0;
-    free_inst_entries(reg->optionals, reg->opt_count);
-    reg->opt_count = 0;
     free_inst_entries(reg->channels, reg->chan_count);
     reg->chan_count = 0;
 }
@@ -1012,41 +1003,7 @@ int cc_type_registry_add_map(CCTypeRegistry* reg, const char* key_type, const ch
     return 0;
 }
 
-/* Ensure capacity for optional entries */
-static int ensure_opt_capacity(CCTypeRegistry* reg, size_t needed) {
-    if (reg->opt_capacity >= needed) return 0;
-    size_t new_cap = reg->opt_capacity ? reg->opt_capacity * 2 : 8;
-    while (new_cap < needed) new_cap *= 2;
-    CCTypeInstEntry* nv = (CCTypeInstEntry*)realloc(reg->optionals, new_cap * sizeof(CCTypeInstEntry));
-    if (!nv) return -1;
-    reg->optionals = nv;
-    reg->opt_capacity = new_cap;
-    return 0;
-}
-
-int cc_type_registry_add_optional(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name) {
-    if (!reg || !elem_type || !mangled_name) return -1;
-
-    /* Check for duplicate */
-    for (size_t i = 0; i < reg->opt_count; i++) {
-        if (strcmp(reg->optionals[i].mangled_name, mangled_name) == 0) {
-            return 0; /* Already registered */
-        }
-    }
-
-    if (ensure_opt_capacity(reg, reg->opt_count + 1) != 0) return -1;
-    reg->optionals[reg->opt_count].kind = CC_CONTAINER_VEC; /* Not used for optionals */
-    reg->optionals[reg->opt_count].mangled_name = strdup(mangled_name);
-    reg->optionals[reg->opt_count].type1 = strdup(elem_type);
-    reg->optionals[reg->opt_count].type2 = NULL;
-    if (!reg->optionals[reg->opt_count].mangled_name || !reg->optionals[reg->opt_count].type1) {
-        free(reg->optionals[reg->opt_count].mangled_name);
-        free(reg->optionals[reg->opt_count].type1);
-        return -1;
-    }
-    reg->opt_count++;
-    return 0;
-}
+/* (retired) The CCOptional_* type registry used to live here. */
 
 static int ensure_chan_capacity(CCTypeRegistry* reg, size_t needed) {
     if (reg->chan_capacity >= needed) return 0;
@@ -1099,15 +1056,6 @@ size_t cc_type_registry_map_count(CCTypeRegistry* reg) {
 const CCTypeInstantiation* cc_type_registry_get_map(CCTypeRegistry* reg, size_t idx) {
     if (!reg || idx >= reg->map_count) return NULL;
     return (const CCTypeInstantiation*)&reg->maps[idx];
-}
-
-size_t cc_type_registry_optional_count(CCTypeRegistry* reg) {
-    return reg ? reg->opt_count : 0;
-}
-
-const CCTypeInstantiation* cc_type_registry_get_optional(CCTypeRegistry* reg, size_t idx) {
-    if (!reg || idx >= reg->opt_count) return NULL;
-    return (const CCTypeInstantiation*)&reg->optionals[idx];
 }
 
 size_t cc_type_registry_channel_count(CCTypeRegistry* reg) {

@@ -31,20 +31,7 @@ int main(void) {
         printf("FAIL: cc_io_test_int(-5) should have returned error\n");
         return 1;
     }
-    
-    // Test CCOpt(int)
-    CCOptional_int opt1 = cc_io_test_opt(true);
-    if (!cc_is_some(opt1)) {
-        printf("FAIL: cc_io_test_opt(true) returned none\n");
-        return 1;
-    }
-    
-    CCOptional_int opt2 = cc_io_test_opt(false);
-    if (!cc_is_none(opt2)) {
-        printf("FAIL: cc_io_test_opt(false) returned some\n");
-        return 1;
-    }
-    
+
     printf("PASS\n");
     return 0;
 }

@@ -6,8 +6,8 @@
  *   lower_headers <input_dir> <output_dir> --rewrite-includes <src_dir> <dst_dir>
  *
  * Mode 1 (headers): Recursively finds all .cch files in input_dir, transforms
- * CC syntax (T!>(E) -> CCResult_T_E, T? -> CCOptional_T), and writes .h files
- * to output_dir preserving directory structure.
+ * CC syntax (T!>(E) -> CCResult_T_E), and writes .h files to output_dir
+ * preserving directory structure.
  *
  * Mode 2 (--rewrite-includes): Additionally copies .c and .h files from
  * src_dir to dst_dir, rewriting any #include referencing .cch to .h so that
@@ -283,7 +283,6 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "       %s <input_dir> <output_dir> --rewrite-includes <src_dir> <dst_dir>\n", argv[0]);
         fprintf(stderr, "\nLowers .cch headers to .h files:\n");
         fprintf(stderr, "  - Rewrites T!>(E) -> CCResult_T_E + guarded CC_DECL_RESULT_SPEC\n");
-        fprintf(stderr, "  - Rewrites T? -> CCOptional_T + guarded CC_DECL_OPTIONAL\n");
         fprintf(stderr, "\n--rewrite-includes: copy .c/.h files, rewriting .cch includes to .h\n");
         return 1;
     }

@@ -1815,7 +1815,6 @@ char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* in
 }
 
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);
-static int cc__is_known_optional_type(const char* mangled);
 static void cc__mangle_container_type_param(const char* src, size_t len, char* out, size_t out_sz);
 static void cc__canonicalize_ufcs_alias_target(char* out, size_t out_sz, const char* type_src);
 static const char* cc__lookup_scoped_type_alias(const char* src, size_t limit, const char* alias_name, char* out_type, size_t out_type_sz);
@@ -2711,20 +2710,9 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
             }
         }
     }
-    if (base_end > start && base_end[-1] == '?') {
-        const char* inner_s = start;
-        const char* inner_e = base_end - 1;
-        char mangled_inner[128];
-        cc__trim_span_ws(&inner_s, &inner_e);
-        if (inner_e > inner_s) {
-            cc__mangle_type_name(inner_s, (size_t)(inner_e - inner_s), mangled_inner, sizeof(mangled_inner));
-            if (mangled_inner[0]) {
-                snprintf(out, out_sz, "CCOptional_%s%.*s",
-                         mangled_inner, ptr_count, "********");
-                return;
-            }
-        }
-    }
+    /* (retired) The `T?` -> `CCOptional_T` receiver-type inference was once
+     * handled here. Optionals are gone; the T? detector in the main
+     * preprocess pass emits a diagnostic before we reach this path. */
     {
         size_t base_len = (size_t)(base_end - start);
         CCTypeRegistry* reg = cc_type_registry_get_global();
@@ -2762,7 +2750,6 @@ static int cc__type_is_known_ufcs_family_base(const char* type_name) {
            strcmp(type_name, "CCNursery") == 0 ||
            strcmp(type_name, "CCCommand") == 0 ||
            strcmp(type_name, "CCFile") == 0 ||
-           strncmp(type_name, "CCOptional_", 11) == 0 ||
            strncmp(type_name, "CCResult_", 9) == 0 ||
            strncmp(type_name, "CCChanTx_", 9) == 0 ||
            strncmp(type_name, "CCChanRx_", 9) == 0 ||
@@ -3629,7 +3616,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || nursery_like ||
               chan_tx || chan_rx ||
-              strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             i++;
             continue;
@@ -3663,8 +3649,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             i++;
             continue;
         }
-        family_by_value = (strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
-                           strncmp(recv_type_base, "CCResult_", 9) == 0);
+        family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0);
         family_pass_direct = parser_map || (strncmp(recv_type_base, "Map_", 4) == 0);
         if (strncmp(recv_type_base, "CCResult_", 9) == 0) {
             if (!(strcmp(method_name, "value") == 0 ||
@@ -3847,40 +3832,6 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
     cc_result_spec_mangle_type(src, len, out, out_sz);
 }
 
-/* Collect optional types (T) for typedef generation. */
-static char cc__optional_types[64][128];
-static size_t cc__optional_type_count = 0;
-
-static void cc__add_optional_type(const char* mangled) {
-    /* Check for duplicates */
-    for (size_t i = 0; i < cc__optional_type_count; i++) {
-        if (strcmp(cc__optional_types[i], mangled) == 0) {
-            return; /* Already have this type */
-        }
-    }
-    if (cc__optional_type_count >= 64) {
-        static int warned = 0;
-        if (!warned) {
-            fprintf(stderr, "warning: too many optional types (limit 64), some may be ignored\n");
-            warned = 1;
-        }
-        return;
-    }
-    snprintf(cc__optional_types[cc__optional_type_count++], 128, "%s", mangled);
-}
-
-/* Check if an optional type is a "known" type that's pre-defined in parse stubs */
-static int cc__is_known_optional_type(const char* mangled) {
-    static const char* known[] = {
-        "int", "bool", "char", "size_t", "voidptr", "charptr",
-        "long", "short", "float", "double", "void", NULL
-    };
-    for (int i = 0; known[i]; i++) {
-        if (strcmp(mangled, known[i]) == 0) return 1;
-    }
-    return 0;
-}
-
 /* Check if a token is a known C base type (for error detection) */
 static int cc__is_known_base_type(const char* s, size_t len) {
     static const char* types[] = {
@@ -3896,249 +3847,69 @@ static int cc__is_known_base_type(const char* s, size_t len) {
     return 0;
 }
 
-/* Rewrite optional types:
-   - `T?` -> `CCOptional_T`
-   The '?' must immediately follow a type name (no space).
-   We detect: identifier? or )? or ]? or >? patterns. */
+/* Retired: optional types (`T?`) are gone. This pass now serves purely as a
+ * diagnostic emitter — when it spots a `T?` sigil in a type context it reports
+ * the retirement and refuses to continue. Non-type uses of `?` (ternary `?:`,
+ * CC `?>` suffix, `??` operators) are untouched. */
 static char* cc__rewrite_optional_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
-    
-    /* Reset optional type tracking for each preprocessing call.
-       This ensures inline typedefs are emitted fresh each time. */
-    cc__optional_type_count = 0;
-    
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    
+
     size_t i = 0;
-    size_t last_emit = 0;
     CCScannerState scan;
     cc_scanner_init(&scan);
-    
+
     while (i < n) {
-        /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
+
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        /* Detect T? pattern: identifier followed by '?' (not '?:' ternary) */
-        if (c == '?' && c2 != ':' && c2 != '?') {
-            /* Check what precedes the '?' */
+
+        if (c == '?' && c2 != ':' && c2 != '?' && c2 != '>') {
             if (i > 0) {
                 char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>' */
                 if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
-                    /* Scan back to find the type start */
-                    size_t ty_start = cc__scan_back_to_delim(src, i);
-                    if (ty_start < i) {
-                        /* Extract the type name */
-                        size_t ty_len = i - ty_start;
-                        
-                        /* VALIDATION: Check if this looks like a variable, not a type.
-                           Get just the identifier immediately before '?' (not the whole scanned type) */
-                        size_t ident_end = i;
-                        size_t ident_start = ident_end;
-                        while (ident_start > 0 && cc_is_ident_char(src[ident_start - 1])) ident_start--;
-                        size_t ident_len = ident_end - ident_start;
-                        
-                        /* Types typically: start uppercase, or are known types (int, char, etc.)
-                           Variables typically: start lowercase, single word */
-                        if (ident_len > 0 && ident_len < 32) {
-                            char first_char = src[ident_start];
-                            int looks_like_variable = (first_char >= 'a' && first_char <= 'z') &&
-                                                      !cc__is_known_base_type(src + ident_start, ident_len);
-                            
-                            if (looks_like_variable) {
-                                /* Emit helpful error */
-                                char var_name[64];
-                                size_t vlen = ident_len < sizeof(var_name) - 1 ? ident_len : sizeof(var_name) - 1;
-                                memcpy(var_name, src + ident_start, vlen);
-                                var_name[vlen] = '\0';
-                                
-                                char rel[1024];
-                                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        scan.line, scan.col, "syntax",
-                                        "'%s?' looks like optional unwrap of variable '%s'", var_name, var_name);
-                                fprintf(stderr, "  hint: to unwrap an optional, use '*%s' instead of '%s?'\n", var_name, var_name);
-                                fprintf(stderr, "  hint: '%s?' syntax is for declaring optional TYPES (e.g., 'int? maybe_value')\n", var_name);
-                                free(out);
-                                return NULL;
-                            }
-                        }
-                        
-                        char mangled[256];
-                        cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
-                        
-                        if (mangled[0]) {
-                            /* Check if we've already emitted this type */
-                            int already_emitted = 0;
-                            for (size_t ti = 0; ti < cc__optional_type_count; ti++) {
-                                if (strcmp(cc__optional_types[ti], mangled) == 0) {
-                                    already_emitted = 1;
-                                    break;
-                                }
-                            }
-                            
-                            /* Collect for tracking */
-                            cc__add_optional_type(mangled);
-                            
-                            /* Emit everything up to ty_start */
-                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            
-                            /* For user types (not known types), emit inline struct definition on first use */
-                            if (!already_emitted && !cc__is_known_optional_type(mangled)) {
-                                /* Extract original type name (before mangling) */
-                                char orig_type[256];
-                                size_t orig_len = ty_len < sizeof(orig_type) - 1 ? ty_len : sizeof(orig_type) - 1;
-                                memcpy(orig_type, src + ty_start, orig_len);
-                                orig_type[orig_len] = '\0';
-                                
-                                /* Emit struct definition: typedef struct { int has; union { T value; } u; } CCOptional_T; */
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "typedef struct { int has; union { ");
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, orig_type);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, " value; } u; } CCOptional_");
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
-                            }
-                            
-                            /* Emit CCOptional_T - type name */
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                            last_emit = i + 1; /* skip past '?' */
+                    size_t ident_end = i;
+                    size_t ident_start = ident_end;
+                    while (ident_start > 0 && cc_is_ident_char(src[ident_start - 1])) ident_start--;
+                    size_t ident_len = ident_end - ident_start;
+
+                    if (ident_len > 0 && ident_len < 64) {
+                        char first_char = src[ident_start];
+                        int looks_like_type = (first_char >= 'A' && first_char <= 'Z') ||
+                                              cc__is_known_base_type(src + ident_start, ident_len);
+                        if (looks_like_type) {
+                            char name[64];
+                            size_t vlen = ident_len < sizeof(name) - 1 ? ident_len : sizeof(name) - 1;
+                            memcpy(name, src + ident_start, vlen);
+                            name[vlen] = '\0';
+
+                            char rel[1024];
+                            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>",
+                                                                rel, sizeof(rel)),
+                                            scan.line, scan.col, "syntax",
+                                            "optional type '%s?' has been retired", name);
+                            fprintf(stderr,
+                                    "  hint: replace with one of:\n"
+                                    "    - nullable pointer `%s*` (NULL = absent)\n"
+                                    "    - `bool op(%s* out)` out-parameter\n"
+                                    "    - in-band sentinel (empty slice / -1 / etc.)\n"
+                                    "    - result type `%s !>(CCError)` for fallible operations\n"
+                                    "  see cc/include/ccc/DEPRECATIONS.md for the full migration matrix\n",
+                                    name, name, name);
+                            return NULL;
                         }
                     }
                 }
             }
         }
-        
+
         i++;
     }
-    
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
+
+    /* No T? found — return NULL so the pass-chain keeps the original buffer. */
+    return NULL;
 }
 
-/* Rewrite optional constructors for parser mode:
-   - `cc_some_CCOptional_T(v)` -> `__CC_OPTIONAL_SOME(T, v)`
-   - `cc_none_CCOptional_T()` -> `__CC_OPTIONAL_NONE(T)`
-   This allows custom types to work during TCC parsing. */
-static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    
-    size_t i = 0;
-    size_t last_emit = 0;
-    CCScannerState scan;
-    cc_scanner_init(&scan);
-    
-    while (i < n) {
-        /* Skip comments and strings using shared helper */
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
-        /* Check for cc_some_CCOptional_ or cc_none_CCOptional_ patterns */
-        const char* some_prefix = "cc_some_CCOptional_";
-        const char* none_prefix = "cc_none_CCOptional_";
-        size_t some_len = 19;  /* strlen("cc_some_CCOptional_") */
-        size_t none_len = 19;  /* strlen("cc_none_CCOptional_") */
-        
-        int is_some = (i + some_len < n && strncmp(src + i, some_prefix, some_len) == 0);
-        int is_none = (i + none_len < n && strncmp(src + i, none_prefix, none_len) == 0);
-        
-        if (is_some || is_none) {
-            /* Make sure this isn't part of a longer identifier */
-            if (i > 0 && cc_is_ident_char(src[i - 1])) {
-                i++;
-                continue;
-            }
-            
-            size_t prefix_len = is_some ? some_len : none_len;
-            size_t j = i + prefix_len;
-            
-            /* Extract the type name (identifier after prefix) */
-            size_t type_start = j;
-            while (j < n && cc_is_ident_char(src[j])) j++;
-            size_t type_end = j;
-            
-            /* Skip whitespace to find '(' */
-            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-            if (j >= n || src[j] != '(') {
-                i++;
-                continue;
-            }
-            
-            j++;  /* skip '(' */
-            
-            /* Find matching ')' */
-            int paren_depth = 1;
-            size_t arg_start = j;
-            int in_s = 0, in_c = 0;
-            while (j < n && paren_depth > 0) {
-                char ch = src[j];
-                if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
-                if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
-                if (ch == '"') { in_s = 1; j++; continue; }
-                if (ch == '\'') { in_c = 1; j++; continue; }
-                if (ch == '(') paren_depth++;
-                else if (ch == ')') paren_depth--;
-                j++;
-            }
-            
-            if (paren_depth != 0) {
-                i++;
-                continue;
-            }
-            
-            size_t paren_close = j - 1;  /* position of ')' */
-            size_t arg_end = paren_close;
-            
-            /* Extract type name */
-            size_t type_len = type_end - type_start;
-            if (type_len == 0 || type_len >= 256) {
-                i++;
-                continue;
-            }
-            
-            char type_name[256];
-            memcpy(type_name, src + type_start, type_len);
-            type_name[type_len] = '\0';
-            
-            /* Emit everything up to this pattern */
-            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            
-            if (is_some) {
-                /* Keep a parser-visible generic constructor call in the comma lhs,
-                   but make the value of the full expression the typed optional. */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)__CC_OPTIONAL_SOME(");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "), (CCOptional_");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 1, .u.value = ");
-                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "})");
-            } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)__CC_OPTIONAL_NONE(");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "), (CCOptional_");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 0})");
-            }
-            
-            last_emit = j;  /* skip past ')' */
-            i = j;
-            continue;
-        }
-        
-        i++;
-    }
-    
-    if (last_emit == 0) return NULL;  /* No rewrites done */
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
 
 /* Rewrite result constructors for parser mode:
    - `cc_ok_CCResult_T_E(v)` -> `__CC_RESULT_OK(0, 0, v)`
@@ -4358,12 +4129,6 @@ static void cc__canonicalize_ufcs_alias_target(char* out, size_t out_sz, const c
     if (out[0] && strcmp(out, type_src) != 0) return;
     cc__normalize_ufcs_type_name(out, out_sz, type_src);
     cc__canonicalize_container_param_type(out, out_sz);
-}
-
-static int cc__vec_optional_predeclared(const char* mangled_elem) {
-    if (!mangled_elem) return 0;
-    if (cc__is_known_optional_type(mangled_elem)) return 1;
-    return strcmp(mangled_elem, "CCSlice") == 0 || strcmp(mangled_elem, "CCSliceUnique") == 0;
 }
 
 /* Mangle a type parameter for container names (int -> int, char[:] -> charslice, etc.) */
@@ -5527,93 +5292,39 @@ static char* cc__rewrite_try_exprs(const char* src, size_t n) {
     return out;
 }
 
-/* Rewrite *opt -> cc_unwrap_opt(opt) for variables declared with CCOptional_* type.
-   Two-pass approach:
-   1. Scan for CCOptional_<T> <varname> declarations
-   2. Rewrite *varname to cc_unwrap_opt(varname)
-*/
+/* Rewrite `*res` -> `cc_unwrap(res)` for variables declared with CCResult_*
+ * type. Two-pass approach:
+ *   1. Scan for CCResult_<T>_<E> or `__CC_RESULT(T, E)` variable declarations.
+ *   2. Rewrite `*varname` to `cc_unwrap(varname)`.
+ *
+ * (retired) The optional arm of this pass, which recognized CCOptional_<T>
+ * declarations and rewrote `*opt` -> `cc_unwrap_opt(opt)`, has been removed
+ * along with the optional surface. */
 static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
-    
-    /* Pass 1: Collect optional and result variable names */
+
+    /* Pass 1: Collect Result variable names. */
     #define MAX_UNWRAP_VARS 256
-    typedef struct {
-        char* name;
-        int is_optional;  /* 1 for Optional, 0 for Result */
-    } UnwrapVar;
-    UnwrapVar vars[MAX_UNWRAP_VARS];
+    char* vars[MAX_UNWRAP_VARS];
     int var_count = 0;
-    
+
     size_t i = 0;
     CCScannerState scan;
     cc_scanner_init(&scan);
-    
+
     while (i < n && var_count < MAX_UNWRAP_VARS) {
-        /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
+
         char c = src[i];
-        
-        /* Look for Optional types: CCOptional_ or __CC_OPTIONAL( */
-        int is_cc_optional = (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0);
-        int is_macro_optional = (c == '_' && i + 14 < n && strncmp(src + i, "__CC_OPTIONAL(", 14) == 0);
-        
-        if (is_cc_optional || is_macro_optional) {
-            /* Skip to end of type name */
-            size_t type_end = i;
-            if (is_cc_optional) {
-                type_end += 11;
-                while (type_end < n && cc_is_ident_char(src[type_end])) type_end++;
-            } else {
-                /* __CC_OPTIONAL(T) - skip to closing paren */
-                type_end += 14;
-                int paren_depth = 1;
-                while (type_end < n && paren_depth > 0) {
-                    if (src[type_end] == '(') paren_depth++;
-                    else if (src[type_end] == ')') paren_depth--;
-                    type_end++;
-                }
-            }
-            /* Skip whitespace */
-            size_t ws_end = type_end;
-            while (ws_end < n && (src[ws_end] == ' ' || src[ws_end] == '\t' || src[ws_end] == '\n')) ws_end++;
-            /* Check for variable name (not function) */
-            if (ws_end < n && cc_is_ident_start(src[ws_end])) {
-                size_t var_start = ws_end;
-                while (ws_end < n && cc_is_ident_char(src[ws_end])) ws_end++;
-                size_t var_len = ws_end - var_start;
-                /* Skip whitespace */
-                size_t after_ws = ws_end;
-                while (after_ws < n && (src[after_ws] == ' ' || src[after_ws] == '\t')) after_ws++;
-                /* If followed by '=' or ';' or ',', it's a variable declaration */
-                if (after_ws < n && (src[after_ws] == '=' || src[after_ws] == ';' || src[after_ws] == ',')) {
-                    char* varname = (char*)malloc(var_len + 1);
-                    if (varname) {
-                        memcpy(varname, src + var_start, var_len);
-                        varname[var_len] = 0;
-                        vars[var_count].name = varname;
-                        vars[var_count].is_optional = 1;
-                        var_count++;
-                    }
-                }
-            }
-            i = type_end;
-            continue;
-        }
-        
-        /* Look for Result types: CCResult_ or __CC_RESULT( */
         int is_cc_result = (c == 'C' && i + 8 < n && strncmp(src + i, "CCResult_", 9) == 0);
         int is_macro_result = (c == '_' && i + 13 < n && strncmp(src + i, "__CC_RESULT(", 12) == 0);
-        
+
         if (is_cc_result || is_macro_result) {
-            /* Skip to end of type name */
             size_t type_end = i;
             if (is_cc_result) {
                 type_end += 9;
-                /* CCResult_T_E - skip through identifier and underscore and another identifier */
                 while (type_end < n && (cc_is_ident_char(src[type_end]) || src[type_end] == '_')) type_end++;
             } else {
-                /* __CC_RESULT(T, E) - skip to closing paren */
                 type_end += 12;
                 int paren_depth = 1;
                 while (type_end < n && paren_depth > 0) {
@@ -5622,125 +5333,98 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
                     type_end++;
                 }
             }
-            /* Skip whitespace */
             size_t ws_end = type_end;
             while (ws_end < n && (src[ws_end] == ' ' || src[ws_end] == '\t' || src[ws_end] == '\n')) ws_end++;
-            /* Check for variable name (not function) */
             if (ws_end < n && cc_is_ident_start(src[ws_end])) {
                 size_t var_start = ws_end;
                 while (ws_end < n && cc_is_ident_char(src[ws_end])) ws_end++;
                 size_t var_len = ws_end - var_start;
-                /* Skip whitespace */
                 size_t after_ws = ws_end;
                 while (after_ws < n && (src[after_ws] == ' ' || src[after_ws] == '\t')) after_ws++;
-                /* If followed by '=' or ';' or ',', it's a variable declaration */
                 if (after_ws < n && (src[after_ws] == '=' || src[after_ws] == ';' || src[after_ws] == ',')) {
                     char* varname = (char*)malloc(var_len + 1);
                     if (varname) {
                         memcpy(varname, src + var_start, var_len);
                         varname[var_len] = 0;
-                        vars[var_count].name = varname;
-                        vars[var_count].is_optional = 0;
-                        var_count++;
+                        vars[var_count++] = varname;
                     }
                 }
             }
             i = type_end;
             continue;
         }
-        
+
         i++;
     }
-    
-    /* If no vars found, nothing to rewrite */
+
     if (var_count == 0) return NULL;
-    
-    /* Pass 2: Rewrite *varname to unwrap call */
+
+    /* Pass 2: Rewrite `*varname` to `cc_unwrap(varname)`. */
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    
+
     i = 0;
     size_t last_emit = 0;
-    cc_scanner_init(&scan);  /* Reset scanner for pass 2 */
-    
+    cc_scanner_init(&scan);
+
     while (i < n) {
-        /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
+
         char c = src[i];
-        
-        /* Look for * followed by an optional/result variable name */
+
         if (c == '*') {
             size_t star_pos = i;
-            
-            /* Skip if this looks like a pointer type declaration (preceded by identifier).
-               E.g. "S* res" should NOT be rewritten, but "*res" or "= *res" should be. */
+
             int is_ptr_type_decl = 0;
             if (star_pos > 0) {
                 size_t prev = star_pos - 1;
-                /* Skip whitespace before the * */
                 while (prev > 0 && (src[prev] == ' ' || src[prev] == '\t')) prev--;
-                /* If preceded by identifier char, it's likely a type like "S*" or "int*" */
                 if (prev < n && cc_is_ident_char(src[prev])) {
                     is_ptr_type_decl = 1;
                 }
             }
-            
+
             if (is_ptr_type_decl) {
                 i++;
                 continue;
             }
-            
+
             i++;
-            /* Skip whitespace */
             while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
-            /* Check for identifier */
             if (i < n && cc_is_ident_start(src[i])) {
                 size_t var_start = i;
                 while (i < n && cc_is_ident_char(src[i])) i++;
                 size_t var_len = i - var_start;
-                
-                /* Check if this identifier is in our vars list */
+
                 int found_idx = -1;
                 for (int j = 0; j < var_count; j++) {
-                    if (strlen(vars[j].name) == var_len && strncmp(vars[j].name, src + var_start, var_len) == 0) {
+                    if (strlen(vars[j]) == var_len && strncmp(vars[j], src + var_start, var_len) == 0) {
                         found_idx = j;
                         break;
                     }
                 }
-                
+
                 if (found_idx >= 0) {
-                    /* Rewrite *varname to unwrap call */
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, star_pos - last_emit);
-                    if (vars[found_idx].is_optional) {
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap_opt(");
-                    } else {
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap(");
-                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap(");
                     cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_len);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                     last_emit = i;
                     continue;
                 }
             }
-            /* Not a match, continue normally */
             i = star_pos + 1;
             continue;
         }
-        
+
         i++;
     }
-    
-    /* Free vars */
+
     for (int j = 0; j < var_count; j++) {
-        free(vars[j].name);
+        free(vars[j]);
     }
-    
-    if (last_emit == 0) {
-        /* No rewrites done */
-        return NULL;
-    }
-    
+
+    if (last_emit == 0) return NULL;
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
@@ -6606,25 +6290,10 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                     if (strcmp(mangled_elem, "char") == 0) {
                         continue;
                     }
-                    
-                    /* Use FULL macro whenever the optional type is not predeclared or the
-                       element type is not a simple builtin token. */
-                    int opt_predeclared = cc__vec_optional_predeclared(mangled_elem);
-                    int is_complex = (!opt_predeclared ||
-                                      strchr(inst->type1, '*') != NULL ||
-                                      strncmp(inst->type1, "struct ", 7) == 0 ||
-                                      strncmp(inst->type1, "union ", 6) == 0);
-                    if (is_complex) {
-                        if (!opt_predeclared) {
-                            /* Emit optional type declaration first */
-                            fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
-                        }
-                        /* Use FULL macro with explicit optional type */
-                        fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
-                                inst->type1, inst->mangled_name, mangled_elem);
-                    } else {
-                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                    }
+
+                    /* Optionals retired — always use the 2-arg macro.
+                     * vec.cch treats the legacy 3-arg form as ignoring OptT. */
+                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                 }
             }
             
@@ -6641,10 +6310,9 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
                         hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                     }
-                    char mangled_val[128];
-                    cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
-                    fprintf(out, "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
-                            inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
+                    /* Optionals retired — always use the 5-arg macro. */
+                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
+                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
                 }
             }
 
@@ -6776,20 +6444,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 if (inst && inst->type1 && inst->mangled_name) {
                     const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
                     if (strcmp(mangled_elem, "char") == 0) continue;
-                    int opt_predeclared = cc__vec_optional_predeclared(mangled_elem);
-                    int is_complex = (!opt_predeclared ||
-                                      strchr(inst->type1, '*') != NULL || 
-                                      strncmp(inst->type1, "struct ", 7) == 0 ||
-                                      strncmp(inst->type1, "union ", 6) == 0);
-                    if (is_complex) {
-                        if (!opt_predeclared) {
-                            fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
-                        }
-                        fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
-                                inst->type1, inst->mangled_name, mangled_elem);
-                    } else {
-                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                    }
+                    /* Optionals retired — always use the 2-arg macro. */
+                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                 }
             }
             
@@ -6806,10 +6462,9 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
                         hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                     }
-                    char mangled_val[128];
-                    cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
-                    fprintf(out, "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
-                            inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
+                    /* Optionals retired — always use the 5-arg macro. */
+                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
+                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
                 }
             }
 
@@ -7461,7 +7116,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     }
     if (cc_pass_chain_apply(chain, cc__lower_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_match_syntax(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_optional_constructors(chain->src, chain->len)) < 0) return -1;
+    /* (retired) cc__rewrite_optional_constructors used to run here. */
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
     if (cc_pass_chain_apply(chain, cc__rewrite_result_constructors(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
@@ -7484,7 +7139,6 @@ static char* cc__canonicalize_cc_for_comptime(const char* input,
        program, but stop short of parser stubs or host-C survival lowering.
        Keep this deliberately conservative while comptime execution still grows:
        normalize type/syntax sugar, not final C-facing mechanics. */
-    cc__optional_type_count = 0;
     cc_result_spec_table_reset(&cc__result_specs);
     cc_result_spec_table_set_global(&cc__result_specs);
     reg = cc_type_registry_get_global();
@@ -7559,29 +7213,13 @@ static const char* cc__parse_stubs =
     "typedef __CCVecGeneric CCVec_float;\n"
     "typedef __CCMapGeneric Map_int_int;\n"
     "typedef __CCMapGeneric Map_charptr_int;\n"
-    /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */
-    "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
+    /* Key macros: rewritten T!>(E) -> __CC_RESULT(T,E).
+     * (retired) __CC_OPTIONAL(T) and the `__cc_optional_*_impl` parser stubs
+     * were removed along with the optional surface. */
     "#define __CC_RESULT(T, E) CCResult_##T##_##E\n"
-    /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME
-       These need to be function calls (not compound literals) so TCC records them in the AST.
-       Using comma expressions to type-check the value while returning through the function. */
-    "#ifndef __CC_TYPED_OPT_CTORS_DEFINED\n"
-    "#define __CC_TYPED_OPT_CTORS_DEFINED\n"
-    "#define __CC_OPTIONAL_SOME(T, ...) __cc_optional_some_impl(__VA_ARGS__)\n"
-    "#define __CC_OPTIONAL_NONE(T) __cc_optional_none_impl()\n"
-    "#endif\n"
     "/* Helper functions - extern (not inline) so TCC records the calls */\n"
-    "__CCOptionalGeneric __cc_optional_some_impl(long v);\n"
-    "__CCOptionalGeneric __cc_optional_none_impl(void);\n"
     "__CCResultGeneric __cc_result_ok_impl(long v);\n"
     "__CCResultGeneric __cc_result_err_impl(int kind, const char* msg);\n"
-    /* Common optional types (direct names, for explicit CCOptional_T usage) */
-    "typedef __CCOptionalGeneric CCOptional_int;\n"
-    "typedef __CCOptionalGeneric CCOptional_bool;\n"
-    "typedef __CCOptionalGeneric CCOptional_char;\n"
-    "typedef __CCOptionalGeneric CCOptional_size_t;\n"
-    "typedef __CCOptionalGeneric CCOptional_voidptr;\n"
-    "typedef __CCOptionalGeneric CCOptional_charptr;\n"
     /* Common result types */
     "typedef __CCResultGeneric CCResult_int_CCError;\n"
     "typedef __CCResultGeneric CCResult_bool_CCError;\n"
@@ -7604,22 +7242,13 @@ static const char* cc__parse_stubs =
     "#define cc_ok(v) __cc_result_generic_ok()\n"
     "#define cc_err(...) __cc_result_generic_err()\n"
     "#endif\n"
-    /* Optional constructors - same approach */
-    "#ifndef __CC_OPT_CTORS_DEFINED\n"
-    "#define __CC_OPT_CTORS_DEFINED\n"
-    "#define cc_some(v) ((void)(v), (__CCOptionalGeneric){.has = 1})\n"
-    "#define cc_none() ((__CCOptionalGeneric){.has = 0})\n"
-    "#endif\n"
-    /* Accessor macros */
-    "#define cc_is_some(opt) ((opt).has)\n"
-    "#define cc_is_none(opt) (!(opt).has)\n"
+    /* Accessor macros (optional-family macros retired). */
     "#define cc_is_ok(res) ((res).ok)\n"
     "#define cc_is_err(res) (!(res).ok)\n"
     "#define cc_unwrap(res) ((res).u.value)\n"
     "#define cc_unwrap_as(res, T) (*(T*)(void*)&(res).u.value)\n"
     "#define cc_unwrap_err(res) ((res).u.error)\n"
     "#define cc_unwrap_err_as(res, T) (*(T*)(void*)&(res).u.error)\n"
-    "#define cc_unwrap_opt(opt) ((opt).u.value)\n"
     "#endif\n";
 
 // Simple preprocessing for the experimental AST/codegen path: rewrites type syntax and adds parse-time stubs.
@@ -7630,7 +7259,6 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     if (!input || input_len == 0) return NULL;
     
     /* Reset type collectors */
-    cc__optional_type_count = 0;
     cc_result_spec_table_reset(&cc__result_specs);
     cc_result_spec_table_set_global(&cc__result_specs);
     
@@ -7689,16 +7317,8 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 4: Rewrite T? -> CCOptional_T */
+    /* Pass 4: Diagnose any lingering `T?` — optional types are retired. */
     buffers[buf_idx] = cc__rewrite_optional_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 4b: Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
-    buffers[buf_idx] = cc__rewrite_optional_constructors(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);

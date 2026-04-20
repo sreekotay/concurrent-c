@@ -18,21 +18,7 @@
 #include "util/text.h"
 #include "visitor/pass_type_syntax.h"
 
-/* Built-in optional types that are already declared in cc_optional.cch */
-static const char* cc__builtin_optional_types[] = {
-    "int", "bool", "size_t", "intptr_t", "char", "float", "double",
-    "voidptr", "charptr", "intptr", "CCSlice",
-    NULL
-};
-
-static int cc__is_builtin_optional(const char* mangled) {
-    for (int i = 0; cc__builtin_optional_types[i]; i++) {
-        if (strcmp(mangled, cc__builtin_optional_types[i]) == 0) return 1;
-    }
-    return 0;
-}
-
-/* Mangle a type name for use in CCResult_T_E or CCOptional_T */
+/* Mangle a type name for use in CCResult_T_E */
 static void cc__mangle_type(const char* src, size_t len, char* out, size_t out_sz) {
     cc_result_spec_mangle_type(src, len, out, out_sz);
 }
@@ -118,53 +104,13 @@ void cc_lower_state_add_result(CCLowerState* state,
                                    mangled_ok, mangled_err);
 }
 
-void cc_lower_state_add_optional(CCLowerState* state,
-                                  const char* raw_type, size_t raw_len,
-                                  const char* mangled_type) {
-    if (!state || !raw_type || !mangled_type) return;
-    
-    /* Skip built-in optional types */
-    if (cc__is_builtin_optional(mangled_type)) return;
-    
-    /* Check for duplicates */
-    for (size_t i = 0; i < state->optional_type_count; i++) {
-        if (strcmp(state->optional_types[i].mangled_type, mangled_type) == 0) {
-            return;
-        }
-    }
-    
-    if (state->optional_type_count >= 64) return;
-    
-    CCLowerOptionalType* p = &state->optional_types[state->optional_type_count++];
-    
-    if (raw_len >= sizeof(p->raw_type)) raw_len = sizeof(p->raw_type) - 1;
-    memcpy(p->raw_type, raw_type, raw_len);
-    p->raw_type[raw_len] = '\0';
-    
-    strncpy(p->mangled_type, mangled_type, sizeof(p->mangled_type) - 1);
-    p->mangled_type[sizeof(p->mangled_type) - 1] = '\0';
-}
-
 char* cc_lower_state_emit_decls(const CCLowerState* state) {
     if (!state) return NULL;
-    if (state->result_specs.count == 0 && state->optional_type_count == 0) return NULL;
-    
+    if (state->result_specs.count == 0) return NULL;
+
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    
-    /* Emit optional type declarations */
-    for (size_t i = 0; i < state->optional_type_count; i++) {
-        const CCLowerOptionalType* p = &state->optional_types[i];
-        char decl[512];
-        snprintf(decl, sizeof(decl),
-            "#ifndef CCOptional_%s_DEFINED\n"
-            "#define CCOptional_%s_DEFINED\n"
-            "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n"
-            "#endif\n",
-            p->mangled_type, p->mangled_type, p->mangled_type, p->raw_type);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, decl);
-    }
-    
+
     /* Emit result type declarations */
     for (size_t i = 0; i < state->result_specs.count; i++) {
         const CCResultSpec* p = cc_result_spec_table_get(&state->result_specs, i);
@@ -328,68 +274,6 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
     return out;
 }
 
-/*
- * Rewrite T? syntax to CCOptional_T and collect types.
- */
-static char* cc__lower_optional_types(const char* src, size_t n, CCLowerState* state) {
-    if (!src || n == 0) return NULL;
-    
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    
-    while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Detect T? pattern: identifier followed by '?' (not '?:' ternary or '??') */
-        if (c == '?' && c2 != ':' && c2 != '?') {
-            if (i > 0) {
-                char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>' */
-                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
-                    size_t ty_start = cc__scan_back_to_type_start(src, i);
-                    if (ty_start < i) {
-                        size_t ty_len = i - ty_start;
-                        char mangled[256];
-                        cc__mangle_type(src + ty_start, ty_len, mangled, sizeof(mangled));
-                        
-                        if (mangled[0]) {
-                            /* Collect this optional type */
-                            if (state) {
-                                cc_lower_state_add_optional(state, src + ty_start, ty_len, mangled);
-                            }
-                            
-                            /* Emit: everything up to type start, then CCOptional_T */
-                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                            last_emit = i + 1;  /* skip past '?' */
-                        }
-                    }
-                }
-            }
-        }
-        
-        i++;
-    }
-    
-    if (last_emit == 0) return NULL;  /* No rewrites needed */
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
 static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
     char* out = NULL;
     size_t i = 0;
@@ -494,8 +378,6 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf_result_ctors = NULL;
     char* buf2 = NULL;
     char* buf_result_fields = NULL;
-    char* buf3 = NULL;
-    char* buf_unwrap = NULL;
     
     /* Pass 0: Strip raw @comptime blocks so lowered headers are valid C. */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
@@ -542,20 +424,9 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur = buf_result_fields;
         cur_len = strlen(buf_result_fields);
     }
-    
-    /* Pass 2: Rewrite T? -> CCOptional_T */
-    buf3 = cc__lower_optional_types(cur, cur_len, &state);
-    if (buf3) {
-        cur = buf3;
-        cur_len = strlen(buf3);
-    }
 
-    buf_unwrap = cc__rewrite_optional_unwrap_text(NULL, cur, cur_len);
-    if (buf_unwrap) {
-        cur = buf_unwrap;
-        cur_len = strlen(buf_unwrap);
-    }
-    
+    /* (retired) Pass 2 used to rewrite T? -> CCOptional_T. */
+
     /* Build final output */
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -624,8 +495,6 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf_result_ctors);
     free(buf2);
     free(buf_result_fields);
-    free(buf3);
-    free(buf_unwrap);
     free(parser_result_aliases);
     cc_result_spec_table_free(&state.result_specs);
     

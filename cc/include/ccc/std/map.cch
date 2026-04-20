@@ -1,23 +1,23 @@
 /*
  * Arena-backed hash map for Concurrent-C stdlib.
- * 
+ *
  * Built on khashl (MIT, Attractive Chaos) with these benefits:
  * - 1-bit per bucket flags (32x smaller than naive)
  * - No tombstones (backshift deletion)
  * - Fibonacci hashing (better distribution)
  * - Linear probing (cache-friendly)
- * 
- * Spec-compliant API:
- * - Name_get(h, key) returns V? (optional, None if not found)
- * - Name_get_ptr(h, key) returns V* (mutable access, NULL if not found)
- * - Name_insert(h, key, val) inserts or updates
- * - Name_remove(h, key) returns bool (true if existed)
- * 
+ *
+ * API:
+ * - Name_get(h, key)     returns V* (mutable access; NULL if not found)
+ * - Name_get_ptr(h, key) alias for Name_get (kept for source-compat)
+ * - Name_insert(h, k, v) inserts or updates
+ * - Name_remove(h, key)  returns bool (true if existed)
+ *
  * Usage:
- *   CC_MAP_DECL_ARENA_FULL(int, int, IntMap, CCOptional_int, hash_i32, eq_i32)
+ *   CC_MAP_DECL_ARENA(int, int, IntMap, cc_kh_hash_i32, cc_kh_eq_i32)
  *   IntMap *m = IntMap_init(&arena);
  *   IntMap_insert(m, 42, 100);
- *   int? val = IntMap_get(m, 42);  // returns optional
+ *   int* val = IntMap_get(m, 42);  // returns pointer; NULL if absent
  */
 #ifndef CC_STD_MAP_H
 #define CC_STD_MAP_H
@@ -27,8 +27,8 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <ccc/cc_arena.cch>
-#include <ccc/cc_optional.cch>
 
 /*
  * TCC PARSER MODE: Map types use a generic placeholder during parsing.
@@ -41,7 +41,7 @@
 
 /* Generic Map placeholder struct for parser mode - any key/value types.
    Simplified struct that just needs to compile for type checking.
-   Guard allows cccn parse stubs to predefine this. */
+   Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_MAP_GENERIC_DEFINED
 #define __CC_MAP_GENERIC_DEFINED
 typedef struct __CCMapGeneric {
@@ -70,40 +70,36 @@ static inline __CCMapGeneric* __cc_map_generic_init(void *arena) {
 /* Macro-based init that accepts any key/value types - parser mode just validates types. */
 #define __CC_MAP_INIT(K, V, arena) __cc_map_generic_init((void*)(arena))
 
-/* Parser-mode method stubs - just need to type-check, not actually run */
-static inline int __cc_map_generic_insert(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    return 0; 
+/* Parser-mode method stubs - just need to type-check, not actually run.
+   get() returns void* (treated as V*). */
+static inline int __cc_map_generic_insert(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
 }
-static inline int __cc_map_generic_put(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    return 0; 
+static inline int __cc_map_generic_put(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
 }
-static inline __CCOptionalGeneric __cc_map_generic_get(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    __CCOptionalGeneric result = {0};
-    return result; 
+static inline void* __cc_map_generic_get(__CCMapGeneric *m, ...) {
+    (void)m;
+    return NULL;
 }
-static inline void* __cc_map_generic_get_ptr(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    return NULL; 
+static inline int __cc_map_generic_remove(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
 }
-static inline int __cc_map_generic_remove(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    return 0; 
+static inline int __cc_map_generic_del(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
 }
-static inline int __cc_map_generic_del(__CCMapGeneric *m, ...) { 
-    (void)m; 
-    return 0; 
+static inline size_t __cc_map_generic_len(const __CCMapGeneric *m) {
+    return m ? m->count : 0;
 }
-static inline size_t __cc_map_generic_len(const __CCMapGeneric *m) { 
-    return m ? m->count : 0; 
+static inline void __cc_map_generic_clear(__CCMapGeneric *m) {
+    (void)m;
 }
-static inline void __cc_map_generic_clear(__CCMapGeneric *m) { 
-    (void)m; 
-}
-static inline void __cc_map_generic_destroy(__CCMapGeneric *m) { 
-    (void)m; 
+static inline void __cc_map_generic_destroy(__CCMapGeneric *m) {
+    (void)m;
 }
 
 /* Parser-mode: common Map types are aliases to __CCMapGeneric */
@@ -119,7 +115,7 @@ typedef __CCMapGeneric Map_uint64_t_voidptr;
 #define Map_int_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
 #define Map_int_int_put(m, k, v, r) __cc_map_generic_put((m), (k), (v), (r))
 #define Map_int_int_get(m, k)     __cc_map_generic_get((m), (k))
-#define Map_int_int_get_ptr(m, k) __cc_map_generic_get_ptr((m), (k))
+#define Map_int_int_get_ptr(m, k) __cc_map_generic_get((m), (k))
 #define Map_int_int_remove(m, k)  __cc_map_generic_remove((m), (k))
 #define Map_int_int_del(m, k)     __cc_map_generic_del((m), (k))
 #define Map_int_int_len(m)        __cc_map_generic_len((m))
@@ -129,6 +125,7 @@ typedef __CCMapGeneric Map_uint64_t_voidptr;
 #define Map_uint64_t_int_init(a)       __cc_map_generic_init((void*)(a))
 #define Map_uint64_t_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
 #define Map_uint64_t_int_get(m, k)     __cc_map_generic_get((m), (k))
+#define Map_uint64_t_int_get_ptr(m, k) __cc_map_generic_get((m), (k))
 #define Map_uint64_t_int_len(m)        __cc_map_generic_len((m))
 
 #else /* !CC_PARSER_MODE - real compilation */
@@ -220,25 +217,24 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
 }
 
 /*
- * CC_MAP_DECL_ARENA_FULL(K, V, Name, OptV, HASH_FN, EQ_FN)
- * 
- * Declares an arena-backed hash map with optional-returning get.
- * OptV is the optional type for V (e.g., CCOptional_int for int).
- * 
+ * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
+ *
+ * Declares an arena-backed hash map.
+ *
  * API:
  * - Name_init(arena) -> Name*
  * - Name_destroy(h)
  * - Name_insert(h, key, val) -> 0 on success, -1 on failure
- * - Name_get(h, key) -> OptV (None if not found)
- * - Name_get_ptr(h, key) -> V* (mutable access, NULL if not found)
- * - Name_remove(h, key) -> bool (true if existed)
+ * - Name_get(h, key)     -> V* (NULL if not found)
+ * - Name_get_ptr(h, key) -> alias for Name_get
+ * - Name_remove(h, key)  -> bool (true if existed)
  * - Name_len(h) -> size
  * - Name_clear(h)
- * 
+ *
  * HASH_FN: khint_t fn(K key)
  * EQ_FN:   int fn(K a, K b)  (returns non-zero if equal)
  */
-#define CC_MAP_DECL_ARENA_FULL(K, V, Name, OptV, HASH_FN, EQ_FN)               \
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                          \
     KHASHL_MAP_INIT(KH_LOCAL, Name##__kh, Name##__kh, K, V, HASH_FN, EQ_FN)    \
                                                                                \
     typedef Name##__kh Name;                                                   \
@@ -272,23 +268,17 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         return (int)k;                                                         \
     }                                                                          \
                                                                                \
-    /* Get: returns optional (None if not found) */                            \
-    static inline OptV Name##_get(const Name *h, K key) {                      \
-        OptV result = {0};                                                     \
-        if (!h) return result;                                                 \
-        khint_t k = Name##__kh_get(h, key);                                    \
-        if (k == kh_end(h)) return result;                                     \
-        result.has = 1;                                                        \
-        CC_OPT_SET_VALUE(result, kh_val(h, k));                                \
-        return result;                                                         \
-    }                                                                          \
-                                                                               \
-    /* Mutable pointer access: returns pointer or NULL */                      \
-    static inline V* Name##_get_ptr(Name *h, K key) {                          \
+    /* Get: returns pointer into the table (NULL if not found). */             \
+    static inline V* Name##_get(Name *h, K key) {                              \
         if (!h) return NULL;                                                   \
         khint_t k = Name##__kh_get(h, key);                                    \
         if (k == kh_end(h)) return NULL;                                       \
         return &kh_val(h, k);                                                  \
+    }                                                                          \
+                                                                               \
+    /* Alias for callers that spell the pointer form explicitly. */            \
+    static inline V* Name##_get_ptr(Name *h, K key) {                          \
+        return Name##_get(h, key);                                             \
     }                                                                          \
                                                                                \
     /* Remove: returns true if key existed */                                  \
@@ -313,14 +303,12 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         if (h) Name##__kh_clear(h);                                            \
     }
 
-/*
- * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
- * 
- * Convenience macro for simple value types where OptV = CCOptional_##V.
- * For complex value types (pointers, structs), use CC_MAP_DECL_ARENA_FULL.
- */
-#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN) \
-    CC_MAP_DECL_ARENA_FULL(K, V, Name, CCOptional_##V, HASH_FN, EQ_FN)
+/* Backwards-compat: CC_MAP_DECL_ARENA_FULL used to take an extra OptV
+   parameter for the optional return type. Optionals are retired; the OptV
+   argument is accepted and ignored so existing codegen emit paths keep
+   compiling until they switch to the 5-arg form. */
+#define CC_MAP_DECL_ARENA_FULL(K, V, Name, OptV_ignored, HASH_FN, EQ_FN)       \
+    CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
 
 /* Iteration helper: iterates over all (key, val) pairs */
 #define CC_MAP_FOREACH(h, k_var, v_var)                                        \
@@ -328,15 +316,15 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         if (kh_exist((h), __i) &&                                              \
             ((k_var) = kh_key((h), __i), (v_var) = kh_val((h), __i), 1))
 
-/* Convenience: common key types (simple value types only) */
+/* Convenience: common key types */
 #define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
 #define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
 #define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
 
-/* Full versions with explicit optional type */
-#define CC_MAP_DECL_INT_FULL(V, Name, OptV)    CC_MAP_DECL_ARENA_FULL(int, V, Name, OptV, cc_kh_hash_i32, cc_kh_eq_i32)
-#define CC_MAP_DECL_U64_FULL(V, Name, OptV)    CC_MAP_DECL_ARENA_FULL(uint64_t, V, Name, OptV, cc_kh_hash_u64, cc_kh_eq_u64)
-#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV)  CC_MAP_DECL_ARENA_FULL(CCSlice, V, Name, OptV, cc_kh_hash_slice, cc_kh_eq_slice)
+/* Legacy *_FULL aliases (OptV arg accepted and ignored). */
+#define CC_MAP_DECL_INT_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
+#define CC_MAP_DECL_U64_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
+#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV_ignored)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
 
 /* Legacy alias for compatibility */
 #define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)

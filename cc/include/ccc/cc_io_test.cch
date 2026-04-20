@@ -8,7 +8,7 @@
 #define CC_IO_TEST_H
 
 #include <ccc/cc_io_error.cch>
-#include <ccc/cc_optional.cch>
+#include <ccc/cc_result.cch>
 
 /* Test function using CCRes(T, E) macro */
 static inline CCRes(bool, CCIoError) cc_io_test_func(void) {
@@ -21,14 +21,6 @@ static inline CCRes(int, CCError) cc_io_test_int(int x) {
         return CCRes_err(int, CCError, CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
     }
     return CCRes_ok(int, CCError, x * 2);
-}
-
-/* Test with CCOpt(int) */
-static inline CCOpt(int) cc_io_test_opt(bool has_value) {
-    if (has_value) {
-        return CCOpt_some(int, 42);
-    }
-    return CCOpt_none(int);
 }
 
 #endif /* CC_IO_TEST_H */

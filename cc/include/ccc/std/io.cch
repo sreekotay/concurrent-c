@@ -42,7 +42,6 @@ typedef struct {
 } CCBufWriter;
 
 // Result types
-#include <ccc/cc_optional.cch>
 #ifdef CC_PARSER_MODE
 #ifndef CCResult_CCSlice_CCIoError_DEFINED
 #define CCResult_CCSlice_CCIoError_DEFINED 1
@@ -55,17 +54,9 @@ typedef struct CCResult_CCSlice_CCIoError {
 #define CCResult_size_t_CCIoError_DEFINED 1
 typedef __CCResultGeneric CCResult_size_t_CCIoError;
 #endif
-#ifndef CCResult_CCOptional_CCSlice_CCIoError_DEFINED
-#define CCResult_CCOptional_CCSlice_CCIoError_DEFINED 1
-typedef struct CCResult_CCOptional_CCSlice_CCIoError {
-    bool ok;
-    union { CCOptional_CCSlice value; CCIoError error; } u;
-} CCResult_CCOptional_CCSlice_CCIoError;
-#endif
 #else
 CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
-CC_DECL_RESULT_SPEC(CCResult_CCOptional_CCSlice_CCIoError, CCOptional_CCSlice, CCIoError)
 #endif
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
@@ -376,51 +367,50 @@ static inline int cc_buf_reader_init(CCBufReader *r, CCFile *f, CCArena *arena, 
     return 0;
 }
 
-// Refill buffer. Returns Ok(Some(slice)) if data read, Ok(None) if EOF.
-static inline CCResOpt(CCSlice, CCIoError) cc_buf_reader_next(CCBufReader *r, size_t n) {
+// Refill buffer. Returns Ok(slice) (empty slice = EOF) or Err(e).
+static inline CCRes(CCSlice, CCIoError) cc_buf_reader_next(CCBufReader *r, size_t n) {
     if (!r || !r->file || !r->file->handle || n == 0) {
-        return CCResOpt_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
+        return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
     }
     if (r->eof) {
-        return CCResOpt_ok(CCSlice, CCIoError, CCOpt_none(CCSlice));
+        return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
     }
     if (n > r->cap) n = r->cap;
     size_t got = fread(r->buf, 1, n, r->file->handle);
     if (got == 0) {
         if (feof(r->file->handle)) {
             r->eof = 1;
-            return CCResOpt_ok(CCSlice, CCIoError, CCOpt_none(CCSlice));
+            return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
         }
         if (ferror(r->file->handle)) {
-            return CCResOpt_err(CCSlice, CCIoError, cc_io_from_errno(errno));
+            return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(errno));
         }
         // No data, no EOF/error - treat as EOF
-        return CCResOpt_ok(CCSlice, CCIoError, CCOpt_none(CCSlice));
+        return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
     }
     r->pos = 0;
     r->len = got;
     if (feof(r->file->handle)) r->eof = 1;
     CCSlice slice = cc_slice_from_parts(r->buf, got, CC_SLICE_ID_UNTRACKED, r->cap);
-    return CCResOpt_ok(CCSlice, CCIoError, CCOpt_some(CCSlice, slice));
+    return CCRes_ok(CCSlice, CCIoError, slice);
 }
 
-// Read one line from buffered reader. Returns Ok(Some(slice)) or Ok(None) on EOF.
-static inline CCResOpt(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *r, CCArena *arena) {
+// Read one line from buffered reader. Returns Ok(slice) (empty slice = EOF) or Err(e).
+static inline CCRes(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *r, CCArena *arena) {
     if (!r || !r->file || !r->file->handle || !arena) {
-        return CCResOpt_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
+        return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
     }
     CCString line = CCString_new(arena);
-    if (!line.data) return CCResOpt_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
+    if (!line.data) return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     while (1) {
         if (r->pos >= r->len) {
-            CCResOpt(CCSlice, CCIoError) fill = cc_buf_reader_next(r, r->cap);
+            CCRes(CCSlice, CCIoError) fill = cc_buf_reader_next(r, r->cap);
             if (cc_is_err(fill)) return fill;
-            // Check if EOF with no data
-            CCOpt(CCSlice) opt = cc_unwrap(fill);
-            if (!opt.has) {
+            CCSlice filled = cc_value(fill);
+            if (filled.len == 0) {
                 if (line.len == 0) {
                     // No data accumulated, true EOF
-                    return CCResOpt_ok(CCSlice, CCIoError, CCOpt_none(CCSlice));
+                    return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
                 }
                 // Have accumulated data, return it
                 break;
@@ -429,12 +419,12 @@ static inline CCResOpt(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *
         if (r->pos >= r->len) break;
         char c = r->buf[r->pos++];
         if (!CCString_push_char(&line, c)) {
-            return CCResOpt_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
+            return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
         if (c == '\n') break;
     }
     CCSlice slice = CCString_as_slice(&line);
-    return CCResOpt_ok(CCSlice, CCIoError, CCOpt_some(CCSlice, slice));
+    return CCRes_ok(CCSlice, CCIoError, slice);
 }
 
 static inline int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena *arena, size_t cap) {

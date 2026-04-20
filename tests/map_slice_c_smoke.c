@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 CC_MAP_DECL_SLICE(int, SliceIntMap);
-CC_MAP_DECL_SLICE_FULL(void*, SlicePtrMap, CCOptional_voidptr);
+CC_MAP_DECL_SLICE(void*, SlicePtrMap);
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));

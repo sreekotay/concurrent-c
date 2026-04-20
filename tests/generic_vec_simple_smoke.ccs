@@ -19,10 +19,10 @@ int main(void) {
         return 2;
     }
     
-    /* Test optional-returning get with explicit call */
-    int? val = CCVec_int_get(&v, 0);
-    if (!val.has) {
-        fprintf(stderr, "FAIL: get returned None\n");
+    /* Test pointer-returning get with explicit call (NULL = out of bounds). */
+    int* val = CCVec_int_get(&v, 0);
+    if (!val) {
+        fprintf(stderr, "FAIL: get returned NULL\n");
         return 3;
     }
     if (*val != 10) {

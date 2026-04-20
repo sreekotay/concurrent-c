@@ -35,7 +35,6 @@ static const char* cc__core_builtin_result_types[] = {
 static const char* cc__stdlib_predeclared_result_types[] = {
     "CCResult_CCSlice_CCIoError",
     "CCResult_size_t_CCIoError",
-    "CCResult_CCOptional_CCSlice_CCIoError",
     "CCResult_CCDirIterptr_CCIoError",
     "CCResult_CCDirEntry_CCIoError",
     "CCResult_bool_CCIoError",

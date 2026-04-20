@@ -165,7 +165,7 @@ index 00000000..4426a146
 +    CC_AST_WITH_NODE(
 +        node->aux1 = op_tok;
 +        node->aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
-+        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by cccn parser */
++        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by ccc AST consumer */
 +        node->col_start = tok_col;
 +        if (op) node->col_end = tok_col + (int)strlen(op);
 +    );
@@ -1306,7 +1306,7 @@ index 50802edf..b9455b58 100644
 +            unary();
 +            /* CC: try unwraps Result type to its inner value type.
 +               If operand is __CCResultGeneric or CCResult_*, change type to intptr_t
-+               so type checking passes. cccn handles the real types in codegen. */
++               so type checking passes. Real types are handled in ccc codegen. */
 +            if ((vtop->type.t & VT_BTYPE) == VT_STRUCT && vtop->type.ref) {
 +                int v = vtop->type.ref->v & ~SYM_STRUCT;
 +                if (v < SYM_FIRST_ANOM) {

@@ -9,7 +9,7 @@
 
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_slice.cch>
-#include <ccc/cc_optional.cch>
+#include <ccc/cc_result.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include <ccc/std/string.cch>
@@ -61,13 +61,6 @@ typedef struct CCParsedArg {
     int argv_index;
 } CCParsedArg;
 
-typedef struct CCOptional_CCParsedArg {
-    bool has;
-    union {
-        CCParsedArg value;
-    } u;
-} CCOptional_CCParsedArg;
-
 #ifndef CC_VEC_CCPARSEDARG_DEFINED
 #define CC_VEC_CCPARSEDARG_DEFINED 1
 #ifdef CC_PARSER_MODE
@@ -76,7 +69,7 @@ typedef __CCVecGeneric CCVec_CCParsedArg;
 #define CCVec_CCParsedArg_push(v, x) __cc_vec_generic_push((v), (x))
 #define CCVec_CCParsedArg_len(v) __cc_vec_generic_len((v))
 #else
-CC_VEC_DECL_ARENA_FULL(CCParsedArg, CCVec_CCParsedArg, CCOptional_CCParsedArg)
+CC_VEC_DECL_ARENA(CCParsedArg, CCVec_CCParsedArg)
 #endif
 #endif
 
@@ -572,46 +565,49 @@ static inline size_t cc_parsed_args_count(const CCParsedArgs* args, const char* 
     return count;
 }
 
-static inline CCOptional_CCSlice cc_parsed_args_value_at(const CCParsedArgs* args, const char* key, size_t idx) {
+/* Return a pointer to the nth matching value, or NULL if absent.
+ * The pointer is stable for the lifetime of the parsed-args table
+ * (the CLI parser is single-shot: parse once, then consume). */
+static inline const CCSlice* cc_parsed_args_value_at(const CCParsedArgs* args, const char* key, size_t idx) {
     size_t i;
     size_t seen = 0;
     for (i = 0; i < cc_parsed_args_len(args); i++) {
         const CCParsedArg* arg = cc_parsed_args_get(args, i);
         if (!arg || !arg->key || !key || strcmp(arg->key, key) != 0) continue;
-        if (seen == idx) return cc_some_CCOptional_CCSlice(arg->value);
+        if (seen == idx) return &arg->value;
         seen++;
     }
-    return cc_none_CCOptional_CCSlice();
+    return NULL;
 }
 
-static inline CCOptional_CCSlice cc_parsed_args_last_value(const CCParsedArgs* args, const char* key) {
+static inline const CCSlice* cc_parsed_args_last_value(const CCParsedArgs* args, const char* key) {
     size_t i = cc_parsed_args_len(args);
     while (i > 0) {
         const CCParsedArg* arg = cc_parsed_args_get(args, i - 1);
         if (arg && arg->key && key && strcmp(arg->key, key) == 0) {
-            return cc_some_CCOptional_CCSlice(arg->value);
+            return &arg->value;
         }
         i--;
     }
-    return cc_none_CCOptional_CCSlice();
+    return NULL;
 }
 
 static inline bool cc_parsed_args_find_value_at(const CCParsedArgs* args,
                                                 const char* key,
                                                 size_t idx,
                                                 CCSlice* out) {
-    CCOptional_CCSlice value = cc_parsed_args_value_at(args, key, idx);
-    if (cc_is_none(value)) return false;
-    if (out) *out = cc_unwrap_opt(value);
+    const CCSlice* value = cc_parsed_args_value_at(args, key, idx);
+    if (!value) return false;
+    if (out) *out = *value;
     return true;
 }
 
 static inline bool cc_parsed_args_find_last_value(const CCParsedArgs* args,
                                                   const char* key,
                                                   CCSlice* out) {
-    CCOptional_CCSlice value = cc_parsed_args_last_value(args, key);
-    if (cc_is_none(value)) return false;
-    if (out) *out = cc_unwrap_opt(value);
+    const CCSlice* value = cc_parsed_args_last_value(args, key);
+    if (!value) return false;
+    if (out) *out = *value;
     return true;
 }
 

@@ -1,0 +1,28 @@
+/* Map.get returns V* (NULL when absent) — replacement for retired T? shape. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Map<int, int> m = map_new<int, int>(&arena);
+    m.insert(1, 111);
+    m.insert(2, 222);
+
+    int* hit = m.get(2);
+    if (!hit || *hit != 222) {
+        fprintf(stderr, "FAIL: expected *get(2)==222\n");
+        return 2;
+    }
+
+    int* miss = m.get(99);
+    if (miss != NULL) {
+        fprintf(stderr, "FAIL: expected get(99)==NULL\n");
+        return 3;
+    }
+
+    printf("map_get_ptr_smoke ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}

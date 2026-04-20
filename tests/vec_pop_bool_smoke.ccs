@@ -1,0 +1,39 @@
+/* Vec.pop writes T* out and returns bool — replacement for retired T? shape. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    CCVec::[int] v = cc_vec_new::[int](&arena);
+    v.push(1);
+    v.push(2);
+    v.push(3);
+
+    int sum = 0;
+    int out = 0;
+    while (v.pop(&out)) {
+        sum += out;
+    }
+
+    if (sum != 6) {
+        fprintf(stderr, "FAIL: expected sum=6, got %d\n", sum);
+        return 2;
+    }
+
+    /* Drained: pop on empty vec yields false and must not touch out. */
+    int sentinel = -42;
+    if (v.pop(&sentinel)) {
+        fprintf(stderr, "FAIL: pop on empty vec returned true\n");
+        return 3;
+    }
+    if (sentinel != -42) {
+        fprintf(stderr, "FAIL: pop on empty vec mutated out param\n");
+        return 4;
+    }
+
+    printf("vec_pop_bool_smoke ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}

@@ -268,27 +268,15 @@ static const char* cc__canonicalize_autoblock_value_type(const char* type_str, c
     const char* ok_e = NULL;
     const char* err_s = NULL;
     const char* err_e = NULL;
-    const char* opt_q = NULL;
     char mangled_ok[128];
     char mangled_err[128];
-    char mangled_elem[128];
     char norm_buf[256];
     const char* norm = cc__normalize_autoblock_decl_type(type_str, norm_buf, sizeof(norm_buf));
     if (!norm || !buf || buf_cap == 0) return norm;
 
-    opt_q = strrchr(norm, '?');
-    if (opt_q && opt_q[1] == '\0') {
-        ok_s = norm;
-        ok_e = opt_q;
-        while (ok_s < ok_e && isspace((unsigned char)*ok_s)) ok_s++;
-        while (ok_e > ok_s && isspace((unsigned char)ok_e[-1])) ok_e--;
-        cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_elem, sizeof(mangled_elem));
-        if (mangled_elem[0]) {
-            snprintf(buf, buf_cap, "CCOptional_%s", mangled_elem);
-            return buf;
-        }
-        return norm;
-    }
+    /* (retired) The trailing `?` -> `CCOptional_T` autoblock canonicalization
+     * used to live here. Optionals are gone; stray `T?` spellings are rejected
+     * earlier by the preprocess diagnostic. */
 
     bang = strchr(norm, '!');
     if (!bang || bang[1] == '=') return norm;

@@ -1,6 +1,6 @@
 /*
  * Arena-backed dynamic vector for Concurrent-C stdlib.
- * 
+ *
  * Design:
  * - 2x growth factor (optimal for arena allocation - no memory reuse benefit from 1.5x)
  * - Initial capacity of 8 (skips 2→4 dance for common cases)
@@ -9,10 +9,10 @@
  *
  * Optional heap-backed variant provided via CC_VEC_DECL_HEAP for tools/tests.
  *
- * Spec-compliant API:
- * - Name_get(v, i) returns T? (optional, None if out of bounds)
- * - Name_get_ptr(v, i) returns T* (mutable access, NULL if out of bounds)
- * - Name_pop(v) returns T? (optional, None if empty)
+ * API:
+ * - Name_get(v, i)     -> T* (mutable, NULL if out of bounds)
+ * - Name_pop(v, out)   -> bool (writes *out if non-empty; false if empty)
+ * - Name_push(v, val)  -> int (0 success, -1 failure)
  */
 #ifndef CC_STD_VEC_H
 #define CC_STD_VEC_H
@@ -20,10 +20,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdbool.h>
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_vec.cch>
-#include <ccc/cc_optional.cch>  /* Must be before parser mode block for __CCOptionalGeneric */
 
 /* Default initial capacity - skip tiny allocations */
 #ifndef CC_VEC_INITIAL_CAP
@@ -42,7 +42,7 @@
 
 /* Generic Vec placeholder struct for parser mode - any element type.
    Field names match real Vec layout so field access compiles.
-   Guard allows cccn parse stubs to predefine this. */
+   Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_VEC_GENERIC_DEFINED
 #define __CC_VEC_GENERIC_DEFINED
 typedef struct __CCVecGeneric {
@@ -72,58 +72,52 @@ static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
 #define __CC_VEC_INIT(T, arena) __cc_vec_generic_init((void*)(arena))
 
 /* Parser-mode method stubs - just need to type-check, not actually run.
-   get() and pop() return __CCOptionalGeneric to match real Vec_T_get/pop signatures. */
-static inline int __cc_vec_generic_push(__CCVecGeneric *v, ...) { 
-    (void)v; 
-    return 0; 
+   get() returns void* (maps to T*) and pop(out) returns bool. */
+static inline int __cc_vec_generic_push(__CCVecGeneric *v, ...) {
+    (void)v;
+    return 0;
 }
-static inline __CCOptionalGeneric __cc_vec_generic_get(__CCVecGeneric *v, size_t i) { 
-    (void)v; (void)i; 
-    __CCOptionalGeneric result = {0};
-    return result; 
-}
-static inline void* __cc_vec_generic_get_ptr(__CCVecGeneric *v, size_t i) { 
-    (void)v; (void)i; 
-    return NULL; 
+static inline void* __cc_vec_generic_get(__CCVecGeneric *v, size_t i) {
+    (void)v; (void)i;
+    return NULL;
 }
 static inline int __cc_vec_generic_set(__CCVecGeneric *v, size_t i, ...) {
     (void)v; (void)i;
     return 0;
 }
-static inline __CCOptionalGeneric __cc_vec_generic_pop(__CCVecGeneric *v) { 
-    (void)v; 
-    __CCOptionalGeneric result = {0};
-    return result; 
+static inline bool __cc_vec_generic_pop(__CCVecGeneric *v, void *out) {
+    (void)v; (void)out;
+    return false;
 }
-static inline void* __cc_vec_generic_at_grow(__CCVecGeneric *v, size_t i) { 
-    (void)v; (void)i; 
-    return NULL; 
+static inline void* __cc_vec_generic_at_grow(__CCVecGeneric *v, size_t i) {
+    (void)v; (void)i;
+    return NULL;
 }
-static inline void* __cc_vec_generic_push_ptr(__CCVecGeneric *v) { 
-    (void)v; 
-    return NULL; 
+static inline void* __cc_vec_generic_push_ptr(__CCVecGeneric *v) {
+    (void)v;
+    return NULL;
 }
-static inline int __cc_vec_generic_reserve(__CCVecGeneric *v, size_t n) { 
-    (void)v; (void)n; 
-    return 0; 
+static inline int __cc_vec_generic_reserve(__CCVecGeneric *v, size_t n) {
+    (void)v; (void)n;
+    return 0;
 }
-static inline void __cc_vec_generic_clear(__CCVecGeneric *v) { 
-    (void)v; 
+static inline void __cc_vec_generic_clear(__CCVecGeneric *v) {
+    (void)v;
 }
-static inline size_t __cc_vec_generic_len(const __CCVecGeneric *v) { 
-    return v ? v->len : 0; 
+static inline size_t __cc_vec_generic_len(const __CCVecGeneric *v) {
+    return v ? v->len : 0;
 }
-static inline size_t __cc_vec_generic_cap(const __CCVecGeneric *v) { 
-    return v ? v->cap : 0; 
+static inline size_t __cc_vec_generic_cap(const __CCVecGeneric *v) {
+    return v ? v->cap : 0;
 }
-static inline void* __cc_vec_generic_begin(__CCVecGeneric *v) { 
-    return v ? v->data : NULL; 
+static inline void* __cc_vec_generic_begin(__CCVecGeneric *v) {
+    return v ? v->data : NULL;
 }
-static inline void* __cc_vec_generic_end(__CCVecGeneric *v) { 
-    return v ? (char*)v->data + v->len : NULL; 
+static inline void* __cc_vec_generic_end(__CCVecGeneric *v) {
+    return v ? (char*)v->data + v->len : NULL;
 }
-static inline void* __cc_vec_generic_data(__CCVecGeneric *v) { 
-    return v ? v->data : NULL; 
+static inline void* __cc_vec_generic_data(__CCVecGeneric *v) {
+    return v ? v->data : NULL;
 }
 static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     if (!v || !v->data) return cc_slice_empty();
@@ -145,9 +139,9 @@ typedef __CCVecGeneric CCVec_intptr;
    Uses macros since we can't do function aliasing in C. */
 #define CCVec_int_init(a, c)     __cc_vec_generic_init((void*)(a))
 #define CCVec_int_push(v, x)     __cc_vec_generic_push((v), (x))
-#define CCVec_int_pop(v)         __cc_vec_generic_pop((v))
+#define CCVec_int_pop(v, o)      __cc_vec_generic_pop((v), (o))
 #define CCVec_int_get(v, i)      __cc_vec_generic_get((v), (i))
-#define CCVec_int_get_ptr(v, i)  __cc_vec_generic_get_ptr((v), (i))
+#define CCVec_int_get_ptr(v, i)  __cc_vec_generic_get((v), (i))
 #define CCVec_int_set(v, i, x)   __cc_vec_generic_set((v), (i), (x))
 #define CCVec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
 #define CCVec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
@@ -162,9 +156,9 @@ typedef __CCVecGeneric CCVec_intptr;
 
 #define CCVec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
 #define CCVec_char_push(v, x)    __cc_vec_generic_push((v), (x))
-#define CCVec_char_pop(v)        __cc_vec_generic_pop((v))
+#define CCVec_char_pop(v, o)     __cc_vec_generic_pop((v), (o))
 #define CCVec_char_get(v, i)     __cc_vec_generic_get((v), (i))
-#define CCVec_char_get_ptr(v, i) __cc_vec_generic_get_ptr((v), (i))
+#define CCVec_char_get_ptr(v, i) __cc_vec_generic_get((v), (i))
 #define CCVec_char_set(v, i, x)  __cc_vec_generic_set((v), (i), (x))
 #define CCVec_char_at_grow(v, i) __cc_vec_generic_at_grow((v), (i))
 #define CCVec_char_push_ptr(v)   __cc_vec_generic_push_ptr((v))
@@ -198,36 +192,31 @@ typedef __CCVecGeneric CCVec_intptr;
 /*
  * CC_VEC_DECLARE_GUARDED(T, Name)
  *
- * Helper macro that wraps CC_VEC_DECL_ARENA with a guard to prevent
- * duplicate declarations. Uses __CC_VEC_##Name##_DECLARED as the guard.
+ * Helper that expands to CC_VEC_DECL_ARENA(T, Name). The former guard layer
+ * existed only to thread the optional-type parameter through; with optionals
+ * retired, the helper is a one-liner alias kept for source-compat.
  */
-#define CC_VEC_DECLARE_GUARDED(T, Name) \
-    CC_VEC_DECLARE_GUARDED_FULL(T, Name, CCOptional_##T)
-
-#define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT) \
-    CC_VEC_DECL_ARENA_FULL(T, Name, OptT)
+#define CC_VEC_DECLARE_GUARDED(T, Name) CC_VEC_DECL_ARENA(T, Name)
 
 /*
- * CC_VEC_DECL_ARENA_FULL(T, Name, OptT)
- * 
- * Full arena-backed vector with optional-returning methods.
- * OptT is the optional type for T (e.g., CCOptional_int for int).
- * 
+ * CC_VEC_DECL_ARENA(T, Name)
+ *
+ * Arena-backed vector.
+ *
  * API:
- * - Name_init(arena, initial_cap) -> Name
- * - Name_push(v, value) -> 0 on success, -1 on failure
- * - Name_pop(v) -> OptT (None if empty)
- * - Name_get(v, i) -> OptT (None if out of bounds)
- * - Name_get_ptr(v, i) -> T* (mutable access, NULL if out of bounds)
- * - Name_set(v, i, value) -> 0 on success, -1 on out-of-bounds
- * - Name_at_grow(v, i) -> T* (auto-extends if needed)
- * - Name_push_ptr(v) -> T* (push slot, returns pointer)
- * - Name_as_slice(v) -> CCSlice
+ * - Name_init(arena, initial_cap)   -> Name
+ * - Name_push(v, value)             -> 0 on success, -1 on failure
+ * - Name_pop(v, T* out)             -> bool (true + writes *out, false if empty)
+ * - Name_get(v, i)                  -> T* (mutable, NULL if out of bounds)
+ * - Name_set(v, i, value)           -> 0 on success, -1 on out-of-bounds
+ * - Name_at_grow(v, i)              -> T* (auto-extends if needed)
+ * - Name_push_ptr(v)                -> T* (push slot, returns pointer)
+ * - Name_as_slice(v)                -> CCSlice
  * - Name_len(v), Name_cap(v)
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
  */
-#define CC_VEC_DECL_ARENA_FULL(T, Name, OptT)                                     \
+#define CC_VEC_DECL_ARENA(T, Name)                                                \
     typedef struct {                                                              \
         size_t len;                                                               \
         size_t cap;                                                               \
@@ -264,29 +253,22 @@ typedef __CCVecGeneric CCVec_intptr;
         return (T *)cc_vec_push_slot((CCVec *)v, sizeof(T), _Alignof(T));         \
     }                                                                             \
                                                                                   \
-    /* Pop: returns optional (None if empty) */                                   \
-    static inline OptT Name##_pop(Name *v) {                                      \
-        OptT result = {0};                                                        \
-        if (!v || v->len == 0) return result;                                     \
+    /* Pop: writes last element to *out and returns true; false if empty. */      \
+    static inline bool Name##_pop(Name *v, T *out) {                              \
+        if (!v || v->len == 0) return false;                                      \
         v->len--;                                                                 \
-        result.has = 1;                                                           \
-        CC_OPT_SET_VALUE(result, v->data[v->len]);                                \
-        return result;                                                            \
+        if (out) *out = v->data[v->len];                                          \
+        return true;                                                              \
     }                                                                             \
                                                                                   \
-    /* Bounds-safe get: returns optional (None if out of bounds) */               \
-    static inline OptT Name##_get(Name *v, size_t i) {                            \
-        OptT result = {0};                                                        \
-        if (!v || i >= v->len) return result;                                     \
-        result.has = 1;                                                           \
-        CC_OPT_SET_VALUE(result, v->data[i]);                                     \
-        return result;                                                            \
-    }                                                                             \
-                                                                                  \
-    /* Mutable pointer access: returns pointer or NULL */                         \
-    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
+    /* Bounds-safe get: returns pointer (NULL if out of bounds). */               \
+    static inline T* Name##_get(Name *v, size_t i) {                              \
         if (!v || i >= v->len) return NULL;                                       \
         return &v->data[i];                                                       \
+    }                                                                             \
+    /* Alias for callers that spell the pointer form explicitly. */               \
+    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
+        return Name##_get(v, i);                                                  \
     }                                                                             \
                                                                                   \
     static inline int Name##_set(Name *v, size_t i, T value) {                    \
@@ -314,13 +296,11 @@ typedef __CCVecGeneric CCVec_intptr;
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
 
-/*
- * CC_VEC_DECL_ARENA(T, Name)
- * 
- * Convenience macro for simple types where OptT = CCOptional_##T.
- * For complex types (pointers, structs), use CC_VEC_DECL_ARENA_FULL.
- */
-#define CC_VEC_DECL_ARENA(T, Name) CC_VEC_DECL_ARENA_FULL(T, Name, CCOptional_##T)
+/* Backwards-compat alias: CC_VEC_DECL_ARENA_FULL used to take an extra OptT
+   parameter for the optional return type. Optionals are retired; the third
+   argument is ignored. Remove once callers migrate. */
+#define CC_VEC_DECL_ARENA_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
+#define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
 
 #ifndef CC_PARSER_MODE
 #ifndef CC_VEC_SIZE_T_DEFINED
@@ -334,11 +314,11 @@ CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
     for (size_t idx_var = 0; (vptr) && idx_var < (vptr)->len && (((item_var) = (vptr)->data[idx_var]), 1); ++idx_var)
 
 /*
- * CC_VEC_DECL_HEAP_FULL(T, Name, OptT)
- * 
- * Heap-backed vector (tool/test-only; not arena-scoped) with optional returns.
+ * CC_VEC_DECL_HEAP(T, Name)
+ *
+ * Heap-backed vector (tool/test-only; not arena-scoped).
  */
-#define CC_VEC_DECL_HEAP_FULL(T, Name, OptT)                                      \
+#define CC_VEC_DECL_HEAP(T, Name)                                                 \
     typedef struct { size_t len, cap; T *data; } Name;                            \
     static inline Name Name##_init(void) { Name v = {0,0,NULL}; return v; }       \
     static inline void Name##_free(Name *v) {                                     \
@@ -371,24 +351,18 @@ CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
         }                                                                         \
         return &v->data[v->len++];                                                \
     }                                                                             \
-    static inline OptT Name##_pop(Name *v) {                                      \
-        OptT result = {0};                                                        \
-        if (!v || v->len == 0) return result;                                     \
+    static inline bool Name##_pop(Name *v, T *out) {                              \
+        if (!v || v->len == 0) return false;                                      \
         v->len--;                                                                 \
-        result.has = 1;                                                           \
-        CC_OPT_SET_VALUE(result, v->data[v->len]);                                \
-        return result;                                                            \
+        if (out) *out = v->data[v->len];                                          \
+        return true;                                                              \
     }                                                                             \
-    static inline OptT Name##_get(Name *v, size_t i) {                            \
-        OptT result = {0};                                                        \
-        if (!v || i >= v->len) return result;                                     \
-        result.has = 1;                                                           \
-        CC_OPT_SET_VALUE(result, v->data[i]);                                     \
-        return result;                                                            \
-    }                                                                             \
-    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
+    static inline T* Name##_get(Name *v, size_t i) {                              \
         if (!v || i >= v->len) return NULL;                                       \
         return &v->data[i];                                                       \
+    }                                                                             \
+    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
+        return Name##_get(v, i);                                                  \
     }                                                                             \
     static inline T* Name##_at_grow(Name *v, size_t i) {                          \
         if (!v) return NULL;                                                      \
@@ -407,7 +381,7 @@ CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
 
-#define CC_VEC_DECL_HEAP(T, Name) CC_VEC_DECL_HEAP_FULL(T, Name, CCOptional_##T)
+#define CC_VEC_DECL_HEAP_FULL(T, Name, OptT_ignored) CC_VEC_DECL_HEAP(T, Name)
 
 /* Legacy alias for compatibility */
 #define Vec(T, Name) CC_VEC_DECL_ARENA(T, Name)

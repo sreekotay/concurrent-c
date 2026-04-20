@@ -1,0 +1,29 @@
+/* Vec.get returns T* (NULL on out-of-range) — replacement for retired T? shape. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    CCVec::[int] v = cc_vec_new::[int](&arena);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+
+    int* in_range = v.get(1);
+    if (!in_range || *in_range != 20) {
+        fprintf(stderr, "FAIL: expected *get(1)==20\n");
+        return 2;
+    }
+
+    int* out_of_range = v.get(99);
+    if (out_of_range != NULL) {
+        fprintf(stderr, "FAIL: expected get(99)==NULL\n");
+        return 3;
+    }
+
+    printf("vec_get_ptr_smoke ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}

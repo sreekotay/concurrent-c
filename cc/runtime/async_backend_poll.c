@@ -66,7 +66,8 @@ static int backend_read_all(void* ctx, CCFile *file, CCArena *arena, CCSlice* ou
     return 0;
 }
 
-static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
+/* EOF is signalled by writing an empty slice (len == 0) — no separate option tag. */
+static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
     if (!file || !file->handle || !arena || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
@@ -74,7 +75,6 @@ static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCOpt
     void* buf = cc_arena_alloc(arena, n, 1);
     if (!buf) return ENOMEM;
     size_t off = 0;
-    int eof = 0;
     while (off < n) {
         int w = wait_poll(fd, POLLIN, d);
         if (w != 0) { if (w == ETIMEDOUT) break; return w; }
@@ -83,24 +83,21 @@ static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCOpt
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return errno;
         }
-        if (r == 0) { eof = 1; break; }
+        if (r == 0) break;
         off += (size_t)r;
         if (cc_deadline_expired(d)) break;
     }
-    // Return Ok(None) if EOF with no data, Ok(Some(slice)) otherwise
-    if (eof && off == 0) {
-        *out = cc_none_CCOptional_CCSlice();
-    } else {
-        CCSlice slice = {buf, off, 0, n};
-        *out = cc_some_CCOptional_CCSlice(slice);
-    }
+    out->ptr = (off == 0) ? NULL : buf;
+    out->len = off;
+    out->id = 0;
+    out->alen = (off == 0) ? 0 : n;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));
     return 0;
 }
 
-static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
     if (!file || !file->handle || !arena || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
@@ -109,7 +106,6 @@ static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCOptional
     char* buf = (char*)cc_arena_alloc(arena, cap, 1);
     if (!buf) return ENOMEM;
     size_t len = 0;
-    int eof = 0;
     for (;;) {
         int w = wait_poll(fd, POLLIN, d);
         if (w != 0) { if (w == ETIMEDOUT) break; return w; }
@@ -119,18 +115,15 @@ static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCOptional
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return errno;
         }
-        if (r == 0) { eof = 1; break; }
+        if (r == 0) break;
         if (len + 1 > cap) { return ENOMEM; }
         buf[len++] = c;
         if (c == '\n') break;
     }
-    // Return Ok(None) if EOF with no data, Ok(Some(slice)) otherwise
-    if (eof && len == 0) {
-        *out = cc_none_CCOptional_CCSlice();
-    } else {
-        CCSlice slice = {buf, len, 0, cap};
-        *out = cc_some_CCOptional_CCSlice(slice);
-    }
+    out->ptr = (len == 0) ? NULL : buf;
+    out->len = len;
+    out->id = 0;
+    out->alen = (len == 0) ? 0 : cap;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));

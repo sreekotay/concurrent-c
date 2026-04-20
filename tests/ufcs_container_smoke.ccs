@@ -12,14 +12,14 @@ int main(void) {
     v.push(20);
     v.push(30);
     
-    int? val = v.get(1);
-    if (!val.has || *val != 20) {
+    int* val = v.get(1);
+    if (!val || *val != 20) {
         printf("FAIL: get(1) expected 20\n");
         return 1;
     }
-    
-    int? popped = v.pop();
-    if (!popped.has || *popped != 30) {
+
+    int popped = 0;
+    if (!v.pop(&popped) || popped != 30) {
         printf("FAIL: pop() expected 30\n");
         return 1;
     }

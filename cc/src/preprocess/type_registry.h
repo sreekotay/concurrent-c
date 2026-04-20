@@ -5,7 +5,7 @@
  * like v.push(x) can be resolved to the correct concrete function (e.g., CCVec_int_push).
  *
  * Also tracks which generic type instantiations are used so that the compiler
- * can emit the necessary macro declarations (CC_VEC_DECL_ARENA, CC_DECL_OPTIONAL, etc).
+ * can emit the necessary macro declarations (CC_VEC_DECL_ARENA, CC_MAP_DECL_ARENA, etc).
  */
 #ifndef CC_TYPE_REGISTRY_H
 #define CC_TYPE_REGISTRY_H
@@ -59,7 +59,6 @@ const char* cc_type_registry_canonicalize_type_name(CCTypeRegistry* reg,
 /* Generic type instantiation tracking (for emitting macro decls) */
 int cc_type_registry_add_vec(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
 int cc_type_registry_add_map(CCTypeRegistry* reg, const char* key_type, const char* val_type, const char* mangled_name);
-int cc_type_registry_add_optional(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
 int cc_type_registry_add_channel(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
 
 /* Iterate over registered types for emitting declarations */
@@ -75,9 +74,6 @@ const CCTypeInstantiation* cc_type_registry_get_vec(CCTypeRegistry* reg, size_t 
 
 size_t cc_type_registry_map_count(CCTypeRegistry* reg);
 const CCTypeInstantiation* cc_type_registry_get_map(CCTypeRegistry* reg, size_t idx);
-
-size_t cc_type_registry_optional_count(CCTypeRegistry* reg);
-const CCTypeInstantiation* cc_type_registry_get_optional(CCTypeRegistry* reg, size_t idx);
 
 size_t cc_type_registry_channel_count(CCTypeRegistry* reg);
 const CCTypeInstantiation* cc_type_registry_get_channel(CCTypeRegistry* reg, size_t idx);
