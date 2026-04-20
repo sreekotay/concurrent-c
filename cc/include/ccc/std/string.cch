@@ -55,14 +55,6 @@ CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseErr
 CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
 CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
 
-#ifdef CC_PARSER_MODE
-/* Parser-mode UFCS method stubs so `str.as_slice()` and `int.to_str(arena)`
-   parse against TCC's stub-AST pass before the UFCS visitor rewrites them
-   into concrete cc_string_* free calls. */
-static CCSlice as_slice();
-static CCString to_str();
-#endif
-
 // ----------------------- Arena-backed slice helpers -------------------------
 
 static inline CCSlice cc_slice_clone(CCArena *arena, CCSlice s) {

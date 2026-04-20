@@ -1,0 +1,42 @@
+#include <ccc/std/prelude.cch>
+
+/* Guards the "no parser-mode UFCS method stubs" regression: TCC's stub-AST
+   parser synthesizes a UFCS call as `int method()`, which would otherwise
+   fail to type-check when the result is assigned to a struct-typed local.
+   The fix in third_party/tcc/tccgen.c morphs the vtop type to the LHS
+   declarator type. If any of these lines regress to needing a hand-written
+   `static <StructType> method();` stub in cc_arena.cch / std/string.cch,
+   this test will fail to build. */
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+
+    // struct-returning UFCS (detach returns CCArena)
+    CCArena detached = arena.detach();
+    detached.free();
+
+    arena = cc_arena_heap(kilobytes(4));
+
+    // struct-returning UFCS through a named-field receiver
+    typedef struct { CCArena arena; } Holder;
+    Holder h = { cc_arena_heap(kilobytes(4)) };
+    CCArenaCheckpoint cp = h.arena.checkpoint();
+    (void)cp;
+    h.arena.free();
+
+    // size_t/scalar return still works
+    size_t rem = arena.remaining();
+    (void)rem;
+
+    arena.free();
+
+    // CCString -> CCSlice via as_slice UFCS (struct-return)
+    CCArena a2 = cc_arena_heap(kilobytes(4));
+    CCString s = int_to_str(42, &a2);
+    CCSlice view = s.as_slice();
+    (void)view;
+    cc_arena_free(&a2);
+
+    printf("ufcs_no_stub_struct_return_smoke: OK\n");
+    return 0;
+}
