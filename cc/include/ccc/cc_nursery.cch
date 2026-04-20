@@ -103,6 +103,13 @@ static inline void cc_nursery_destroy(CCNursery* n) {
     cc_nursery_free(n);
 }
 
+/* CCNursery keeps its bespoke `cc_nursery_lower_c` because the surface
+   names `spawn` / `spawnhybrid` collide with existing raw-fn-pointer
+   entry points (`cc_nursery_spawn(n, fn, arg)`); the hook routes the
+   UFCS short names to the closure-taking implementations
+   (`cc_nursery_spawn_closure0`, etc.) and aliases `close_on` ->
+   `cc_nursery_add_closing_tx`.  Migration to the generic helper would
+   require renaming the raw-fn-pointer entry points first. */
 static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
                                          CCSlice method,
                                          CCSlice mode,
@@ -118,15 +125,6 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
     }
     if (cc_ufcs_slice_eq_cstr(method, "spawnhybrid")) {
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawnhybrid_closure0");
-    }
-    if (cc_ufcs_slice_eq_cstr(method, "wait")) {
-        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_wait");
-    }
-    if (cc_ufcs_slice_eq_cstr(method, "cancel")) {
-        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_cancel");
-    }
-    if (cc_ufcs_slice_eq_cstr(method, "destroy")) {
-        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_destroy");
     }
     if (cc_ufcs_slice_eq_cstr(method, "close_on")) {
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_add_closing_tx");

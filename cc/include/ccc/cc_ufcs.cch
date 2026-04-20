@@ -47,6 +47,13 @@ static inline CCSlice cc_ufcs_concat2(CCArena *arena, CCSlice left, CCSlice righ
     return cc_slice_from_buffer(buf, total);
 }
 
+/* `cc_ufcs_generic_cc_prefix_lower_c` (generic `CC<Rest>` -> `cc_<rest>_`
+ * name composer) is defined in cc_arena.cch so individual type headers
+ * can reference it in their own `@comptime cc_type_register(...)` blocks
+ * without needing a circular include of cc_ufcs.cch here.  Every header
+ * that registers UFCS hooks already includes cc_arena.cch transitively
+ * (via cc_slice.cch / prelude).  See cc/include/ccc/cc_arena.cch. */
+
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
     CCUfcsRegistration reg = {0};
     reg.pattern = pattern ? cc_slice_from_buffer((void *)pattern, strlen(pattern)) : cc_slice_empty();
@@ -71,5 +78,31 @@ static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, C
     return reg.rewrite(recv_type, method, mode, argv, arg_types, arena);
 }
 #endif
+
+/* NOTE: `cc_ufcs_generic_cc_prefix_lower_c` is intentionally NOT
+ * registered globally via `cc_type_register("CC*", ...)` — a broad
+ * wildcard would shadow the hardcoded CamelCase paths for the CCSlice
+ * family (CCSlice / CCSliceUnique / CCSliceShared) which still emit
+ * `CCSlice_len(&s)` etc. and must keep working until those families
+ * are migrated to registered hooks.  Instead, individual headers opt
+ * in explicitly when their type's C API already follows the
+ * `cc_<snake_type>_<method>` convention:
+ *
+ *     @comptime {
+ *         (void)cc_type_register("CCFoo", (CCTypeHooks){
+ *             .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
+ *         });
+ *     }
+ *
+ * Smart snake_case lowering splits CamelCase on uppercase boundaries
+ * (CCArenaCheckpoint -> cc_arena_checkpoint, CCFile -> cc_file,
+ * CCArenaPool -> cc_arena_pool), so each opt-in collapses ~15 lines of
+ * per-type `*_lower_c` boilerplate down to this one-liner.
+ *
+ * Currently opted in: CCArena, CCArenaCheckpoint, CCArenaPool, CCFile,
+ * CCCommand, CCSocket, CCListener, CCString.  CCNursery and the channel
+ * families keep bespoke hooks because their UFCS surface names diverge
+ * from the canonical C entry points (spawn -> spawn_closure0, etc.).
+ */
 
 #endif

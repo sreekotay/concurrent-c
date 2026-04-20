@@ -833,28 +833,46 @@ static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
     return cc_err_CCResult_bool_CC_BoolParseError(CC_BOOL_PARSE_INVALID_VALUE);
 }
 
-static inline CCSlice cc_string_lower_c(CCSlice recv_type,
-                                        CCSlice method,
-                                        CCSlice mode,
-                                        CCSliceArray argv,
-                                        CCSliceArray arg_types,
-                                        CCArena *arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    return cc_ufcs_concat2(arena,
-                           cc_slice_from_buffer((void*)"CCString_", sizeof("CCString_") - 1),
-                           method);
-}
+/* `cc_string_*` aliases: the canonical implementations historically
+   used the CamelCase prefix `CCString_` (predating the cc_<snake>_*
+   convention).  These aliases let the generic snake_case UFCS helper
+   resolve `s.method()` -> `cc_string_method(&s)` without renaming every
+   pre-existing C caller of `CCString_method(...)`.  Function-like macros
+   (push / append / from) need matching parameter signatures.
+   `cc_string_as_slice` is intentionally re-emitted here even though it's
+   declared earlier in the file, to keep the alias block self-contained. */
+#define cc_string_new            CCString_new
+#define cc_string_from_slice     CCString_from_slice
+#define cc_string_from           CCString_from
+#define cc_string_push_slice     CCString_push_slice
+#define cc_string_push(str, data)    CCString_push((str), (data))
+#define cc_string_append(str, data)  CCString_append((str), (data))
+#define cc_string_push_char      CCString_push_char
+#define cc_string_push_int       CCString_push_int
+#define cc_string_push_uint      CCString_push_uint
+#define cc_string_push_f32       CCString_push_f32
+#define cc_string_push_f64       CCString_push_f64
+#define cc_string_push_float     CCString_push_float
+#define cc_string_push_cstr      CCString_push_cstr
+#define cc_string_push_policy    CCString_push_policy
+#define cc_string_apply_policy   CCString_apply_policy
+#define cc_string_clear          CCString_clear
+#define cc_string_cstr           CCString_cstr
+#define cc_string_len            CCString_len
+#define cc_string_cap            CCString_cap
+
+/* CCString UFCS uses the shared generic snake_case helper:
+   smart-lowering CCString -> cc_string_*, dispatched through the
+   `cc_string_*` aliases above to the existing CCString_* C entry
+   points. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCString", (CCTypeHooks){
-        .ufcs = cc_string_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCString*", (CCTypeHooks){
-        .ufcs = cc_string_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif

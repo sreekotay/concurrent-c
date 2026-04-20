@@ -1,8 +1,6 @@
 # Concurrent-C Specification
 
-A C preprocessor that extends C syntax with first-class concurrency, desugaring to portable C.
-
-The key concept: lifetime of memory and the lifetime of tasks are explicitly bound to the structure of the code.
+An extension of C with concurrency primitives and a specified lowering to portable C.
 
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
@@ -12,305 +10,21 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
-## The CC Principle of Orthogonal Concerns
+This specification defines:
 
-The key goal: (as much as possible) the compiler enforces the Shape of the program (Memory/Tasks), while the runtime monitors the Flow of the program (Channels).
+- Surface syntax and compile-time rules
+- Runtime contract (scheduler, channels, arenas)
+- Lowering to C
 
-- The Skeleton (Structure): Nurseries and Arenas et al are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
-- The Circulatory System (Flow): Channels et al are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree. The provenance model is what makes the graph safe.
+The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c`.
 
----
-
-## Quick Reference: Keywords and Constructs
-
-Concurrent-C adds ~40 new language constructs. Here's a quick overview:
-
-### Core Keywords (6)
-
-
-| Keyword      | Purpose                                                                 | Example                         |
-| ------------ | ----------------------------------------------------------------------- | ------------------------------- |
-| `await`      | Suspend and wait for async operation to complete                        | `data = await read_file(path);` |
-| `defer`      | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();`             |
-| `defer(err)` | Cleanup only if returning error (with `@defer(err)`)                    | `@defer(err) free(ptr);`        |
-| `defer(ok)`  | Cleanup only if returning success (with `@defer(ok)`)                   | `@defer(ok) commit();`          |
-| `unsafe`     | Disable safety checks in a block (e.g., for raw pointer casts)          | `unsafe { ptr_cast(); }`        |
-| `comptime`   | Mark code for compile-time evaluation (with `@comptime if`)             | `@comptime if (DEBUG) { }`      |
-
-
-### Contextual Keywords (3)
-
-These are only reserved in specific contexts, so they can be used as identifiers elsewhere:
-
-
-| Keyword   | Context                           | Purpose                                |
-| --------- | --------------------------------- | -------------------------------------- |
-| `async`   | After `@` (in `@async fn`)        | Mark function as asynchronous          |
-| `lock`    | After `@` (in `@lock (m) as var`) | Acquire mutex guard                    |
-| `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
-
-
-### Special Block Forms (10)
-
-
-| Form                        | Purpose                                                  | Example                                                  |
-| --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
-| `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
-| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard<T>;`                                 |
-| `@create(...) @destroy`     | Resource lifetime declaration with deterministic cleanup | `CCNursery* n = @create(NULL) @destroy;`                 |
-| `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
-| `@match { case T x = ... }` | Multiplex on channel events                              | `@match { case int x = await ch: ... }`                  |
-| `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
-| `@for await (T x : ch) { }` | Async iteration (consume channel)                        | `@for await (int x : ch) { process(x); }`                |
-| `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
-| `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
-
-
-### Result unwrap operators (2)
-
-Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cleanly separated roles cover every consumption path:
-
-
-| Form                      | Context                | Purpose                                                                           | Example                                        |
-| ------------------------- | ---------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `expr ?> default`         | expression             | Unwrap value or substitute a default value                                        | `int x = parse(s) ?> 0;`                       |
-| `expr ?>(e) default_expr` | expression             | Unwrap value, or evaluate `default_expr` with `e` bound to the error              | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
-| `call !> body`            | statement / expression | Unwrap, or execute `body` on error. At expression position the body must diverge. | `int x = parse(s) !>(e) return cc_err(e);`     |
-| `call !>;`                | statement / expression | Unwrap, or invoke the enclosing `@errhandler`                                     | `flush() !>;`                                  |
-
-
-The `**?>` operator is the "default value" operator** (comparable to `??` in Swift/C#/JavaScript or `?:` in Kotlin). Its RHS is a pure C expression producing a `T`. Divergent statements (`return`, `break`, `continue`, `goto`, `@err(e);`), compound blocks `{ ... }`, and the bare shorthand are not allowed; use `!>` for that logic. The optional `(ident)` binder scopes the bound error name to the RHS.
-
-The `**!>` operator is the "error handler" operator**, usable at both statement and expression position. The body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
-
-- At **expression position** (RHS of `=`, inside `(`, `,`, `?`, `:`, `&&`, `||`, or after `return`) the body must *visibly diverge*: end in `return`, `break`, `continue`, `goto`, `@err(e);`, or a call to a known-noreturn function. The bare shorthand `call !>;` synthesizes a binder and inlines the enclosing `@errhandler` body (which must diverge).
-- At **statement position** the body may fall through; control returns to the statement after the `!>`.
-
-
-| Registration form          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@errhandler(E e) { ... }` | Block-scoped default handler. Non-divergent bodies are fine for handlers reached only via `call() !>;` (control returns to the call site). Handlers reached via an `@err(e);` forward must visibly diverge — end in `return`/`break`/`continue`/`goto`, `@err(e);` (nested forward), or a call to `exit`/`abort`/`_Exit`/`longjmp`/`siglongjmp`/`pthread_exit`/`__builtin_unreachable`/`__builtin_trap`. |
-| `@err(e);`                 | Inside a `!> (e) BODY` only. Forwards to the registered `@errhandler`. Never returns; any statement following it in the same block is a compile error (unreachable).                                                                                                                                                                                                                                     |
-
-
-A result-typed call appearing as a bare statement (`f();` where `f` returns `T!>(E)`) without being consumed by one of the above is a compile error, gated by `CC_STRICT_RESULT_UNWRAP=1` during phase 1. To discard explicitly, write `(void)f();`.
-
-**See §2.2** for full semantics, grammar, and lowering.
-
-### Type Constructors (6)
-
-
-| Constructor | Meaning                                               | Example                         |
-| ----------- | ----------------------------------------------------- | ------------------------------- |
-| `T!>(E)`    | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
-| `char[:]`   | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
-| `char[4:]`  | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
-| `char[:0]`  | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
-| `char[:0!]` | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
-
-
-> **Note:** The legacy optional-type constructor `T?` has been retired. See the migration appendix at the end of §2.1 for the replacement patterns (`T !>(E)`, `T`* with `NULL`, empty-slice sentinels, `bool`+out-param).
-
-### Expression Forms (3)
-
-
-| Form                                                     | Purpose                                                               | Example                                   |
-| -------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
-| `await expr`                                             | Suspend until task completes, unwrap result                           | `int result = await fetch();`             |
-| `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
-| `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
-
-
-### Block Forms (2)
-
-
-| Form                   | Purpose                         | Example                                     |
-| ---------------------- | ------------------------------- | ------------------------------------------- |
-| `with_deadline(d) { }` | Apply timeout/deadline to block | `with_deadline(seconds(5)) { await op(); }` |
-
-
-### Library Functions (6)
-
-These are normal functions in `concurrent_c.h` with `cc`_ prefix to avoid naming conflicts:
-
-
-| Function                     | Purpose                                  | Example                                   |
-| ---------------------------- | ---------------------------------------- | ----------------------------------------- |
-| `cc_ok(value)`               | Construct T!>(E) success (inferred)      | `return cc_ok(42);`                       |
-| `cc_err(error)`              | Construct T!>(E) error (inferred)        | `return cc_err(MyError_NotFound);`        |
-| `cc_ok(void)`                | Construct void!>(E) success (inferred)   | `return cc_ok(void);`                     |
-| `cc_err(CC_ERR_*, "msg")`    | CCError shorthand                        | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
-| `cc_ok(T, value)`            | T!>(CCError) success (explicit)          | `return cc_ok(int, 42);`                  |
-| `cc_ok(T, E, value)`         | T!>(E) success (explicit)                | `return cc_ok(int, MyError, 42);`         |
-| `cc_err(T, error)`           | T!>(CCError) error (explicit)            | `return cc_err(int, CC_ERROR(...));`      |
-| `cc_err(T, E, error)`        | T!>(E) error (explicit)                  | `return cc_err(int, MyError, err);`       |
-| `cc_move(x)`                 | Explicit move of move-only value         | `ch.send_take(arr, cc_move(arr));`        |
-| `cc_cancel()`                | Cancel current task or nursery           | `if (timeout) cc_cancel();`               |
-| `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }`       |
-| `cc_is_cancelled()`          | Check if current task is cancelled       | `if (cc_is_cancelled()) return;`          |
-
-
-### Result Methods (UFCS)
-
-Result types (`T!>(E)`) support these methods via UFCS:
-
-
-| Method             | Purpose              | Example                                |
-| ------------------ | -------------------- | -------------------------------------- |
-| `r.is_ok()`        | Check if success     | `if (r.is_ok()) { ... }`               |
-| `r.is_err()`       | Check if error       | `if (r.is_err()) handle(cc_error(r));` |
-| `r.value()`        | Get value or abort   | `int v = r.value();`                   |
-| `r.error()`        | Get error or abort   | `CCIoError e = r.error();`             |
-| `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);`              |
-
-
-**Macro helpers (for C interop/generated code):**
-
-
-| Macro                      | Purpose                | Example                                           |
-| -------------------------- | ---------------------- | ------------------------------------------------- |
-| `cc_is_ok(res)`            | Check if success       | `if (cc_is_ok(res)) { ... }`                      |
-| `cc_is_err(res)`           | Check if error         | `if (cc_is_err(res)) handle_err();`               |
-| `cc_unwrap(res)`           | Get value (primitives) | `int v = cc_unwrap(res);`                         |
-| `cc_unwrap_as(res, T)`     | Get value (structs)    | `MyStruct v = cc_unwrap_as(res, MyStruct);`       |
-| `cc_unwrap_err(res)`       | Get error (primitives) | `CCError e = cc_unwrap_err(res);`                 |
-| `cc_unwrap_err_as(res, E)` | Get error (structs)    | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
-
-
-**C ABI naming:** All runtime/stdlib symbols use `CC`*/`cc_`* prefixes to avoid collisions with user code. The compiler automatically resolves short aliases (`String`, `Arena`, etc.) to their prefixed forms (`CCString`, `CCArena`, etc.) during compilation.
+Editorial principles governing modifications to this specification appear in **Appendix K**.
 
 ---
 
-**Concurrent-C is a C preprocessor for safe concurrent systems programming.** It extends C syntax with first-class async/await, message-passing channels, and structured concurrency, desugaring to standard portable C. Developers write CC code; the CC-to-C translator outputs clean, readable C suitable for any standards-compliant C compiler.
+## 1. Foundations
 
-**Why a preprocessor?** C is portable, mature, and ubiquitous. Rather than replace it, CC enhances it: add concurrency syntax, generate efficient C, link with a minimal task scheduler and channel implementation. Users get modern concurrent programming without leaving the C ecosystem—mix CC and C freely in the same codebase.
-
-**Core concepts:** Async functions (`@async`) desugar to state machines; channels (a `T[~... >]`/`T[~... <]` handle pair) desugar to queue types + two capability handles; arenas desugar to bump allocators with atomic ops; slices desugar to `{ ptr, len }` structs with provenance metadata. Everything has a clean C lowering; no mystery.
-
-**Design philosophy:** Stay close to C (syntax, semantics, compilation model), make concurrency explicit (visible in function signatures and lowering), catch errors at compile time (via type system and provenance checking), and generate efficient C code (no intermediate VM or GC—just C + library).
-
----
-
-## Mental Model: Core Abstractions
-
-Before diving into syntax, here are the five core ideas that guide Concurrent-C:
-
-### 1. Blocking Hierarchy
-
-Understanding performance requires understanding what blocks:
-
-```
-PURE (Never blocks)
-  └─ String, Vec, Map operations
-     Arithmetic, local data structures
-     Compiler optimization: Always inline
-
-BOUNDED (Blocks for bounded time)
-  └─ CPU work: parse, encode, compute
-     Local synchronization (spin locks)
-     Compiler decision: Can coalesce or separate
-     User control: @latency_sensitive prevents coalescing
-
-STALLING (Blocks indefinitely)
-  └─ File I/O, network, database
-     External synchronization (locks held elsewhere)
-     Explicit classification: May fail with Busy
-     User control: Deadline timeout, backpressure strategy
-
-SATURATION (Capacity exhausted)
-  └─ Blocking executor full
-     Signal: IoError::Busy (fail-fast, observable)
-     Strategy: Drop (lossy), Block (backpressure), Sample (sparse)
-```
-
-**Key insight:** Different operations need different handling. Pure ops are free. Bounded work is predictable. Stalling I/O needs explicit timeout and backpressure. Saturation needs a strategy.
-
-### 2. Request-Scoped Resources
-
-Three mechanisms prevent leaks and races in request handlers:
-
-**Per-Request Arena:**
-
-- Allocate all request data into one arena
-- Reset in O(1) after request (pointer reset only)
-- No manual `free()`; no fragmentation
-
-**Deadline Per Request:**
-
-- Timeout enforced cooperatively (cancellation)
-- Prevents runaway requests
-- Cancellation is observable (not silent)
-
-**Scope-Bound Values (@scoped):**
-
-- References cannot escape scope
-- Compiler verifies (no unsafe casting)
-- Safe to send across threads
-
-**Result:** Complete request isolation, no allocations leak between requests, all resources tied to scope.
-
-### 3. Concurrency Model
-
-One primitive: **Nursery** (structured scope with spawned tasks)
-
-```c
-nursery {
-    spawn (task1());
-    spawn (task2());
-    // Both tasks run concurrently
-}
-// Nursery waits for all tasks to complete (or cancel)
-```
-
-**Properties:**
-
-- All spawned tasks complete before scope exits
-- Cancellation propagates to all tasks
-- Error from any task fails the nursery
-- Compiler-enforced structure eliminates many task-lifecycle deadlocks; channel-flow deadlocks are diagnosed via compile-time checks and runtime guards
-
-**Channels:** Async-only or sync-only (determined at type, not context)
-
-**Cancellation:** Cooperative but effective (propagates via @match, await, channel operations)
-
-### 4. The @latency_sensitive Contract
-
-Request handlers need predictable latency. Mark with `@latency_sensitive`:
-
-```c
-@async @latency_sensitive Response!>(IoError) handler(Request* req, Arena* a) {
-    // Compiler enforces: only @noblock and awaited @async calls allowed
-}
-```
-
-**What this means:**
-
-- No surprise coalescing (latency is observable)
-- Latency violations caught at compile time
-- Compiler: CPU work is inlined, I/O is separate dispatch
-
-### 5. Backpressure Strategies
-
-When I/O queues are full, three canonical strategies handle saturation. See **Appendix C: Standard Error Types & Backpressure** for detailed comparison table and use cases.
-
-**Quick reference:**
-
-- **Drop:** Discard oldest (lossy; access logs)
-- **Block:** Block sender until space (backpressure; audit logs)
-- **Sample:** Keep ~rate% deterministically (sparse; trace logs)
-
-**Used in:** Channels (`T[~N >, Drop]` / `T[~N <, Drop]`), logging (`log_drop()`, `log_block()`, `log_sample()`)
-
----
-
-## 1. Design Principles
-
-1. **C superset with clean lowering** — A translation unit using no CC syntax is valid C. CC extends C with new syntax; the CC-to-C translator desugars all CC constructs to standard C code that any standards-compliant C compiler can compile. Lowering is transparent—developers can inspect generated C (`--emit-c` flag).
-2. **Portable C output** — All CC features lower to C11 (or C99 + platform extensions). No intermediate representation, no VM. Generated code integrates seamlessly into existing C build systems (Make, CMake, Meson, etc.).
-3. **Minimal runtime** — Only `@async` (task scheduler, channel types) requires a linked runtime. Arenas, slices, results—all lower to pure C structures. Users can replace the async runtime with custom implementations if needed.
-4. **Explicit by default** — Effects visible in function signatures. Allocations pass `Arena`* explicitly. Errors return `T!>(E)` (Result types). Async code is marked `@async`. Ownership transfer is explicit (via `move()` or function parameters).
-5. **Scoped safety** — Arenas + tracked slices catch common lifetime errors; raw pointers remain unsafe. Compile-time provenance tracking (via slice metadata) enables `send_take` zero-copy transfers without runtime checks.
+This section defines rules about values, closures, lexing, and parsing that apply throughout the specification. Editorial principles governing modifications to this specification appear in **Appendix K**.
 
 **Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task<T>`, `Mutex<T>`, `Atomic<T>`) are always initialized on declaration. Plain C types follow C initialization rules.
 
@@ -538,72 +252,184 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 | `T[~... >]` / `T[~... <]`     | Channel handle type   | `~` is not bitwise-not here   |
 | `T[~n N:M >]` / `T[~n N:M <]` | Channel with topology | `N:M` is topology, not label  |
 
+---
 
-## Concurrent-C Language Constructs: Complete Reference
+## 2. Primitives
 
-Concurrent-C extends C with ~40 new constructs for async/await, structured concurrency, and error handling. This table shows all of them.
+Concurrent-C extends C with six primitives. All other surface forms are either sugar over these, attributes on them, or library types defined in terms of them.
 
+### 2.1 UFCS — receiver-typed dispatch
 
-| Category              | Construct                          | Purpose                                                                                 | Example                                                       |
-| --------------------- | ---------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| **Core Keywords**     | `await`                            | Suspend until async operation completes                                                 | `char[:] data = await read_file(path);`                       |
-|                       | `spawn`                            | Create new task in nursery                                                              | `spawn (worker());`                                           |
-|                       | `defer`                            | Cleanup on scope exit (with `@defer`)                                                   | `@defer free(ptr);`                                           |
-|                       | `unsafe`                           | Disable safety checks in block                                                          | `unsafe { *ptr = value; }`                                    |
-|                       | `comptime`                         | Compile-time conditional (with `@comptime`)                                             | `@comptime if (DEBUG) { }`                                    |
-| **@ Statements**      | `@async`                           | Mark function as asynchronous                                                           | `@async void handler() { }`                                   |
-|                       | `@latency_sensitive`               | Latency-critical (no coalescing)                                                        | `@async @latency_sensitive Response handle() { }`             |
-|                       | `@scoped`                          | Type tied to lexical scope                                                              | `@scoped type Guard<T>;`                                      |
-|                       | `@nursery`                         | Structured concurrency block                                                            | `@nursery { spawn (task()); }`                                |
-|                       | `@closing(ch)`                     | Producer-scope channel ownership                                                        | `@closing(tx) spawn(task);`                                   |
-|                       | `@create(...) @destroy`            | Deterministic resource lifetime                                                         | `CCArena a = @create(kilobytes(4)) @destroy;`                 |
-|                       | `@lock (m) as var`                 | Mutex guard acquisition                                                                 | `@lock (m) as g { g.value++; }`                               |
-|                       | `@match`                           | Channel event dispatch                                                                  | `@match { case T x = await ch: ... }`                         |
-|                       | `@defer`                           | Deferred cleanup statement                                                              | `@defer cleanup();`                                           |
-|                       | `@for await (T x : ch)`            | Async iteration loop                                                                    | `@for await (int x : ch) { ... }`                             |
-|                       | `@comptime if`                     | Compile-time conditional                                                                | `@comptime if (feature) { }`                                  |
-|                       | `@errhandler`                      | Block default handler for `call() !>;` and `@err(e);` forwards                          | `@errhandler(CCError e) { return cc_err(e); }`                |
-| **Type Constructors** | `T!>(E)`                           | Result type (success or error)                                                          | `int!>(IoError) read(path);`                                  |
-|                       | `char[:]`                          | Slice (variable-length view)                                                            | `void process(char[:] data);`                                 |
-|                       | `char[n:]`                         | Fixed-length slice refinement                                                           | `void hash(char[32:] digest);`                                |
-|                       | `char[:k]`                         | Sentinel slice refinement                                                               | `char[:0] name = s.as_slice();`                               |
-|                       | `char[:k!]`                        | Sentinel unique slice refinement                                                        | `char[:0!] buf = recv(ch);`                                   |
-| **String Forms**      | `@slice("...")`                    | Build-time canonical sentinel slice                                                     | `char[:0] tag = @slice("attr");`                              |
-|                       | `@string(expr, arena)`             | Direct string construction                                                              | `CCString msg = @string(42, arena);`                          |
-|                       | `@string(policy, \`..., arena)`    | Policy-driven template (`${...}`, `$~tag{...}`)                                         | `CCString html = @string(html_policy, \`# ${name}`, arena);`` |
-| **Expression Forms**  | `await expr`                       | Suspend and unwrap task result                                                          | `int result = await fetch();`                                 |
-|                       | `spawn (expr)`                     | Create task (must be in `@nursery`)                                                     | `spawn (handler(request));`                                   |
-| **Result unwrap**     | `expr ?> default`                  | Default-value operator: unwrap or substitute a pure expression                          | `int x = parse(s) ?> 0;`                                      |
-|                       | `expr ?>(e) default_expr`          | Default-value operator with binder (RHS still a pure C expression)                      | `int x = parse(s) ?>(e) fallback_for(e.kind);`                |
-|                       | `call !> body` / `call !>(e) body` | Error-handler operator (statement or expression); expression-position body must diverge | `int x = parse(s) !>(e) return cc_err(e);`                    |
-|                       | `call !>;`                         | Bare handler: delegate to the enclosing `@errhandler`                                   | `flush() !>;`                                                 |
-|                       | `@err(e);`                         | Forward bound error to enclosing `@errhandler` (inside `!> (e) BODY`); never returns    | `@err(e);`                                                    |
-| **Block Forms**       | `cc_with_deadline(d) { }`          | Apply timeout/deadline to block                                                         | `cc_with_deadline(seconds(5)) { await op(); }`                |
-| **Library Functions** | `cc_ok(value)`                     | Construct T!>(E) success (inferred)                                                     | `return cc_ok(42);`                                           |
-|                       | `cc_ok(void)`                      | Construct void!>(E) success (inferred)                                                  | `return cc_ok(void);`                                         |
-|                       | `cc_err(error)`                    | Construct T!>(E) error (inferred)                                                       | `return cc_err(MyError_NotFound);`                            |
-|                       | `cc_ok(T, value)`                  | T!>(CCError) success (explicit)                                                         | `return cc_ok(int, 42);`                                      |
-|                       | `cc_ok(T, E, v)`                   | T!>(E) success (explicit)                                                               | `return cc_ok(int, MyError, 42);`                             |
-|                       | `cc_err(T, e)`                     | T!>(CCError) error (explicit)                                                           | `return cc_err(int, CC_ERROR(...));`                          |
-|                       | `cc_err(T, E, e)`                  | T!>(E) error (explicit)                                                                 | `return cc_err(int, MyError, err);`                           |
-|                       | `cc_move(x)`                       | Explicit move of move-only value                                                        | `ch.send_take(arr, cc_move(arr));`                            |
-|                       | `cc_cancel()`                      | Cancel current task/nursery                                                             | `if (timeout) cc_cancel();`                                   |
-|                       | `cc_with_deadline(Duration)`       | Create deadline scope                                                                   | `cc_with_deadline(seconds(30)) { }`                           |
-|                       | `cc_is_cancelled()`                | Check if task cancelled                                                                 | `if (cc_is_cancelled()) return;`                              |
+Defined normatively in §9.0. Method-call syntax `x.f(...)` / `p->f(...)` dispatches on the resolved type of the receiver expression.
 
+### 2.2 Result types and unwrapping
+
+Defined normatively in §3.1. Type constructor `T!>(E)`; operators `?>` (default value), `!>` (error handler); forms `@err(e);` and `@errhandler(E e) { ... }`.
+
+### 2.3 `@defer` — scope-exit actions
+
+Defined normatively in §5.1. Schedules an action at scope exit in reverse-declaration order. `@destroy` and `@defer(err)` / `@defer(ok)` are positional and conditional forms of the same primitive.
+
+### 2.4 `@async` / `await` — cooperative suspension
+
+Defined normatively in §8. `@async` marks functions that may suspend; `await` marks suspension points. Lowers to state-machine frames (Appendix J).
+
+### 2.5 Provenance — arenas, slices, strings
+
+Defined normatively in §§3.4–3.5 (slice ABI and ownership) and §5 (arenas). Values track their origin at the value level; the slice type `T[:]` carries provenance metadata that enables scope-escape detection, safe channel transfer, and runtime observability. Strings build on slices and arenas; see §9.1.
+
+### 2.6 `comptime` — compile-time evaluation
+
+Defined normatively in §14. `@comptime if`, `comptime {}` blocks, and `comptime` declarations admit a restricted evaluation mode at compile time.
 
 ---
 
-**Rules:**
+Everything else in this specification is one of:
 
-- **Reserved words:** Only in CC mode. Pure-C files can use these as identifiers.
-- **@ prefix:** Marks CC-specific block forms and statements. Helps distinguish from C control flow.
-- **Contextual keywords:** `async`, `arena`, `lock`, `noblock`, `closing` are recognized only in specific contexts (after `@`, in nursery, etc.), not reserved globally. Safer for identifier reuse.
-- **Library functions:** `ok`, `err`, `move`, `cancel`, `with_deadline`, `is_cancelled` are normal functions in `concurrent_c.h`. No special parsing needed.
+- **Sugar** over these primitives (e.g., `@create(...) @destroy` is `@defer` at declaration; `@lock (m) as g` is `@defer`-shaped; `@closing(ch)` is `@defer` on a channel handle).
+- **Attributes** (e.g., `@noblock`, `@latency_sensitive`, `@nonblocking`).
+- **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
 
-**Rule:** In type contexts, `?`, `!`, `[:]`, `[~ ...]` are type constructors. In expression contexts, they retain C semantics (ternary, logical-not, etc.) or are syntax errors if ambiguous.
+---
 
-**Rule:** `@for await (T x : expr)` is parsed as a single statement form, not `for` followed by `await`.
+## Quick Reference: Keywords and Constructs
+
+Syntax inventory, grouped by purpose. See §2 for the primitive taxonomy and individual sections for normative rules.
+
+### Core Keywords (6)
+
+
+| Keyword      | Purpose                                                                 | Example                         |
+| ------------ | ----------------------------------------------------------------------- | ------------------------------- |
+| `await`      | Suspend and wait for async operation to complete                        | `data = await read_file(path);` |
+| `defer`      | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();`             |
+| `defer(err)` | Cleanup only if returning error (with `@defer(err)`)                    | `@defer(err) free(ptr);`        |
+| `defer(ok)`  | Cleanup only if returning success (with `@defer(ok)`)                   | `@defer(ok) commit();`          |
+| `unsafe`     | Disable safety checks in a block (e.g., for raw pointer casts)          | `unsafe { ptr_cast(); }`        |
+| `comptime`   | Mark code for compile-time evaluation (with `@comptime if`)             | `@comptime if (DEBUG) { }`      |
+
+
+### Contextual Keywords (3)
+
+These are only reserved in specific contexts, so they can be used as identifiers elsewhere:
+
+
+| Keyword   | Context                           | Purpose                                |
+| --------- | --------------------------------- | -------------------------------------- |
+| `async`   | After `@` (in `@async fn`)        | Mark function as asynchronous          |
+| `lock`    | After `@` (in `@lock (m) as var`) | Acquire mutex guard                    |
+| `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
+
+
+### Special Block Forms (8)
+
+
+| Form                        | Purpose                                                  | Example                                                  |
+| --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
+| `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
+| `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
+| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard<T>;`                                 |
+| `@create(...) @destroy`     | Resource lifetime declaration with deterministic cleanup | `CCNursery* n = @create(NULL) @destroy;`                 |
+| `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
+| `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
+| `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
+| `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+
+
+### Result unwrap operators (2)
+
+Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cleanly separated roles cover every consumption path:
+
+
+| Form                      | Context                | Purpose                                                                           | Example                                        |
+| ------------------------- | ---------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `expr ?> default`         | expression             | Unwrap value or substitute a default value                                        | `int x = parse(s) ?> 0;`                       |
+| `expr ?>(e) default_expr` | expression             | Unwrap value, or evaluate `default_expr` with `e` bound to the error              | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
+| `call !> body`            | statement / expression | Unwrap, or execute `body` on error. At expression position the body must diverge. | `int x = parse(s) !>(e) return cc_err(e);`     |
+| `call !>;`                | statement / expression | Unwrap, or invoke the enclosing `@errhandler`                                     | `flush() !>;`                                  |
+
+
+**See §3.1** for full semantics (divergence rules at expression position, `@errhandler` registration, `@err(e);` forwards, bare-statement consumption rule), grammar, and lowering.
+
+### Type Constructors (6)
+
+
+| Constructor | Meaning                                               | Example                         |
+| ----------- | ----------------------------------------------------- | ------------------------------- |
+| `T!>(E)`    | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
+| `char[:]`   | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
+| `char[4:]`  | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
+| `char[:0]`  | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
+| `char[:0!]` | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
+
+
+### Expression Forms (3)
+
+
+| Form                                                     | Purpose                                                               | Example                                   |
+| -------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
+| `await expr`                                             | Suspend until task completes, unwrap result                           | `int result = await fetch();`             |
+| `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
+| `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
+
+
+### Block Forms (2)
+
+
+| Form                   | Purpose                         | Example                                     |
+| ---------------------- | ------------------------------- | ------------------------------------------- |
+| `with_deadline(d) { }` | Apply timeout/deadline to block | `with_deadline(seconds(5)) { await op(); }` |
+
+
+### Library Functions (6)
+
+These are normal functions in `concurrent_c.h` with `cc`_ prefix to avoid naming conflicts:
+
+
+| Function                     | Purpose                                  | Example                                   |
+| ---------------------------- | ---------------------------------------- | ----------------------------------------- |
+| `cc_ok(value)`               | Construct T!>(E) success (inferred)      | `return cc_ok(42);`                       |
+| `cc_err(error)`              | Construct T!>(E) error (inferred)        | `return cc_err(MyError_NotFound);`        |
+| `cc_ok(void)`                | Construct void!>(E) success (inferred)   | `return cc_ok(void);`                     |
+| `cc_err(CC_ERR_*, "msg")`    | CCError shorthand                        | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
+| `cc_ok(T, value)`            | T!>(CCError) success (explicit)          | `return cc_ok(int, 42);`                  |
+| `cc_ok(T, E, value)`         | T!>(E) success (explicit)                | `return cc_ok(int, MyError, 42);`         |
+| `cc_err(T, error)`           | T!>(CCError) error (explicit)            | `return cc_err(int, CC_ERROR(...));`      |
+| `cc_err(T, E, error)`        | T!>(E) error (explicit)                  | `return cc_err(int, MyError, err);`       |
+| `cc_move(x)`                 | Explicit move of move-only value         | `ch.send_take(arr, cc_move(arr));`        |
+| `cc_cancel()`                | Cancel current task or nursery           | `if (timeout) cc_cancel();`               |
+| `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }`       |
+| `cc_is_cancelled()`          | Check if current task is cancelled       | `if (cc_is_cancelled()) return;`          |
+
+
+### Result Methods (UFCS)
+
+Result types (`T!>(E)`) support these methods via UFCS:
+
+
+| Method             | Purpose              | Example                                |
+| ------------------ | -------------------- | -------------------------------------- |
+| `r.is_ok()`        | Check if success     | `if (r.is_ok()) { ... }`               |
+| `r.is_err()`       | Check if error       | `if (r.is_err()) handle(cc_error(r));` |
+| `r.value()`        | Get value or abort   | `int v = r.value();`                   |
+| `r.error()`        | Get error or abort   | `CCIoError e = r.error();`             |
+| `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);`              |
+
+
+**Macro helpers (for C interop/generated code):**
+
+
+| Macro                      | Purpose                | Example                                           |
+| -------------------------- | ---------------------- | ------------------------------------------------- |
+| `cc_is_ok(res)`            | Check if success       | `if (cc_is_ok(res)) { ... }`                      |
+| `cc_is_err(res)`           | Check if error         | `if (cc_is_err(res)) handle_err();`               |
+| `cc_unwrap(res)`           | Get value (primitives) | `int v = cc_unwrap(res);`                         |
+| `cc_unwrap_as(res, T)`     | Get value (structs)    | `MyStruct v = cc_unwrap_as(res, MyStruct);`       |
+| `cc_unwrap_err(res)`       | Get error (primitives) | `CCError e = cc_unwrap_err(res);`                 |
+| `cc_unwrap_err_as(res, E)` | Get error (structs)    | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
+
+
+**C ABI naming:** All runtime/stdlib symbols use `CC`*/`cc_`* prefixes to avoid collisions with user code. The compiler automatically resolves short aliases (`String`, `Arena`, etc.) to their prefixed forms (`CCString`, `CCArena`, etc.) during compilation.
 
 ---
 
@@ -649,89 +475,20 @@ int ! IoError read_int (char [ : ] data) {
 }
 ```
 
-### Method Call Style
-
-Ordinary C member access is primary: if `receiver.name` or `receiver->name` resolves to a struct or union member, that is an ordinary field access and UFCS does not apply. UFCS is the secondary dispatch rule: when the member name is **not** a field of the receiver's type, `receiver.method(args)` / `receiver->method(args)` lowers through the receiver-type's UFCS family. This gives a receiver-oriented method surface on top of plain C structs without perturbing field access. See §8 for the full dispatch contract and error rules.
-
-**Use UFCS for method chains:**
-
-```c
-char[:] result = input
-    .trim()
-    .lower(&arena)
-    .slice(0, 10);
-```
-
-**Use direct library calls for composition:**
-
-```c
-char[:] result = slice(lower(trim(input), &arena), 0, 10);
-```
-
-**Mix as needed:**
-
-```c
-// Choose the style the library exposes and that reads best
-x.method(y)       // UFCS style
-method(x, y)      // Direct library call style
-```
-
-### Attribute Placement
-
-All attributes use the `@` prefix and follow consistent spacing:
-
-
-| Construct            | Style                                          | Notes                                                                       |
-| -------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
-| `@async`             | `@async fn() { }`                              | No space before function name                                               |
-| `@latency_sensitive` | `@async @latency_sensitive fn() { }`           | Stack before `@async`                                                       |
-| `@noblock`           | `@noblock fn() { }`                            | Marks synchronous non-blocking function                                     |
-| `@scoped`            | `@scoped type Guard<T>;`                       | On type declarations                                                        |
-| `@nursery`           | `@nursery { ... }`                             | No parameters, always a block                                               |
-| `@arena`             | retired                                        | Use `CCArena a = @create(...) @destroy` instead                             |
-| `@lock`              | `@lock (m) as g { ... }`                       | Space before parentheses (statement form)                                   |
-| `@for await`         | `@for await (T x : ch) { }`                    | Unified statement, no confusion with `for` + `await`                        |
-| `@defer`             | `@defer cleanup();`                            | Single statement after                                                      |
-| `@errhandler`        | `@errhandler(CCError e) { return cc_err(e); }` | Block-scoped default for `call() !>;` and `@err(e);` forwards in this block |
-| `@match`             | `@match { ... }`                               | Channel multiplexing                                                        |
-
-
 ---
 
-## 2. Core Types
+## 3. Core Types
 
 This section defines the fundamental value-level building blocks:
 
-- **§2.1 Migration appendix: retired `T?`** — mapping from the old optional-type constructor to its replacements
-- **§2.2 Results (`T!>(E)`)** — success or failure; statement-level `@err` / `@errhandler`
-- **§2.3 Type Precedence** — how type modifiers bind
-- **§2.4 Arrays and Slices** — fixed arrays and views
-- **§2.5 Slice ABI** — provenance metadata layout
+- **§3.1 Results (`T!>(E)`)** — success or failure; statement-level `@err` / `@errhandler`
+- **§3.2 Type Precedence** — how type modifiers bind
+- **§3.3 Arrays and Slices** — fixed arrays and views
+- **§3.4 Slice ABI** — provenance metadata layout
 
 ---
 
-### 2.1 Migration appendix: retired `T?`
-
-> **Retired.** Optional types (`T?`) have been removed from the normative language surface. The parsing and lowering paths may still exist during the phase-1 transition, but no normative spec surface — grammar, examples, stdlib signatures — uses `T?`. New code MUST NOT use `T?`. Existing `T?` call sites migrate as follows:
-
-
-| Old pattern                                                           | Replacement                                                                  |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Fallible read / await returning "value or EOF" (`char[:]? read(...)`) | `char[:] !>(CCIoError)`; empty slice (`len == 0`) is EOF                     |
-| Channel `recv` into an optional (`char[:]? x = await ch.recv();`)     | `bool !>(CCIoError) got = await ch.recv(&x);` — `ok(false)` = closed+drained |
-| Iterator `next()` (`T? next()`)                                       | `bool next(T* out)` — loop with `while (it.next(&x)) { ... }`                |
-| Container lookup (`V? Map.get(K)`, `T? Vec.get(i)`)                   | `V* Map.get(K)`, `T* Vec.get(i)` — `NULL` for absent                         |
-| Index search (`size_t? s.index_of(...)`)                              | `ssize_t s.index_of(...)` — `-1` for not found                               |
-| Pop-style (`T? Vec.pop()`)                                            | `bool Vec.pop(T* out)`                                                       |
-| Struct-field optional slice (`char[:]? field`)                        | `char[:] field` where `len == 0` means absent                                |
-| Struct-field optional handle/config (`TlsConfig? tls`)                | `TlsConfig* tls` — `NULL` means absent                                       |
-
-
-The legacy macros `CCOpt(T)` / `CCOptPtr` / `CCOptRes` / `CCResOpt`, and the helpers `cc_is_some` / `cc_is_none` / `cc_unwrap_opt` / `cc_unwrap_or`, are **no longer part of the normative surface**. They may continue to exist in the runtime/C-interop header family during migration, but new code uses `cc_is_ok` / `cc_value` (from `T!>(E)`), pointer `NULL` checks, or plain length/sentinel tests instead.
-
----
-
-### 2.2 Results (`T!>(E)`)
+### 3.1 Results (`T!>(E)`)
 
 `T!>(E)` represents **success or failure** with an explicit error value. Unwrapping is strictly explicit: every result-typed call is consumed by one of the two operators with cleanly separated roles — `?>` (default-value operator; pure expression RHS) or `!>` (error-handler operator; works at both statement and expression position) — or by an `@err(e);` forward inside a `!>` body, or by the registered `@errhandler` via the bare `call !>;` shorthand. Bare result-typed statements are ill-formed. See **Unwrapping Results** below.
 
@@ -967,7 +724,7 @@ CCRes(MyData, MyError) my_function(int arg);
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
      A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
 7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch. (Enforced behind the `CC_STRICT_RESULT_UNWRAP=1` transition flag during phase 1; enabled unconditionally in phase 3.)
-8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, and `try` / `catch` / `if @try`. During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths. Optional types (`T?`) are retired outright in this revision — the normative spec no longer uses them; see §2.1 migration appendix.
+8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, and `try` / `catch` / `if @try`. During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths. Optional types (`T?`) are retired outright in this revision — the normative spec no longer uses them.
 
 **Grammar (normative, minus whitespace).**
 
@@ -1090,9 +847,28 @@ int main(void) {
 
 **Composition with `@defer` and `@create(...) @destroy`.** `?>` and `!>` participate in deferred cleanup like any other C statement: `@defer` scheduled entries run on scope exit regardless of which branch of `?>` / `!>` fired. Divergent RHS (`return`, `break`, `continue`) respect the scope boundary they cross; the surrounding `@defer` runs as usual.
 
+**Success destructor — `!> … @destroy { D }` / `?> … @destroy { D }`.** Either operator may be followed by a trailing `@destroy { D }` suffix that attaches a *success destructor* to the statement:
+
+```
+stmt ::= … call '!>' [ '(' ident ')' ] [ body ] '@destroy' '{' D '}' ';'
+       | … call '?>' [ '(' ident ')' ] rhs  '@destroy' '{' D '}' ';'
+       | … call '!>'                       '@destroy' '{' D '}' ';'   // bare !>
+```
+
+Semantics: `EXPR !> BODY @destroy { D }` is exactly `(EXPR !> BODY) @sdestroy { D }` — on the success path of the unwrap, `D` is scheduled to run at scope exit in reverse-declaration order (i.e., as if `@defer { D };` followed the statement). On the error path, the handler body / divergent RHS has already left the scope, so `D` does not run. For `?> … @destroy { D }`, both branches yield a bound value, so `D` runs at scope exit unconditionally.
+
+Any binder introduced by the host statement (e.g., the LHS of a declaration like `T* p = CALL() !> … @destroy { use(p); };`) is in scope inside `D` because `D` expands to a `@defer` in the surrounding block.
+
+When the host statement declares a built-in owned type, the destructor body is composed with that type's lifecycle hooks so the result matches `@create(...) @destroy { D }`:
+
+- `CCNursery* n = CALL() !> BODY @destroy { D };` runs `cc_nursery_wait(n)`, then `D`, then `cc_nursery_free(n)` at scope exit.
+- `CCArena a = CALL() !> BODY @destroy { D };` runs `D`, then `cc_arena_destroy(&a)` at scope exit.
+
+For any other declared type, no hooks are injected and the suffix is simply `@defer { D };`.
+
 ---
 
-### 2.3 Type Precedence
+### 3.2 Type Precedence
 
 Type modifiers bind with the following precedence (tightest first):
 
@@ -1134,7 +910,7 @@ int!>(Error)[~10 >] results_tx;          // sender for channel of results
 
 ---
 
-### 2.4 Arrays and Slices
+### 3.3 Arrays and Slices
 
 
 | Type     | Meaning     | Storage                | Size                        |
@@ -1169,7 +945,7 @@ Slices are *views*; they do not own memory.
 
 ---
 
-### 2.5 Slice ABI (32 bytes)
+### 3.4 Slice ABI (32 bytes)
 
 All slices lower to the following ABI:
 
@@ -1225,7 +1001,7 @@ struct AllocationRecord {
 - Debug builds maintain the allocation table and trap on access to freed/reset allocations
 - Release builds skip tracking; stale access is undefined behavior
 
-### 2.6 Slice Ownership: Views vs Unique
+### 3.5 Slice Ownership: Views vs Unique
 
 Slices are either **views** (copyable, no destructor) or **unique** (move-only, has destructor).
 
@@ -1251,7 +1027,7 @@ Slices are either **views** (copyable, no destructor) or **unique** (move-only, 
 - Created by `recv()` (channel receive) or `adopt()` (FFI adoption)
 - Move-only — copying is a compile-time error
 - Has destructor that runs at scope exit (or is suppressed if moved)
-- Only `recv()` slices can use `send_take` for zero-copy transfer (see §7.3)
+- Only `recv()` slices can use `send_take` for zero-copy transfer (see §8.3)
 
 **Rule (unique assignment ban):** Any assignment, copy, or parameter passing that would duplicate a slice value with `id.is_unique=1` is illegal unless it occurs in a move context (`move()`, `return`, `send_take`).
 
@@ -1325,19 +1101,19 @@ This guarantees that full-range subslices remain eligible for transfer (if the s
 
 ---
 
-## 3. Type Categories and Scope-Bound Values
+## 4. Type Categories and Scope-Bound Values
 
 This section defines categories of types that have special restrictions:
 
-- **§3.1 Scope-bound values (`@scoped`)** — types tied to lexical scope
-- **§3.2 Suspension points** — where scope-bound values cannot be held
-- **§3.3 Compiler enforcement** — how violations are detected
+- **§4.1 Scope-bound values (`@scoped`)** — types tied to lexical scope
+- **§4.2 Suspension points** — where scope-bound values cannot be held
+- **§4.3 Compiler enforcement** — how violations are detected
 
 The central rule: **No scope-bound value may be held across a suspension point.**
 
 ---
 
-### 3.1 Scope-Bound Types (`@scoped`)
+### 4.1 Scope-Bound Types (`@scoped`)
 
 A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (await, @match, @async call).
 
@@ -1424,9 +1200,9 @@ If a function has `@scoped` values in scope at a suspension point, that's a comp
 
 ---
 
-### 3.2 Suspension Points
+### 4.2 Suspension Points
 
-#### 3.2.1 Definition
+#### 4.2.1 Definition
 
 A **suspension point** is any program point at which execution of the current task may suspend and later resume. At suspension points, **no scope-bound (`@scoped`) values may be held**.
 
@@ -1446,7 +1222,7 @@ A **suspension point** is any program point at which execution of the current ta
 - Arithmetic, logic, control flow
 - Non-blocking operations (`try_send`, `try_recv`, `close`)
 
-#### 3.2.2 Cancellation Observation at Suspension Points (Normative)
+#### 4.2.2 Cancellation Observation at Suspension Points (Normative)
 
 When a suspension point is executed inside an active `with_deadline(...)` scope, the suspension point MUST be treated as **cancellation-aware**.
 
@@ -1465,7 +1241,7 @@ When a suspension point is executed inside an active `with_deadline(...)` scope,
 - Cancellation remains cooperative. No suspension point is required to interrupt an in-progress blocking operation.
 - Cancellation is only observed at suspension points; purely CPU-bound code is unaffected unless it explicitly checks cancellation (e.g., `cc_is_cancelled()` / `is_cancelled()`).
 
-For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7.5 (Cancellation & Deadline)**. This section defines the compiler-level guarantee; § 7.5 specifies the full runtime semantics.
+For complete deadline semantics, scoping rules, and runtime behavior, see **§8.5 (Cancellation & Deadline)**. This section defines the compiler-level guarantee; §8.5 specifies the full runtime semantics.
 
 **Example:**
 
@@ -1572,7 +1348,7 @@ All suspension points (both `await` and `@async` function calls) are implicitly 
 
 ---
 
-### 3.3 Compiler Enforcement
+### 4.3 Compiler Enforcement
 
 The compiler checks scope-bound restrictions in several places:
 
@@ -1634,13 +1410,13 @@ help: release @scoped value before suspension
 
 ---
 
-## 4. Arenas
+## 5. Arenas
 
 This section defines the allocation model and lifetime boundaries:
 
 - **Arena API** — creation, allocation, lifecycle
-- **§4.1 `@defer`** — scoped cleanup
-- **§4.2 Arena blocks** — structured arena lifetime
+- **§5.1 `@defer`** — scoped cleanup
+- **§5.2 Arena blocks** — structured arena lifetime
 
 ---
 
@@ -1825,7 +1601,7 @@ cc_arena_free(&a);  // BUG: thread may still be using s
 
 ---
 
-### 4.1 `@defer`
+### 5.1 `@defer`
 
 `@defer stmt;` schedules `stmt` to run on scope exit.
 
@@ -1833,7 +1609,7 @@ cc_arena_free(&a);  // BUG: thread may still be using s
 - LIFO order.
 - No exceptions or unwinding.
 
-**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). `**@errhandler`** defines behavior when a `call() !>;` statement or an `@err(e);` forward observes an **error**—at the unwrap site, not deferred to exit. See §2.2.
+**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). `**@errhandler`** defines behavior when a `call() !>;` statement or an `@err(e);` forward observes an **error**—at the unwrap site, not deferred to exit. See §3.1.
 
 ```c
 CCArena scratch = cc_arena_heap(kilobytes(64));
@@ -1954,7 +1730,7 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 }
 ```
 
-**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see § 3.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
+**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
 
 ```c
 @async void!>(Error) good(Arena* scratch) {
@@ -1978,7 +1754,7 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 
 ---
 
-### 4.2 Arena blocks
+### 5.2 Arena blocks
 
 Arena blocks provide scoped arena lifetime (create form) and scoped reset (reset form).
 
@@ -2038,7 +1814,7 @@ The reset form is selected when the parenthesized expression has type `Arena*` (
 
 ---
 
-## 5. Threads
+## 6. Threads
 
 This section defines OS-level parallelism and shared state:
 
@@ -2050,7 +1826,7 @@ This section defines OS-level parallelism and shared state:
 
 ---
 
-### 5.1 Thread API
+### 6.1 Thread API
 
 OS threads are for CPU parallelism.
 
@@ -2096,7 +1872,7 @@ This prevents data races while allowing explicit shared state through safe wrapp
 
 ---
 
-### 5.2 Direct OS Threading (Advanced)
+### 6.2 Direct OS Threading (Advanced)
 
 **For most applications, use `@nursery { spawn ... }` instead of the APIs in this section.**
 
@@ -2104,7 +1880,7 @@ Direct OS thread control is rarely needed. For details on `ThreadGroup` and `spa
 
 ---
 
-### 5.3 Mutex (OS Mutex)
+### 6.3 Mutex (OS Mutex)
 
 `Mutex<T>` provides mutex-protected access to shared state for any type `T` using OS-level synchronization.
 
@@ -2114,7 +1890,7 @@ LockGuard<T> Mutex<T>.lock_guard();           // get a lock guard
 void Mutex<T>.with_lock(void (*fn)(T*));      // callback-style access (can block)
 ```
 
-#### 5.3.1 Structured Lock Access with `@lock`
+#### 6.3.1 Structured Lock Access with `@lock`
 
 The `@lock` statement provides clean, scoped access to mutex-protected data:
 
@@ -2165,7 +1941,7 @@ T* value = &(*__guard);  // or operator-> access
 __guard goes out of scope, lock releases
 ```
 
-#### 5.3.2 Lock Guard (Alternative Approach)
+#### 6.3.2 Lock Guard (Alternative Approach)
 
 If you need the guard to escape the `@lock` block (rare), use direct `lock_guard()`:
 
@@ -2177,7 +1953,7 @@ int val = *g;  // explicit deref
 // explicitly or via scope exit
 ```
 
-#### 5.3.3 Callback Style (Alternative)
+#### 6.3.3 Callback Style (Alternative)
 
 For cases where explicit callback control is preferred (not recommended):
 
@@ -2243,7 +2019,7 @@ The `run_blocking` wrapper ensures the lock is acquired and released within a si
 
 ---
 
-### 5.4 AsyncMutex (Suspending Mutex)
+### 6.4 AsyncMutex (Suspending Mutex)
 
 `AsyncMutex<T>` provides mutex-protected access that **suspends** instead of blocking, making it safe for `@async` code.
 
@@ -2289,7 +2065,7 @@ AsyncMutex<int> counter = async_mutex(0);
 
 **Rule:** `AsyncMutex<T>` is sendable.
 
-**Rule (scope-bound guard types):** `LockGuard<T>` and `AsyncGuard<T>` are `@scoped` types (see § 3.1). They cannot be held across suspension points. The compiler enforces this at compile time to prevent deadlocks and keep critical sections short.
+**Rule (scope-bound guard types):** `LockGuard<T>` and `AsyncGuard<T>` are `@scoped` types (see §4.1). They cannot be held across suspension points. The compiler enforces this at compile time to prevent deadlocks and keep critical sections short.
 
 ```c
 @async void bad(AsyncMutex<int>* m, int[~ >]* tx) {
@@ -2339,7 +2115,7 @@ AsyncMutex<int> counter = async_mutex(0);
 
 ---
 
-### 5.5 Atomic (Lock-Free)
+### 6.5 Atomic (Lock-Free)
 
 `Atomic<T>` provides lock-free atomic operations for primitive types with configurable memory ordering.
 
@@ -2419,17 +2195,17 @@ int v = data.load(.relaxed);      // guaranteed to see 42
 
 ---
 
-## 6. Channels
+## 7. Channels
 
 This section defines message-passing and coordination primitives:
 
-- **§6.1 Channel Types** — topologies and views
-- **§6.2 Ordered Channels** — `ordered` flag and `cc_channel_send_task`
-- **§6.3 Semantics** — buffering and termination
-- **§6.4 Copy vs Transfer** — `send` vs `send_take`
-- **§6.5 Select** — multiplexing operations
-- **§6.6 Timeouts** — time-bounded operations
-- **§6.7 Channel API** — function signatures
+- **§7.1 Channel Types** — topologies and views
+- **§7.2 Ordered Channels** — `ordered` flag and `cc_channel_send_task`
+- **§7.3 Semantics** — buffering and termination
+- **§7.4 Copy vs Transfer** — `send` vs `send_take`
+- **§7.5 Select** — multiplexing operations
+- **§7.6 Timeouts** — time-bounded operations
+- **§7.7 Channel API** — function signatures
 
 ---
 
@@ -2479,7 +2255,7 @@ ptr->handle.free();
 
 **Rule:** Channel operations keep the same **surface signatures** in sync and async contexts: `send(v)`, `recv(&out)`, `send_take(v)`, `close()`, and `free()`. The suspension behavior is contextual; the internal runtime lowering may differ, but the user-facing model stays in terms of these receiver-first operations.
 
-### 6.1 Channel Types
+### 7.1 Channel Types
 
 Channels are categorized by **mode** (async vs sync) and **topology/direction**.
 
@@ -2643,7 +2419,7 @@ int[~10 1:N sync <] sync_sub = sync_events.subscribe();  // subscribe to sync
 
 ---
 
-### 6.2 Ordered Channels and Task Sending
+### 7.2 Ordered Channels and Task Sending
 
 Channels support an `ordered` flag for FIFO result delivery in task-parallel pipelines. Combined with `cc_channel_send_task`, this enables clean producer-consumer patterns.
 
@@ -2754,7 +2530,7 @@ Standard channel semantics apply:
 
 ---
 
-### 6.4 Semantics
+### 7.4 Semantics
 
 - **Buffered channels** enqueue up to `n` items; sends block when full.
 - **Unbuffered channels** rendezvous: sender blocks until receiver is ready.
@@ -3076,7 +2852,7 @@ Capacity `N` and topology `Topo` are erased at runtime (all use the same impleme
 
 ---
 
-### 6.7 Owned Channels (Resource Pools)
+### 7.7 Owned Channels (Resource Pools)
 
 Owned channels extend the channel primitive with **lifecycle management**, enabling the pool pattern where resources are borrowed and returned rather than transferred.
 
@@ -3085,7 +2861,7 @@ Owned channels extend the channel primitive with **lifecycle management**, enabl
 - **Plain channels** transfer ownership (sender → receiver, one-way flow)
 - **Owned channels** retain ownership (pool owns items, users borrow/return)
 
-#### 6.7.1 Syntax
+#### 7.7.1 Syntax
 
 ```c
 T[~N owned {
@@ -3116,7 +2892,7 @@ lifecycle_callback := '.' ('create' | 'destroy' | 'reset') '=' closure_expr
 closure_expr := '(' param_list? ')' '=>' ('[' capture_list ']')? expr
 ```
 
-#### 6.7.2 Semantics
+#### 7.7.2 Semantics
 
 **Borrow semantics:**
 
@@ -3146,7 +2922,7 @@ arena_pool.send(arena);   // Calls .reset before re-adding to pool
 
 **Rule (no direction modifier):** Owned channels are implicitly bidirectional (both send and recv). Direction modifiers (`>`, `<`) are not allowed with `owned`.
 
-#### 6.7.3 Lifetime and Ownership
+#### 7.7.3 Lifetime and Ownership
 
 **Rule (pool lifetime):** An owned channel's lifetime is the lexical scope in which it is declared. The pool must outlive all borrows.
 
@@ -3154,7 +2930,7 @@ arena_pool.send(arena);   // Calls .reset before re-adding to pool
 
 **Rule (capacity semantics):** Capacity `N` specifies the maximum number of items the pool can hold. The pool may contain fewer items if some are borrowed or if `.create` hasn't been called enough times.
 
-#### 6.7.4 Error Handling
+#### 7.7.4 Error Handling
 
 **Rule (create failure):** If `.create` returns a value indicating failure (e.g., null pointer, zero-initialized struct), the behavior is undefined. `.create` should allocate successfully or abort.
 
@@ -3164,7 +2940,7 @@ arena_pool.send(arena);   // Calls .reset before re-adding to pool
 - Items still in the pool are destroyed via `.destroy`
 - Borrowed items are not affected (borrower still holds them)
 
-#### 6.7.5 Example: Arena Pool
+#### 7.7.5 Example: Arena Pool
 
 ```c
 // Pool of 4 arenas, each 4KB
@@ -3189,7 +2965,7 @@ CCArena[~4 owned {
 // Pool destroyed here: .destroy called for each arena
 ```
 
-#### 6.7.6 Example: Connection Pool
+#### 7.7.6 Example: Connection Pool
 
 ```c
 typedef struct { int fd; bool valid; } Connection;
@@ -3211,7 +2987,7 @@ Response resp = recv_response(conn.fd);
 conn_pool.send(conn);  // Return to pool
 ```
 
-#### 6.7.7 Comparison: Plain vs Owned Channels
+#### 7.7.7 Comparison: Plain vs Owned Channels
 
 
 | Aspect    | Plain Channel                 | Owned Channel                      |
@@ -3228,7 +3004,7 @@ conn_pool.send(conn);  // Return to pool
 
 ---
 
-### 6.8 Bidirectional Error Propagation
+### 7.8 Bidirectional Error Propagation
 
 Channels support bidirectional error propagation for pipeline error handling.
 
@@ -3259,21 +3035,21 @@ return;  // Clean exit, no manual drain needed
 
 ---
 
-## 7. Concurrency
+## 8. Concurrency
 
 Concurrent-C provides a single, unified concurrency primitive: **nurseries**. A nursery is a structured concurrency construct that manages task spawning, automatic error propagation, and cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
 
 This section specifies:
 
-- **§7.1 Structured Concurrency with Nurseries** — the primary pattern for all concurrent work
-- **§7.2 Async Functions and Automatic Task Batching** — how `@async` enables non-blocking I/O and automatic blocking call wrapping
-- **§7.3 Tasks** — lazy async computations (Task.start is discouraged; use @nursery instead)
-- **§7.4 Channels in Async vs Sync** — context-sensitive channel operations
-- **§7.5 Cancellation** — cooperative task cancellation, automatically propagated in nurseries
-- **§7.6 Streaming** — channel-based producers with @for await
-- **§7.7 Runtime API** — function signatures for tasks, timing, and sync bridging
-- **§7.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
-- **§7.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §2.2 with async/nursery forms
+- **§8.1 Structured Concurrency with Nurseries** — the primary pattern for all concurrent work
+- **§8.2 Async Functions and Automatic Task Batching** — how `@async` enables non-blocking I/O and automatic blocking call wrapping
+- **§8.3 Tasks** — lazy async computations (Task.start is discouraged; use @nursery instead)
+- **§8.4 Channels in Async vs Sync** — context-sensitive channel operations
+- **§8.5 Cancellation** — cooperative task cancellation, automatically propagated in nurseries
+- **§8.6 Streaming** — channel-based producers with @for await
+- **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
+- **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
+- **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async/nursery forms
 
 ---
 
@@ -3315,330 +3091,131 @@ This section specifies:
 
 ---
 
-### 7.1 Structured Concurrency with Nurseries
+### 8.1 Structured Concurrency with `CCNursery`
 
-A **nursery** is a lexical structured-concurrency block that manages the lifetime, cancellation, and completion of spawned child tasks. Nurseries enforce a tree-shaped concurrency structure and provide compile-time guarantees against common deadlocks.
+A **nursery** is a scope-bound handle that manages the lifetime, cancellation, and completion of spawned child tasks. Nurseries enforce a tree-shaped concurrency structure: every task is a child of some nursery, and no task outlives its nursery.
+
+`CCNursery` is a library type (§9.4) constructed with `cc_nursery_new()` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
+
+```c
+CCNursery* n = cc_nursery_new(NULL) !> @destroy {
+    // runs after all children have joined
+};
+n->spawn(() => work1());
+n->spawn(() => work2());
+```
+
+The `@destroy` clause on the declaration schedules nursery teardown (which joins all children) at scope exit. Nothing in the lowered form runs implicitly — `@defer`-shaped lifetime (§5.1) is the normative mechanism.
 
 **Properties:**
 
-- Tasks spawned within a nursery are children of that nursery
-- The nursery waits for all children to complete before exiting
-- Child task handles cannot outlive the nursery (compile-time error if they escape)
-- If any child fails, all siblings are automatically cancelled
-- Peer tasks cannot wait on each other (compile-time error)
+- Tasks spawned on `n` are children of `n`.
+- The nursery's `@destroy` waits for all children to complete before returning.
+- Child task handles cannot outlive the nursery's scope (compile-time error if they escape).
+- If any child fails, all siblings are cancelled and the nursery's `@destroy` returns the first error via the enclosing error-handling context.
+- Peer tasks cannot wait on each other (compile-time error).
 
-**Syntax:**
+---
+
+#### 8.1.1 Construction
+
+`cc_nursery_new(CCNursery* parent)` returns `CCNursery*!>(CCError)`. Pass `NULL` for a top-level nursery; pass a parent nursery for nested structured concurrency.
 
 ```c
-@nursery {
-    spawn (work1());
-    spawn (work2());
-}  // implicitly joins all children
+@errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
+
+CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+CCNursery* inner = cc_nursery_new(outer) !> @destroy;
 ```
 
-**With automatic channel close:**
+The `!>` operator consumes the result: on success, the value is bound; on error, control transfers to the enclosing `@errhandler` (§3.1). The trailing `@destroy` is a `@defer`-shaped destructor (§5.1) that joins children on scope exit.
+
+---
+
+#### 8.1.2 Spawning
+
+Spawn a child task via UFCS on the nursery handle:
 
 ```c
-@closing(ch1, ch2) {
-    spawn (producer(ch1));
-    spawn (consumer(ch2));
-}  // closes ch1, ch2 after all children exit
+n->spawn(() => work());                 // lambda expression
+n->spawn(worker_fn);                     // function reference
+n->spawn(() => worker_with_arg(x));      // captured argument
+```
+
+The compiler enforces the following normative rules:
+
+- **Rule (task handle escape):** A task handle returned by `spawn` may not be stored in a variable that outlives the nursery, returned from the enclosing function, or captured in closures escaping the nursery.
+- **Rule (no peer joins):** A child task may not await or otherwise join another sibling's completion.
+- **Rule (no explicit join):** The nursery's `@destroy` is the only legitimate join point.
+
+---
+
+#### 8.1.3 Error Propagation and Cancellation
+
+If any child returns an error or panics:
+
+1. The nursery cancels all remaining children.
+2. The nursery's `@destroy` blocks until every child has terminated (including cancellation observation and cleanup).
+3. `@destroy` forwards the error through the error-handling context established at construction (either the enclosing `@errhandler` or an explicit `!>` consumer on the `@destroy` clause).
+
+Cancellation is cooperative. Children observe cancellation via `cc_is_cancelled()` or by using cancellation-aware operation variants (§8.5). Cancellation observation is defined in §4.2.2 and may be deferred by `with_shield` regions (§8.5.10).
+
+```c
+CCNursery* n = cc_nursery_new(NULL) !> @destroy;
+n->spawn(() => ok_task());
+n->spawn(() => failing_task());     // returns cc_err(E)
+// At scope exit: ok_task is cancelled, cleanup completes, error forwarded.
 ```
 
 ---
 
-#### 7.1.1 Nursery Semantics
+#### 8.1.4 Channel Close Ordering
 
-**Task Lifetime:**
-
-Every `spawn` inside a nursery creates a child task. The nursery implicitly waits for all children to complete before the block exits, even on early returns or errors.
+To close a channel after all child producers on the nursery have exited, register it with `close_on`:
 
 ```c
-@nursery {
-    spawn (long_running_task());
-    spawn (another_task());
-}  // blocks here until both tasks complete
+CCNursery* n = cc_nursery_new(NULL) !> @destroy;
+n->close_on(tx);                    // close tx when @destroy runs
+n->spawn(() => producer(tx));
+n->spawn(() => consumer(rx));
 ```
 
-**Error Propagation:**
-
-If any spawned task returns an error or panics:
-
-1. The nursery MUST cancel all remaining child tasks
-2. The nursery MUST NOT complete until all child tasks have terminated (including observing cancellation and exiting)
-3. The nursery block terminates with that error
-
-Cancellation is observed according to **§ 3.2.2** and may be deferred by `with_shield` regions (**§ 7.5.10**).
+`close_on` is the normative mechanism for deterministic channel close: the channel is closed **after** the nursery has joined all children. Use nested nurseries to sequence producer-close before consumer-drain:
 
 ```c
-@nursery {
-    spawn (ok_task());
-    spawn (failing_task());  // returns err(E)
-}
-// nursery cancels ok_task, waits for cleanup, returns err(E)
-```
+CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+outer->spawn(() => consumer(rx));
 
-**Cancellation:**
-
-Cancellation is cooperative. Child tasks observe cancellation via `cc_is_cancelled()` or by awaiting operations that check the cancellation flag.
-
-```c
-@async void long_task() {
-    while (!cc_is_cancelled()) {
-        await do_work();
-    }
-}
-
-@nursery {
-    spawn (long_task());
-}  // if another task fails, long_task observes cc_is_cancelled()
-```
-
-**Channel Close Ordering (Preferred Pattern):**
-
-Use `@closing(...)` to make producer ownership explicit so channels close when the producer scope exits:
-
-```c
-@nursery {
-    spawn(consumer(out));          // drains until close
-    @closing(out) spawn(producer(out));
-}
-```
-
-Group form is supported for multiple producer tasks:
-
-```c
-@nursery {
-    spawn(writer);
-    @closing(results_tx) {
-        for (int w = 0; w < N; w++) spawn(worker);
-    }
-}
-```
-
-Legacy equivalent (still supported):
-
-```c
-@nursery {
-    spawn(writer);
-    @closing(results_tx) {
-        for (int w = 0; w < N; w++) spawn(worker);
-        @closing(blocks_tx) {
-            spawn(reader);
-        }
-    }
-}
+CCNursery* inner = cc_nursery_new(outer) !> @destroy;
+inner->close_on(tx);
+for (int w = 0; w < N; w++) inner->spawn(() => worker(tx));
+// inner's @destroy closes tx; consumer observes EOF; outer's @destroy joins.
 ```
 
 ---
 
-#### 7.1.2 Compile-Time Restrictions (Normative)
-
-**Rule (task handle escape):** A task handle created by `spawn` inside a nursery may not be:
-
-- Returned from the nursery block
-- Stored in a variable that outlives the nursery
-- Captured by closures escaping the nursery
-
-Violation is a compile-time error.
-
-```c
-// ERROR: task handle escapes
-Task<void> t;
-@nursery {
-    t = spawn (work());  // ERROR: cannot store outside nursery
-}
-```
-
-**Rule (no peer waits):** A child task may not await another child's completion inside the nursery. Violation is a compile-time error.
-
-```c
-// ERROR: peer task cannot wait on sibling
-@nursery {
-    Task<void> t1 = spawn task1();
-    Task<void> t2 = spawn task2();
-    
-    await t1;  // ERROR: cannot await sibling in nursery
-}
-```
-
-**Rule (no explicit join):** Child tasks may not call `threadgroup_join()` or equivalent join primitives. The nursery provides the only join point.
-
----
-
-#### 7.1.3 Implicit Wrapping of Blocking Calls
-
-Every `@async` function has an implicit nursery available for automatic wrapping of blocking calls. When the compiler detects a **direct call to a non-`@async` function** inside `@async` code, it automatically wraps that call in `run_blocking`.
-
-This applies to:
-
-- Extern functions (`extern int read(...)`)
-- Concurrent-C functions without `@async` (`void helper(...)`)
-- **Sync channel operations** (`recv()`, `send()` on `T[~ ... sync ...]` handles)
-- **Synchronous mutex operations** (`Mutex<T>.lock_guard()`, `Mutex<T>.with_lock()` via `@lock` syntax)
-
-**Async channels do NOT get wrapped** — they suspend cooperatively and work naturally in `@async` code via `await`.
-
-```c
-extern int sys_read(int fd, void* buf, int n);  // non-@async
-
-@async void handler(int fd, int[~ <] async_rx, int[~ sync <] sync_rx) {
-    char buf[128];
-    sys_read(fd, buf, 128);        // Compiler auto-wraps: await __implicit_nursery.run_blocking(...)
-    
-    // Async channel: no wrapping needed, just await
-    int x = await recv(&async_rx);  // Suspends cooperatively, no run_blocking
-    
-    // Sync channel: gets auto-wrapped
-    int y = recv(&sync_rx);         // Compiler auto-wraps: await run_blocking(...)
-    
-    Mutex<int> m;
-    @lock (m) as val {             // lock_guard() auto-wrapped: await run_blocking(...)
-        val++;
-    }
-}
-```
-
-**Note:** This is why `@lock` and sync channels work in `@async` code even though they can block—they are automatically wrapped in `run_blocking`, which dispatches them to the thread pool. Keep critical sections short since the entire thread pool thread is blocked while the lock is held.
-
-**Rule (automatic batching):** Multiple consecutive direct calls to non-`@async` functions (with no intervening suspension points) are automatically batched into a single thread pool dispatch for efficiency.
-
-```c
-@async void db_transaction(Db* db) {
-    db_begin(db);           // batched together
-    db_query(db, "SELECT");
-    db_update(db, "UPDATE");
-    db_commit(db);
-    // Compiler batches all four into one dispatch
-}
-```
-
-**Rule (suspension breaks batch):** A suspension point breaks the batch. Suspension points include `await`, `@match`, and `@async` function calls. Importantly, async channel operations (`await recv()` on async channels) are suspension points and break the batch.
-
-**Rule (control flow does not break batching):** Conditional branches, loops, and other control flow structures are transparent to batching. Only explicit suspension points break a batch.
-
----
-
-#### 7.1.4 Explicit Nursery with `spawn`
-
-For fine-grained control over spawning and cancellation, use explicit `@nursery` blocks:
-
-```c
-@async void coordinated_work() {
-    @nursery {
-        spawn worker1();
-        spawn worker2();
-        spawn worker3();
-    }
-    // All three workers have completed and been joined here
-}
-```
-
-**When to use explicit `@nursery`:**
-
-- When you need to spawn multiple async children
-- When you need error propagation and automatic cancellation
-- When you want to pair with `closing(...)` for channel cleanup
-
-**When auto-wrapping is sufficient:**
-
-- Simple blocking calls in linear async code
-- No explicit task spawning needed
-
----
-
-#### 7.1.5 Desugaring (Normative)
-
-A nursery:
-
-```c
-@nursery {
-    spawn (f());
-    spawn (g());
-}
-```
-
-desugars to (approximately):
-
-```c
-{
-    ThreadGroup __tg;
-    threadgroup_init(&__tg);
-    
-    threadgroup_spawn(&__tg, f);
-    threadgroup_spawn(&__tg, g);
-    
-    threadgroup_join(&__tg);
-}
-```
-
-with compile-time restrictions enforced by the CC compiler (task handle escape checks, peer-join prevention).
-
-The `closing(...)` clause:
-
-```c
-@closing(ch) {
-    spawn (producer(ch));
-}
-```
-
-desugars to:
-
-```c
-{
-    ThreadGroup __tg;
-    threadgroup_init(&__tg);
-    
-    threadgroup_spawn(&__tg, () => producer(ch));
-    threadgroup_join(&__tg);
-    
-    ch.close();  // closes AFTER join
-}
-```
-
----
-
-#### 7.1.6 Nursery Guarantees
+#### 8.1.5 Guarantees
 
 A nursery guarantees:
 
-- ✅ All spawned tasks are joined
-- ✅ No task outlives its lexical scope
-- ✅ No forgotten join deadlocks (impossible syntactically)
-- ✅ No cyclic peer waits (impossible syntactically)
-- ✅ Deterministic error fan-out to all siblings (automatic)
-- ✅ Deterministic cancellation propagation (automatic on error)
-- ✅ Cancelled tasks will exit promptly (when they reach a cancellation-aware operation)
-- ✅ Deterministic close ordering (when paired with `closing(...)`)
+- All spawned children are joined before the nursery's `@destroy` returns.
+- No child outlives its nursery's scope.
+- No forgotten-join deadlocks (impossible syntactically).
+- No cyclic peer waits (impossible syntactically).
+- Deterministic error fan-out to siblings.
+- Deterministic cancellation propagation on error.
+- Deterministic channel close ordering (with `close_on`).
 
 A nursery does **not** guarantee:
 
-- ❌ Deadlock freedom for arbitrary channel cycles (outside nursery scope)
-- ❌ Fairness or starvation freedom
-- ❌ Immediate cancellation of blocking operations (cooperative; use @match or variants)
-- ❌ Stack unwinding on cancellation (no destructors)
-
-**Recommendation for cancellable tasks:** Use `@match` with cancellation-aware operations. Avoid plain `await` for operations that might block indefinitely on a cancelled task. See §7.5 Cancellation for examples.
+- Deadlock freedom for channel cycles across sibling nurseries.
+- Fairness or starvation freedom.
+- Immediate cancellation of blocking operations (cooperative; see §8.5).
+- Stack unwinding on cancellation.
 
 ---
 
-#### 7.1.7 Implicit Nursery Lifetime
-
-The implicit nursery in an `@async` function is created at function entry and joined at function exit (including early returns and error propagation).
-
-```c
-@async int!>(Error) work() {
-    int n = read(0, buf, 128);  // auto-wrapped in implicit nursery
-
-    if (n < 0) return cc_err(Error.Fail);  // implicit nursery joined here
-
-    return cc_ok(n);  // implicit nursery joined here
-}
-```
-
----
-
-### 7.2 Async Functions and Automatic Task Batching
+### 8.2 Async Functions and Automatic Task Batching
 
 Every `@async` function has the compiler automatically wrap calls to non-`@async` functions in `run_blocking`, dispatching them to the thread pool. This is called **automatic task batching** and allows async code to look synchronous while maintaining non-blocking semantics.
 
@@ -3721,7 +3298,7 @@ extern @noblock void memcpy(void* dst, void* src, size_t n);
 
 ---
 
-### 7.3 Tasks
+### 8.3 Tasks
 
 **Positioning:** Use `Task<T>` for single async computations that produce one result; use nurseries + channels for coordinated, multi-task work with backpressure.
 
@@ -3770,7 +3347,7 @@ log_event(evt).start();  // fire and forget
 
 ---
 
-### 7.4 Channels: Async vs Sync (Type-Based)
+### 8.4 Channels: Async vs Sync (Type-Based)
 
 Channels are **explicitly typed as async or sync** at declaration. The type determines whether operations suspend (`@async` channel) or block (sync channel). This eliminates context-dependent behavior and ensures compiler safety.
 
@@ -3778,7 +3355,7 @@ Channels also support **backpressure modes** to handle overload gracefully in se
 
 ---
 
-#### 7.4.0 Backpressure Modes
+#### 8.4.0 Backpressure Modes
 
 When a bounded channel is full, different workloads need different strategies. Backpressure mode is specified at channel declaration.
 
@@ -3828,7 +3405,7 @@ In brief:
 
 ---
 
-#### 7.4.1 Channel Types
+#### 8.4.1 Channel Types
 
 **Async channels** (most common):
 
@@ -3854,7 +3431,7 @@ cc_channel_free(ch);
 
 ---
 
-#### 7.4.2 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
+#### 8.4.2 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
 
 Async channels **suspend cooperatively** and require `await`. They are used in `@async` functions and with `@nursery`.
 
@@ -3899,7 +3476,7 @@ Async channels work with `@match` and have implicit cancellation cases.
 
 ---
 
-#### 7.4.3 Sync Channels (`int[~ ... sync ... >]` and `int[~ ... sync ... <]`)
+#### 8.4.3 Sync Channels (`int[~ ... sync ... >]` and `int[~ ... sync ... <]`)
 
 Sync channels **block the OS thread** and do NOT use `await`. They are used for thread coordination and blocking operations.
 
@@ -3950,7 +3527,7 @@ Sync channels do not work with `@match`.
 
 ---
 
-#### 7.4.4 Type Signatures Document Intent
+#### 8.4.4 Type Signatures Document Intent
 
 Function signatures make clear what context is required:
 
@@ -3976,7 +3553,7 @@ void sync_worker(int[~ sync <] requests) {
 
 ---
 
-#### 7.4.5 Refactoring Safety
+#### 8.4.5 Refactoring Safety
 
 When refactoring a sync function to async, the compiler enforces correctness:
 
@@ -4004,7 +3581,7 @@ The compiler forces you to fix the channel type when refactoring. No silent beha
 
 ---
 
-#### 7.4.6 Error Handling
+#### 8.4.6 Error Handling
 
 **Async channels:**
 
@@ -4041,7 +3618,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 
 ---
 
-#### 7.4.7 Comparison Table
+#### 8.4.7 Comparison Table
 
 
 | Aspect                   | Async handles (`int[~ ... >]` / `int[~ ... <]`) | Sync handles (`int[~ ... sync ... >]` / `int[~ ... sync ... <]`) |
@@ -4057,7 +3634,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 
 ---
 
-#### 7.4.8 Real-World Patterns
+#### 8.4.8 Real-World Patterns
 
 **Pattern 1: Producer-Consumer (Async)**
 
@@ -4155,7 +3732,7 @@ No manual polling or timeouts in reader. Cancellation handles it.
 
 ---
 
-#### 7.4.9 Split Handle Model
+#### 8.4.9 Split Handle Model
 
 Each channel value has one clear capability:
 
@@ -4177,7 +3754,7 @@ The language model does not include a combined send/recv channel handle. A progr
 
 ---
 
-### 7.5 Cancellation & Deadline
+### 8.5 Cancellation & Deadline
 
 Cancellation is **cooperative but effective**. Tasks respond to cancellation by one of two mechanisms:
 
@@ -4188,7 +3765,7 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 
 ---
 
-#### 7.5.1 Implicit Cancellation Case in `@match`
+#### 8.5.1 Implicit Cancellation Case in `@match`
 
 **Rule (@match requires async channels):** `@match` works **only with async channel handles** (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`). Sync handles (`T[~ ... sync ... >/<]`) do not support `@match`. If you need to multiplex sync channels, use low-level primitives outside of `@match` (rare).
 
@@ -4271,11 +3848,11 @@ Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get impl
 
 ---
 
-#### 7.5.2 Cancellation-Aware Operation Variants
+#### 8.5.2 Cancellation-Aware Operation Variants
 
 For operations **outside `@match`** (single await, channel recv/send, sleep), use explicit cancellation-aware variants.
 
-**Guidance:** Inside an active `with_deadline(...)` scope, suspension points are already cancellation-aware per **§ 3.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
+**Guidance:** Inside an active `with_deadline(...)` scope, suspension points are already cancellation-aware per **§4.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
 
 ```c
 // Channels
@@ -4321,7 +3898,7 @@ Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duratio
 
 ---
 
-#### 7.5.3 Polling-Based Fallback
+#### 8.5.3 Polling-Based Fallback
 
 For cases where neither implicit `@match` nor variants apply, use the polling-based API:
 
@@ -4339,7 +3916,7 @@ This is still supported but should be rare—most code uses `@match` or variants
 
 ---
 
-#### 7.5.4 Cancellation Semantics
+#### 8.5.4 Cancellation Semantics
 
 **Rule:** Cancellation is **fully cooperative**. No task is forcibly interrupted.
 
@@ -4349,15 +3926,15 @@ This is still supported but should be rare—most code uses `@match` or variants
   - `recv_cancellable()` / `send_cancellable()` (immediate)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
-- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§ 3.2.2** (and may be deferred by `with_shield`, **§ 7.5.10**).
+- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `with_shield`, **§8.5.10**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
-**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `with_deadline(...)` scope, where suspension points are cancellation-aware per **§ 3.2.2**).
+**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
 
 ---
 
-#### 7.5.5 Real-World Pattern: Timeout Enforcer
+#### 8.5.5 Real-World Pattern: Timeout Enforcer
 
 ```c
 enum WorkerError {
@@ -4413,7 +3990,7 @@ enum WorkerError {
 
 ---
 
-#### 7.5.6 Guarantees and Limitations
+#### 8.5.6 Guarantees and Limitations
 
 **What cancellation guarantees:**
 
@@ -4433,7 +4010,7 @@ enum WorkerError {
 
 ---
 
-#### 7.5.7 Error Type Design
+#### 8.5.7 Error Type Design
 
 **Recommendation:** When designing tasks for a nursery, include `Cancelled` in the error type:
 
@@ -4464,7 +4041,7 @@ enum TaskError {
 
 ---
 
-#### 7.5.8 Comparison: Implicit vs Explicit
+#### 8.5.8 Comparison: Implicit vs Explicit
 
 
 | Scenario                        | Use                             |
@@ -4478,7 +4055,7 @@ enum TaskError {
 
 ---
 
-### 7.5.9 Deadline Primitive (Timeout Abstraction)
+### 8.5.9 Deadline Primitive (Timeout Abstraction)
 
 For request handling and other time-bounded operations, a simple `Deadline` type makes timeout patterns idiomatic and consistent.
 
@@ -4537,7 +4114,7 @@ Duration deadline_remaining(Deadline d);
 
 - A `with_deadline(d)` scope establishes a deadline that applies to all **descendant tasks created within the scope**.
 - If the deadline expires, cancellation is requested for all tasks within the scope (and descendants).
-- Cancellation is observed according to **§ 3.2.2** (and may be deferred by shielded regions; see **§ 7.5.10**).
+- Cancellation is observed according to **§4.2.2** (and may be deferred by shielded regions; see **§8.5.10**).
 
 **Design Notes:**
 
@@ -4548,7 +4125,7 @@ Duration deadline_remaining(Deadline d);
 
 ---
 
-### 7.5.10 Shielded Regions (`with_shield`)
+### 8.5.10 Shielded Regions (`with_shield`)
 
 A **shielded region** temporarily suppresses observation of cancellation originating from enclosing deadline scopes for the duration of the region.
 
@@ -4567,7 +4144,7 @@ with_shield {
 
 **Exit rule:**
 
-- Upon exiting a `with_shield` region, if cancellation has been requested, the next suspension point MUST observe it immediately (per **§ 3.2.2**).
+- Upon exiting a `with_shield` region, if cancellation has been requested, the next suspension point MUST observe it immediately (per **§4.2.2**).
 
 **Constraints:**
 
@@ -4577,9 +4154,9 @@ with_shield {
 
 ---
 
-### 7.5.11 Cancel-Safe API Surface (Recommended Contracts)
+### 8.5.11 Cancel-Safe API Surface (Recommended Contracts)
 
-This subsection defines minimal vocabulary for documenting async APIs in the presence of cancellation at suspension points (**§ 3.2.2**).
+This subsection defines minimal vocabulary for documenting async APIs in the presence of cancellation at suspension points (**§4.2.2**).
 
 **Cancellation-safe operation (contract):**
 
@@ -4611,7 +4188,7 @@ If an API is `@cancel_unsafe`, its documentation MUST specify:
 
 Tooling SHOULD warn/error when a `@cancel_unsafe` operation is awaited inside an active `with_deadline(...)` scope unless it is awaited within a `with_shield { ... }` region (or the API’s documented recovery action is performed on cancellation).
 
-### 7.6 Streaming
+### 8.6 Streaming
 
 Streaming uses explicit channel parameters:
 
@@ -4659,7 +4236,7 @@ Streaming uses explicit channel parameters:
 
 ---
 
-### 7.7 Runtime API
+### 8.7 Runtime API
 
 ```c
 // Internal Scope (created implicitly in @async functions for batching/wrapping)
@@ -4744,7 +4321,7 @@ void sync_boundary() {
 
 ---
 
-### 7.7.1 Deadlock Prevention: `@nonblocking` and `cc_concurrent`
+### 8.7.1 Deadlock Prevention: `@nonblocking` and `cc_concurrent`
 
 **Problem:** `block_on` creates a single-task execution context. If that task performs a channel operation that blocks waiting for a peer (send on full buffer, recv on empty buffer), the program deadlocks because no other task can run to unblock it.
 
@@ -4998,7 +4575,7 @@ int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
 
 ---
 
-### 7.7.2 Blocking Thread Pool
+### 8.7.2 Blocking Thread Pool
 
 Certain operations may stall indefinitely (I/O, locks, OS calls). These run on a bounded thread pool to avoid blocking the async scheduler.
 
@@ -5082,7 +4659,7 @@ enum IoError {
 
 ---
 
-### 7.7.3 Standard Error Types
+### 8.7.3 Standard Error Types
 
 The runtime and stdlib define standard error types used across the standard library:
 
@@ -5110,15 +4687,15 @@ enum BoundsError {
 };
 ```
 
-These enums are used in stdlib operations like `File.read()`, `char[:].parse_i64()`, and `Vec<T>.set()`. Applications may compose multiple error types using wrapper enums (see §7.9).
+These enums are used in stdlib operations like `File.read()`, `char[:].parse_i64()`, and `Vec<T>.set()`. Applications may compose multiple error types using wrapper enums (see §8.9).
 
 ---
 
-### 7.8 Execution Model (Normative)
+### 8.8 Execution Model (Normative)
 
 This section defines how Concurrent-C classifies potentially blocking operations and how they interact with `@async` execution.
 
-#### 7.8.1 Definitions
+#### 8.8.1 Definitions
 
 **Blocking:** An operation is blocking if it may suspend the calling thread for a non-zero duration.
 
@@ -5135,7 +4712,7 @@ This section defines how Concurrent-C classifies potentially blocking operations
 - does not wait on synchronization primitives
 - and does not block except for bounded CPU execution
 
-#### 7.8.2 Default Classification Rule
+#### 8.8.2 Default Classification Rule
 
 All non-`@async` functions are conservatively treated as potentially blocking.
 
@@ -5147,7 +4724,7 @@ This includes:
 
 **Rule:** This classification applies transitively — if a function calls a potentially blocking function, it is itself potentially blocking.
 
-#### 7.8.3 @async Execution Rule
+#### 8.8.3 @async Execution Rule
 
 Calling a non-`@async` function from within an `@async` function must not block the async scheduler.
 
@@ -5242,7 +4819,7 @@ void process_logs(int count);           // Must be awaited or marked @noblock
 
 **Rationale:** Prevents accidental blocking calls that violate the latency guarantee.
 
-#### 7.8.4 Blocking Executor Constraints
+#### 8.8.4 Blocking Executor Constraints
 
 Blocking work is executed on a bounded blocking executor.
 
@@ -5258,7 +4835,7 @@ Blocking work is executed on a bounded blocking executor.
 - Work already queued or in-flight continues to completion.
 - The queue is FIFO; starvation is possible under sustained saturation.
 
-#### 7.8.5 Stall Awareness
+#### 8.8.5 Stall Awareness
 
 Operations that may stall indefinitely must be explicitly classified as such.
 
@@ -5274,7 +4851,7 @@ Operations that may stall indefinitely must be explicitly classified as such.
 - May fail with `IoError::Busy` if capacity is exhausted
 - Have no guarantee of cancellation or bounded latency
 
-#### 7.8.6 @noblock Contract
+#### 8.8.6 @noblock Contract
 
 A function annotated `@noblock` asserts that it will never block or stall.
 
@@ -5291,7 +4868,7 @@ A function annotated `@noblock` asserts that it will never block or stall.
 
 This annotation exists to allow high-confidence opt-out from conservative blocking assumptions.
 
-#### 7.8.7 Standard Library Guarantees
+#### 8.8.7 Standard Library Guarantees
 
 **Pure Operations (non-blocking, never stall):**
 
@@ -5312,7 +4889,7 @@ This annotation exists to allow high-confidence opt-out from conservative blocki
 - May fail with `IoError::Busy`
 - Subject to executor saturation rules
 
-#### 7.8.8 Cancellation and Progress
+#### 8.8.8 Cancellation and Progress
 
 Blocking and stalling operations provide no cancellation or progress guarantees.
 
@@ -5325,11 +4902,11 @@ Blocking and stalling operations provide no cancellation or progress guarantees.
   - continue running on the blocking executor thread even after the task is cancelled
 - Programs requiring strict latency bounds must avoid stalling operations in critical paths and may need explicit timeouts (e.g., `with_timeout_cancellable`)
 
-#### 7.8.9 Interaction with Nurseries (Non-Normative)
+#### 8.8.9 Interaction with Nurseries (Non-Normative)
 
-When a spawned task stalls on I/O, the nursery continues scheduling other work. The nursery scope does not complete until all spawned tasks complete (including any offloaded blocking work). Nursery cancellation requests are propagated to in-flight work but provide no hard latency guarantees (§ 7.8.8).
+When a spawned task stalls on I/O, the nursery continues scheduling other work. The nursery scope does not complete until all spawned tasks complete (including any offloaded blocking work). Nursery cancellation requests are propagated to in-flight work but provide no hard latency guarantees (§8.8.8).
 
-#### 7.8.10 Design Intent (Non-Normative)
+#### 8.8.10 Design Intent (Non-Normative)
 
 The blocking model is intentionally conservative:
 
@@ -5355,11 +4932,11 @@ The blocking model is intentionally conservative:
 
 ---
 
-### 7.9 Error handling in async and nurseries
+### 8.9 Error handling in async and nurseries
 
-Errors in Concurrent-C are **value-based**, not exceptions. `T!>(E)` is the return type for functions that can fail; unwrap and handling syntax is defined normatively in §2.2 (`?>`, `!>`, `@err(e);`, `@errhandler`). `@defer` always runs; there is no unwinding.
+Errors in Concurrent-C are **value-based**, not exceptions. `T!>(E)` is the return type for functions that can fail; unwrap and handling syntax is defined normatively in §3.1 (`?>`, `!>`, `@err(e);`, `@errhandler`). `@defer` always runs; there is no unwinding.
 
-Error handling in `@async` functions and `@nursery` blocks uses the operators defined in **§2.2** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or `nursery`-specific error construct exists; everything composes through the same surface.
+Error handling in `@async` functions and `@nursery` blocks uses the operators defined in **§3.1** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or `nursery`-specific error construct exists; everything composes through the same surface.
 
 **Async call with default.**
 
@@ -5399,11 +4976,11 @@ int!>(AppError) pipeline(char[:] path) {
 }
 ```
 
-The `?>(e) return cc_err(e);` idiom is the new propagation equivalent of the retired `try` keyword. For bail-out without a value (statement context), use `!>` with an `@errhandler` or a local `!> (e) BODY`. See §2.2 for the full grammar and semantics.
+The `?>(e) return cc_err(e);` idiom is the new propagation equivalent of the retired `try` keyword. For bail-out without a value (statement context), use `!>` with an `@errhandler` or a local `!> (e) BODY`. See §3.1 for the full grammar and semantics.
 
 ---
 
-## 8. Standard Library (UFCS-First Design)
+## 9. Standard Library (UFCS-First Design)
 
 This section defines the core standard library using **UFCS-first design**: method syntax is primary and UFCS lowering is type-directed and library-owned.
 
@@ -5461,7 +5038,7 @@ Vec<int> result = vec_map(vec_filter(input, is_even), double);
 
 ---
 
-### 8.0 UFCS Registration and Custom Lowering
+### 9.0 UFCS Registration and Custom Lowering
 
 UFCS is a type-owned extensible language feature. Libraries declare custom lowering rules at compile time by registering hooks for a concrete type or type family.
 
@@ -5567,7 +5144,7 @@ This same contract applies to standard-library families such as channels, files,
 
 ---
 
-### 8.1 Strings
+### 9.1 Strings
 
 **Type:** `String` — Arena-backed growable string (Vec)
 
@@ -5580,7 +5157,7 @@ This same contract applies to standard-library families such as channels, files,
 
 `String.as_slice()` is the canonical sentinel string view: it returns `char[:0]`, not plain `char[:]`.
 
-#### 8.1.1 Core API
+#### 9.1.1 Core API
 
 ```c
 // Direct library-call constructors and C ABI
@@ -5640,7 +5217,7 @@ String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
 String row = @string(row_policy, `name=${name}; age=$~meta{age}`, &arena);
 ```
 
-#### 8.1.6 Formatting (Global)
+#### 9.1.6 Formatting (Global)
 
 ```c
 // Build formatted strings (use with Arena)
@@ -5653,11 +5230,11 @@ str msg = format(&arena, "Hello {}! Score: {}", name, score);
 
 ---
 
-### 8.2 Slices with UFCS
+### 9.2 Slices with UFCS
 
 **Type:** `T[:]` — Mutable view into contiguous data
 
-#### 8.2.1 Core Methods
+#### 9.2.1 Core Methods
 
 ```c
 // Normative
@@ -5673,7 +5250,7 @@ T[:]    s.slice(int start, int end);
 T*      s.ptr();
 ```
 
-#### 8.2.2 Query Methods
+#### 9.2.2 Query Methods
 
 ```c
 // Normative
@@ -5687,7 +5264,7 @@ bool s.contains(T value);
 int  s.find(T value);
 ```
 
-#### 8.2.3 Mutation Methods
+#### 9.2.3 Mutation Methods
 
 ```c
 // Normative (mutate in place)
@@ -5712,7 +5289,7 @@ nums.reverse();
 if (nums.contains(42)) { ... }
 ```
 
-#### 8.2.4 Iteration
+#### 9.2.4 Iteration
 
 ```c
 // Standard range-for (already in Surface Syntax)
@@ -5726,7 +5303,7 @@ for (int i = 0; i < slice.len(); i++) {
 
 ---
 
-### 8.3 Arrays
+### 9.3 Arrays
 
 Arrays in CC are still `T[N]` (fixed-size, stack or struct-embedded). UFCS methods work on arrays too (they decay to slices):
 
@@ -5744,22 +5321,22 @@ int[:] view = arr[..];
 
 ---
 
-### 8.4 Numeric Types with Methods
+### 9.4 Numeric Types with Methods
 
 Primitive numeric types get UFCS methods for common operations:
 
 ---
 
-## 9. FFI and Unsafe Operations
+## 10. FFI and Unsafe Operations
 
 Because CC is a C preprocessor, **native C interop is first-class**. The entire C standard library and existing C code is immediately accessible. This section defines escape hatches for when CC's safety checks must be bypassed:
 
-- **§9.1 `unsafe {}`** — bypassing compile-time checks (slice provenance, sendability)
-- **§9.2 `adopt`** — adopting FFI allocations as CC slices
+- **§10.1 `unsafe {}`** — bypassing compile-time checks (slice provenance, sendability)
+- **§10.2 `adopt`** — adopting FFI allocations as CC slices
 
 ---
 
-### 9.1 `unsafe {}`
+### 10.1 `unsafe {}`
 
 `unsafe {}` bypasses compile-time checks for:
 
@@ -5780,7 +5357,7 @@ unsafe {
 
 ---
 
-### 9.2 Adopting FFI Allocations
+### 10.2 Adopting FFI Allocations
 
 C APIs that return owned buffers can be adopted as unique slices:
 
@@ -5820,7 +5397,7 @@ unsafe {
 
 ---
 
-## 10. Surface Syntax Notes
+## 11. Surface Syntax Notes
 
 This section documents syntactic sugar and conventions:
 
@@ -5917,7 +5494,7 @@ while (true) {
 
 - `next(&out)` returning `ok(false)` indicates end-of-stream (EOF, closed+drained).
 - Errors propagate normally via the `bool !>(E)` result.
-- Suspension points inside async iteration are subject to **§ 3.2.2** and **§ 7.5.10**.
+- Suspension points inside async iteration are subject to **§4.2.2** and **§8.5.10**.
 
 `**@for await` on pointers:**
 
@@ -6070,7 +5647,7 @@ if (e == IoError.FileNotFound) { ... }
 if (e is IoError.Other(code)) { use(code); }
 ```
 
-**Generics:** See §11 for comprehensive generics documentation.
+**Generics:** See §12 for comprehensive generics documentation.
 
 **Built-in generic types:**
 
@@ -6096,7 +5673,7 @@ if (e is IoError.Other(code)) { use(code); }
 
 ---
 
-## 11. Generics
+## 12. Generics
 
 Concurrent-C uses **compile-time monomorphization** for generic families.
 
@@ -6104,7 +5681,7 @@ Concurrent-C uses **compile-time monomorphization** for generic families.
 
 - **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
 - **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
-- **Retired:** `T?` (optional types) have been retired from the normative spec surface (see §2.1 migration appendix). Use `T`* (with `NULL` for absence), `T !>(E)` (for fallible operations), `bool op(T* out)` (for iterators / pop / recv), or an in-band sentinel (empty slice, `-1`) instead.
+- **Retired:** `T?` (optional types) have been retired from the normative spec surface. Use `T`* (with `NULL` for absence), `T !>(E)` (for fallible operations), `bool op(T* out)` (for iterators / pop / recv), or an in-band sentinel (empty slice, `-1`) instead.
 
 This section therefore mixes:
 
@@ -6113,16 +5690,16 @@ This section therefore mixes:
 
 No trait system is part of v1.0.
 
-- **§11.1 Syntax** — type parameters and value parameters
-- **§11.2 Instantiation & monomorphization** — when code is generated
-- **§11.3 Type inference** — how parameters are inferred
-- **§11.4 Specialization** — `@comptime if` on types/values
-- **§11.5 Semantics with ownership** — copy vs move through generics
-- **§11.6 Restrictions (v1.0)** — what is intentionally missing
+- **§12.1 Syntax** — type parameters and value parameters
+- **§12.2 Instantiation & monomorphization** — when code is generated
+- **§12.3 Type inference** — how parameters are inferred
+- **§12.4 Specialization** — `@comptime if` on types/values
+- **§12.5 Semantics with ownership** — copy vs move through generics
+- **§12.6 Restrictions (v1.0)** — what is intentionally missing
 
 ---
 
-### 11.1 Syntax
+### 12.1 Syntax
 
 Concurrent-C uses `::[T]` syntax for generic parameters, using `::` as a specialization operator and `[]` for the parameter list. This avoids all parsing ambiguity with comparison operators (`<`, `>`) and channel direction markers (`T[~N >]`), and eliminates the `>>` nesting problem.
 
@@ -6174,13 +5751,13 @@ Built-in generic families such as `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and chan
 
 - array lengths `T[N]`
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
-- other constant-expression contexts (see §13)
+- other constant-expression contexts (see §14)
 
 **Deprecation note (`<>` syntax and legacy vec spellings):** Built-in families currently accept legacy `<T>` spellings during a transition period. For vectors, legacy `Vec::[T]`, `Vec<T>`, and `vec_new<T>(...)` are accepted as aliases of `CCVec::[T]` / `cc_vec_new::[T](...)`. New code should use `::[...]` syntax, with `CCVec::[T]` as the canonical vector family spelling. User-defined generic functions and types use `::[T]` exclusively.
 
 ---
 
-### 11.2 Instantiation & Monomorphization (Normative)
+### 12.2 Instantiation & Monomorphization (Normative)
 
 Generic instantiation uses compile-time monomorphization.
 
@@ -6208,7 +5785,7 @@ Generic instantiation uses compile-time monomorphization.
 
 ---
 
-### 11.3 Type Inference
+### 12.3 Type Inference
 
 **Rule (inference from arguments):** Type parameters may be inferred from call-site arguments.
 
@@ -6236,9 +5813,9 @@ push(&v, 3);   // infers T=int, N=8
 
 ---
 
-### 11.4 Specialization (Zig-style)
+### 12.4 Specialization (Zig-style)
 
-Generic code can branch on type/value parameters using `@comptime if` (defined in §13).
+Generic code can branch on type/value parameters using `@comptime if` (defined in §14).
 
 ```c
 void copy::[T](T[:] dst, T[:] src) {
@@ -6254,7 +5831,7 @@ void copy::[T](T[:] dst, T[:] src) {
 
 ---
 
-### 11.5 Ownership and Moves in Generic Code
+### 12.5 Ownership and Moves in Generic Code
 
 Generic code obeys the same copy/move rules as non-generic code.
 
@@ -6274,7 +5851,7 @@ take(u);                       // moves u into take(), OK
 
 ---
 
-### 11.6 Restrictions (v1.0)
+### 12.6 Restrictions (v1.0)
 
 Intentionally omitted in v1.0:
 
@@ -6286,11 +5863,11 @@ Intentionally omitted in v1.0:
 
 **Rule:** Built-in generic families (`Task::[T]`, `Mutex::[T]`, `Map::[K,V]`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
 
-**Retired:** `T?` (optional types) are retired from the normative spec surface as of this revision. Use `T*` (NULL for absence), `T !>(E)` (result types), or `bool op(T* out)` / in-band sentinels (empty slice, `-1`) instead. Legacy `T?` parsing may still lower during phase-1 migration; see §2.1 migration appendix.
+**Retired:** `T?` (optional types) are retired from the normative spec surface as of this revision. Use `T*` (NULL for absence), `T !>(E)` (result types), or `bool op(T* out)` / in-band sentinels (empty slice, `-1`) instead. Legacy `T?` parsing may still lower during phase-1 migration.
 
 ---
 
-## 12. Collections
+## 13. Collections
 
 Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
@@ -6319,22 +5896,22 @@ m.remove(key);
 
 ---
 
-## 13. Compile-Time Evaluation (`comptime`)
+## 14. Compile-Time Evaluation (`comptime`)
 
 This section defines compile-time computation as a restricted evaluation mode used for constants, specialization, and generic metaprogramming.
 
-- **§13.1 Constant expressions** — what counts as compile-time
-- **§13.2 `comptime` declarations** — compile-time storage
-- **§13.3 `comptime` parameters** — compile-time arguments
-- **§13.4 `@comptime if`** — compile-time branching
-- **§13.5 `comptime {}` blocks** — compile-time execution for initialization
-- **§13.6 Built-ins** — minimal type/ABI queries
-- **§13.7 Static assertions** — compile-time invariants
-- **§13.8 Restrictions** — what comptime cannot do
+- **§14.1 Constant expressions** — what counts as compile-time
+- **§14.2 `comptime` declarations** — compile-time storage
+- **§14.3 `comptime` parameters** — compile-time arguments
+- **§14.4 `@comptime if`** — compile-time branching
+- **§14.5 `comptime {}` blocks** — compile-time execution for initialization
+- **§14.6 Built-ins** — minimal type/ABI queries
+- **§14.7 Static assertions** — compile-time invariants
+- **§14.8 Restrictions** — what comptime cannot do
 
 ---
 
-### 13.1 Constant Expressions (Normative)
+### 14.1 Constant Expressions (Normative)
 
 A **constant expression** is an expression evaluable during compilation.
 
@@ -6345,14 +5922,14 @@ Constant expressions may use:
 - Arithmetic/bitwise/boolean operations
 - Casts between integer types (if no overflow beyond target width)
 - References to other `comptime` values
-- Calls to `comptime` functions (see §13.2), if all arguments are constant expressions
+- Calls to `comptime` functions (see §14.2), if all arguments are constant expressions
 - Enum values
 
 **Rule:** A constant expression must not depend on runtime state (globals with runtime initialization, function calls without `comptime`, I/O, allocation, atomics, mutexes, channels, tasks).
 
 ---
 
-### 13.2 `comptime` Declarations
+### 14.2 `comptime` Declarations
 
 `comptime` on a variable requires compile-time evaluation and gives it static storage duration.
 
@@ -6393,7 +5970,7 @@ comptime int mask(comptime int bits) {
 
 ---
 
-### 13.3 `comptime` Parameters
+### 14.3 `comptime` Parameters
 
 Functions may take compile-time parameters explicitly:
 
@@ -6422,7 +5999,7 @@ int sum_n(comptime int N, int[N] xs) {
 
 ---
 
-### 13.4 `@comptime if`
+### 14.4 `@comptime if`
 
 `@comptime if (COND) { ... } else { ... }` chooses a branch at compile time.
 
@@ -6452,7 +6029,7 @@ void serialize::[T](T value, char[~]* out) {
 
 ---
 
-### 13.5 `comptime {}` Blocks
+### 14.5 `comptime {}` Blocks
 
 A `comptime { ... }` block runs during compilation and may be used to initialize `comptime` variables and static data.
 
@@ -6488,7 +6065,7 @@ comptime {
 
 ---
 
-### 13.6 Built-in `comptime` Queries
+### 14.6 Built-in `comptime` Queries
 
 The following are available in constant expressions:
 
@@ -6511,7 +6088,7 @@ comptime bool is_copyable(type T);
 
 ---
 
-### 13.7 Static Assertions
+### 14.7 Static Assertions
 
 `comptime_assert` checks conditions at compile time:
 
@@ -6525,7 +6102,7 @@ comptime_assert(BUFFER_SIZE >= 1024, "buffer too small");
 
 ---
 
-### 13.8 Restrictions (v1.0)
+### 14.8 Restrictions (v1.0)
 
 At compile time, the following are forbidden:
 
@@ -6541,7 +6118,7 @@ At compile time, the following are forbidden:
 
 ---
 
-## 14. Non-Goals and Explicit Omissions
+## 15. Non-Goals and Explicit Omissions
 
 The following are explicitly out of scope for this specification:
 
@@ -6762,31 +6339,31 @@ The following must be diagnosed at compile time:
 
 | Category                                                      | Examples                                                                                                             | Spec Section |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------ |
-| Type errors                                                   | Optional/result field access on wrong branch                                                                         | § 2.1, 2.2   |
-| Provenance errors                                             | Slice outlives arena (statically provable)                                                                           | § 2.4–2.6    |
-| Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | § 1.2, § 7.3 |
-| Ownership errors                                              | Copy of unique slice, use after move                                                                                 | § 1.1, § 2.6 |
-| Borrow errors                                                 | Borrow outlives owner (statically provable)                                                                          | § 3.2        |
-| Async errors                                                  | Missing `await`, invalid suspension point                                                                            | § 7.2        |
-| Blocking context errors                                       | Blocking call in @async where auto-wrap unavailable                                                                  | § 7.8        |
-| @latency_sensitive violations                                 | Blocking call in @latency_sensitive function                                                                         | § 7.8.3.1    |
-| Comptime errors                                               | Non-constant in `comptime` context                                                                                   | § 13         |
-| Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | § 10         |
-| Optional unwrap                                               | `*x` without proven Some branch                                                                                      | § 2.1        |
-| Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | § 2.2        |
-| Use after move                                                | Accessing move-only value after transfer                                                                             | § 1.1        |
-| Guard across suspension                                       | Guard held across `await` or `run_blocking`                                                                          | § 7.8        |
+| Type errors                                                   | Optional/result field access on wrong branch                                                                         | §3.1   |
+| Provenance errors                                             | Slice outlives arena (statically provable)                                                                           | §3.3–2.6    |
+| Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | §1.2, §8.3 |
+| Ownership errors                                              | Copy of unique slice, use after move                                                                                 | §1.1, §3.5 |
+| Borrow errors                                                 | Borrow outlives owner (statically provable)                                                                          | §4.2        |
+| Async errors                                                  | Missing `await`, invalid suspension point                                                                            | §8.2        |
+| Blocking context errors                                       | Blocking call in @async where auto-wrap unavailable                                                                  | §8.8        |
+| @latency_sensitive violations                                 | Blocking call in @latency_sensitive function                                                                         | §8.8.3.1    |
+| Comptime errors                                               | Non-constant in `comptime` context                                                                                   | §14         |
+| Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | §11         |
+| Optional unwrap                                               | `*x` without proven Some branch                                                                                      | §3.1        |
+| Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | §3.1        |
+| Use after move                                                | Accessing move-only value after transfer                                                                             | §1.1        |
+| Guard across suspension                                       | Guard held across `await` or `run_blocking`                                                                          | §8.8        |
 | Unsafe adoption                                               | `adopt()` outside `unsafe {}`                                                                                        | § G.2        |
-| Result unwrap — missing default                               | `expr ?>` / `expr ?>(e)` with nothing on RHS                                                                         | § 2.2        |
-| Result unwrap — '?>' misuse for error handling                | `?>` RHS is a divergent statement, a `{ ... }` block, or the bare `?>;` shorthand; use `!>` for error-handling logic | § 2.2        |
-| Result unwrap — expression-position '!>' body must diverge    | `expr !>(e) { log(e); };` in a declaration initializer or other expression context whose body falls through          | § 2.2        |
-| Result unwrap — '!>;' at expression position requires handler | `int x = call() !>;` with no enclosing `@errhandler` in scope                                                        | § 2.2        |
-| Result unwrap — bad binder                                    | `expr ?>() RHS`, `expr ?>(123) RHS`, `call() !> () BODY`                                                             | § 2.2        |
-| Result unwrap — missing body                                  | `call() !> (e) ;`                                                                                                    | § 2.2        |
-| Result forward — unbound binder                               | `@err(X);` where `X` is not the enclosing `!>` binder                                                                | § 2.2        |
-| Result forward — dead code                                    | statement following `@err(e);` in the same block                                                                     | § 2.2        |
-| Handler non-divergent                                         | Forward-reached `@errhandler` body last statement is not one of the approved divergent forms                         | § 2.2        |
-| Unhandled result call                                         | bare `f();` where `f` returns `T!>(E)` (phase-1: gated on `CC_STRICT_RESULT_UNWRAP=1`)                               | § 2.2        |
+| Result unwrap — missing default                               | `expr ?>` / `expr ?>(e)` with nothing on RHS                                                                         | §3.1        |
+| Result unwrap — '?>' misuse for error handling                | `?>` RHS is a divergent statement, a `{ ... }` block, or the bare `?>;` shorthand; use `!>` for error-handling logic | §3.1        |
+| Result unwrap — expression-position '!>' body must diverge    | `expr !>(e) { log(e); };` in a declaration initializer or other expression context whose body falls through          | §3.1        |
+| Result unwrap — '!>;' at expression position requires handler | `int x = call() !>;` with no enclosing `@errhandler` in scope                                                        | §3.1        |
+| Result unwrap — bad binder                                    | `expr ?>() RHS`, `expr ?>(123) RHS`, `call() !> () BODY`                                                             | §3.1        |
+| Result unwrap — missing body                                  | `call() !> (e) ;`                                                                                                    | §3.1        |
+| Result forward — unbound binder                               | `@err(X);` where `X` is not the enclosing `!>` binder                                                                | §3.1        |
+| Result forward — dead code                                    | statement following `@err(e);` in the same block                                                                     | §3.1        |
+| Handler non-divergent                                         | Forward-reached `@errhandler` body last statement is not one of the approved divergent forms                         | §3.1        |
+| Unhandled result call                                         | bare `f();` where `f` returns `T!>(E)` (phase-1: gated on `CC_STRICT_RESULT_UNWRAP=1`)                               | §3.1        |
 
 
 ### B.2 Runtime Errors (Debug Builds)
@@ -7587,7 +7164,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 }
 ```
 
-**Current behavior (§ 7.5, § 3.2):** Inside an active `with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per § 3.2); the runtime behavior is defined in § 7.5.
+**Current behavior (§8.5, §4.2):** Inside an active `with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
 
 **Possible direction:** Inside an active `with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
 
@@ -7596,7 +7173,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 - Every long-lived loop (WebSocket, gRPC bidirectional stream, streaming read) needs this
 - Correct-by-default: deadline semantics + await = safe cancellation
 - Eliminates boilerplate `@select` in read/write loops
-- Aligns with your existing deadline-aware cancellation semantics (§ 3.2, § 7.5)
+- Aligns with your existing deadline-aware cancellation semantics (§4.2, §8.5)
 
 **Impact:** Unary handlers (with deadline), takeover handlers (explicit deadline control), and request body streaming all become safer with zero additional code.
 
@@ -7793,7 +7370,7 @@ Task_T fn(Args... args) {
 
 **Normative rule:** Inside an active `with_deadline()` scope, all suspension points must check for cancellation before and after suspension. Checks must be cheap (single branch).
 
-For full deadline semantics and cancellation behavior, see **language spec § 7.5 (Cancellation & Deadline)**. This section describes how the compiler lowers these semantics to portable C using single-branch checks.
+For full deadline semantics and cancellation behavior, see **language spec §8.5 (Cancellation & Deadline)**. This section describes how the compiler lowers these semantics to portable C using single-branch checks.
 
 **Lowering:**
 
@@ -8025,6 +7602,59 @@ TaskPoll poll_result = task.poll(task.frame, task.waker);
 - `poll()` is re-entrant; same Task can be polled multiple times
 - Cancellation is checked via waker context, not Task state
 - Task completion frees the frame and runs drop glue
+
+---
+
+## Appendix K: Editorial Principles
+
+The following principles govern changes to this specification. They are retrospective descriptions of the language as it exists and normative for proposed modifications. Where principles conflict, the earlier principle governs.
+
+### K.1 No hidden behavior
+
+Every runtime effect must be nameable in source. The compiler must not introduce behavior the programmer did not write.
+
+Consequences (normative):
+
+- Control flow is never implicit. Error propagation uses visible operators (`!>`, `?>`, `@err(e);`); there are no exceptions.
+- Allocation is never implicit. Every allocation takes an explicit arena; there is no garbage collector.
+- Suspension is never implicit. `await` marks every suspension point; `@async` marks every function that may suspend.
+- Destruction ordering is never implicit. `@defer` statements run in reverse-declaration order at scope exit; nothing runs at scope exit without a `@defer` / `@destroy` in source.
+- Dispatch at types that admit multiple implementations is visible. UFCS dispatches on the resolved type of the receiver expression at the call site.
+
+Bounded exceptions are permitted only where all of the following hold:
+
+1. Ergonomic gain over the lowered form is substantial.
+2. The exception is scoped to a specific syntactic form (not ambient).
+3. The lowered form remains available to users who need explicit control.
+4. All invocation sites are locatable by grep on the syntactic form.
+
+Exceptions currently conforming:
+
+- `@string(`...${e}...`, arena)` — template interpolation dispatches `to_str()` per slot; scope is the backtick template form.
+- UFCS method-call dispatch `x.f(...)` — dispatches on the type of `x`; scope is method-call syntax.
+
+### K.2 Orthogonal concerns
+
+Shape and flow are separate concerns with separate mechanisms.
+
+- **Shape** — memory and task lifetimes. Hierarchical, lexical, enforced at compile time. Arenas and nurseries are scope-bound; their lifetimes end at lexical scope exit.
+- **Flow** — inter-task communication. A graph that may cross shape boundaries. Channels are values, not scopes; their lifetimes are independent of the scopes that create them and are managed with `@defer`.
+
+Consequences (normative):
+
+- Values transferred across channels carry provenance metadata identifying their origin arena (§3.4, §3.5). Channel transfer is the mechanism by which a value legitimately crosses a shape boundary.
+- The compiler enforces shape invariants statically. Flow invariants not provable at compile time are enforced at runtime in debug builds (provenance checks, deadlock detection) and are undefined in release builds unless otherwise specified.
+
+### K.3 Lowering as specification
+
+Every CC construct has a specified lowering to C. The lowered form is the normative operational semantics; the surface syntax is a spelling of that form.
+
+Consequences (normative):
+
+- A CC feature is in scope for this specification only if it has a direct lowering to C. Features that cannot be lowered cleanly are out of scope.
+- Specification sections that define a construct must define its lowering.
+- The runtime (prelude headers, scheduler, channel implementation) is part of the lowered form and is specified with it.
+- `--emit-c` output is an authoritative form of the source. Two conforming implementations must produce lowerings with identical observable behavior.
 
 ---
 

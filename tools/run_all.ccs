@@ -7,6 +7,10 @@
  *   ccc run tools/run_all.ccs -- --perf       # run all perf benchmarks
  *   ccc run tools/run_all.ccs -- --all        # run everything
  *
+ * Pick one (or more) categories — --stress is what usually panics:
+ *   ccc run tools/run_all.ccs -- --trace --stream --stress
+ # Or everything:
+ *   ccc run tools/run_all.ccs -- --trace --stream --all
  * Add --trace to write a per-test-boundary log that is fflush+fsynced after
  * every START/END marker. If the machine kernel-panics mid-test, reading
  * tmp/run_all_logs/run_trace.log after reboot shows exactly which test was
