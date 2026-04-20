@@ -706,14 +706,15 @@ static int cc__build_compile_and_load(const char* input_path,
 
     cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n#define __CC__ 1\n#endif\n");
     if (needs_cc_preprocess && !source_is_header) {
-        /* For .ccs batches: CC_PARSER_MODE keeps the type registry's injected
-           member-function pointers (e.g. `int (*bump)();`) visible so UFCS
-           calls in lowered main bodies still parse as struct member calls.
-           The CC preprocessor's parser-mode expansions also require it.
-           Eagerly include cc_result.h AFTER defining CC_PARSER_MODE (the
+        /* For .ccs batches: CC_PARSER_MODE keeps generic container
+           (`__CCVecGeneric`, `__CCMapGeneric`) and generic-result
+           (`__CCResultGeneric`) typedefs in scope so the TCC stub-AST
+           parser accepts `Vec<T>`/`Map<K,V>`/`T!>(E)` placeholders that
+           the later codegen pass rewrites to concrete types.  Eagerly
+           include cc_result.h AFTER defining CC_PARSER_MODE (the
            __CCResultGeneric definition lives inside that header's
-           `#ifdef CC_PARSER_MODE` block) so any parser-mode typedef block
-           in the lowered body has a resolvable referent. */
+           `#ifdef CC_PARSER_MODE` block) so any parser-mode typedef
+           block in the lowered body has a resolvable referent. */
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef CC_PARSER_MODE\n#define CC_PARSER_MODE 1\n#endif\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_result.h>\n");
     }

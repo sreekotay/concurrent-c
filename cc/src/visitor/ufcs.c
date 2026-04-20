@@ -1346,11 +1346,12 @@ static int cc__emit_closure_field_call(char* out,
          *
          * Opt-out: if the receiver type has a registered UFCS hook
          * (cc_type_register(".ufcs = ...")), treat that as the user
-         * explicitly taking ownership of method dispatch.  This covers
-         * the stdlib + user pattern where a struct body carries a
-         * CC_PARSER_MODE-only scaffold field like `int (*ping)();` to
-         * keep CCC's parser-mode TCC happy — those scaffold fields do
-         * not exist in host-C and must not shadow the real UFCS hook. */
+         * explicitly taking ownership of method dispatch.  (Historical
+         * note: prior parser-mode-only scaffold fields like `int
+         * (*ping)();` have been removed now that TCC parses UFCS
+         * natively, but the opt-out still matters for user types whose
+         * C bodies genuinely carry a field whose name collides with a
+         * UFCS method the user wants to dispatch via the hook.) */
         const void* fn_ptr = NULL;
         if (g_ufcs_symbols &&
             cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, type_for_lookup, &fn_ptr) == 0 &&

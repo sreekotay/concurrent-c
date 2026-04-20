@@ -311,35 +311,31 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 /* Get value or default (no abort) */
 #define cc_unwrap_or(opt, default_val) ((opt).has ? (opt).u.value : (default_val))
 
-/* Convenience macros for type names.
- * In parser mode, these expand to generic placeholders. */
-#ifdef CC_PARSER_MODE
+/* Convenience macros for type names.  CCOpt(T) is the same in parser and
+ * codegen modes; only CCOptPtr(T) degrades to the generic placeholder
+ * during parse since pointer-payload optionals have a distinct C typedef. */
 #define CCOpt(T) CCOptional_##T
+#ifdef CC_PARSER_MODE
 #define CCOptPtr(T) __CCOptionalGeneric
 #else
-#define CCOpt(T) CCOptional_##T
 #define CCOptPtr(T) CCOptional_##T##ptr
 #endif
 
 /* C interop: explicit result/optional type names.
- * In parser mode, these expand to generic placeholders.
- * In real compilation, they expand to the actual type names.
  *
- * Type macros:
+ * Type macros are spelled identically in both modes (they just form
+ * typedef names):
  *   CCRes(int, CCError)      -> CCResult_int_CCError
  *   CCResPtr(char, CCError)  -> CCResult_charptr_CCError
  *
- * Constructor macros:
- *   CCRes_ok(int, CCError, 42)     -> cc_ok_CCResult_int_CCError(42)
- *   CCRes_err(int, CCError, err)   -> cc_err_CCResult_int_CCError(err)
- *   CCOpt_some(int, 42)            -> cc_some_CCOptional_int(42)
- *   CCOpt_none(int)                -> cc_none_CCOptional_int()
- */
-#ifdef CC_PARSER_MODE
+ * Only the ok/err/some/none constructor expansions differ: real mode
+ * invokes the generated per-type functions; parser mode synthesises a
+ * shape-compatible struct literal so TCC's stub-AST pass stays typed. */
 #define CCRes(T, E) CCResult_##T##_##E
 #define CCResPtr(T, E) CCResult_##T##ptr_##E
 #define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
 #define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
+#ifdef CC_PARSER_MODE
 #define CCRes_ok(T, E, v) ((void)(v), (CCResult_##T##_##E){ .ok = 1 })
 #define CCRes_err(T, E, e) ((void)(e), (CCResult_##T##_##E){ .ok = 0 })
 #define CCResPtr_ok(T, E, v) ((void)(v), (CCResult_##T##ptr_##E){ .ok = 1 })
@@ -349,10 +345,6 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #define CCOpt_some(T, v) __cc_optional_generic_some()
 #define CCOpt_none(T) __cc_optional_generic_none()
 #else
-#define CCRes(T, E) CCResult_##T##_##E
-#define CCResPtr(T, E) CCResult_##T##ptr_##E
-#define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
-#define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
 #define CCRes_ok(T, E, v) cc_ok_CCResult_##T##_##E(v)
 #define CCRes_err(T, E, e) cc_err_CCResult_##T##_##E(e)
 #define CCResPtr_ok(T, E, v) cc_ok_CCResult_##T##ptr_##E(v)

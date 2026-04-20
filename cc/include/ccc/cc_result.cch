@@ -63,10 +63,6 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
 
 #endif /* CC_PARSER_MODE */
 
-#ifdef CC_PARSER_MODE
-/* Parser-mode CCError support is declared later, after the placeholder type is available. */
-#endif
-
 /*
  * Result type layout:
  *   r.ok       - true if success
@@ -217,7 +213,9 @@ static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
 
 /* cc_try macro: unwrap T!>(E) or return error.
    Must be used in a function that returns the same result type.
-   This is a GCC statement expression and works with clang/gcc. */
+   Gated off in parser mode so the misuse test produces the
+   "incompatible types" error at the expected source line instead of
+   deep inside the statement-expression expansion. */
 #ifndef CC_PARSER_MODE
 #define cc_try(expr) __extension__ ({                \
     __typeof__(expr) __cc_try_r = (expr);            \
