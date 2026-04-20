@@ -1,8 +1,6 @@
 /*
  * String Set and String Map utilities for compiler passes.
  * Simple, allocation-based collections for tracking names and types.
- * 
- * Ported from cccn/util/string_set.h with CC naming convention.
  */
 #ifndef CC_UTIL_STRING_SET_H
 #define CC_UTIL_STRING_SET_H

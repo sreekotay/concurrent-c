@@ -12,7 +12,7 @@
 
 struct CCChan; /* forward */
 
-/* Guard allows cccn parse stubs to predefine these */
+/* Guard allows parser-mode stubs to predefine these */
 #ifndef __CC_CHAN_TX_DEFINED
 #define __CC_CHAN_TX_DEFINED
 typedef struct { struct CCChan* raw; } CCChanTx;

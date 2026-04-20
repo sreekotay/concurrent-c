@@ -54,12 +54,8 @@ ifeq ($(TCC_EXT),1)
 endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
-# The production compiler still uses the established visitor/pass.c pipeline.
-# Experimental cccn sources stay out of SRCS and build only via an explicit target.
 # Note: src/tools/ is excluded - those are standalone utilities with their own main()
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/cccn/% src/tools/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
-# Keep cccn modules available for the standalone experimental binary.
-CCCN_CORE := src/cccn/ast/ast.c src/cccn/parser/parser.c src/cccn/codegen/codegen.c src/cccn/passes/pass_ufcs.c src/cccn/passes/pass_closure.c
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
@@ -70,24 +66,6 @@ DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
 REAL_BINARY := bin/ccc
 WRAPPER := $(OUT_BINDIR)/ccc
 
-# Experimental CCCN (CCC Next) binary - not built by default.
-CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
-    src/header/lower_header.c \
-    src/parser/tcc_bridge.c \
-    src/parser/cc_ext_parser.c \
-    src/preprocess/preprocess.c \
-    src/preprocess/type_registry.c \
-    src/result_spec.c \
-    src/comptime/symbols.c \
-    src/util/io.c \
-    src/util/path.c \
-    src/util/result_fn_registry.c \
-    src/visitor/pass_err_syntax.c \
-    src/visitor/pass_result_unwrap.c \
-    src/visitor/visitor_fileutil.c
-CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
-CCCN_BINARY := bin/cccn
-CCCN_WRAPPER := $(OUT_BINDIR)/cccn
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
 	src/preprocess/preprocess.c \
@@ -126,9 +104,6 @@ test-build-stub: $(WRAPPER)
 	@echo "Running build stub test..."
 	@sh ../examples/build_stub/test-build-stub.sh
 
-.PHONY: cccn
-cccn: $(CCCN_WRAPPER)
-
 $(REAL_BINARY): $(OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
@@ -139,18 +114,6 @@ $(WRAPPER): $(REAL_BINARY)
 	@printf '%s\n' 'set -e' >> $@
 	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
 	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/ccc" "$$@"' >> $@
-	@chmod +x $@
-
-$(CCCN_BINARY): $(CCCN_OBJS) $(TCC_LIB_DEP)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CCCN_OBJS) $(LDLIBS)
-
-$(CCCN_WRAPPER): $(CCCN_BINARY)
-	@mkdir -p $(dir $@)
-	@printf '%s\n' '#!/bin/sh' > $@
-	@printf '%s\n' 'set -e' >> $@
-	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
-	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/cccn" "$$@"' >> $@
 	@chmod +x $@
 
 $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)
@@ -168,7 +131,7 @@ $(OBJDIR)/%.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 clean:
-	rm -f $(WRAPPER) $(REAL_BINARY) $(CCCN_WRAPPER) $(CCCN_BINARY) $(LOWER_HEADERS_BINARY)
+	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY)
 	rm -rf $(OBJDIR)
 	rm -rf $(OUT_INCLUDE)
 	rm -rf $(OUT_RUNTIME)
@@ -176,7 +139,7 @@ clean:
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc
 
-.PHONY: all clean cccn
+.PHONY: all clean
 
 # Auto-generated dependency files for objects (includes runtime/concurrent_c.c -> runtime/*.c).
 -include $(DEPS)
