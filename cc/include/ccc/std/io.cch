@@ -263,13 +263,6 @@ static inline CCRes(size_t, CCIoError) cc__file_read_buf_count(CCFile *file, voi
 // Stdout/Stderr convenience
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);
 CCRes(size_t, CCIoError) cc_std_err_write(CCSlice data);
-#ifdef CC_PARSER_MODE
-/* Synthetic singleton receiver names so raw `cc_std_out.write(...)` /
-   `cc_std_err.write(...)` parse in parser mode; normal UFCS lowering handles
-   the real call selection later. */
-extern int cc_std_out;
-extern int cc_std_err;
-#endif
 static inline CCRes(size_t, CCIoError) cc_std_out_write_string(const CCString* s) {
     return cc_std_out_write(CCString_as_slice(s));
 }

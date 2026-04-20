@@ -7,9 +7,6 @@
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*mix)();
-#endif
 } ArgToy;
 
 static void arg_toy_mix_int(ArgToy* toy, int delta) {

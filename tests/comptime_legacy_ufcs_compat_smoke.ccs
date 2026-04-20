@@ -6,23 +6,14 @@
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*bump)();
-#endif
 } GenericToy;
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*bump)();
-#endif
 } OverrideToy;
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*bump)();
-#endif
 } LegacyWildAlpha;
 
 static void generic_toy_bump(GenericToy* toy) {

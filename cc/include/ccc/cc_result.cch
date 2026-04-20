@@ -260,17 +260,6 @@ typedef __CCGenericError CCError;
 #define CC_ERROR(err_kind, err_msg) ((CCError){ (int)(err_kind), 0, 0, (err_msg) })
 #endif
 
-/* Parser-mode UFCS method stubs for raw method syntax before result UFCS
-   has been lowered to Type_method(...) calls. */
-static intptr_t unwrap();
-static intptr_t value();
-static bool is_ok();
-static bool is_err();
-static intptr_t unwrap_or();
-static __CCGenericError unwrap_err();
-static __CCGenericError error();
-
-
 /* Generic result placeholder struct - used for ALL result types during parsing.
    Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
    Uses named union 'u' matching the real struct layout.

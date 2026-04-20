@@ -6,17 +6,10 @@
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*bump)();
-    int (*bump_by)();
-#endif
 } NamedToy;
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*bump)();
-#endif
 } LambdaToy;
 
 static void named_toy_bump(NamedToy* toy) {

@@ -6,16 +6,10 @@
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*ping)();
-#endif
 } NamedToy;
 
 typedef struct {
     int value;
-#ifdef CC_PARSER_MODE
-    int (*ping)();
-#endif
 } LambdaToy;
 
 static void named_toy_ping(NamedToy* toy) {
