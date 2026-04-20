@@ -9,8 +9,7 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    //future: CCArena arena = cc_arena_heap(kilobytes(4)) !> @destroy;
-    CCArena arena = @create(kilobytes(4)) @destroy;
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
     if (!arena.base) return 1;
     for (int i = 1; i <= 3; i++) {
         CCString s = @string(`Processing request ${i} bytes: ${arena.remaining()}\n`, &arena);

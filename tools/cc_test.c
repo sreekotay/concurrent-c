@@ -559,7 +559,7 @@ int main(int argc, char** argv) {
     const char* filter = NULL;
     int verbose = 0;
     int list_only = 0;
-    int jobs = 1;
+    int jobs = 6;
     int use_cache = 0;
     int clean = 0;
     int build_timeout_sec = 300;

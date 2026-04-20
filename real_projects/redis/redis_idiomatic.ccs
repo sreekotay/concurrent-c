@@ -1050,7 +1050,8 @@ int main(int argc, char** argv) {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCNetError aerr = CC_NET_OK;
-                CCSocket client = ln_ptr->accept(&aerr);
+                //bug: should work: CCSocket client = ln_ptr->accept(&aerr);
+                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
                 if (aerr != CC_NET_OK) {
                     fprintf(stderr, "accept error: %d\n", aerr);
                     break;

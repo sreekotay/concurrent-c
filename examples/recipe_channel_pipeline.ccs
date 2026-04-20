@@ -16,20 +16,19 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
+    @errhandler(CCError e) {  
+        fprintf(stderr, "fatal: %s\n", e.message); 
+        return 1; 
+    } //if you omit this errhandler, the naked error unwrapping (e.g. line 31) will compile error
 
     int[~4 >] tx;
     int[~4 <] rx;
-    CCChan* ch = cc_channel_pair(&tx, &rx);
-    if (!ch) return 1;
-    @defer ch->free();
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     cc_atomic_int sum = 0;
 
     {
-        //future: CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
-        CCNursery* outer = @create(NULL) @destroy;
-        if (!outer) abort();
+        CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
 
         outer->spawn(() => [&sum, rx] {
             int v;
@@ -39,10 +38,8 @@ int main(void) {
             }
         });
 
-        {
-            //future: CCNursery* inner = cc_nursery_create(NULL) !> @destroy;
-            CCNursery* inner = @create(NULL) @destroy;
-            if (!inner) abort();
+        { // inner nursery - parented by outer nursery
+            CCNursery* inner = cc_nursery_create(outer) !> @destroy;
             (void)inner->close_on(tx);
 
             inner->spawn(() => [tx] {

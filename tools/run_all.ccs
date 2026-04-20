@@ -151,7 +151,7 @@ static int get_expected_exit_code(const char* path) {
      * its own accept() prototype, producing "incompatible types for redefinition
      * of 'accept'" on macOS SDK headers.  Triage separately when we touch the
      * curl integration. */
-    if (strstr(path, "recipe_http_get") != NULL) return -1;
+    //if (strstr(path, "recipe_http_get") != NULL) return -1; //BUG - fixing it now
     /* MACHINE-CRASHER (confirmed by trace [1776551671194] START ...
      *   [no END]): this benchmark runs 6 benches x 7 samples x 100
      * batches x 1000 spawns = ~4.2M fiber spawn/join pairs, with the

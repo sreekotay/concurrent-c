@@ -29,6 +29,7 @@
  */
 int cc__rewrite_unwrap_destroy_suffix(const char* src,
                                       size_t n,
+                                      const char* input_path,
                                       char** out_buf,
                                       size_t* out_len);
 

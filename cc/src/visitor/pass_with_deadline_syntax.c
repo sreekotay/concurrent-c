@@ -160,6 +160,25 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             size_t expr_r = k;
             size_t after_paren = expr_r + 1;
             while (after_paren < n && (src[after_paren] == ' ' || src[after_paren] == '\t' || src[after_paren] == '\r' || src[after_paren] == '\n')) after_paren++;
+
+            /* Optional "as <ident>" clause: binds CCDeadline* <ident> inside the block. */
+            const char* as_ident = NULL;
+            size_t as_ident_len = 0;
+            if (after_paren + 2 < n && src[after_paren] == 'a' && src[after_paren + 1] == 's' &&
+                (after_paren + 2 >= n || !cc_is_ident_char(src[after_paren + 2]))) {
+                size_t cur = after_paren + 2;
+                while (cur < n && (src[cur] == ' ' || src[cur] == '\t' || src[cur] == '\r' || src[cur] == '\n')) cur++;
+                if (cur < n && cc_is_ident_start(src[cur])) {
+                    size_t id_s = cur;
+                    cur++;
+                    while (cur < n && cc_is_ident_char(src[cur])) cur++;
+                    as_ident = src + id_s;
+                    as_ident_len = cur - id_s;
+                    while (cur < n && (src[cur] == ' ' || src[cur] == '\t' || src[cur] == '\r' || src[cur] == '\n')) cur++;
+                    after_paren = cur;
+                }
+            }
+
             if (after_paren >= n || src[after_paren] != '{') {
                 cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 i = j;
@@ -196,14 +215,28 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             size_t body_e = m;
 
             counter++;
-            char hdr[512];
-            snprintf(hdr, sizeof(hdr),
-                     "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
-                     "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
-                     "@defer cc_deadline_pop(__cc_prev%lu); ",
-                     counter,
-                     (int)(expr_r - expr_l), src + expr_l,
-                     counter, counter, counter);
+            char hdr[768];
+            if (as_ident) {
+                snprintf(hdr, sizeof(hdr),
+                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
+                         "CCDeadline* %.*s = &__cc_dl%lu; "
+                         "CCDeadline* __cc_prev%lu = cc_deadline_push(%.*s); "
+                         "@defer cc_deadline_pop(__cc_prev%lu); ",
+                         counter,
+                         (int)(expr_r - expr_l), src + expr_l,
+                         (int)as_ident_len, as_ident, counter,
+                         counter,
+                         (int)as_ident_len, as_ident,
+                         counter);
+            } else {
+                snprintf(hdr, sizeof(hdr),
+                         "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
+                         "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
+                         "@defer cc_deadline_pop(__cc_prev%lu); ",
+                         counter,
+                         (int)(expr_r - expr_l), src + expr_l,
+                         counter, counter, counter);
+            }
             cc_sb_append_cstr(&out, &olen, &ocap, hdr);
             cc_sb_append(&out, &olen, &ocap, src + body_s, body_e - body_s);
             cc_sb_append_cstr(&out, &olen, &ocap, " }");

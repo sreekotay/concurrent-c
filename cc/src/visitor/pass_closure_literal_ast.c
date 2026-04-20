@@ -2765,9 +2765,82 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         d->end_line = n[i].line_end;
         size_t start_off = 0;
         int start_col1 = 1;
-        if (!cc__closure_start_off_best_effort(in_src, in_len, n[i].line_start, n[i].line_end, n[i].col_start, &start_off, &start_col1)) {
-            cc__free_closure_desc(d);
-            continue;
+        int be_ok = cc__closure_start_off_best_effort(in_src, in_len, n[i].line_start, n[i].line_end, n[i].col_start, &start_off, &start_col1);
+        /* Validate: start_off must actually lead to `=>` within a short
+         * window (accounting for `(params)` and whitespace).  When the AST
+         * line is garbage, cc__closure_start_off_best_effort can resolve via
+         * a backward-arrow scan that lands inside a preceding comment or
+         * matches an already-claimed arrow, producing a "success" offset
+         * that isn't actually a closure head.  Reject those so the text
+         * fallback below can recover.
+         *
+         * We also reject the case where start_off duplicates an
+         * already-claimed descriptor's offset (two AST nodes racing for the
+         * same source closure). */
+        if (be_ok) {
+            size_t scan_lim = start_off + 256;
+            if (scan_lim > in_len) scan_lim = in_len;
+            int has_arrow = 0;
+            for (size_t q = start_off; q + 1 < scan_lim; q++) {
+                if (in_src[q] == '=' && in_src[q + 1] == '>') { has_arrow = 1; break; }
+            }
+            if (!has_arrow) be_ok = 0;
+        }
+        if (be_ok) {
+            for (int kk = 0; kk < k; kk++) {
+                if (descs[kk].start_off == start_off) { be_ok = 0; break; }
+            }
+        }
+        if (!be_ok) {
+            /* AST line/col is unreliable here.  This happens when the
+             * reparse prelude pulls in a header whose internal `#line`
+             * directives leave tcc's line counter drifted relative to the
+             * shared source text (e.g. after `#include <ccc/std/prelude.cch>`
+             * with its own `#line N "std/prelude.h"` entries), so the
+             * CLOSURE node lands on a line that is past the end of the
+             * shared buffer — or on a line that resolves to a duplicate of
+             * an already-claimed closure via the backward-arrow fallback.
+             * The AST *count* of CLOSURE nodes is still correct, so we
+             * recover by walking `in_src` forward and picking the first
+             * `() => [...]` head whose derived start isn't already claimed
+             * by a previously-resolved descriptor.  The set of claimed
+             * offsets is small; a linear scan over descs[0..k-1] is fine. */
+            int found = 0;
+            size_t scan = 0;
+            while (scan + 1 < in_len) {
+                if (in_src[scan] == '=' && in_src[scan + 1] == '>') {
+                    size_t st_guess = cc__find_closure_start_from_arrow(in_src, 0, scan);
+                    if (st_guess < in_len && st_guess + 1 < in_len) {
+                        int claimed = 0;
+                        for (int kk = 0; kk < k; kk++) {
+                            if (descs[kk].start_off == st_guess) { claimed = 1; break; }
+                        }
+                        if (!claimed) {
+                            start_off = st_guess;
+                            size_t ln_lo = st_guess;
+                            while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
+                            start_col1 = 1 + (int)(st_guess - ln_lo);
+                            found = 1;
+                            break;
+                        }
+                    }
+                    scan = scan + 2;
+                    continue;
+                }
+                scan++;
+            }
+            if (!found) {
+                if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
+                    fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d DROPPED line=%d col=%d (no fallback match)\n",
+                            d->id, n[i].line_start, n[i].col_start);
+                }
+                cc__free_closure_desc(d);
+                continue;
+            }
+            if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
+                fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d RECOVERED line=%d->%zu col=%d via text fallback\n",
+                        d->id, n[i].line_start, start_off, start_col1);
+            }
         }
         d->start_col = start_col1 - 1;
         d->end_col = (n[i].col_end > 0) ? (n[i].col_end - 1) : -1;

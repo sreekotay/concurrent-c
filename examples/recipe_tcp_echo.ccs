@@ -25,7 +25,7 @@
  * Echoes back everything received until client closes. */
 void handle_client(CCSocket client) {
     {
-        CCArena cca = @create(kilobytes(4)) @destroy;
+        CCArena cca = cc_arena_heap(kilobytes(4)) @destroy;
         if (!cca.base) abort();
         CCArena* a = &cca;
         CCNetError err = CC_NET_OK;
@@ -80,7 +80,7 @@ int main(void) {
 
     /* Accept loop - handle a few connections for demo */
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        CCSocket client = cc_listener_accept(&ln, &err);
+        CCSocket client = ln.accept(&err);
         if (err != CC_NET_OK) {
             printf("accept error: %d\n", err);
             break;

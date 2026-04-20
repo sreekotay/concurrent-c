@@ -26,12 +26,12 @@ const char* g_urls[] = {
 #define NUM_URLS 3
 
 static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
-    /* Each task gets its own arena backed by stack memory */
+    /* Each task gets its own arena backed by stack memory. */
     char buf[32 * 1024];
     {
-        CCArena __cc_arena13 = @create(buf, sizeof(buf)) @destroy;
-        if (!__cc_arena13.base) abort();
-        CCArena* arena = &__cc_arena13;
+        CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
+        if (!scratch.base) abort();
+        CCArena* arena = &scratch;
         CCHttpErrorInfo err = {0};
         CCHttpResponse resp = cc_http_get(arena, g_urls[idx], strlen(g_urls[idx]), &err);
 
@@ -49,6 +49,8 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
     printf("Fetching %d URLs in parallel...\n\n", NUM_URLS);
 
     /* Results storage stays valid until the nursery scope waits on all tasks. */
@@ -58,16 +60,14 @@ int main(void) {
     size_t* body_len_p = body_len;
 
     {
-        CCNursery* __cc_nursery103 = @create(NULL) @destroy;
-        if (!__cc_nursery103) abort();
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
         for (int i = 0; i < NUM_URLS; i++) {
             int idx = i;  /* capture copy */
-            __cc_nursery103->spawn(() => {
+            n->spawn(() => {
                 fetch_one(idx, status_p, body_len_p);
             });
         }
-    
     }
 
     /* All requests complete - summarize */

@@ -1048,14 +1048,24 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 snprintf(rx_arg, sizeof(rx_arg), "&%s", rx_name);
 
                 char repl[1024];
+                size_t consumed;
                 if (is_expression) {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
+                    /* Expression form: emit the call as a pure expression (no
+                     * trailing `;`) and consume only through the closing `)`
+                     * of cc_channel_pair(...).  Whatever follows (`;`, `!>`,
+                     * `?>`, `.method(...)`, etc.) stays untouched. */
                     snprintf(repl, sizeof(repl),
-                             "/* cc_channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
+                             "/* cc_channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s)",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+                    /* `p` points one past the closing `)`. */
+                    consumed = (size_t)(p - (src + i));
+                    i += consumed;
+                    last_emit = i;
+                    col += (int)consumed;
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
@@ -1064,12 +1074,14 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+                    /* Statement form: consume through the trailing `;` (at
+                     * `after`) to swallow it, since the replacement already
+                     * terminates with `while(0);`. */
+                    consumed = (size_t)(after - (src + i));
+                    i += consumed + 1;
+                    last_emit = i;
+                    col += (int)consumed + 1;
                 }
-
-                size_t consumed = (size_t)(after - (src + i));
-                i += consumed + 1;
-                last_emit = i;
-                col += (int)consumed + 1;
                 continue;
             }
         }

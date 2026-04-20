@@ -5,7 +5,7 @@
  * failed nursery creation right at the call site; @destroy runs once
  * all tasks have joined.
  *
- * For programs with many fallible calletls, factor the handler out with
+ * For programs with many fallible calls, factor the handler out with
  * @errhandler — see recipe_result_error_handling.ccs.
  */
 #include <ccc/cc_runtime.cch>
@@ -22,7 +22,7 @@ int main(void) {
             printf("All tasks completed.\n");
         };
 
-    n->spawn(() => { usleep(100000); printf("Hello from task A!\n"); });
+    n->spawn(() => { usleep(100000); printf("Hello from task A! (last)\n"); });
     n->spawn(() => printf("Hello from task B!\n"));
     n->spawn(() => printf("Hello from task C!\n"));
 

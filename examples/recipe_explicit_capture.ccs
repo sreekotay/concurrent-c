@@ -1,84 +1,59 @@
 /*
- * Recipe: Capture Semantics
+ * Recipe: Closure Capture Semantics
  *
- * Demonstrates:
- *   - Implicit value capture (default behavior)
- *   - Closures capture by value — original variable unaffected
- *   - Reference capture [&x] for read-only sharing
- *   - Why mutation of shared references requires safety mechanisms
+ * Closures in n->spawn(...) capture outer variables. Two modes:
  *
- * See spec §9.5 for full capture rules.
+ *   () => body             — value capture (default): each outer variable
+ *                            is copied into the closure; the original is
+ *                            unaffected; the copy is immutable in the body.
+ *
+ *   () => [&x] body        — reference capture: the closure sees the
+ *                            SAME variable. Read-only by default.
+ *
+ * Mutation through a reference capture is a compile error unless the
+ * captured variable is wrapped in a thread-safe type (CCAtomic::[T],
+ * CCMutex::[T]) or the closure is marked @unsafe.
+ *
+ * See spec §1.2 for full capture rules.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
+    /* --- value capture (default) --- */
     int snapshot = 42;
-    int counter = 0;
-
-    printf("=== Value Capture (default) ===\n");
+    printf("=== value capture ===\n");
     printf("before: snapshot = %d\n", snapshot);
-    
-    /*
-     * Value capture: closure gets a COPY of the variable.
-     * The copy is immutable within the closure.
-     * Original variable is unaffected by closure execution.
-     */
     {
-        CCNursery* __cc_nursery100 = @create(NULL) @destroy;
-        if (!__cc_nursery100) abort();
-
-        /* Implicit value capture of 'snapshot' */
-        __cc_nursery100->spawn(() => {
-            printf("task A sees snapshot = %d\n", snapshot);
-            /* snapshot++; would be ERROR: cannot modify value-captured variable */
-        });
-
-        __cc_nursery100->spawn(() => {
-            printf("task B sees snapshot = %d\n", snapshot);
-        });
-    
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => printf("  task A sees snapshot = %d\n", snapshot));
+        n->spawn(() => printf("  task B sees snapshot = %d\n", snapshot));
+        /* snapshot++ inside the body would be a compile error:
+         * value-captured variables are immutable. */
     }
-    
-    printf("after: snapshot still = %d (unchanged by tasks)\n\n", snapshot);
+    printf("after:  snapshot = %d (unchanged)\n\n", snapshot);
 
-    printf("=== Reference Capture (read-only) ===\n");
-    /*
-     * Reference capture [&x]: closure sees the SAME variable.
-     * Read-only access is always safe.
-     */
-    counter = 100;
+    /* --- reference capture (read-only) --- */
+    int counter = 100;
+    printf("=== reference capture (read-only) ===\n");
     printf("before: counter = %d\n", counter);
-    
     {
-        CCNursery* __cc_nursery101 = @create(NULL) @destroy;
-        if (!__cc_nursery101) abort();
-
-        __cc_nursery101->spawn(() => [&counter] {
-            printf("task C reads counter = %d (via reference)\n", counter);
-        });
-    
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [&counter] { printf("  task C reads counter = %d\n", counter); });
+        /* counter++ in the body would be a compile error:
+         * mutation of a shared reference requires a safe wrapper. */
     }
-    
-    printf("after: counter = %d\n\n", counter);
+    printf("after:  counter = %d\n\n", counter);
 
-    printf("=== Why Mutation Requires Safety ===\n");
-    /*
-     * Mutation with reference capture is NOT allowed by default:
+    /* --- when you need mutation ---
+     *   CCAtomic::[int] counter        — lock-free atomic ops
+     *   CCMutex::[int]  counter        — lock-based guard
+     *   () => @unsafe [&counter] ...   — opt-out; the race is on you
+     *   channels                       — pass values, don't share state
      *
-     *   spawn(() => [&counter] { counter++; });
-     *   // error: mutation of shared reference 'counter' in spawned task
-     *   // help: use Atomic<int>, Mutex<int>, or @unsafe [&counter]
-     *
-     * This prevents accidental data races. Safe alternatives:
-     *   1. @atomic int counter;         — hardware atomic ops
-     *   2. Mutex<int> counter;          — lock-based safety
-     *   3. @unsafe () => [&counter]     — opt-out (you own the race)
-     *   4. Channels                     — message passing instead of sharing
-     *   5. Result array                 — each task owns its slot
+     * See recipe_fanout_capture.ccs and recipe_channel_pipeline.ccs.
      */
-    printf("See recipe_fanout_capture.ccs for the result-array pattern.\n");
-    printf("See recipe_channel_pipeline.ccs for the channel pattern.\n");
-
     return 0;
 }

@@ -1,0 +1,14 @@
+ok_short=hello
+ok_multi=hello
+one_line=hello
+multi_dest=hello
+default_eh=hello
+with_default=fallback
+qmark_dest=hello
+done
+destroy n3 (user)
+destroy n2 (user)
+destroy qmark_dest
+destroy default_eh
+destroy multidest
+destroy oneline

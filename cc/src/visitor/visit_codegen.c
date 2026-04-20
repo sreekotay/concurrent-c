@@ -3110,6 +3110,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Lower @await fname(...) -> cc_block_on(ReturnType, fname(...)) before
+     * any AST reparse, so TCC never sees the @await token. */
+    if (src_ufcs && src_ufcs_len && strstr(src_ufcs, "@await")) {
+        char* rewritten = cc__rewrite_at_await(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
+
     /* Rewrite `if @try (T x = expr) { ... }` into expanded form */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc__rewrite_if_try_syntax(src_ufcs, src_ufcs_len);
@@ -3383,7 +3394,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
         char* ud_out = NULL;
         size_t ud_out_len = 0;
-        if (cc__rewrite_unwrap_destroy_suffix(src_ufcs, src_ufcs_len, &ud_out, &ud_out_len) > 0 && ud_out) {
+        int ud_r = cc__rewrite_unwrap_destroy_suffix(
+            src_ufcs, src_ufcs_len,
+            ctx && ctx->input_path ? ctx->input_path : NULL,
+            &ud_out, &ud_out_len);
+        if (ud_r < 0) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return -1;
+        }
+        if (ud_r > 0 && ud_out) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = ud_out;
             src_ufcs_len = ud_out_len;

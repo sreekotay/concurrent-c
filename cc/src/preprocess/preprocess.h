@@ -97,5 +97,12 @@ char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src,
                                                  const char* input_path,
                                                  CCSymbolTable* symbols);
 
+// Rewrite @await fname(...) -> cc_block_on(ReturnType, fname(...)) in any context.
+// Collects @async function return types from the source, then rewrites each
+// @await call site to cc_block_on.  Unknown callees have @await stripped and
+// the expression is emitted as-is.
+// Returns newly allocated string on change, NULL if no @await present.
+char* cc__rewrite_at_await(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

@@ -185,7 +185,7 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
     *pre_hook = NULL;
     *post_hook = NULL;
     *post_pass_address = 0;
-    int saw_nursery = 0, saw_arena = 0, saw_star = 0;
+    int saw_nursery = 0, saw_arena = 0, saw_chan = 0, saw_star = 0;
     size_t i = type_a;
     while (i < type_b) {
         char c = s[i];
@@ -196,20 +196,27 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
             size_t len = i - start;
             if (len == 9 && memcmp(s + start, "CCNursery", 9) == 0) saw_nursery = 1;
             else if (len == 7 && memcmp(s + start, "CCArena", 7) == 0) saw_arena = 1;
+            else if (len == 6 && memcmp(s + start, "CCChan", 6) == 0) saw_chan = 1;
             continue;
         }
         i++;
     }
-    if (saw_nursery && saw_star && !saw_arena) {
+    if (saw_nursery && saw_star && !saw_arena && !saw_chan) {
         *pre_hook = "cc_nursery_wait";
         *post_hook = "cc_nursery_free";
         *post_pass_address = 0;
         return 1;
     }
-    if (saw_arena && !saw_nursery && !saw_star) {
+    if (saw_arena && !saw_nursery && !saw_chan && !saw_star) {
         *pre_hook = NULL;
         *post_hook = "cc_arena_destroy";
         *post_pass_address = 1;
+        return 1;
+    }
+    if (saw_chan && saw_star && !saw_nursery && !saw_arena) {
+        *pre_hook = NULL;
+        *post_hook = "cc_channel_free";
+        *post_pass_address = 0;
         return 1;
     }
     return 0;
@@ -258,8 +265,21 @@ static void cc__ud_emit_pad(char** out, size_t* out_len, size_t* out_cap,
     }
 }
 
+/* Compute 1-based (line, col) for source offset `off` in buffer `src`. */
+static void cc__ud_offset_to_line_col(const char* src, size_t off,
+                                      int* out_line, int* out_col) {
+    int line = 1, col = 1;
+    for (size_t i = 0; src && i < off; i++) {
+        if (src[i] == '\n') { line++; col = 1; }
+        else col++;
+    }
+    if (out_line) *out_line = line;
+    if (out_col) *out_col = col;
+}
+
 int cc__rewrite_unwrap_destroy_suffix(const char* src,
                                       size_t n,
+                                      const char* input_path,
                                       char** out_buf,
                                       size_t* out_len) {
     if (!src || n == 0 || !out_buf || !out_len) {
@@ -291,36 +311,33 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             continue;
         }
 
-        /* Parse `@destroy [ { body } ] ;`.  A bodyless form isn't
-         * meaningful here; require the `{ ... }`. */
+        /* Parse `@destroy [ { body } ] ;`.  Bodyless form `@destroy;` is
+         * meaningful for builtin-owned types (auto-free).  The `;` ending
+         * the host statement is still required. */
         size_t after_kw = i + 8;
-        size_t body_s = after_kw;
-        while (body_s < n &&
-               (src[body_s] == ' ' || src[body_s] == '\t' ||
-                src[body_s] == '\n' || src[body_s] == '\r'))
-            body_s++;
-        if (body_s >= n || src[body_s] != '{') {
-            /* Give up — leave the @destroy alone so a later pass (or
-             * error reporter) can complain. */
-            i = after_kw;
-            continue;
+        size_t cur = after_kw;
+        while (cur < n &&
+               (src[cur] == ' ' || src[cur] == '\t' ||
+                src[cur] == '\n' || src[cur] == '\r'))
+            cur++;
+        int have_body = 0;
+        size_t body_s = 0, body_e = 0;
+        if (cur < n && src[cur] == '{') {
+            body_s = cur;
+            if (!cc_find_matching_brace(src, n, body_s, &body_e)) {
+                i = body_s + 1;
+                continue;
+            }
+            have_body = 1;
+            cur = body_e + 1;
+            while (cur < n &&
+                   (src[cur] == ' ' || src[cur] == '\t' ||
+                    src[cur] == '\n' || src[cur] == '\r'))
+                cur++;
         }
-        size_t body_e = 0;
-        if (!cc_find_matching_brace(src, n, body_s, &body_e)) {
-            i = body_s + 1;
-            continue;
-        }
-        /* body_e is index of `}`; body content is [body_s+1 .. body_e). */
-
-        /* The original statement's terminating `;` must follow (allowing
-         * whitespace).  If missing, bail out. */
-        size_t semi = body_e + 1;
-        while (semi < n &&
-               (src[semi] == ' ' || src[semi] == '\t' ||
-                src[semi] == '\n' || src[semi] == '\r'))
-            semi++;
+        size_t semi = cur;
         if (semi >= n || src[semi] != ';') {
-            i = body_e + 1;
+            i = have_body ? body_e + 1 : after_kw;
             continue;
         }
 
@@ -339,6 +356,45 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             size_t type_b = name_a;
             while (type_b > stmt_a && isspace((unsigned char)src[type_b - 1])) type_b--;
             cc__ud_builtin_owned_hooks(src, stmt_a, type_b, &pre_hook, &post_hook, &post_pass_addr);
+        }
+
+        /* Bodyless `@destroy;` is only meaningful when the declared type has a
+         * registered destructor (a builtin-owned type).  Otherwise there's
+         * nothing for the synthesized `@defer { }` to run — refuse to silently
+         * emit a no-op and tell the user what's needed. */
+        if (!have_body && !pre_hook && !post_hook) {
+            int line = 1, col = 1;
+            cc__ud_offset_to_line_col(src, i, &line, &col);
+            const char* f = input_path ? input_path : "<input>";
+            if (have_name) {
+                /* Trim the declared type span for the diagnostic. */
+                size_t type_a = stmt_a;
+                size_t type_b = name_a;
+                while (type_a < type_b && isspace((unsigned char)src[type_a])) type_a++;
+                while (type_b > type_a && isspace((unsigned char)src[type_b - 1])) type_b--;
+                int type_len = (int)(type_b - type_a);
+                fprintf(stderr,
+                        "%s:%d:%d: error: @destroy: bodyless `@destroy;` requires a "
+                        "registered destructor for type `%.*s`, but none is known\n",
+                        f, line, col, type_len, src + type_a);
+                fprintf(stderr,
+                        "%s:%d:%d: note: provide an explicit cleanup body: "
+                        "`@destroy { /* cleanup using %.*s */ }`\n",
+                        f, line, col, (int)(name_b - name_a), src + name_a);
+            } else {
+                fprintf(stderr,
+                        "%s:%d:%d: error: @destroy: bodyless `@destroy;` is only "
+                        "allowed on a declaration of a type with a registered "
+                        "destructor\n",
+                        f, line, col);
+                fprintf(stderr,
+                        "%s:%d:%d: note: either provide `@destroy { ... }` with an "
+                        "explicit cleanup body, or declare the value with a "
+                        "registered owner type (e.g. CCNursery*, CCArena, CCChan*)\n",
+                        f, line, col);
+            }
+            free(out);
+            return -1;
         }
 
         /* Emit everything up to (but not including) the `@destroy` kw. */
@@ -369,18 +425,20 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
          * confusing the closure-literal pass.  Line numbers are already
          * preserved via the padding emitted for the original source
          * span. */
-        for (size_t bi = body_s + 1; bi < body_e; ) {
-            char bc = src[bi];
-            /* Strip `//` line comments: they would comment out everything
-             * after them on the collapsed single line. */
-            if (bc == '/' && bi + 1 < body_e && src[bi + 1] == '/') {
-                while (bi < body_e && src[bi] != '\n') bi++;
-                continue;
+        if (have_body) {
+            for (size_t bi = body_s + 1; bi < body_e; ) {
+                char bc = src[bi];
+                /* Strip `//` line comments: they would comment out everything
+                 * after them on the collapsed single line. */
+                if (bc == '/' && bi + 1 < body_e && src[bi + 1] == '/') {
+                    while (bi < body_e && src[bi] != '\n') bi++;
+                    continue;
+                }
+                /* Collapse newlines/tabs to spaces. */
+                char out_ch = (bc == '\n' || bc == '\r' || bc == '\t') ? ' ' : bc;
+                cc__append_n(&out, &ol, &oc, &out_ch, 1);
+                bi++;
             }
-            /* Collapse newlines/tabs to spaces. */
-            char out_ch = (bc == '\n' || bc == '\r' || bc == '\t') ? ' ' : bc;
-            cc__append_n(&out, &ol, &oc, &out_ch, 1);
-            bi++;
         }
         if (post_hook && have_name) {
             cc__append_str(&out, &ol, &oc, " ");
