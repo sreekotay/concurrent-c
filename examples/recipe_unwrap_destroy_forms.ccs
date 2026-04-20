@@ -27,7 +27,7 @@ static char* maybe_null(int want_null) {
     return want_null ? NULL : buf;
 }
 
-int run(void) {
+int main(void) {
     /* 1. Top-level @errhandler: a bare `!>` reuses this when there's no
      *    inline handler. */
     @errhandler(CCError e) { fprintf(stderr, "[eh] %s\n", e.message); abort(); }
@@ -101,8 +101,4 @@ int run(void) {
 
     printf("done\n");
     return 0;
-}
-
-int main(void) {
-    return run();
 }

@@ -168,6 +168,66 @@ static int cc__chunk_contains_at(const char* src, size_t start, size_t end) {
     return 0;
 }
 
+/* True if [start, end) contains an unrewritten UFCS-shaped method call of the
+ * form `IDENT.IDENT(`.  The @comptime hook TU is built BEFORE UFCS rewriting
+ * has run, so any such call fails to compile as host C (e.g. `g_tx.send(7)`
+ * where `CCChanTx` has no `send` field).  Drop those chunks (typically the
+ * user's main() body, which the hook dylib never needs anyway).  Legitimate
+ * pointer-member calls via `->` are left alone. */
+static int cc__chunk_contains_ufcs_shaped_call(const char* src, size_t start, size_t end) {
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src || end <= start) return 0;
+    for (size_t i = start; i < end; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < end) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c != '.') continue;
+        /* Not a '.' if part of '->', '..', or a numeric literal. */
+        if (i > start && src[i - 1] == '-') continue;
+        if (c2 == '.') continue;
+        /* LHS must be an identifier ending just before this '.'. */
+        {
+            size_t lhs_end = i;
+            size_t lhs = lhs_end;
+            while (lhs > start) {
+                char p = src[lhs - 1];
+                if (isalnum((unsigned char)p) || p == '_') lhs--;
+                else break;
+            }
+            if (lhs == lhs_end) continue;
+            /* Reject numeric literals like 1.foo (not valid but be safe). */
+            if (isdigit((unsigned char)src[lhs])) continue;
+            /* LHS must start at a token boundary (no `x->y.z(` where `y` is
+             * actually a field, which is legal C). */
+            if (lhs > start) {
+                char prev = src[lhs - 1];
+                if (prev == '.' || prev == '>') continue;
+            }
+        }
+        /* RHS must be identifier then '(' (possibly with whitespace). */
+        {
+            size_t j = i + 1;
+            size_t id_start = j;
+            while (j < end) {
+                char p = src[j];
+                if (isalnum((unsigned char)p) || p == '_') j++;
+                else break;
+            }
+            if (j == id_start) continue;
+            while (j < end && isspace((unsigned char)src[j])) j++;
+            if (j < end && src[j] == '(') return 1;
+        }
+    }
+    return 0;
+}
+
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
     char* out;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
@@ -278,7 +338,8 @@ static void cc__emit_top_level_filtered(char** out,
                     size_t body_r = 0;
                     if (!cc__find_matching_brace(src, n, j, &body_r)) { return; }
                     if (!saw_top_paren_close) { j = body_r; continue; }
-                    if (!cc__chunk_contains_at(src, start, body_r + 1)) {
+                    if (!cc__chunk_contains_at(src, start, body_r + 1) &&
+                        !cc__chunk_contains_ufcs_shaped_call(src, start, body_r + 1)) {
                         cc__hc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
                         cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
                     }
@@ -286,7 +347,8 @@ static void cc__emit_top_level_filtered(char** out,
                     break;
                 }
                 if (c == ';' && depth == 0) {
-                    if (!cc__chunk_contains_at(src, start, j + 1)) {
+                    if (!cc__chunk_contains_at(src, start, j + 1) &&
+                        !cc__chunk_contains_ufcs_shaped_call(src, start, j + 1)) {
                         cc__hc_sb_append(out, out_len, out_cap, src + start, j + 1 - start);
                         cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
                     }

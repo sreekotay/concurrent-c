@@ -866,15 +866,7 @@ static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
    `cc_string_*` aliases above to the existing CCString_* C entry
    points. */
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCString", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-    (void)cc_type_register("CCString*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-}
-#endif
+/* CCString UFCS dispatch is covered by the global `CC*` registration
+   in cc_arena.cch; no per-type opt-in needed here. */
 
 #endif // CC_STD_STRING_H

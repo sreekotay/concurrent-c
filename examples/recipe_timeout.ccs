@@ -16,8 +16,6 @@
  *       (remaining time, explicit expiry checks, logging, etc.).
  *
  * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
- *
- * See spec §8.5.9 for complete semantics.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>

@@ -1,94 +1,128 @@
 /*
- * Recipe: TCP Echo Server
+ * Recipe: TCP Echo Server (Structured Concurrency)
  *
- * Demonstrates:
- *   - TCP socket primitives (listen, accept, read, write)
- *   - Connection handling with explicit nursery ownership
- *   - Arena-based memory management
- *   - Graceful cleanup
+ * Real servers accept in a loop until shutdown; shutdown in production
+ * usually comes from closing the listener (signal handler, supervisor).
+ * One nursery owns the accept loop AND every live connection — the
+ * nursery's @destroy waits for the loop to stop and every spawned
+ * handler to drain. Graceful shutdown with no refcount, no join array.
  *
- * Run:
- *   ./cc/bin/ccc build run examples/recipe_tcp_echo.ccs
+ *   nursery n:
+ *     [accept loop on main's fiber]
+ *     per accept: n->spawn(() => handle_client(sock))
+ *     if --test:  n->spawn(() => run_test_client())
  *
- * Test with:
- *   echo "Hello" | nc localhost 9000
+ * Accept loop exit conditions:
+ *   1. cc_listener_accept returns an error (listener closed, fd gone) —
+ *      this is the real-server path (SIGTERM handler closes the listener).
+ *   2. In --test mode, after one connection has been served, so CI can
+ *      finish deterministically without external signalling.
+ *
+ * Test mode (--test):
+ *   Spawn an in-process client under the same nursery, do one round-trip,
+ *   exit. Fully self-contained — CI runs this recipe with no external
+ *   tooling (nc, curl, etc.).
+ *
+ * Manual run:
+ *   ./ccc run examples/recipe_tcp_echo.ccs
+ *   (in another shell:)  echo "hello" | nc 127.0.0.1 9000
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
-#include <stdio.h>
+#include <ccc/std/cli.cch>
+#include <string.h>
 
 #define PORT "127.0.0.1:9000"
-#define MAX_CONNECTIONS 4
 
-/* Handle a single client connection.
- * Echoes back everything received until client closes. */
-void handle_client(CCSocket client) {
-    {
-        CCArena cca = cc_arena_heap(kilobytes(4)) @destroy;
-        if (!cca.base) abort();
-        CCArena* a = &cca;
-        CCNetError err = CC_NET_OK;
+/* Echo every received chunk until the peer closes. */
+static void handle_client(CCSocket sock) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    if (!a.base) { cc_socket_close(&sock); return; }
 
-        /* Get peer address for logging */
-        CCSlice peer = cc_socket_peer_addr(&client, a, &err);
-        if (err == CC_NET_OK) {
-            printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
-        }
-
-        /* Echo loop */
-        while (1) {
-            cc_arena_reset(a);
-            CCSlice data = cc_socket_read(&client, a, 1024, &err);
-            if (err != CC_NET_OK) {
-                if (err == CC_NET_CONNECTION_CLOSED) {
-                    printf("client disconnected\n");
-                } else {
-                    printf("read error: %d\n", err);
-                }
-                break;
-            }
-            if (data.len == 0) {
-                printf("client disconnected (EOF)\n");
-                break;
-            }
-
-            printf("received %zu bytes, echoing...\n", data.len);
-            size_t written = cc_socket_write(&client, data.ptr, data.len, &err);
-            if (err != CC_NET_OK) {
-                printf("write error: %d\n", err);
-                break;
-            }
-            (void)written;
-        }
-    
-    }
-
-    cc_socket_close(&client);
-}
-
-int main(void) {
     CCNetError err = CC_NET_OK;
-
-    /* Start listening */
-    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1, &err);
-    if (err != CC_NET_OK) {
-        printf("listen error: %d\n", err);
-        return 1;
+    CCSlice peer = cc_socket_peer_addr(&sock, &a, &err);
+    if (err == CC_NET_OK) {
+        printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
     }
-    printf("listening on %s\n", PORT);
 
-    /* Accept loop - handle a few connections for demo */
-    for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        CCSocket client = ln.accept(&err);
-        if (err != CC_NET_OK) {
-            printf("accept error: %d\n", err);
+    for (;;) {
+        cc_arena_reset(&a);
+        CCSlice data = cc_socket_read(&sock, &a, 1024, &err);
+        if (err != CC_NET_OK || data.len == 0) {
+            printf("client disconnected\n");
             break;
         }
-
-        /* In a real server, spawn into nursery. For simplicity, handle inline. */
-        handle_client(client);
+        printf("echo %zu bytes\n", data.len);
+        (void)cc_socket_write(&sock, data.ptr, data.len, &err);
+        if (err != CC_NET_OK) break;
     }
+    cc_socket_close(&sock);
+}
+
+/* In-process client: connect, send, read echo, close. */
+static void run_test_client(void) {
+    CCNetError err = CC_NET_OK;
+    CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1, &err);
+    if (err != CC_NET_OK) { fprintf(stderr, "dial error: %d\n", err); return; }
+
+    const char msg[] = "hello from test\n";
+    (void)cc_socket_write(&sock, msg, sizeof(msg) - 1, &err);
+    if (err != CC_NET_OK) { cc_socket_close(&sock); return; }
+
+    char buf[64] = {0};
+    size_t got = cc_socket_read_into(&sock, buf, sizeof(buf) - 1, &err);
+    printf("test client got %zu bytes: %.*s", got, (int)got, buf);
+    cc_socket_close(&sock);
+}
+
+static bool parse_test_flag(int argc, char** argv) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    if (!a.base) return false;
+    static const CCArgSpec ARGS[] = {
+        { .long_ = "test", .kind = CC_ARG_FLAG,
+          .desc = "Self-test: spawn a client, do one round-trip, exit." },
+    };
+    CCCliParse cli = cc_cli_parse_args(argc, argv, ARGS,
+                                       cc_arg_spec_count(ARGS), &a);
+    if (!cli.ok) { cli.print(stderr); return false; }
+    return cli.args.has("test");
+}
+
+int main(int argc, char** argv) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
+    bool test_mode = parse_test_flag(argc, argv);
+
+    CCNetError err = CC_NET_OK;
+    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1, &err);
+    if (err != CC_NET_OK) { printf("listen error: %d\n", err); return 1; }
+    printf("listening on %s (%s mode)\n", PORT, test_mode ? "test" : "demo");
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+
+        /* Test-mode client: sibling task of the handlers. */
+        if (test_mode) {
+            n->spawn(() => run_test_client());
+        }
+
+        /* Accept loop on main's fiber. Each accepted socket is handed to a
+         * freshly spawned handler; the nursery's @destroy joins them all. */
+        do {
+            //bug: should work: CCSocket sock = ln.accept(&err);
+            CCSocket sock = cc_listener_accept(&ln, &err);
+            if (err != CC_NET_OK) {
+                /* Real-server shutdown path: listener closed, fd gone,
+                 * peer unreachable, etc. */
+                printf("accept stopped: %d\n", err);
+                break;
+            }
+            n->spawn(() => [sock] { handle_client(sock); });
+        } while (!test_mode);  /* Test mode bails after one connection so CI is deterministic */
+    }
+    /* nursery @destroy: accept loop exited, every handler (and the test
+     * client, if any) have drained. */
 
     cc_listener_close(&ln);
     printf("server done\n");

@@ -256,19 +256,9 @@ static inline CCRes(size_t, CCIoError) cc__file_read_buf_count(CCFile *file, voi
 #define cc_file_read_buf4(file, buf, n, out) cc_file_read_buf_into((file), (buf), (n), (out))
 #define cc_file_read_buf(...) CC__FILE_SELECT_3_OR_4(__VA_ARGS__, cc_file_read_buf4, cc_file_read_buf3)(__VA_ARGS__)
 
-/* CCFile UFCS uses the shared generic snake_case helper:
-   smart-lowering CCFile -> cc_file_*, matching the existing C API. */
-
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCFile", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-    (void)cc_type_register("CCFile*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-}
-#endif
+/* CCFile UFCS dispatch is covered by the global `CC*` registration in
+   cc_arena.cch (smart-lowering CCFile -> cc_file_*, matching the
+   existing C API); no per-type opt-in is needed here. */
 
 // Stdout/Stderr convenience
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);

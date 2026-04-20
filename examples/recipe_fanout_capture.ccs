@@ -1,53 +1,54 @@
 /*
  * Recipe: Fan-Out with Per-Task Capture
  *
- * Spawns N tasks, each with its own captured data, then aggregates.
+ * When spawning tasks in a loop, each closure must capture its own
+ * copy of the loop variable. Otherwise every task sees the final
+ * value of the loop variable.
  *
- * Key idiom: copy the loop variable to a local BEFORE the closure.
- * A closure value-captures the outer locals visible at its point of
- * creation, so each iteration must introduce a fresh local for the
- * closure to copy; otherwise every closure would share the single
- * outer `i` at its final value.
- *
- * Result aggregation: each task writes to a disjoint slot in a shared
- * array. No mutex is needed because the tasks' writes never overlap.
- *
- * See spec §1.2 for capture semantics.
+ * Correct idiom: copy the loop variable to a fresh local before
+ * creating the closure.
  */
+
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_TASKS 5
 
 static int results[NUM_TASKS];
-static int compute(int x) { return x * x; }
+
+static int compute(int x) {
+    return x * x;
+}
 
 int main(void) {
-    /* Any bare `!>` in this scope (see the nursery below) forwards its
-     * error here. Omit @errhandler and the bare `!>` fails to compile. */
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
 
-    printf("=== fan-out: spawn %d tasks ===\n", NUM_TASKS);
+    printf("=== Fan-out: spawning %d tasks ===\n", NUM_TASKS);
+
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+
         for (int i = 0; i < NUM_TASKS; i++) {
-            int task_id = i;               /* fresh local per iteration */
+            int task_id = i;                    /* fresh local per iteration */
+
             n->spawn(() => {
                 int r = compute(task_id);
                 printf("  task %d: compute(%d) = %d\n", task_id, task_id, r);
-                results[task_id] = r;      /* disjoint slot: no race */
+                results[task_id] = r;           /* disjoint write, no race */
             });
         }
     }
 
-    printf("\n=== results ===\n");
+    printf("\n=== Results ===\n");
     int sum = 0;
     for (int i = 0; i < NUM_TASKS; i++) {
         printf("  results[%d] = %d\n", i, results[i]);
         sum += results[i];
     }
-    printf("sum = %d\n", sum);
+    printf("sum = %d (expected 30)\n", sum);
 
-    /* sanity: 0 + 1 + 4 + 9 + 16 = 30 */
     return (sum == 30) ? 0 : 1;
 }
