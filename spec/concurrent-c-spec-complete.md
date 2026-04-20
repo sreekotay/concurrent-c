@@ -1874,7 +1874,7 @@ This prevents data races while allowing explicit shared state through safe wrapp
 
 ### 6.2 Direct OS Threading (Advanced)
 
-**For most applications, use `@nursery { spawn ... }` instead of the APIs in this section.**
+**For most applications, use `CCNursery` (§8.1) instead of the APIs in this section.**
 
 Direct OS thread control is rarely needed. For details on `ThreadGroup` and `spawn_thread` for NUMA/affinity/CPU-pinning use cases, see **Appendix D: Advanced Runtime Control**.
 
@@ -2343,7 +2343,7 @@ Notes:
 
 - `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
-- `close(tx)` / `close(rx)` (or `closing(tx)` in a nursery) closes the underlying channel.
+- `close(tx)` / `close(rx)` (or `n->close_on(tx)` on a nursery) closes the underlying channel.
 - `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
 
 **Ownership idiom:**
@@ -2351,16 +2351,14 @@ Notes:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = cc_channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy { cc_channel_free(ch); };
 
-@nursery {
-    spawn(consumer(rx));
-    @closing(tx) {
-        spawn(producer(tx));
-    }
-}
+CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+outer->spawn(() => consumer(rx));
 
-cc_channel_free(ch);  // free what you created
+CCNursery* inner = cc_nursery_new(outer) !> @destroy;
+inner->close_on(tx);
+inner->spawn(() => producer(tx));
 ```
 
 **Error channels:**
@@ -2457,24 +2455,22 @@ Both execute tasks immediately. The difference is purely in `recv` sequencing.
 ```c
 CompressedResult*[~16 ordered >] results_tx;
 CompressedResult*[~16 ordered <] results_rx;
-CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
+CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy { cc_channel_free(ch); };
 
-@nursery {
-    // Consumer: receives results in submission order
-    spawn(() => [results_rx, out] {
-        CompressedResult* r;
-        while (cc_io_avail(results_rx.recv(&r))) {
-            cc_file_write(out, r->data);
-            cc_arena_free(&r->arena);
-        }
-    });
-    
-    // Producer: spawn tasks, results queued in order
-    @closing(results_tx) {
-        while (read_block(&blk)) {
-            cc_channel_send_task(results_tx, () => [blk] compress_block(blk));
-        }
+CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+outer->spawn(() => {
+    CompressedResult* r;
+    while (cc_io_avail(results_rx.recv(&r))) {
+        cc_file_write(out, r->data);
+        cc_arena_free(&r->arena);
     }
+});
+
+// Producer nursery closes results_tx after all workers exit, so the consumer sees EOF.
+CCNursery* inner = cc_nursery_new(outer) !> @destroy;
+inner->close_on(results_tx);
+while (read_block(&blk)) {
+    cc_channel_send_task(results_tx, () => [blk] compress_block(blk));
 }
 
 cc_channel_free(ch);
