@@ -20,6 +20,7 @@
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
 #include "visitor/pass_result_unwrap.h"
+#include "visitor/pass_unwrap_destroy.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_type_syntax.h"
@@ -3823,6 +3824,32 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rew_infer;
                 src_ufcs_len = strlen(src_ufcs);
+            }
+        }
+        /* Lift any `@destroy { body }` suffix on `!>` / `?>` statements
+         * into a standalone `@defer { body };` BEFORE the unwrap pass
+         * runs.  This lets the normal precedence chain take over: the
+         * `!>` / `?>` rewriter sees a canonical `expr OP {..} ;` form,
+         * and the later `cc__rewrite_defer_syntax` call naturally picks
+         * up the synthesized `@defer`.  No new end-of-pipeline plumbing
+         * is required. */
+        if (src_ufcs && src_ufcs_len &&
+            strstr(src_ufcs, "@destroy") != NULL &&
+            (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
+            char* ud_out = NULL;
+            size_t ud_out_len = 0;
+            int ud_r = cc__rewrite_unwrap_destroy_suffix(src_ufcs, src_ufcs_len, &ud_out, &ud_out_len);
+            if (ud_r < 0) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (ud_r > 0 && ud_out) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = ud_out;
+                src_ufcs_len = ud_out_len;
             }
         }
         /* Lower @err / @errhandler / <? / =<! ... @err for host C emission (parse already

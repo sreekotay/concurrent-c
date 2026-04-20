@@ -15,6 +15,28 @@
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
 
+/* Detect whether the trimmed expression `s[a..b)` is a bare call to a
+ * raw-pointer-returning function registered by cc_pointer_fn_registry_scan
+ * (e.g. `fopen(...)`, `cc_nursery_create()`).  When true, the normal
+ * Result-struct lowering would emit `cc_is_err(tmp)`/`cc_value(tmp)` on a
+ * plain pointer, which TCC rejects with "struct or union expected"; this
+ * flag switches the emission to a NULL-check + synthesized CCError form. */
+static int cc__ru_expr_is_pointer_returning_call(const char* s, size_t a, size_t b) {
+    while (a < b && isspace((unsigned char)s[a])) a++;
+    while (b > a && isspace((unsigned char)s[b - 1])) b--;
+    if (a >= b) return 0;
+    if (s[b - 1] != ')') return 0;
+    if (!cc_is_ident_start(s[a])) return 0;
+    size_t name_a = a;
+    size_t name_b = a;
+    while (name_b < b && cc_is_ident_char(s[name_b])) name_b++;
+    if (name_b == name_a) return 0;
+    size_t k = name_b;
+    while (k < b && isspace((unsigned char)s[k])) k++;
+    if (k >= b || s[k] != '(') return 0;
+    return cc_pointer_fn_registry_contains(s + name_a, name_b - name_a);
+}
+
 /* ------------------------------------------------------------------
  * `?>` — default-value expression operator (Swift/C# `??`, Kotlin `?:`).
  *
@@ -143,6 +165,51 @@ static void cc__skip_str_backward(const char* s, size_t* i) {
     *i = 0;
 }
 
+/* Skip a block comment scanning BACKWARD.  On entry *i points at the `/`
+ * of the closing delimiter; the caller has verified s[*i - 1] == '*'.
+ * On return *i points at the `/` of the opening delimiter, or 0 if we
+ * ran off the start without finding one.  Needed to keep the LHS scan
+ * from mis-parsing block-comment contents as real code — a block comment
+ * containing braces, parens, or semicolons is otherwise indistinguishable
+ * from surrounding source and blew past the enclosing statement boundary
+ * (see examples/hello.ccs reproducer). */
+static void cc__skip_block_comment_backward(const char* s, size_t* i) {
+    if (*i < 1) { *i = 0; return; }
+    size_t k = *i - 1;
+    while (k > 0) {
+        k--;
+        if (s[k] == '/' && k + 1 < *i && s[k + 1] == '*') {
+            *i = k;
+            return;
+        }
+    }
+    *i = 0;
+}
+
+/* Check whether the scanner is currently inside a single-line `//` comment
+ * on the line that contains position `pos`.  We walk back from `pos` to
+ * the previous newline (or SOF); if we find a `//` (not inside a string)
+ * before reaching `pos`, then `pos` sits inside a line comment and should
+ * be skipped.  Strings on the same line are respected via a simple forward
+ * re-scan from line start. */
+static int cc__pos_in_line_comment(const char* s, size_t pos) {
+    size_t line_start = pos;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    int in_str = 0;
+    char qch = 0;
+    for (size_t k = line_start; k < pos; k++) {
+        char c = s[k];
+        if (in_str) {
+            if (c == '\\' && k + 1 < pos) { k++; continue; }
+            if (c == qch) in_str = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { in_str = 1; qch = c; continue; }
+        if (c == '/' && k + 1 < pos && s[k + 1] == '/') return 1;
+    }
+    return 0;
+}
+
 /* Find the start of the LHS expression by scanning backward from `from`
  * (exclusive). Returns the position of the first byte of the LHS. */
 static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
@@ -151,6 +218,20 @@ static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
     while (i > 0) {
         i--;
         char c = s[i];
+        /* Block comment: the closing delimiter seen backward is `/` at
+         * s[i] preceded by `*` at s[i-1].  Skip back to the matching
+         * opening delimiter. */
+        if (c == '/' && i > 0 && s[i - 1] == '*') {
+            cc__skip_block_comment_backward(s, &i);
+            continue;
+        }
+        /* Line comment: if this byte lies inside a `// ...` on its line,
+         * jump back to the line start so we don't misparse the comment
+         * body. */
+        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+            while (i > 0 && s[i] != '\n') i--;
+            continue;
+        }
         if (c == '"' || c == '\'') {
             cc__skip_str_backward(s, &i);
             continue;
@@ -270,8 +351,44 @@ static void cc__line_from_pos(const char* s, size_t pos, int* line) {
 }
 
 static void cc__trim_range(const char* s, size_t* a, size_t* b) {
-    while (*a < *b && isspace((unsigned char)s[*a])) (*a)++;
-    while (*b > *a && isspace((unsigned char)s[*b - 1])) (*b)--;
+    /* Trim whitespace AND leading/trailing block/line comments from the
+     * edges of [*a, *b).  Without stripping comments, the `!>` / `?>`
+     * rewrites blank any preceding block comment along with the LHS
+     * expression (see examples/hello.ccs: a block comment between
+     * `int main() {` and `cc_nursery_create()` was being overwritten
+     * by the replacement text's whitespace padding).  The edge-trim
+     * keeps real comment text intact by advancing the range past it
+     * so only the actual expression range is rewritten. */
+    int progress = 1;
+    while (progress && *a < *b) {
+        progress = 0;
+        while (*a < *b && isspace((unsigned char)s[*a])) { (*a)++; progress = 1; }
+        if (*a + 1 < *b && s[*a] == '/' && s[*a + 1] == '*') {
+            size_t k = *a + 2;
+            while (k + 1 < *b && !(s[k] == '*' && s[k + 1] == '/')) k++;
+            if (k + 1 < *b) { *a = k + 2; progress = 1; }
+            else { *a = *b; progress = 1; }
+        }
+        if (*a + 1 < *b && s[*a] == '/' && s[*a + 1] == '/') {
+            size_t k = *a + 2;
+            while (k < *b && s[k] != '\n') k++;
+            *a = k;
+            progress = 1;
+        }
+    }
+    progress = 1;
+    while (progress && *b > *a) {
+        progress = 0;
+        while (*b > *a && isspace((unsigned char)s[*b - 1])) { (*b)--; progress = 1; }
+        if (*b >= *a + 2 && s[*b - 1] == '/' && s[*b - 2] == '*') {
+            size_t k = *b - 2;
+            while (k > *a && !(s[k] == '/' && k + 1 < *b && s[k + 1] == '*')) k--;
+            if (k >= *a && s[k] == '/' && k + 1 < *b && s[k + 1] == '*') {
+                *b = k;
+                progress = 1;
+            }
+        }
+    }
 }
 
 /* Return 1 if the substring s[i..i+strlen(kw)) is exactly `kw` with no
@@ -487,17 +604,44 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     cc__append_n(&out, &ol, &oc, s, lhs_start);
     if (lhs_a > lhs_start) cc__append_n(&out, &ol, &oc, s + lhs_start, lhs_a - lhs_start);
 
-    /* Case 1 / 2: ternary, optionally with scoped binder on the err arm. */
+    /* Case 1 / 2: ternary, optionally with scoped binder on the err arm.
+     * When the LHS is a pointer-returning call, lower via `(tmp) != NULL ?
+     * (tmp) : DEFAULT` and synthesize a `CCError{ CC_ERR_NULL, ... }` for
+     * any binder. */
+    int lhs_is_ptr = cc__ru_expr_is_pointer_returning_call(s, lhs_a, lhs_b);
+    char ptr_err_literal[1024] = {0};
+    if (lhs_is_ptr) {
+        char rel[1024];
+        const char* f = cc_path_rel_to_repo(
+            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+        size_t exl = lhs_b - lhs_a;
+        if (exl > 200) exl = 200;
+        snprintf(ptr_err_literal, sizeof(ptr_err_literal),
+                 "(CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }",
+                 (int)exl, s + lhs_a, f, line_no);
+    }
+
     cc__append_str(&out, &ol, &oc, "({ __typeof__(");
     cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-    cc_sb_append_fmt(&out, &ol, &oc, "); cc_is_ok(%s) ? cc_value(%s) : ",
-                     tmpv, tmpv);
+    if (lhs_is_ptr) {
+        cc_sb_append_fmt(&out, &ol, &oc, "); ((%s) != NULL) ? (%s) : ",
+                         tmpv, tmpv);
+    } else {
+        cc_sb_append_fmt(&out, &ol, &oc, "); cc_is_ok(%s) ? cc_value(%s) : ",
+                         tmpv, tmpv);
+    }
     if (has_binder) {
-        cc_sb_append_fmt(&out, &ol, &oc,
-                         "({ __typeof__(cc_error(%s)) %s = cc_error(%s); (",
-                         tmpv, binder, tmpv);
+        if (lhs_is_ptr) {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "({ CCError %s = %s; (",
+                             binder, ptr_err_literal);
+        } else {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "({ __typeof__(cc_error(%s)) %s = cc_error(%s); (",
+                             tmpv, binder, tmpv);
+        }
         cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
         cc__append_str(&out, &ol, &oc, "); })");
     } else {
@@ -1289,14 +1433,27 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, splice_from);
 
+    int call_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
     cc__append_str(&out, &ol, &oc, "{ __typeof__(");
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-    cc_sb_append_fmt(&out, &ol, &oc,
-                     "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                     tmpv, binder, tmpv);
+    if (call_is_ptr) {
+        char rel[1024];
+        const char* f = cc_path_rel_to_repo(
+            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+        size_t exl = call_b - call_a;
+        if (exl > 200) exl = 200;
+        cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
+                         binder, (int)exl, s + call_a, f, op_line);
+    } else {
+        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                         tmpv, binder, tmpv);
+    }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
         /* Expression body: terminate with `;` so it reads as a statement. */
@@ -1330,6 +1487,18 @@ static size_t cc__find_bang_lhs_start_ex(const char* s, size_t op_at,
     while (i > 0) {
         i--;
         char c = s[i];
+        /* Skip block-comment bodies: closing delimiter seen backward is
+         * `/` preceded by `*`.  Without this the scan happily walks
+         * through commented-out code and picks up phantom braces/parens
+         * as the statement boundary (examples/hello.ccs repro). */
+        if (c == '/' && i > 0 && s[i - 1] == '*') {
+            cc__skip_block_comment_backward(s, &i);
+            continue;
+        }
+        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+            while (i > 0 && s[i] != '\n') i--;
+            continue;
+        }
         if (c == '"' || c == '\'') {
             cc__skip_str_backward(s, &i);
             continue;
@@ -1494,6 +1663,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
          * swallow the only `;` in sight. */
         size_t splice_to = scan;
 
+        int bare_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
         char* out = NULL;
         size_t ol = 0, oc = 0;
         cc__append_n(&out, &ol, &oc, s, call_start);
@@ -1501,12 +1671,27 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
         cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-        cc_sb_append_fmt(&out, &ol, &oc,
-                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                         tmpv, binder, tmpv);
+        if (bare_is_ptr) {
+            char rel[1024];
+            const char* ff = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            size_t exl = call_b - call_a;
+            if (exl > 200) exl = 200;
+            cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
+                             binder, (int)exl, s + call_a, ff, line_no);
+        } else {
+            cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                             tmpv, binder, tmpv);
+        }
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
-        cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+        if (bare_is_ptr)
+            cc_sb_append_fmt(&out, &ol, &oc, " } (%s); })", tmpv);
+        else
+            cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
         free(substituted);
         if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
         *out_buf = out;
@@ -1579,6 +1764,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     char tmpv[48];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_x_%d", tid);
 
+    int expr_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
     char* out = NULL;
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, call_start);
@@ -1586,11 +1772,25 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-    if (has_binder) {
-        cc_sb_append_fmt(&out, &ol, &oc,
-                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                         tmpv, binder, tmpv);
+    if (expr_is_ptr) {
+        cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
+        if (has_binder) {
+            char rel[1024];
+            const char* ff = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            size_t exl = call_b - call_a;
+            if (exl > 200) exl = 200;
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
+                             binder, (int)exl, s + call_a, ff, line_no);
+        }
+    } else {
+        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
+        if (has_binder) {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                             tmpv, binder, tmpv);
+        }
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (!is_block) {
@@ -1599,7 +1799,10 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
          * processed already ends with `;` — skip). */
         (void)0;
     }
-    cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+    if (expr_is_ptr)
+        cc_sb_append_fmt(&out, &ol, &oc, " } (%s); })", tmpv);
+    else
+        cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
     free(processed);
     if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
     *out_buf = out;

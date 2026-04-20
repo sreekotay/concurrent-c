@@ -1,0 +1,13 @@
+// Smoke: ?> default-value form on pointer; NULL returns -> default used.
+#include <stdio.h>
+
+static char* get_null_str(void) { return NULL; }
+static int g_fallback_buf = 7;
+
+int main(void) {
+    char fallback[] = "fallback";
+    const char* s = get_null_str() ?> fallback;
+    printf("s=%s\n", s);
+    (void)g_fallback_buf;
+    return 0;
+}

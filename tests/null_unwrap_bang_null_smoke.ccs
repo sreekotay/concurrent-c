@@ -1,0 +1,11 @@
+// Smoke: !> on a pointer-returning C function; value is NULL, body fires and diverges.
+#include <stdio.h>
+#include <stdlib.h>
+
+static int* get_null(void) { return NULL; }
+
+int main(void) {
+    int* p = get_null() !> { printf("got NULL\n"); exit(0); };
+    printf("UNEXPECTED p=%p\n", (void*)p);
+    return 1;
+}

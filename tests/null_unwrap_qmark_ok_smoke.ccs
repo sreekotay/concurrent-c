@@ -1,0 +1,12 @@
+// Smoke: ?> on pointer; non-NULL returned -> original value flows through.
+#include <stdio.h>
+
+static const char g_good[] = "real";
+static const char* get_real(void) { return g_good; }
+
+int main(void) {
+    const char fallback[] = "fallback";
+    const char* s = get_real() ?> fallback;
+    printf("s=%s\n", s);
+    return 0;
+}

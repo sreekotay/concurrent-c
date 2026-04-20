@@ -47,6 +47,7 @@ typedef enum {
     CC_ERR_CLOSED,
     CC_ERR_OVERFLOW,
     CC_ERR_UNDERFLOW,
+    CC_ERR_NULL,               /* Unexpected NULL return from a pointer-returning call (synthesized by !> / ?>). */
     CC_ERR_USER = 1000  /* User-defined errors start here */
 } CCErrorKind;
 
