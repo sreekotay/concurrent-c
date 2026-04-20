@@ -20,7 +20,6 @@
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_result.cch>
-#include <ccc/cc_optional.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include <ccc/cc_io_error.cch>

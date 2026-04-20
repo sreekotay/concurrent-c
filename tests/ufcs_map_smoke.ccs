@@ -12,23 +12,23 @@ int main(void) {
     m.insert(2, 200);
     m.insert(3, 300);
     
-    int? val = m.get(2);
-    if (!val.has || *val != 200) {
+    int* val = m.get(2);
+    if (!val || *val != 200) {
         printf("FAIL: get(2) expected 200\n");
         return 1;
     }
-    
+
     /* Test remove */
     int removed = m.remove(2);
     if (!removed) {
         printf("FAIL: remove(2) should return true\n");
         return 1;
     }
-    
+
     /* Verify removed */
-    int? after = m.get(2);
-    if (after.has) {
-        printf("FAIL: get(2) should be None after remove\n");
+    int* after = m.get(2);
+    if (after) {
+        printf("FAIL: get(2) should be NULL after remove\n");
         return 1;
     }
     

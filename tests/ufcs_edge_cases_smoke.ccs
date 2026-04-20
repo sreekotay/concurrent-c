@@ -40,15 +40,15 @@ int main(void) {
         pc.items->push(20);  // Pointer receiver - must become CCVec_int_push(pc.items, 20)
         pc.items->push(30);
         
-        // Verify Vec contents using UFCS .get() which returns optional
-        int? v0 = c.items.get(0);
-        int? v1 = pc.items->get(1);
-        int? v2 = c.items.get(2);
-        
+        // Verify Vec contents using UFCS .get() which returns T* (NULL if OOB).
+        int* v0 = c.items.get(0);
+        int* v1 = pc.items->get(1);
+        int* v2 = c.items.get(2);
+
         if (c.items.len() == 3 &&
-            v0.has && *v0 == 10 &&
-            v1.has && *v1 == 20 &&
-            v2.has && *v2 == 30) {
+            v0 && *v0 == 10 &&
+            v1 && *v1 == 20 &&
+            v2 && *v2 == 30) {
             cc_std_out.write("case3:ok\n");
         } else {
             cc_std_out.write("case3:FAIL\n");

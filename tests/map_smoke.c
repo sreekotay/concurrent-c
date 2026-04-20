@@ -25,17 +25,17 @@ int main(void) {
     if (IntMap_put(m, k1, v1, &rc) < 0) return 3;
     if (IntMap_put(m, k2, v2, &rc) < 0) return 4;
 
-    /* Get now returns an optional */
-    CCOptional_int opt1 = IntMap_get(m, k1);
-    CCOptional_int opt2 = IntMap_get(m, k2);
-    bool ok1 = opt1.has && opt1.u.value == v1;
-    bool ok2 = opt2.has && opt2.u.value == v2;
+    /* Get returns a pointer (NULL if absent). */
+    int *got1 = IntMap_get(m, k1);
+    int *got2 = IntMap_get(m, k2);
+    bool ok1 = got1 && *got1 == v1;
+    bool ok2 = got2 && *got2 == v2;
     if (!ok1 || !ok2) return 5;
-    
+
     /* Test deletion */
     if (!IntMap_del(m, k1)) return 6;
-    CCOptional_int opt3 = IntMap_get(m, k1);
-    if (opt3.has) return 7;  /* should not find deleted key */
+    int *got3 = IntMap_get(m, k1);
+    if (got3) return 7;  /* should not find deleted key */
     
     /* Test len */
     if (IntMap_len(m) != 1) return 8;

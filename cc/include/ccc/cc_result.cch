@@ -1,7 +1,7 @@
 /*
  * Generic Result helpers for generated C.
  *
- * TYPE MACROS (defined in cc_optional.cch):
+ * TYPE MACROS (defined at the bottom of this header):
  *   CCRes(T, E)        - CCResult_T_E
  *   CCResPtr(T, E)     - CCResult_Tptr_E
  *
@@ -30,7 +30,7 @@
 #include <ccc/cc_compat.cch>
 
 /* Common error type - a simple tagged enum with message.
- * Skipped during cccn parse phase (stubs provide placeholders). */
+ * Skipped during parser-mode pre-parse (stubs provide placeholders). */
 #ifndef CC_PARSER_MODE
 typedef enum {
     CC_ERR_NONE = 0,
@@ -234,7 +234,7 @@ static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
 #ifdef CC_PARSER_MODE
 
 /* Generic error struct for parser mode - has common fields so code compiles.
-   Guard allows cccn parse stubs to predefine this. */
+   Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_GENERIC_ERROR_DEFINED
 #define __CC_GENERIC_ERROR_DEFINED
 typedef struct __CCGenericError {
@@ -261,7 +261,7 @@ typedef __CCGenericError CCError;
 /* Generic result placeholder struct - used for ALL result types during parsing.
    Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
    Uses named union 'u' matching the real struct layout.
-   Guard allows cccn parse stubs to predefine this. */
+   Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_RESULT_GENERIC_DEFINED
 #define __CC_RESULT_GENERIC_DEFINED
 typedef struct __CCResultGeneric {
@@ -514,6 +514,37 @@ typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
     } \
     *(T*)(void*)&__r.u.error; \
 })
+#endif
+
+/* ============================================================================
+ * Convenience type/constructor macros for Result surfaces.
+ *
+ * Type macros expand identically in parser/codegen modes (they just form
+ * typedef names); only the constructor expansions differ.
+ *
+ *   CCRes(T, E)          -> CCResult_T_E
+ *   CCResPtr(T, E)       -> CCResult_Tptr_E
+ *   CCRes_ok(T, E, v)    -> cc_ok_CCResult_T_E(v)    (parser mode: typed stub)
+ *   CCRes_err(T, E, e)   -> cc_err_CCResult_T_E(e)
+ *   CCResPtr_ok(T, E, v) -> cc_ok_CCResult_Tptr_E(v)
+ *   CCResPtr_err(T, E, e)-> cc_err_CCResult_Tptr_E(e)
+ *
+ * (retired) The companion Optional macros (CCOpt(T), CCOpt_some, CCOpt_none,
+ * CCOptRes, CCResOpt) used to live in cc_optional.cch and are now gone; see
+ * cc/include/ccc/DEPRECATIONS.md for the migration matrix.
+ * ============================================================================ */
+#define CCRes(T, E) CCResult_##T##_##E
+#define CCResPtr(T, E) CCResult_##T##ptr_##E
+#ifdef CC_PARSER_MODE
+#define CCRes_ok(T, E, v) ((void)(v), (CCResult_##T##_##E){ .ok = 1 })
+#define CCRes_err(T, E, e) ((void)(e), (CCResult_##T##_##E){ .ok = 0 })
+#define CCResPtr_ok(T, E, v) ((void)(v), (CCResult_##T##ptr_##E){ .ok = 1 })
+#define CCResPtr_err(T, E, e) ((void)(e), (CCResult_##T##ptr_##E){ .ok = 0 })
+#else
+#define CCRes_ok(T, E, v) cc_ok_CCResult_##T##_##E(v)
+#define CCRes_err(T, E, e) cc_err_CCResult_##T##_##E(e)
+#define CCResPtr_ok(T, E, v) cc_ok_CCResult_##T##ptr_##E(v)
+#define CCResPtr_err(T, E, e) cc_err_CCResult_##T##ptr_##E(e)
 #endif
 
 #endif /* CC_RESULT_H */

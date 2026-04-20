@@ -12,8 +12,8 @@ int main(void) {
     if (IntVec_push(&v, 20) != 0) return 3;
     if (IntVec_push(&v, 30) != 0) return 4;
 
-    CCOptional_int popped = IntVec_pop(&v);
-    if (!popped.has || popped.u.value != 30) return 5;
+    int popped = 0;
+    if (!IntVec_pop(&v, &popped) || popped != 30) return 5;
     if (IntVec_len(&v) != 2) return 6;
 
     CCSlice msg = cc_slice_from_buffer("vec smoke ok\n", 14);

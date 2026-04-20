@@ -48,15 +48,15 @@ int main(void) {
     numbers.push(20);
     numbers.push(30);
     
-    int? val = numbers.get(1);   // Optional return: Some(20)
-    int? oob = numbers.get(100); // Optional return: None
-    
+    int* val = numbers.get(1);   // Nullable pointer: &20
+    int* oob = numbers.get(100); // Nullable pointer: NULL
+
     // Map<K, V> - hash table
     Map<int, char*> names = map_new<int, char*>(&arena);
     names.insert(1, "Alice");
     names.insert(2, "Bob");
-    
-    char*? name = names.get(1);  // Optional return: Some("Alice")
+
+    char** name = names.get(1);  // Nullable pointer: &"Alice"
     
     cc_heap_arena_free(&arena);
     return 0;

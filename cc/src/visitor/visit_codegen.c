@@ -3609,44 +3609,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             continue;
                         }
                         
-                        int opt_predeclared = (strcmp(mangled_elem, "int") == 0 ||
-                                               strcmp(mangled_elem, "bool") == 0 ||
-                                               strcmp(mangled_elem, "char") == 0 ||
-                                               strcmp(mangled_elem, "size_t") == 0 ||
-                                               strcmp(mangled_elem, "voidptr") == 0 ||
-                                               strcmp(mangled_elem, "charptr") == 0 ||
-                                               strcmp(mangled_elem, "long") == 0 ||
-                                               strcmp(mangled_elem, "short") == 0 ||
-                                               strcmp(mangled_elem, "float") == 0 ||
-                                               strcmp(mangled_elem, "double") == 0 ||
-                                               strcmp(mangled_elem, "void") == 0 ||
-                                               strcmp(mangled_elem, "CCSlice") == 0 ||
-                                               strcmp(mangled_elem, "CCSliceUnique") == 0);
-                        int is_complex = (!opt_predeclared ||
-                                          strchr(inst->type1, '*') != NULL || 
-                                          strncmp(inst->type1, "struct ", 7) == 0 ||
-                                          strncmp(inst->type1, "union ", 6) == 0);
-                        if (is_complex) {
-                            if (!opt_predeclared) {
-                                char line[512];
-                                snprintf(line, sizeof(line), "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
-                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                            }
-                            {
-                                char line[512];
-                                snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
-                                        inst->type1, inst->mangled_name, mangled_elem);
-                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                            }
-                        } else {
-                            char line[512];
-                            snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                            cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                        }
+                        /* Optionals (T?) are retired; pointer-return / bool-out forms replace them.
+                         * Always emit the 2-arg convenience macro — vec.cch treats the old
+                         * 3-arg CC_VEC_DECL_ARENA_FULL form as ignoring its OptT slot. */
+                        char line[512];
+                        snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
                     }
                 }
                 
-                /* Emit Map declarations (with CC_DECL_OPTIONAL for value type) */
+                /* Emit Map declarations (optionals retired — use the 5-arg convenience macro). */
                 for (size_t i = 0; i < n_map; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                     if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
@@ -3659,26 +3631,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                         } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
                             hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                         }
-                        char mangled_val[128];
-                        cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
-                        {
-                            int opt_predeclared = (strcmp(mangled_val, "charptr") == 0 ||
-                                                   strcmp(mangled_val, "intptr") == 0 ||
-                                                   strcmp(mangled_val, "voidptr") == 0 ||
-                                                   strcmp(mangled_val, "int") == 0 ||
-                                                   strcmp(mangled_val, "char") == 0);
-                            if (!opt_predeclared) {
-                                char line[512];
-                                snprintf(line, sizeof(line), "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_val, inst->type2);
-                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                            }
-                        }
-                        {
-                            char line[512];
-                            snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
-                                    inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
-                            cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                        }
+                        char line[512];
+                        snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
+                                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
                     }
                 }
 
@@ -3755,23 +3711,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = strlen(src_ufcs);
         }
         /* Reset type registries once before the type-rewriting passes so they
-           accumulate correctly across the optional and result scans below.
-           Previously each scan function reset on entry, losing types collected
-           by earlier calls in the same compilation unit. */
+           accumulate correctly across the result scan below.  Previously each
+           scan function reset on entry, losing types collected by earlier
+           calls in the same compilation unit.
+           (The retired optional rewriter used to run here first.) */
         cc__cg_reset_type_registries();
         cc_result_spec_table_set_global(&cc__cg_result_specs);
-        /* Rewrite T? -> CCOptional_T */
-        {
-            if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: calling cc__rewrite_optional_types_text, len=%zu\n", src_ufcs_len);
-            char* rew_opt = cc__rewrite_optional_types_text(ctx, src_ufcs, src_ufcs_len);
-            if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: rew_opt=%p\n", (void*)rew_opt);
-            if (rew_opt) {
-            if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rew_opt;
-                src_ufcs_len = strlen(src_ufcs);
-                if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: new len=%zu\n", src_ufcs_len);
-            }
-        }
         /* Rewrite T!>(E) -> CCResult_T_E and collect result type pairs */
         {
             char* rew_res = cc__rewrite_result_types_text(ctx, src_ufcs, src_ufcs_len);
@@ -3795,96 +3740,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
-        /* Insert optional type declarations for custom types.
-           Each CC_DECL_OPTIONAL is inserted right before the first use of that specific
-           optional type, to ensure the underlying type is defined by then. */
-        if (cc__cg_optional_type_count > 0) {
-            /* Sort types by their first usage position (descending) so we can insert
-               from end to start without invalidating positions */
-            size_t* type_positions = (size_t*)malloc(cc__cg_optional_type_count * sizeof(size_t));
-            size_t* sorted_indices_buf = (size_t*)malloc(cc__cg_optional_type_count * sizeof(size_t));
-            if (!type_positions || !sorted_indices_buf) {
-                free(type_positions);
-                free(sorted_indices_buf);
-                goto skip_optional_decls;
-            }
-            for (size_t oi = 0; oi < cc__cg_optional_type_count; oi++) {
-                CCCodegenOptionalType* p = &cc__cg_optional_types[oi];
-                char pattern1[256], pattern2[256];
-                snprintf(pattern1, sizeof(pattern1), "CCOptional_%s", p->mangled_type);
-                snprintf(pattern2, sizeof(pattern2), "__CC_OPTIONAL(%s)", p->mangled_type);
-                const char* found1 = strstr(src_ufcs, pattern1);
-                const char* found2 = strstr(src_ufcs, pattern2);
-                size_t pos = src_ufcs_len;
-                if (found1 && (size_t)(found1 - src_ufcs) < pos) {
-                    pos = (size_t)(found1 - src_ufcs);
-                }
-                if (found2 && (size_t)(found2 - src_ufcs) < pos) {
-                    pos = (size_t)(found2 - src_ufcs);
-                }
-                /* Back up to start of line/function */
-                if (pos < src_ufcs_len) {
-                    size_t search_pos = pos;
-                    while (search_pos > 0) {
-                        size_t line_start = search_pos;
-                        while (line_start > 0 && src_ufcs[line_start - 1] != '\n') line_start--;
-                        const char* line = src_ufcs + line_start;
-                        while (*line == ' ' || *line == '\t') line++;
-                        if ((strncmp(line, "int ", 4) == 0 || strncmp(line, "void ", 5) == 0 ||
-                             strncmp(line, "static ", 7) == 0 || strncmp(line, "CCOptional_", 11) == 0 ||
-                             strncmp(line, "__CC_OPTIONAL", 13) == 0 || strncmp(line, "typedef ", 8) == 0) &&
-                            strchr(line, '(') != NULL) {
-                            pos = line_start;
-                            break;
-                        }
-                        if (line_start == 0) break;
-                        search_pos = line_start - 1;
-                    }
-                }
-                type_positions[oi] = pos;
-            }
-            
-            /* Sort indices by position descending (bubble sort is fine for small N) */
-            size_t* sorted_indices = sorted_indices_buf;
-            for (size_t i = 0; i < cc__cg_optional_type_count; i++) sorted_indices[i] = i;
-            for (size_t i = 0; i < cc__cg_optional_type_count; i++) {
-                for (size_t j = i + 1; j < cc__cg_optional_type_count; j++) {
-                    if (type_positions[sorted_indices[j]] > type_positions[sorted_indices[i]]) {
-                        size_t tmp = sorted_indices[i];
-                        sorted_indices[i] = sorted_indices[j];
-                        sorted_indices[j] = tmp;
-                    }
-                }
-            }
-            
-            /* Insert each declaration at its position (from end to start) */
-            for (size_t si = 0; si < cc__cg_optional_type_count; si++) {
-                size_t oi = sorted_indices[si];
-                size_t insert_offset = type_positions[oi];
-                if (insert_offset >= src_ufcs_len) continue;
-                
-                CCCodegenOptionalType* p = &cc__cg_optional_types[oi];
-                char decl[512];
-                snprintf(decl, sizeof(decl), 
-                    "/* CC optional for %s */\nCC_DECL_OPTIONAL(CCOptional_%s, %s)\n",
-                    p->raw_type, p->mangled_type, p->raw_type);
-                
-                /* Build new source: prefix + decl + suffix */
-                char* new_src = NULL;
-                size_t new_len = 0, new_cap = 0;
-                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, insert_offset);
-                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, decl);
-                cc__sb_append_local(&new_src, &new_len, &new_cap, 
-                                    src_ufcs + insert_offset, src_ufcs_len - insert_offset);
-                
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = new_src;
-                src_ufcs_len = new_len;
-            }
-            free(type_positions);
-            free(sorted_indices_buf);
-        }
-        skip_optional_decls:;
+        /* (retired) The optional-type insertion pass used to splice
+         * `CC_DECL_OPTIONAL(CCOptional_T, T)` before first use. With optionals
+         * retired, no such insertion is needed. */
         /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on enclosing function return type */
         {
             char* rew_infer = cc__rewrite_inferred_result_constructors(src_ufcs, src_ufcs_len);
@@ -3942,15 +3800,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
-        /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
-        {
-            char* rew_unwrap = cc__rewrite_optional_unwrap_text(ctx, src_ufcs, src_ufcs_len);
-            if (rew_unwrap) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rew_unwrap;
-                src_ufcs_len = strlen(src_ufcs);
-            }
-        }
+        /* (retired) The `*opt -> cc_unwrap_opt(opt)` pass used to run here
+         * for variables declared with CCOptional_* type. Optionals are
+         * retired; `*ptr` dereferences now resolve normally via C. */
         /* Channel UFCS is handled by the AST UFCS pass (via the
            CCChanTx/CCChanRx registered hooks).  Drop the belt-and-suspenders
            text rewriter; it used to run here to normalize channel receivers

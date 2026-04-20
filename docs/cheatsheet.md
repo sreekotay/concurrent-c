@@ -149,19 +149,29 @@ FILE* f = fopen("data.txt", "r");
 
 ---
 
-## Optionals (`T?`)
+## "Maybe present" values (optionals are retired)
+
+Concurrent-C no longer has an `Optional<T>` / `T?` surface. For values that may
+be absent, pick the shape that matches the operation:
 
 ```c
-int? maybe = cc_some(42);
-int? empty = cc_none(int);
+// Nullable pointer — best for container lookups and struct fields.
+int* hit = m.get(key);
+if (hit) { use(*hit); }
 
-if (cc_is_some(maybe)) {
-    int val = *maybe;  // unwrap
-}
+// Bool + out-parameter — best for pop / next iterators.
+int out;
+if (v.pop(&out)) { use(out); }
 
-// Or use cc_unwrap (asserts non-empty)
-int val = cc_unwrap(maybe);
+// In-band sentinel — best for stream reads (empty slice = EOF).
+CCSlice chunk = try buf.next();
+if (chunk.len == 0) { /* EOF */ }
+
+// Result — best for fallible operations with a real error channel.
+int !>(CCError) lookup(int key);
 ```
+
+See `cc/include/ccc/DEPRECATIONS.md` for the full migration matrix.
 
 ---
 
