@@ -30,7 +30,7 @@ int main(void) {
     Widget w = { .base = 7 };
     Widget* wp = &w;
 
-    CCNursery* nursery = cc_nursery_create_child(NULL);
+    CCNursery* nursery = cc_nursery_create(NULL);
     if (!nursery) return 1;
 
     cc_nursery_spawn_closure0(nursery, () => [wp] {

@@ -91,7 +91,7 @@ static double bench_nursery_spawn_once(void) {
 static double bench_nursery_api_once(void) {
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         if (!n) {
             fprintf(stderr, "cc_nursery_create failed\n");
             abort();

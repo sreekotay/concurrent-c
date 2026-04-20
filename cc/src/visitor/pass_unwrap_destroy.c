@@ -86,9 +86,27 @@ static size_t cc__ud_stmt_start_backward(const char* s, size_t pos) {
             continue;
         }
         /* Skip line comment: if `k` is inside a `//...` on this line,
-         * rewind to just before the `//`. */
+         * rewind `i` to the position of the `//` so we still process any
+         * code tokens (e.g. a `{` or `}`) that appear before the comment
+         * on the same line. */
         if (c != '\n' && cc__ud_pos_in_line_comment(s, k)) {
-            while (i > 0 && s[i - 1] != '\n') i--;
+            size_t line_start = k;
+            while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+            size_t slash = line_start;
+            int in_str = 0; char qch = 0;
+            while (slash < k) {
+                char ch = s[slash];
+                if (in_str) {
+                    if (ch == '\\' && slash + 1 < k) { slash += 2; continue; }
+                    if (ch == qch) in_str = 0;
+                    slash++;
+                    continue;
+                }
+                if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; slash++; continue; }
+                if (ch == '/' && slash + 1 < k && s[slash + 1] == '/') break;
+                slash++;
+            }
+            i = slash;
             continue;
         }
         if (c == ')') { paren_depth++; i--; continue; }
@@ -341,9 +359,29 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
             cc__append_str(&out, &ol, &oc, "); ");
         }
-        cc__append_n(&out, &ol, &oc,
-                     src + body_s + 1,
-                     body_e - (body_s + 1));
+        /* The emitted `@defer { ... };` is injected inline on a single
+         * output line.  Collapse any newlines inside the user body to
+         * spaces so the entire synthesized statement stays on one line
+         * — multi-line `@destroy` bodies otherwise leave stray newlines
+         * and horizontal whitespace inside the `@defer` body that the
+         * downstream defer pass compresses with `cc__append_newline_
+         * padding`, shifting later text (spawns, closures) and
+         * confusing the closure-literal pass.  Line numbers are already
+         * preserved via the padding emitted for the original source
+         * span. */
+        for (size_t bi = body_s + 1; bi < body_e; ) {
+            char bc = src[bi];
+            /* Strip `//` line comments: they would comment out everything
+             * after them on the collapsed single line. */
+            if (bc == '/' && bi + 1 < body_e && src[bi + 1] == '/') {
+                while (bi < body_e && src[bi] != '\n') bi++;
+                continue;
+            }
+            /* Collapse newlines/tabs to spaces. */
+            char out_ch = (bc == '\n' || bc == '\r' || bc == '\t') ? ' ' : bc;
+            cc__append_n(&out, &ol, &oc, &out_ch, 1);
+            bi++;
+        }
         if (post_hook && have_name) {
             cc__append_str(&out, &ol, &oc, " ");
             cc__append_str(&out, &ol, &oc, post_hook);

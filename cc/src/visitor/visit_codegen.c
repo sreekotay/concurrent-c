@@ -3361,6 +3361,54 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Normalise the source so that the stage1 reparse (and the closure-lift
+       pass that uses it) always operates on fully-lowered, position-stable
+       text.  Both rewrites mutate potentially multi-line constructs into
+       single-expression forms; doing them here ensures the AST node spans
+       recorded by cc__rewrite_closure_literals_with_nodes remain in sync
+       with the text buffer throughout the rest of the pipeline.
+       Previously these ran AFTER closure lifting, which caused character
+       positions to shift under already-computed AST offsets — producing
+       truncated or misassigned closure bodies whenever the `!>` handler or
+       `@destroy` body spanned more than one line. */
+
+    /* 1. @destroy → @defer.  Track whether the rewrite fired; if it did,
+          the source now contains a synthesized @defer block whose text
+          displaces subsequent character positions — we must also lower
+          !> / ?> before the AST reparse so the closure-lift pass sees a
+          stable, already-normalised source. */
+    int ud_fired = 0;
+    if (src_ufcs && src_ufcs_len &&
+        strstr(src_ufcs, "@destroy") != NULL &&
+        (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
+        char* ud_out = NULL;
+        size_t ud_out_len = 0;
+        if (cc__rewrite_unwrap_destroy_suffix(src_ufcs, src_ufcs_len, &ud_out, &ud_out_len) > 0 && ud_out) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = ud_out;
+            src_ufcs_len = ud_out_len;
+            ud_fired = 1;
+        }
+    }
+    /* 2. !> / ?> → inline expression.  Only needed here when step 1
+          fired: the @defer insertion can shift char positions, so both
+          passes must run together before the closure-AST reparse.  When
+          step 1 did NOT fire there is no position disruption and the late
+          text-pass call (after closure lifting) is sufficient — running it
+          early in that case risks misrewriting the `T !>(E) name = expr`
+          declaration form before the pointer-fn registry is populated. */
+    if (ud_fired && ctx &&
+        src_ufcs && src_ufcs_len &&
+        (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
+        char* ru_out = NULL;
+        size_t ru_out_len = 0;
+        if (cc__rewrite_result_unwrap(ctx, src_ufcs, src_ufcs_len, &ru_out, &ru_out_len) > 0 && ru_out) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = ru_out;
+            src_ufcs_len = ru_out_len;
+        }
+    }
+
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering.
        These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
@@ -3824,32 +3872,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rew_infer;
                 src_ufcs_len = strlen(src_ufcs);
-            }
-        }
-        /* Lift any `@destroy { body }` suffix on `!>` / `?>` statements
-         * into a standalone `@defer { body };` BEFORE the unwrap pass
-         * runs.  This lets the normal precedence chain take over: the
-         * `!>` / `?>` rewriter sees a canonical `expr OP {..} ;` form,
-         * and the later `cc__rewrite_defer_syntax` call naturally picks
-         * up the synthesized `@defer`.  No new end-of-pipeline plumbing
-         * is required. */
-        if (src_ufcs && src_ufcs_len &&
-            strstr(src_ufcs, "@destroy") != NULL &&
-            (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
-            char* ud_out = NULL;
-            size_t ud_out_len = 0;
-            int ud_r = cc__rewrite_unwrap_destroy_suffix(src_ufcs, src_ufcs_len, &ud_out, &ud_out_len);
-            if (ud_r < 0) {
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-            if (ud_r > 0 && ud_out) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = ud_out;
-                src_ufcs_len = ud_out_len;
             }
         }
         /* Lower @err / @errhandler / <? / =<! ... @err for host C emission (parse already

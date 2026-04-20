@@ -1,25 +1,30 @@
 /*
  * Hello, Concurrent-C!
  *
- * Three tasks run concurrently. The nursery waits for all of them at
- * scope exit; the @destroy block fires after. A program-scope
- * @errhandler turns any unhandled !> into a fatal diagnostic.
+ * Three tasks run concurrently. The inline !>(e) { ... } handles a
+ * failed nursery creation right at the call site; @destroy runs once
+ * all tasks have joined.
+ *
+ * For programs with many fallible calletls, factor the handler out with
+ * @errhandler — see recipe_result_error_handling.ccs.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 #include <unistd.h>
 
 int main(void) {
-    /* ther other option:
-    @errhandler(CCError e) {fprintf(stderr, "Error [%ld]: %s", (long)e.kind, e.message); exit(1);}
-    CCNursery* n = cc_nursery_create() !> @destroy { printf("Done. Always After B, C, A\n"); };
-    */
-    CCNursery* n = cc_nursery_create() !>(e) { //Error handler
-                fprintf(stderr, "Error [%ld]: %s", (long)e.kind, e.message); 
-                return 1;
-                } @destroy { printf("Done. Always After B, C, A\n"); }; //Scope deferred cleanup
-    n->spawn(() => {usleep(100); printf("Hello from task A! (Always third)\n");});
+    CCNursery* n = cc_nursery_create(NULL)
+        !>(e) {                                      // handle nursery creation failure
+            fprintf(stderr, "fatal [%ld]: %s\n", (long)e.kind, e.message);
+            return 1;
+        }
+        @destroy {                                   // runs after all tasks finish
+            printf("All tasks completed.\n");
+        };
+
+    n->spawn(() => { usleep(100000); printf("Hello from task A!\n"); });
     n->spawn(() => printf("Hello from task B!\n"));
     n->spawn(() => printf("Hello from task C!\n"));
-    return 0;
+
+    return 0;   // ← nursery teardown happens here
 }

@@ -43,8 +43,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_arena_scope.ccs` | Scoped memory | Arena reset per iteration |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
-| `recipe_optional_values.ccs` | Optionals | `T?` types, find/map patterns |
-| `recipe_result_error_handling.ccs` | Results | `T!>(E)` error handling |
+| `recipe_result_error_handling.ccs` | Results | `T!>(E)`, `@errhandler`, `!>;`, `?>` |
 
 Run any recipe:
 ```bash

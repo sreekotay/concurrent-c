@@ -1,6 +1,8 @@
 # Concurrent-C Specification
 
-An extension of C with concurrency primitives and a specified lowering to portable C.
+A C preprocessor that extends C syntax with first-class concurrency, desugaring to portable C.
+
+**Core concept:** the lifetime of memory and the lifetime of tasks are explicitly bound to the structure of the code.
 
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
@@ -18,23 +20,32 @@ This specification defines:
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c`.
 
-Editorial principles governing modifications to this specification appear in **Appendix K**.
+---
+
+## The CC Principle of Orthogonal Concerns
+
+The key goal: (as much as possible) the compiler enforces the **Shape** of the program (Memory/Tasks), while the runtime monitors the **Flow** of the program (Channels).
+
+- **The Skeleton (Structure):** Nurseries and Arenas et al are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
+- **The Circulatory System (Flow):** Channels et al are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree. The provenance model is what makes the graph safe.
+
+Editorial principles governing modifications to this specification, including the normative consequences of orthogonal concerns, appear in **Appendix K**.
 
 ---
 
 ## 1. Foundations
 
-This section defines rules about values, closures, lexing, and parsing that apply throughout the specification. Editorial principles governing modifications to this specification appear in **Appendix K**.
+This section defines rules about values, closures, lexing, and parsing that apply throughout the specification.
 
-**Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task<T>`, `Mutex<T>`, `Atomic<T>`) are always initialized on declaration. Plain C types follow C initialization rules.
+**Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task::[T]`, `Mutex::[T]`, `Atomic::[T]`) are always initialized on declaration. Plain C types follow C initialization rules.
 
 **Exception:** `T!>(E)` (Result types) do not require immediate initialization and instead follow **definite assignment** rules. A `T!>(E)` variable may be declared without an initializer if the compiler can prove it is assigned on all control-flow paths before any use or before scope exit.
 
 **Rule (Concurrent-C type initialization):**
 
 - `T!>(E)` uses **definite assignment**: the compiler verifies that a `T!>(E)` variable is assigned on all paths before any use or scope exit.
-- Channels, tasks, `Mutex<T>`, and `Atomic<T>` are always initialized on declaration.
-- `Map<K,V>` requires an explicit initializer (needs arena).
+- Channels, tasks, `Mutex::[T]`, and `Atomic::[T]` are always initialized on declaration.
+- `Map::[K,V]` requires an explicit initializer (needs arena).
 
 **Rule (T!>(E) and destructors):** Definite assignment for `T!>(E)` is required because the destructor must know which arm (`T` or `E`) to drop. An uninitialized `T!>(E)` at scope exit would have undefined destructor behavior—the compiler cannot determine whether to drop `value` or `error`. This is why definite assignment analysis must cover all paths to scope exit, not just paths to explicit reads.
 
@@ -66,12 +77,12 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 - All C primitive types
 - Structs containing only copyable fields
 - `T!>(E)` where `T` and `E` are copyable
-- `Mutex<T>`, `Atomic<T>` (handle types)
+- `Mutex::[T]`, `Atomic::[T]` (handle types)
 
 **Move-only types:**
 
-- `Task<T>` (represents unique computation)
-- `Map<K,V>` (arena-backed, unique ownership)
+- `Task::[T]` (represents unique computation)
+- `Map::[K,V]` (arena-backed, unique ownership)
 - `T!>(E)` where `T` or `E` is move-only
 
 **Slices (`T[:]`):** The slice type itself is always the same, but **copyability depends on the value's provenance**:
@@ -192,14 +203,14 @@ spawn_thread(() => {
 | Static slices            | Yes                            | Lives forever                               |
 | Stack slices             | **No**                         | Frame dies on return                        |
 | Unique slices (`recv()`) | Yes                            | Owned, no external pointer                  |
-| `Mutex<T>`               | Yes                            | Handle to synchronized state                |
-| `AsyncMutex<T>`          | Yes                            | Handle to synchronized state                |
-| `Atomic<T>`              | Yes                            | Lock-free primitive                         |
-| `Map<K,V>`               | Yes iff contents capturable    | Move-only; moved into closure               |
-| `Task<T>`                | Yes                            | Can be awaited from any thread              |
+| `Mutex::[T]`               | Yes                            | Handle to synchronized state                |
+| `AsyncMutex::[T]`          | Yes                            | Handle to synchronized state                |
+| `Atomic::[T]`              | Yes                            | Lock-free primitive                         |
+| `Map::[K,V]`               | Yes iff contents capturable    | Move-only; moved into closure               |
+| `Task::[T]`                | Yes                            | Can be awaited from any thread              |
 | Channels                 | Yes                            | Thread-safe handles                         |
-| `LockGuard<T>`           | **No**                         | Scope-bound                                 |
-| `AsyncGuard<T>`          | **No**                         | Scope-bound                                 |
+| `LockGuard::[T]`           | **No**                         | Scope-bound                                 |
+| `AsyncGuard::[T]`          | **No**                         | Scope-bound                                 |
 | `ThreadGroup`            | **No**                         | Must be used in creating thread             |
 | `Scope`                  | **No**                         | Stack-bound capability                      |
 | Raw pointers             | Yes                            | But safety is caller's responsibility       |
@@ -286,7 +297,7 @@ Defined normatively in §14. `@comptime if`, `comptime {}` blocks, and `comptime
 
 Everything else in this specification is one of:
 
-- **Sugar** over these primitives (e.g., `@create(...) @destroy` is `@defer` at declaration; `@lock (m) as g` is `@defer`-shaped; `@closing(ch)` is `@defer` on a channel handle).
+- **Sugar** over these primitives (e.g., `CALL() !> @destroy { D };` schedules `D` on scope exit — it is `@defer` at a declaration with error-checked construction; `@lock (m) as g` is `@defer`-shaped).
 - **Attributes** (e.g., `@noblock`, `@latency_sensitive`, `@nonblocking`).
 - **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
 
@@ -321,17 +332,19 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
 
 
-### Special Block Forms (8)
+### Special Block Forms (10)
 
 
 | Form                        | Purpose                                                  | Example                                                  |
 | --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
 | `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
 | `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
-| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard<T>;`                                 |
-| `@create(...) @destroy`     | Resource lifetime declaration with deterministic cleanup | `CCNursery* n = @create(NULL) @destroy;`                 |
+| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                                 |
+| `CALL() !> @destroy { D };` | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`       |
 | `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
+| `@match { case T x = ... }` | Multiplex on channel events                              | `@match { case int x = await ch: ... }`                  |
 | `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
+| `@for await (T x : ch) { }` | Async iteration (consume channel)                        | `@for await (int x : ch) { process(x); }`                |
 | `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
 
@@ -354,13 +367,14 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 ### Type Constructors (6)
 
 
-| Constructor | Meaning                                               | Example                         |
-| ----------- | ----------------------------------------------------- | ------------------------------- |
-| `T!>(E)`    | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
-| `char[:]`   | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
-| `char[4:]`  | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
-| `char[:0]`  | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
-| `char[:0!]` | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
+| Constructor               | Meaning                                               | Example                         |
+| ------------------------- | ----------------------------------------------------- | ------------------------------- |
+| `T!>(E)`                  | Result type: success (T) or error (E)                 | `int!>(IoError) read(path);`    |
+| `char[:]`                 | Slice (variable-length view with provenance metadata) | `void process(char[:] data);`   |
+| `char[4:]`                | Fixed-length slice refinement                         | `void hash(char[32:] digest);`  |
+| `char[:0]`                | Sentinel slice refinement                             | `char[:0] name = s.as_slice();` |
+| `char[:0!]`               | Sentinel unique slice refinement                      | `char[:0!] buf = recv(ch);`     |
+| `T[~... >]` / `T[~... <]` | Channel handle type (tx / rx; topology in `~...`)     | `int[~n 1:1 >] tx;`             |
 
 
 ### Expression Forms (3)
@@ -373,7 +387,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
 
 
-### Block Forms (2)
+### Block Forms (1)
 
 
 | Form                   | Purpose                         | Example                                     |
@@ -466,8 +480,8 @@ int!>(IoError) read_int(char[:] data) {
     return cc_ok(parse_int(trimmed));
 }
 
-Vec<int> numbers = vec_new<int>(&arena);
-Map<char[:], int> registry = map_new<char[:], int>(&arena);
+Vec::[int] numbers = vec_new::[int](&arena);
+Map::[char[:], int] registry = map_new<char[:], int>(&arena);
 
 // Incorrect (visual noise, harder to parse)
 int ! IoError read_int (char [ : ] data) {
@@ -503,7 +517,7 @@ This section defines the fundamental value-level building blocks:
     - `cc_ok(void)` - construct `void!>(CCError)` success
     - `cc_err(T, error)` - construct `T!>(CCError)` error
     - `cc_err(T, E, error)` - construct `T!>(E)` error (custom error type)
-- Shorthand for `Result<T, E>`.
+- Shorthand for `Result::[T, E]`.
 
 ```c
 // Inferred constructors inside a function returning T!>(E)
@@ -581,26 +595,6 @@ if (read_res.ok) {
     CCIoError e = read_res.u.error;
 }
 ```
-
-```c
-// Source (try binding)
-if @try (int n = parse_count(s)) {
-    use(n);
-}
-
-// Lowered C (shape)
-{
-    CCResult_int_CCError __cc_try_bind = parse_count(s);
-    if (__cc_try_bind.ok) {
-        int n = __cc_try_bind.u.value;
-        use(n);
-    } else {
-        return cc_err_CCResult_int_CCError(__cc_try_bind.u.error);
-    }
-}
-```
-
-> This is a deprecated shape. New code uses `?>` or `!>` per **Unwrapping Results** below.
 
 **Rule (active field):** Only the active union member is initialized and valid, as determined by `ok`. When `ok == true`, `u.value` is active; when `ok == false`, `u.error` is active. Reading the inactive member is undefined behavior (and is a compile-time error where statically provable).
 
@@ -723,8 +717,7 @@ CCRes(MyData, MyError) my_function(int arg);
     - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
      A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
-7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch. (Enforced behind the `CC_STRICT_RESULT_UNWRAP=1` transition flag during phase 1; enabled unconditionally in phase 3.)
-8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, and `try` / `catch` / `if @try`. During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths. Optional types (`T?`) are retired outright in this revision — the normative spec no longer uses them.
+7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch.
 
 **Grammar (normative, minus whitespace).**
 
@@ -928,8 +921,6 @@ Slices are *views*; they do not own memory.
 
 **Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are also ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view. `T[:k!]` additionally carries unique / move-only semantics on the slice value.
 
-**Compatibility note:** Current implementations may still accept legacy `T[:!]` as a compatibility spelling for a unique slice. The normative surface going forward is `T[:k!]` (most commonly `T[:0!]` for strings).
-
 **Implicit conversions:**
 
 - `T[n]` → `T[:]`
@@ -1120,9 +1111,9 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
 **Types that are scope-bound:**
 
 ```c
-@scoped type LockGuard<T>;           // Mutex guard
-@scoped type AsyncGuard<T>;          // Async mutex guard
-@scoped type BorrowRegion<T>;        // Borrow region (active borrow)
+@scoped type LockGuard::[T];           // Mutex guard
+@scoped type AsyncGuard::[T];          // Async mutex guard
+@scoped type BorrowRegion::[T];        // Borrow region (active borrow)
 @scoped type DeferHandle;            // Defer cleanup handle
 @scoped type FileHandle;             // File handle (future)
 @scoped type Transaction;            // Database transaction (future)
@@ -1139,7 +1130,7 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
 **Example:**
 
 ```c
-@async void!>(Error) worker(Mutex<int>* m) {
+@async void!>(Error) worker(Mutex::[int]* m) {
     // ✅ CORRECT: guard doesn't cross suspension point
     {
         @lock (m) as guard {  // guard is @scoped
@@ -1150,7 +1141,7 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
     await io_operation();  // ✅ OK: no @scoped values held
 }
 
-@async void!>(Error) bad(Mutex<int>* m) {
+@async void!>(Error) bad(Mutex::[int]* m) {
     @lock (m) as guard {
         guard++;
         await io_operation();  // ❌ ERROR: @scoped value guard held across await
@@ -1161,23 +1152,23 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
 **Rule (scope-bound cannot escape):**
 
 ```c
-@scoped type LockGuard<T> { /* ... */ }
+@scoped type LockGuard::[T] { /* ... */ }
 
-LockGuard<int> bad_return(Mutex<int>* m) {
-    LockGuard<int> g = m.lock_guard();
+LockGuard::[int] bad_return(Mutex::[int]* m) {
+    LockGuard::[int] g = m.lock_guard();
     return g;  // ❌ ERROR: cannot return @scoped value
 }
 
-void take_guard(LockGuard<int> g) { }
+void take_guard(LockGuard::[int] g) { }
 
-void bad_pass(Mutex<int>* m) {
+void bad_pass(Mutex::[int]* m) {
     @lock (m) as g {
         take_guard(g);  // ❌ ERROR: cannot pass @scoped across function boundary
     }
 }
 
 struct Container {
-    guard: LockGuard<int>  // ❌ ERROR: cannot store @scoped in struct
+    guard: LockGuard::[int]  // ❌ ERROR: cannot store @scoped in struct
 }
 ```
 
@@ -1186,7 +1177,7 @@ struct Container {
 If a function has `@scoped` values in scope at a suspension point, that's a compile error. The typical fix is to release the value before suspending:
 
 ```c
-@async int!>(Error) correct(Mutex<int>* m) {
+@async int!>(Error) correct(Mutex::[int]* m) {
     let val = {
         @lock (m) as g {
             g + 1
@@ -1246,7 +1237,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§8.
 **Example:**
 
 ```c
-@async int!>(Error) pattern(Mutex<int>* m) {
+@async int!>(Error) pattern(Mutex::[int]* m) {
     // ✅ CORRECT: use guard, then release, then suspend
     let val = {
         @lock (m) as g {
@@ -1258,7 +1249,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§8.
     return cc_ok(val);
 }
 
-@async int!>(Error) antipattern(Mutex<int>* m) {
+@async int!>(Error) antipattern(Mutex::[int]* m) {
     @lock (m) as g {
         let val = g + 1;
         
@@ -1278,7 +1269,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§8.
 1. **Type declarations (primary use):**
 
 ```c
-@scoped type LockGuard<T>;
+@scoped type LockGuard::[T];
 @scoped struct Guard {
     handle: int;
 };
@@ -1366,7 +1357,7 @@ The compiler checks scope-bound restrictions in several places:
 
 ```c
 @async void handler() {
-    LockGuard<int> g = ...;
+    LockGuard::[int] g = ...;
     await io();  // ❌ ERROR: @scoped value g held across suspension
 }
 ```
@@ -1374,9 +1365,9 @@ The compiler checks scope-bound restrictions in several places:
 **At function boundaries:**
 
 ```c
-void takes_guard(LockGuard<int> g) { }
+void takes_guard(LockGuard::[int] g) { }
 
-@async void caller(Mutex<int>* m) {
+@async void caller(Mutex::[int]* m) {
     @lock (m) as g {
         takes_guard(g);  // ❌ ERROR: cannot pass @scoped across function boundary
     }
@@ -1387,7 +1378,7 @@ void takes_guard(LockGuard<int> g) { }
 
 ```c
 struct Holder {
-    guard: LockGuard<int>  // ❌ ERROR: cannot store @scoped in struct
+    guard: LockGuard::[int]  // ❌ ERROR: cannot store @scoped in struct
 }
 ```
 
@@ -1821,8 +1812,8 @@ This section defines OS-level parallelism and shared state:
 - **Thread API** — spawning and joining
 - **ThreadGroup** — coordinating multiple workers
 - **Sendability** — what can cross thread boundaries
-- `**Mutex<T>`** — mutex-protected shared state
-- `**Atomic<T>`** — lock-free atomic primitives
+- `**Mutex::[T]`** — mutex-protected shared state
+- `**Atomic::[T]`** — lock-free atomic primitives
 
 ---
 
@@ -1842,12 +1833,12 @@ void   Thread.join();                    // wait for completion
 2. `v` is not assigned after the capture point, AND
 3. No address of `v` is taken in a way that escapes the closure's scope
 
-**Rule (value capture):** Thread closures capture by value by default. For copyable types, the captured value is a copy. For move-only types (e.g., `Map<K,V>`, unique slices), the capture is a move and the original becomes invalid. Value-captured variables are immutable within the closure.
+**Rule (value capture):** Thread closures capture by value by default. For copyable types, the captured value is a copy. For move-only types (e.g., `Map::[K,V]`, unique slices), the capture is a move and the original becomes invalid. Value-captured variables are immutable within the closure.
 
 **Rule (reference capture):** Explicit reference capture `[&v]` creates a shared reference to the outer variable. Reference captures are subject to mutation checks:
 
 - Read-only access is allowed
-- Mutation is a compile error unless the type is a safe wrapper (`@atomic T`, `Atomic<T>`, `Mutex<T>`, channel handles), or the capture is inside `@unsafe`
+- Mutation is a compile error unless the type is a safe wrapper (`@atomic T`, `Atomic::[T]`, `Mutex::[T]`, channel handles), or the capture is inside `@unsafe`
 
 ```c
 int x = 0;
@@ -1861,7 +1852,7 @@ spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
 spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
 
 // Safe wrappers: mutation allowed
-Atomic<int> counter = atomic_new(0);
+Atomic::[int] counter = atomic_new(0);
 spawn(() => [&counter] { counter++; }); // ✅ OK: Atomic is thread-safe
 
 // Escape hatch: @unsafe bypasses check
@@ -1882,12 +1873,12 @@ Direct OS thread control is rarely needed. For details on `ThreadGroup` and `spa
 
 ### 6.3 Mutex (OS Mutex)
 
-`Mutex<T>` provides mutex-protected access to shared state for any type `T` using OS-level synchronization.
+`Mutex::[T]` provides mutex-protected access to shared state for any type `T` using OS-level synchronization.
 
 ```c
-Mutex<T> mutex(T initial);                    // create with initial value
-LockGuard<T> Mutex<T>.lock_guard();           // get a lock guard
-void Mutex<T>.with_lock(void (*fn)(T*));      // callback-style access (can block)
+Mutex::[T] mutex(T initial);                    // create with initial value
+LockGuard::[T] Mutex::[T].lock_guard();           // get a lock guard
+void Mutex::[T].with_lock(void (*fn)(T*));      // callback-style access (can block)
 ```
 
 #### 6.3.1 Structured Lock Access with `@lock`
@@ -1896,7 +1887,7 @@ The `@lock` statement provides clean, scoped access to mutex-protected data:
 
 ```c
 @lock (m) as value {
-    // value is T (auto-dereferenced from LockGuard<T>)
+    // value is T (auto-dereferenced from LockGuard::[T])
     // can read/modify value freely
 }  // lock automatically released here
 ```
@@ -1904,7 +1895,7 @@ The `@lock` statement provides clean, scoped access to mutex-protected data:
 **Examples:**
 
 ```c
-Mutex<int> counter = mutex(0);
+Mutex::[int] counter = mutex(0);
 
 // Simple increment
 @lock (counter) as c {
@@ -1913,14 +1904,14 @@ Mutex<int> counter = mutex(0);
 }
 
 // Struct access (auto-deref handles operator->)
-Mutex<struct { int x; int y; }> state = mutex({0, 0});
+Mutex::[struct { int x; int y; }] state = mutex({0, 0});
 @lock (state) as s {
     s.x = 10;
     s.y = 20;
 }
 
 // Complex operations
-Mutex<Vec<int>> tasks = mutex(vec_new(&arena));
+Mutex::[Vec::[int]] tasks = mutex(vec_new(&arena));
 @lock (tasks) as task_list {
     vec_push(task_list, 42);
     vec_push(task_list, 43);
@@ -1946,7 +1937,7 @@ __guard goes out of scope, lock releases
 If you need the guard to escape the `@lock` block (rare), use direct `lock_guard()`:
 
 ```c
-Mutex<int> counter = mutex(0);
+Mutex::[int] counter = mutex(0);
 auto g = counter.lock_guard();
 int val = *g;  // explicit deref
 *g += 1;
@@ -1965,21 +1956,21 @@ counter.with_lock(c => {
 
 **Note:** The `@lock (m) as var { }` statement form is preferred over callbacks because it supports all C control flow (return, break, continue) cleanly.
 
-`**LockGuard<T>` semantics:**
+`**LockGuard::[T]` semantics:**
 
 - Automatic unlock on scope exit (RAII)
 - Automatically dereferenced in `@lock` statements
 - Can be manually dereferenced via `*guard` or `guard->field` if needed
 - Not sendable—must not outlive the scope where created
 
-**Rule:** `Mutex<T>` is sendable (can be shared across threads).
+**Rule:** `Mutex::[T]` is sendable (can be shared across threads).
 
-**Rule:** `Mutex<T>.lock_guard()` and `Mutex<T>.with_lock()` can block the OS thread. They are allowed in `@async` code **only via implicit `run_blocking`** wrapping. The compiler wraps `lock_guard()` / `with_lock()` calls in `@async` code automatically, treating them as non-`@async` function calls. Keep critical sections short since the entire thread pool thread is blocked while the lock is held.
+**Rule:** `Mutex::[T].lock_guard()` and `Mutex::[T].with_lock()` can block the OS thread. They are allowed in `@async` code **only via implicit `run_blocking`** wrapping. The compiler wraps `lock_guard()` / `with_lock()` calls in `@async` code automatically, treating them as non-`@async` function calls. Keep critical sections short since the entire thread pool thread is blocked while the lock is held.
 
 **Lowering in `@async`:**
 
 ```c
-@async void good(Mutex<int>* m) {
+@async void good(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
     }  // lowers to: await __implicit_nursery.run_blocking(() => {
@@ -1994,13 +1985,13 @@ The `run_blocking` wrapper ensures the lock is acquired and released within a si
 
 ```c
 // ❌ WRONG: direct call to lock_guard() without @lock syntax
-@async void bad(Mutex<int>* m) {
+@async void bad(Mutex::[int]* m) {
     auto g = m.lock_guard();  // ERROR: bare blocking call in @async
     g++;
 }
 
 // ❌ ALSO WRONG: guard held across await
-@async void bad_await(Mutex<int>* m) {
+@async void bad_await(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
         await some_async_work();  // ERROR: guard held across suspension point
@@ -2008,30 +1999,30 @@ The `run_blocking` wrapper ensures the lock is acquired and released within a si
 }
 
 // ✅ CORRECT: use @lock in @async (wrapped automatically)
-@async void good(Mutex<int>* m) {
+@async void good(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
     }  // implicit run_blocking wraps the lock/unlock
 }
 ```
 
-**Rule (handle semantics):** `Mutex<T>` is a handle type. Copying creates another reference to the same underlying synchronized state.
+**Rule (handle semantics):** `Mutex::[T]` is a handle type. Copying creates another reference to the same underlying synchronized state.
 
 ---
 
 ### 6.4 AsyncMutex (Suspending Mutex)
 
-`AsyncMutex<T>` provides mutex-protected access that **suspends** instead of blocking, making it safe for `@async` code.
+`AsyncMutex::[T]` provides mutex-protected access that **suspends** instead of blocking, making it safe for `@async` code.
 
 ```c
-AsyncMutex<T> async_mutex(T initial);           // create with initial value
-@async AsyncGuard<T> AsyncMutex<T>.lock();      // suspending lock
+AsyncMutex::[T] async_mutex(T initial);           // create with initial value
+@async AsyncGuard::[T] AsyncMutex::[T].lock();      // suspending lock
 ```
 
 **Usage with `@lock` statement (recommended):**
 
 ```c
-AsyncMutex<int> counter = async_mutex(0);
+AsyncMutex::[int] counter = async_mutex(0);
 
 @async void increment() {
     @lock (await counter.lock()) as c {
@@ -2044,7 +2035,7 @@ AsyncMutex<int> counter = async_mutex(0);
 **Direct guard access (alternative):**
 
 ```c
-AsyncMutex<int> counter = async_mutex(0);
+AsyncMutex::[int] counter = async_mutex(0);
 
 @async void increment() {
     auto g = await counter.lock();  // suspends, does NOT block OS thread
@@ -2052,28 +2043,28 @@ AsyncMutex<int> counter = async_mutex(0);
 }  // unlocks here
 ```
 
-`**AsyncGuard<T>` semantics:**
+`**AsyncGuard::[T]` semantics:**
 
 - Automatic unlock on scope exit (RAII)
 - Automatically dereferenced in `@lock` statements
 - Can be manually dereferenced via `*guard` or `guard->field` if needed
 - Not sendable—must not outlive the scope where created
 
-**Rule:** `AsyncMutex<T>.lock()` is **suspending** (not a blocking operation). It is allowed in `@async` code.
+**Rule:** `AsyncMutex::[T].lock()` is **suspending** (not a blocking operation). It is allowed in `@async` code.
 
-**Rule:** `AsyncGuard<T>` is not sendable. It must not outlive the scope where it was created.
+**Rule:** `AsyncGuard::[T]` is not sendable. It must not outlive the scope where it was created.
 
-**Rule:** `AsyncMutex<T>` is sendable.
+**Rule:** `AsyncMutex::[T]` is sendable.
 
-**Rule (scope-bound guard types):** `LockGuard<T>` and `AsyncGuard<T>` are `@scoped` types (see §4.1). They cannot be held across suspension points. The compiler enforces this at compile time to prevent deadlocks and keep critical sections short.
+**Rule (scope-bound guard types):** `LockGuard::[T]` and `AsyncGuard::[T]` are `@scoped` types (see §4.1). They cannot be held across suspension points. The compiler enforces this at compile time to prevent deadlocks and keep critical sections short.
 
 ```c
-@async void bad(AsyncMutex<int>* m, int[~ >]* tx) {
+@async void bad(AsyncMutex::[int]* m, int[~ >]* tx) {
     auto g = await m.lock();
     await tx.send(*g);  // ❌ ERROR: @scoped value guard held across suspension
 }
 
-@async void good(AsyncMutex<int>* m, int[~ >]* tx) {
+@async void good(AsyncMutex::[int]* m, int[~ >]* tx) {
     int val;
     {
         auto g = await m.lock();
@@ -2086,13 +2077,13 @@ AsyncMutex<int> counter = async_mutex(0);
 **Rule (no guard across run_blocking):** No mutex guard (`LockGuard` or `AsyncGuard`) may be live across a call to `run_blocking`. Since guards are `@scoped`, the compiler enforces this automatically. This prevents deadlocks where the blocking closure attempts to acquire the same mutex.
 
 ```c
-@async void bad(AsyncMutex<int>* m) {
+@async void bad(AsyncMutex::[int]* m) {
     auto g = await m.lock();
     // Cannot do any blocking/await operations while guard is held
     await async_work();  // ERROR: cannot await while holding guard
 }
 
-@async void good(AsyncMutex<int>* m) {
+@async void good(AsyncMutex::[int]* m) {
     int val;
     {
         auto g = await m.lock();
@@ -2102,67 +2093,67 @@ AsyncMutex<int> counter = async_mutex(0);
 }
 ```
 
-**Rule (handle semantics):** `AsyncMutex<T>` is a handle type. Copying creates another reference to the same underlying synchronized state.
+**Rule (handle semantics):** `AsyncMutex::[T]` is a handle type. Copying creates another reference to the same underlying synchronized state.
 
 **When to use which:**
 
 
 | Type            | Use case                                                       |
 | --------------- | -------------------------------------------------------------- |
-| `Mutex<T>`      | Sync code or functions that can block, short critical sections |
-| `AsyncMutex<T>` | `@async` code, short critical sections (no await while held)   |
+| `Mutex::[T]`      | Sync code or functions that can block, short critical sections |
+| `AsyncMutex::[T]` | `@async` code, short critical sections (no await while held)   |
 
 
 ---
 
 ### 6.5 Atomic (Lock-Free)
 
-`Atomic<T>` provides lock-free atomic operations for primitive types with configurable memory ordering.
+`Atomic::[T]` provides lock-free atomic operations for primitive types with configurable memory ordering.
 
 ```c
 // Memory ordering (mirrors C11)
 enum Ordering { relaxed, acquire, release, acq_rel, seq_cst }
 
 // Creation
-Atomic<T> atomic(T initial);
+Atomic::[T] atomic(T initial);
 
 // Load/Store (default: seq_cst)
-T    Atomic<T>.load(Ordering o = .seq_cst);
-void Atomic<T>.store(T v, Ordering o = .seq_cst);
+T    Atomic::[T].load(Ordering o = .seq_cst);
+void Atomic::[T].store(T v, Ordering o = .seq_cst);
 
 // Arithmetic
-T    Atomic<T>.fetch_add(T delta, Ordering o = .seq_cst);
-T    Atomic<T>.fetch_sub(T delta, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_add(T delta, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_sub(T delta, Ordering o = .seq_cst);
 
 // Bitwise
-T    Atomic<T>.fetch_and(T mask, Ordering o = .seq_cst);
-T    Atomic<T>.fetch_or(T mask, Ordering o = .seq_cst);
-T    Atomic<T>.fetch_xor(T mask, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_and(T mask, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_or(T mask, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_xor(T mask, Ordering o = .seq_cst);
 
 // Min/Max
-T    Atomic<T>.fetch_min(T v, Ordering o = .seq_cst);
-T    Atomic<T>.fetch_max(T v, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_min(T v, Ordering o = .seq_cst);
+T    Atomic::[T].fetch_max(T v, Ordering o = .seq_cst);
 
 // Compare-and-swap
-bool Atomic<T>.compare_exchange(T* expected, T desired,
+bool Atomic::[T].compare_exchange(T* expected, T desired,
                                 Ordering success = .seq_cst,
                                 Ordering failure = .seq_cst);
 ```
 
-**Rule:** `Atomic<T>` is only available when `T` is one of: `bool`, integer types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`), or pointer types.
+**Rule:** `Atomic::[T]` is only available when `T` is one of: `bool`, integer types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`), or pointer types.
 
 **Rule (default memory ordering):** All atomic operations default to `seq_cst` (sequentially consistent) unless an explicit ordering is provided. This is the safest default and matches C11 behavior. Applications requiring relaxed ordering must explicitly specify it.
 
-**Rule:** `Atomic<T>` is sendable.
+**Rule:** `Atomic::[T]` is sendable.
 
-**Rule (handle semantics):** `Atomic<T>` is a handle type. Copying creates another reference to the same underlying atomic state.
+**Rule (handle semantics):** `Atomic::[T]` is a handle type. Copying creates another reference to the same underlying atomic state.
 
 **Rule:** Ordering semantics match C11 `_Atomic` and lower directly to platform atomics/intrinsics.
 
 **Example:**
 
 ```c
-Atomic<int> counter = atomic(0);
+Atomic::[int] counter = atomic(0);
 
 spawn_thread(() => {
     counter.fetch_add(1, .relaxed);  // relaxed for simple counters
@@ -2179,8 +2170,8 @@ int final = counter.load(.acquire);  // 2
 **Example (lock-free flag):**
 
 ```c
-Atomic<bool> ready = atomic(false);
-Atomic<int> data = atomic(0);
+Atomic::[bool] ready = atomic(false);
+Atomic::[int] data = atomic(0);
 
 // Producer
 data.store(42, .relaxed);
@@ -2343,7 +2334,7 @@ Notes:
 
 - `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
-- `close(tx)` / `close(rx)` (or `n->close_on(tx)` on a nursery) closes the underlying channel.
+- `close(tx)` / `close(rx)` closes the underlying channel. Idiomatically, close is scheduled on nursery teardown: `CCNursery* n = cc_nursery_create(NULL) !> @destroy { tx.close(); };` (§8.1.4).
 - `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
 
 **Ownership idiom:**
@@ -2353,11 +2344,10 @@ int[~10 >] tx;
 int[~10 <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy { cc_channel_free(ch); };
 
-CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
 outer->spawn(() => consumer(rx));
 
-CCNursery* inner = cc_nursery_new(outer) !> @destroy;
-inner->close_on(tx);
+CCNursery* inner = cc_nursery_create(outer) !> @destroy { tx.close(); };
 inner->spawn(() => producer(tx));
 ```
 
@@ -2366,8 +2356,8 @@ inner->spawn(() => producer(tx));
 Channels can carry results using `T!>(E)` as the element type:
 
 ```c
-int!>(ParseError)[~100 >] results_tx;        // async sender of Result<int, ParseError>
-int!>(ParseError)[~100 <] results_rx;        // async receiver of Result<int, ParseError>
+int!>(ParseError)[~100 >] results_tx;        // async sender of Result::[int, ParseError]
+int!>(ParseError)[~100 <] results_rx;        // async receiver of Result::[int, ParseError]
 CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
 
 int!>(ParseError)[~100 sync >] sync_results_tx;   // sync sender
@@ -2457,7 +2447,7 @@ CompressedResult*[~16 ordered >] results_tx;
 CompressedResult*[~16 ordered <] results_rx;
 CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy { cc_channel_free(ch); };
 
-CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
 outer->spawn(() => {
     CompressedResult* r;
     while (cc_io_avail(results_rx.recv(&r))) {
@@ -2467,13 +2457,10 @@ outer->spawn(() => {
 });
 
 // Producer nursery closes results_tx after all workers exit, so the consumer sees EOF.
-CCNursery* inner = cc_nursery_new(outer) !> @destroy;
-inner->close_on(results_tx);
+CCNursery* inner = cc_nursery_create(outer) !> @destroy { results_tx.close(); };
 while (read_block(&blk)) {
     cc_channel_send_task(results_tx, () => [blk] compress_block(blk));
 }
-
-cc_channel_free(ch);
 ```
 
 **Error propagation:**
@@ -2946,19 +2933,14 @@ CCArena[~4 owned {
     .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
-@nursery {
-    // Worker borrows arena, uses it, returns it
-    spawn(() => [arena_pool] {
-        CCArena arena;
-        arena_pool.recv(&arena);  // Borrow
-        
-        // Use arena for allocations
-        void* p = cc_arena_alloc(&arena, 100);
-        
-        arena_pool.send(arena);   // Return (auto-reset)
-    });
-}
-// Pool destroyed here: .destroy called for each arena
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+// Pool destroyed when enclosing scope ends: .destroy called for each arena
+n->spawn(() => {
+    CCArena arena;
+    arena_pool.recv(&arena);  // Borrow
+    void* p = cc_arena_alloc(&arena, 100);
+    arena_pool.send(arena);   // Return (auto-reset)
+});
 ```
 
 #### 7.7.6 Example: Connection Pool
@@ -3033,57 +3015,19 @@ return;  // Clean exit, no manual drain needed
 
 ## 8. Concurrency
 
-Concurrent-C provides a single, unified concurrency primitive: **nurseries**. A nursery is a structured concurrency construct that manages task spawning, automatic error propagation, and cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
+Concurrent-C provides a single, unified concurrency primitive: the **nursery** (`CCNursery`, §8.1). A nursery is a scope-bound handle that manages task spawning, error propagation, and cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
 
 This section specifies:
 
-- **§8.1 Structured Concurrency with Nurseries** — the primary pattern for all concurrent work
+- **§8.1 Structured Concurrency with `CCNursery`** — the primary pattern for all concurrent work
 - **§8.2 Async Functions and Automatic Task Batching** — how `@async` enables non-blocking I/O and automatic blocking call wrapping
-- **§8.3 Tasks** — lazy async computations (Task.start is discouraged; use @nursery instead)
+- **§8.3 Tasks** — lazy async computations (`Task::[T].start()` is discouraged; use `CCNursery` instead)
 - **§8.4 Channels in Async vs Sync** — context-sensitive channel operations
-- **§8.5 Cancellation** — cooperative task cancellation, automatically propagated in nurseries
-- **§8.6 Streaming** — channel-based producers with @for await
+- **§8.5 Cancellation** — cooperative task cancellation, automatically propagated through nurseries
+- **§8.6 Streaming** — channel-based producers
 - **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
-- **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async/nursery forms
-
----
-
-#### Recommendation: Use @nursery Everywhere
-
-**For all concurrent work, use `@nursery { spawn ... }`** — single API, automatic error propagation, automatic sibling cancellation, and compile-time safety.
-
-```c
-// Fan-out/fan-in
-@nursery {
-    spawn (worker1());
-    spawn (worker2());
-    spawn (worker3());
-}
-
-// With error propagation
-@nursery {
-    spawn (ok_task());
-    spawn (fail_task());  // error cancels siblings automatically
-}
-
-// With channel cleanup
-@closing(ch1, ch2) {
-    spawn (producer(ch1));
-    spawn (consumer(ch2));
-}
-
-// In @async (blocking calls wrapped automatically)
-@async void handler() {
-    blocking_call();  // compiler wraps in run_blocking
-}
-```
-
-**Don't use:**
-
-- ❌ `ThreadGroup` (advanced runtime control, Appendix D)
-- ❌ `spawn_thread` (NUMA/affinity escape hatch, Appendix D)
-- ❌ Direct OS threads in application code
+- **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async and nursery forms
 
 ---
 
@@ -3091,10 +3035,10 @@ This section specifies:
 
 A **nursery** is a scope-bound handle that manages the lifetime, cancellation, and completion of spawned child tasks. Nurseries enforce a tree-shaped concurrency structure: every task is a child of some nursery, and no task outlives its nursery.
 
-`CCNursery` is a library type (§9.4) constructed with `cc_nursery_new()` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
+`CCNursery` is a library type constructed with `cc_nursery_create(NULL)` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
 
 ```c
-CCNursery* n = cc_nursery_new(NULL) !> @destroy {
+CCNursery* n = cc_nursery_create(NULL) !> @destroy {
     // runs after all children have joined
 };
 n->spawn(() => work1());
@@ -3115,13 +3059,13 @@ The `@destroy` clause on the declaration schedules nursery teardown (which joins
 
 #### 8.1.1 Construction
 
-`cc_nursery_new(CCNursery* parent)` returns `CCNursery*!>(CCError)`. Pass `NULL` for a top-level nursery; pass a parent nursery for nested structured concurrency.
+`cc_nursery_create(CCNursery* parent)` returns `CCNursery*!>(CCError)`. Pass `NULL` for a top-level nursery; pass a parent nursery for nested structured concurrency.
 
 ```c
 @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
 
-CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
-CCNursery* inner = cc_nursery_new(outer) !> @destroy;
+CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+CCNursery* inner = cc_nursery_create(outer) !> @destroy;
 ```
 
 The `!>` operator consumes the result: on success, the value is bound; on error, control transfers to the enclosing `@errhandler` (§3.1). The trailing `@destroy` is a `@defer`-shaped destructor (§5.1) that joins children on scope exit.
@@ -3157,7 +3101,7 @@ If any child returns an error or panics:
 Cancellation is cooperative. Children observe cancellation via `cc_is_cancelled()` or by using cancellation-aware operation variants (§8.5). Cancellation observation is defined in §4.2.2 and may be deferred by `with_shield` regions (§8.5.10).
 
 ```c
-CCNursery* n = cc_nursery_new(NULL) !> @destroy;
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 n->spawn(() => ok_task());
 n->spawn(() => failing_task());     // returns cc_err(E)
 // At scope exit: ok_task is cancelled, cleanup completes, error forwarded.
@@ -3167,26 +3111,37 @@ n->spawn(() => failing_task());     // returns cc_err(E)
 
 #### 8.1.4 Channel Close Ordering
 
-To close a channel after all child producers on the nursery have exited, register it with `close_on`:
+A nursery's `@destroy` body runs **after** all children have joined. Close a channel there to signal EOF to any consumer downstream. This is the preferred CC surface form:
 
 ```c
-CCNursery* n = cc_nursery_new(NULL) !> @destroy;
-n->close_on(tx);                    // close tx when @destroy runs
+CCNursery* n = cc_nursery_create(NULL) !> @destroy { tx.close(); };
 n->spawn(() => producer(tx));
 n->spawn(() => consumer(rx));
 ```
 
-`close_on` is the normative mechanism for deterministic channel close: the channel is closed **after** the nursery has joined all children. Use nested nurseries to sequence producer-close before consumer-drain:
+The close action is visible at the nursery declaration, and its timing (after children join) is a direct consequence of `@destroy` ordering — no hidden behavior.
+
+Use nested nurseries to sequence producer-close before consumer-drain:
 
 ```c
-CCNursery* outer = cc_nursery_new(NULL) !> @destroy;
+CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
 outer->spawn(() => consumer(rx));
 
-CCNursery* inner = cc_nursery_new(outer) !> @destroy;
-inner->close_on(tx);
+CCNursery* inner = cc_nursery_create(outer) !> @destroy { tx.close(); };
 for (int w = 0; w < N; w++) inner->spawn(() => worker(tx));
-// inner's @destroy closes tx; consumer observes EOF; outer's @destroy joins.
+// inner's @destroy closes tx after workers exit; consumer drains and
+// outer's @destroy joins the consumer.
 ```
+
+**C-interface form.** Callers from plain C (which cannot write `@destroy` blocks) use `cc_nursery_close_on(n, tx)` / `n->close_on(tx)` to register the same close-after-join action:
+
+```c
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+n->close_on(tx);                    // equivalent to @destroy { tx.close(); }
+n->spawn(() => producer(tx));
+```
+
+`close_on` is the underlying runtime primitive; the `@destroy { ch.close(); }` surface form lowers to an equivalent registration. Prefer the surface form in CC source.
 
 ---
 
@@ -3200,7 +3155,7 @@ A nursery guarantees:
 - No cyclic peer waits (impossible syntactically).
 - Deterministic error fan-out to siblings.
 - Deterministic cancellation propagation on error.
-- Deterministic channel close ordering (with `close_on`).
+- Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C).
 
 A nursery does **not** guarantee:
 
@@ -3296,14 +3251,14 @@ extern @noblock void memcpy(void* dst, void* src, size_t n);
 
 ### 8.3 Tasks
 
-**Positioning:** Use `Task<T>` for single async computations that produce one result; use nurseries + channels for coordinated, multi-task work with backpressure.
+**Positioning:** Use `Task::[T]` for single async computations that produce one result; use nurseries + channels for coordinated, multi-task work with backpressure.
 
 ```c
 @async int work(int x) {
     return x + 1;
 }
 
-Task<int> t = work(5);    // created, not running
+Task::[int] t = work(5);    // created, not running
 int v = await t;          // starts + waits
 ```
 
@@ -3324,7 +3279,7 @@ log_event(evt).start();  // fire and forget
 
 | Operation                          | Behavior                                     |
 | ---------------------------------- | -------------------------------------------- |
-| `Task<T> t = fn(args)`             | Creates task, does not start                 |
+| `Task::[T] t = fn(args)`             | Creates task, does not start                 |
 | `await t`                          | Starts (if needed) + waits for result        |
 | `t.start()`                        | Starts detached, returns immediately         |
 | `await t` after `.start()`         | Joins detached task, returns result          |
@@ -3335,11 +3290,9 @@ log_event(evt).start();  // fire and forget
 
 **Rule (detached task errors):** If a detached task returns `T!>(E)` with an error and is never awaited, the error is silently discarded.
 
-**Rule (Task**** ABI):** `Task<T>` is an opaque handle. Its internal representation is implementation-defined.
+**Rule (Task**** ABI):** `Task::[T]` is an opaque handle. Its internal representation is implementation-defined.
 
-**Recommendation (v1.0):** Prefer `@nursery` spawning over detached tasks (`Task<T>.start()`) unless explicit detachment is required. Structured concurrency via nurseries is safer and prevents lifetime footguns.
-
-*Design note (non-normative):* Future versions may deprecate `Task<T>.start()` in favor of `@nursery` exclusively, pushing users toward structured concurrency by default. This would eliminate lifetime footguns around detached tasks and reduce the concurrency surface area.
+**Recommendation:** Prefer `CCNursery` spawning (§8.1) over detached tasks (`Task::[T].start()`) unless explicit detachment is required. Structured concurrency is safer and prevents lifetime footguns.
 
 ---
 
@@ -3429,7 +3382,7 @@ cc_channel_free(ch);
 
 #### 8.4.2 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
 
-Async channels **suspend cooperatively** and require `await`. They are used in `@async` functions and with `@nursery`.
+Async channels **suspend cooperatively** and require `await`. They are used in `@async` functions and with `CCNursery`.
 
 **Operations:**
 
@@ -3653,12 +3606,10 @@ CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
     }
 }
 
-@closing(work_tx) {
-    spawn (producer());
-    spawn (consumer());
-}
-
-cc_channel_free(work_ch);
+CCNursery* n = cc_nursery_create(NULL) !> @destroy { work_tx.close(); };
+n->spawn(() => producer());
+n->spawn(() => consumer());
+// cc_channel_free(work_ch) is scheduled on the @destroy of the channel pair above.
 ```
 
 **Pattern 2: Thread Pool (Sync)**
@@ -3701,10 +3652,9 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
 **Pattern 3: Async with Timeout (using cancellation)**
 
 ```c
-@nursery {
-    spawn (reader(requests));
-    spawn (timeout_enforcer());
-}
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+n->spawn(() => reader(requests));
+n->spawn(() => timeout_enforcer());
 
 @async int!>(Error) reader(int[~ <] ch) {
     int x;
@@ -3856,13 +3806,13 @@ bool !>(Cancelled) recv_cancellable(T[~ <]* rx, T* out);   // ok(true)=received,
 bool send_cancellable(T[~ >]* tx, T value);                // returns false if cancelled
 
 // Tasks
-T!>(Cancelled) await task_cancellable<T>(Task<T!>(Cancelled)> t);
+T!>(Cancelled) await task_cancellable::[T](Task::[T!>(Cancelled)] t);
 
 // Sleep
-Task<void!>(Cancelled)> sleep_cancellable(Duration d);
+Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
 
 // Timing
-Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duration d);
+Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, Duration d);
 ```
 
 **Example (non-select context):**
@@ -3939,11 +3889,10 @@ enum WorkerError {
     IoError(IoError),
 }
 
-@nursery {
-    spawn (reader(requests));
-    spawn (writer(responses));
-    spawn (timeout_enforcer());
-}
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+n->spawn(() => reader(requests));
+n->spawn(() => writer(responses));
+n->spawn(() => timeout_enforcer());
 
 @async void!>(WorkerError) reader(int[~ <] requests) {
     int req;
@@ -4199,11 +4148,12 @@ Streaming uses explicit channel parameters:
 @async void consume() {
     int[~10 >] tx;
     int[~10 <] rx;
-    cc_channel_pair(&tx, &rx);
-    @closing(tx) {
-        spawn (produce(100, &tx));
-        @for await (int x : rx) use(x);
-    }
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy { cc_channel_free(ch); };
+
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy { tx.close(); };
+    n->spawn(() => produce(100, &tx));
+    int x;
+    while (cc_io_avail(rx.recv(&x))) use(x);
 }
 ```
 
@@ -4244,27 +4194,27 @@ struct Scope {
 }
 
 // Task control
-Task<T> task = async_fn(args);         // lazy, not started
-void   Task<T>.start();                // begin execution (detached)
-T      await Task<T>;                  // suspend until complete
-void   Task<T>.cancel();               // request cooperative cancellation
+Task::[T] task = async_fn(args);         // lazy, not started
+void   Task::[T].start();                // begin execution (detached)
+T      await Task::[T];                  // suspend until complete
+void   Task::[T].cancel();               // request cooperative cancellation
 
 // Cancellation-aware variants (observe cancellation when awaited)
-T!>(Cancelled)   await task_cancellable<T>(Task<T!>(Cancelled)> t);
-bool !>(Cancelled) recv_cancellable<T>(T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
-bool             send_cancellable<T>(T[~ >]* tx, T value);
-Task<void!>(Cancelled)> sleep_cancellable(Duration d);
-Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duration d);
+T!>(Cancelled)   await task_cancellable::[T](Task::[T!>(Cancelled)] t);
+bool !>(Cancelled) recv_cancellable::[T](T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
+bool             send_cancellable::[T](T[~ >]* tx, T value);
+Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
+Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, Duration d);
 
 // Cancellation polling (valid only in @async functions)
 bool   is_cancelled();
 
 // Timing
-Task<void> sleep(Duration d);
-Task<T!>(E)> with_timeout<T, E>(Task<T!>(E)> t, Duration d);
+Task::[void] sleep(Duration d);
+Task::[T!>(E)] with_timeout::[T, E](Task::[T!>(E)] t, Duration d);
 
 // Sync bridge (can block)
-T block_on::[T](Task<T> t);    // run task to completion, blocking
+T block_on::[T](Task::[T] t);    // run task to completion, blocking
 
 // Duration literals
 1ns, 1us, 1ms, 1s, 1m, 1h
@@ -4291,7 +4241,7 @@ T block_on::[T](Task<T> t);    // run task to completion, blocking
 }
 
 void g() {
-    Task<int> t = async_work();
+    Task::[int] t = async_work();
     int result = block_on(t);   // ERROR: block_on called from threadpool thread!
 }
 ```
@@ -4309,7 +4259,7 @@ void g() {
 
 // CORRECT: call block_on from sync context (not inside @async or run_blocking)
 void sync_boundary() {
-    Task<int> t = async_work();
+    Task::[int] t = async_work();
     int result = block_on(t);  // OK: called from actual sync context
     use(result);
 }
@@ -4430,7 +4380,7 @@ CC_DEADLOCK_DETECT=0 ./my_program
   Thread 1: blocked on recv (channel empty, waiting for sender)
 
 Common causes:
-  • cc_block_on() inside spawn() or @nursery
+  • cc_block_on() inside spawn() or a nursery child
   • Producer/consumer mismatch (sends without receivers)
   • Missing channel close (receiver waiting forever)
 
@@ -4566,7 +4516,7 @@ int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
 | `cc_block_all`  | Fan-out/fan-in          | N                | No                      |
 | `cc_block_race` | First wins              | N                | No                      |
 | `cc_block_any`  | First success           | N                | No                      |
-| `@nursery`      | Inside @async functions | N                | No                      |
+| `CCNursery`     | Inside @async functions | N                | No                      |
 
 
 ---
@@ -4578,7 +4528,7 @@ Certain operations may stall indefinitely (I/O, locks, OS calls). These run on a
 **Blocking-class operations:**
 
 - File I/O: `File.read()`, `File.write()`, `File.sync()`
-- Mutex lock: `Mutex<T>.lock()` (when contended)
+- Mutex lock: `Mutex::[T].lock()` (when contended)
 - OS operations: `sleep()`, `join()`, system calls
 
 **Non-blocking operations (run inline, no pool):**
@@ -4683,7 +4633,7 @@ enum BoundsError {
 };
 ```
 
-These enums are used in stdlib operations like `File.read()`, `char[:].parse_i64()`, and `Vec<T>.set()`. Applications may compose multiple error types using wrapper enums (see §8.9).
+These enums are used in stdlib operations like `File.read()`, `char[:].parse_i64()`, and `CCVec::[T].set()`. Applications may compose multiple error types using wrapper enums (see §8.9).
 
 ---
 
@@ -4932,7 +4882,7 @@ The blocking model is intentionally conservative:
 
 Errors in Concurrent-C are **value-based**, not exceptions. `T!>(E)` is the return type for functions that can fail; unwrap and handling syntax is defined normatively in §3.1 (`?>`, `!>`, `@err(e);`, `@errhandler`). `@defer` always runs; there is no unwinding.
 
-Error handling in `@async` functions and `@nursery` blocks uses the operators defined in **§3.1** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or `nursery`-specific error construct exists; everything composes through the same surface.
+Error handling in `@async` functions and nurseries uses the operators defined in **§3.1** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or nursery-specific error construct exists; everything composes through the same surface.
 
 **Async call with default.**
 
@@ -4949,10 +4899,9 @@ Error handling in `@async` functions and `@nursery` blocks uses the operators de
 
 ```c
 @async int!>(IoError) process(char[:] url) {
-    @nursery {
-        spawn (subtask_a(url));
-        int v = (await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds nursery
-    }
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => subtask_a(url));
+    int v = (await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
     return cc_ok(0);
 }
 ```
@@ -4972,7 +4921,7 @@ int!>(AppError) pipeline(char[:] path) {
 }
 ```
 
-The `?>(e) return cc_err(e);` idiom is the new propagation equivalent of the retired `try` keyword. For bail-out without a value (statement context), use `!>` with an `@errhandler` or a local `!> (e) BODY`. See §3.1 for the full grammar and semantics.
+For bail-out without a value (statement context), use `!>` with an `@errhandler` or a local `!> (e) BODY`. See §3.1 for the full grammar and semantics.
 
 ---
 
@@ -5029,7 +4978,7 @@ Functional composition becomes natural with direct library calls:
 int[] squared = vec_map(numbers, (int x) => x * x);
 
 // Chain via free functions
-Vec<int> result = vec_map(vec_filter(input, is_even), double);
+Vec::[int] result = vec_map(vec_filter(input, is_even), double);
 ```
 
 ---
@@ -5077,7 +5026,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
-- Recognized hook fields are `.create`, `.destroy`, and `.ufcs`. The implementation also accepts legacy `.create1` and `.create2` spellings as compatibility aliases for one- and two-argument create registrations.
+- Recognized hook fields are `.create`, `.destroy`, and `.ufcs`.
 
 **UFCS handler contract (normative):**
 
@@ -5358,7 +5307,7 @@ unsafe {
 C APIs that return owned buffers can be adopted as unique slices:
 
 ```c
-T[:] adopt<T>(void* ptr, size_t count, void (*deleter)(void*));
+T[:] adopt::[T](void* ptr, size_t count, void (*deleter)(void*));
 ```
 
 - Only valid inside `unsafe {}`.
@@ -5548,7 +5497,7 @@ x => expr                     // single parameter, expression body
 For thread/task closures, reference captures (`[&x]`) are checked for mutation:
 
 - **Read-only access:** Allowed. The closure may read the referenced variable.
-- **Mutation:** Compile error unless the type is a safe wrapper (`@atomic T`, `Atomic<T>`, `Mutex<T>`, channel handles), or the capture is inside `@unsafe`.
+- **Mutation:** Compile error unless the type is a safe wrapper (`@atomic T`, `Atomic::[T]`, `Mutex::[T]`, channel handles), or the capture is inside `@unsafe`.
 
 ```c
 int counter = 0;
@@ -5567,10 +5516,10 @@ spawn(() => [&counter] { printf("%d", counter); });
 // ❌ ERROR: mutation of shared reference
 spawn(() => [&counter] { counter++; });
 // error: mutation of shared reference 'counter' in spawned task
-// help: use Atomic<int>, Mutex<int>, or @unsafe [&counter]
+// help: use Atomic::[int], Mutex::[int], or @unsafe [&counter]
 
 // ✅ OK: safe wrapper
-Atomic<int> safe_counter = atomic_new(0);
+Atomic::[int] safe_counter = atomic_new(0);
 spawn(() => [&safe_counter] { safe_counter++; });
 
 // ⚠️ OK: explicit unsafe (you own this race)
@@ -5598,8 +5547,8 @@ For thread/task closures, captured values must also be capturable (see §1.2).
 
 ```c
 auto x = 42;                // int
-auto t = work();            // Task<T> where work returns @async T
-auto it = iter(&m);         // MapIter<K, V>
+auto t = work();            // Task::[T] where work returns @async T
+auto it = iter(&m);         // MapIter::[K, V]
 ```
 
 **Structs:**
@@ -5653,7 +5602,7 @@ if (e is IoError.Other(code)) { use(code); }
 - `AsyncMutex::[T]` — suspending mutex-protected shared state
 - `AsyncGuard::[T]` — RAII lock guard (from `AsyncMutex::[T].lock()`)
 - `Atomic::[T]` — lock-free atomic (primitives only)
-- `CCVec::[T]` — dynamic array (legacy `Vec::[T]` is accepted during migration and lowers to the same concrete family)
+- `CCVec::[T]` — dynamic array
 - `Map::[K, V]` — hash map
 - `T[~... >]` / `T[~... <]` — channel handles for element type T
 
@@ -5673,25 +5622,14 @@ if (e is IoError.Other(code)) { use(code); }
 
 Concurrent-C uses **compile-time monomorphization** for generic families.
 
-**Implementation status (v1.0):**
-
-- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
-- **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
-- **Retired:** `T?` (optional types) have been retired from the normative spec surface. Use `T`* (with `NULL` for absence), `T !>(E)` (for fallible operations), `bool op(T* out)` (for iterators / pop / recv), or an in-band sentinel (empty slice, `-1`) instead.
-
-This section therefore mixes:
-
-- the **normative monomorphization model** used by implemented built-in families today
-- the **target source-language model** for future full user-defined generics
-
-No trait system is part of v1.0.
+No trait system.
 
 - **§12.1 Syntax** — type parameters and value parameters
 - **§12.2 Instantiation & monomorphization** — when code is generated
 - **§12.3 Type inference** — how parameters are inferred
 - **§12.4 Specialization** — `@comptime if` on types/values
 - **§12.5 Semantics with ownership** — copy vs move through generics
-- **§12.6 Restrictions (v1.0)** — what is intentionally missing
+- **§12.6 Restrictions** — what is intentionally missing
 
 ---
 
@@ -5749,8 +5687,6 @@ Built-in generic families such as `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and chan
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
 - other constant-expression contexts (see §14)
 
-**Deprecation note (`<>` syntax and legacy vec spellings):** Built-in families currently accept legacy `<T>` spellings during a transition period. For vectors, legacy `Vec::[T]`, `Vec<T>`, and `vec_new<T>(...)` are accepted as aliases of `CCVec::[T]` / `cc_vec_new::[T](...)`. New code should use `::[...]` syntax, with `CCVec::[T]` as the canonical vector family spelling. User-defined generic functions and types use `::[T]` exclusively.
-
 ---
 
 ### 12.2 Instantiation & Monomorphization (Normative)
@@ -5769,7 +5705,6 @@ Generic instantiation uses compile-time monomorphization.
 **Lowering (normative for built-in generic families):**
 
 - `CCVec::[T]` lowers to the concrete family `CCVec_<mangledT>`.
-- Legacy `Vec::[T]` lowers to the same concrete family `CCVec_<mangledT>`.
 - `cc_vec_new::[T](arena)` lowers to `CCVec_<mangledT>_init((arena), CC_VEC_INITIAL_CAP)`.
 - `Map::[K,V]` lowers to a concrete family such as `Map_<mangledK>_<mangledV>`.
 - `T!>(E)` lowers to `CCResult_<mangledT>_<mangledE>`.
@@ -5847,9 +5782,9 @@ take(u);                       // moves u into take(), OK
 
 ---
 
-### 12.6 Restrictions (v1.0)
+### 12.6 Restrictions
 
-Intentionally omitted in v1.0:
+Intentionally omitted:
 
 - Trait/protocol bounds (`::[T: Hashable]`)
 - User-defined compile-time interfaces
@@ -5858,8 +5793,6 @@ Intentionally omitted in v1.0:
 - Runtime reflection over type `T`
 
 **Rule:** Built-in generic families (`Task::[T]`, `Mutex::[T]`, `Map::[K,V]`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
-
-**Retired:** `T?` (optional types) are retired from the normative spec surface as of this revision. Use `T*` (NULL for absence), `T !>(E)` (result types), or `bool op(T* out)` / in-band sentinels (empty slice, `-1`) instead. Legacy `T?` parsing may still lower during phase-1 migration.
 
 ---
 
@@ -6098,7 +6031,7 @@ comptime_assert(BUFFER_SIZE >= 1024, "buffer too small");
 
 ---
 
-### 14.8 Restrictions (v1.0)
+### 14.8 Restrictions
 
 At compile time, the following are forbidden:
 
@@ -6168,7 +6101,7 @@ C APIs often return owned buffers. The `adopt()` function integrates these into 
 **Signature:**
 
 ```c
-T[:] adopt<T>(void* ptr, size_t count, void (*deleter)(void*));
+T[:] adopt::[T](void* ptr, size_t count, void (*deleter)(void*));
 ```
 
 **Parameters:**
@@ -6292,7 +6225,7 @@ c_process(s.ptr, s.len);  // decompose slice into ptr/len
 extern void c_fill_buffer(char* ptr, size_t len);
 
 CCArena arena = cc_arena_heap(megabytes(1));
-Vec<char> buf = vec_with_capacity<char>(&arena, 1000);
+Vec::[char] buf = vec_with_capacity<char>(&arena, 1000);
 c_fill_buffer(buf.ptr, buf.cap());  // fill with C code
 ```
 
@@ -6496,16 +6429,15 @@ Lowers to:
 - Value capture (default) → safe (captures are copies or moves)
 - Reference capture `[&x]` in non-escaping closure → allowed
 - Reference capture `[&x]` in escaping closure → allowed for read-only access, mutation is error
-- Reference capture `[&x]` with mutation → requires `Mutex<T>`, `Atomic<T>`, or `@unsafe`
+- Reference capture `[&x]` with mutation → requires `Mutex::[T]`, `Atomic::[T]`, or `@unsafe`
 
 **Example (escape safety):**
 
 ```c
 @async void bad() {
     int x = 42;
-    nursery {
-        spawn (() => { use(x); });  // ✅ OK: value capture (copy)
-    }
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => { use(x); });  // OK: value capture (copy)
 }
 ```
 
@@ -6514,26 +6446,23 @@ Lowers to:
 ```c
 @async void bad_race() {
     int counter = 0;
-    nursery {
-        spawn (() => [&counter] { counter++; });  // ❌ ERROR: mutation of shared ref
-        spawn (() => [&counter] { counter++; });
-    }
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => [&counter] { counter++; });  // ERROR: mutation of shared ref
+    n->spawn(() => [&counter] { counter++; });
 }
 
 @async void ok_atomic() {
-    Atomic<int> counter = atomic_new(0);
-    nursery {
-        spawn (() => [&counter] { counter++; });  // ✅ OK: Atomic is thread-safe
-        spawn (() => [&counter] { counter++; });
-    }
+    Atomic::[int] counter = atomic_new(0);
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => [&counter] { counter++; });  // OK: Atomic is thread-safe
+    n->spawn(() => [&counter] { counter++; });
 }
 
 @async void ok_readonly() {
     int config = 42;
-    nursery {
-        spawn (() => [&config] { printf("%d", config); });  // ✅ OK: read-only
-        spawn (() => [&config] { printf("%d", config); });
-    }
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => [&config] { printf("%d", config); });  // OK: read-only
+    n->spawn(() => [&config] { printf("%d", config); });
 }
 ```
 
@@ -6697,7 +6626,7 @@ struct Result_T_E {
 // sizeof(Result_T_E) = max_align + max(sizeof(T), sizeof(E))
 ```
 
-**Example (Result<int, ParseError>):**
+**Example (Result::[int, ParseError]):**
 
 If ParseError is 8 bytes:
 
@@ -6753,7 +6682,7 @@ struct Duration {
 
 `@async` functions lower to state-machine generators. The exact ABI is implementation-defined, but:
 
-- `Task<T>` is an opaque pointer-sized handle (typically a `void`* pointing to heap-allocated state)
+- `Task::[T]` is an opaque pointer-sized handle (typically a `void`* pointing to heap-allocated state)
 - The state includes registers (local variables), current PC, and result storage
 - Calling an `@async` function allocates and initializes state but does not start execution
 - Execution begins on first `await` of the returned task
@@ -7008,12 +6937,11 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
         try await protocol_handshake(conn, conn_arena);
     }
 
-    // 2) Serve (long-lived)
-    @nursery {
-        spawn (reader_task(conn, conn_arena));
-        spawn (writer_task(conn, conn_arena));
-        // Any child failure/close cancels siblings; nursery joins all children.
-    }
+    // 2) Serve (long-lived). Any child failure/close cancels siblings;
+    //    the nursery's @destroy joins all children.
+    CCNursery* serve = cc_nursery_create(NULL) !> @destroy;
+    serve->spawn(() => reader_task(conn, conn_arena));
+    serve->spawn(() => writer_task(conn, conn_arena));
 
     // 3) Teardown (bounded, shielded)
     with_shield {
@@ -7064,11 +6992,10 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `@latency_sensitive` | No coalescing allowed                      | Mark request handlers       |
 | `@scoped`            | Cannot escape scope                        | Mark safe cross-thread refs |
 | `@match`             | Pattern matching                           | Multiplex on channels       |
-| `spawn`              | Create task                                | In nursery scope            |
+| `spawn`              | Create task                                | Method on `CCNursery`       |
 | `defer`              | Defer cleanup                              | Guarantee execution         |
-| `try`                | Propagate error                            | Chain operations            |
 | `await`              | Suspend on async                           | Call @async functions       |
-| `nursery`            | Structured concurrency                     | Scope with tasks            |
+| `CCNursery`          | Structured concurrency                     | Scope with tasks            |
 | `with_deadline`      | Apply timeout                              | Enforce deadline            |
 | `with_shield`        | Suppress deadline cancellation observation | Bounded teardown/cleanup    |
 
@@ -7078,12 +7005,12 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 
 | Sugar                                         | Full                                                  | Meaning                         |
 | --------------------------------------------- | ----------------------------------------------------- | ------------------------------- |
-| `T!>(E)`                                      | `Result<T, E>`                                        | Either T or error E             |
+| `T!>(E)`                                      | `Result::[T, E]`                                        | Either T or error E             |
 | `T[:]`                                        | Slice of T                                            | Pointer + length                |
-| `T[~... >]` / `T[~... <]`                     | `AsyncChanTx<T>` / `AsyncChanRx<T>`                   | Async channel handles           |
-| `T[~N ... >]` / `T[~N ... <]`                 | `AsyncChanTx<T, N>` / `AsyncChanRx<T, N>`             | Async handles, capacity N       |
-| `T[~N, Mode ... >]` / `T[~N, Mode ... <]`     | `AsyncChanTx<T, N, Mode>` / `AsyncChanRx<T, N, Mode>` | Async handles with backpressure |
-| `T[~ ... sync ... >]` / `T[~ ... sync ... <]` | `SyncChanTx<T>` / `SyncChanRx<T>`                     | Sync channel handles            |
+| `T[~... >]` / `T[~... <]`                     | `AsyncChanTx::[T]` / `AsyncChanRx::[T]`                   | Async channel handles           |
+| `T[~N ... >]` / `T[~N ... <]`                 | `AsyncChanTx::[T, N]` / `AsyncChanRx::[T, N]`             | Async handles, capacity N       |
+| `T[~N, Mode ... >]` / `T[~N, Mode ... <]`     | `AsyncChanTx::[T, N, Mode]` / `AsyncChanRx::[T, N, Mode]` | Async handles with backpressure |
+| `T[~ ... sync ... >]` / `T[~ ... sync ... <]` | `SyncChanTx::[T]` / `SyncChanRx::[T]`                     | Sync channel handles            |
 
 
 ---
@@ -7208,7 +7135,7 @@ while (true) {
 **Possible direction:** A language-level async iterator protocol and declarative for-await syntax:
 
 ```c
-struct AsyncIterator<T> {
+struct AsyncIterator::[T] {
     @async bool !>(E) next(Arena* a, T* out);
 };
 
@@ -7246,14 +7173,16 @@ Real protocols often need unidirectional closure: proxies (forward until upstrea
 ```c
 @async void!>(IoError) proxy_handler(Duplex* client, Duplex* upstream, Arena* a) {
     // Bidirectional forwarding
-    @nursery {
-        spawn (forward_client_to_upstream(client, upstream, a));
-        spawn (forward_upstream_to_client(upstream, client, a));
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => forward_client_to_upstream(client, upstream, a));
+        n->spawn(() => forward_upstream_to_client(upstream, client, a));
+        // @destroy joins both directions; whichever finishes first will cancel the other.
     }
-    
+
     // One direction closed; signal other direction to close write
-    try await upstream.shutdown(Write);
-    try await client.shutdown(Write);
+    upstream.shutdown(Write) !>;
+    client.shutdown(Write) !>;
 }
 ```
 
@@ -7459,7 +7388,7 @@ Desugars to:
 
 ```c
 {
-    AsyncIterator<char[:]> iter = req.body;
+    AsyncIterator::[char[:]] iter = req.body;
     while (true) {
         char[:] !>(IoError) next_result = await iter.next(arena);
 
@@ -7631,12 +7560,7 @@ Exceptions currently conforming:
 
 ### K.2 Orthogonal concerns
 
-Shape and flow are separate concerns with separate mechanisms.
-
-- **Shape** — memory and task lifetimes. Hierarchical, lexical, enforced at compile time. Arenas and nurseries are scope-bound; their lifetimes end at lexical scope exit.
-- **Flow** — inter-task communication. A graph that may cross shape boundaries. Channels are values, not scopes; their lifetimes are independent of the scopes that create them and are managed with `@defer`.
-
-Consequences (normative):
+See **The CC Principle of Orthogonal Concerns** in the introduction for the shape/flow framing. Normative consequences:
 
 - Values transferred across channels carry provenance metadata identifying their origin arena (§3.4, §3.5). Channel transfer is the mechanism by which a value legitimately crosses a shape boundary.
 - The compiler enforces shape invariants statically. Flow invariants not provable at compile time are enforced at runtime in debug builds (provenance checks, deadlock detection) and are undefined in release builds unless otherwise specified.

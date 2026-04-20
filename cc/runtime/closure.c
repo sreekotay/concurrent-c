@@ -52,7 +52,7 @@ int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c) {
 
 CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c) {
     if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create_child(parent);
+    CCNursery* child = cc_nursery_create(parent);
     if (!child) return NULL;
     if (cc_nursery_spawn_closure0(child, c) != 0) {
         cc_nursery_free(child);
@@ -96,7 +96,7 @@ int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0) {
 
 CCNursery* cc_nursery_spawn_child_closure1(CCNursery* parent, CCClosure1 c, intptr_t arg0) {
     if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create_child(parent);
+    CCNursery* child = cc_nursery_create(parent);
     if (!child) return NULL;
     if (cc_nursery_spawn_closure1(child, c, arg0) != 0) {
         cc_nursery_free(child);
@@ -143,7 +143,7 @@ int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_
 
 CCNursery* cc_nursery_spawn_child_closure2(CCNursery* parent, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
     if (!c.fn) return NULL;
-    CCNursery* child = cc_nursery_create_child(parent);
+    CCNursery* child = cc_nursery_create(parent);
     if (!child) return NULL;
     if (cc_nursery_spawn_closure2(child, c, arg0, arg1) != 0) {
         cc_nursery_free(child);

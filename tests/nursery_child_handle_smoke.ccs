@@ -24,7 +24,7 @@ int main(void) {
     root->free();
     assert(g_child_runs == 1);
 
-    CCNursery* parent = cc_nursery_create();
+    CCNursery* parent = cc_nursery_create(NULL);
     assert(parent != NULL);
     parent->cancel();
 

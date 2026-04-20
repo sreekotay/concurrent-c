@@ -18,7 +18,7 @@ void* chain_task(void* arg) {
     int depth = (int)(intptr_t)arg;
     if (depth <= 0) return NULL;
 
-    CCNursery* n = cc_nursery_create();
+    CCNursery* n = cc_nursery_create(NULL);
     cc_nursery_spawn(n, chain_task, (void*)(intptr_t)(depth - 1));
     cc_nursery_wait(n);
     cc_nursery_free(n);
@@ -35,7 +35,7 @@ int main(void) {
 
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&g_completed, 0);
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, chain_task, (void*)(intptr_t)DEPTH);
         cc_nursery_wait(n);
         cc_nursery_free(n);

@@ -25,7 +25,7 @@ int main(void) {
     printf("fiber_spawn_join_tight: %d iterations\n", ITERATIONS);
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, instant_task, NULL);
         cc_nursery_wait(n);
         cc_nursery_free(n);

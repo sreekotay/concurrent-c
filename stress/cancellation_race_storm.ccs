@@ -48,7 +48,7 @@ int main(void) {
 
         printf("\rIteration %d/%d...", iter, NUM_ITERS);
 
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         if (!n) {
             printf("\nFailed to create nursery!\n");
             return 1;
