@@ -18,6 +18,20 @@ typedef struct {
 
 #define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
 
+/* Sentinel returned by a registered `.ufcs` hook to mean "I don't want to
+ * handle this (type, method) pair — please fall through to whatever
+ * dispatch path would have run with no registered hook at all."  This is
+ * distinct from returning `cc_slice_empty()`, which is "strict reject:
+ * raise a hard error".  Used by the global wildcard hooks in
+ * cc_arena.cch to defer to the compiler's hardcoded channel / slice
+ * dispatchers for the handful of types whose surface spelling diverges
+ * from the stdlib naming convention. */
+#define CC_UFCS_PASS_TAG "__cc_ufcs_pass__"
+
+static inline CCSlice cc_ufcs_pass(void) {
+    return cc_slice_from_buffer((void*)CC_UFCS_PASS_TAG, sizeof(CC_UFCS_PASS_TAG) - 1);
+}
+
 static inline bool cc_ufcs_slice_eq_cstr(CCSlice s, const char *cstr) {
     size_t len = cstr ? strlen(cstr) : 0;
     return cstr && s.len == len && memcmp(s.ptr, cstr, len) == 0;
@@ -47,12 +61,13 @@ static inline CCSlice cc_ufcs_concat2(CCArena *arena, CCSlice left, CCSlice righ
     return cc_slice_from_buffer(buf, total);
 }
 
-/* `cc_ufcs_generic_cc_prefix_lower_c` (generic `CC<Rest>` -> `cc_<rest>_`
- * name composer) is defined in cc_arena.cch so individual type headers
- * can reference it in their own `@comptime cc_type_register(...)` blocks
- * without needing a circular include of cc_ufcs.cch here.  Every header
- * that registers UFCS hooks already includes cc_arena.cch transitively
- * (via cc_slice.cch / prelude).  See cc/include/ccc/cc_arena.cch. */
+/* The generic UFCS name composers (`cc_ufcs_generic_cc_prefix_lower_c`
+ * for snake_case receivers and `cc_ufcs_generic_cc_camel_same_c` for
+ * the CCSlice family) live in cc_arena.cch — their bodies need
+ * `cc_arena_alloc`, and cc_ufcs.cch is the one that includes that
+ * header, so putting the helpers there avoids a circular include.  The
+ * global `cc_type_register("CC*", ...)` / `cc_type_register("CCSlice*", ...)`
+ * entries at the end of cc_arena.cch wire them in once for all CC types. */
 
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
     CCUfcsRegistration reg = {0};
@@ -79,30 +94,29 @@ static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, C
 }
 #endif
 
-/* NOTE: `cc_ufcs_generic_cc_prefix_lower_c` is intentionally NOT
- * registered globally via `cc_type_register("CC*", ...)` — a broad
- * wildcard would shadow the hardcoded CamelCase paths for the CCSlice
- * family (CCSlice / CCSliceUnique / CCSliceShared) which still emit
- * `CCSlice_len(&s)` etc. and must keep working until those families
- * are migrated to registered hooks.  Instead, individual headers opt
- * in explicitly when their type's C API already follows the
- * `cc_<snake_type>_<method>` convention:
+/* Default UFCS dispatch is wired up globally in cc_arena.cch via two
+ * wildcard `cc_type_register(...)` entries:
  *
- *     @comptime {
- *         (void)cc_type_register("CCFoo", (CCTypeHooks){
- *             .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
- *         });
- *     }
+ *     cc_type_register("CC*",      { .ufcs = cc_ufcs_generic_cc_prefix_lower_c });
+ *     cc_type_register("CCSlice*", { .ufcs = cc_ufcs_generic_cc_camel_same_c });
  *
- * Smart snake_case lowering splits CamelCase on uppercase boundaries
- * (CCArenaCheckpoint -> cc_arena_checkpoint, CCFile -> cc_file,
- * CCArenaPool -> cc_arena_pool), so each opt-in collapses ~15 lines of
- * per-type `*_lower_c` boilerplate down to this one-liner.
+ * Every `CCFoo` / `CCFoo*` receiver whose C API follows the stdlib
+ * `cc_<snake_foo>_<method>` convention (CCArena, CCArenaCheckpoint,
+ * CCArenaPool, CCFile, CCCommand, CCSocket, CCListener, CCString, ...)
+ * gets UFCS dispatch for free — headers no longer need a per-type
+ * `@comptime cc_type_register(...)` opt-in.
  *
- * Currently opted in: CCArena, CCArenaCheckpoint, CCArenaPool, CCFile,
- * CCCommand, CCSocket, CCListener, CCString.  CCNursery and the channel
- * families keep bespoke hooks because their UFCS surface names diverge
- * from the canonical C entry points (spawn -> spawn_closure0, etc.).
+ * The CCSlice family (CCSlice / CCSliceUnique / CCSliceShared) keeps
+ * the CamelCase `CCSlice_<method>` spelling and is covered by the
+ * `CCSlice*` entry, which overrides `CC*` because the symbol-table
+ * lookup picks the longest matching prefix (7 chars > 2 chars — see
+ * cc__ufcs_pattern_matches in cc/src/comptime/symbols.c).
+ *
+ * Types that diverge further from both conventions — CCNursery and the
+ * CCChanTx / CCChanRx families whose method names deliberately differ
+ * from their C entry points (spawn -> spawn_closure0, etc.) — still
+ * register a more specific pattern with a bespoke rewrite function and
+ * win over both generic defaults by the same longest-prefix rule.
  */
 
 #endif

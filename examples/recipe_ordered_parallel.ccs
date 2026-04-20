@@ -9,6 +9,12 @@
  * The channel carries task handles, not results. Sending handles in
  * input order and awaiting them in FIFO order yields ordered output
  * without any reorder buffer, even though tasks finish out of order.
+ *
+ * Why cc_thread_spawn (not n->spawn)? Nursery-spawned tasks are joined
+ * by the nursery's @destroy in fire-and-forget fashion; there is no
+ * handle to await individually. This recipe needs a first-class task
+ * handle that can cross a channel and be awaited out-of-declaration
+ * order — that's what cc_thread_spawn / cc_block_on_intptr give us.
  */
 #include <ccc/std/prelude.cch>
 #include <unistd.h>

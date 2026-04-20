@@ -271,13 +271,14 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
  *      CCString s;            s.len()         -> cc_string_len(&s)
  *      CCNursery* n;          n->wait()       -> cc_nursery_wait(n)
  *
- * Types opt in by registering this helper directly:
- *
- *      @comptime {
- *          (void)cc_type_register("CCFoo", (CCTypeHooks){
- *              .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
- *          });
- *      }
+ * Registered globally via `cc_type_register("CC*", ...)` at the bottom of
+ * this file, so every `CC<Rest>` type that follows the snake-case convention
+ * gets UFCS dispatch for free; there is no per-type opt-in to maintain.
+ * Types whose C API diverges from this convention (CCSlice / CCSliceUnique /
+ * CCSliceShared keep the CamelCase `CCSlice_<method>` names, CCNursery and
+ * the channel families rename methods to distinguish arities) register a
+ * more specific pattern to override the default — longest-prefix match wins
+ * in the symbol-table lookup (see cc__ufcs_pattern_matches in symbols.c).
  *
  * Lives in cc_arena.cch (rather than cc_ufcs.cch) because the body needs
  * `cc_arena_alloc` and cc_ufcs.cch is the one that #includes this header;
@@ -315,6 +316,29 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     /* Require the `CC` prefix followed by at least one more character so
        we don't produce `cc__method` for the bare `CC` typedef. */
     if (tlen <= 2 || t[0] != 'C' || t[1] != 'C') return cc_slice_empty();
+    /* Pass-through for types whose C API doesn't match the stdlib
+       `cc_<snake_type>_<method>` convention.  The compiler's hardcoded
+       dispatch paths (cc_ufcs_channel_callee for the CCChan family,
+       the CCSlice switch in ufcs.c) handle these — returning the
+       sentinel here lets those paths run even though this generic hook
+       is registered globally via `cc_type_register("CC*", ...)`.
+
+       CCChanTx / CCChanRx (bare + typed family `CCChanTx_int`, etc.)
+       already have dedicated hooks registered in cc_channel.cch;
+       their longer-prefix patterns win over `CC*` so we never even
+       reach this helper for those — we list them defensively anyway
+       so a future refactor that drops those hooks still compiles. */
+    if ((tlen == 6 && memcmp(t, "CCChan", 6) == 0) ||
+        (tlen >= 8 && memcmp(t, "CCChanTx", 8) == 0 &&
+         (tlen == 8 || t[8] == '_')) ||
+        (tlen >= 8 && memcmp(t, "CCChanRx", 8) == 0 &&
+         (tlen == 8 || t[8] == '_'))) {
+        /* Inline the CC_UFCS_PASS_TAG literal: cc_ufcs.cch (which defines
+           the macro + helper) includes this header, so we can't reference
+           cc_ufcs_pass() here without a circular include. */
+        static const char pass_tag[] = "__cc_ufcs_pass__";
+        return cc_slice_from_buffer((void*)pass_tag, sizeof(pass_tag) - 1);
+    }
     /* Worst case: every remaining char is uppercase and gains a `_`, so
        plan for 2x + the "cc_" prefix + "_" separator + method. */
     max_total = 3 /* "cc_" */ + (tlen - 2) * 2 + 1 /* "_" */ + method.len;
@@ -338,6 +362,37 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         wi += method.len;
     }
     total = wi;
+    return cc_slice_from_buffer(buf, total);
+}
+
+/* Slice-family name composer: every variant in the slice family (plain
+ * CCSlice, CCSliceUnique, CCSliceShared, ...) dispatches through the
+ * canonical `CCSlice_<method>` entry points — there is no
+ * `CCSliceUnique_len` or `CCSliceShared_eq_cstr`, only `CCSlice_*`.
+ * This hook therefore emits `CCSlice_<method>` regardless of the
+ * concrete receiver subtype.  Registered globally for `CCSlice*` at
+ * the bottom of this file so the whole family opts into the right
+ * callee without per-type boilerplate. */
+static inline CCSlice cc_ufcs_generic_cc_camel_same_c(CCSlice recv_type,
+                                                      CCSlice method,
+                                                      CCSlice mode,
+                                                      CCSliceArray argv,
+                                                      CCSliceArray arg_types,
+                                                      CCArena *arena) {
+    static const char prefix[] = "CCSlice_";
+    size_t prefix_len = sizeof(prefix) - 1;
+    size_t total;
+    char *buf;
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    if (!arena) return cc_slice_empty();
+    total = prefix_len + method.len;
+    buf = (char *)cc_arena_alloc(arena, total, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    memcpy(buf, prefix, prefix_len);
+    if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
     return cc_slice_from_buffer(buf, total);
 }
 
@@ -605,14 +660,6 @@ static inline void cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
     cc_arena_restore(*cp);
 }
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCArenaCheckpoint", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-}
-#endif
-
 // True (non-zero) iff the current slab can satisfy this alloc without growing
 // (same condition as cc__arena_alloc_fast). Does not observe future growth; use
 // cc_arena_remaining for raw tail space ignoring alignment.
@@ -657,10 +704,9 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
-/* CCArena UFCS uses the generic `cc_<lower_type>_<method>` convention
- * (cc_arena_alloc, cc_arena_remaining, ...), so it opts in to the shared
- * `cc_ufcs_generic_cc_prefix_lower_c` helper rather than carrying a
- * bespoke name-composer here.  See cc/include/ccc/cc_ufcs.cch. */
+/* CCArena's UFCS dispatch is covered by the global `CC*` registration
+ * (see end of this file).  Only the lifecycle hooks (`.create` /
+ * `.destroy`) need a type-specific entry. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
@@ -672,7 +718,6 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
          * directly with CC_ARENA_GROWABLE. */
         .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif
@@ -779,15 +824,31 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
     }
 }
 
-/* CCArenaPool UFCS uses the generic snake_case helper: CamelCase split
-   on uppercase maps `CCArenaPool` -> `cc_arena_pool_*`, matching the
-   existing C API (alloc/free/destroy) plus the `detach_arena` alias
-   declared above. */
+/* CCArenaPool / CCArenaCheckpoint UFCS dispatch is covered by the
+ * global `CC*` registration below. */
 
+/* Global UFCS registrations:
+ *
+ *   `CC*`      -> cc_ufcs_generic_cc_prefix_lower_c  (default: CCFoo ->
+ *                 cc_foo_<method>, the stdlib convention).
+ *   `CCSlice*` -> cc_ufcs_generic_cc_camel_same_c    (CCSlice family keeps
+ *                 the CamelCase `CCSlice_<method>` spelling).
+ *
+ * Longest-pattern-prefix wins in the symbol-table lookup
+ * (cc__ufcs_pattern_matches in cc/src/comptime/symbols.c), so `CCSlice*`
+ * (7-char prefix) overrides `CC*` (2-char prefix) for CCSlice /
+ * CCSliceUnique / CCSliceShared receivers.  Types whose C API diverges
+ * further (CCNursery, CCChanTx/Rx families with renamed methods) can
+ * still register their own specific pattern with a bespoke rewrite to
+ * win over either generic default.  Per-type `.ufcs = ...` opt-ins
+ * in the std headers are no longer needed and have been removed. */
 #ifdef CC_COMPTIME_SCAN
 @comptime {
-    (void)cc_type_register("CCArenaPool", (CCTypeHooks){
+    (void)cc_type_register("CC*", (CCTypeHooks){
         .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
+    });
+    (void)cc_type_register("CCSlice*", (CCTypeHooks){
+        .ufcs = cc_ufcs_generic_cc_camel_same_c,
     });
 }
 #endif

@@ -13,8 +13,6 @@
  * Mutation through a reference capture is a compile error unless the
  * captured variable is wrapped in a thread-safe type (CCAtomic::[T],
  * CCMutex::[T]) or the closure is marked @unsafe.
- *
- * See spec §1.2 for full capture rules.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>

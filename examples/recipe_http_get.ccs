@@ -56,6 +56,14 @@ int main(void) {
     /* Results storage stays valid until the nursery scope waits on all tasks. */
     int status[NUM_URLS] = {0};
     size_t body_len[NUM_URLS] = {0};
+    /* The natural form would be [&status, &body_len] on the closure below,
+     * but today's &-capture lowering treats the captured name as a scalar
+     * lvalue (`#define status (*__cc_ref_status)`), so `status` in the body
+     * expands to a single int instead of decaying to int*. Value-capture
+     * would need array-by-assignment in the closure env (not legal C), so
+     * neither direct form works. As a BUG-workaround, alias each array to
+     * a pointer and value-capture the pointers — tasks write disjoint
+     * slots, so no synchronisation is needed. */
     int* status_p = status;
     size_t* body_len_p = body_len;
 

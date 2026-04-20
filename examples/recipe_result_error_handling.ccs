@@ -11,8 +11,6 @@
  * hello.ccs shows the single-call inline form. This recipe shows the
  * hoisted @errhandler pattern: declare one fatal policy at the top of
  * a scope, then use bare !>; at every call site.
- *
- * See spec §3.1 for complete semantics.
  */
 #include <ccc/std/prelude.cch>
 

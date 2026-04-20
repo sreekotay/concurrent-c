@@ -12,8 +12,6 @@
  *
  * For resource lifetimes tied to a declaration, see @destroy in
  * hello.ccs (e.g. CCNursery* n = ... !> @destroy { ... };).
- *
- * See spec §5.1 for complete semantics.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>

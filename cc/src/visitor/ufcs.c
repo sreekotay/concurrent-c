@@ -867,6 +867,22 @@ static int cc__emit_registered_callable(char* out,
     mode_slice = cc_slice_from_buffer((void*)(g_ufcs_await_context ? "await" : "sync"),
                                       g_ufcs_await_context ? sizeof("await") - 1 : sizeof("sync") - 1);
     lowered = fn(recv_type_slice, method_slice, mode_slice, argv, arg_types, &arena);
+    /* Pass-through sentinel: the hook explicitly declines to handle this
+     * (type, method) pair and wants the dispatcher to behave as if no
+     * hook were registered.  Used by the global `CC*` wildcard in
+     * cc_arena.cch to defer to the compiler's hardcoded channel / slice
+     * dispatch for types whose C API doesn't match the generic naming
+     * convention (CCChan / CCChanTx / CCChanRx families).  Distinct from
+     * returning cc_slice_empty(), which stays "strict reject". */
+    {
+        static const char pass_tag[] = "__cc_ufcs_pass__";
+        const size_t pass_len = sizeof(pass_tag) - 1;
+        if (lowered.ptr && lowered.len == pass_len &&
+            memcmp(lowered.ptr, pass_tag, pass_len) == 0) {
+            cc_heap_arena_free(&arena);
+            return -1;
+        }
+    }
     if (!lowered.ptr || lowered.len == 0) {
         cc_heap_arena_free(&arena);
         /* Registered hook said "not mine": strict C-first demands UNRESOLVED

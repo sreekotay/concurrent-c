@@ -144,7 +144,7 @@ static void print_process_output_excerpt(const CCProcessOutput* out) {
  * Most tests expect 0, but some (like deadlock demos) expect 1.
  * Returns -1 if the test should be skipped entirely (like servers). */
 static int get_expected_exit_code(const char* path) {
-    if (strstr(path, "recipe_tcp_echo") != NULL) return -1;       /* Server */
+    /* recipe_tcp_echo runs in self-contained --test mode (see get_extra_args). */
     if (strstr(path, "ping_server") != NULL) return -1;           /* Server */
     /* Pre-existing toolchain conflict, unrelated to V1 strip:
      * curl/system.h pulls in <sys/socket.h> after libcurl has already declared
@@ -169,6 +169,15 @@ static int get_expected_exit_code(const char* path) {
     if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
     if (strstr(path, "complex_deadlock") != NULL) return 1;   /* Expected deadlock abort */
     return 0;
+}
+
+/* Returns NULL if no extra args. Otherwise, a NULL-terminated list of extra
+ * args to pass to the test program (after `--`). Lets self-testable recipes
+ * opt into a deterministic mode under the runner without being skipped. */
+static const char* const* get_extra_args(const char* path) {
+    static const char* TCP_ECHO_ARGS[] = { "--test", NULL };
+    if (strstr(path, "recipe_tcp_echo") != NULL) return TCP_ECHO_ARGS;
+    return NULL;
 }
 
 static int get_timeout_sec(const char* path, int default_timeout_sec) {
@@ -226,6 +235,13 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         cmd.arg_if(timeout_for_file > 0, "--timeout");
         cmd.arg_i32_if(timeout_for_file > 0, timeout_for_file);
         cmd.arg(path);
+        const char* const* extra = get_extra_args(path);
+        if (extra != NULL) {
+            cmd.arg("--");
+            for (size_t k = 0; extra[k] != NULL; k++) {
+                cmd.arg(extra[k]);
+            }
+        }
         if (stream_output) {
             cmd.inherit_stdio();
             status = cmd.status();

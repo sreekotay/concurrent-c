@@ -232,6 +232,34 @@ static int cc__is_storage_keyword_range(const char* s, size_t n) {
            cc__keyword_eq_range(s, n, "_Noreturn");
 }
 
+/* Scan forward from 0 to `end` tracking block/line comments and string/char
+ * literals.  Return the offset just after the last `;`, `{`, or `}` that is
+ * NOT inside a comment or string literal.  Returns 0 if there is no such
+ * terminator (i.e. the declaration is at top of file).  Critical for
+ * cc__extract_function_return_type: a naive backward walk from the function
+ * name happily lands on a `;` inside a long block-comment header,
+ * which then makes the return-type extractor splice a huge chunk of source
+ * into the function prologue.  Scan is O(end) per call. */
+static size_t cc__last_stmt_terminator_before(const char* s, size_t end) {
+    size_t last = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!s || end == 0) return 0;
+    for (size_t i = 0; i < end; ++i) {
+        char c = s[i];
+        char c2 = (i + 1 < end) ? s[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == ';' || c == '{' || c == '}') last = i + 1;
+    }
+    return last;
+}
+
 static size_t cc__skip_decl_noise(const char* s, size_t pos, size_t end) {
     if (!s) return pos;
     for (;;) {
@@ -418,12 +446,7 @@ static int cc__extract_function_return_type(const char* s, size_t len, size_t br
     if (name_start == name_end || !cc__is_ident_start(s[name_start])) return 0;
     if (cc__is_control_keyword_range(s + name_start, name_end - name_start)) return 0;
 
-    prefix_start = name_start;
-    while (prefix_start > 0) {
-        char prev = s[prefix_start - 1];
-        if (prev == ';' || prev == '}' || prev == '{') break;
-        prefix_start--;
-    }
+    prefix_start = cc__last_stmt_terminator_before(s, name_start);
     while (prefix_start < name_start && isspace((unsigned char)s[prefix_start])) prefix_start++;
     prefix_end = name_start;
     while (prefix_end > prefix_start && isspace((unsigned char)s[prefix_end - 1])) prefix_end--;

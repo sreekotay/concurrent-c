@@ -1,0 +1,43 @@
+/*
+ * Regression: a long block-comment header preceding the first function
+ * with a `@destroy` local used to break the compiler when the comment
+ * body contained any `;`, `{`, or `}`.
+ *
+ * Root cause: cc__extract_function_return_type (pass_defer_syntax.c)
+ * walked backward from the function name looking for the most recent
+ * statement-terminator (`; { }`) to find where the return-type text
+ * begins.  The naive walk ignored comment state, so it happily landed
+ * on a `;` sitting inside this header, and then the "decl noise"
+ * forward-skipper never recovered because the opening block-comment
+ * marker was way earlier.  The return-type string ended up as a 255-byte chunk of
+ * comment + #includes + `static void`, which the @destroy prologue
+ * pass then spliced as `<huge-chunk> __cc_retval_1;` right after the
+ * opening `{`.  Results: unrecognized-character errors on stray
+ * backticks / em-dashes from the comment, parser errors pointing at
+ * wildly wrong lines, and in general a truncated function body.
+ *
+ * This header intentionally contains:
+ *   - multiple `;` characters inside running prose   ; one; two; three;
+ *   - `{` and `}` in prose                            { } { }
+ *   - `\x60`-style backtick literals in words like `./ccc run`
+ *   - non-ASCII em-dashes — — —
+ *   - `--flag` style tokens that used to collide with pass heuristics
+ * so any reintroduction of the corruption surfaces as a compile fail
+ * rather than a silent miscompile.
+ *
+ * Expected behaviour: this file must compile cleanly and print the
+ * two lines captured in the .stdout file.
+ */
+#include <ccc/std/prelude.cch>
+
+static void alpha(void) {
+    CCArena a = cc_arena_heap(1024) @destroy;
+    (void)a;
+    printf("alpha ok\n");
+}
+
+int main(void) {
+    alpha();
+    printf("done\n");
+    return 0;
+}
