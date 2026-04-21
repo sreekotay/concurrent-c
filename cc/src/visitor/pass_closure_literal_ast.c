@@ -1513,30 +1513,36 @@ static const char* cc__lookup_param_type_by_src(const CCFuncSig* sigs,
     if (!sigs || sig_n <= 0 || !src || !param_name) return NULL;
     const CCFuncSig* best_sig = NULL;
     size_t best_off = 0;
+    /* Only search the region before `closure_off` — the goal is to
+     * find the most recent call to one of `sigs[*]` whose bounded
+     * argument position would supply the closure's param types. */
+    size_t scan_end = closure_off;
     for (int i = 0; i < sig_n; i++) {
         if (!sigs[i].name) continue;
         size_t name_len = strlen(sigs[i].name);
-        const char* p = src;
-        const char* last = NULL;
-        while ((p = strstr(p, sigs[i].name)) != NULL) {
-            size_t off = (size_t)(p - src);
-            if (off >= closure_off) break;
-            char prev = (off > 0) ? src[off - 1] : '\0';
-            char next = (off + name_len < closure_off) ? src[off + name_len] : '\0';
-            if ((off == 0 || cc__is_ident_boundary_char(prev)) &&
-                (next == '\0' || cc__is_ident_boundary_char(next) || next == '(' || next == ' ' || next == '\t')) {
-                const char* q = p + name_len;
-                while (*q == ' ' || *q == '\t') q++;
-                if (*q == '(') {
-                    last = p;
-                }
+        if (name_len == 0) continue;
+        size_t last_off = (size_t)-1;
+        size_t scan_pos = 0;
+        while (scan_pos < scan_end) {
+            /* Comment/string-aware, word-bounded identifier find —
+             * pre-metaclass this used `strstr` which would match
+             * `sigs[i].name` inside block comments and string
+             * literals (e.g. `/ * calls foo(x) * /`) and pull the
+             * "last call" offset into dead text.  See util/text.h. */
+            size_t hit = cc_find_ident_top_level(src, scan_pos, scan_end,
+                                                 sigs[i].name, name_len);
+            if (hit >= scan_end) break;
+            size_t after = hit + name_len;
+            const char* q = src + after;
+            while (after < scan_end && (*q == ' ' || *q == '\t')) { q++; after++; }
+            if (after < scan_end && *q == '(') {
+                last_off = hit;
             }
-            p += name_len;
+            scan_pos = hit + name_len;
         }
-        if (last) {
-            size_t off = (size_t)(last - src);
-            if (off < closure_off && off >= best_off) {
-                best_off = off;
+        if (last_off != (size_t)-1) {
+            if (last_off >= best_off) {
+                best_off = last_off;
                 best_sig = &sigs[i];
             }
         }

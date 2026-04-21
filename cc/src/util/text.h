@@ -255,6 +255,434 @@ static inline size_t cc_skip_ws_and_comments(const char* src, size_t len, size_t
     return i;
 }
 
+/* ---- Structural forward search (comment/string/bracket aware) ----
+ *
+ * Raw-text lowering passes repeatedly ask "given a function/decl/sigil at
+ * position P, where is the next `(` / `{` / identifier X?"  The naive
+ * answers (`strchr`, `strstr`) accept any byte match, including bytes
+ * inside `/ * ... * /` and `// ...` comments, string/char literals, and
+ * nested bracket groups.  That has been the root cause of a long tail of
+ * lowering bugs where the scanner drifts into a comment's parenthetical,
+ * a neighbouring statement-expression `({ ... })`, or the body of an
+ * already-rewritten sibling function — and emits garbage.
+ *
+ * These helpers answer the same questions but respect C lexical
+ * structure: they skip line comments (`// ... \n`), block comments
+ * (`/ * ... * /`), and `"..." / '...'` literals, and — for
+ * `cc_find_char_top_level` — only return matches at paren/brace/bracket
+ * nesting depth zero relative to the starting position.  That last
+ * property is what lets callers say "find the `(` that opens the param
+ * list, not any `(` that happens to appear inside a declarator tag or a
+ * `__typeof__(...)` stmt-expr that was already emitted by an earlier
+ * pass."
+ *
+ * Both functions are pure forward searches over the half-open range
+ * `src[start..end)`.  They return `end` if no match is found, so callers
+ * can use `pos < end` as a success check. */
+
+/* Forward-find the first top-level occurrence of `ch` in src[start..end),
+ * skipping line/block comments and string/char literals, and skipping
+ * over balanced `()` / `[]` / `{}` groups so that only depth-0 matches
+ * are returned.  Note: this means if `ch == '('`, the very first `(` at
+ * depth 0 is returned and the scan does not descend into it. */
+static inline size_t cc_find_char_top_level(const char* src, size_t start, size_t end, char ch) {
+    if (!src || start >= end) return end;
+    int par = 0, brk = 0, br = 0;
+    int in_lc = 0, in_bc = 0;
+    int ins = 0; char q = 0;
+    for (size_t p = start; p < end; p++) {
+        char c = src[p];
+        char c2 = (p + 1 < end) ? src[p + 1] : 0;
+        /* Line-comment ends AT the `\n`, so the terminator is not part
+         * of the comment and may still be a valid delimiter match for
+         * callers searching for newline boundaries. */
+        if (in_lc) { if (c == '\n') { in_lc = 0; } else continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) { if (c == '\\' && p + 1 < end) { p++; continue; } if (c == q) ins = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; p++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; p++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+        if (par == 0 && brk == 0 && br == 0 && c == ch) return p;
+        if (c == '(') par++;
+        else if (c == ')') { if (par) par--; }
+        else if (c == '[') brk++;
+        else if (c == ']') { if (brk) brk--; }
+        else if (c == '{') br++;
+        else if (c == '}') { if (br) br--; }
+    }
+    return end;
+}
+
+/* Backward-find the first top-level occurrence of any char in `delims`
+ * when scanning from `end` towards `start` in `src`.  Like the forward
+ * helper, this:
+ *   - skips `/ * ... * /` and `// ...\n` comments,
+ *   - skips `"..."` / `'...'` literals,
+ *   - treats `()` / `[]` / `{}` as balanced groups: an inner `(` can
+ *     match an inner `)` and the scan will not stop on either, but a
+ *     lone opener with no preceding closer at the current depth WILL
+ *     stop the scan (matching the `cc__scan_back_to_delim` semantics
+ *     for C declarators, where `(` delimits the start of a parenthesized
+ *     declarator).
+ *
+ * Returns a position `p` in `[start..end]` such that `src[p]` is the
+ * matching delim (or `(` at depth 0), with leading whitespace skipped
+ * forward so the returned position points at the first non-whitespace
+ * character following the delim — matching the convention used by the
+ * original `cc__scan_back_to_delim`.  If no delim is found the function
+ * returns `start` (still skipped past leading whitespace).
+ *
+ * `delims` is a null-terminated string of delimiter characters.  A
+ * common choice for C decl boundaries is `";{},<\n"`.
+ *
+ * Implementation note: this walks backward one byte at a time.  Because
+ * comments and strings are only delimited forward-in-time, detecting
+ * them during a backward walk requires a prepass.  We do a lightweight
+ * prepass that labels every byte in `[start..end]` as either "code" or
+ * "skip", then do the backward scan over labeled bytes only.  That's
+ * O(end - start) space but still linear time and avoids the tricky
+ * "am I inside a comment?" question on the backward pass. */
+static inline size_t cc_rfind_char_top_level(const char* src, size_t start, size_t end,
+                                              const char* delims) {
+    if (!src || !delims || start >= end) return start;
+    size_t span = end - start;
+    /* `mask[i] == 1` => src[start+i] is inside a comment or string
+     * literal and should be skipped.  Caller buffers up to 1<<20 bytes;
+     * that's the largest source region any pass scans in practice.  For
+     * anything larger, fall back to naive backward scan (which is still
+     * better than the pre-metaclass state since most backward-scan
+     * call sites run on short local regions). */
+    if (span > (1u << 20)) {
+        size_t i = end;
+        while (i > start) {
+            char c = src[i - 1];
+            for (const char* d = delims; *d; d++) {
+                if (c == *d) {
+                    size_t p = i;
+                    while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
+                    return p;
+                }
+            }
+            i--;
+        }
+        size_t p = start;
+        while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
+        return p;
+    }
+    unsigned char stackbuf[1024];
+    unsigned char* mask = stackbuf;
+    unsigned char* heapbuf = NULL;
+    if (span > sizeof(stackbuf)) {
+        heapbuf = (unsigned char*)malloc(span);
+        if (!heapbuf) {
+            size_t p = start;
+            while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
+            return p;
+        }
+        mask = heapbuf;
+    }
+    /* Forward prepass: mark comment / string / char-literal bytes. */
+    {
+        int in_lc = 0, in_bc = 0;
+        int ins = 0; char q = 0;
+        for (size_t i = 0; i < span; i++) {
+            char c = src[start + i];
+            char c2 = (i + 1 < span) ? src[start + i + 1] : 0;
+            if (in_lc) {
+                /* Line-comment ends AT the `\n`, so the terminator is
+                 * not part of the comment — leave it unmasked so the
+                 * backward scan can still treat it as a line delim. */
+                if (c == '\n') { in_lc = 0; mask[i] = 0; continue; }
+                mask[i] = 1;
+                continue;
+            }
+            if (in_bc) {
+                mask[i] = 1;
+                if (c == '*' && c2 == '/') {
+                    if (i + 1 < span) { mask[i + 1] = 1; i++; }
+                    in_bc = 0;
+                }
+                continue;
+            }
+            if (ins) {
+                mask[i] = 1;
+                if (c == '\\' && i + 1 < span) {
+                    if (i + 1 < span) { mask[i + 1] = 1; i++; }
+                    continue;
+                }
+                if (c == q) ins = 0;
+                continue;
+            }
+            if (c == '/' && c2 == '/') {
+                mask[i] = 1;
+                if (i + 1 < span) { mask[i + 1] = 1; i++; }
+                in_lc = 1;
+                continue;
+            }
+            if (c == '/' && c2 == '*') {
+                mask[i] = 1;
+                if (i + 1 < span) { mask[i + 1] = 1; i++; }
+                in_bc = 1;
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                mask[i] = 1;
+                ins = 1; q = c;
+                continue;
+            }
+            mask[i] = 0;
+        }
+    }
+    /* Backward scan on code bytes only, tracking paren/bracket nesting. */
+    int paren_depth = 0, brack_depth = 0, brace_depth = 0;
+    size_t i = span;
+    size_t hit = (size_t)-1;
+    while (i > 0) {
+        i--;
+        if (mask[i]) continue;
+        char c = src[start + i];
+        if (c == ')') { paren_depth++; continue; }
+        if (c == '(') {
+            if (paren_depth > 0) { paren_depth--; continue; }
+            /* Position after the `(` — caller expects the first byte
+             * of whatever sits inside the parenthesized declarator. */
+            hit = i + 1;
+            break;
+        }
+        if (c == ']') { brack_depth++; continue; }
+        if (c == '[') { if (brack_depth > 0) brack_depth--; continue; }
+        if (c == '}') { brace_depth++; continue; }
+        if (c == '{') {
+            if (brace_depth > 0) { brace_depth--; continue; }
+            /* `{` is a delim if listed. */
+        }
+        if (paren_depth == 0 && brack_depth == 0 && brace_depth == 0) {
+            for (const char* d = delims; *d; d++) {
+                if (c == *d) { hit = i + 1; goto done; }
+            }
+        }
+    }
+done:
+    {
+        size_t p = (hit == (size_t)-1) ? start : (start + hit);
+        while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (heapbuf) free(heapbuf);
+        return p;
+    }
+}
+
+/* Forward-find the first word-bounded occurrence of `name` (length
+ * `name_len`) in src[start..end), skipping comments and strings.  Word
+ * boundary = the chars immediately before the match and immediately
+ * after must not be identifier chars.  Returns position of first char
+ * of the match, or `end` if not found.  Unlike `cc_find_char_top_level`,
+ * this DOES return matches inside nested brackets (so it can find e.g.
+ * the function name inside `int handle_client(int x)` where the name
+ * sits between the return type and the param `(`).  Callers who need
+ * top-level-only lookups should post-filter. */
+static inline size_t cc_find_ident_top_level(const char* src, size_t start, size_t end,
+                                             const char* name, size_t name_len) {
+    if (!src || !name || name_len == 0 || start + name_len > end) return end;
+    int in_lc = 0, in_bc = 0;
+    int ins = 0; char q = 0;
+    for (size_t p = start; p + name_len <= end; p++) {
+        char c = src[p];
+        char c2 = (p + 1 < end) ? src[p + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) { if (c == '\\' && p + 1 < end) { p++; continue; } if (c == q) ins = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; p++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; p++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+        if (memcmp(src + p, name, name_len) != 0) continue;
+        if (p > start && cc_is_ident_char(src[p - 1])) continue;
+        if (p + name_len < end && cc_is_ident_char(src[p + name_len])) continue;
+        return p;
+    }
+    return end;
+}
+
+/* Forward-find the first occurrence of literal substring `needle` (length
+ * `needle_len`) in src[start..end), skipping comments and string
+ * literals.  Unlike `cc_find_ident_top_level`, this does NOT require
+ * word boundaries around the match — it's suitable for multi-char
+ * sigils like `!>`, `?>`, `=<!`, `@async`, `@destroy`, where the
+ * surrounding chars are typically punctuation anyway.
+ *
+ * Returns position of first byte of the match, or `end` if not found.
+ *
+ * Use this as a drop-in replacement for `strstr(buf, needle)` when
+ * `buf` contains user source text and a match inside a comment or
+ * string literal would mis-steer a lowering decision. */
+static inline size_t cc_find_substr_top_level(const char* src, size_t start, size_t end,
+                                              const char* needle, size_t needle_len) {
+    if (!src || !needle || needle_len == 0 || start + needle_len > end) return end;
+    int in_lc = 0, in_bc = 0;
+    int ins = 0; char q = 0;
+    for (size_t p = start; p + needle_len <= end; p++) {
+        char c = src[p];
+        char c2 = (p + 1 < end) ? src[p + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) { if (c == '\\' && p + 1 < end) { p++; continue; } if (c == q) ins = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; p++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; p++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+        if (memcmp(src + p, needle, needle_len) == 0) return p;
+    }
+    return end;
+}
+
+/* Boolean predicate: does `needle` appear in src[0..len) outside
+ * comments and string literals?  This is the drop-in replacement for
+ * `strstr(src, needle) != NULL` in presence-check heuristics scattered
+ * across the lowering passes (e.g. "does this function body contain
+ * an `@async` / `await` / `!>` sigil, and therefore need the async-
+ * aware code path?").
+ *
+ * Pre-metaclass, those checks flagged false positives any time the
+ * sigil appeared in a comment — `/ * example: await x * /` was enough
+ * to switch a pass onto its async path, which at best was wasted work
+ * and at worst produced incorrect lowerings. */
+static inline int cc_contains_token_top_level(const char* src, size_t len, const char* needle) {
+    if (!src || !needle) return 0;
+    size_t nl = strlen(needle);
+    if (nl == 0) return 0;
+    return cc_find_substr_top_level(src, 0, len, needle, nl) < len;
+}
+
+/* ---- Error-lowering helpers ----
+ *
+ * The `!> / ?> / @err` pointer-lowering paths all need to embed a snippet
+ * of user source text (the consumed expression) inside a synthesized C
+ * string literal — the `"NULL returned from <expr> at <file>:<line>"`
+ * message that populates `CCError.message`.  Doing that naively with
+ * `snprintf("... %.*s ...", (int)n, src+a)` breaks any time the source
+ * expression spans multiple lines, contains an unescaped `"` or `\`, or
+ * includes a raw control byte — the generated C no longer compiles
+ * ("missing terminating `\"` character").
+ *
+ * The helpers below centralize the three concerns:
+ *   - sanitize: collapse whitespace runs (incl. `\n`/`\t`) to a single
+ *     space, escape `"` and `\`, replace control bytes with `?`, and
+ *     truncate overly long snippets with `...`.
+ *   - emit: append a properly-quoted C string literal to a `cc_sb_*`
+ *     string builder.
+ *   - compose: append a full `__cc_err_null_at("<expr>", "<file>",
+ *     "<line>")` call — i.e. the complete `CCError` constructor that
+ *     `cc_result.cch` exposes — so callers just supply the expression
+ *     range and location.
+ *
+ * All five `CC_ERR_NULL` synthesis sites across `pass_result_unwrap.c`
+ * and `pass_err_syntax.c` use these helpers; keeping the structural
+ * `(CCError){ .kind = ..., .message = ... }` boilerplate inside the
+ * runtime macro (and out of the lowering passes) means future changes
+ * to the `CCError` shape don't have to be chased across N copies of the
+ * same string template. */
+
+/* Append a C string literal to the string builder, rendering
+ * `src[a..b)` safely: whitespace runs collapse to a single space,
+ * `"` / `\` are escaped, control bytes become `?`, and snippets longer
+ * than 160 visible chars are truncated with `...`.  Emits the opening
+ * and closing `"` itself. */
+static inline void cc_sb_append_c_string_literal(char** buf, size_t* len, size_t* cap,
+                                                  const char* src, size_t a, size_t b) {
+    if (!buf || !len || !cap) return;
+    cc_sb_append(buf, len, cap, "\"", 1);
+    if (src && b > a) {
+        char tmp[256];
+        size_t w = 0;
+        int prev_space = 0;
+        const size_t vis_max = 160;
+        int truncated = 0;
+        for (size_t i = a; i < b && w + 3 < sizeof(tmp); i++) {
+            unsigned char c = (unsigned char)src[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+                c == '\v' || c == '\f') {
+                if (!prev_space && w > 0) { tmp[w++] = ' '; prev_space = 1; }
+                continue;
+            }
+            prev_space = 0;
+            if (w >= vis_max) { truncated = 1; break; }
+            if (c == '\\' || c == '"') {
+                if (w + 2 >= sizeof(tmp)) { truncated = 1; break; }
+                tmp[w++] = '\\';
+                tmp[w++] = (char)c;
+            } else if (c < 0x20 || c == 0x7f) {
+                tmp[w++] = '?';
+            } else {
+                tmp[w++] = (char)c;
+            }
+        }
+        while (w > 0 && tmp[w - 1] == ' ') w--;
+        if (w) cc_sb_append(buf, len, cap, tmp, w);
+        if (truncated) cc_sb_append(buf, len, cap, "...", 3);
+    }
+    cc_sb_append(buf, len, cap, "\"", 1);
+}
+
+/* Append a `__cc_err_null_at("<sanitized-expr>", "<file>", "<line>")`
+ * call expression to the string builder.  The three literal arguments
+ * are spelled as C string literals so the runtime macro in
+ * `cc_result.cch` can string-concat them at preprocessor time (no
+ * runtime formatting).  Callers still need to emit the surrounding
+ * `CCError <binder> = ...;` or `if (x == NULL) { ... }` scaffolding —
+ * this helper only produces the error-value expression itself. */
+static inline void cc_sb_append_err_null_at(char** buf, size_t* len, size_t* cap,
+                                             const char* src, size_t a, size_t b,
+                                             const char* file, int line) {
+    if (!buf || !len || !cap) return;
+    cc_sb_append(buf, len, cap, "__cc_err_null_at(", (size_t)sizeof("__cc_err_null_at(") - 1);
+    cc_sb_append_c_string_literal(buf, len, cap, src, a, b);
+    cc_sb_append(buf, len, cap, ", ", 2);
+    /* File path goes in as a plain C string literal — the runtime doesn't
+     * need it sanitized the same way the expression does, but we reuse
+     * the helper so embedded quotes/backslashes (e.g. Windows paths) are
+     * handled consistently. */
+    {
+        const char* f = file ? file : "<input>";
+        size_t fl = strlen(f);
+        cc_sb_append_c_string_literal(buf, len, cap, f, 0, fl);
+    }
+    cc_sb_append(buf, len, cap, ", \"", 3);
+    {
+        char lbuf[32];
+        int n = snprintf(lbuf, sizeof(lbuf), "%d", line);
+        if (n > 0) cc_sb_append(buf, len, cap, lbuf, (size_t)n);
+    }
+    cc_sb_append(buf, len, cap, "\")", 2);
+}
+
+/* Append a `__cc_uw_err_at(<tmpv>, "<sanitized-expr>", "<file>", "<line>")`
+ * call expression — the _Generic-dispatching unified variant of
+ * `cc_sb_append_err_null_at`.  The macro selects the Result-struct's
+ * `.u.error` when `<tmpv>` is a Result type and `__cc_err_null_at(...)`
+ * when `<tmpv>` is a raw pointer.  Callers don't need to scan the
+ * source to decide between the two shapes. */
+static inline void cc_sb_append_uw_err_at(char** buf, size_t* len, size_t* cap,
+                                           const char* tmpv,
+                                           const char* src, size_t a, size_t b,
+                                           const char* file, int line) {
+    if (!buf || !len || !cap || !tmpv) return;
+    cc_sb_append(buf, len, cap, "__cc_uw_err_at(", (size_t)sizeof("__cc_uw_err_at(") - 1);
+    cc_sb_append(buf, len, cap, tmpv, strlen(tmpv));
+    cc_sb_append(buf, len, cap, ", ", 2);
+    cc_sb_append_c_string_literal(buf, len, cap, src, a, b);
+    cc_sb_append(buf, len, cap, ", ", 2);
+    {
+        const char* f = file ? file : "<input>";
+        size_t fl = strlen(f);
+        cc_sb_append_c_string_literal(buf, len, cap, f, 0, fl);
+    }
+    cc_sb_append(buf, len, cap, ", \"", 3);
+    {
+        char lbuf[32];
+        int n = snprintf(lbuf, sizeof(lbuf), "%d", line);
+        if (n > 0) cc_sb_append(buf, len, cap, lbuf, (size_t)n);
+    }
+    cc_sb_append(buf, len, cap, "\")", 2);
+}
+
 /* ---- Token checking ---- */
 
 /* Check if a token exists in a range (word boundaries respected). */

@@ -304,8 +304,12 @@ static char* cc__rewrite_typed_chan_await_expr(const char* expr) {
     size_t prefix_len;
     char* out;
     if (!s) return strdup(expr);
-    lpar = strchr(s, '(');
-    if (!lpar) return strdup(expr);
+    {
+        size_t slen = strlen(s);
+        size_t lp = cc_find_char_top_level(s, 0, slen, '(');
+        if (lp >= slen) return strdup(expr);
+        lpar = s + lp;
+    }
     name_len = (size_t)(lpar - s);
     if (name_len <= 5) return strdup(expr);
     if (strncmp(s, "CCChanTx_", 9) == 0 && memcmp(lpar - 5, "_send", 5) == 0) {
@@ -430,6 +434,85 @@ static void cc__debug_dump_stmt_list(const char* label, const Stmt* st, int n, i
         if (s->then_st && s->then_n) cc__debug_dump_stmt_list("then", s->then_st, s->then_n, indent + 2);
         if (s->else_st && s->else_n) cc__debug_dump_stmt_list("else", s->else_st, s->else_n, indent + 2);
     }
+}
+
+/* Recover a declarator's type text by scanning the already-built
+ * stmt-list for a decl of this name.
+ *
+ * Motivation: the primary extraction path (line-scan at
+ * DECL_ITEM.line_start) is unreliable for identifiers that survive
+ * multiple text-rewriting passes.  The DECL_ITEM node's source
+ * position can be re-pinned to the ident's FIRST occurrence in the
+ * current (post-rewrite) text, which for a multi-use local is
+ * typically a use-site, not the decl.  When the line-scan then walks
+ * back from the ident on that line it finds `if (...` or similar,
+ * rejects the prefix as control-flow noise, and falls through to
+ * aux_s2.  For result-typed decls aux_s2 is a parser-mode placeholder
+ * (`struct __CCResultGeneric`, only forward-declared at real-compile
+ * time), so the emitted frame field has incomplete type.
+ *
+ * This helper bypasses line_start entirely: it walks every ST_SEMI
+ * in the function's stmt-list (recursing into nested blocks and
+ * if/while/for bodies) and looks for a stmt whose text has the shape
+ * `TYPE NAME = ...` or `TYPE NAME;` where NAME is bounded by
+ * non-ident chars.  We additionally require the TYPE prefix to
+ * contain a result-sigil `!>` or `?>` — this function is only called
+ * when aux_s2 is a result-type placeholder, and the sigil check
+ * prevents false positives on plain scalar decls or assignments
+ * embedded in stmt-exprs.
+ *
+ * The stmt-list text here still has the literal `T !>(E) NAME`
+ * spelling (pass_type_syntax has not yet rewritten it to
+ * CCResult_T_E), so the returned type text is suitable for emission
+ * into the frame struct: pass_type_syntax will subsequently rewrite
+ * it to the concrete `CCResult_T_E` form, which is a complete type
+ * at real-compile time.
+ *
+ * Returns a malloc'd string (caller frees) or NULL if no matching
+ * decl is found. */
+static char* cc__find_decl_type_in_stmt_list(const Stmt* st, int n, const char* name) {
+    if (!st || n <= 0 || !name) return NULL;
+    size_t nlen = strlen(name);
+    if (nlen == 0) return NULL;
+    for (int i = 0; i < n; i++) {
+        const Stmt* s = &st[i];
+        if (s->kind == ST_BLOCK || s->kind == ST_IF || s->kind == ST_WHILE || s->kind == ST_FOR) {
+            char* r = cc__find_decl_type_in_stmt_list(s->then_st, s->then_n, name);
+            if (r) return r;
+            r = cc__find_decl_type_in_stmt_list(s->else_st, s->else_n, name);
+            if (r) return r;
+            continue;
+        }
+        if (s->kind != ST_SEMI || !s->text) continue;
+        const char* txt = s->text;
+        size_t tlen = strlen(txt);
+        for (size_t q = 0; q + nlen <= tlen; q++) {
+            if (memcmp(txt + q, name, nlen) != 0) continue;
+            if (q > 0 && cc__is_ident_char(txt[q - 1])) continue;
+            if (q + nlen < tlen && cc__is_ident_char(txt[q + nlen])) continue;
+            /* Require a decl-init or bare-decl shape to the right of NAME:
+             * optional ws/comments followed by `=` or `;` or end-of-text. */
+            size_t r = q + nlen;
+            while (r < tlen && (txt[r] == ' ' || txt[r] == '\t')) r++;
+            if (r < tlen && txt[r] != '=' && txt[r] != ';') continue;
+            /* The prefix must contain `!>` (or `?>`) to confirm this is a
+             * result-typed decl; otherwise we might match a plain scalar
+             * assignment in a stmt-expr and mis-extract. */
+            int has_sigil = 0;
+            for (size_t p = 0; p + 1 < q; p++) {
+                if (txt[p] == '!' && txt[p + 1] == '>') { has_sigil = 1; break; }
+                if (txt[p] == '?' && txt[p + 1] == '>') { has_sigil = 1; break; }
+            }
+            if (!has_sigil) continue;
+            /* Trim the prefix to the type token(s): take everything from
+             * the start of the stmt-text up to (but not including) NAME,
+             * then trim whitespace. */
+            char* ty = cc__strndup_trim_ws(txt, q);
+            if (ty && ty[0]) return ty;
+            free(ty);
+        }
+    }
+    return NULL;
 }
 
 static void cc__collect_decl_names_from_stmt_list(const Stmt* st, int n, char** out_names, int* io_n, int cap) {
@@ -1065,12 +1148,14 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
     /* classify */
     if (kw && strcmp(kw, "if") == 0) {
         out->kind = ST_IF;
-        /* parse condition from full */
-        const char* p = strstr(full, "if");
-        if (!p) p = full;
-        const char* lp = strchr(p, '(');
-        if (!lp) { free(full); return 0; }
-        size_t lpo = (size_t)(lp - full);
+        /* parse condition from full — comment/string-aware so a block
+         * comment containing the word `if` or a `(` can't mis-steer
+         * the header scanner (see util/text.h). */
+        size_t full_len = strlen(full);
+        size_t kwo = cc_find_ident_top_level(full, 0, full_len, "if", 2);
+        if (kwo >= full_len) kwo = 0;
+        size_t lpo = cc_find_char_top_level(full, kwo, full_len, '(');
+        if (lpo >= full_len) { free(full); return 0; }
         size_t rpo = 0;
         if (!cc__find_matching_paren(full, strlen(full), lpo, &rpo)) { free(full); return 0; }
         out->cond = cc__dup_slice(full, lpo + 1, rpo);
@@ -1138,7 +1223,7 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
         /* Fallback: if the stub-AST couldn't structure an `else if` chain, it often appears as raw text
            in else_st as `} else if (...) { ... }`. Detect and rebuild the entire chain via text parse. */
         if (out->else_n > 0 && out->else_st && out->else_st[0].kind == ST_SEMI && out->else_st[0].text &&
-            strstr(out->else_st[0].text, "else if") != NULL) {
+            cc_contains_token_top_level(out->else_st[0].text, strlen(out->else_st[0].text), "else if")) {
             cc__free_stmt_list(out->then_st, out->then_n);
             cc__free_stmt_list(out->else_st, out->else_n);
             free(out->then_st); out->then_st = NULL; out->then_n = 0;
@@ -1157,11 +1242,12 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
 
     if (kw && strcmp(kw, "while") == 0) {
         out->kind = ST_WHILE;
-        const char* p = strstr(full, "while");
-        if (!p) p = full;
-        const char* lp = strchr(p, '(');
-        if (!lp) { free(full); return 0; }
-        size_t lpo = (size_t)(lp - full);
+        /* Comment/string-aware header scan (see util/text.h). */
+        size_t full_len = strlen(full);
+        size_t kwo = cc_find_ident_top_level(full, 0, full_len, "while", 5);
+        if (kwo >= full_len) kwo = 0;
+        size_t lpo = cc_find_char_top_level(full, kwo, full_len, '(');
+        if (lpo >= full_len) { free(full); return 0; }
         size_t rpo = 0;
         if (!cc__find_matching_paren(full, strlen(full), lpo, &rpo)) { free(full); return 0; }
         out->cond = cc__dup_slice(full, lpo + 1, rpo);
@@ -1192,11 +1278,12 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
 
     if (kw && strcmp(kw, "for") == 0) {
         out->kind = ST_FOR;
-        const char* p = strstr(full, "for");
-        if (!p) p = full;
-        const char* lp = strchr(p, '(');
-        if (!lp) { free(full); return 0; }
-        size_t lpo = (size_t)(lp - full);
+        /* Comment/string-aware header scan (see util/text.h). */
+        size_t full_len = strlen(full);
+        size_t kwo = cc_find_ident_top_level(full, 0, full_len, "for", 3);
+        if (kwo >= full_len) kwo = 0;
+        size_t lpo = cc_find_char_top_level(full, kwo, full_len, '(');
+        if (lpo >= full_len) { free(full); return 0; }
         size_t rpo = 0;
         if (!cc__find_matching_paren(full, strlen(full), lpo, &rpo)) { free(full); return 0; }
         char* header = cc__dup_slice(full, lpo + 1, rpo);
@@ -2529,7 +2616,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 }
                 cc__emit_line_fmt(e, "int __cc_for_c%d = (%s);", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_for_c%d ? %d : %d;", cond_state, body_state, after_state);
-                cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                cc__emit_line(e, "continue;");
                 free(cond3);
                 cc__emit_close_case(e);
             }
@@ -2543,7 +2630,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
                     cc__emit_line_fmt(e, "__f->__st = %d;", post_state);
-                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                    cc__emit_line(e, "continue;");
                     cc__emit_close_case(e);
                 }
             }
@@ -2554,7 +2641,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 if (!cc__emit_semi_like(e, s->for_post)) return 0;
             }
             cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
 
             if (e->loop_depth > 0) e->loop_depth--;
@@ -2566,7 +2653,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             if (e->loop_depth <= 0) return 0;
             int bs = e->break_state[e->loop_depth - 1];
             cc__emit_line_fmt(e, "__f->__st = %d;", bs);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
             *e->finished = 1;
             continue;
@@ -2576,7 +2663,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             if (e->loop_depth <= 0) return 0;
             int cs = e->cont_state[e->loop_depth - 1];
             cc__emit_line_fmt(e, "__f->__st = %d;", cs);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
             *e->finished = 1;
             continue;
@@ -2674,13 +2761,29 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             }
         }
         size_t lbrace = 0, rbrace = 0;
-        /* Find first '{' after the function name. */
+        /* Find first '{' after the function name — comment/string-aware.
+         *
+         * Follow-up bug [F6] metaclass fix: `strstr` + naive char walk
+         * used to accept matches inside block comments and string
+         * literals, so a doc comment mentioning `handle_client(...)`
+         * before the real decl would pull the scanner into the comment
+         * and mis-identify the function's body brace.  Use the shared
+         * structural-search helpers in util/text.h instead — they skip
+         * comments + literals and, for `(`/`{`, return depth-0 matches.
+         *
+         * Note: the `{` we want is the FIRST `{` at top level after the
+         * function name (the function body opener).  There shouldn't be
+         * an earlier `{` in valid source — C params can't contain a
+         * brace — but a user-visible `{` embedded in a block comment on
+         * the decl line certainly can; that's what this guards. */
         const char* nm = n[i].aux_s1;
-        const char* hit = nm ? strstr(in_src + scan, nm) : NULL;
-        size_t p = hit ? (size_t)(hit - in_src) : scan;
-        for (; p < in_len; p++) {
-            if (in_src[p] == '{') { lbrace = p; break; }
+        size_t name_pos = in_len;
+        if (nm && nm[0]) {
+            name_pos = cc_find_ident_top_level(in_src, scan, in_len, nm, strlen(nm));
         }
+        size_t p = (name_pos < in_len) ? name_pos : scan;
+        size_t br = cc_find_char_top_level(in_src, p, in_len, '{');
+        if (br < in_len) lbrace = br;
         size_t e = scan;
         if (lbrace && cc__find_matching_brace(in_src, in_len, lbrace, &rbrace)) {
             e = rbrace + 1;
@@ -2984,6 +3087,35 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 if (!local_tys[local_n - 1] && n[i].aux_s2) {
                     local_tys[local_n - 1] = strdup(n[i].aux_s2);
                 }
+                /* Guard against emitting a parser-mode placeholder.  The
+                 * line-scan above takes everything on the decl's source
+                 * line before the ident as the type prefix; that prefix
+                 * is discarded when it starts with a control-flow
+                 * keyword (for/while/if/switch), because the DECL_ITEM's
+                 * line_start can be re-pinned to a use-site (e.g.
+                 * `if (cc_is_err(name))`) by intervening text-rewrite
+                 * passes.  In that case we fall through to aux_s2, and
+                 * for result-typed decls aux_s2 is
+                 * `struct __CCResultGeneric` — which is only
+                 * forward-declared at real-compile time (cc_result.cch
+                 * guards the definition behind CC_PARSER_MODE).
+                 * Emitting that as a frame-field type breaks the final
+                 * compile with "field has incomplete type".
+                 *
+                 * Recover the real type from the stmt-list, which still
+                 * carries the literal `T !>(E) NAME = ...` spelling
+                 * here (pass_type_syntax has not yet rewritten it).
+                 * That spelling is perfectly good frame-field text;
+                 * pass_type_syntax will later rewrite it to the
+                 * concrete CCResult_T_E form, which is complete. */
+                if (local_tys[local_n - 1] && n[i].aux_s1 &&
+                    (strstr(local_tys[local_n - 1], "__CCResultGeneric") != NULL)) {
+                    char* ty_from_stmt = cc__find_decl_type_in_stmt_list(st, st_n, n[i].aux_s1);
+                    if (ty_from_stmt) {
+                        free(local_tys[local_n - 1]);
+                        local_tys[local_n - 1] = ty_from_stmt;
+                    }
+                }
             }
         }
 
@@ -3011,14 +3143,51 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             aw_names[i] = strdup(nm);
         }
 
-        /* Parse params from source slice (best-effort): find name(...). */
+        /* Parse params from source slice (best-effort): find name(...).
+         *
+         * Follow-up bug [F6] metaclass fix: the previous implementation
+         * used raw `strstr`/`strchr` which accept matches inside
+         * comments, string literals, and statement-expressions
+         * `({ ... })` emitted by earlier rewrite passes.  Three
+         * observed failure modes in `redis_idiomatic.ccs`:
+         *
+         *   1) Top-of-file doc comment mentions `handle_client(...)`
+         *      in prose; `strstr` picks up the comment match and
+         *      `strchr` then returns the `(` inside the comment.
+         *   2) A sibling `@async` fn's body, already rewritten into
+         *      `({ __typeof__(...) __cc_pu_x_N = ...; })`, contains a
+         *      `handle_client` recursion hint; the scanner drifts in.
+         *   3) The `!>` / `?>` expansions in THIS fn's body are
+         *      stmt-exprs whose leading `({` can be mistaken for a
+         *      param-list opener if the preceding scan overshoots.
+         *
+         * Two structural bounds make the search safe regardless:
+         *
+         *   (a) Search for the function-name identifier at word
+         *       boundaries, skipping comments + literals
+         *       (`cc_find_ident_top_level`).
+         *   (b) Search for the opening `(` only in the range between
+         *       the name and `fn->lbrace` (the body opener), using a
+         *       nesting-aware forward search (`cc_find_char_top_level`).
+         *       Params can't cross the body brace in valid C.
+         *
+         * Both helpers live in `util/text.h` and are reusable by other
+         * passes that scan raw text. */
         char* params_text = NULL;
         {
-            const char* fn_pos = strstr(cur + fn->start, fn->name);
-            if (!fn_pos) fn_pos = cur + fn->start;
-            const char* lp = strchr(fn_pos, '(');
-            if (lp) {
-                size_t lpo = (size_t)(lp - cur);
+            size_t fn_start = fn->start;
+            if (fn_start > cur_len) fn_start = cur_len;
+            /* Upper bound: body '{' (if known) else end of file.  Using
+             * lbrace bounds the scan to the signature region and
+             * prevents drift into the body's stmt-exprs or trailing
+             * text. */
+            size_t search_end = (fn->lbrace > fn_start && fn->lbrace <= cur_len) ? fn->lbrace : cur_len;
+            size_t name_len = strlen(fn->name);
+            size_t name_pos = cc_find_ident_top_level(cur, fn_start, search_end,
+                                                     fn->name, name_len);
+            size_t after_name = (name_pos < search_end) ? (name_pos + name_len) : fn_start;
+            size_t lpo = cc_find_char_top_level(cur, after_name, search_end, '(');
+            if (lpo < search_end) {
                 size_t rpo = 0;
                 if (cc__find_matching_paren(cur, cur_len, lpo, &rpo)) {
                     params_text = cc__dup_slice(cur, lpo + 1, rpo);
@@ -3199,7 +3368,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         if (!finished) {
             cc__emit_line(&em, "__f->__r = 0;");
             cc__emit_line(&em, "__f->__st = 999;");
-            cc__emit_line(&em, "return CC_FUTURE_PENDING;");
+            cc__emit_line(&em, "continue;");
             cc__emit_close_case(&em);
         }
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    case 999: {\n");

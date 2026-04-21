@@ -43,7 +43,11 @@ static int cc__parse_lowered_match_call(const char* hdr,
     const char* comma = NULL;
     size_t a_len, b_len;
     if (!hdr || !out_kind || !ch_expr || !arg_expr) return 0;
-    lp = strchr(hdr, '(');
+    {
+        size_t hl = strlen(hdr);
+        size_t lpo = cc_find_char_top_level(hdr, 0, hl, '(');
+        lp = (lpo < hl) ? (hdr + lpo) : NULL;
+    }
     rp = lp ? strrchr(hdr, ')') : NULL;
     if (!lp || !rp || rp <= lp) return 0;
     fn_len = (size_t)(lp - hdr);
@@ -264,8 +268,17 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             cases[case_n].kind = 2;
                             cancel_idx = case_n;
                         } else {
-                            const char* recv = strstr(hdr, ".recv");
-                            const char* send = strstr(hdr, ".send");
+                            /* Comment/string-aware `.recv` / `.send`
+                             * lookup.  See util/text.h metaclass fix —
+                             * a block comment at the start of a case
+                             * header like `/ * receives x * / ch.recv(&x)`
+                             * must not be mistaken for the real
+                             * discriminator. */
+                            size_t hdr_len_s = strlen(hdr);
+                            size_t recv_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".recv", 5);
+                            size_t send_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".send", 5);
+                            const char* recv = (recv_p < hdr_len_s) ? (hdr + recv_p) : NULL;
+                            const char* send = (send_p < hdr_len_s) ? (hdr + send_p) : NULL;
                             const char* dot = recv ? recv : send;
                             int is_recv = (recv != NULL);
                             int is_send = (send != NULL);
@@ -276,7 +289,10 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                                 memcpy(cases[case_n].ch_expr, hdr, cn);
                                 cases[case_n].ch_expr[cn] = 0;
 
-                                const char* lp = strchr(dot, '(');
+                                size_t dot_off = (size_t)(dot - hdr);
+                                size_t dot_len = hdr_len_s - dot_off;
+                                size_t lp_off = cc_find_char_top_level(dot, 0, dot_len, '(');
+                                const char* lp = (lp_off < dot_len) ? (dot + lp_off) : NULL;
                                 const char* rp = lp ? strrchr(dot, ')') : NULL;
                                 if (!lp || !rp || rp <= lp) {
                                     char rel[1024];
@@ -562,8 +578,14 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             cases[case_n].kind = 2;
                             cancel_idx = case_n;
                         } else {
-                            const char* recv = strstr(hdr, ".recv");
-                            const char* send = strstr(hdr, ".send");
+                            /* Comment/string-aware lookup (see metaclass
+                             * fix in util/text.h).  Identical to the
+                             * earlier @match-case parser above. */
+                            size_t hdr_len_s = strlen(hdr);
+                            size_t recv_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".recv", 5);
+                            size_t send_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".send", 5);
+                            const char* recv = (recv_p < hdr_len_s) ? (hdr + recv_p) : NULL;
+                            const char* send = (send_p < hdr_len_s) ? (hdr + send_p) : NULL;
                             const char* dot = recv ? recv : send;
                             int is_recv = (recv != NULL);
                             int is_send = (send != NULL);
@@ -579,7 +601,10 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             memcpy(cases[case_n].ch_expr, hdr, cn);
                             cases[case_n].ch_expr[cn] = 0;
 
-                            const char* lp = strchr(dot, '(');
+                            size_t dot_off = (size_t)(dot - hdr);
+                            size_t dot_len = hdr_len_s - dot_off;
+                            size_t lp_off = cc_find_char_top_level(dot, 0, dot_len, '(');
+                            const char* lp = (lp_off < dot_len) ? (dot + lp_off) : NULL;
                             const char* rp = lp ? strrchr(dot, ')') : NULL;
                             if (!lp || !rp || rp <= lp) {
                                 char rel[1024];

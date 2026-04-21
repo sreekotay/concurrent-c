@@ -36,6 +36,9 @@ $(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DI
 $(OUT_DIR)/redis_hybrid: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_hybrid.ccs --release
 
+$(OUT_DIR)/redis_hybrid_struct: redis_hybrid_struct.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_hybrid_struct.ccs --release
+
 # Debug: symbols + light optimization (lldb-friendly without pathological slowdown).
 $(OUT_DIR)/redis_hybrid_debug: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -o $@ redis_hybrid.ccs --cc-flags "-g -Og"
@@ -43,6 +46,9 @@ $(OUT_DIR)/redis_hybrid_debug: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DI
 # Profile: optimized release build with symbols (sample / Instruments).
 $(OUT_DIR)/redis_hybrid_profile: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_hybrid.ccs --release --cc-flags "-g"
+
+$(OUT_DIR)/redis_hybrid_struct_profile: redis_hybrid_struct.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_hybrid_struct.ccs --release --cc-flags "-g"
 
 $(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "-g"
@@ -52,12 +58,14 @@ $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_hybrid: $(OUT_DIR)/redis_hybrid
+redis_hybrid_struct: $(OUT_DIR)/redis_hybrid_struct
 redis_hybrid_debug: $(OUT_DIR)/redis_hybrid_debug
 redis_hybrid_profile: $(OUT_DIR)/redis_hybrid_profile
+redis_hybrid_struct_profile: $(OUT_DIR)/redis_hybrid_struct_profile
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_cc: $(OUT_DIR)/redis_cc
 
-all: redis_idiomatic redis_hybrid redis_cc
+all: redis_idiomatic redis_hybrid redis_hybrid_struct redis_cc
 
 clean:
 	rm -rf $(OUT_DIR)
@@ -67,4 +75,4 @@ print-config:
 	@echo "REDIS_URL=$(REDIS_URL)"
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 
-.PHONY: setup upstream redis_idiomatic redis_hybrid redis_hybrid_debug redis_hybrid_profile redis_cc all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_hybrid redis_hybrid_struct redis_hybrid_debug redis_hybrid_profile redis_hybrid_struct_profile redis_idiomatic_profile redis_cc all clean print-config

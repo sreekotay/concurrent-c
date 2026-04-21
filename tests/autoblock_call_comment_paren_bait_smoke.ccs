@@ -1,0 +1,34 @@
+/* Metaclass regression: the autoblock-rewrite path extracts the
+ * argument span of a blocking call by finding the opening paren in
+ * `call_txt`.  Pre-fix this used `strchr(call_txt, '(')`.  If the
+ * call text happens to carry an inline block comment that precedes
+ * the real call-paren and itself contains a `(`, the raw `strchr`
+ * would return the comment's `(` and the inferred `args_s` / `args_e`
+ * would slice into comment bytes.
+ *
+ * Post-fix: all three `call_txt` paren scans in pass_autoblock route
+ * through `cc_find_char_top_level` (util/text.h) which skips
+ * comments and string literals.
+ *
+ * The test below places a `/ * (note) * /` comment immediately before
+ * the call-paren in the blocking-call expression to reproduce the
+ * pre-fix trap.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <stdint.h>
+#include <ccc/std/task.cch>
+
+static int add1(int x) { return x + 1; }
+
+@async int f(int x) {
+    int y = 0;
+    y = add1(/* fake (paren) note */ x);
+    return y;
+}
+
+int main(void) {
+    intptr_t r = cc_block_on_intptr(f(41));
+    return (r == 42) ? 0 : 1;
+}

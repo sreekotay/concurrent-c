@@ -81,17 +81,150 @@ static void cc__ru_emit_err_binder(char** out, size_t* ol, size_t* oc,
                      tmpv, binder, tmpv);
 }
 
-/* Detect whether the trimmed expression `s[a..b)` is a bare call to a
- * raw-pointer-returning function registered by cc_pointer_fn_registry_scan
- * (e.g. `fopen(...)`, `cc_nursery_create()`).  When true, the normal
- * Result-struct lowering would emit `cc_is_err(tmp)`/`cc_value(tmp)` on a
- * plain pointer, which TCC rejects with "struct or union expected"; this
- * flag switches the emission to a NULL-check + synthesized CCError form. */
+/* Emit the "error binder" line for the unified unwrap lowering:
+ *   __typeof__(__cc_uw_err_at(tmpv, "expr", "file", "line")) binder =
+ *       __cc_uw_err_at(tmpv, "expr", "file", "line");
+ *
+ * The `_Generic`-backed `__cc_uw_err_at` macro resolves at compile time to
+ *   - `(tmpv).u.error` when `tmpv` is a Result struct, and
+ *   - `__cc_err_null_at(...)` (yielding a `CCError`) when `tmpv` is a
+ *     raw pointer.
+ *
+ * So a single lowering call shape works for BOTH the Result-struct and
+ * pointer-returning-call variants of `!>` / `?>` — no source-scan needed
+ * to pick between them at pass time. */
+static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
+                                       const char* s, size_t call_a, size_t call_b,
+                                       const char* tmpv, const char* binder,
+                                       const char* file, int line) {
+    /* Prefer the typed binder path when the callee is a plain name whose
+     * declared error type we tracked in the result-fn registry.  This is
+     * what makes `!>(e) report(e)` type-check in parser mode when `report`
+     * expects the declared error type (e.g. `CCIoError`) rather than the
+     * generic parser-mode error struct. */
+    char callee[128];
+    char err_type[256];
+    if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
+        cc_result_fn_registry_get_err_type(callee, strlen(callee),
+                                            err_type, sizeof(err_type))) {
+        cc_sb_append_fmt(out, ol, oc,
+                         "%s %s = *(%s*)(void*)&((%s).u.error); ",
+                         err_type, binder, err_type, tmpv);
+        return;
+    }
+    /* Fallback: untyped callee (method call, chained expression, or a
+     * pointer-returning expression with no registry entry).  Use
+     * `__typeof__(__cc_uw_err_at(...))` so the binder resolves to:
+     *   - the Result struct's declared error field for Result LHS, and
+     *   - `CCError` for raw-pointer LHS (via the default _Generic arm). */
+    cc__append_str(out, ol, oc, "__typeof__(");
+    cc_sb_append_uw_err_at(out, ol, oc, tmpv, s, call_a, call_b, file, line);
+    cc_sb_append_fmt(out, ol, oc, ") %s = ", binder);
+    cc_sb_append_uw_err_at(out, ol, oc, tmpv, s, call_a, call_b, file, line);
+    cc__append_str(out, ol, oc, "; ");
+}
+
+/* Try to parse a leading C cast at `s[a..b)` of the form `(TYPE *)` (one or
+ * more `*`s, zero or more type tokens).  On success, writes the byte after
+ * the closing `)` of the cast into `*out_after` and returns 1.  Returns 0
+ * if the leading parenthesised group is not a cast to pointer type.
+ *
+ * The heuristic is intentionally narrow: we accept idents, `struct` /
+ * `union` / `enum` / `const` / `volatile` / `unsigned` / `signed` / `long`
+ * / `short`, plus `*`, plus whitespace — any other operator (`+`, `-`,
+ * `.`, `->`, `[`, `=`, digits, etc.) disqualifies the group so we don't
+ * mis-read `(a * b)` or `(p->q)` as a cast.  At least one `*` and one
+ * ident/keyword are required so plain `(x)` grouping falls through. */
+static int cc__ru_try_parse_leading_ptr_cast(const char* s, size_t a, size_t b,
+                                              size_t* out_after) {
+    if (a >= b || s[a] != '(') return 0;
+    size_t k = a + 1;
+    int depth = 1;
+    int saw_star = 0, saw_type_tok = 0, disq = 0;
+    while (k < b && depth > 0) {
+        char c = s[k];
+        if (c == '(') { depth++; k++; continue; }
+        if (c == ')') { depth--; k++; if (depth == 0) break; continue; }
+        if (isspace((unsigned char)c)) { k++; continue; }
+        if (c == '*') { saw_star = 1; k++; continue; }
+        if (cc_is_ident_start(c)) {
+            size_t ia = k;
+            while (k < b && cc_is_ident_char(s[k])) k++;
+            size_t il = k - ia;
+            /* Reject if the ident looks like an expression keyword. */
+            if ((il == 6 && memcmp(s + ia, "sizeof", 6) == 0) ||
+                (il == 8 && memcmp(s + ia, "_Alignof", 8) == 0) ||
+                (il == 7 && memcmp(s + ia, "alignof", 7) == 0) ||
+                (il == 8 && memcmp(s + ia, "_Generic", 8) == 0) ||
+                (il == 8 && memcmp(s + ia, "__typeof", 8) == 0) ||
+                (il == 10 && memcmp(s + ia, "__typeof__", 10) == 0)) {
+                disq = 1; break;
+            }
+            saw_type_tok = 1;
+            continue;
+        }
+        /* Anything else (digits, operators, brackets, quotes, comments)
+         * disqualifies the group as a cast. */
+        disq = 1; break;
+    }
+    if (disq || depth != 0) return 0;
+    if (!saw_star || !saw_type_tok) return 0;
+    if (out_after) *out_after = k;
+    return 1;
+}
+
+/* Detect whether the trimmed expression `s[a..b)` has pointer type.
+ *
+ * Recognised shapes:
+ *   1. `IDENT(...)` where `IDENT` is in the pointer-fn registry
+ *      (e.g. `fopen(...)`, `cc_nursery_create()`).
+ *   2. `(T *) EXPR` — a C cast to pointer type; the cast's result type
+ *      settles it regardless of what `EXPR` is.
+ *   3. `(EXPR)` — outer grouping parens; peel and retry.  Lets users
+ *      write `((RedisReply*)(cc_arena_alloc(...)))` and similar.
+ *
+ * When the detection returns 1, pass_result_unwrap emits the NULL-check +
+ * synthesized `CCError{ CC_ERR_NULL, ... }` lowering instead of the
+ * Result-struct `cc_is_err`/`cc_value` lowering (which TCC would reject
+ * with "struct or union expected" on a pointer-valued expression). */
 static int cc__ru_expr_is_pointer_returning_call(const char* s, size_t a, size_t b) {
     while (a < b && isspace((unsigned char)s[a])) a++;
     while (b > a && isspace((unsigned char)s[b - 1])) b--;
     if (a >= b) return 0;
     if (s[b - 1] != ')') return 0;
+
+    /* Shape (2): leading pointer cast `(T *) ...`.  The cast's result
+     * type settles the pointer-ness of the whole expression. */
+    {
+        size_t after_cast = 0;
+        if (cc__ru_try_parse_leading_ptr_cast(s, a, b, &after_cast) &&
+            after_cast < b) {
+            return 1;
+        }
+    }
+
+    /* Shape (3): outer grouping parens.  Peel one layer and retry
+     * (bounded by recursion depth via the loop form). */
+    if (s[a] == '(') {
+        /* Only peel if the opening `(` at `a` is matched by the closing
+         * `)` at `b-1` — otherwise the leading `(` belongs to a cast or
+         * a subexpression, not grouping. */
+        int depth = 0;
+        size_t k = a;
+        size_t match_close = (size_t)-1;
+        for (; k < b; k++) {
+            if (s[k] == '(') depth++;
+            else if (s[k] == ')') {
+                depth--;
+                if (depth == 0) { match_close = k; break; }
+            }
+        }
+        if (match_close == b - 1) {
+            return cc__ru_expr_is_pointer_returning_call(s, a + 1, b - 1);
+        }
+    }
+
+    /* Shape (1): bare `IDENT(...)` call. */
     if (!cc_is_ident_start(s[a])) return 0;
     size_t name_a = a;
     size_t name_b = a;
@@ -671,43 +804,26 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     if (lhs_a > lhs_start) cc__append_n(&out, &ol, &oc, s + lhs_start, lhs_a - lhs_start);
 
     /* Case 1 / 2: ternary, optionally with scoped binder on the err arm.
-     * When the LHS is a pointer-returning call, lower via `(tmp) != NULL ?
-     * (tmp) : DEFAULT` and synthesize a `CCError{ CC_ERR_NULL, ... }` for
-     * any binder. */
-    int lhs_is_ptr = cc__ru_expr_is_pointer_returning_call(s, lhs_a, lhs_b);
-    char ptr_err_literal[1024] = {0};
-    if (lhs_is_ptr) {
-        char rel[1024];
-        const char* f = cc_path_rel_to_repo(
-            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-        size_t exl = lhs_b - lhs_a;
-        if (exl > 200) exl = 200;
-        snprintf(ptr_err_literal, sizeof(ptr_err_literal),
-                 "(CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }",
-                 (int)exl, s + lhs_a, f, line_no);
-    }
+     * The unified `__cc_uw_*` macros in cc_result.cch dispatch at compile
+     * time via `_Generic` — Result-struct LHSs extract `.ok` / `.u.value`
+     * / `.u.error`; raw-pointer LHSs get `== NULL` / identity /
+     * synthesized `CC_ERR_NULL`.  So the lowering no longer cares whether
+     * the LHS is a pointer-returning call or a Result-typed expression. */
+    char rel[1024];
+    const char* f = cc_path_rel_to_repo(
+        ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
 
     cc__append_str(&out, &ol, &oc, "({ __typeof__(");
     cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-    if (lhs_is_ptr) {
-        cc_sb_append_fmt(&out, &ol, &oc, "); ((%s) != NULL) ? (%s) : ",
-                         tmpv, tmpv);
-    } else {
-        cc_sb_append_fmt(&out, &ol, &oc, "); cc_is_ok(%s) ? cc_value(%s) : ",
-                         tmpv, tmpv);
-    }
+    cc_sb_append_fmt(&out, &ol, &oc,
+                     "); !__cc_uw_is_err(%s) ? __cc_uw_value(%s) : ",
+                     tmpv, tmpv);
     if (has_binder) {
-        if (lhs_is_ptr) {
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "({ CCError %s = %s; (",
-                             binder, ptr_err_literal);
-        } else {
-            cc_sb_append_fmt(&out, &ol, &oc, "({ ");
-            cc__ru_emit_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, binder);
-            cc_sb_append_fmt(&out, &ol, &oc, "(");
-        }
+        cc__append_str(&out, &ol, &oc, "({ ");
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, binder, f, line_no);
+        cc__append_str(&out, &ol, &oc, "(");
         cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
         cc__append_str(&out, &ol, &oc, "); })");
     } else {
@@ -1521,25 +1637,15 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, splice_from);
 
-    int call_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
+    char rel[1024];
+    const char* f = cc_path_rel_to_repo(
+        ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
     cc__append_str(&out, &ol, &oc, "{ __typeof__(");
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    if (call_is_ptr) {
-        char rel[1024];
-        const char* f = cc_path_rel_to_repo(
-            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-        size_t exl = call_b - call_a;
-        if (exl > 200) exl = 200;
-        cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
-        cc_sb_append_fmt(&out, &ol, &oc,
-                         "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
-                         binder, (int)exl, s + call_a, f, op_line);
-    } else {
-        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-        cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
-    }
+    cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+    cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, f, op_line);
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
         /* Expression body: terminate with `;` so it reads as a statement. */
@@ -1749,7 +1855,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
          * swallow the only `;` in sight. */
         size_t splice_to = scan;
 
-        int bare_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
+        char rel[1024];
+        const char* ff = cc_path_rel_to_repo(
+            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
         char* out = NULL;
         size_t ol = 0, oc = 0;
         cc__append_n(&out, &ol, &oc, s, call_start);
@@ -1757,25 +1865,10 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
         cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-        if (bare_is_ptr) {
-            char rel[1024];
-            const char* ff = cc_path_rel_to_repo(
-                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-            size_t exl = call_b - call_a;
-            if (exl > 200) exl = 200;
-            cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
-                             binder, (int)exl, s + call_a, ff, line_no);
-        } else {
-            cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-            cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
-        }
+        cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, ff, line_no);
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
-        if (bare_is_ptr)
-            cc_sb_append_fmt(&out, &ol, &oc, " } (%s); })", tmpv);
-        else
-            cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+        cc_sb_append_fmt(&out, &ol, &oc, " } __cc_uw_value(%s); })", tmpv);
         free(substituted);
         if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
         *out_buf = out;
@@ -1848,7 +1941,6 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     char tmpv[48];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_x_%d", tid);
 
-    int expr_is_ptr = cc__ru_expr_is_pointer_returning_call(s, call_a, call_b);
     char* out = NULL;
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, call_start);
@@ -1856,23 +1948,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    if (expr_is_ptr) {
-        cc_sb_append_fmt(&out, &ol, &oc, "); if ((%s) == NULL) { ", tmpv);
-        if (has_binder) {
-            char rel[1024];
-            const char* ff = cc_path_rel_to_repo(
-                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-            size_t exl = call_b - call_a;
-            if (exl > 200) exl = 200;
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "CCError %s = (CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }; ",
-                             binder, (int)exl, s + call_a, ff, line_no);
-        }
-    } else {
-        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-        if (has_binder) {
-            cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
-        }
+    cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+    if (has_binder) {
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, f, line_no);
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (!is_block) {
@@ -1881,10 +1959,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
          * processed already ends with `;` — skip). */
         (void)0;
     }
-    if (expr_is_ptr)
-        cc_sb_append_fmt(&out, &ol, &oc, " } (%s); })", tmpv);
-    else
-        cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+    cc_sb_append_fmt(&out, &ol, &oc, " } __cc_uw_value(%s); })", tmpv);
     free(processed);
     if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
     *out_buf = out;

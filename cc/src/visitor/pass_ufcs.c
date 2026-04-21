@@ -9,6 +9,7 @@
 
 #include "preprocess/preprocess.h"
 #include "util/path.h"
+#include "util/text.h"
 #include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
 
@@ -469,9 +470,11 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         {
             const char* p = expr;
             while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+            size_t p_len = strlen(p);
+            int defers = cc_find_substr_top_level(p, 0, p_len, "@defer", 6) < p_len;
             if ((strncmp(p, "@defer", 6) == 0 &&
                  (p[6] == '\0' || p[6] == ' ' || p[6] == '\t' || p[6] == '\n' || p[6] == '\r' || p[6] == '(')) ||
-                strstr(p, "@defer") != NULL) {
+                defers) {
                 free(expr);
                 free(out_buf);
                 continue;

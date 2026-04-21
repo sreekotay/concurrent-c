@@ -988,7 +988,13 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     ctx->recv_is_addressable = ctx->recv_is_simple || cc__is_addressable_lvalue_expr(recv);
     ctx->recv_is_ptr = 0;
     ctx->recv_type_name = g_ufcs_recv_type;
-    recv_is_member_chain = recv && (strstr(recv, ".") != NULL || strstr(recv, "->") != NULL);
+    if (recv) {
+        size_t rl = strlen(recv);
+        recv_is_member_chain = (cc_find_substr_top_level(recv, 0, rl, ".", 1) < rl) ||
+                               (cc_find_substr_top_level(recv, 0, rl, "->", 2) < rl);
+    } else {
+        recv_is_member_chain = 0;
+    }
     if (reg) {
         if (g_ufcs_source_text && (is_ident_only(recv) || is_addr_of_ident(recv))) {
             const char* local_type_name = cc__ufcs_lookup_scoped_local_var_type(

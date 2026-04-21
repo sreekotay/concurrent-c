@@ -222,8 +222,12 @@ CCResultSpecTable cc__cg_result_specs = {0};
 
 static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
                                     const char* mangled_ok, const char* mangled_err) {
-    /* Check if this is a built-in type (in stdlib headers) - skip to avoid redefinition */
-    if (cc_result_spec_is_stdlib_predeclared(mangled_ok, mangled_err)) return;
+    /* Track all Result specs — including those predeclared in stdlib headers.
+     * The struct-decl emission is guarded by `#ifndef NAME_DEFINED` so
+     * duplicate `CC_DECL_RESULT_SPEC(...)` expansions are no-ops, and the
+     * unified `__cc_uw_*` `_Generic` emission needs a per-type arm for
+     * every concrete Result struct used in the translation unit (stdlib
+     * or not) to dispatch correctly. */
     (void)cc_result_spec_table_add(&cc__cg_result_specs,
                                    ok, ok_len, err, err_len,
                                    mangled_ok, mangled_err);

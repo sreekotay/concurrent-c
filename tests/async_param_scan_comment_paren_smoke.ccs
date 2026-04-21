@@ -1,0 +1,53 @@
+// Follow-up bug [F6] smoke (symptom 1): async_ast's param-list scanner
+// must not drift into preceding block comments that happen to contain
+// parentheses.
+//
+// Pre-fix: async_ast extracted the param list via a `strstr(fn_name)`
+// followed by `strchr('(')` — both raw byte matches.  If the doc
+// comment before the `@async` decl mentions the function name
+// followed by an illustrative call-site, `strstr` picks up the comment
+// match and `strchr('(')` returns the comment's `(`:
+//
+//   /* Example: worker(a, b) spawns a task ... */
+//   @async int worker(int x, int y) { ... }
+//
+// The emitted entry-point then had `worker(a, b)` as its parameter
+// list — "a", "b" become fake params typed `` (empty) — and the tcc
+// reparse failed downstream with a confusing error that did not
+// mention the comment.
+//
+// Post-fix: the search uses `cc_find_ident_top_level` +
+// `cc_find_char_top_level` which skip comments and string literals,
+// and the `(` search is bounded by `fn->lbrace` so it can't cross
+// into the body or trailing code.  See `cc/src/util/text.h`.
+//
+// Note: the doc comment below is engineered to be the PRE-FIX trap.
+// It names `bad_name` and contains the string `bad_name(fake_a, fake_b)`
+// which pre-fix would grab as the param list.
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+/*
+ * Doc comment for bad_name.  Example usage:
+ *
+ *     bad_name(fake_a, fake_b);   // <- pre-fix bait: strchr('(')
+ *                                 //    returned THIS paren, and
+ *                                 //    `params_text` became
+ *                                 //    "fake_a, fake_b".
+ *
+ * Post-fix the scanner skips past this comment and lands on the
+ * real param list below.
+ */
+@async int bad_name(int real_x, int real_y) {
+    return real_x + real_y;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(bad_name(3, 4));
+    cc_nursery_destroy(n);
+    printf("f6_comment: OK\n");
+    return 0;
+}

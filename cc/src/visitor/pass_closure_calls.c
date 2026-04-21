@@ -50,13 +50,19 @@ static void cc__maybe_record_decl(char*** scope_names,
     const char* p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '#' || *p == '\0') return;
-    const char* semi = strchr(p, ';');
-    if (!semi) return;
-    /* Ignore function prototypes (best-effort):
-       if we see '(' before ';' and there is no '=' before that '(', it's likely a prototype/declarator. */
-    const char* lp = strchr(p, '(');
+    /* Comment/string-aware delimiter scans over this declaration line
+     * (see util/text.h metaclass fix) — a trailing `// note: ;` or
+     * `/ * (foo) * /` must not be mistaken for the statement terminator
+     * or the declarator-opening paren. */
+    size_t p_len = strlen(p);
+    size_t semi_off = cc_find_char_top_level(p, 0, p_len, ';');
+    if (semi_off >= p_len) return;
+    const char* semi = p + semi_off;
+    size_t lp_off = cc_find_char_top_level(p, 0, p_len, '(');
+    const char* lp = (lp_off < p_len) ? (p + lp_off) : NULL;
     if (lp && lp < semi) {
-        const char* eq = strchr(p, '=');
+        size_t eq_off = cc_find_char_top_level(p, 0, p_len, '=');
+        const char* eq = (eq_off < p_len) ? (p + eq_off) : NULL;
         if (!eq || eq > lp) return;
     }
 
@@ -153,12 +159,18 @@ static void cc__maybe_record_decl(char*** scope_names,
        - CC_SLICE_ID_UNIQUE bit present in an id expression
        This is still best-effort text parsing until we have a typed AST. */
     if ((flags & 1) != 0) {
-        const char* eq = strchr(name_s, '=');
-        if (eq && eq < semi) {
-            if (strstr(eq, "CC_SLICE_ID_UNIQUE")) flags |= 2;
-            const char* mk = strstr(eq, "cc_slice_make_id");
+        size_t ns_len = (size_t)(semi - name_s);
+        size_t eq_off = cc_find_char_top_level(name_s, 0, ns_len, '=');
+        const char* eq = (eq_off < ns_len) ? (name_s + eq_off) : NULL;
+        if (eq) {
+            size_t eq_len = (size_t)(semi - eq);
+            if (cc_find_substr_top_level(eq, 0, eq_len, "CC_SLICE_ID_UNIQUE", 18) < eq_len) flags |= 2;
+            size_t mk_off = cc_find_substr_top_level(eq, 0, eq_len, "cc_slice_make_id", 16);
+            const char* mk = (mk_off < eq_len) ? (eq + mk_off) : NULL;
             if (mk) {
-                const char* lp2 = strchr(mk, '(');
+                size_t mk_len = (size_t)(semi - mk);
+                size_t lp2_off = cc_find_char_top_level(mk, 0, mk_len, '(');
+                const char* lp2 = (lp2_off < mk_len) ? (mk + lp2_off) : NULL;
                 if (lp2) {
                     const char* t = lp2 + 1;
                     int comma = 0;
