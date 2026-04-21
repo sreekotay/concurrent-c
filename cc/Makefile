@@ -68,6 +68,8 @@ WRAPPER := $(OUT_BINDIR)/ccc
 
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
+	src/ir/ir.c \
+	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
 	src/preprocess/type_registry.c \
 	src/result_spec.c \
