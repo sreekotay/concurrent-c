@@ -255,9 +255,13 @@ static int cc_ir_is_ident(char c) {
  *   - `;`, `,`, `?`, `:`, `@` at depth 0;
  *   - `=` at depth 0 that is a true assignment boundary;
  *   - `&&` or `||` (second byte) at depth 0.
- * Returns the position just after the boundary.  Skips comments and
- * string literals safely.  If it walks off the beginning, returns 0. */
-static size_t cc_ir_find_lhs_start(const char* s, size_t from_pos) {
+ * Returns the position just after the boundary.  If `out_stmt_pos` is
+ * non-NULL, sets it to 1 when the scan stopped at a statement boundary
+ * (`;`, `{`, `}`, or SOF) and 0 when it stopped at an expression
+ * boundary.  Skips comments and string literals safely.  If it walks
+ * off the beginning, returns 0 with *out_stmt_pos = 1. */
+static size_t cc_ir_find_lhs_start_ex(const char* s, size_t from_pos,
+                                      int* out_stmt_pos) {
     int par = 0, brk = 0, br = 0;
     size_t i = from_pos;
     while (i > 0) {
@@ -278,24 +282,50 @@ static size_t cc_ir_find_lhs_start(const char* s, size_t from_pos) {
         if (c == ')') { par++; continue; }
         if (c == '(') {
             if (par > 0) { par--; continue; }
+            if (out_stmt_pos) *out_stmt_pos = 0;
             return i + 1;
         }
         if (c == ']') { brk++; continue; }
-        if (c == '[') { if (brk > 0) brk--; continue; }
+        if (c == '[') {
+            if (brk > 0) { brk--; continue; }
+            if (out_stmt_pos) *out_stmt_pos = 0;
+            return i + 1;
+        }
         if (c == '}') { br++; continue; }
         if (c == '{') {
             if (br > 0) { br--; continue; }
+            if (out_stmt_pos) *out_stmt_pos = 1;
             return i + 1;
         }
         if (par > 0 || brk > 0 || br > 0) continue;
 
-        if (c == ';' || c == ',') return i + 1;
-        if (c == '?' || c == ':' || c == '@') return i + 1;
-        if (c == '=' && cc_ir_eq_is_boundary(s, from_pos, i)) return i + 1;
-        if (c == '&' && i > 0 && s[i - 1] == '&') return i + 1;
-        if (c == '|' && i > 0 && s[i - 1] == '|') return i + 1;
+        if (c == ';') {
+            if (out_stmt_pos) *out_stmt_pos = 1;
+            return i + 1;
+        }
+        if (c == ',' || c == '?' || c == ':' || c == '@') {
+            if (out_stmt_pos) *out_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '=' && cc_ir_eq_is_boundary(s, from_pos, i)) {
+            if (out_stmt_pos) *out_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '&' && i > 0 && s[i - 1] == '&') {
+            if (out_stmt_pos) *out_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '|' && i > 0 && s[i - 1] == '|') {
+            if (out_stmt_pos) *out_stmt_pos = 0;
+            return i + 1;
+        }
     }
+    if (out_stmt_pos) *out_stmt_pos = 1;  /* SOF is like a stmt start */
     return 0;
+}
+
+static size_t cc_ir_find_lhs_start(const char* s, size_t from_pos) {
+    return cc_ir_find_lhs_start_ex(s, from_pos, NULL);
 }
 
 /* Trim leading whitespace/newlines from [a..b) in src, returning the
@@ -324,6 +354,189 @@ static int cc_ir_lhs_starts_with_return(const char* s, size_t a, size_t b) {
     if (memcmp(s + a, "return", 6) != 0) return 0;
     if (a + 6 < b && cc_ir_is_ident(s[a + 6])) return 0;
     if (a > 0 && cc_ir_is_ident(s[a - 1])) return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------- */
+/* Forward tail scanner                                                 */
+/* ------------------------------------------------------------------- */
+
+/* Is src[a..b) a valid C identifier? */
+static int cc_ir_range_is_ident(const char* s, size_t a, size_t b) {
+    if (b <= a) return 0;
+    if (!cc_is_ident_start(s[a])) return 0;
+    for (size_t i = a + 1; i < b; i++) {
+        if (!cc_is_ident_char(s[i])) return 0;
+    }
+    return 1;
+}
+
+/* Forward scan for the end of an `?>` RHS expression starting at `from`.
+ * Stops at the first top-level byte matching any of:
+ *   `;`, `,`, `)`, `]`, `}`, `?`, `:`, `&&`, `||`
+ * Respects comments, string literals, and `()`/`[]`/`{}` nesting
+ * opened within the body.  Always succeeds (worst case returns `n`). */
+static size_t cc_ir_find_rhs_end(const char* s, size_t n, size_t from) {
+    int par = 0, brk = 0, br = 0;
+    int in_lc = 0, in_bc = 0;
+    int ins = 0; char q = 0;
+    for (size_t i = from; i < n; i++) {
+        char c  = s[i];
+        char c2 = (i + 1 < n) ? s[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
+            continue;
+        }
+        if (ins) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == q) ins = 0;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+
+        if (c == '(') { par++; continue; }
+        if (c == '[') { brk++; continue; }
+        if (c == '{') { br++;  continue; }
+        if (c == ')') { if (par == 0) return i; par--; continue; }
+        if (c == ']') { if (brk == 0) return i; brk--; continue; }
+        if (c == '}') { if (br  == 0) return i; br--;  continue; }
+        if (par > 0 || brk > 0 || br > 0) continue;
+
+        if (c == ';' || c == ',') return i;
+        if (c == '?' || c == ':') return i;
+        if (c == '&' && c2 == '&') return i;
+        if (c == '|' && c2 == '|') return i;
+    }
+    return n;
+}
+
+/* Forward scan for the next top-level `;` starting at `from`.  Returns
+ * the semicolon position, or `n` if not found.  Respects comments,
+ * string literals, and bracket nesting. */
+static size_t cc_ir_find_top_level_semi(const char* s, size_t n, size_t from) {
+    int par = 0, brk = 0, br = 0;
+    int in_lc = 0, in_bc = 0;
+    int ins = 0; char q = 0;
+    for (size_t i = from; i < n; i++) {
+        char c  = s[i];
+        char c2 = (i + 1 < n) ? s[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
+            continue;
+        }
+        if (ins) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == q) ins = 0;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+        if (c == '(') { par++; continue; }
+        if (c == '[') { brk++; continue; }
+        if (c == '{') { br++;  continue; }
+        if (c == ')') { if (par > 0) par--; continue; }
+        if (c == ']') { if (brk > 0) brk--; continue; }
+        if (c == '}') { if (br  > 0) br--;  continue; }
+        if (par == 0 && brk == 0 && br == 0 && c == ';') return i;
+    }
+    return n;
+}
+
+/* Result of the forward tail scan.  Only valid when `recognized == 1`. */
+typedef struct {
+    size_t binder_a;    /* trimmed [binder_a..binder_b) */
+    size_t binder_b;
+    size_t body_a;      /* body content in [body_a..body_b) */
+    size_t body_b;
+    size_t span_end;    /* end-of-construct byte (exclusive).
+                         * Includes a trailing `;` when present. */
+    int    has_binder;
+    int    is_block;    /* true if body came from `{...}` */
+    int    recognized;  /* 1 on successful parse, 0 on fallback */
+} CCIrTail;
+
+/* Parse the text after `!>` or `?>` (starting at `after_sigil`) to find
+ * an optional `(IDENT)` binder and a body.
+ *
+ * For `!>`: body is one of `;`, `{...}`, or `STMT;` (single statement
+ * ending at the next top-level semicolon).
+ *
+ * For `?>`: body is an expression (terminated by the next top-level
+ * `;`, `,`, `)`, `]`, `}`, `?`, `:`, `&&`, `||`).
+ *
+ * Returns 1 on successful parse, 0 on failure (unclosed paren/brace,
+ * malformed binder, EOF mid-construct, etc.).  On failure the caller
+ * falls back to a sigil+LHS-only carve, so raw-text round-trip stays
+ * byte-identical regardless. */
+static int cc_ir_scan_tail(const char* s, size_t n,
+                           size_t after_sigil, CCIrKind kind,
+                           CCIrTail* out) {
+    memset(out, 0, sizeof(*out));
+    size_t p = cc_skip_ws_len(s, n, after_sigil);
+    if (p >= n) return 0;
+
+    /* Optional `(IDENT)` binder. */
+    if (s[p] == '(') {
+        size_t rpar = 0;
+        if (!cc_find_matching_paren(s, n, p, &rpar)) return 0;
+        size_t ba = p + 1, bb = rpar;
+        ba = cc_ir_trim_ws_left(s, ba, bb);
+        bb = cc_ir_trim_ws_right(s, ba, bb);
+        if (ba >= bb || !cc_ir_range_is_ident(s, ba, bb)) return 0;
+        out->binder_a   = ba;
+        out->binder_b   = bb;
+        out->has_binder = 1;
+        p = cc_skip_ws_len(s, n, rpar + 1);
+        if (p >= n) return 0;
+    }
+
+    if (kind == CC_IR_UNWRAP_BANG) {
+        /* `!>` body: `;`, `{...}`, or `STMT;`. */
+        if (s[p] == ';') {
+            out->body_a   = p;
+            out->body_b   = p;
+            out->span_end = p + 1;
+            out->recognized = 1;
+            return 1;
+        }
+        if (s[p] == '{') {
+            size_t rbrace = 0;
+            if (!cc_find_matching_brace(s, n, p, &rbrace)) return 0;
+            out->body_a   = p + 1;
+            out->body_b   = rbrace;
+            out->is_block = 1;
+            size_t q = cc_skip_ws_len(s, n, rbrace + 1);
+            out->span_end = (q < n && s[q] == ';') ? q + 1 : rbrace + 1;
+            out->recognized = 1;
+            return 1;
+        }
+        /* Single-statement body: scan forward to a top-level `;`. */
+        size_t semi = cc_ir_find_top_level_semi(s, n, p);
+        if (semi >= n) return 0;
+        out->body_a   = p;
+        out->body_b   = semi;
+        out->span_end = semi + 1;
+        out->recognized = 1;
+        return 1;
+    }
+
+    /* `?>` body: an expression OR a divergent statement.  Both end at
+     * a top-level RHS boundary; for a divergent stmt (`return X;`), the
+     * terminator is the `;` itself, which is a valid RHS boundary.
+     * We don't distinguish the two here — step 1.3b.iii's rewriter does
+     * that from the body text. */
+    size_t end = cc_ir_find_rhs_end(s, n, p);
+    out->body_a   = p;
+    out->body_b   = end;
+    /* span_end = end (the RHS boundary byte itself is NOT part of the
+     * construct — it belongs to the enclosing statement/expression). */
+    out->span_end = end;
+    out->recognized = 1;
     return 1;
 }
 
@@ -370,6 +583,20 @@ static int cc_ir_append_opaque(CCIrArena* arena, CCIrNode* file,
  *   2. Gives subsequent passes a structured handle to iterate over
  *      unwrap sites (`file->children` filtered by kind) instead of
  *      re-scanning the text from scratch. */
+/* Decl-form heuristic for a stmt-position `!>` / `?>`: if the LHS text
+ * contains no `(` or `)`, and the byte after the sigil (post-ws) is
+ * `(`, the construct is actually a declarator like `T !>(E) ident(...)`
+ * rather than an unwrap operator.  Matches pass_result_unwrap's
+ * `cc__bang_lhs_looks_like_decl` so the IR agrees with the legacy
+ * pass's skip set. */
+static int cc_ir_lhs_is_parenless(const char* s, size_t a, size_t b) {
+    if (b <= a) return 0;
+    for (size_t i = a; i < b; i++) {
+        if (s[i] == '(' || s[i] == ')') return 0;
+    }
+    return 1;
+}
+
 static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
                               const char* src, size_t n) {
     size_t cursor = 0;
@@ -386,8 +613,14 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
          * Clamp to `cursor` so we never consume bytes that have already
          * been emitted into an OPAQUE_TEXT chunk (which would leave
          * duplicate bytes in the output). */
-        size_t lhs_start = cc_ir_find_lhs_start(src, next_sigil);
-        if (lhs_start < cursor) lhs_start = cursor;
+        int    is_stmt  = 0;
+        size_t lhs_start = cc_ir_find_lhs_start_ex(src, next_sigil, &is_stmt);
+        if (lhs_start < cursor) {
+            /* Boundary lived inside a previous opaque chunk; we still
+             * may be inside a statement for the stmt-pos heuristic but
+             * we can't prove it from this side. */
+            lhs_start = cursor;
+        }
 
         /* Strip a leading `return` keyword from the LHS: it belongs to
          * the enclosing statement, not to the unwrap operand.  Leaving
@@ -398,35 +631,73 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
             lhs_start = j + 6;  /* past "return" */
         }
 
+        /* Trimmed LHS range for the decl-form heuristic and payload. */
+        size_t la = cc_ir_trim_ws_left(src, lhs_start, next_sigil);
+        size_t lb = cc_ir_trim_ws_right(src, la, next_sigil);
+
+        CCIrKind k        = (src[next_sigil] == '!') ? CC_IR_UNWRAP_BANG
+                                                     : CC_IR_UNWRAP_Q;
+        size_t   sigil_end = next_sigil + 2;
+
+        /* Decl-form check: stmt-pos + parenless LHS + post-sigil `(`.
+         * These aren't unwraps — they're declarator syntax.  Leave the
+         * sigil bytes inside OPAQUE_TEXT by simply advancing past the
+         * sigil without carving a node. */
+        if (is_stmt && lb > la && cc_ir_lhs_is_parenless(src, la, lb)) {
+            size_t post = cc_skip_ws_len(src, n, sigil_end);
+            if (post < n && src[post] == '(') {
+                cursor = sigil_end;
+                continue;
+            }
+        }
+
+        /* Try the forward tail scanner to capture the binder + body.
+         * On success the UNWRAP node covers the full construct; on
+         * failure we fall back to a LHS+sigil-only carve (raw_text
+         * still round-trips). */
+        CCIrTail tail = {0};
+        int tail_ok = cc_ir_scan_tail(src, n, sigil_end, k, &tail);
+
+        size_t span_end = tail_ok ? tail.span_end : sigil_end;
+
         /* Emit opaque prefix up to the LHS start. */
         if (cc_ir_append_opaque(arena, file, src, cursor, lhs_start) != 0)
             return -1;
 
-        /* UNWRAP node spans [lhs_start .. sigil+2).  LHS text is stored
-         * trimmed so consumers don't re-trim; raw_text preserves the
-         * exact bytes for byte-identical round-trip. */
-        size_t sigil_end = next_sigil + 2;
-        CCIrKind  k   = (src[next_sigil] == '!') ? CC_IR_UNWRAP_BANG
-                                                 : CC_IR_UNWRAP_Q;
-        CCIrSpan  sp  = {lhs_start, sigil_end, 0, 0};
-        CCIrNode* un  = cc_ir_node_new(arena, k, sp);
+        CCIrSpan  sp = {lhs_start, span_end, 0, 0};
+        CCIrNode* un = cc_ir_node_new(arena, k, sp);
         if (!un) return -1;
-        size_t node_len = sigil_end - lhs_start;
+        size_t node_len = span_end - lhs_start;
         un->raw_text = cc_ir_strndup(arena, src + lhs_start, node_len);
         if (!un->raw_text) return -1;
         un->raw_len  = node_len;
 
-        /* Populate structured LHS payload (trimmed). */
-        size_t la = cc_ir_trim_ws_left(src, lhs_start, next_sigil);
-        size_t lb = cc_ir_trim_ws_right(src, la, next_sigil);
+        /* Populate structured payload: LHS, binder, body, stmt-pos. */
         if (lb > la) {
             un->as.unwrap.lhs_text = cc_ir_strndup(arena, src + la, lb - la);
             if (!un->as.unwrap.lhs_text) return -1;
             un->as.unwrap.lhs_len  = lb - la;
         }
+        un->as.unwrap.stmt_position = (uint8_t)(is_stmt ? 1 : 0);
+
+        if (tail_ok) {
+            if (tail.has_binder && tail.binder_b > tail.binder_a) {
+                size_t blen = tail.binder_b - tail.binder_a;
+                un->as.unwrap.binder_name =
+                    cc_ir_strndup(arena, src + tail.binder_a, blen);
+                if (!un->as.unwrap.binder_name) return -1;
+            }
+            if (tail.body_b > tail.body_a) {
+                size_t blen = tail.body_b - tail.body_a;
+                un->as.unwrap.body_text =
+                    cc_ir_strndup(arena, src + tail.body_a, blen);
+                if (!un->as.unwrap.body_text) return -1;
+                un->as.unwrap.body_len  = blen;
+            }
+        }
 
         if (cc_ir_node_append_child(arena, file, un) != 0) return -1;
-        cursor = sigil_end;
+        cursor = span_end;
     }
     return 0;
 }
