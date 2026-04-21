@@ -153,6 +153,181 @@ int cc_ir_node_append_child(CCIrArena* arena,
 }
 
 /* ------------------------------------------------------------------- */
+/* Backward LHS scanner                                                 */
+/* ------------------------------------------------------------------- */
+
+/* Walk backward from `from_pos` (exclusive) to find the start of the
+ * LHS expression feeding an unwrap sigil (`!>` / `?>`).  Mirrors the
+ * semantics of `cc__find_lhs_start_backward_raw` in
+ * pass_result_unwrap.c — same rules for what counts as a boundary
+ * (statement terminators, operator boundaries, unmatched openers) and
+ * the same special handling for comments and string literals seen in
+ * reverse.
+ *
+ * Lives here (not in util/text.h) for two reasons:
+ *   1. The ported recogniser wants one canonical implementation, and
+ *      phase 1.5 will delete the pass's copy once it reads LHS from
+ *      the IR.  Duplicating during the transition is acceptable; two
+ *      inline static copies plus drift would not be.
+ *   2. The heuristics are tied to CC's specific sigil semantics (the
+ *      `=` boundary rule, the `?`/`:` stop, the `&&`/`||` stop), which
+ *      don't generalise and don't belong next to the language-
+ *      agnostic text helpers. */
+
+/* Skip a block comment whose closing `/` sits at `*i`, requires
+ * s[*i-1] == '*'.  On return, `*i` points at the `/` of the opening
+ * delimiter (or 0 if not found). */
+static void cc_ir_skip_block_comment_backward(const char* s, size_t* i) {
+    if (*i < 1) { *i = 0; return; }
+    size_t k = *i - 1;
+    while (k > 0) {
+        k--;
+        if (s[k] == '/' && k + 1 < *i && s[k + 1] == '*') {
+            *i = k;
+            return;
+        }
+    }
+    *i = 0;
+}
+
+/* Skip a string/char literal whose closing quote sits at `*i`.  Best-
+ * effort backward escape handling: a literal whose content contains an
+ * unescaped `"` would fool us, but unwrap sigils don't appear inside
+ * string bodies and the verifier catches any drift. */
+static void cc_ir_skip_str_backward(const char* s, size_t* i) {
+    char q = s[*i];
+    if (*i == 0) return;
+    size_t k = *i;
+    while (k > 0) {
+        k--;
+        if (s[k] == q) {
+            size_t bs = 0;
+            size_t m  = k;
+            while (m > 0 && s[m - 1] == '\\') { bs++; m--; }
+            if ((bs & 1) == 0) { *i = k; return; }
+        }
+    }
+    *i = 0;
+}
+
+/* Is position `pos` inside a `// ...` line comment on its line? */
+static int cc_ir_pos_in_line_comment(const char* s, size_t pos) {
+    size_t line_start = pos;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    int in_str = 0;
+    char qch   = 0;
+    for (size_t k = line_start; k < pos; k++) {
+        char c = s[k];
+        if (in_str) {
+            if (c == '\\' && k + 1 < pos) { k++; continue; }
+            if (c == qch) in_str = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') { in_str = 1; qch = c; continue; }
+        if (c == '/' && k + 1 < pos && s[k + 1] == '/') return 1;
+    }
+    return 0;
+}
+
+/* `=` at `pos` is an expression-terminating boundary unless it's part of
+ * `==`, `!=`, `<=`, `>=`, or the first `=` in a `==` we haven't walked
+ * past yet.  Compound assigns (`+=`, `-=`, ...) keep `=` as a
+ * boundary. */
+static int cc_ir_eq_is_boundary(const char* s, size_t end_exclusive,
+                                size_t pos) {
+    if (pos == 0) return 1;
+    char p = s[pos - 1];
+    if (p == '=' || p == '!' || p == '<' || p == '>') return 0;
+    if (pos + 1 < end_exclusive && s[pos + 1] == '=') return 0;
+    return 1;
+}
+
+static int cc_ir_is_ident(char c) {
+    return (c == '_') ||
+           (c >= '0' && c <= '9') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z');
+}
+
+/* Find the first byte of the LHS expression sitting at `from_pos - 1`
+ * scanning backward.  Stops at:
+ *   - unmatched `(`, `[`, or `{` (expression or statement boundary);
+ *   - `;`, `,`, `?`, `:`, `@` at depth 0;
+ *   - `=` at depth 0 that is a true assignment boundary;
+ *   - `&&` or `||` (second byte) at depth 0.
+ * Returns the position just after the boundary.  Skips comments and
+ * string literals safely.  If it walks off the beginning, returns 0. */
+static size_t cc_ir_find_lhs_start(const char* s, size_t from_pos) {
+    int par = 0, brk = 0, br = 0;
+    size_t i = from_pos;
+    while (i > 0) {
+        i--;
+        char c = s[i];
+        if (c == '/' && i > 0 && s[i - 1] == '*') {
+            cc_ir_skip_block_comment_backward(s, &i);
+            continue;
+        }
+        if (c != '\n' && cc_ir_pos_in_line_comment(s, i)) {
+            while (i > 0 && s[i] != '\n') i--;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            cc_ir_skip_str_backward(s, &i);
+            continue;
+        }
+        if (c == ')') { par++; continue; }
+        if (c == '(') {
+            if (par > 0) { par--; continue; }
+            return i + 1;
+        }
+        if (c == ']') { brk++; continue; }
+        if (c == '[') { if (brk > 0) brk--; continue; }
+        if (c == '}') { br++; continue; }
+        if (c == '{') {
+            if (br > 0) { br--; continue; }
+            return i + 1;
+        }
+        if (par > 0 || brk > 0 || br > 0) continue;
+
+        if (c == ';' || c == ',') return i + 1;
+        if (c == '?' || c == ':' || c == '@') return i + 1;
+        if (c == '=' && cc_ir_eq_is_boundary(s, from_pos, i)) return i + 1;
+        if (c == '&' && i > 0 && s[i - 1] == '&') return i + 1;
+        if (c == '|' && i > 0 && s[i - 1] == '|') return i + 1;
+    }
+    return 0;
+}
+
+/* Trim leading whitespace/newlines from [a..b) in src, returning the
+ * new left edge.  Used to normalise LHS spans so the emitted
+ * lhs_text doesn't start with stray whitespace the scanner left
+ * behind. */
+static size_t cc_ir_trim_ws_left(const char* s, size_t a, size_t b) {
+    while (a < b && (s[a] == ' ' || s[a] == '\t' ||
+                     s[a] == '\n' || s[a] == '\r')) a++;
+    return a;
+}
+
+/* Trim trailing whitespace from [a..b), returning new right edge. */
+static size_t cc_ir_trim_ws_right(const char* s, size_t a, size_t b) {
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' ||
+                     s[b - 1] == '\n' || s[b - 1] == '\r')) b--;
+    return b;
+}
+
+/* Is the identifier `return` the first token of src[a..b)?  Used so a
+ * `return EXPR !> DEFAULT;` statement keeps `return` as prefix text
+ * and hands only `EXPR` to the unwrap node's LHS. */
+static int cc_ir_lhs_starts_with_return(const char* s, size_t a, size_t b) {
+    a = cc_ir_trim_ws_left(s, a, b);
+    if (b < a + 6) return 0;
+    if (memcmp(s + a, "return", 6) != 0) return 0;
+    if (a + 6 < b && cc_ir_is_ident(s[a + 6])) return 0;
+    if (a > 0 && cc_ir_is_ident(s[a - 1])) return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------- */
 /* Build-from-stub: phase-1a recogniser                                 */
 /* ------------------------------------------------------------------- */
 
@@ -206,22 +381,52 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
             /* No more sigils; emit the trailing text slice. */
             return cc_ir_append_opaque(arena, file, src, cursor, n);
         }
-        /* Emit opaque prefix before the sigil. */
-        if (cc_ir_append_opaque(arena, file, src, cursor, next_sigil) != 0)
+
+        /* Determine the LHS start by walking backward from the sigil.
+         * Clamp to `cursor` so we never consume bytes that have already
+         * been emitted into an OPAQUE_TEXT chunk (which would leave
+         * duplicate bytes in the output). */
+        size_t lhs_start = cc_ir_find_lhs_start(src, next_sigil);
+        if (lhs_start < cursor) lhs_start = cursor;
+
+        /* Strip a leading `return` keyword from the LHS: it belongs to
+         * the enclosing statement, not to the unwrap operand.  Leaving
+         * it in would force structured emitters to re-parse the LHS
+         * text to get the real expression; better to do it once here. */
+        if (cc_ir_lhs_starts_with_return(src, lhs_start, next_sigil)) {
+            size_t j = cc_ir_trim_ws_left(src, lhs_start, next_sigil);
+            lhs_start = j + 6;  /* past "return" */
+        }
+
+        /* Emit opaque prefix up to the LHS start. */
+        if (cc_ir_append_opaque(arena, file, src, cursor, lhs_start) != 0)
             return -1;
-        /* Emit the sigil as a typed node.  raw_text carries the 2-byte
-         * sigil so the emitter can reproduce it exactly, structured
-         * payload stays zero-initialised until step 1.3b. */
-        CCIrKind  k  = (src[next_sigil] == '!') ? CC_IR_UNWRAP_BANG
-                                                : CC_IR_UNWRAP_Q;
-        CCIrSpan  sp = {next_sigil, next_sigil + 2, 0, 0};
-        CCIrNode* un = cc_ir_node_new(arena, k, sp);
+
+        /* UNWRAP node spans [lhs_start .. sigil+2).  LHS text is stored
+         * trimmed so consumers don't re-trim; raw_text preserves the
+         * exact bytes for byte-identical round-trip. */
+        size_t sigil_end = next_sigil + 2;
+        CCIrKind  k   = (src[next_sigil] == '!') ? CC_IR_UNWRAP_BANG
+                                                 : CC_IR_UNWRAP_Q;
+        CCIrSpan  sp  = {lhs_start, sigil_end, 0, 0};
+        CCIrNode* un  = cc_ir_node_new(arena, k, sp);
         if (!un) return -1;
-        un->raw_text = cc_ir_strndup(arena, src + next_sigil, 2);
+        size_t node_len = sigil_end - lhs_start;
+        un->raw_text = cc_ir_strndup(arena, src + lhs_start, node_len);
         if (!un->raw_text) return -1;
-        un->raw_len  = 2;
+        un->raw_len  = node_len;
+
+        /* Populate structured LHS payload (trimmed). */
+        size_t la = cc_ir_trim_ws_left(src, lhs_start, next_sigil);
+        size_t lb = cc_ir_trim_ws_right(src, la, next_sigil);
+        if (lb > la) {
+            un->as.unwrap.lhs_text = cc_ir_strndup(arena, src + la, lb - la);
+            if (!un->as.unwrap.lhs_text) return -1;
+            un->as.unwrap.lhs_len  = lb - la;
+        }
+
         if (cc_ir_node_append_child(arena, file, un) != 0) return -1;
-        cursor = next_sigil + 2;
+        cursor = sigil_end;
     }
     return 0;
 }
