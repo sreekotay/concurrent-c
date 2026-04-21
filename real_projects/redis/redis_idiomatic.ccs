@@ -169,6 +169,19 @@ static void redis_conn_release_request(RedisRequest* req);
     });
 }
 
+/* Known compiler limitations this file currently works around (see
+ * docs/known-bugs/redis_idiomatic_async.md for the long-form writeup,
+ * including the minimal repro at /tmp/async_unwrap_repro.ccs).  Short
+ * form:
+ *   - async-body plus unwrap-binder do not compose: blocks the @async
+ *     migration for handle_client and owner_loop, so both stay on the
+ *     hybrid-closure spawn path.
+ *   - e-bound unwrap binder lowers its binder as a generic error type
+ *     regardless of the declared result error type, so Phase D below
+ *     uses the manual res.is_err() shape instead.
+ *   - spurious warning at line 447 from pass_result_unwrap on every
+ *     build; build still succeeds.  Don't chase it. */
+
 static CCError mkerr(int err_kind, const char* msg) {
     CCError err = {0};
     err.kind = err_kind;
