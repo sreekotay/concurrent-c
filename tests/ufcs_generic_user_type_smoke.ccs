@@ -1,0 +1,51 @@
+// Exercises the generic `*` UFCS helper on a bare user type that does
+// NOT start with `CC`.  The helper snake_case-lowers the whole type
+// name and dispatches without synthesizing a `cc_` prefix, so:
+//   `conn->retain()`  becomes  redis_conn_retain(conn)
+//   `conn->drop()`    becomes  redis_conn_drop(conn)
+//   `v.reset()`       becomes  my_widget_reset(&v)
+// Registered globally via cc_type_register("*", ...) in cc_arena.cch.
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+typedef struct RedisConn {
+    int refcount;
+} RedisConn;
+
+static RedisConn* redis_conn_retain(RedisConn* conn) {
+    conn->refcount++;
+    return conn;
+}
+
+static int redis_conn_drop(RedisConn* conn) {
+    return --conn->refcount;
+}
+
+typedef struct MyWidget {
+    int value;
+} MyWidget;
+
+static void my_widget_reset(MyWidget* w) {
+    w->value = 0;
+}
+
+int main(void) {
+    RedisConn conn;
+    conn.refcount = 1;
+
+    RedisConn* self = conn.retain();
+    assert(self == &conn);
+    assert(conn.refcount == 2);
+
+    int left = self->drop();
+    assert(left == 1);
+    assert(conn.refcount == 1);
+
+    MyWidget w;
+    w.value = 42;
+    w.reset();
+    assert(w.value == 0);
+
+    printf("ufcs_generic_user_type_smoke: OK\n");
+    return 0;
+}

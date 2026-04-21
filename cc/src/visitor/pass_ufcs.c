@@ -639,6 +639,12 @@ static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, si
         if (c == '[' && br > 0) { br--; r--; continue; }
         if (c == '{' && brc > 0) { brc--; r--; continue; }
         if (par || br || brc) { r--; continue; }
+        /* `->` is member-access — consume both chars so the receiver chain
+           extends past it (see cc__find_ufcs_span_in_range for details). */
+        if (c == '>' && r >= range_start + 2 && s[r - 2] == '-') {
+            r -= 2;
+            continue;
+        }
         if (c == ',' || c == ';' || c == '=' || c == '\n' ||
             c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
             c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
@@ -741,6 +747,16 @@ static int cc__find_ufcs_span_in_range(const char* s,
             if (c == '[' && br > 0) { br--; r--; continue; }
             if (c == '{' && brc > 0) { brc--; r--; continue; }
             if (par || br || brc) { r--; continue; }
+
+            /* `->` is member-access, not a delimiter: it binds the identifier
+               on its left into the receiver chain (e.g. `obj->field.method()`).
+               Consume both chars and continue scanning left.  Without this,
+               `-`/`>` would break the scan and receiver would be truncated to
+               just the trailing segment. */
+            if (c == '>' && r >= range_start + 2 && s[r - 2] == '-') {
+                r -= 2;
+                continue;
+            }
 
             /* At top-level: stop on likely expression delimiters. */
             if (c == ',' || c == ';' || c == '=' || c == '\n' ||

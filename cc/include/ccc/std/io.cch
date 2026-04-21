@@ -247,7 +247,7 @@ static inline CCRes(size_t, CCIoError) cc__file_read_buf_count(CCFile *file, voi
 #define cc_file_read_buf4(file, buf, n, out) cc_file_read_buf_into((file), (buf), (n), (out))
 #define cc_file_read_buf(...) CC__FILE_SELECT_3_OR_4(__VA_ARGS__, cc_file_read_buf4, cc_file_read_buf3)(__VA_ARGS__)
 
-/* CCFile UFCS dispatch is covered by the global `CC*` registration in
+/* CCFile UFCS dispatch is covered by the global `*` registration in
    cc_arena.cch (smart-lowering CCFile -> cc_file_*, matching the
    existing C API); no per-type opt-in is needed here. */
 

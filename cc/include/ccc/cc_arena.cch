@@ -237,16 +237,17 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
 #define cc_arena_alloc_T_count(T, arena, count) \
     ((T*)cc_arena_alloc((arena), sizeof(T) * (size_t)(count), _Alignof(T)))
 
-/* Generic UFCS name composer shared by any `CC<Rest>` type whose C API
- * follows the stdlib convention `cc_<snake_rest>_<method>(CCType* self, ...)`.
- * Emits the callee name only; the ufcs.c dispatcher handles `&recv` vs
- * `recv` based on whether the receiver is a pointer or an addressable value.
+/* Generic UFCS name composer for any CamelCase-named receiver whose C
+ * API follows the corresponding `<snake_type>_<method>(Type* self, ...)`
+ * convention.  Emits the callee name only; the ufcs.c dispatcher handles
+ * `&recv` vs `recv` based on whether the receiver is a pointer or an
+ * addressable value.
  *
- * The type name (after stripping the leading `CC`) is lowered ASCII-by-
- * ASCII: every uppercase letter after the first becomes `_<lower>`, so
- * CamelCase implicitly splits into snake_case.  This matches the existing
- * stdlib naming without any per-type configuration:
+ * The type name is lowered ASCII-by-ASCII: every uppercase letter after
+ * the first becomes `_<lower>`, so CamelCase implicitly splits into
+ * snake_case.  Two shapes are recognized:
  *
+ *   Shape A — stdlib `CC<Rest>` convention (keeps the `cc_` prefix):
  *      CCFile f;              f.close()       -> cc_file_close(&f)
  *      CCArena* a;            a->remaining()  -> cc_arena_remaining(a)
  *      CCArenaCheckpoint cp;  cp.restore()    -> cc_arena_checkpoint_restore(&cp)
@@ -254,14 +255,21 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
  *      CCString s;            s.len()         -> cc_string_len(&s)
  *      CCNursery* n;          n->wait()       -> cc_nursery_wait(n)
  *
- * Registered globally via `cc_type_register("CC*", ...)` at the bottom of
- * this file, so every `CC<Rest>` type that follows the snake-case convention
- * gets UFCS dispatch for free; there is no per-type opt-in to maintain.
- * Types whose C API diverges from this convention (CCSlice / CCSliceUnique /
- * CCSliceShared keep the CamelCase `CCSlice_<method>` names, CCNursery and
- * the channel families rename methods to distinguish arities) register a
- * more specific pattern to override the default — longest-prefix match wins
- * in the symbol-table lookup (see cc__ufcs_pattern_matches in symbols.c).
+ *   Shape B — bare CamelCase user types (no implicit prefix):
+ *      RedisConn* conn;       conn->retain()  -> redis_conn_retain(conn)
+ *      MyType v;              v.foo()         -> my_type_foo(&v)
+ *
+ * Registered globally via `cc_type_register("*", ...)` at the bottom of
+ * this file, so every CamelCase type that follows the snake-case naming
+ * convention gets UFCS dispatch for free — no per-type opt-in, no need
+ * to rename existing C functions to match a PascalCase UFCS mangling.
+ * Types whose C API diverges from this convention (CCSlice /
+ * CCSliceUnique / CCSliceShared keep the CamelCase `CCSlice_<method>`
+ * names, CCNursery and the channel families rename methods to
+ * distinguish arities) register a more specific pattern to override the
+ * default — longest-prefix match wins in the symbol-table lookup (see
+ * cc__ufcs_pattern_matches in symbols.c), so `CC*` (2-char prefix) beats
+ * bare `*` (0-char prefix) and `CCSlice*` (7-char prefix) beats `CC*`.
  *
  * Lives in cc_arena.cch (rather than cc_ufcs.cch) because the body needs
  * `cc_arena_alloc` and cc_ufcs.cch is the one that #includes this header;
@@ -269,7 +277,12 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
  *
  * Defined unconditionally (no CC_PARSER_MODE guard) because the
  * @comptime hook TU compiler defines CC_PARSER_MODE while still needing
- * this helper as a referenceable symbol for `.ufcs = ...` registrations. */
+ * this helper as a referenceable symbol for `.ufcs = ...` registrations.
+ *
+ * The name retains the historical `_cc_prefix_lower_c` suffix for
+ * backwards compatibility with existing `.ufcs = ...` registrations that
+ * spell it out explicitly; the `CC`-prefix case is now one of two shapes
+ * it handles, not a hard requirement. */
 static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
                                                         CCSlice method,
                                                         CCSlice mode,
@@ -282,6 +295,8 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     size_t ri;
     size_t wi;
     size_t total;
+    size_t body_start;
+    int has_cc_prefix;
     char *buf;
     (void)mode;
     (void)argv;
@@ -296,19 +311,33 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     /* Strip trailing pointer stars and whitespace so both `CCFoo` and
        `CCFoo*` resolve to the same callee. */
     while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
-    /* Require the `CC` prefix followed by at least one more character so
-       we don't produce `cc__method` for the bare `CC` typedef. */
-    if (tlen <= 2 || t[0] != 'C' || t[1] != 'C') return cc_slice_empty();
+    if (tlen == 0) return cc_slice_empty();
+    /* The bare-CC-prefix case (Shape A) prepends `cc_` and strips the
+       leading `CC`; any other CamelCase type (Shape B) emits a direct
+       snake_case transform of the whole name.  Require at least one
+       letter after `CC` for Shape A so we don't produce `cc__method`
+       for the bare `CC` typedef. */
+    has_cc_prefix = (tlen > 2 && t[0] == 'C' && t[1] == 'C' &&
+                     t[2] >= 'A' && t[2] <= 'Z');
+    /* The receiver must *look* like a named C identifier — the hook
+       rejects anything that starts with punctuation, a digit, or
+       whitespace, so non-CamelCase aliases (e.g. primitive-typedef
+       receivers like `size_t`) fall through to the UNRESOLVED path and
+       the existing strict-C-first diagnostic fires.  For user types the
+       first char should be uppercase (CamelCase); lowercase-starting
+       types (e.g. `mytype`) pass through unchanged as `mytype_method`. */
+    if (!((t[0] >= 'A' && t[0] <= 'Z') || (t[0] >= 'a' && t[0] <= 'z') || t[0] == '_'))
+        return cc_slice_empty();
     /* Pass-through for types whose C API doesn't match the stdlib
        `cc_<snake_type>_<method>` convention.  The compiler's hardcoded
        dispatch paths (cc_ufcs_channel_callee for the CCChan family,
        the CCSlice switch in ufcs.c) handle these — returning the
        sentinel here lets those paths run even though this generic hook
-       is registered globally via `cc_type_register("CC*", ...)`.
+       is registered globally via `cc_type_register("*", ...)`.
 
        CCChanTx / CCChanRx (bare + typed family `CCChanTx_int`, etc.)
        already have dedicated hooks registered in cc_channel.cch;
-       their longer-prefix patterns win over `CC*` so we never even
+       their longer-prefix patterns win over `*` so we never even
        reach this helper for those — we list them defensively anyway
        so a future refactor that drops those hooks still compiles. */
     if ((tlen == 6 && memcmp(t, "CCChan", 6) == 0) ||
@@ -322,21 +351,28 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         static const char pass_tag[] = "__cc_ufcs_pass__";
         return cc_slice_from_buffer((void*)pass_tag, sizeof(pass_tag) - 1);
     }
-    /* Worst case: every remaining char is uppercase and gains a `_`, so
-       plan for 2x + the "cc_" prefix + "_" separator + method. */
-    max_total = 3 /* "cc_" */ + (tlen - 2) * 2 + 1 /* "_" */ + method.len;
+    /* Worst case: every char is uppercase and gains a `_`, so plan for
+       2x + optional `cc_` prefix + `_` separator + method. */
+    max_total = 3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
     buf = (char *)cc_arena_alloc(arena, max_total, sizeof(char));
     if (!buf) return cc_slice_empty();
     wi = 0;
-    buf[wi++] = 'c'; buf[wi++] = 'c'; buf[wi++] = '_';
-    /* Smart snake_case: first char after `CC` is emitted as lowercase
+    if (has_cc_prefix) {
+        buf[wi++] = 'c'; buf[wi++] = 'c'; buf[wi++] = '_';
+        body_start = 2;  /* skip the `CC` we just replaced with `cc_` */
+    } else {
+        body_start = 0;
+    }
+    /* Smart snake_case: the first char of the body is emitted as lower
        with no leading `_`; each subsequent uppercase letter gets a
        preceding `_`.  Non-ASCII / already-lowercase / digits / `_` pass
-       through unchanged. */
-    for (ri = 2; ri < tlen; ++ri) {
+       through unchanged.  Works for both Shape A (`CCArena` -> `arena`
+       body, joined with the `cc_` prefix above) and Shape B
+       (`RedisConn` -> `redis_conn`). */
+    for (ri = body_start; ri < tlen; ++ri) {
         char c = t[ri];
         int is_upper = (c >= 'A' && c <= 'Z');
-        if (is_upper && ri > 2) buf[wi++] = '_';
+        if (is_upper && ri > body_start) buf[wi++] = '_';
         buf[wi++] = is_upper ? (char)(c + ('a' - 'A')) : c;
     }
     buf[wi++] = '_';
@@ -687,7 +723,7 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
-/* CCArena's UFCS dispatch is covered by the global `CC*` registration
+/* CCArena's UFCS dispatch is covered by the global `*` registration
  * (see end of this file).  Only the lifecycle hooks (`.create` /
  * `.destroy`) need a type-specific entry. */
 
@@ -808,18 +844,21 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
 }
 
 /* CCArenaPool / CCArenaCheckpoint UFCS dispatch is covered by the
- * global `CC*` registration below. */
+ * global `*` registration below. */
 
 /* Global UFCS registrations:
  *
- *   `CC*`      -> cc_ufcs_generic_cc_prefix_lower_c  (default: CCFoo ->
- *                 cc_foo_<method>, the stdlib convention).
+ *   `*`        -> cc_ufcs_generic_cc_prefix_lower_c  (default for *any*
+ *                 CamelCase receiver: `CCFoo` keeps its `cc_` prefix and
+ *                 maps to `cc_foo_<method>` for the stdlib convention,
+ *                 while bare user types like `RedisConn` map directly to
+ *                 `redis_conn_<method>` with no synthetic prefix).
  *   `CCSlice*` -> cc_ufcs_generic_cc_camel_same_c    (CCSlice family keeps
  *                 the CamelCase `CCSlice_<method>` spelling).
  *
  * Longest-pattern-prefix wins in the symbol-table lookup
  * (cc__ufcs_pattern_matches in cc/src/comptime/symbols.c), so `CCSlice*`
- * (7-char prefix) overrides `CC*` (2-char prefix) for CCSlice /
+ * (7-char prefix) overrides bare `*` (0-char prefix) for CCSlice /
  * CCSliceUnique / CCSliceShared receivers.  Types whose C API diverges
  * further (CCNursery, CCChanTx/Rx families with renamed methods) can
  * still register their own specific pattern with a bespoke rewrite to
@@ -827,7 +866,7 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
  * in the std headers are no longer needed and have been removed. */
 #ifdef CC_COMPTIME_SCAN
 @comptime {
-    (void)cc_type_register("CC*", (CCTypeHooks){
+    (void)cc_type_register("*", (CCTypeHooks){
         .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCSlice*", (CCTypeHooks){

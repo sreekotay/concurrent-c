@@ -62,8 +62,9 @@ static inline CCSlice cc_ufcs_concat2(CCArena *arena, CCSlice left, CCSlice righ
  * the CCSlice family) live in cc_arena.cch — their bodies need
  * `cc_arena_alloc`, and cc_ufcs.cch is the one that includes that
  * header, so putting the helpers there avoids a circular include.  The
- * global `cc_type_register("CC*", ...)` / `cc_type_register("CCSlice*", ...)`
- * entries at the end of cc_arena.cch wire them in once for all CC types. */
+ * global `cc_type_register("*", ...)` / `cc_type_register("CCSlice*", ...)`
+ * entries at the end of cc_arena.cch wire them in once for every
+ * CamelCase type. */
 
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
     CCUfcsRegistration reg = {0};
@@ -80,19 +81,25 @@ static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, C
 /* Default UFCS dispatch is wired up globally in cc_arena.cch via two
  * wildcard `cc_type_register(...)` entries:
  *
- *     cc_type_register("CC*",      { .ufcs = cc_ufcs_generic_cc_prefix_lower_c });
+ *     cc_type_register("*",        { .ufcs = cc_ufcs_generic_cc_prefix_lower_c });
  *     cc_type_register("CCSlice*", { .ufcs = cc_ufcs_generic_cc_camel_same_c });
  *
- * Every `CCFoo` / `CCFoo*` receiver whose C API follows the stdlib
- * `cc_<snake_foo>_<method>` convention (CCArena, CCArenaCheckpoint,
- * CCArenaPool, CCFile, CCCommand, CCSocket, CCListener, CCString, ...)
- * gets UFCS dispatch for free — headers no longer need a per-type
- * `@comptime cc_type_register(...)` opt-in.
+ * Every CamelCase receiver whose C API follows the `<snake_type>_<method>`
+ * convention gets UFCS dispatch for free — headers no longer need a
+ * per-type `@comptime cc_type_register(...)` opt-in.  Two shapes are
+ * recognized by the generic composer:
+ *
+ *   - Stdlib `CCFoo` / `CCFoo*` receivers (CCArena, CCArenaCheckpoint,
+ *     CCArenaPool, CCFile, CCCommand, CCSocket, CCListener, CCString, ...)
+ *     keep their `cc_` prefix and map to `cc_<snake_foo>_<method>`.
+ *   - Bare user types (e.g. `RedisConn*`) map directly to
+ *     `<snake_type>_<method>` — `conn->retain()` -> `redis_conn_retain(conn)`
+ *     with no synthetic `cc_` prefix, matching idiomatic C naming.
  *
  * The CCSlice family (CCSlice / CCSliceUnique / CCSliceShared) keeps
  * the CamelCase `CCSlice_<method>` spelling and is covered by the
- * `CCSlice*` entry, which overrides `CC*` because the symbol-table
- * lookup picks the longest matching prefix (7 chars > 2 chars — see
+ * `CCSlice*` entry, which overrides bare `*` because the symbol-table
+ * lookup picks the longest matching prefix (7 chars > 0 chars — see
  * cc__ufcs_pattern_matches in cc/src/comptime/symbols.c).
  *
  * Types that diverge further from both conventions — CCNursery and the

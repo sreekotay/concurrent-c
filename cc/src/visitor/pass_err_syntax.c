@@ -6,33 +6,9 @@
 #include <string.h>
 
 #include "util/path.h"
-#include "util/result_fn_registry.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
 #include "visitor/visitor.h"
-
-/* Return 1 if the trimmed expression `s[a..b)` looks like `NAME(args)`
- * where NAME is registered as a raw-pointer-returning function (e.g.
- * `fopen`, `cc_nursery_create`).  Used by the `@err` lowering to emit
- * a NULL-check rather than `cc_is_err(...)` (which would try to access
- * `.ok` on a pointer and fail at parse time with TCC's "struct or
- * union expected").  Conservative: only fires on a bare `IDENT(...)`
- * at the top level of the expression. */
-static int cc__expr_is_pointer_returning_call(const char* s, size_t a, size_t b) {
-    while (a < b && isspace((unsigned char)s[a])) a++;
-    while (b > a && isspace((unsigned char)s[b - 1])) b--;
-    if (a >= b) return 0;
-    if (s[b - 1] != ')') return 0;
-    if (!cc_is_ident_start(s[a])) return 0;
-    size_t name_a = a;
-    size_t name_b = a;
-    while (name_b < b && cc_is_ident_char(s[name_b])) name_b++;
-    if (name_b == name_a) return 0;
-    size_t k = name_b;
-    while (k < b && isspace((unsigned char)s[k])) k++;
-    if (k >= b || s[k] != '(') return 0;
-    return cc_pointer_fn_registry_contains(s + name_a, name_b - name_a);
-}
 
 #define cc__append_n cc_sb_append
 #define cc__append_str cc_sb_append_cstr
@@ -1212,63 +1188,33 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                 cc__append_str(&out, &ol, &oc, "; ");
             }
 
-            /* Pointer-lowering detection.  When the consumed expression is a
-             * bare call to a raw-pointer-returning function (registered via
-             * cc_pointer_fn_registry_scan during preprocess), the usual
-             * `cc_is_err(tmp)` / `cc_error(tmp)` / `cc_value(tmp)` macros do
-             * not apply: the value has no `.ok` field.  Switch the emitted
-             * predicate to `(tmp) == NULL` and synthesize a `CCError` with
-             * kind `CC_ERR_NULL` for any binder the body expects.  The
-             * source/line-carrying message is assembled from `input_path`
-             * and `errl` at rewrite time so the handler sees a concrete
-             * location without any runtime overhead. */
-            int expr_is_ptr = cc__expr_is_pointer_returning_call(in_src, expr_a, expr_b);
-            int rest_is_ptr = (has_assign && has_colon_def)
-                ? cc__expr_is_pointer_returning_call(in_src, rest_a, rest_b)
-                : expr_is_ptr;
-            int def_is_ptr = (has_assign && has_colon_def)
-                ? cc__expr_is_pointer_returning_call(in_src, def_a, def_b)
-                : 0;
-            const char* is_err_fmt_expr = expr_is_ptr ? "); if ((%s) == NULL) " : "); if (cc_is_err(%s)) ";
-            const char* is_ok_fmt_rest  = rest_is_ptr ? "); if ((%s) != NULL) { " : "); if (cc_is_ok(%s)) { ";
-            const char* is_err_fmt_def  = def_is_ptr  ? "); if ((%s) == NULL) "  : "); if (cc_is_err(%s)) ";
-            const char* value_fmt_rest_assign = rest_is_ptr ? "%s = (%s); "       : "%s = cc_value(%s); ";
-            const char* value_fmt_expr_assign = expr_is_ptr ? "%s = (%s); "       : "%s = cc_value(%s); ";
-            /* CCError synthesis for the pointer-err path.  Built once into
-             * `ptr_err_literal` via the shared `cc_sb_append_err_null_at`
-             * helper (see util/text.h) and spliced into each usage site —
-             * the structural `__cc_err_null_at(...)` / `(CCError){...}`
-             * boilerplate lives in the runtime macro in cc_result.cch, so
-             * changes to the CCError shape only need to be chased there. */
-            char ptr_err_literal[1024];
-            {
-                char rel[1024];
-                const char* f = cc_path_rel_to_repo(
-                    ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                char* tmp = NULL;
-                size_t tl = 0, tc = 0;
-                cc_sb_append_err_null_at(&tmp, &tl, &tc, in_src, expr_a, expr_b, f, errl);
-                if (tmp) {
-                    size_t n = tl < sizeof(ptr_err_literal) - 1 ? tl : sizeof(ptr_err_literal) - 1;
-                    memcpy(ptr_err_literal, tmp, n);
-                    ptr_err_literal[n] = 0;
-                    free(tmp);
-                } else {
-                    ptr_err_literal[0] = 0;
-                }
-            }
+            /* Unified is-err / value / err-at dispatch.  Emits the same
+             * `__cc_uw_*` macros used by `pass_result_unwrap.c` so the
+             * Result-struct vs raw-pointer choice lives in a single
+             * `_Generic` in `cc_result.cch` instead of being duplicated
+             * as a text-heuristic here.  `__cc_uw_is_err(tmp)` collapses
+             * to `!tmp.ok` for Result and `tmp == NULL` for pointer;
+             * `__cc_uw_value(tmp)` to `tmp.u.value` / `tmp`; and
+             * `__cc_uw_err_at(tmp, ...)` to `tmp.u.error` /
+             * `__cc_err_null_at(...)`.  The file/line strings are
+             * assembled at rewrite time, so parser mode / real mode
+             * agree on the surrounding scaffolding. */
+            char err_file_rel[1024];
+            const char* err_file = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>",
+                err_file_rel, sizeof(err_file_rel));
 
             if (has_assign && has_colon_def) {
                 cc__append_str(&out, &ol, &oc, "{ __typeof__(");
                 cc__append_n(&out, &ol, &oc, in_src + rest_a, rest_b - rest_a);
                 cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
                 cc__append_n(&out, &ol, &oc, in_src + rest_a, rest_b - rest_a);
-                cc_sb_append_fmt(&out, &ol, &oc, is_ok_fmt_rest, tmpv);
+                cc_sb_append_fmt(&out, &ol, &oc, "); if (!__cc_uw_is_err(%s)) { ", tmpv);
                 if (lhs_is_decl) {
                     if (lhs_decl_is_result)
                         cc_sb_append_fmt(&out, &ol, &oc, "%s = %s; ", assignee, tmpv);
                     else
-                        cc_sb_append_fmt(&out, &ol, &oc, value_fmt_rest_assign, assignee, tmpv);
+                        cc_sb_append_fmt(&out, &ol, &oc, "%s = __cc_uw_value(%s); ", assignee, tmpv);
                 }
                 else {
                     cc__append_n(&out, &ol, &oc, in_src + lhs_a, lhs_b - lhs_a);
@@ -1278,18 +1224,25 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                 cc__append_n(&out, &ol, &oc, in_src + def_a, def_b - def_a);
                 cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv_d);
                 cc__append_n(&out, &ol, &oc, in_src + def_a, def_b - def_a);
-                cc_sb_append_fmt(&out, &ol, &oc, is_err_fmt_def, tmpv_d);
+                cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) ", tmpv_d);
             } else {
                 cc__append_str(&out, &ol, &oc, "{ __typeof__(");
                 cc__append_n(&out, &ol, &oc, in_src + expr_a, expr_b - expr_a);
                 cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
                 cc__append_n(&out, &ol, &oc, in_src + expr_a, expr_b - expr_a);
-                cc_sb_append_fmt(&out, &ol, &oc, is_err_fmt_expr, tmpv);
+                cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) ", tmpv);
             }
 
             {
+                /* `err_tmp` is the synthesized name holding the consumed
+                 * expression's value (either the main `tmpv` or the
+                 * has-colon-def fallback `tmpv_d`).  The (err_span_a,
+                 * err_span_b) pair tracks *which* source expression
+                 * produced that value so the `__cc_uw_err_at(...)`
+                 * message cites the correct sub-expression. */
                 const char* err_tmp = (has_assign && has_colon_def) ? tmpv_d : tmpv;
-                int err_tmp_is_ptr = (has_assign && has_colon_def) ? def_is_ptr : expr_is_ptr;
+                size_t err_span_a = (has_assign && has_colon_def) ? def_a : expr_a;
+                size_t err_span_b = (has_assign && has_colon_def) ? def_b : expr_b;
                 if (has_local) {
                     const CCErrFrame* outer_d = (stk_n > 0) ? &stk[stk_n - 1] : NULL;
                     int dg = 1;
@@ -1298,27 +1251,26 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     free(local_body);
                     local_body = NULL;
                     if (!dg || !lb_exp) {
-                        char rel[1024];
-                        const char* f =
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                        cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "bad @errhandler(e); delegation in @err block");
+                        cc_pass_error_cat(err_file, errl, 1, CC_ERR_SYNTAX, "bad @errhandler(e); delegation in @err block");
                         goto fail;
                     }
                     cc__append_str(&out, &ol, &oc, "{ ");
                     if (local_decl[0]) {
-                        if (err_tmp_is_ptr)
-                            cc_sb_append_fmt(&out, &ol, &oc, "%s = %s; ", local_decl, ptr_err_literal);
-                        else
-                            cc_sb_append_fmt(&out, &ol, &oc, "%s = cc_error(%s); ", local_decl, err_tmp);
+                        cc_sb_append_fmt(&out, &ol, &oc, "%s = ", local_decl);
+                        cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
+                                                in_src, err_span_a, err_span_b,
+                                                err_file, errl);
+                        cc__append_str(&out, &ol, &oc, "; ");
                     }
                     cc__append_str(&out, &ol, &oc, lb_exp);
                     cc__append_str(&out, &ol, &oc, " } ");
                     free(lb_exp);
                 } else {
-                    if (err_tmp_is_ptr)
-                        cc_sb_append_fmt(&out, &ol, &oc, "{ %s = %s; ", def->param_decl, ptr_err_literal);
-                    else
-                        cc_sb_append_fmt(&out, &ol, &oc, "{ %s = cc_error(%s); ", def->param_decl, err_tmp);
+                    cc_sb_append_fmt(&out, &ol, &oc, "{ %s = ", def->param_decl);
+                    cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
+                                            in_src, err_span_a, err_span_b,
+                                            err_file, errl);
+                    cc__append_str(&out, &ol, &oc, "; ");
                     cc__append_n(&out, &ol, &oc, def->body, def->body_len);
                     cc__append_str(&out, &ol, &oc, " } ");
                 }
@@ -1330,7 +1282,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     if (lhs_decl_is_result)
                         cc_sb_append_fmt(&out, &ol, &oc, "%s = %s; ", assignee, tmpv_d);
                     else
-                        cc_sb_append_fmt(&out, &ol, &oc, value_fmt_rest_assign, assignee, tmpv_d);
+                        cc_sb_append_fmt(&out, &ol, &oc, "%s = __cc_uw_value(%s); ", assignee, tmpv_d);
                 }
                 else {
                     cc__append_n(&out, &ol, &oc, in_src + lhs_a, lhs_b - lhs_a);
@@ -1345,7 +1297,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                         if (lhs_decl_is_result)
                             cc_sb_append_fmt(&out, &ol, &oc, "%s = %s; ", assignee, tmpv);
                         else
-                            cc_sb_append_fmt(&out, &ol, &oc, value_fmt_expr_assign, assignee, tmpv);
+                            cc_sb_append_fmt(&out, &ol, &oc, "%s = __cc_uw_value(%s); ", assignee, tmpv);
                     }
                     else {
                         cc__append_n(&out, &ol, &oc, in_src + lhs_a, lhs_b - lhs_a);

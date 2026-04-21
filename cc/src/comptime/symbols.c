@@ -467,9 +467,10 @@ int cc_symbols_add_legacy_type_ufcs_callable(CCSymbolTable* t,
     return 0;
 }
 
-int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
-                                         const char* type_name,
-                                         const void** out_fn_ptr) {
+int cc_symbols_lookup_type_ufcs_callable_ex(CCSymbolTable* t,
+                                            const char* type_name,
+                                            const void** out_fn_ptr,
+                                            size_t* out_score) {
     CCTypeEntry* best_entry = NULL;
     size_t best_len = 0;
     if (!t || !type_name || !out_fn_ptr) return EINVAL;
@@ -487,7 +488,14 @@ int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
             *out_fn_ptr = entry->ufcs_callable;
         }
     }
+    if (out_score) *out_score = best_len;
     return best_entry ? 0 : ENOENT;
+}
+
+int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
+                                         const char* type_name,
+                                         const void** out_fn_ptr) {
+    return cc_symbols_lookup_type_ufcs_callable_ex(t, type_name, out_fn_ptr, NULL);
 }
 
 size_t cc_symbols_type_count(CCSymbolTable* t) {

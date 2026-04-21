@@ -27,6 +27,25 @@ int cc_result_spec_is_core_builtin(const char* mangled_ok, const char* mangled_e
 int cc_result_spec_is_stdlib_predeclared(const char* mangled_ok, const char* mangled_err);
 int cc_result_spec_is_stdlib_predeclared_name(const char* concrete_name);
 
+/* Row in the stdlib-predeclared result spec table.  Drives both the
+ * `is_stdlib_predeclared*` duplicate-decl guard AND the on-demand seeding
+ * of `cc__cg_result_specs` so that `_Generic` enumeration for `__cc_uw_*`
+ * covers result types introduced via UFCS-expanded stdlib macros.  */
+typedef struct {
+    const char* concrete_name;
+    const char* ok_type;
+    const char* err_type;
+    const char* mangled_ok;
+    const char* mangled_err;
+} CCStdlibPredeclaredResult;
+
+/* Lookup a stdlib-predeclared result spec by concrete name
+ * (e.g. "CCResult_bool_CCIoError").  Returns NULL if not found. */
+const CCStdlibPredeclaredResult* cc_result_spec_lookup_stdlib_predeclared(const char* concrete_name);
+/* Enumerate stdlib-predeclared result specs by index.  Returns NULL past
+ * the end of the table. */
+const CCStdlibPredeclaredResult* cc_result_spec_lookup_stdlib_predeclared_by_index(int index);
+
 void cc_result_spec_table_init(CCResultSpecTable* table);
 void cc_result_spec_table_reset(CCResultSpecTable* table);
 void cc_result_spec_table_free(CCResultSpecTable* table);

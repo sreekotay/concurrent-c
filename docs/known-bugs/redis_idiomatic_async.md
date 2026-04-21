@@ -7,11 +7,35 @@ owner_loop now run on `spawn_async` + V2-scheduler fibers).  The
 parser-mode result-type collapse work from Bug [3] is still deferred
 as a focused follow-up — tracked at the very bottom of this file.
 
-One new bug surfaced while cleaning up `reply_materialize`'s shape
-([F7] below): tcc's parser rejects a statement-expression initializer
-(`T x = ({ ... });`) when it appears as the first statement of a
-freshly-opened `case LABEL: { ... }` compound.  This blocks the
-natural `T x = foo() !>;` lowering inside switch arms.  OPEN.
+Two new bugs surfaced while cleaning up the reply path, and a third
+fell out of the [F8] fix:
+
+- **[F7]** (OPEN) — tcc's parser rejects a statement-expression
+  initializer (`T x = ({ ... });`) when it appears as the first
+  statement of a freshly-opened `case LABEL: { ... }` compound.  This
+  blocks the natural `T x = foo() !>;` lowering inside switch arms.
+- **[F8]** (FIXED) — the `!>(e) BODY` binder form at expression
+  position used to lower `e` as `__CCGenericError` instead of the
+  declared error arm of the result.  Fixed in
+  `d9ca37f compiler: unify !> / ?> lowering and harden text scanning`
+  by threading the LHS result type through
+  `pass_result_unwrap`'s expression-position rewrite the same way the
+  statement-position decl-form already did.
+- **[F9]** (FIXED) — uncovered by [F8]'s fix: inside an `@async`
+  function, the now-correctly-typed binder `e` introduced by
+  `!>(e) BODY` was picked up by `async_ast` as a local and frame-
+  lifted, so the state-machine lowering emitted an invalid
+  declaration of the form `CCIoError __f->e = ...;` (lvalue-
+  expression in a declarator).  Fix: `pass_result_unwrap` now mangles
+  the user binder to `__cc_pu_bind_<id>_<name>` and rewrites its
+  word-bounded references inside the error-path body accordingly.
+  The `__cc_pu_` prefix matches `async_ast`'s existing no-frame-lift
+  rule, so the binder stays a true local and its declaration survives
+  the identifier-rewrite pass intact.  Uncovered a latent pre-existing
+  defect in the stdlib-predeclared result-spec seeding that was
+  forcing `_Generic` arms for types whose defining header was not in
+  the TU; `visit_codegen.c` now only seeds predeclared specs whose
+  `CCResult_T_E` or ok-type name is referenced in the source.
 
 The final two follow-ups ([F5] and [F6]) both fell out of the same
 underlying pattern: **raw-text lowering passes that hand-roll
@@ -59,6 +83,166 @@ comment bait) live at:
   pass_closure_calls decl-line `;` / `(` / `=` scan.
 - `tests/autoblock_call_comment_paren_bait_smoke.ccs` —
   pass_autoblock `call_txt` paren span extraction.
+
+---
+
+## [F9] async_ast frame-lifts the `!>(e) BODY` binder and emits an invalid declarator — FIXED
+
+### Symptom
+
+Inside an `@async` function, the clean binder shape
+
+```c
+bool more = rr_fill(&reader, &client) !>(e) {
+    write_reply_now(&client, conn, io_err_reply(e));
+    return 0;
+};
+```
+
+fails to reparse after async state-machine lowering.  The dump shows
+`async_ast` has rewritten the unwrap-pass-generated binder declaration
+with a frame-member-access LHS:
+
+```c
+case 25: {
+  __f->more = ({
+    __typeof__(rr_fill(&__f->reader, &__f->__p_client)) __cc_pu_x_12
+        = (rr_fill(&__f->reader, &__f->__p_client));
+    if (__cc_uw_is_err(__cc_pu_x_12)) {
+        CCIoError __f->e = *(CCIoError*)(void*)&((__cc_pu_x_12).u.error);  // <-- invalid
+        write_reply_now(&__f->__p_client, __f->conn, io_err_reply(__f->e));
+        __f->__cc_retval_53 = (0);
+        __f->__cc_ret_set_53 = 1;
+        goto __cc_cleanup_53;
+    }
+    __cc_uw_value(__cc_pu_x_12);
+  });
+  ...
+}
+```
+
+`CCIoError __f->e = ...;` is not a valid declaration — a member-access
+expression can't appear in a declarator.  tcc fails the reparse with
+`';' expected (got '->')` pointing at a sibling frame-field assignment
+a few lines later.  Regular (non-`@async`) functions are unaffected:
+`redis_conn_queue_reply` uses the same binder shape and builds cleanly.
+
+### Evidence
+
+- Repro: adding `rr_fill(&reader, &client) !>(e) { ... return 0; };`
+  inside `handle_client` (`@async int handle_client(...)`) in
+  `real_projects/redis/redis_idiomatic.ccs`.
+- `CC_DUMP_LOWERED` on the same file shows the bogus
+  `CCIoError __f->e = ...;` line as above.
+- `redis_conn_queue_reply` (plain static fn, same file) uses
+  `send(slot) !>(e) { cc_channel_close(tx, e); return false; }` and
+  lowers + compiles fine.  The bug is specifically about `async_ast`
+  frame-lifting, not the unwrap lowering itself.
+
+### Root cause hypothesis
+
+After [F8]'s fix, `pass_result_unwrap` correctly introduces `e` as a
+local of the declared error type (`CCIoError`) inside the error-path
+block.  `async_ast`'s local-variable scan then treats `e` as a
+frame-lifted local (since the enclosing statement yields a value that's
+assigned to a frame field — the `bool more = ...` in the example) and
+rewrites every occurrence of the identifier `e` to `__f->e`, **including
+the declaration itself**.  The correct handling is either:
+
+1. Leave unwrap-pass-introduced binders as non-frame locals (they're
+   scoped to a single block that can't contain a suspension point
+   anyway, so they don't need frame storage), or
+2. If they must be frame-lifted, emit the declaration as a frame-field
+   reference without a type prefix (assignment, not declaration).
+
+Option 1 is the simpler fix — mark the binder declaration site with a
+"no-lift" annotation in the unwrap lowering, and teach `async_ast` to
+skip such marked locals.
+
+### Fix (applied in `pass_result_unwrap.c`)
+
+The cleanest realization of Option 1 turned out to be name-mangling
+rather than a side-channel marker.  All three sites in
+`pass_result_unwrap.c` that emit a `!>(e) BODY` / `?>(e) RHS` binder
+now rename the user-chosen binder to
+`__cc_pu_bind_<id>_<orig_name>` and rewrite every word-bounded
+occurrence of the original name inside the error-path body / RHS
+accordingly (comment- and string-literal-aware via
+`cc_find_ident_top_level`).  The `__cc_pu_` prefix already matches
+`async_ast`'s existing no-frame-lift rule for unwrap-pass temporaries
+(alongside `__cc_pu_x_*`, `__cc_pu_r_*`, `__cc_pu_be_*`), so the
+binder survives into the state-machine lowering as a true local and
+its `TYPE name = ...;` declaration stays valid C.
+
+The fix also uncovered a latent pre-existing defect in the stdlib-
+predeclared result-spec seeding: `visit_codegen.c` was injecting
+`_Generic` arms for every stdlib `CCResult_T_E` regardless of whether
+the TU had included the defining `ccc/std/<X>.cch` header.  The seed
+now only admits specs whose `CCResult_T_E` or ok-type name is
+referenced in the source text.  Together these fixes allow the
+idiomatic binder shape
+
+```c
+bool more = rr_fill(&reader, &client) !>(e) {
+    write_reply_now(&client, conn, io_err_reply(e));
+    return 0;
+};
+```
+
+to build and run inside `@async` bodies.  Regression guard:
+`tests/async_unwrap_bang_binder_no_frame_lift_smoke.ccs`.
+
+The outer result *binding* (e.g. `bool more = ...`) as a frame local
+is orthogonal and was always fine — only the unwrap-pass-introduced
+inner binder tripped the rewrite.  Plain `res.is_err()` /
+`res.error()` / `res.value()` accesses on a manually-destructured
+result also lower without issue and remain a safe fallback.
+
+---
+
+## [F8] `!>(e) BODY` binder at expression position loses declared error type (becomes `__CCGenericError`) — FIXED (d9ca37f)
+
+### Symptom
+
+At expression position, `CALL !>(e) { ... }` introduces a binder `e`
+scoped to `BODY`.  Per spec §3.1 the binder's type should be the error
+arm of the result type of `CALL` — for `CCResult_bool_CCIoError` that is
+`CCIoError`.  The pre-fix lowering instead bound `e` as the parser's
+generic error struct `__CCGenericError`, so any attempt to use `e` as
+a `CCIoError` (pass to `cc_channel_close`, read `.kind`, copy into a
+`CCIoError` slot) failed to compile:
+
+```c
+// idiomatic shape we want at every owner-side channel-send site:
+return conn->reply_tx.send(slot) !>(e) {
+    cc_channel_close(conn->reply_tx, e);   // expects CCIoError
+    return false;
+};
+```
+
+…errors with:
+
+```
+error: cannot convert 'struct __CCGenericError' to 'CCIoError'
+```
+
+Statement-position `!>(e) BODY` had the same issue for typed results.
+
+### Fix (d9ca37f)
+
+`pass_result_unwrap`'s expression-position rewrite now threads the LHS
+result type's error arm through to the binder declaration the same
+way the statement-position decl-form already does.  See the unified
+`!>` / `?>` lowering refactor in
+`cc/src/visitor/pass_result_unwrap.c`.
+
+### Follow-up
+
+Fixing [F8] surfaced **[F9]** — inside `@async` functions, the now-
+correctly-typed binder `e` gets frame-lifted by `async_ast` and the
+lowering emits an invalid `CCIoError __f->e = ...;` declaration.
+Regular (non-`@async`) functions are unaffected; `redis_conn_queue_reply`
+uses the binder form and builds cleanly.  See [F9] above.
 
 ---
 

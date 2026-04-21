@@ -7295,21 +7295,15 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                 if (ud_r < 0) return -1;
                 if (ud_r > 0 && ud_out && cc_pass_chain_apply(chain, ud_out) < 0) return -1;
             }
-            /* Populate the pointer-fn registry before lowering `!>` / `?>` so
-             * the pass can recognize calls to plain C functions that return
-             * raw pointers (e.g. `fopen`, `getenv`, `cc_nursery_create`) and
-             * emit a NULL-check based lowering instead of the Result-struct
-             * lowering.  Scanning both the current source AND the include-
-             * expanded stream lets us pick up declarations in system and
-             * CC-runtime headers without requiring any user-side annotation. */
-            cc_pointer_fn_registry_scan(chain->src, chain->len);
-            if (input_path && input_path[0]) {
-                char* expanded = cc_preprocess_include_expanded(input_path);
-                if (expanded) {
-                    cc_pointer_fn_registry_scan(expanded, strlen(expanded));
-                    free(expanded);
-                }
-            }
+            /* `!>` / `?>` lowering no longer needs a pointer-fn registry:
+             * the Result-vs-pointer dispatch is handled at emission time
+             * by the `__cc_uw_*` `_Generic` macros in `cc_result.cch`
+             * (baseline arms) and `visit_codegen.c` (per-spec enumerated
+             * arms).  The pre-lowering scan that used to populate a
+             * pointer-fn registry has been removed — the lowering now
+             * emits the same unified shape for every LHS and lets the C
+             * type system pick the right arm at preprocessor expansion
+             * time. */
             char* ru_out = NULL;
             size_t ru_out_len = 0;
             CCVisitorCtx ru_ctx = {.symbols = NULL, .input_path = input_path};
