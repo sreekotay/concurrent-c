@@ -2374,6 +2374,163 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
     return any_err ? -1 : 0;
 }
 
+/* ------------------------------------------------------------------
+ * Slice 6b: IR-driven rewrite for no-binder `!>` forms.
+ *
+ * Step 1.3b.iii of the AST-truth refactor (see docs/refactor-ast-truth.md).
+ * Handles the three forms whose lowering is the legacy `!> -> @err`
+ * substitution, no complex synthesis required:
+ *
+ *   Form A:  EXPR !>;                 -> EXPR @err;
+ *   Form B:  EXPR !> STMT;            -> EXPR @err STMT;
+ *   Form C:  EXPR !> { BLOCK }[;]     -> EXPR @err { BLOCK };
+ *                                        (trailing `;` synthesized if absent)
+ *
+ * All three are captured as an UNWRAP_BANG node with binder_name == NULL.
+ * We walk the IR tree in source order, emit OPAQUE_TEXT chunks verbatim,
+ * emit matching UNWRAP_BANG nodes via the substitution above, and leave
+ * everything else (binder bangs, ?> nodes) as literal raw_text so the
+ * legacy fixed-point loop picks them up downstream.  Binder forms and
+ * the `?>` family still live in the legacy path; subsequent 1.3b.iv /
+ * 1.3b.v steps port those.
+ *
+ * On success returns 1 with a newly malloc'd buffer; 0 if there was
+ * nothing to rewrite; -1 on allocation failure.  The caller owns
+ * `*out_buf` and must free it.
+ * ---------------------------------------------------------------- */
+
+/* True iff `n` is a statement-position `!>` with no binder whose tail
+ * was successfully parsed by the recogniser (Form A / B / C).  Expression-
+ * position `!>` has a wholly different lowering (stmt-expr `({ ... })`
+ * block), so it stays in the legacy path.  A tail-scan failure (empty
+ * binder `()`, EOF mid-body, etc.) also stays in the legacy path so the
+ * user gets the proper diagnostic from cc__rewrite_bang_once. */
+static int cc__ir_is_nobinder_stmt_bang(const CCIrNode* n) {
+    if (!n || n->kind != CC_IR_UNWRAP_BANG) return 0;
+    if (n->as.unwrap.binder_name != NULL)    return 0;
+    if (!n->as.unwrap.stmt_position)         return 0;
+    /* Recogniser extended the span past the 2-byte sigil iff the tail
+     * parse succeeded; on failure span_end stops right after `!>`.
+     * raw_len <= sig_off + 2 is the "failed" shape. */
+    const char* hit = strstr(n->raw_text, "!>");
+    if (!hit) return 0;
+    size_t sig_off = (size_t)(hit - n->raw_text);
+    if (sig_off + 2 >= n->raw_len) return 0;
+    return 1;
+}
+
+/* Find the offset of the `!>` / `?>` sigil within `raw_text` relative
+ * to the node's span start.  Fast path: since the IR carver guaranteed
+ * exactly one sigil per UNWRAP_* node and that the sigil is not inside
+ * a comment or string literal, a plain strstr over the NUL-terminated
+ * raw_text suffices.  Returns SIZE_MAX on (defensively) not-found. */
+static size_t cc__ir_node_sigil_offset(const CCIrNode* n) {
+    if (!n || !n->raw_text) return (size_t)-1;
+    const char* needle = (n->kind == CC_IR_UNWRAP_BANG) ? "!>" : "?>";
+    const char* hit = strstr(n->raw_text, needle);
+    if (!hit) return (size_t)-1;
+    return (size_t)(hit - n->raw_text);
+}
+
+static int cc__rewrite_nobinder_bangs_via_ir(const CCVisitorCtx* ctx,
+                                             const char* in,
+                                             size_t in_len,
+                                             char** out_buf,
+                                             size_t* out_len) {
+    (void)ctx;
+    if (!out_buf || !out_len) return 0;
+    *out_buf = NULL;
+    *out_len = 0;
+    if (!in || in_len == 0) return 0;
+
+    /* Quick check: is there any no-binder `!>` present?  If not, bail
+     * out without paying the IR build cost.  The check mirrors the
+     * recogniser (sigil presence is a strict superset of no-binder
+     * sigil presence), so any false-positive just means we build the
+     * IR and discover zero targets. */
+    int has_bang = 0;
+    for (size_t i = 0; i + 1 < in_len; i++) {
+        if (in[i] == '!' && in[i + 1] == '>') { has_bang = 1; break; }
+    }
+    if (!has_bang) return 0;
+
+    CCIrArena* arena = cc_ir_arena_create();
+    if (!arena) return -1;
+
+    int rc = 0;
+    CCIrNode* root = cc_ir_build_from_stub(arena, /*root*/ NULL,
+                                           in, in_len,
+                                           ctx ? ctx->input_path : NULL);
+    if (!root) { rc = -1; goto out; }
+
+    /* Scan for targets first.  If none, skip emission entirely so the
+     * legacy loop sees the untouched buffer. */
+    int any_target = 0;
+    for (size_t i = 0; i < root->children_len; i++) {
+        if (cc__ir_is_nobinder_stmt_bang(root->children[i])) { any_target = 1; break; }
+    }
+    if (!any_target) goto out;
+
+    if (getenv("CC_IR_REWRITE_TRACE")) {
+        size_t count = 0;
+        for (size_t i = 0; i < root->children_len; i++) {
+            if (cc__ir_is_nobinder_stmt_bang(root->children[i])) count++;
+        }
+        fprintf(stderr,
+                "[CC_IR_REWRITE] %s: rewriting %zu no-binder `!>` via IR\n",
+                ctx && ctx->input_path ? ctx->input_path : "<input>", count);
+    }
+
+    char*  buf = NULL;
+    size_t bl  = 0, bc = 0;
+
+    for (size_t i = 0; i < root->children_len; i++) {
+        const CCIrNode* c = root->children[i];
+        if (!cc__ir_is_nobinder_stmt_bang(c)) {
+            /* Everything else (opaque text, binder bangs, ?> nodes)
+             * flows through verbatim.  The legacy loop handles any
+             * remaining sigils. */
+            cc__append_n(&buf, &bl, &bc, c->raw_text, c->raw_len);
+            continue;
+        }
+
+        /* No-binder UNWRAP_BANG: substitute `!>` -> `@err`, preserve
+         * surrounding bytes, synthesize `;` if the span didn't end
+         * with one (Form C without trailing semicolon). */
+        size_t sig_off = cc__ir_node_sigil_offset(c);
+        if (sig_off == (size_t)-1 || sig_off + 2 > c->raw_len) {
+            /* Defensive: the recogniser should never produce this,
+             * but if it did, fall back to literal emission so the
+             * legacy loop still rewrites it correctly. */
+            cc__append_n(&buf, &bl, &bc, c->raw_text, c->raw_len);
+            continue;
+        }
+        /* Prefix: LHS + any whitespace before the sigil. */
+        cc__append_n(&buf, &bl, &bc, c->raw_text, sig_off);
+        cc__append_str(&buf, &bl, &bc, "@err");
+        /* Tail after `!>`.  For Form A this is just `;`; Form B has
+         * ` STMT;`; Form C has ` { BLOCK }` possibly followed by `;`. */
+        size_t tail_a = sig_off + 2;
+        cc__append_n(&buf, &bl, &bc, c->raw_text + tail_a, c->raw_len - tail_a);
+
+        /* Form C semicolon synthesis: if the span didn't already end
+         * with `;`, add one so the downstream `@err` expansion parses
+         * as a standalone statement.  Matches the legacy
+         * `insert_semi_at` branch in cc__rewrite_bang_once. */
+        if (c->raw_len == 0 || c->raw_text[c->raw_len - 1] != ';') {
+            cc__append_str(&buf, &bl, &bc, ";");
+        }
+    }
+
+    *out_buf = buf;
+    *out_len = bl;
+    rc = 1;
+
+out:
+    cc_ir_arena_destroy(arena);
+    return rc;
+}
+
 int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
                               const char* in_src,
                               size_t in_len,
@@ -2453,6 +2610,32 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
     size_t curlen = in_len;
 
     int any = 0;
+
+    /* Step 1.3b.iii: IR-driven preprocess for no-binder `!>` forms.
+     * Rewrites Form A / B / C to the `@err` surface using the IR
+     * recogniser's structured payload, then hands off to the legacy
+     * fixed-point loop below for remaining sigils (binder `!>` and
+     * the whole `?>` family).  The legacy loop is a no-op for TUs
+     * whose only unwrap sigils were no-binder bangs, which covers a
+     * significant fraction of real code (everywhere a default handler
+     * is acceptable).
+     *
+     * Emits byte-identical output to pure-legacy under the full test
+     * suite — verified by running CC_VERIFY_IR=1 before commit. */
+    if (need_rewrite) {
+        char* ir_pp = NULL;
+        size_t ir_pp_len = 0;
+        int ir_rc = cc__rewrite_nobinder_bangs_via_ir(ctx, cur, curlen,
+                                                     &ir_pp, &ir_pp_len);
+        if (ir_rc < 0) { free(cur); return -1; }
+        if (ir_rc == 1 && ir_pp) {
+            free(cur);
+            cur    = ir_pp;
+            curlen = ir_pp_len;
+            any    = 1;
+        }
+    }
+
     if (need_rewrite) {
         /* Process `?>` expression operators to fixed point. */
         for (int iter = 0; iter < 64; iter++) {
