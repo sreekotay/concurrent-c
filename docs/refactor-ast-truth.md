@@ -72,15 +72,19 @@ pass reads *and* edits, so that:
 ### 3.1 A thin, mutable CC-IR layered on the TCC stub
 
 Populate the existing `CCASTNode` / `CCASTRoot` types in
-`cc/src/ast/ast.h` (today unused — everyone reads `root->nodes`).
+`cc/src/ir/ir.h`.  (The `CCASTRoot` / `CCASTNode` types under
+`cc/src/ast/` stay where they are — they're the TCC stub-node side
+table, and the refactor builds the new IR *on top of* them rather
+than replacing them.)
+
 The IR carries:
 
 - `kind` + `span` + typed children (union by kind, not `children[]`).
 - A back-pointer to the originating stub node (for parser diagnostics).
-- A **stable id** per node (`cc_ast_node_id_t`, 32-bit monotonic).
+- A **stable id** per node (`cc_ir_node_id_t`, 32-bit monotonic).
 - An **edit list** (see §3.2) instead of a `const char* text` field.
 
-A single initial builder, `cc_ast_build_from_stub(root) -> CCASTRoot*`,
+A single initial builder, `cc_ir_build_from_stub(root) -> CCIrNode*`,
 walks `root->nodes` once and produces the structured tree.  This
 runs once after preprocess.
 
@@ -157,10 +161,10 @@ already buy most of the debuggability win.
 
 ### Phase 1 — IR skeleton + single pass ported
 
-1. Flesh out `CCASTNode` into a real tagged union keyed by
-   `CCASTKind`.  Add `cc_ast_node_id_t`, spans that refer to both
+1. Flesh out `CCIrNode` into a real tagged union keyed by
+   `CCIrKind`.  Add `cc_ir_node_id_t`, spans that refer to both
    pre- and post-lowering sources.
-2. Write `cc_ast_build_from_stub()`.  Today this is effectively
+2. Write `cc_ir_build_from_stub()`.  Today this is effectively
    one-to-one with `root->nodes` plus a bit of grouping.
 3. Pick the smallest pass with the highest bug density:
    **`pass_result_unwrap`** (already touched in F4/F8/F9).
@@ -211,7 +215,7 @@ post-`@match`, post-UFCS chain resolution).
 
 At this point only the initial builder reads the stub table.  The
 stub table becomes an implementation detail of
-`cc_ast_build_from_stub()`, and `visit_codegen.c` shrinks to an
+`cc_ir_build_from_stub()`, and `visit_codegen.c` shrinks to an
 orchestrator of declared `CCIrPass`es.
 
 ## 5. Test & safety strategy
@@ -260,7 +264,7 @@ orchestrator of declared `CCIrPass`es.
 
 ## 8. Decisions locked in
 
-1. **`CCASTKind` grows per phase.** Only the kinds the current phase
+1. **`CCIrKind` grows per phase.** Only the kinds the current phase
    needs land in the enum when that phase ports; we learn the shape
    as we go rather than guessing the full taxonomy up front.
 2. **Per-TU arena allocation** for IR nodes (single bulk free at end
@@ -278,7 +282,7 @@ orchestrator of declared `CCIrPass`es.
 5. `@match` exhaustiveness checking lands on the IR when
    `pass_match_syntax` ports in phase 3 — it needs arm structure
    that the lowered C doesn't carry.
-6. Phase-boundary reparses reuse `cc_ast_build_from_stub()` (same
+6. Phase-boundary reparses reuse `cc_ir_build_from_stub()` (same
    builder, same IR type) rather than consuming raw stub nodes
    ad-hoc.
 
