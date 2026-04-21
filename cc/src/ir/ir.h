@@ -103,15 +103,6 @@ typedef struct {
 
 struct CCIrNode;
 
-typedef struct {
-    /* Contents of the slice, NUL-terminated and arena-owned.  `len` is
-     * the strlen (same as byte_end - byte_start in a fresh build; may
-     * drift if a pass edits the text portion of a mixed tree — always
-     * trust `len`, not the span). */
-    const char* text;
-    size_t      len;
-} CCIrOpaqueText;
-
 /* Data carried by both CC_IR_UNWRAP_BANG and CC_IR_UNWRAP_Q.  The
  * parent kind disambiguates how the handler body is interpreted. */
 typedef struct {
@@ -167,6 +158,14 @@ typedef struct CCIrNode {
      * synthetic nodes created by passes. */
     const void*     stub;
 
+    /* Arena-owned NUL-terminated copy of the exact source bytes this
+     * node was recognised from.  Present on every node (including
+     * typed nodes), so the emitter can fall back to literal re-emission
+     * while structured emitters for typed kinds are phased in.  Once
+     * a typed kind has a real emitter, it stops consulting raw_text. */
+    const char*     raw_text;
+    size_t          raw_len;
+
     /* Children array.  Ownership: arena.  Meaning of children is kind-
      * dependent; the common case for this phase is:
      *   CC_IR_FILE           -> ordered list of top-level chunks
@@ -178,9 +177,9 @@ typedef struct CCIrNode {
     size_t            children_len;
     size_t            children_cap;
 
-    /* Per-kind payload.  Exactly one field is meaningful per kind. */
+    /* Per-kind structured payload (zero-valued until that kind has a
+     * structured emitter).  Exactly one field is meaningful per kind. */
     union {
-        CCIrOpaqueText opaque;
         CCIrUnwrap     unwrap;
     } as;
 } CCIrNode;
