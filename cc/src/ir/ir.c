@@ -235,7 +235,10 @@ CCIrNode* cc_ir_build_from_stub(CCIrArena* arena,
     (void)input_path;  /* reserved for diagnostics */
     if (!arena || (!src && src_len > 0)) return NULL;
 
-    CCIrSpan file_span = {0, src_len, 1, 1};
+    /* FILE span covers the whole TU, so line/col are meaningless here
+     * (they describe a point, not a range) — leave them 0 per the
+     * CCIrSpan convention.  Children carry their own line/col. */
+    CCIrSpan file_span = {0, src_len, 0, 0};
     CCIrNode* file = cc_ir_node_new(arena, CC_IR_FILE, file_span);
     if (!file) return NULL;
     /* The root gets an arena copy of the full source too — handy for
