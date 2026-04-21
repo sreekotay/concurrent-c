@@ -1224,14 +1224,78 @@ void sched_v2_signal(fiber_v2* f) {
  * Park / Yield (unchanged — fiber-side API)
  * ============================================================================ */
 
+/*
+ * Yield/park entry points.
+ *
+ * We identify the currently-running fiber via mco_running() + user_data,
+ * NOT via `tls_v2_current_fiber`.  These two *should* always agree, but
+ * under optimisation — specifically @async code that alternates channel
+ * sends/receives and therefore parks repeatedly — we've observed them
+ * disagree on macOS arm64: mco_running() (minicoro's own __thread slot,
+ * written inside _mco_prepare_jumpin on each resume) returns the correct
+ * coro, while `tls_v2_current_fiber` returns a fiber_v2 that was current
+ * on a *different* worker thread at some earlier point.  Passing the
+ * stale f->coro to mco_yield then trips the stack-overflow check
+ * (because the SP we're on is in a different coro's stack), leaving the
+ * user with:
+ *
+ *   [mco overflow] coroutine stack overflow, try increasing the stack
+ *
+ * which is confusing — the stack isn't actually deep, we just passed
+ * in the wrong coro.  Sourcing the coro from mco_running() makes the
+ * hot path immune to that staleness because minicoro publishes
+ * mco_current_co inside the resume itself, on the resuming thread,
+ * just before jumping into the coro's stack.  Anything the coro then
+ * reads via mco_running() is by construction a fresh, on-this-thread
+ * TLS read — no callee-saved-register cache from a pre-migration
+ * thread can alias it.
+ *
+ * Root cause of the original staleness is still under investigation:
+ * static __thread file-scope variables should yield a fresh TLV
+ * resolver call on each access, and the disassembly of sched_v2_yield
+ * did show that pattern, yet the stale-value failure reproduced 100%
+ * on an optimised build.  The CC_DEBUG_YIELD=1 diagnostic below logs
+ * any remaining divergence between tls_v2_current_fiber and the
+ * user_data-derived fiber so we can keep an eye on it.
+ */
+static int g_sched_v2_yield_mismatches = 0;
+static void sched_v2_yield_report_mismatch(const char* where,
+                                            fiber_v2* tls_f,
+                                            mco_coro* co,
+                                            fiber_v2* real_f) {
+    const char* e = getenv("CC_DEBUG_YIELD");
+    if (!e || !*e || *e == '0') return;
+    int n = __sync_fetch_and_add(&g_sched_v2_yield_mismatches, 1);
+    if (n >= 16) return;
+    fprintf(stderr,
+        "[sched-v2-stale] %s: tls_fiber=%p (coro=%p) mco_running=%p "
+        "user_data=%p tid=%p\n",
+        where, (void*)tls_f, (void*)(tls_f ? tls_f->coro : NULL),
+        (void*)co, (void*)real_f, (void*)pthread_self());
+}
+
+static inline fiber_v2* sched_v2_current_fiber_checked(const char* where,
+                                                        mco_coro** out_co) {
+    mco_coro* co = mco_running();
+    if (!co) { *out_co = NULL; return NULL; }
+    fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
+    if (!f) { *out_co = NULL; return NULL; }
+    *out_co = co;
+    if (tls_v2_current_fiber != f) {
+        sched_v2_yield_report_mismatch(where, tls_v2_current_fiber, co, f);
+    }
+    return f;
+}
+
 void sched_v2_park(void) {
-    fiber_v2* f = tls_v2_current_fiber;
+    mco_coro* co;
+    fiber_v2* f = sched_v2_current_fiber_checked("park", &co);
     if (!f) return;
 
     V2_STAT_INC(g_v2_parks);
     f->park_reason = tls_v2_park_reason;
     f->yield_kind = V2_YIELD_PARK;
-    mco_result res = mco_yield(f->coro);
+    mco_result res = mco_yield(co);
     if (res != MCO_SUCCESS) {
         V2_STAT_INC(g_v2_mco_yield_fail);
         fprintf(stderr, "[sched_v2] mco_yield(park) failed rc=%d\n", (int)res);
@@ -1240,11 +1304,12 @@ void sched_v2_park(void) {
 }
 
 void sched_v2_yield(void) {
-    fiber_v2* f = tls_v2_current_fiber;
+    mco_coro* co;
+    fiber_v2* f = sched_v2_current_fiber_checked("yield", &co);
     if (!f) return;
 
     f->yield_kind = V2_YIELD_YIELD;
-    mco_result res = mco_yield(f->coro);
+    mco_result res = mco_yield(co);
     if (res != MCO_SUCCESS) {
         V2_STAT_INC(g_v2_mco_yield_fail);
         fprintf(stderr, "[sched_v2] mco_yield(yield) failed rc=%d\n", (int)res);

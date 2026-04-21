@@ -1824,10 +1824,26 @@ mco_result mco_yield(mco_coro* co) {
   size_t stack_min = (size_t)co->stack_base;
   size_t stack_max = stack_min + co->stack_size;
   if(co->magic_number != MCO_MAGIC_NUMBER || stack_addr < stack_min || stack_addr > stack_max) { /* Stack overflow. */
-    fprintf(stderr, "[mco overflow] co=%p magic=%zx(want %zx) sp=%zx base=%zx size=%zu sp-base=%zd\n",
-            (void*)co, co->magic_number, (size_t)MCO_MAGIC_NUMBER,
+    /* Verbose overflow diagnostic: compare the coro the caller asked us
+     * to yield against minicoro's own thread-local pointer to the
+     * actually-running coro.  If they differ, the caller passed a
+     * stale/wrong co.  The sched_v2 caller now derives co from
+     * mco_running() directly, which eliminates this class of bug; we
+     * keep the diagnostic so any new caller gets a clear message. */
+    mco_coro* real_co = mco_current_co;
+    fprintf(stderr, "[mco overflow] passed_co=%p real_co=%p %s magic=%zx(want %zx) sp=%zx base=%zx size=%zu sp-base=%zd\n",
+            (void*)co, (void*)real_co,
+            (real_co == co ? "SAME" : "WRONG-CORO"),
+            co->magic_number, (size_t)MCO_MAGIC_NUMBER,
             stack_addr, stack_min, co->stack_size,
             (ssize_t)((ssize_t)stack_addr - (ssize_t)stack_min));
+    if (real_co && real_co != co) {
+      size_t r_base = (size_t)real_co->stack_base;
+      size_t r_size = real_co->stack_size;
+      fprintf(stderr, "[mco overflow]   real_co stack=[%zx..%zx] size=%zu sp-in-real=%s\n",
+              r_base, r_base + r_size, r_size,
+              (stack_addr >= r_base && stack_addr <= r_base + r_size) ? "YES" : "no");
+    }
     MCO_LOG("coroutine stack overflow, try increasing the stack size");
     return MCO_STACK_OVERFLOW;
   }

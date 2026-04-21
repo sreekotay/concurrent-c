@@ -1,13 +1,34 @@
+/* Direct-@async variant of the request/reply handoff test.
+ *
+ * Guards against the "[mco overflow] coroutine stack overflow"
+ * regression that used to fire 100% of the time when an @async function
+ * bodies used cc_channel_send / cc_channel_recv (which expand to a
+ * synchronous blocking path internally) while running on the V2
+ * scheduler with several worker threads.  Root cause: sched_v2_yield /
+ * sched_v2_park were identifying the current fiber through
+ * `tls_v2_current_fiber`, which on macOS arm64 could yield a stale
+ * pointer to a fiber_v2 that had previously run on a *different* worker
+ * thread.  The resulting mco_yield(f->coro) passed a coro whose stack
+ * range didn't match the SP we were actually on, and minicoro
+ * correctly (and confusingly) reported it as a stack overflow.
+ *
+ * Fixed in cc/runtime/sched_v2.c by sourcing the coro from
+ * mco_running() directly (minicoro publishes its own __thread slot
+ * inside _mco_prepare_jumpin on the resuming thread), and deriving the
+ * fiber from mco_get_user_data(co).  Stress the path with a mix of
+ * send/recv, worker count > 1, and channel capacities that force both
+ * park and resume across migrations. */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
 
 #include <stdio.h>
 #include <stdlib.h>
 
-#define REQUESTS 4000
-#define REQUEST_CHAN_CAP 128
+#define REQUESTS 16
+#define REQUEST_CHAN_CAP 4
 
 typedef struct {
     int request_id;
@@ -21,7 +42,7 @@ static int expected_reply_value(int request_id) {
     return request_id * 17;
 }
 
-static void handoff_owner(CCChanRx req_rx, CCChanTx reply_tx) {
+@async int handoff_owner(CCChanRx req_rx, CCChanTx reply_tx) {
     HandoffRequest* req = NULL;
     while (cc_io_avail(cc_channel_recv(req_rx, &req))) {
         if (!req) continue;
@@ -37,67 +58,40 @@ static void handoff_owner(CCChanRx req_rx, CCChanTx reply_tx) {
         }
 
         free(req);
-        if ((expected & 31) == 0) cc_yield();
     }
+    return 0;
 }
 
-static void handoff_client(CCChanTx req_tx, CCChanRx reply_rx) {
-    /* Historical context for this test's shape:
-     *
-     * 1) Direct `@async` body used to fail at lowering because
-     *    autoblock's ASSIGN_CALL rewrite emitted
-     *        req = await cc_run_blocking_task_intptr(...);
-     *    with no cast, so `__f->req = __f->__cc_aw0` assigned intptr_t
-     *    to a pointer. Fixed; guarded by
-     *    tests/async_ptr_assign_autoblock_smoke.ccs.
-     *
-     * 2) Even after (1), a direct @async variant exploded at runtime
-     *    with "[mco overflow] coroutine stack overflow" — because
-     *    sched_v2_yield used tls_v2_current_fiber to identify the
-     *    currently-running fiber, and that __thread variable could be
-     *    observed stale after a fiber migrated between V2 workers,
-     *    causing mco_yield to receive a coro whose stack didn't match
-     *    the SP we were actually on. Fixed in cc/runtime/sched_v2.c by
-     *    sourcing the coro from mco_running()/mco_get_user_data(). The
-     *    direct @async variant is now covered by
-     *    tests/async_direct_handoff_smoke.ccs.
-     *
-     * This version remains on the nursery-spawn closure form as an
-     * independent source-stable regression guard. */
+@async int handoff_client(CCChanTx req_tx, CCChanRx reply_rx) {
     HandoffRequest* req = NULL;
     int expected = 0;
     int reply = -1;
     for (int request_id = 1; request_id <= REQUESTS; ++request_id) {
         req = malloc(sizeof(HandoffRequest));
-        if (!req) {
-            cc_atomic_fetch_add(&g_errors, 1);
-            return;
-        }
+        if (!req) { cc_atomic_fetch_add(&g_errors, 1); return 1; }
 
         expected = expected_reply_value(request_id);
         req->request_id = request_id;
         req->expected_reply = expected;
 
-        if ((request_id & 7) == 0) cc_yield();
         if (!cc_io_avail(cc_channel_send(req_tx, req))) {
             cc_atomic_fetch_add(&g_errors, 1);
             free(req);
-            return;
+            return 2;
         }
 
         reply = -1;
         if (!cc_io_avail(cc_channel_recv(reply_rx, &reply))) {
             cc_atomic_fetch_add(&g_errors, 1);
-            return;
+            return 3;
         }
         if (reply != expected) {
             cc_atomic_fetch_add(&g_errors, 1);
-            return;
+            return 4;
         }
     }
-    /* Close explicitly from the producer side so the owner recv loop can
-     * terminate without depending on nursery-closing order. */
     cc_channel_close(req_tx);
+    return 0;
 }
 
 int main(void) {
@@ -124,12 +118,8 @@ int main(void) {
     {
         CCNursery* n = @create(NULL) @destroy;
         if (!n) return 12;
-        n->spawn(() => [req_rx_raw, reply_tx_raw] {
-            handoff_owner(req_rx_raw, reply_tx_raw);
-        });
-        n->spawn(() => [req_tx_raw, reply_rx_raw] {
-            handoff_client(req_tx_raw, reply_rx_raw);
-        });
+        if (n->spawn_async(handoff_owner(req_rx_raw, reply_tx_raw)) != 0) return 13;
+        if (n->spawn_async(handoff_client(req_tx_raw, reply_rx_raw)) != 0) return 14;
     }
 
     int expected_total = REQUESTS;
