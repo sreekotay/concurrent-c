@@ -4710,7 +4710,14 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                          * not treated as functions. */
                                         size_t q = cc_skip_ws_and_comments(src, n, v);
                                         if (q < n && src[q] == '(') {
-                                            cc_result_fn_registry_add(var_name, vn_len);
+                                            /* Record the fn name *and* the declared textual
+                                             * error type so `pass_result_unwrap.c` can emit a
+                                             * typed binder for `!>(e)` / `?>(e)` forms.  The
+                                             * err_type slice here is the unmangled source
+                                             * text (e.g. "CCIoError"). */
+                                            cc_result_fn_registry_add_typed(var_name, vn_len,
+                                                                             src + err_start,
+                                                                             err_end - err_start);
                                         }
                                     }
                                 }
@@ -5036,6 +5043,115 @@ static char* cc__rewrite_defer_syntax(const char* src, size_t n) {
     
     if (last_emit == 0) return NULL;
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* ---- @async void return-type rewrite ----------------------------------- */
+/* `@async void fn(...)` is functionally the same as any other `@async` fn —
+ * the body is lowered into a state-machine that always returns
+ * `CCTaskIntptr`.  But phase-3 reparse happens BEFORE the async lowering,
+ * and call-sites such as `nursery->spawn_async(fn(args))` lower (via UFCS)
+ * to `cc_nursery_spawn_async(n, fn(args))`, whose second parameter is
+ * `CCTask` (typedef'd to `int` in parser mode).  With `fn` still declared
+ * `void`, reparse fails with "cannot convert 'void' to 'int'".
+ *
+ * The fix is a narrow text-level rewrite: replace the explicit `void`
+ * return type of `@async` functions with the marker typedef
+ * `CCAsyncVoidRet` (also `int` in parser mode, `CCTaskIntptr` at runtime).
+ * The async lowering (`async_ast.c`) treats `CCAsyncVoidRet` as
+ * equivalent to the original `void`, so bare `return;` inside the body
+ * remains legal.
+ *
+ * Only `@async` declarations are rewritten; plain `void fn(...)` is
+ * left alone.  Function-body text (where `void` might appear as a
+ * local cast or pointer type) is untouched because the rewrite is
+ * anchored on `@async` + an identifier followed by `(`. */
+char* cc__rewrite_async_void_ret(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    if (!strstr(src, "@async")) return NULL;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+
+    for (size_t i = 0; i < n; ) {
+        char c = src[i], c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        /* Match '@async' at a word boundary. */
+        if (c == '@' && i + 6 <= n && memcmp(src + i + 1, "async", 5) == 0
+                && (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            /* Skip '@async' plus trailing @-attributes (e.g. @nonblocking,
+             * @latency_sensitive) and whitespace to land on the return-type
+             * token. */
+            size_t j = i + 6;
+            for (;;) {
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r'))
+                    j++;
+                if (j < n && src[j] == '@') {
+                    size_t k = j + 1;
+                    while (k < n && cc_is_ident_char(src[k])) k++;
+                    if (k == j + 1) break;
+                    j = k;
+                    continue;
+                }
+                break;
+            }
+            size_t rt_start = j;
+            /* Return-type must be the literal 'void' identifier (no pointer
+             * or qualifier), followed by whitespace, an identifier, and an
+             * opening '('. */
+            if (rt_start + 4 <= n && memcmp(src + rt_start, "void", 4) == 0
+                    && (rt_start + 4 >= n || !cc_is_ident_char(src[rt_start + 4]))) {
+                size_t after_void = rt_start + 4;
+                size_t p = after_void;
+                while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r'))
+                    p++;
+                if (p < n && cc_is_ident_start(src[p])) {
+                    size_t ne = p;
+                    while (ne < n && cc_is_ident_char(src[ne])) ne++;
+                    size_t q = ne;
+                    while (q < n && (src[q] == ' ' || src[q] == '\t' || src[q] == '\n' || src[q] == '\r'))
+                        q++;
+                    if (q < n && src[q] == '(') {
+                        /* Commit rewrite: emit source up through rt_start,
+                         * then the marker typedef, then resume after the
+                         * 'void' token. */
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, rt_start - last_emit);
+                        cc_sb_append(&out, &out_len, &out_cap, "CCAsyncVoidRet", 14);
+                        last_emit = after_void;
+                        changed = 1;
+                        i = after_void;
+                        continue;
+                    }
+                }
+            }
+            /* Not a match; advance past '@async' so we don't scan it again. */
+            i = rt_start > i ? rt_start : i + 1;
+            continue;
+        }
+        i++;
+    }
+
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) {
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    }
+    cc_sb_append(&out, &out_len, &out_cap, "", 1);  /* NUL */
+    out_len -= 1;
+    (void)out_len;
     return out;
 }
 
@@ -7031,6 +7147,11 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
+    /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
+     * that phase-3 reparse sees a task-returning signature (required for
+     * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check).
+     * async_ast recognises CCAsyncVoidRet as an originally-void declaration. */
+    if (cc_pass_chain_apply(chain, cc__rewrite_async_void_ret(chain->src, chain->len)) < 0) return -1;
     /* @await fname(...) -> cc_block_on(ReturnType, fname(...)).  Runs after
      * result-type rewriting so the return types are already in canonical form. */
     if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;

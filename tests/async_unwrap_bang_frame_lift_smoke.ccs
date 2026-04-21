@@ -1,0 +1,64 @@
+/* Smoke: `@async` body with `!>;` binder applied to a declaration
+ * initializer must lift the local into the frame struct and emit the
+ * initializer as an assignment — not as a declaration with the type
+ * prefix still attached.
+ *
+ * Regression guard for bug [1] in docs/known-bugs/redis_idiomatic_async.md:
+ * `async_ast.c` previously handled
+ *
+ *     bool got = try_call(...) !>;
+ *
+ * inside an `@async` function by falling through to the generic-emit
+ * path, which only substituted idents.  The result was invalid C:
+ *
+ *     bool __f->got = ({ ... });
+ *
+ * (the `bool ` type specifier survives the rewrite to frame-slot
+ * assignment).  The root causes were two-fold:
+ *   1. When an `@errhandler { ... }` precedes the decl in the same
+ *      `@async` body, the stub-AST groups them into a single ST_SEMI
+ *      text span.  `cc__split_top_level_semis` now splits after the
+ *      `@errhandler` body's closing `}`, so the `T name = CALL !>;`
+ *      decl reaches the scalar-decl handler on its own.
+ *   2. The scalar-decl handler wrapped the initializer in `(...)`
+ *      before emission, producing `__f->got = (CALL !>);`.  The trailing
+ *      `!>` inside parens confused `pass_result_unwrap`'s back-scan.
+ *      The handler now drops the wrap when the RHS has no top-level
+ *      comma, leaving the `!>` at its natural statement boundary.
+ *   3. Result-unwrap temporaries (`__cc_pu_e_*`, `__cc_pu_be_*`) that
+ *      live inside the synthesized `({ ... })` stmt-expression are no
+ *      longer hoisted into the frame struct — their types depend on the
+ *      expanded call site and aren't valid at struct-field position.
+ */
+#include <stdio.h>
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+
+bool !>(CCError) make_bool(bool want) {
+    if (!want) return cc_err(CC_ERR_NOT_FOUND, "nope");
+    return cc_ok(true);
+}
+
+int !>(CCError) make_int(int v) {
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok(v);
+}
+
+@async int work(void) {
+    @errhandler(CCError e) { fprintf(stderr, "err: %s\n", e.message); return 99; }
+
+    bool got = make_bool(true) !>;
+    if (!got) return 2;
+
+    int v = make_int(7) !>;
+    if (v != 7) return 3;
+
+    return 0;
+}
+
+int main(void) {
+    CCTaskIntptr t = work();
+    intptr_t rc = cc_block_on_intptr(t);
+    printf("rc=%ld\n", (long)rc);
+    return (int)rc;
+}

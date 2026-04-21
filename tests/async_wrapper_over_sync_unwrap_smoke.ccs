@@ -1,0 +1,46 @@
+/* Bug [4] smoke: a thin `@async int` wrapper around a plain sync function
+ * that uses `!>` unwrap-binder forms must not be perturbed by the sync
+ * neighbour.
+ *
+ * Previously `async_ast` failed with
+ *   CC: async_ast: failed to build statement list for @async function
+ *       'wrapper' (no body block + no braces)
+ * because its raw-text body scan leaked across function boundaries onto a
+ * neighbouring sync function's `!>` forms.  After the Bug [1] fixes to
+ * `async_ast.c` (errhandler statement splitting + not hoisting the
+ * unwrap pass's `__cc_pu_*` temporaries), the wrapper pattern builds and
+ * runs.  This test locks that behavior in. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static bool !>(CCError) may_fail(int x) {
+    if (x < 0) { CCError e = {0}; e.message = "neg"; return cc_err(e); }
+    return cc_ok(true);
+}
+
+/* Sync function exercising both bare `!>;` and `!>{...}` forms — exactly
+ * the shape that used to break the `@async` neighbour's body scan. */
+static void handle_impl(int x) {
+    @errhandler(CCError e) { (void)e; return; }
+    bool got = may_fail(x) !>;
+    (void)got;
+    may_fail(x) !> { return; };
+}
+
+/* Thin async wrapper that simply calls the sync impl.  Its own body
+ * contains no `!>` forms. */
+@async int wrapper(int x) {
+    handle_impl(x);
+    return 0;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(wrapper(1));
+    (void)n->spawn_async(wrapper(2));
+    cc_nursery_destroy(n);
+    printf("async_wrapper_over_sync_unwrap: OK\n");
+    return 0;
+}

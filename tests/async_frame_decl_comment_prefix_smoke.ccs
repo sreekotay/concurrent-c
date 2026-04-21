@@ -1,0 +1,52 @@
+/* Follow-up bug [F1] smoke: a plain `T x = INIT;` decl whose variable
+ * is lifted onto the coroutine frame must have its type prefix
+ * stripped even when the decl is preceded by a block or line comment.
+ *
+ * Root cause the fix addressed: async_ast.c's `cc__skip_ws` only ate
+ * space/tab/newline, so a leading comment on a statement hid the type
+ * keyword and dropped the statement into the generic fallback path.
+ * That path emitted the raw text verbatim, producing invalid C like
+ *   size_t __f->outstanding = 0;
+ * This test covers three shapes that previously leaked:
+ *   - block comment then decl inside a while-body
+ *   - line comment then decl inside a for-body
+ *   - block comment between @errhandler and the decl
+ * all in an @async function whose body crosses a yield point. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+@async int worker(int limit) {
+    int i = 0;
+    int total = 0;
+    while (i < limit) {
+        @errhandler(CCError e) { (void)e; return 99; }
+
+        /* block comment right before the decl */
+        size_t outstanding = 0;
+        outstanding += 1;
+
+        // line comment right before the decl
+        int step = 2;
+        total += step + (int)outstanding;
+
+        for (int k = 0; k < 1; k++) {
+            /* nested-block leading comment, different type */
+            size_t inner = 10;
+            total += (int)inner;
+        }
+
+        cc_yield();
+        i++;
+    }
+    (void)total;
+    return total;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(worker(3));
+    cc_nursery_destroy(n);
+    printf("async_frame_decl_comment_prefix: OK\n");
+    return 0;
+}

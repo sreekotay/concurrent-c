@@ -203,6 +203,36 @@ static inline int cc_find_matching_bracket(const char* b, size_t bl, size_t lbra
 
 /* ---- Skip whitespace and comments ---- */
 
+/* Pointer-based whitespace + comment skipper.
+ *
+ * Equivalent to `cc_skip_ws` but also eats `// ...` line comments and
+ * `/ * ... * /` block comments.  Used by raw-text rewrite passes that
+ * classify statements by their leading token: a comment sitting before a
+ * decl would otherwise hide the type keyword and push the scanner onto
+ * the generic fallback path, which leaks the type prefix into the
+ * emitted output (e.g. `size_t __f->x = 0;`).  See
+ * `cc/src/visitor/async_ast.c` for the original bug. */
+static inline const char* cc_skip_ws_and_comments_ptr(const char* s) {
+    if (!s) return s;
+    while (*s) {
+        char c = *s;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { s++; continue; }
+        if (c == '/' && s[1] == '/') {
+            s += 2;
+            while (*s && *s != '\n') s++;
+            continue;
+        }
+        if (c == '/' && s[1] == '*') {
+            s += 2;
+            while (*s && !(*s == '*' && s[1] == '/')) s++;
+            if (*s) s += 2;
+            continue;
+        }
+        break;
+    }
+    return s;
+}
+
 static inline size_t cc_skip_ws_and_comments(const char* src, size_t len, size_t i) {
     while (i < len) {
         char c = src[i];

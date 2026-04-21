@@ -15,6 +15,72 @@
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
 
+/* Extract the callee identifier from a plain `ident(...)` call expression.
+ *
+ * Writes the identifier (NUL-terminated) into `out` if the call is of the
+ * form `IDENT(...)` with optional whitespace between `IDENT` and `(`.
+ * Returns 1 on success, 0 if the call is not a plain name call (e.g.
+ * `obj.method(...)`, `(f)(...)`, `ptr->method(...)`, or the trimmed text
+ * does not end with `)`).  Used to look up the declared error type of the
+ * callee in `cc_result_fn_registry_get_err_type`. */
+static int cc__ru_extract_plain_callee(const char* s, size_t a, size_t b,
+                                        char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return 0;
+    out[0] = 0;
+    while (a < b && isspace((unsigned char)s[a])) a++;
+    while (b > a && isspace((unsigned char)s[b - 1])) b--;
+    if (a >= b) return 0;
+    if (s[b - 1] != ')') return 0;
+    if (!cc_is_ident_start(s[a])) return 0;
+    size_t name_a = a;
+    size_t name_b = a;
+    while (name_b < b && cc_is_ident_char(s[name_b])) name_b++;
+    if (name_b == name_a) return 0;
+    size_t k = name_b;
+    while (k < b && isspace((unsigned char)s[k])) k++;
+    if (k >= b || s[k] != '(') return 0;
+    size_t name_len = name_b - name_a;
+    if (name_len + 1 > out_sz) return 0;
+    memcpy(out, s + name_a, name_len);
+    out[name_len] = 0;
+    return 1;
+}
+
+/* Emit the error-binder declaration for an unwrap expansion.
+ *
+ * When the call expression `s[call_a..call_b)` is a plain `IDENT(...)` call
+ * to a result-returning function registered with an explicit error type,
+ * emit a typed binder:
+ *     ErrType BINDER = *(ErrType*)(void*)&((TMP).u.error);
+ * which parses cleanly in both `CC_PARSER_MODE` (where `(tmp).u.error` has
+ * type `__CCGenericError` — the cast + deref recover the declared type)
+ * and real compilation (where it is a no-op identity cast).
+ *
+ * Falls back to the legacy `__typeof__(cc_error(tmp))`-based emission when
+ * the callee cannot be resolved; this matches previous behavior for method
+ * calls, chained expressions, and locally-typed temporaries. */
+static void cc__ru_emit_err_binder(char** out, size_t* ol, size_t* oc,
+                                     const char* s, size_t call_a, size_t call_b,
+                                     const char* tmpv, const char* binder) {
+    char callee[128];
+    char err_type[256];
+    if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
+        cc_result_fn_registry_get_err_type(callee, strlen(callee),
+                                            err_type, sizeof(err_type))) {
+        /* Typed binder path — see function comment for rationale. */
+        cc_sb_append_fmt(out, ol, oc,
+                         "%s %s = *(%s*)(void*)&((%s).u.error); ",
+                         err_type, binder, err_type, tmpv);
+        return;
+    }
+    /* Fallback: the callee is not a plain name we recognize.  Use the
+     * original `__typeof__`-based binder; this keeps the pre-fix behavior
+     * for method calls and chained expressions. */
+    cc_sb_append_fmt(out, ol, oc,
+                     "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                     tmpv, binder, tmpv);
+}
+
 /* Detect whether the trimmed expression `s[a..b)` is a bare call to a
  * raw-pointer-returning function registered by cc_pointer_fn_registry_scan
  * (e.g. `fopen(...)`, `cc_nursery_create()`).  When true, the normal
@@ -638,9 +704,9 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
                              "({ CCError %s = %s; (",
                              binder, ptr_err_literal);
         } else {
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "({ __typeof__(cc_error(%s)) %s = cc_error(%s); (",
-                             tmpv, binder, tmpv);
+            cc_sb_append_fmt(&out, &ol, &oc, "({ ");
+            cc__ru_emit_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, binder);
+            cc_sb_append_fmt(&out, &ol, &oc, "(");
         }
         cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
         cc__append_str(&out, &ol, &oc, "); })");
@@ -741,12 +807,13 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
 
 /* Scan forward for the first `!>` at a word boundary outside of strings
  * and comments.  Mirrors cc__find_unwrap_token but for the `!>` token. */
-static int cc__find_bang_token(const char* s, size_t n, size_t* out_pos) {
+static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
+                                     size_t* out_pos) {
     int in_str = 0;
     char qch = 0;
     int in_line_comment = 0;
     int in_block_comment = 0;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = start; i < n; i++) {
         char ch = s[i];
         if (in_line_comment) {
             if (ch == '\n') in_line_comment = 0;
@@ -781,6 +848,27 @@ static int cc__find_bang_token(const char* s, size_t n, size_t* out_pos) {
         }
     }
     return 0;
+}
+
+static int cc__find_bang_token(const char* s, size_t n, size_t* out_pos) {
+    return cc__find_bang_token_from(s, n, 0, out_pos);
+}
+
+/* Classify whether the text `s[lhs_a..lhs_b)` is the type-specifier prefix
+ * of a declaration (e.g. `static bool`, `RedisRequest*`, `int64_t`) rather
+ * than a callable expression (`foo()`, `obj->method()`).  The heuristic:
+ * a callable expression must contain a balanced `(...)` pair; a type
+ * specifier never does.  String/comment context is irrelevant here: the
+ * LHS comes from a stmt-position back-scan that already stopped at the
+ * previous `;`, `{`, or `}`, so any `(` or `)` we see belongs to the LHS
+ * itself. */
+static int cc__bang_lhs_looks_like_decl(const char* s, size_t lhs_a,
+                                        size_t lhs_b) {
+    if (lhs_b <= lhs_a) return 0;
+    for (size_t i = lhs_a; i < lhs_b; i++) {
+        if (s[i] == '(' || s[i] == ')') return 0;
+    }
+    return 1;
 }
 
 /* Word-boundary substitution: replace every occurrence of `from` (as a
@@ -1450,9 +1538,7 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
                          binder, (int)exl, s + call_a, f, op_line);
     } else {
         cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-        cc_sb_append_fmt(&out, &ol, &oc,
-                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                         tmpv, binder, tmpv);
+        cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
@@ -1683,9 +1769,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
                              binder, (int)exl, s + call_a, ff, line_no);
         } else {
             cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                             tmpv, binder, tmpv);
+            cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
         }
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
         if (bare_is_ptr)
@@ -1787,9 +1871,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     } else {
         cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
         if (has_binder) {
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                             tmpv, binder, tmpv);
+            cc__ru_emit_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder);
         }
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
@@ -1820,38 +1902,66 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
                                  char** out_buf,
                                  size_t* out_len) {
     size_t op_at = 0;
-    if (!cc__find_bang_token(s, n, &op_at)) return 0;
-
-    int line_no = 1;
-    cc__line_from_pos(s, op_at, &line_no);
-
-    size_t after = op_at + 2;
-    size_t scan = cc_skip_ws_len(s, n, after);
-
-    if (scan >= n) {
-        char rel[1024];
-        const char* f = cc_path_rel_to_repo(
-            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-        cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
-                          "unexpected end of input after '!>'");
-        return -1;
-    }
-
-    /* Dispatch: determine whether `!>` is at statement or expression
-     * position based on the character before the LHS call expression. */
+    size_t search_from = 0;
     int is_stmt_pos = 1;
-    size_t call_start = cc__find_bang_lhs_start_ex(s, op_at, &is_stmt_pos);
-    /* Special-case: if LHS textually begins with `return`, we are actually
-     * at expression position (the `!>` operand is `return`'s expression). */
-    if (is_stmt_pos) {
-        size_t a = call_start;
-        while (a < op_at && isspace((unsigned char)s[a])) a++;
-        if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
-            (a + 6 < op_at && !cc_is_ident_char(s[a + 6]))) {
-            is_stmt_pos = 0;
-            call_start = a + 6;
+    size_t call_start = 0;
+    int line_no = 1;
+    size_t after = 0;
+    size_t scan = 0;
+
+    /* Skip past declaration-form sigils (`T !>(E) name(...)` and
+     * `T !>(E) var = ...`): the type-syntax pass rewrites those into
+     * `CCResult_T_E ...` later.  If we treat them as expression-position
+     * binders we either mis-rewrite them or emit a spurious
+     * "expected ';' terminating '!> (E) body'" diagnostic when the
+     * forward `;` search walks past EOF. */
+    for (;;) {
+        if (!cc__find_bang_token_from(s, n, search_from, &op_at)) return 0;
+
+        line_no = 1;
+        cc__line_from_pos(s, op_at, &line_no);
+
+        after = op_at + 2;
+        scan = cc_skip_ws_len(s, n, after);
+        if (scan >= n) {
+            char rel[1024];
+            const char* f = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "unexpected end of input after '!>'");
+            return -1;
         }
+
+        is_stmt_pos = 1;
+        call_start = cc__find_bang_lhs_start_ex(s, op_at, &is_stmt_pos);
+        /* Special-case: if LHS textually begins with `return`, we are
+         * actually at expression position (the `!>` operand is `return`'s
+         * expression). */
+        if (is_stmt_pos) {
+            size_t a = call_start;
+            while (a < op_at && isspace((unsigned char)s[a])) a++;
+            if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
+                (a + 6 < op_at && !cc_is_ident_char(s[a + 6]))) {
+                is_stmt_pos = 0;
+                call_start = a + 6;
+            }
+        }
+
+        /* Declaration-form detection: only stmt-position `!>` tokens whose
+         * LHS text contains no parens can be a type annotation like
+         * `bool !>(CCError) f(...)`.  Expression-position and parenful
+         * LHS (`foo() !> ...`) always go through the usual dispatch. */
+        if (is_stmt_pos && s[scan] == '(') {
+            size_t lhs_a = call_start, lhs_b = op_at;
+            cc__trim_range(s, &lhs_a, &lhs_b);
+            if (cc__bang_lhs_looks_like_decl(s, lhs_a, lhs_b)) {
+                search_from = op_at + 2;
+                continue;
+            }
+        }
+        break;
     }
+
     if (!is_stmt_pos) {
         return cc__rewrite_bang_expr_once(ctx, s, n, op_at, call_start,
                                           line_no, out_buf, out_len);

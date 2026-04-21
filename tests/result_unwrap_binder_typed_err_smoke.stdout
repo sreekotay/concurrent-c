@@ -1,0 +1,4 @@
+report: kind=3 os_code=0
+report: kind=9 os_code=42
+report: kind=3 os_code=0
+binder_typed_err: OK

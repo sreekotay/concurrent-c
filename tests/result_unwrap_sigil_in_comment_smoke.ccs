@@ -1,0 +1,60 @@
+/* Smoke: `!>` and `?>` sigils inside comments are ignored by the
+ * result-unwrap rewrite passes.
+ *
+ * Regression guard for bug [5] in docs/known-bugs/redis_idiomatic_async.md:
+ * the scan helpers in pass_result_unwrap.c (cc__find_bang_token,
+ * cc__find_unwrap_token) and the back-scan in
+ * cc__find_bang_lhs_start_ex all need to track string and comment
+ * context so that documentation like
+ *
+ *     // use `call() !>(e) { ... };`
+ *     // alt: `call() !> { return -1; };`
+ *     /` * bad shape: `call() !>;` *` /
+ *
+ * never ends up parsed as a real unwrap and does not fire diagnostics
+ * like:
+ *   error: syntax: expected ';' terminating '!>' body
+ *   error: syntax: expression-position '!>' body must diverge
+ *
+ * The file is also intentionally dense with `!>` / `?>` sigils so that
+ * any partially-comment-unaware helper would tip over on it.
+ */
+#include <stdio.h>
+
+/* `T !>(E) name(...)`, `call() !>(e) { return 9; };`,
+ * `call() !>;`, `call() !> { return -1; };`, `ptr ?> default`.
+ *
+ * The line above repeats the sigils — the helpers must ignore them.
+ */
+// `bool !>(CCError) always_err_bool()` // inline in a line comment
+// if (!x) return err !>; // dangling sigil at line-comment end
+
+bool !>(CCError) always_ok_bool(void) {
+    return cc_ok(true);
+}
+
+int !>(CCError) get_int(int v) {
+    // `get_int() !>;` — again a comment
+    return cc_ok(v);
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 99; }
+
+    /* `always_ok_bool() !>;` in a block comment */
+    bool ok = always_ok_bool() !>;
+    if (!ok) return 1;
+
+    int v = get_int(42) !>;
+    if (v != 42) return 2;
+
+    /* Mix with `?>` (null unwrap) sigil inside a comment:
+     * `int* p = maybe_null() ?> { return 3; };` */
+
+    int* pp = &v;
+    int x = (pp != NULL) ? *pp : 0;
+    if (x != 42) return 4;
+
+    printf("ok v=%d x=%d\n", v, x);
+    return 0;
+}
