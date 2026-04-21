@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ir/ir.h"
+#include "ir/verifier.h"
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
@@ -2381,6 +2383,34 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
     *out_src = NULL;
     *out_len = 0;
     if (!in_src || in_len == 0) return 0;
+
+    /* Phase-1 IR roundtrip check.  Under CC_VERIFY_IR=1 we build an IR
+     * from the pass input, emit it back to text, and assert the
+     * result is byte-identical to the input.  This proves the IR
+     * skeleton (arena + build_from_stub + emit) is correct on real
+     * source before step 1.3 starts carving typed nodes out of the
+     * OPAQUE_TEXT passthrough.  See docs/refactor-ast-truth.md
+     * phase 1.  No behavioural effect when the env var is unset. */
+    if (cc_ir_verify_active()) {
+        CCIrArena* arena = cc_ir_arena_create();
+        if (arena) {
+            CCIrNode* ir = cc_ir_build_from_stub(
+                arena, /* root */ NULL,
+                in_src, in_len,
+                ctx ? ctx->input_path : NULL);
+            if (ir) {
+                char*  emit_buf = NULL;
+                size_t emit_len = 0;
+                if (cc_ir_emit_text(ir, &emit_buf, &emit_len) == 0) {
+                    (void)cc_ir_verify_diff("result_unwrap.roundtrip",
+                                            in_src,   in_len,
+                                            emit_buf, emit_len);
+                }
+                free(emit_buf);
+            }
+            cc_ir_arena_destroy(arena);
+        }
+    }
 
     /* Cheap early-out: if neither `?>` nor `!>` is present anywhere, skip
      * the operator rewrites.  We still need to run the strict
