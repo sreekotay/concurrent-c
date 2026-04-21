@@ -38,6 +38,7 @@ struct CCSpawnTask;
 /* Parse-only dummy type: TCC doesn't like assigning/returning structs during stub-AST parsing. */
 typedef int CCTask;
 typedef int CCTaskIntptr;
+typedef int CCAsyncVoidRet;
 typedef int CCTaskKind;
 typedef int CCTaskIntptrKind;
 #define CC_TASK_KIND_INVALID 0
@@ -71,6 +72,13 @@ typedef struct CCTask {
 
 /* Backward compatibility type aliases */
 typedef CCTask CCTaskIntptr;
+/* Marker typedef: used by the compiler to preserve the originally-declared
+ * `@async void` return type through phase-3 reparse.  Functionally identical
+ * to `CCTaskIntptr` (an @async function always returns a poll task handle),
+ * but the distinct spelling lets the async lowering detect that the source
+ * declared the function as void-returning so that bare `return;` inside the
+ * body is accepted. */
+typedef CCTaskIntptr CCAsyncVoidRet;
 typedef CCTaskKind CCTaskIntptrKind;
 #define CC_TASK_INTPTR_KIND_INVALID CC_TASK_KIND_INVALID
 #define CC_TASK_INTPTR_KIND_FUTURE  CC_TASK_KIND_FUTURE

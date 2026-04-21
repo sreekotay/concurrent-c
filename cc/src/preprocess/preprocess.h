@@ -104,5 +104,14 @@ char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src,
 // Returns newly allocated string on change, NULL if no @await present.
 char* cc__rewrite_at_await(const char* src, size_t n);
 
+// Rewrite `@async [<attrs>] void <name>(...)` to `@async [<attrs>] CCAsyncVoidRet <name>(...)`.
+// Keeps the function visible to phase-3 reparse as a CCTaskIntptr-returning
+// function (needed so that call-sites like `n->spawn_async(fn(args))` type-check
+// against `cc_nursery_spawn_async(CCNursery*, CCTask)`). The async lowering in
+// `async_ast.c` recognises the `CCAsyncVoidRet` marker as an originally
+// `@async void` declaration and keeps bare `return;` valid in the body.
+// Returns newly allocated string on change, NULL if no rewrite applied.
+char* cc__rewrite_async_void_ret(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

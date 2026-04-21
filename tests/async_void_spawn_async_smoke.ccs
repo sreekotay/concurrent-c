@@ -1,0 +1,58 @@
+/* Smoke test for bug [2] (docs/known-bugs/redis_idiomatic_async.md):
+ *
+ * `ns->spawn_async(fn(args))` where `fn` is declared `@async void`
+ * used to fail phase-3 reparse with
+ *
+ *   error: cannot convert 'void' to 'int'
+ *
+ * because `cc_nursery_spawn_async(CCNursery*, CCTask)` takes `CCTask`
+ * (typedef `int` in parser mode) and the untransformed `@async void fn`
+ * signature was still literally void at reparse time.
+ *
+ * Fixed by preprocess-level rewrite of `@async void fn(...)` to
+ * `@async CCAsyncVoidRet fn(...)` (a typedef for CCTaskIntptr) so the
+ * reparser sees the task-returning form.  The async lowering keeps
+ * bare `return;` legal inside the body by recognising the marker. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static cc_atomic_int g_total = 0;
+static cc_atomic_int g_skipped = 0;
+
+@async void greet(int who) {
+    (void)who;
+    cc_atomic_fetch_add(&g_total, 1);
+}
+
+@async void early_exit(int who) {
+    if (who < 0) {
+        cc_atomic_fetch_add(&g_skipped, 1);
+        return;
+    }
+    cc_atomic_fetch_add(&g_total, 1);
+}
+
+int main(void) {
+    cc_atomic_store(&g_total, 0);
+    cc_atomic_store(&g_skipped, 0);
+
+    CCNursery* ns = cc_nursery_create(NULL);
+    if (!ns) return 1;
+    ns->spawn_async(greet(1));
+    ns->spawn_async(greet(2));
+    ns->spawn_async(early_exit(-1));
+    ns->spawn_async(early_exit(7));
+    cc_nursery_destroy(ns);
+
+    int total = cc_atomic_load(&g_total);
+    int skipped = cc_atomic_load(&g_skipped);
+    if (total != 3 || skipped != 1) {
+        printf("async_void_spawn_async_smoke: FAIL total=%d skipped=%d\n", total, skipped);
+        return 2;
+    }
+    printf("async_void_spawn_async_smoke: OK\n");
+    return 0;
+}

@@ -1,0 +1,59 @@
+/* Smoke: `T !>(E) name(...)` declaration-form `!>` must not trigger the
+ * expression-position binder lowering path in `pass_result_unwrap`.
+ *
+ * Regression guard for bug [6] in docs/known-bugs/redis_idiomatic_async.md:
+ * prior to the fix, `cc__rewrite_bang_once` dispatched the declaration's
+ * `!>(CCError)` through the stmt-position binder branch, scanned forward
+ * for a `;` terminator at depth 0, walked past EOF, and emitted
+ *    error: syntax: expected ';' terminating '!> (CCError) body'
+ * on every build.  The diagnostic was ignored (the outer caller
+ * swallowed the -1) but spammed stderr on every invocation.
+ *
+ * We arrange a TU that mixes multiple declaration-form `!>` shapes
+ * (`T !>(E) f(...)`, `T* !>(E) g(...)`, `T[] !>(E) h(...)`) with a
+ * handful of real `!>` / `!>(e)` usages elsewhere in the same file, so
+ * the fix is exercised both for the skip and for the continued scan.
+ */
+#include <stdio.h>
+
+static int g_main_calls = 0;
+static int g_ptr_calls  = 0;
+
+bool !>(CCError) always_ok_bool(void) {
+    return cc_ok(true);
+}
+
+int !>(CCError) get_int(int v) {
+    return cc_ok(v);
+}
+
+int* !>(CCError) get_int_ptr(int* p) {
+    return cc_ok(p);
+}
+
+static bool !>(CCError) check(bool want) {
+    if (!want) return cc_err(CC_ERR_INVALID_ARG, "check failed");
+    return cc_ok(true);
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 0; }
+
+    bool ok = always_ok_bool() !>;
+    if (!ok) return 1;
+
+    int v = get_int(7) !>;
+    if (v != 7) return 2;
+
+    int base = 42;
+    int* p = get_int_ptr(&base) !>;
+    if (!p || *p != 42) return 3;
+    g_ptr_calls++;
+
+    bool c = check(true) !>(e) { (void)e; return 4; };
+    if (!c) return 5;
+
+    g_main_calls++;
+    printf("ok main=%d ptr=%d v=%d *p=%d\n", g_main_calls, g_ptr_calls, v, *p);
+    return 0;
+}

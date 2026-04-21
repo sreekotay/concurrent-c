@@ -32,6 +32,10 @@ static int cc__find_func_ret_is_void(const CCASTRoot* root,
             const char* endt = r + strlen(r);
             while (endt > r && (endt[-1] == ' ' || endt[-1] == '\t')) endt--;
             if (endt - r >= 4 && memcmp(endt - 4, "void", 4) == 0) return 1;
+            /* `CCAsyncVoidRet` is the preprocess-level marker for an
+             * originally `@async void` declaration; treat it as void so
+             * that bare `return;` inside the body remains legal. */
+            if (endt - r >= 14 && memcmp(endt - 14, "CCAsyncVoidRet", 14) == 0) return 1;
         }
     }
     return 0;
@@ -76,7 +80,25 @@ static size_t cc__node_end_off(const char* src, size_t len, const NodeView* nd) 
 #define cc__is_ident_char cc_is_ident_char
 #define cc__range_contains_token cc_range_contains_token
 #define cc__strndup_trim_ws cc_strndup_trim_ws
-#define cc__skip_ws cc_skip_ws
+/* Comment-aware whitespace skip.
+ *
+ * Before: aliased to `cc_skip_ws`, which only eats space/tab/newline.
+ * Because this pass reasons about statement boundaries by inspecting
+ * `p[0]` after a whitespace skip, any leading `/ * ... * /` or `// ...`
+ * comment on a line would hide the real token and push the statement
+ * onto the generic fallback path.  That in turn left the type prefix
+ * intact on frame-lifted decls, producing invalid C like
+ *   size_t __f->outstanding = 0;
+ * for bodies like
+ *   while (true) {
+ *       / * a comment * /
+ *       size_t outstanding = 0;
+ *       ...
+ *   }
+ * All 50+ call sites in this pass want "advance to the next real token",
+ * so point the alias at the comment-aware variant uniformly.  See
+ * `cc_skip_ws_and_comments_ptr` in `cc/src/util/text.h`. */
+#define cc__skip_ws cc_skip_ws_and_comments_ptr
 #define cc__sb_append_cstr cc_sb_append_cstr
 #define cc__dup_slice cc_dup_slice
 
@@ -837,6 +859,12 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
     int ins = 0; char q = 0;
     int in_lc = 0, in_bc = 0;
     size_t seg_s = 0;
+    /* When an `@errhandler` (or similar `@`-prefixed) directive appears
+     * at segment start, its `{...}` body is a self-contained statement
+     * with no trailing `;`.  Remember the head offset so we can split
+     * immediately after the closing `}` instead of letting it fuse with
+     * the next real statement. */
+    int at_errhandler = 0;
 
     char** parts = NULL;
     int pn = 0, pc = 0;
@@ -857,8 +885,24 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
         else if (ch == '{') br++;
         else if (ch == '}') { if (br) br--; }
 
-        if (par == 0 && brk == 0 && br == 0 && ch == ';') {
-            char* part = cc__dup_slice(s, seg_s, i);
+        /* Detect `@errhandler` at segment start (after leading ws) so
+         * the body-closing `}` counts as a split point. */
+        if (!at_errhandler && par == 0 && brk == 0 && br == 0 &&
+            ch == '@' && i + 11 <= sl &&
+            memcmp(s + i, "@errhandler", 11) == 0 &&
+            (i + 11 == sl || !cc__is_ident_char(s[i + 11]))) {
+            size_t j = seg_s;
+            while (j < i && (s[j] == ' ' || s[j] == '\t' ||
+                             s[j] == '\n' || s[j] == '\r')) {
+                j++;
+            }
+            if (j == i) at_errhandler = 1;
+        }
+
+        if (par == 0 && brk == 0 && br == 0 &&
+            (ch == ';' || (at_errhandler && ch == '}'))) {
+            size_t end_off = (ch == '}') ? i + 1 : i;
+            char* part = cc__dup_slice(s, seg_s, end_off);
             if (!part) continue;
             cc__trim_ws_inplace(part);
             if (part[0]) {
@@ -871,7 +915,8 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
             } else {
                 free(part);
             }
-            seg_s = i + 1;
+            seg_s = (ch == '}') ? i + 1 : i + 1;
+            at_errhandler = 0;
         }
     }
     if (seg_s < sl) {
@@ -1370,6 +1415,35 @@ static const char* cc__emit_lookup_local_type(const Emit* e, const char* name) {
 static int cc__emit_rhs_is_brace_init(const char* rhs) {
     rhs = cc__skip_ws(rhs);
     return rhs && rhs[0] == '{';
+}
+
+/* Returns non-zero if `rhs` contains a top-level (depth-0) `,` — i.e. a
+ * comma operator that, when emitted without enclosing parens in
+ * `lhs = rhs;`, would be mis-parsed as a declarator list.  Paren, bracket
+ * and brace depth, plus string/comment context, are tracked. */
+static int cc__rhs_has_top_level_comma(const char* rhs) {
+    if (!rhs) return 0;
+    int par = 0, brk = 0, br = 0;
+    int ins = 0; char q = 0;
+    int in_lc = 0, in_bc = 0;
+    for (size_t i = 0; rhs[i]; i++) {
+        char ch = rhs[i];
+        char ch2 = rhs[i + 1];
+        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
+        if (ins) { if (ch == '\\' && ch2) { i++; continue; } if (ch == q) ins = 0; continue; }
+        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
+        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
+        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == ',' && par == 0 && brk == 0 && br == 0) return 1;
+    }
+    return 0;
 }
 
 static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n);
@@ -1972,8 +2046,21 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                                 if (lhs2 && rhs2) {
                                     if (ty2 && ty2[0] && cc__emit_rhs_is_brace_init(rhs2)) {
                                         cc__emit_line_fmt(e, "%s = (%s)%s;", lhs2, ty2, rhs2);
-                                    } else {
+                                    } else if (cc__rhs_has_top_level_comma(rhs2)) {
+                                        /* Wrap so the comma operator isn't
+                                         * mis-parsed as a declarator list. */
                                         cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                                    } else {
+                                        /* No wrapping parens: any remaining
+                                         * `!>` / `?>` sigils in the RHS are
+                                         * later processed by pass_result_unwrap,
+                                         * which back-scans from the sigil to
+                                         * the enclosing statement boundary.
+                                         * Adding an extra `(...)` confuses
+                                         * that scan (it treats the wrap `(`
+                                         * as the expression boundary and the
+                                         * wrap `)` as not-a-terminator).   */
+                                        cc__emit_line_fmt(e, "%s = %s;", lhs2, rhs2);
                                     }
                                 }
                                 free(lhs2);
@@ -2076,7 +2163,6 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                 q = cc__skip_ws(q);
                 if (!cc__is_ident_start(*q)) break;
             }
-            
             /* var_start/var_end is the last identifier; check if it's followed by '=' or ';' */
             if (var_start && var_end && (*q == '=' || *q == ';' || *q == '\0')) {
                 size_t nn = (size_t)(var_end - var_start);
@@ -2112,8 +2198,10 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                             if (lhs2 && rhs2) {
                                 if (ty2 && ty2[0] && cc__emit_rhs_is_brace_init(rhs2)) {
                                     cc__emit_line_fmt(e, "%s = (%s)%s;", lhs2, ty2, rhs2);
-                                } else {
+                                } else if (cc__rhs_has_top_level_comma(rhs2)) {
                                     cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                                } else {
+                                    cc__emit_line_fmt(e, "%s = %s;", lhs2, rhs2);
                                 }
                             }
                             free(lhs2);
@@ -2600,6 +2688,23 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         fn.ret_is_void = cc__find_func_ret_is_void(root, ctx, fn_name, n[i].file);
         if (!fn.ret_is_void && n[i].aux_s2 && strstr(n[i].aux_s2, "void") == n[i].aux_s2)
             fn.ret_is_void = 1; /* fallback */
+        /* The preprocess pass rewrites `@async void fn(...)` to
+         * `@async CCAsyncVoidRet fn(...)` so phase-3 reparse type-checks
+         * call sites such as `n->spawn_async(fn(args))`.  TCC normalises
+         * the typedef away (aux_s2 becomes "int (...)" in parser mode),
+         * so we look for the spelling in the raw source between the
+         * `@async` keyword and the opening brace. */
+        if (!fn.ret_is_void && lbrace > scan && scan < in_len) {
+            size_t end = lbrace < in_len ? lbrace : in_len;
+            const char* span = in_src + scan;
+            size_t span_len = end - scan;
+            for (size_t q = 0; q + 14 <= span_len; q++) {
+                if (memcmp(span + q, "CCAsyncVoidRet", 14) != 0) continue;
+                int before_ok = (q == 0) || !cc__is_ident_char(span[q - 1]);
+                int after_ok = (q + 14 >= span_len) || !cc__is_ident_char(span[q + 14]);
+                if (before_ok && after_ok) { fn.ret_is_void = 1; break; }
+            }
+        }
         fns[fn_n++] = fn;
     }
 
@@ -2720,6 +2825,13 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             /* Avoid hoisting compiler-introduced temporaries / closure locals; keep them as locals in the current state. */
             if (strncmp(n[i].aux_s1, "__cc_ab_", 8) == 0) continue;
             if (strncmp(n[i].aux_s1, "__cc_ns_c", 9) == 0) continue;  /* nursery spawn closure temps */
+            /* result-unwrap temporaries live inside `({ __typeof__(CALL) tmp = ...; ... })`
+             * stmt-expressions and must not be hoisted out — their
+             * `__typeof__(CALL)` type depends on a call that in general
+             * isn't well-formed at struct-field position (e.g. autoblocking
+             * substitutions emit CCAbIntptr helpers before async lowering).
+             * The stmt-expression scope keeps them local to the state body. */
+            if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) continue;
             if (i == fn->decl_item_idx) continue;
             /* ensure in subtree */
             int p = n[i].parent;

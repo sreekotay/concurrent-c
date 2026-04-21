@@ -1,0 +1,56 @@
+/* Bug [3] smoke: `!>(e)` / `?>(e)` binders propagate the callee's declared
+ * error type.  Previously, in parser mode the binder was typed as the
+ * parser-mode generic `__CCGenericError`, so any user code that passed the
+ * binder to a function expecting the real error type (e.g. `report(e)`
+ * where `report: void(CCIoError)`) failed at parse time with
+ *     cannot convert 'struct __CCGenericError' to 'CCIoError'
+ *
+ * Fix: `pass_result_unwrap.c` now extracts the plain callee name from the
+ * unwrap call expression, looks up the declared textual error type in the
+ * extended `result_fn_registry`, and emits a typed binder of the form
+ *     E e = *(E*)(void*)&((tmp).u.error);
+ * which parses cleanly in both parser mode (cast through void* on the
+ * generic struct) and real compilation (no-op identity cast on the
+ * declared type).  Falls back to `__typeof__(cc_error(tmp))` when the
+ * callee is not a plain-name call (method calls, chained expressions). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_io_error.cch>
+#include <stdio.h>
+
+/* Result-returning function with a concrete error type. */
+static bool !>(CCIoError) rr_check(int x) {
+    if (x < 0) return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
+    if (x == 0) return cc_err(cc_io_error_os(CC_IO_OTHER, 42));
+    return cc_ok(true);
+}
+
+/* Consumer that requires the *declared* error type, not the generic one. */
+static void report(const CCIoError e) {
+    printf("report: kind=%d os_code=%d\n", (int)e.kind, (int)e.os_code);
+}
+
+/* Expression-position `?>(e)` — the binder must be typed so `report(e)`
+ * type-checks even in parser mode. */
+static int use_qmark(int x) {
+    bool ok = rr_check(x) ?>(e) ({ report(e); false; });
+    return ok ? 1 : 0;
+}
+
+/* Statement-position `!>(e) STMT` — same requirement. */
+static void use_bang_stmt(int x) {
+    rr_check(x) !>(e) return report(e);
+}
+
+/* Statement-position `!>(e) { BLOCK }` — same requirement. */
+static void use_bang_block(int x) {
+    rr_check(x) !>(e) { report(e); return; }
+}
+
+int main(void) {
+    use_bang_stmt(-1);
+    use_bang_block(0);
+    (void)use_qmark(-1);
+    (void)use_qmark(5);
+    printf("binder_typed_err: OK\n");
+    return 0;
+}

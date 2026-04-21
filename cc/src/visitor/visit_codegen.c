@@ -3110,6 +3110,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
+     * that phase-3 reparse sees a task-returning signature (needed for
+     * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check
+     * against `cc_nursery_spawn_async(CCNursery*, CCTask)`).  async_ast
+     * recognises the CCAsyncVoidRet marker and still treats the function
+     * as originally void-returning (bare `return;` stays valid). */
+    if (src_ufcs && src_ufcs_len && strstr(src_ufcs, "@async")) {
+        char* rewritten = cc__rewrite_async_void_ret(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
+
     /* Lower @await fname(...) -> cc_block_on(ReturnType, fname(...)) before
      * any AST reparse, so TCC never sees the @await token. */
     if (src_ufcs && src_ufcs_len && strstr(src_ufcs, "@await")) {
