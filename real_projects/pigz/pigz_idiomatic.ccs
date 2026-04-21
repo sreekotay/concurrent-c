@@ -191,7 +191,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             results_tx.send_task(() => [blk] {
                 CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
                 blk->arena.free();
-                res;
+                return res;
             });
             
             if (is_last) break;

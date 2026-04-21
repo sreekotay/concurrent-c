@@ -48,40 +48,7 @@ static int cc__ru_extract_plain_callee(const char* s, size_t a, size_t b,
 
 /* Emit the error-binder declaration for an unwrap expansion.
  *
- * When the call expression `s[call_a..call_b)` is a plain `IDENT(...)` call
- * to a result-returning function registered with an explicit error type,
- * emit a typed binder:
- *     ErrType BINDER = *(ErrType*)(void*)&((TMP).u.error);
- * which parses cleanly in both `CC_PARSER_MODE` (where `(tmp).u.error` has
- * type `__CCGenericError` — the cast + deref recover the declared type)
- * and real compilation (where it is a no-op identity cast).
- *
- * Falls back to the legacy `__typeof__(cc_error(tmp))`-based emission when
- * the callee cannot be resolved; this matches previous behavior for method
- * calls, chained expressions, and locally-typed temporaries. */
-static void cc__ru_emit_err_binder(char** out, size_t* ol, size_t* oc,
-                                     const char* s, size_t call_a, size_t call_b,
-                                     const char* tmpv, const char* binder) {
-    char callee[128];
-    char err_type[256];
-    if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
-        cc_result_fn_registry_get_err_type(callee, strlen(callee),
-                                            err_type, sizeof(err_type))) {
-        /* Typed binder path — see function comment for rationale. */
-        cc_sb_append_fmt(out, ol, oc,
-                         "%s %s = *(%s*)(void*)&((%s).u.error); ",
-                         err_type, binder, err_type, tmpv);
-        return;
-    }
-    /* Fallback: the callee is not a plain name we recognize.  Use the
-     * original `__typeof__`-based binder; this keeps the pre-fix behavior
-     * for method calls and chained expressions. */
-    cc_sb_append_fmt(out, ol, oc,
-                     "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                     tmpv, binder, tmpv);
-}
-
-/* Emit the "error binder" line for the unified unwrap lowering:
+ * Emit the "error binder" line for the unified unwrap lowering:
  *   __typeof__(__cc_uw_err_at(tmpv, "expr", "file", "line")) binder =
  *       __cc_uw_err_at(tmpv, "expr", "file", "line");
  *
@@ -93,6 +60,8 @@ static void cc__ru_emit_err_binder(char** out, size_t* ol, size_t* oc,
  * So a single lowering call shape works for BOTH the Result-struct and
  * pointer-returning-call variants of `!>` / `?>` — no source-scan needed
  * to pick between them at pass time. */
+static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i);
+
 static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
                                        const char* s, size_t call_a, size_t call_b,
                                        const char* tmpv, const char* binder,
@@ -124,116 +93,54 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
     cc__append_str(out, ol, oc, "; ");
 }
 
-/* Try to parse a leading C cast at `s[a..b)` of the form `(TYPE *)` (one or
- * more `*`s, zero or more type tokens).  On success, writes the byte after
- * the closing `)` of the cast into `*out_after` and returns 1.  Returns 0
- * if the leading parenthesised group is not a cast to pointer type.
+/* Mangle the user's `!>(e) BODY` binder into a `__cc_pu_bind_<id>_<name>`
+ * identifier.  The `__cc_pu_` prefix already matches `async_ast`'s
+ * no-frame-lift rule for unwrap-pass temporaries, so the mangled binder
+ * stays a true local inside `@async` bodies (bug [F9]) — without the
+ * mangling `async_ast` would frame-lift the binder and turn
+ * `TYPE e = ...;` into the invalid `TYPE __f->e = ...;` after the
+ * identifier-rewrite pass.
  *
- * The heuristic is intentionally narrow: we accept idents, `struct` /
- * `union` / `enum` / `const` / `volatile` / `unsigned` / `signed` / `long`
- * / `short`, plus `*`, plus whitespace — any other operator (`+`, `-`,
- * `.`, `->`, `[`, `=`, digits, etc.) disqualifies the group so we don't
- * mis-read `(a * b)` or `(p->q)` as a cast.  At least one `*` and one
- * ident/keyword are required so plain `(x)` grouping falls through. */
-static int cc__ru_try_parse_leading_ptr_cast(const char* s, size_t a, size_t b,
-                                              size_t* out_after) {
-    if (a >= b || s[a] != '(') return 0;
-    size_t k = a + 1;
-    int depth = 1;
-    int saw_star = 0, saw_type_tok = 0, disq = 0;
-    while (k < b && depth > 0) {
-        char c = s[k];
-        if (c == '(') { depth++; k++; continue; }
-        if (c == ')') { depth--; k++; if (depth == 0) break; continue; }
-        if (isspace((unsigned char)c)) { k++; continue; }
-        if (c == '*') { saw_star = 1; k++; continue; }
-        if (cc_is_ident_start(c)) {
-            size_t ia = k;
-            while (k < b && cc_is_ident_char(s[k])) k++;
-            size_t il = k - ia;
-            /* Reject if the ident looks like an expression keyword. */
-            if ((il == 6 && memcmp(s + ia, "sizeof", 6) == 0) ||
-                (il == 8 && memcmp(s + ia, "_Alignof", 8) == 0) ||
-                (il == 7 && memcmp(s + ia, "alignof", 7) == 0) ||
-                (il == 8 && memcmp(s + ia, "_Generic", 8) == 0) ||
-                (il == 8 && memcmp(s + ia, "__typeof", 8) == 0) ||
-                (il == 10 && memcmp(s + ia, "__typeof__", 10) == 0)) {
-                disq = 1; break;
-            }
-            saw_type_tok = 1;
-            continue;
-        }
-        /* Anything else (digits, operators, brackets, quotes, comments)
-         * disqualifies the group as a cast. */
-        disq = 1; break;
-    }
-    if (disq || depth != 0) return 0;
-    if (!saw_star || !saw_type_tok) return 0;
-    if (out_after) *out_after = k;
-    return 1;
-}
-
-/* Detect whether the trimmed expression `s[a..b)` has pointer type.
+ * `src[0..n)` is the already-processed body text; every word-bounded
+ * occurrence of `binder` (skipping comments / string literals) is
+ * rewritten to the mangled name.  Caller owns the returned buffer.
  *
- * Recognised shapes:
- *   1. `IDENT(...)` where `IDENT` is in the pointer-fn registry
- *      (e.g. `fopen(...)`, `cc_nursery_create()`).
- *   2. `(T *) EXPR` — a C cast to pointer type; the cast's result type
- *      settles it regardless of what `EXPR` is.
- *   3. `(EXPR)` — outer grouping parens; peel and retry.  Lets users
- *      write `((RedisReply*)(cc_arena_alloc(...)))` and similar.
- *
- * When the detection returns 1, pass_result_unwrap emits the NULL-check +
- * synthesized `CCError{ CC_ERR_NULL, ... }` lowering instead of the
- * Result-struct `cc_is_err`/`cc_value` lowering (which TCC would reject
- * with "struct or union expected" on a pointer-valued expression). */
-static int cc__ru_expr_is_pointer_returning_call(const char* s, size_t a, size_t b) {
-    while (a < b && isspace((unsigned char)s[a])) a++;
-    while (b > a && isspace((unsigned char)s[b - 1])) b--;
-    if (a >= b) return 0;
-    if (s[b - 1] != ')') return 0;
-
-    /* Shape (2): leading pointer cast `(T *) ...`.  The cast's result
-     * type settles the pointer-ness of the whole expression. */
-    {
-        size_t after_cast = 0;
-        if (cc__ru_try_parse_leading_ptr_cast(s, a, b, &after_cast) &&
-            after_cast < b) {
-            return 1;
-        }
+ * See docs/known-bugs/redis_idiomatic_async.md — [F9]. */
+static int cc__pu_mangle_binder_in_body(const char* src, size_t n,
+                                        const char* binder, const char* mangled,
+                                        char** out_buf, size_t* out_len) {
+    size_t from_n = strlen(binder);
+    size_t to_n = strlen(mangled);
+    if (from_n == 0) {
+        char* buf = (char*)malloc(n + 1);
+        if (!buf) return -1;
+        if (n) memcpy(buf, src, n);
+        buf[n] = 0;
+        *out_buf = buf;
+        *out_len = n;
+        return 0;
     }
-
-    /* Shape (3): outer grouping parens.  Peel one layer and retry
-     * (bounded by recursion depth via the loop form). */
-    if (s[a] == '(') {
-        /* Only peel if the opening `(` at `a` is matched by the closing
-         * `)` at `b-1` — otherwise the leading `(` belongs to a cast or
-         * a subexpression, not grouping. */
-        int depth = 0;
-        size_t k = a;
-        size_t match_close = (size_t)-1;
-        for (; k < b; k++) {
-            if (s[k] == '(') depth++;
-            else if (s[k] == ')') {
-                depth--;
-                if (depth == 0) { match_close = k; break; }
-            }
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    size_t p = 0;
+    while (p < n) {
+        size_t found = cc_find_ident_top_level(src, p, n, binder, from_n);
+        if (found >= n) {
+            cc__append_n(&out, &ol, &oc, src + p, n - p);
+            break;
         }
-        if (match_close == b - 1) {
-            return cc__ru_expr_is_pointer_returning_call(s, a + 1, b - 1);
-        }
+        cc__append_n(&out, &ol, &oc, src + p, found - p);
+        cc__append_n(&out, &ol, &oc, mangled, to_n);
+        p = found + from_n;
     }
-
-    /* Shape (1): bare `IDENT(...)` call. */
-    if (!cc_is_ident_start(s[a])) return 0;
-    size_t name_a = a;
-    size_t name_b = a;
-    while (name_b < b && cc_is_ident_char(s[name_b])) name_b++;
-    if (name_b == name_a) return 0;
-    size_t k = name_b;
-    while (k < b && isspace((unsigned char)s[k])) k++;
-    if (k >= b || s[k] != '(') return 0;
-    return cc_pointer_fn_registry_contains(s + name_a, name_b - name_a);
+    if (!out) {
+        out = (char*)malloc(1);
+        if (!out) return -1;
+        out[0] = 0;
+    }
+    *out_buf = out;
+    *out_len = ol;
+    return 0;
 }
 
 /* ------------------------------------------------------------------
@@ -821,11 +728,27 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
                      "); !__cc_uw_is_err(%s) ? __cc_uw_value(%s) : ",
                      tmpv, tmpv);
     if (has_binder) {
+        /* Mangle user binder -> `__cc_pu_bind_<id>_<name>` and rewrite
+         * the RHS expression accordingly (bug [F9]).  The mangled name
+         * keeps the binder off async_ast's frame-lift list. */
+        char mangled_binder[256];
+        snprintf(mangled_binder, sizeof(mangled_binder), "__cc_pu_bind_%d_%s", id, binder);
+        char* mangled_rhs = NULL;
+        size_t mangled_rhs_len = 0;
+        const char* emit_rhs = s + rhs_a;
+        size_t emit_rhs_len = rhs_b - rhs_a;
+        if (cc__pu_mangle_binder_in_body(s + rhs_a, rhs_b - rhs_a,
+                                         binder, mangled_binder,
+                                         &mangled_rhs, &mangled_rhs_len) == 0 && mangled_rhs) {
+            emit_rhs = mangled_rhs;
+            emit_rhs_len = mangled_rhs_len;
+        }
         cc__append_str(&out, &ol, &oc, "({ ");
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, binder, f, line_no);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, mangled_binder, f, line_no);
         cc__append_str(&out, &ol, &oc, "(");
-        cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
+        cc__append_n(&out, &ol, &oc, emit_rhs, emit_rhs_len);
         cc__append_str(&out, &ol, &oc, "); })");
+        free(mangled_rhs);
     } else {
         cc__append_str(&out, &ol, &oc, "(");
         cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
@@ -964,10 +887,6 @@ static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
         }
     }
     return 0;
-}
-
-static int cc__find_bang_token(const char* s, size_t n, size_t* out_pos) {
-    return cc__find_bang_token_from(s, n, 0, out_pos);
 }
 
 /* Classify whether the text `s[lhs_a..lhs_b)` is the type-specifier prefix
@@ -1633,6 +1552,21 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     char tmpv[48];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_s_%d", id);
 
+    /* Mangle user binder `e` -> `__cc_pu_bind_<id>_e` so async_ast's
+     * existing `__cc_pu_` skip rule keeps the binder a true local
+     * inside `@async` bodies (bug [F9]). */
+    char mangled_binder[256];
+    snprintf(mangled_binder, sizeof(mangled_binder), "__cc_pu_bind_%d_%s", id, binder);
+    char* mangled_body = NULL;
+    size_t mangled_body_len = 0;
+    if (cc__pu_mangle_binder_in_body(processed, processed_len,
+                                     binder, mangled_binder,
+                                     &mangled_body, &mangled_body_len) == 0 && mangled_body) {
+        free(processed);
+        processed = mangled_body;
+        processed_len = mangled_body_len;
+    }
+
     char* out = NULL;
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, splice_from);
@@ -1645,7 +1579,7 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
-    cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, f, op_line);
+    cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, op_line);
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
         /* Expression body: terminate with `;` so it reads as a statement. */
@@ -1941,6 +1875,21 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     char tmpv[48];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_x_%d", tid);
 
+    /* Mangle user binder to `__cc_pu_bind_<id>_<name>` (bug [F9]). */
+    char mangled_binder[256];
+    if (has_binder) {
+        snprintf(mangled_binder, sizeof(mangled_binder), "__cc_pu_bind_%d_%s", tid, binder);
+        char* mangled_body = NULL;
+        size_t mangled_body_len = 0;
+        if (cc__pu_mangle_binder_in_body(processed, processed_len,
+                                         binder, mangled_binder,
+                                         &mangled_body, &mangled_body_len) == 0 && mangled_body) {
+            free(processed);
+            processed = mangled_body;
+            processed_len = mangled_body_len;
+        }
+    }
+
     char* out = NULL;
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, call_start);
@@ -1950,7 +1899,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
     cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
     if (has_binder) {
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, f, line_no);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, line_no);
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (!is_block) {
@@ -2011,12 +1960,13 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
         call_start = cc__find_bang_lhs_start_ex(s, op_at, &is_stmt_pos);
         /* Special-case: if LHS textually begins with `return`, we are
          * actually at expression position (the `!>` operand is `return`'s
-         * expression). */
+         * expression).  Use the comment-aware forward skip so any block
+         * or line comments between the preceding statement boundary and
+         * `return` don't hide the keyword and drag it into the operand. */
         if (is_stmt_pos) {
-            size_t a = call_start;
-            while (a < op_at && isspace((unsigned char)s[a])) a++;
+            size_t a = cc__skip_ws_comments_forward(s, op_at, call_start);
             if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
-                (a + 6 < op_at && !cc_is_ident_char(s[a + 6]))) {
+                (a + 6 == op_at || !cc_is_ident_char(s[a + 6]))) {
                 is_stmt_pos = 0;
                 call_start = a + 6;
             }

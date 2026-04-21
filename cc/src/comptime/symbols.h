@@ -82,6 +82,18 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
  int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
                                          const char* type_name,
                                          const void** out_fn_ptr);
+/* Same as cc_symbols_lookup_type_ufcs_callable, but also reports the
+ * specificity of the matched pattern: the length of the literal prefix
+ * before any trailing `*`.  A bare `*` wildcard scores 0; a type-name
+ * pattern like `CC*` scores 2; an exact type name scores its full
+ * length.  Callers use this to distinguish "user explicitly registered
+ * a hook for this type" (score > 0) from "a global catch-all wildcard
+ * caught this type by default" (score == 0), since the two cases imply
+ * different authority over things like field-wins shadowing. */
+ int cc_symbols_lookup_type_ufcs_callable_ex(CCSymbolTable* t,
+                                             const char* type_name,
+                                             const void** out_fn_ptr,
+                                             size_t* out_score);
  size_t cc_symbols_type_count(CCSymbolTable* t);
  const char* cc_symbols_type_name(CCSymbolTable* t, size_t idx);
  int cc_symbols_collect_type_registrations(CCSymbolTable* t,

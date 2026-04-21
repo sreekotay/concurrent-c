@@ -141,6 +141,80 @@ static int cc__append_autoblock_capture_name_fmt(char** buf,
     return cc__append_str(buf, len, cap, tmp);
 }
 
+/* Emit the `__cc_ab_l%d_arg%d` capture-list entry for one positional arg,
+ * unless the arg was identified as a pure string literal — in which case
+ * it's inlined into the closure body directly (no temp captured). */
+static void cc__ab_emit_arg_cap(char** buf, size_t* len, size_t* cap,
+                                int* first, const int* arg_is_str_lit,
+                                int line_start, int ai) {
+    if (arg_is_str_lit && arg_is_str_lit[ai]) return;
+    cc__append_autoblock_capture_name_fmt(buf, len, cap, first,
+                                          "__cc_ab_l%d_arg%d", line_start, ai);
+}
+
+/* Emit the body-side reference to one positional arg: the captured
+ * temp name, or the original source literal for string-literal args. */
+static void cc__ab_emit_arg_use(char** buf, size_t* len, size_t* cap,
+                                const int* arg_is_str_lit,
+                                const char* call_txt,
+                                const size_t* arg_starts,
+                                const size_t* arg_ends,
+                                int line_start, int ai) {
+    if (arg_is_str_lit && arg_is_str_lit[ai]) {
+        cc__append_n(buf, len, cap,
+                     call_txt + arg_starts[ai],
+                     arg_ends[ai] - arg_starts[ai]);
+    } else {
+        cc__append_fmt(buf, len, cap, "__cc_ab_l%d_arg%d", line_start, ai);
+    }
+}
+
+/* Return 1 if the source slice `s[a..b)` is a pure string literal — possibly
+ * adjacent-concatenated (C joins `"foo" "bar"`), possibly prefixed with an
+ * encoding marker (`L"..."`, `u"..."`, `u8"..."`, `U"..."`), with only
+ * whitespace and C-style comments between segments.  The autoblock pass
+ * uses this to avoid lifting format-string arguments through a captured
+ * variable: the original `fprintf(stderr, "msg %d\n", x)` stays format-aware
+ * in the synthesized closure body, so `-Wformat-security` does not fire and
+ * the generated code reads like the source.  Anything even slightly more
+ * complex than a chain of string literals (a cast, a macro, a concatenated
+ * non-literal identifier) falls back to the capture path — correctness over
+ * cleverness. */
+static int cc__ab_arg_is_string_literal(const char* s, size_t a, size_t b) {
+    if (!s || a >= b) return 0;
+    size_t i = a;
+    int segments = 0;
+    for (;;) {
+        while (i < b) {
+            char c = s[i];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
+            if (c == '/' && i + 1 < b && s[i + 1] == '/') {
+                i += 2; while (i < b && s[i] != '\n') i++; continue;
+            }
+            if (c == '/' && i + 1 < b && s[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < b && !(s[i] == '*' && s[i + 1] == '/')) i++;
+                if (i + 1 < b) i += 2;
+                continue;
+            }
+            break;
+        }
+        if (i >= b) break;
+        if (i + 2 < b && s[i] == 'u' && s[i + 1] == '8' && s[i + 2] == '"') i += 2;
+        else if (i + 1 < b && (s[i] == 'L' || s[i] == 'u' || s[i] == 'U') && s[i + 1] == '"') i += 1;
+        if (i >= b || s[i] != '"') return 0;
+        i++;
+        while (i < b && s[i] != '"') {
+            if (s[i] == '\\' && i + 1 < b) { i += 2; continue; }
+            i++;
+        }
+        if (i >= b) return 0;
+        i++;
+        segments++;
+    }
+    return segments > 0;
+}
+
 static int cc__ab_only_ws_comments(const char* s, size_t a, size_t b) {
     if (!s) return 0;
     size_t i = a;
@@ -1499,6 +1573,25 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         /* Handle empty-arg call. */
         if (args_s == args_e) argc = 0;
 
+        /* Trim whitespace on each arg in-place and note whether the payload
+         * is a pure string literal.  Literal args are inlined into the
+         * synthesized closure body instead of flowing through a captured
+         * temporary: this keeps format-string arguments to `printf`/`fprintf`
+         * visible to the compiler so `-Wformat`/-Wformat-security/ don't
+         * fire on generated autoblock wrappers. */
+        int arg_is_str_lit[16] = {0};
+        for (int ai = 0; ai < argc; ai++) {
+            size_t a = arg_starts[ai];
+            size_t e = arg_ends[ai];
+            while (a < e && (call_txt[a] == ' ' || call_txt[a] == '\t' ||
+                             call_txt[a] == '\n' || call_txt[a] == '\r')) a++;
+            while (e > a && (call_txt[e - 1] == ' ' || call_txt[e - 1] == '\t' ||
+                             call_txt[e - 1] == '\n' || call_txt[e - 1] == '\r')) e--;
+            arg_starts[ai] = a;
+            arg_ends[ai] = e;
+            arg_is_str_lit[ai] = cc__ab_arg_is_string_literal(call_txt, a, e);
+        }
+
         /* Indent string from original line. */
         char* ind = NULL;
         if (reps[ri].indent_len > 0 && reps[ri].indent_start + reps[ri].indent_len <= cur_len) {
@@ -1513,8 +1606,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         for (int ai = 0; ai < argc; ai++) {
             size_t arg_s = arg_starts[ai];
             size_t arg_e = arg_ends[ai];
-            while (arg_s < arg_e && (call_txt[arg_s] == ' ' || call_txt[arg_s] == '\t')) arg_s++;
-            while (arg_e > arg_s && (call_txt[arg_e - 1] == ' ' || call_txt[arg_e - 1] == '\t')) arg_e--;
+            /* String-literal args are inlined into the closure body, so
+             * they don't need a captured temporary. */
+            if (arg_is_str_lit[ai]) continue;
             {
                 char norm_type[256];
                 const char* forced_type = cc__known_autoblock_param_type(reps[ri].callee, ai);
@@ -1555,9 +1649,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             {
                 int first_cap = 1;
                 for (int ai = 0; ai < argc; ai++) {
-                    cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                          "__cc_ab_l%d_arg%d",
-                                                          reps[ri].line_start, ai);
+                    cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                        arg_is_str_lit, reps[ri].line_start, ai);
                 }
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
@@ -1567,7 +1660,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
             for (int ai = 0; ai < argc; ai++) {
                 if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%sintptr_t %s = 0;\n", I, tmp_name);
@@ -1671,9 +1765,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             {
                 int first_cap = 1;
                 for (int ai = 0; ai < argc; ai++) {
-                    cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                          "__cc_ab_l%d_arg%d",
-                                                          reps[ri].line_start, ai);
+                    cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                        arg_is_str_lit, reps[ri].line_start, ai);
                 }
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "] { ");
@@ -1681,7 +1774,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
             for (int ai = 0; ai < argc; ai++) {
                 if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
@@ -1691,9 +1785,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                 {
                     int first_cap = 1;
                     for (int ai = 0; ai < argc; ai++) {
-                        cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                              "__cc_ab_l%d_arg%d",
-                                                              reps[ri].line_start, ai);
+                        cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                            arg_is_str_lit, reps[ri].line_start, ai);
                     }
                 }
                 cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
@@ -1703,7 +1796,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                 cc__append_str(&repl, &repl_len, &repl_cap, "(");
                 for (int ai = 0; ai < argc; ai++) {
                     if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
                 }
                 cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  return await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
@@ -1725,9 +1819,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                                                               "cc_ab_retp_l%d",
                                                               reps[ri].line_start);
                         for (int ai = 0; ai < argc; ai++) {
-                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                                  "__cc_ab_l%d_arg%d",
-                                                                  reps[ri].line_start, ai);
+                            cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                                arg_is_str_lit, reps[ri].line_start, ai);
                         }
                     }
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "] { *cc_ab_retp_l%d = ",
@@ -1736,7 +1829,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, "(");
                     for (int ai = 0; ai < argc; ai++) {
                         if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                        cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
@@ -1751,9 +1845,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     {
                         int first_cap = 1;
                         for (int ai = 0; ai < argc; ai++) {
-                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                                  "__cc_ab_l%d_arg%d",
-                                                                  reps[ri].line_start, ai);
+                            cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                                arg_is_str_lit, reps[ri].line_start, ai);
                         }
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
@@ -1763,7 +1856,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, "(");
                     for (int ai = 0; ai < argc; ai++) {
                         if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                        cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = ", I, reps[ri].lhs_name);
@@ -1794,9 +1888,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                                                               "cc_ab_retp_l%d",
                                                               reps[ri].line_start);
                         for (int ai = 0; ai < argc; ai++) {
-                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                                  "__cc_ab_l%d_arg%d",
-                                                                  reps[ri].line_start, ai);
+                            cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                                arg_is_str_lit, reps[ri].line_start, ai);
                         }
                     }
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "] { *cc_ab_retp_l%d = ",
@@ -1805,7 +1898,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, "(");
                     for (int ai = 0; ai < argc; ai++) {
                         if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                        cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
@@ -1820,9 +1914,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     {
                         int first_cap = 1;
                         for (int ai = 0; ai < argc; ai++) {
-                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
-                                                                  "__cc_ab_l%d_arg%d",
-                                                                  reps[ri].line_start, ai);
+                            cc__ab_emit_arg_cap(&repl, &repl_len, &repl_cap, &first_cap,
+                                                arg_is_str_lit, reps[ri].line_start, ai);
                         }
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
@@ -1832,7 +1925,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, "(");
                     for (int ai = 0; ai < argc; ai++) {
                         if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                        cc__ab_emit_arg_use(&repl, &repl_len, &repl_cap, arg_is_str_lit,
+                                    call_txt, arg_starts, arg_ends, reps[ri].line_start, ai);
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s %s = ", I, reps[ri].decl_type, reps[ri].lhs_name);

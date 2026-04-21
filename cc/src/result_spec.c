@@ -32,17 +32,30 @@ static const char* cc__core_builtin_result_types[] = {
     NULL
 };
 
-static const char* cc__stdlib_predeclared_result_types[] = {
-    "CCResult_CCSlice_CCIoError",
-    "CCResult_size_t_CCIoError",
-    "CCResult_CCDirIterptr_CCIoError",
-    "CCResult_CCDirEntry_CCIoError",
-    "CCResult_bool_CCIoError",
-    "CCResult_int64_t_CC_I64ParseError",
-    "CCResult_uint64_t_CC_U64ParseError",
-    "CCResult_double_CC_F64ParseError",
-    "CCResult_bool_CC_BoolParseError",
-    NULL
+/* Stdlib-predeclared result specs: the struct typedefs and helper inline
+ * functions for these are emitted by `CC_DECL_RESULT_SPEC(...)` invocations
+ * in stdlib `.cch` headers, so codegen must NOT re-emit struct decls for
+ * them (avoids duplicate typedefs).  But the `_Generic` enumeration of
+ * `__cc_uw_*` MUST still cover them, because UFCS-expanded stdlib calls
+ * (e.g. `tx.send(x)` → `cc_channel_send_typed` → `CCResult_bool_CCIoError`)
+ * introduce result types into the TU without ever writing the mangled
+ * `CCResult_T_E` token in user source.  So we seed cc__cg_result_specs
+ * with these specs from this table whenever codegen scans a Result
+ * reference that hits a predeclared name.
+ *
+ * Keep in sync with the `CC_DECL_RESULT_SPEC(...)` invocations in the
+ * ccc/std/*.cch headers. */
+static const CCStdlibPredeclaredResult cc__stdlib_predeclared_result_specs[] = {
+    { "CCResult_CCSlice_CCIoError",          "CCSlice",  "CCIoError",         "CCSlice",        "CCIoError" },
+    { "CCResult_size_t_CCIoError",           "size_t",   "CCIoError",         "size_t",         "CCIoError" },
+    { "CCResult_CCDirIterptr_CCIoError",     "CCDirIter*", "CCIoError",       "CCDirIterptr",   "CCIoError" },
+    { "CCResult_CCDirEntry_CCIoError",       "CCDirEntry", "CCIoError",       "CCDirEntry",     "CCIoError" },
+    { "CCResult_bool_CCIoError",             "bool",     "CCIoError",         "bool",           "CCIoError" },
+    { "CCResult_int64_t_CC_I64ParseError",   "int64_t",  "CC_I64ParseError",  "int64_t",        "CC_I64ParseError" },
+    { "CCResult_uint64_t_CC_U64ParseError",  "uint64_t", "CC_U64ParseError",  "uint64_t",       "CC_U64ParseError" },
+    { "CCResult_double_CC_F64ParseError",    "double",   "CC_F64ParseError",  "double",         "CC_F64ParseError" },
+    { "CCResult_bool_CC_BoolParseError",     "bool",     "CC_BoolParseError", "bool",           "CC_BoolParseError" },
+    { NULL, NULL, NULL, NULL, NULL }
 };
 
 static void cc__normalize_type_name(char* name) {
@@ -129,16 +142,43 @@ int cc_result_spec_is_core_builtin(const char* mangled_ok, const char* mangled_e
 }
 
 int cc_result_spec_is_stdlib_predeclared(const char* mangled_ok, const char* mangled_err) {
-    return cc__result_key_matches(cc__stdlib_predeclared_result_types, mangled_ok, mangled_err, 1);
+    char key[256];
+    int i;
+    if (!mangled_ok || !mangled_err) return 0;
+    cc_result_spec_format_name(mangled_ok, mangled_err, key, sizeof(key));
+    for (i = 0; cc__stdlib_predeclared_result_specs[i].concrete_name; i++) {
+        if (strcmp(cc__stdlib_predeclared_result_specs[i].concrete_name, key) == 0) return 1;
+    }
+    return 0;
 }
 
 int cc_result_spec_is_stdlib_predeclared_name(const char* concrete_name) {
     int i;
     if (!concrete_name) return 0;
-    for (i = 0; cc__stdlib_predeclared_result_types[i]; i++) {
-        if (strcmp(cc__stdlib_predeclared_result_types[i], concrete_name) == 0) return 1;
+    for (i = 0; cc__stdlib_predeclared_result_specs[i].concrete_name; i++) {
+        if (strcmp(cc__stdlib_predeclared_result_specs[i].concrete_name, concrete_name) == 0) return 1;
     }
     return 0;
+}
+
+const CCStdlibPredeclaredResult* cc_result_spec_lookup_stdlib_predeclared(const char* concrete_name) {
+    int i;
+    if (!concrete_name) return NULL;
+    for (i = 0; cc__stdlib_predeclared_result_specs[i].concrete_name; i++) {
+        if (strcmp(cc__stdlib_predeclared_result_specs[i].concrete_name, concrete_name) == 0) {
+            return &cc__stdlib_predeclared_result_specs[i];
+        }
+    }
+    return NULL;
+}
+
+const CCStdlibPredeclaredResult* cc_result_spec_lookup_stdlib_predeclared_by_index(int index) {
+    int i;
+    if (index < 0) return NULL;
+    for (i = 0; cc__stdlib_predeclared_result_specs[i].concrete_name; i++) {
+        if (i == index) return &cc__stdlib_predeclared_result_specs[i];
+    }
+    return NULL;
 }
 
 void cc_result_spec_table_init(CCResultSpecTable* table) {

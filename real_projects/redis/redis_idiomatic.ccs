@@ -1,25 +1,17 @@
 /*
- * redis_idiomatic.ccs — iteration core.
+ * redis_idiomatic.ccs
  *
- * Classic "one db writer" concurrency: a dedicated owner fiber holds the
- * RedisDb exclusively and drains a shared request channel; each client
- * fiber talks to it by submitting a batch of requests into the shared
- * channel, then draining the matching batch of replies from its own
- * per-conn reply channel.
+ * One-writer concurrency: a dedicated owner fiber holds the RedisDb
+ * and drains a shared N:1 request channel; each client fiber sends a
+ * batch of requests into that channel and receives the matching batch
+ * of replies on its own 1:1 reply channel.  Serialization is by
+ * channel topology, not worker pinning — the scheduler can use any
+ * number of OS threads because only the owner ever touches the db.
  *
- * Serialization is by channel topology, not by pinning workers: the
- * request channel is N:1, so only the owner fiber ever holds a RedisDb*
- * to race on.  The scheduler is free to use as many OS threads as it
- * wants — only the owner fiber ever calls db_execute.
+ * Pipeline depth is bounded by PIPELINE_LIMIT: a burst collapses into
+ * one submit/drain/flush round-trip.
  *
- * Pipeline depth is set by REPLY_CHAN_CAP (= PIPELINE_LIMIT): the owner
- * can buffer that many replies per conn without blocking, so a burst
- * of pipelined requests collapses into a few scheduler hops rather
- * than per-request round-trips.
- *
- * Build / profile (quick ref):
- *   make redis_idiomatic         → out/redis_idiomatic (--release)
- *   bench: ./bench_robust.sh
+ * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
  */
 
 #include <ccc/std/prelude.cch>
@@ -47,25 +39,14 @@
 #define WRITE_BUF_CAP (16 * 1024)
 #define REQ_BUF_SIZE 512
 #define ENTRY_ARENA_OVERHEAD 128
-/* PIPELINE_LIMIT: sizes the request slot pool per connection.  With the
- * synchronous execute_request round-trip each client fiber has exactly
- * one parsed-but-unreleased request at a time, so the steady-state
- * high-water mark is 1.  We keep the pool at 16 to match redis_hybrid
- * for apples-to-apples comparison and to absorb transient bursts if we
- * later pipeline multiple sends before the first recv. */
+/* Max requests packed into one submit/drain/flush cycle. */
 #define PIPELINE_LIMIT 16
-/* Shared request channel: every client fiber sends into this, the single
- * owner fiber drains it.  Capacity N absorbs bursty arrivals (many
- * connections submitting within the same scheduler tick) without forcing
- * the senders to block; once full, backpressure propagates naturally. */
+/* Shared request channel capacity.  Sized well above PIPELINE_LIMIT so
+ * bursts from many connections don't serialise senders; once full,
+ * backpressure propagates naturally. */
 #define REQUEST_CHAN_CAP 512
-/* Per-conn reply channel: sized to PIPELINE_LIMIT so the owner can
- * fire-and-forget up to PIPELINE_LIMIT replies without blocking while
- * a client fiber is still in its submit phase.  Serialization of db
- * access does NOT depend on this cap — that's handled by the shared
- * request channel's N:1 topology (one owner fiber = one db writer).
- * This cap controls pipeline depth only: bigger = more in-flight per
- * conn, better amortization of scheduler hops. */
+/* Per-conn reply channel capacity.  Matching PIPELINE_LIMIT lets the
+ * owner publish a whole batch without blocking. */
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
 typedef struct RedisEntry RedisEntry;
 
@@ -87,68 +68,47 @@ typedef struct RedisConn {
     _Atomic size_t refs;
     uint64_t conn_id;
     uint64_t next_request_id;
-    /* req_pool: each slot is REQ_BUF_SIZE and backs a RedisRequest's arena;
-     * the RedisRequest struct plus its cloned argv strings live inside the
-     * slot.  Slot count is sized to PIPELINE_LIMIT — the steady-state max
-     * number of parsed-but-unreleased requests a single handle_client
-     * iteration can hold in the encode buffer before it flushes.
+    /* Per-conn request slots.  Each REQ_BUF_SIZE slot backs one
+     * parsed RedisRequest plus its cloned argv.
      *
-     * LIFETIME INVARIANT (load-bearing): any cc_arena_pool_free(&req_pool, slot)
-     * MUST precede the redis_conn_drop that may be last-ref.  If the drop
-     * runs first, redis_conn_destroy tears down the pool's backing arena,
-     * and the subsequent pool_free writes a freelist link into memory that
-     * libc has already reclaimed.  See redis_conn_release_request. */
+     * LIFETIME INVARIANT (load-bearing): cc_arena_pool_free on a slot
+     * MUST precede the redis_conn_drop that may be last-ref.  If the
+     * drop runs first, redis_conn_destroy tears down the pool's
+     * backing arena and pool_free writes a freelist link into freed
+     * memory.  See redis_conn_release_request. */
     CCArenaPool req_pool;
-    /* reply_arena: owner fiber bump-allocates each reply's serialized
-     * bytes (and the RedisReply slot itself) in here, then hands the
-     * slot pointer to the client via reply_tx.  Client resets the
-     * arena once per batch after it has drained all `outstanding`
-     * slots into out_buf (see handle_client Phase B) — quiescent at
-     * that point because REPLY_CHAN_CAP == PIPELINE_LIMIT bounds the
-     * in-flight count and the drain fully consumes them. */
+    /* Owner stacks each batch's replies (slot + serialized bytes)
+     * into this arena; the client resets it once per batch after
+     * draining all `outstanding` slots. */
     CCArena reply_arena;
-    /* Reply channel: 1:1 (the owner is the only producer, this conn's
-     * fiber the only consumer), cap PIPELINE_LIMIT so the owner can
-     * fire-and-forget an entire pipeline burst without blocking. */
+    /* Owner → client reply stream (1:1, cap PIPELINE_LIMIT so the
+     * owner never blocks publishing a full batch). */
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
 } RedisConn;
 
-/* DbHandle: client-side view of the owner fiber.  Just the send end of
- * the shared request channel — clients hand a RedisRequest* to the
- * owner and await a RedisReply* on their own conn->reply_rx.
- *
- * This is the type that makes execute_request's signature mean
- * "talk to the db-owning fiber", not "touch this db directly". */
+/* Client-side handle on the owner fiber: just the send end of the
+ * request channel.  Clients hand a RedisRequest* across; the owner
+ * replies on conn->reply_rx. */
 typedef struct DbHandle {
     RedisRequest*[~REQUEST_CHAN_CAP N:1 >] tx;
 } DbHandle;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
-static void redis_conn_retain(RedisConn* conn);
-static void redis_conn_drop(RedisConn* conn);
+static RedisConn* redis_conn_retain(RedisConn* conn);
+static RedisConn* redis_conn_drop(RedisConn* conn);
 static void redis_conn_release_request(RedisRequest* req);
 
-/* Register the RedisConn* destroy hook so handle_client's create call
- * can use the `!> @destroy { body }` shorthand.  Per-use @destroy bodies
- * run BEFORE the registered callee (redis_conn_drop), which lets the
- * caller insert the connection's teardown-invariant step (cancel
- * reply_rx) ahead of the refcount drop. */
+/* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
+ * BEFORE the registered callee, letting handle_client cancel reply_rx
+ * ahead of the refcount drop. */
 @comptime {
     (void)cc_type_register("RedisConn*", (CCTypeHooks){
         .destroy = cc_type_destroy_call("redis_conn_drop"),
     });
 }
-
-/* Known compiler limitations this file still works around (see
- * docs/known-bugs/redis_idiomatic_async.md for the long-form writeup):
- *   - e-bound unwrap binder (Bug [3]) does not propagate the declared
- *     error type, so Phase D below uses the manual res.is_err() shape
- *     instead of `rr_fill(...) !>(e) { ... }`.
- *   - pass_result_unwrap emits a spurious terminating-body warning on
- *     every build (Bug [6]); build still succeeds.  Don't chase it. */
 
 static CCError mkerr(int err_kind, const char* msg) {
     CCError err = {0};
@@ -399,28 +359,20 @@ static RedisRequest* !>(CCError) build_request(CCArena* req_arena,
     }
 
     req->conn = conn;
-    redis_conn_retain(conn);
+    conn->retain();
     req->arena = cc_arena_detach(req_arena);
     return cc_ok(req);
 }
-/* ReqIter — non-blocking iterator over pipelined requests in the buffered
- * reader.  Owns the full parse path: pool-slot alloc, arena setup, RESP
- * parse, command-shape decode, and request build.  Three yield shapes from
- * rr_req_iter_next:
+/* Non-blocking iterator over pipelined requests in the buffered
+ * reader.  rr_req_iter_next yields:
+ *   ok(true), *out = req  → caller owns req (release via
+ *                           redis_conn_release_request).
+ *   ok(false)             → buffered bytes exhausted mid-message;
+ *                           caller must rr_fill and retry.
+ *   err(e)                → parse or allocation error; pool slot
+ *                           already returned.
  *
- *   ok(true),  *out = req  → yielded a fresh RedisRequest; caller owns it
- *                            (release via redis_conn_release_request).
- *   ok(false)              → buffered bytes exhausted mid-message; caller
- *                            must fill the reader from the socket before
- *                            retrying.  No slot consumed.
- *   err(e)                 → parse or allocation error; no request returned,
- *                            pool slot already returned.
- *
- * The iterator holds borrowed pointers to the reader and conn; its lifetime
- * must nest inside theirs.  Does not touch conn->next_request_id — the
- * caller is responsible for bumping that on successful handoff, preserving
- * today's semantic that ids are only consumed after a successful send to
- * the owner. */
+ * Borrows `reader` and `conn`; must nest inside their lifetimes. */
 typedef struct ReqIter {
     RespReader* reader;
     RedisConn* conn;
@@ -433,17 +385,13 @@ static ReqIter rr_req_iter(RespReader* reader, RedisConn* conn) {
 
 static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     RedisConn* conn = it->conn;
-    /* Out-of-slots shouldn't happen in steady state (inline execution
-     * releases each slot within one loop iteration), but be explicit
-     * rather than silently stalling the read path. */
     void* slot = cc_arena_pool_alloc(&conn->req_pool);
     if (!slot) {
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
     }
-    /* Pool slot is the fast-path root; oversized values (e.g. large SET
-     * payloads that exceed REQ_BUF_SIZE) spill into a heap slab owned by
-     * the request arena.  cc_arena_free in redis_conn_release_request frees
-     * any heap spill but leaves the pool slot intact for pool_free to reclaim. */
+    /* Fast-path root: oversized values (e.g. large SET payloads) spill
+     * into a heap slab owned by req_arena; the pool slot itself is
+     * reclaimed separately by pool_free in release_request. */
     CCArena req_arena = cc_arena_create_buffer(slot, REQ_BUF_SIZE, CC_ARENA_GROWABLE);
     if (!req_arena.base) {
         cc_arena_pool_free(&conn->req_pool, slot);
@@ -472,9 +420,8 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         return cc_err(shape_res.error());
     }
 
-    /* On success build_request detaches req_arena into req->arena, so the
-     * pool slot's ownership transfers to the returned request; on error the
-     * arena's base (the pool slot) is untouched and we return it here. */
+    /* On success build_request detaches req_arena into req->arena,
+     * transferring ownership of the slot to the returned request. */
     RedisRequest* !>(CCError) req_res =
         build_request(&req_arena, args, arg_start, req_argc, kind,
                       conn, conn->conn_id, conn->next_request_id);
@@ -672,32 +619,14 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     return cc_ok(reply_integer(value));
 }
 
-/* Owner-private dispatch: only called from owner_loop, so touching the
- * shared db here needs no lock.  Never yields (no awaits), so no other
- * fiber can observe the db mid-mutation.
+/* Owner-private dispatch.  Called only from owner_loop, so db access
+ * here needs no lock.  `@noblock` forces pass_autoblock to inline
+ * each call site rather than bouncing through the threadpool.
  *
- * Declared `@noblock` so `pass_autoblock` inlines every call site
- * instead of wrapping it in `cc_run_blocking_task_intptr` — this is a
- * tight in-memory hash op that never blocks, and threadpool bounces
- * here crater per-op latency.
- *
- * The return type is the already-lowered `CCResult_RedisReply_CCError`
- * rather than the nicer `RedisReply !>(CCError)` sugar.  That sidesteps
- * an open preprocessor bug where the `!>` base-type scanner walks
- * backward from `!>` and swallows `@noblock static` into the
- * synthesised result-type name — e.g.
- *
- *     @noblock static RedisReply !>(CCError) execute_request(...)
- *
- * lowers to
- *
- *     CCResult_noblock_static_RedisReply_CCError execute_request(...)
- *
- * losing the decl-attribute entirely.  Confirmed via
- * CC_DEBUG_AUTOBLOCK_CALLS=1: with the sugared form, the autoblock
- * callee lookup reports `noblock=0`; with the pre-lowered form, it
- * reports `noblock=1` and the call is inlined.  When the preprocessor
- * is fixed this can revert to the sugared form. */
+ * The pre-lowered CCResult return type is a workaround: writing the
+ * sugared `RedisReply !>(CCError)` here currently trips a parse error
+ * on user-defined result types in function signatures.  Revert when
+ * the parser is fixed. */
 @noblock static CCResult_RedisReply_CCError execute_request(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
@@ -770,12 +699,9 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
-/* Encode the reply into `arena`. On return, reply->kind == REDIS_REPLY_RAW and
- * reply->data points into `arena`. Bytes outlive the call exactly as long as
- * the arena does: for the per-conn reply path that's until the next
- * drain-and-reset; for write_reply_now that's the stack frame.
- *
- * `alloc(n)` expands to `cc_arena_alloc(arena, n, 1)` and bails on OOM. */
+/* Encode `reply` into `arena`.  On return reply->kind ==
+ * REDIS_REPLY_RAW and reply->data points into `arena`, valid for the
+ * arena's lifetime. */
 static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
     if (!reply || !arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize null arg"));
 
@@ -838,10 +764,8 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
 #undef alloc
 }
 
-/* Initial reply_arena size: holds up to ~PIPELINE_LIMIT replies'
- * worth of bytes without growth (owner stacks replies into the arena
- * and the client resets it once the whole batch has been copied into
- * out_buf).  Oversized replies overflow to heap blocks automatically. */
+/* Sized to hold ~PIPELINE_LIMIT replies without growth; oversized
+ * replies overflow to heap blocks automatically. */
 #define REPLY_ARENA_INITIAL (16 * 1024)
 
 static RedisConn* redis_conn_create(uint64_t conn_id) {
@@ -875,40 +799,36 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
 }
 
 static void redis_conn_destroy(RedisConn* conn) {
-    /* We only reach destroy when the last ref drops — handle_client has
-     * released its ref (via @destroy body + registered drop) AND the
-     * owner has released every per-request ref (via release_request,
-     * driven by either normal completion or the rx-cancel path after
-     * handle_client exited).  So nothing is in flight here and every
-     * pool slot has been returned to req_pool. */
+    /* Reached only when the last ref drops, after both handle_client's
+     * ref and every per-request owner ref have been released, so
+     * nothing is in flight and every pool slot has been returned. */
     cc_arena_free(&conn->reply_arena);
     cc_arena_pool_destroy(&conn->req_pool);
     cc_channel_free(conn->reply_tx);
     free(conn);
 }
 
-static void redis_conn_retain(RedisConn* conn) {
+static RedisConn* redis_conn_retain(RedisConn* conn) {
     atomic_fetch_add_explicit(&conn->refs, 1, memory_order_relaxed);
+    return conn;
 }
 
-static void redis_conn_drop(RedisConn* conn) {
+static RedisConn* redis_conn_drop(RedisConn* conn) {
     if (atomic_fetch_sub_explicit(&conn->refs, 1, memory_order_acq_rel) == 1) {
         redis_conn_destroy(conn);
     }
+    return conn;
 }
 
 static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    /* After reply_materialize, reply->data points into the arena we fed to
-     * materialize (either the per-conn reply_arena or a write_reply_now
-     * stack scratch arena). Valid for the lifetime of that arena. */
     if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
     return buffer_write_bytes(sock, conn, reply->data);
 }
 
+/* One-shot error-reporting path: materialize into a stack-backed
+ * scratch arena that starts on the reply's inline_buf and overflows
+ * to heap only for oversize encodings.  Freed on return. */
 static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
-    /* One-shot error-reporting path: materialize into a stack-backed scratch
-     * arena that starts on the reply's own inline_buf and overflows to heap
-     * only for oversize encodings. Freed on return. */
     CCArena scratch = {0};
     cc_arena_buffer(&scratch, reply.inline_buf, sizeof(reply.inline_buf));
     scratch.block_max = 0;
@@ -920,57 +840,39 @@ static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
     return ok;
 }
 
-/* Conn method: release one in-flight request + drop the matching conn ref.
+/* Release one in-flight request + drop its conn ref.  pool_free MUST
+ * precede conn_drop — see LIFETIME INVARIANT on RedisConn.req_pool.
  *
- * Pool return MUST precede the conn_drop that may be last-ref; if our drop
- * is last, conn_destroy tears down req_pool's backing arena and a later
- * pool_free would scribble into reclaimed memory.  See the LIFETIME
- * INVARIANT on RedisConn.req_pool.
- *
- * req itself is the slot: build_request places RedisRequest at offset 0 of
- * the req_pool slot (first alloc in a buffer-backed arena, aligned base).
- * arena.free() only touches req->arena's own fields; pool_free then
- * overwrites the head of the slot with the freelist link. */
+ * `req` doubles as the pool slot: build_request places RedisRequest at
+ * offset 0 of the slot (first alloc in a buffer-backed arena). */
 static void redis_conn_release_request(RedisRequest* req) {
     if (!req) return;
     RedisConn* conn = req->conn;
     if (req->arena.base) req->arena.free();
     if (conn) {
         cc_arena_pool_free(&conn->req_pool, req);
-        redis_conn_drop(conn);
+        conn->drop();
     }
 }
 
-/* Owner-side: materialize the reply into conn->reply_arena and publish
- * the slot pointer.  On allocation/send failure, close the reply stream
- * with a structured error so the client's recv surfaces the exact shape
- * (OOM vs CANCELLED) rather than a generic EOF. */
-static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
+/* Owner-side: materialize `reply` into conn->reply_arena and publish
+ * the slot.  On alloc/send failure, close reply_tx with a structured
+ * error so the client's recv surfaces the exact shape (OOM vs
+ * CANCELLED) rather than a generic EOF. */
+static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
     @errhandler(CCError e) { cc_channel_close(conn->reply_tx, cc_io_error(e)); return false; }
     if (!conn || !reply) return false;
-    /* Slot + materialized bytes both live in conn->reply_arena; the
-     * channel carries just the slot pointer.  Client resets the arena
-     * after draining a full batch — safe because owner-side allocs
-     * for this conn happen before each send, and the client only
-     * resets after it has recv'd exactly `outstanding` slots. */
-    RedisReply* slot = (RedisReply*)(cc_arena_alloc(&conn->reply_arena,
-                                                    sizeof(RedisReply),
-                                                    _Alignof(RedisReply))) !>;
-    *slot = *reply; 
-
+    RedisReply* slot = cc_arena_alloc_T(RedisReply, &conn->reply_arena) !>;
+    *slot = *reply;
     reply_materialize(slot, &conn->reply_arena) !>;
-    bool !>(CCIoError) send_res = cc_channel_send(conn->reply_tx, slot);
-    if (!cc_io_avail(send_res)) {
-        CCIoError e = send_res.ok ? cc_io_error(CC_IO_CONNECTION_CLOSED) : send_res.error();
+    return conn->reply_tx.send(slot) !>(e) {
         cc_channel_close(conn->reply_tx, e);
         return false;
-    }
-    return true;
+    };
 }
 
-/* Owner loop: drain requests, execute, reply.  The RedisDb is owned by
- * this fiber — it's stack-allocated here so it can't outlive the owner
- * and nobody else can take its address. */
+/* Owner loop: drain requests, execute, reply.  `db` is stack-local so
+ * it can't outlive the owner and nobody else can take its address. */
 @async int owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 131072)) {
@@ -985,56 +887,31 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
 
         RedisConn* conn = req->conn;
         @defer redis_conn_release_request(req);
-        /* execute_request is @noblock and returns the already-lowered
-         * CCResult directly — see its header for why it doesn't use the
-         * `RedisReply !>(CCError)` sugar. */
+
         CCResult_RedisReply_CCError exec_res = execute_request(&db, req);
         RedisReply reply = cc_is_err(exec_res)
                                ? err_reply(CCResult_RedisReply_CCError_error(exec_res))
                                : CCResult_RedisReply_CCError_unwrap(exec_res);
-        /* reply.data may alias db storage; owner_queue_reply materializes
-         * into conn->reply_arena (a copy) before publishing. */
-        (void)owner_queue_reply(conn, &reply);
+        /* reply.data may alias db storage; queue_reply copies into
+         * conn->reply_arena before publishing. */
+        (void)conn->queue_reply(&reply);
     }
     return 0;
 }
 
-/* Per-connection driver.  Each outer iteration is one batch round-trip:
+/* Per-connection driver.  Each outer iteration is one batch:
  *
- *   submit  - parse buffered RESP requests and hand them to the owner,
- *             bounded by PIPELINE_LIMIT.
- *   drain   - recv that many replies back, write each into the output
- *             buffer, then reset the reply arena.
+ *   submit  - parse up to PIPELINE_LIMIT buffered RESP requests and
+ *             hand them to the owner.
+ *   drain   - recv the matching replies, write them into out_buf,
+ *             then reset reply_arena.
  *   flush   - one socket write for the whole batch.
- *   rr_fill - park until more bytes arrive or EOF.
- *
- * bug [F6]: submit and drain would read better as named helpers, but
- *           async_ast's parameter / frame-field scanner leaks text
- *           from neighbouring @async bodies and from `!>` expansions
- *           into the helper's signature, so the four phases stay
- *           inline below until that scanner learns proper bounds.
- *
- * db serialization is by channel topology -- the request channel is
- * multi-producer single-consumer, and the owner fiber is the sole
- * receiver, not by pinning workers; the scheduler is free to use any
- * number of OS threads.
- *
- * Pipelining comes for free: a client that ships 16 requests in a
- * single RESP burst gets 16 submit/drain hops per outer iteration
- * instead of 16 round-trips. */
+ *   rr_fill - park until more bytes arrive or EOF. */
 @async int handle_client(CCSocket client, DbHandle* h, uint64_t conn_id) {
     @defer client.close();
-    /* Teardown order -- cancel the per-conn reply rx first, then
-     * drop the refcount -- is encoded in the @destroy body plus the
-     * registered post-callee redis_conn_drop.  Cancel first so any
-     * owner-side send still in flight completes with a cancelled
-     * CCIoError instead of wedging on a full reply channel; the drop
-     * then races the owner's own per-request refs to zero and
-     * redis_conn_destroy fires on the last one out.
-     *
-     * bug: async_ast picks up calls or parentheticals in this comment
-     *      as frame-field declarations -- keep the prose flat here.
-     *      Tracked as [F6]. */
+    /* Teardown: cancel reply_rx first (unblocks any owner-side send
+     * stuck on a full reply channel), then drop the ref.  Encoded via
+     * the @destroy body plus the registered redis_conn_drop. */
     RedisConn* conn = redis_conn_create(conn_id) !> { return 1; } @destroy {
         conn->reply_rx.cancel();
     };
@@ -1044,16 +921,13 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
     while (true) {
-        /* Batch-scope policy: any CCError surfaced via !> (parse error
-         * or owner channel unavailable) becomes one err_reply to the
-         * client and we tear down via the outer @defer. */
+        /* Any CCError surfaced via !> in this batch becomes one
+         * err_reply and we tear down via the outer @defer. */
         @errhandler(CCError e) {
             (void)write_reply_now(&client, conn, err_reply(e));
             return 0;
         }
 
-        /* submit: parse up to PIPELINE_LIMIT requests from the
-         * reader's buffered bytes and hand each to the owner. */
         size_t outstanding = 0;
         for (size_t s = 0; s < PIPELINE_LIMIT; s++) {
             RedisRequest* req = NULL;
@@ -1069,10 +943,8 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
             outstanding++;
         }
 
-        /* drain + flush: REPLY_CHAN_CAP == PIPELINE_LIMIT guarantees
-         * the owner's per-conn sends never block, so draining exactly
-         * `outstanding` replies both pulls each slot for writing AND
-         * drives the arena back to quiescence before the reset. */
+        /* Draining exactly `outstanding` replies also drives
+         * reply_arena back to quiescence before the reset. */
         while (outstanding > 0) {
             RedisReply* slot = NULL;
             conn->reply_rx.recv(&slot) !> { return 0; };
@@ -1082,16 +954,11 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
         cc_arena_reset(&conn->reply_arena);
         if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
 
-        /* rr_fill parks the fiber until the socket has more bytes or
-         * EOF.  `!>(e) { ... }` would read better here, but the
-         * binder lowers `e` as __CCGenericError rather than the
-         * declared CCIoError, so destructure manually for now. */
-        bool !>(CCIoError) fill_res = rr_fill(&reader, &client);
-        if (fill_res.is_err()) {
-            write_reply_now(&client, conn, io_err_reply(fill_res.error()));
+        bool more = rr_fill(&reader, &client) !>(e) {
+            write_reply_now(&client, conn, io_err_reply(e));
             return 0;
-        }
-        if (!fill_res.value()) return 0;  /* clean EOF */
+        };
+        if (!more) return 0;
     }
 }
 
@@ -1107,17 +974,13 @@ int main(int argc, char** argv) {
     char addr[64];
     snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
 
-    /* cc_tcp_listen is an out-param API — can't !> it, so we guard
-     * explicitly.  Everything else in this function uses unwrap sugar. */
+    /* cc_tcp_listen uses an out-param, so guard explicitly instead
+     * of !>; everything else in this function uses unwrap sugar. */
     CCNetError err = CC_NET_OK;
     CCListener ln = cc_tcp_listen(addr, strlen(addr), &err);
     if (err != CC_NET_OK) { fprintf(stderr, "listen error: %d\n", err); return 1; }
     @defer ln.close();
 
-    /* Shared request channel.  N-producer (every client fiber), 1-consumer
-     * (the owner fiber).  Capacity absorbs arrival bursts; when full,
-     * senders block and natural backpressure propagates out to the
-     * client's socket read loop. */
     RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;
     RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx;
     CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
@@ -1131,9 +994,8 @@ int main(int argc, char** argv) {
 
     {
         CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-        /* close_on(req_tx): nursery cancellation closes the tx end, which
-         * causes owner_loop's recv to return Ok(false) and the owner to
-         * exit cleanly — no explicit shutdown-is-happening flag needed. */
+        /* On cancel, close req_tx so owner_loop's recv returns
+         * Ok(false) and the owner exits cleanly. */
         (void)server->close_on(req_tx);
 
         static const int shutdown_sigs[] = { SIGINT, SIGTERM };
@@ -1155,12 +1017,9 @@ int main(int argc, char** argv) {
                     break;
                 }
 
-                /* Disable Nagle's algorithm on accepted sockets. Without this,
-                 * redis-benchmark's pipelined pattern (write 16 requests, wait
-                 * for 16 replies, repeat) interacts badly with Nagle + delayed
-                 * ACKs and produces intermittent multi-second stalls where the
-                 * server has replies to send but TCP coalesces them waiting
-                 * for an ACK that the client delays. */
+                /* TCP_NODELAY: redis-benchmark's pipelined pattern
+                 * (write N, read N, repeat) interacts with Nagle +
+                 * delayed-ACK to produce multi-second stalls. */
                 extern int setsockopt(int, int, int, const void*, unsigned int);
                 int one = 1;
                 (void)setsockopt(client.fd, CC_IPPROTO_TCP, CC_TCP_NODELAY, &one, sizeof(one));

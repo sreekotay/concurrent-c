@@ -1,0 +1,32 @@
+// Smoke: UFCS method call whose receiver is itself a chained member access
+// `obj->field.method(args)`.
+//
+// Regression: the AST UFCS pass used to fall back to a range-based span
+// scanner whose delimiter list treated `>` as an expression terminator,
+// cutting the receiver at `field` and emitting broken C like
+// `obj->cc_channel_send(field, args)`.  `->` must be recognized as a
+// member-access chain continuation, not a delimiter.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Conn {
+    int*[~4 1:1 >] tx;
+} Conn;
+
+static bool queue(Conn* c, int* p) {
+    @errhandler(CCError e) { (void)e; return false; }
+    // `c->tx.send(p)` — receiver is `c->tx`, method is `send`.
+    return c->tx.send(p) !>(e) { (void)e; return false; };
+}
+
+int main(void) {
+    int*[~4 1:1 >] tx;
+    int*[~4 1:1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    (void)ch;
+    Conn c = { tx };
+    int v = 42;
+    bool ok = queue(&c, &v);
+    printf("ok=%d\n", ok ? 1 : 0);
+    return 0;
+}

@@ -404,7 +404,22 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             memcpy(concrete_name, src + i, j - i);
             concrete_name[j - i] = '\0';
 
-            if (cc_result_spec_is_stdlib_predeclared_name(concrete_name)) {
+            /* Stdlib-predeclared result specs: the struct typedef itself is
+             * emitted by a `CC_DECL_RESULT_SPEC(...)` in a stdlib header,
+             * so codegen skips re-emitting it.  But we STILL want this spec
+             * in `cc__cg_result_specs` so the `_Generic` enumeration for
+             * `__cc_uw_*` gets a per-type arm — otherwise UFCS-expanded
+             * stdlib macros (e.g. `tx.send(x) !>(e) { ... }` which expands
+             * to a `CCResult_bool_CCIoError`-valued stmt-expr) silently
+             * fall through to the raw-pointer default arm and the binder
+             * `e` degrades to `__CCGenericError`.
+             * See docs/known-bugs/redis_idiomatic_async.md [F8]. */
+            const CCStdlibPredeclaredResult* pre =
+                cc_result_spec_lookup_stdlib_predeclared(concrete_name);
+            if (pre) {
+                cc__cg_add_result_type(pre->ok_type, strlen(pre->ok_type),
+                                       pre->err_type, strlen(pre->err_type),
+                                       pre->mangled_ok, pre->mangled_err);
                 i = j;
                 continue;
             }

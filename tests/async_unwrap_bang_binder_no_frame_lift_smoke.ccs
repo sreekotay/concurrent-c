@@ -1,0 +1,46 @@
+/* Smoke: inside an `@async` function, the user-named binder in
+ * `CALL !>(e) { use(e); ... };` must NOT be frame-lifted by async_ast.
+ *
+ * Regression guard for bug [F9] in docs/known-bugs/redis_idiomatic_async.md.
+ * pass_result_unwrap now mangles the user binder to
+ * `__cc_pu_bind_<id>_<name>`, which matches async_ast's existing
+ * `__cc_pu_` no-frame-lift rule and keeps the binder a true local.
+ * Without the fix the state-machine lowering emitted an invalid
+ * `TYPE __f->e = ...;` decl (lvalue expression in a declarator) after
+ * the identifier-rewrite pass rewrote `e` -> `__f->e` inside the
+ * generated binder declaration itself. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_err_calls = 0;
+
+bool !>(CCError) may_fail(bool want_err) {
+    if (want_err) return cc_err(CC_ERR_INVALID_ARG, "boom");
+    return cc_ok(true);
+}
+
+@async int work(bool want_err) {
+    @errhandler(CCError e) { (void)e; return 99; }
+    /* The key F9 invariant: `e` is the user-written binder name.  With
+     * the fix it's mangled to `__cc_pu_bind_<id>_e` and NOT frame-
+     * lifted, so the generated `TYPE e = ...;` decl stays valid C.
+     * We observe correctness via a side-effect counter and via the
+     * unwrapped value on the success path. */
+    bool b = may_fail(want_err) !>(e) {
+        g_err_calls++;
+        if (e.kind == CC_ERR_INVALID_ARG) g_err_calls += 10;
+        @err(e);
+    };
+    return b ? 1 : 0;
+}
+
+int main(void) {
+    CCTaskIntptr t1 = work(false);
+    intptr_t rc1 = cc_block_on_intptr(t1);
+    printf("ok_rc=%ld calls=%d\n", (long)rc1, g_err_calls);
+
+    CCTaskIntptr t2 = work(true);
+    intptr_t rc2 = cc_block_on_intptr(t2);
+    printf("err_rc=%ld calls=%d\n", (long)rc2, g_err_calls);
+    return 0;
+}

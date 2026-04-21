@@ -21,10 +21,29 @@ typedef enum {
     CC_IO_OTHER
 } CCIoErrorKind;
 
+#ifdef CC_PARSER_MODE
+/* In parser mode, alias CCIoError to the generic parser-mode error struct.
+ *
+ * Rationale: the `__cc_uw_err_at` macro in cc_result.cch dispatches via
+ * `_Generic` and, for any `__CCResultGeneric` (which all parser-mode
+ * `CCResult_T_E` typedefs flatten to), yields `.u.error` of type
+ * `__CCGenericError`.  An untyped `!>(e) BODY` binder therefore types `e`
+ * as `__CCGenericError`.  Concrete stdlib error structs like `CCIoError`
+ * must be structurally identical to `__CCGenericError` in parser mode, or
+ * uses of the binder across parameter boundaries (e.g. `cc_channel_close(h, e)`
+ * where the parameter is `CCIoError`) fail to type-check during TCC's
+ * parser pass — even though the same code is fine in the real compile,
+ * where `visit_codegen.c` enumerates concrete `_Generic` arms.
+ *
+ * The real struct layout lives in the `#else` branch and drives the final
+ * compile.  See docs/known-bugs/redis_idiomatic_async.md [F8]. */
+typedef __CCGenericError CCIoError;
+#else
 typedef struct {
     CCIoErrorKind kind;
     int32_t os_code; // errno or platform-specific code; 0 when not applicable.
 } CCIoError;
+#endif
 
 // Create CCIoError from a kind (os_code = 0).
 static inline CCIoError __cc_io_error_from_kind(CCIoErrorKind kind) {

@@ -207,7 +207,7 @@ CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
    smart-lowering CCSocket -> cc_socket_*, CCListener -> cc_listener_*,
    matching the existing C API. */
 
-/* CCSocket / CCListener UFCS dispatch is covered by the global `CC*`
+/* CCSocket / CCListener UFCS dispatch is covered by the global `*`
    registration in cc_arena.cch; no per-type opt-in needed here. */
 
 #endif /* CC_STD_NET_H */

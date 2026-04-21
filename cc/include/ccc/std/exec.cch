@@ -92,7 +92,7 @@ CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
 /* CCCommand UFCS uses the shared generic snake_case helper:
    smart-lowering CCCommand -> cc_command_*, matching the existing C API. */
 
-/* CCCommand UFCS dispatch is covered by the global `CC*` registration
+/* CCCommand UFCS dispatch is covered by the global `*` registration
    in cc_arena.cch; no per-type opt-in needed here. */
 
 #endif /* CC_STD_EXEC_H */

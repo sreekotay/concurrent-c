@@ -861,7 +861,7 @@ static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
    `cc_string_*` aliases above to the existing CCString_* C entry
    points. */
 
-/* CCString UFCS dispatch is covered by the global `CC*` registration
+/* CCString UFCS dispatch is covered by the global `*` registration
    in cc_arena.cch; no per-type opt-in needed here. */
 
 #endif // CC_STD_STRING_H

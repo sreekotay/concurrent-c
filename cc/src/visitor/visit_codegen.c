@@ -4087,7 +4087,73 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* Insert result type declarations INTO the source at the right position.
            They must come AFTER custom type definitions but BEFORE functions that use them.
-           Find the first CCResult_ usage and insert before that line (at file scope). */
+           Find the first CCResult_ usage and insert before that line (at file scope).
+
+           Also: if the unified unwrap primitives appear in the lowered source
+           (meaning a `!>` / `?>` / `@err` lowered to `__cc_uw_*`), seed the
+           TU spec table with the stdlib-predeclared result specs so the
+           `_Generic` enumeration below covers result types introduced via
+           UFCS-expanded stdlib macros (e.g. `tx.send(x)` expanding to a
+           `CCResult_bool_CCIoError`-valued stmt-expr).  Without this seeding
+           the parser-mode default arm wins and binder types collapse to
+           `__CCGenericError`.  See docs/known-bugs/redis_idiomatic_async.md
+           [F8]. */
+        int uses_uw_primitives =
+            (cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                     "__cc_uw_is_err", 14) < src_ufcs_len) ||
+            (cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                     "__cc_uw_value", 13) < src_ufcs_len) ||
+            (cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                     "__cc_uw_err_at", 14) < src_ufcs_len);
+        if (uses_uw_primitives) {
+            int pi;
+            if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: specs_before=%zu\n", cc__cg_result_specs.count);
+            for (pi = 0; ; pi++) {
+                const CCStdlibPredeclaredResult* pre =
+                    cc_result_spec_lookup_stdlib_predeclared_by_index(pi);
+                if (!pre) break;
+                if (cc_result_spec_table_find_by_name(&cc__cg_result_specs,
+                                                      pre->concrete_name)) continue;
+                /* Only seed a stdlib predeclared spec when the TU actually
+                 * references either the `CCResult_T_E` concrete type or its
+                 * ok-type / err-type.  Otherwise the `_Generic` arm below
+                 * would name a typedef whose defining header `ccc/std/X.cch`
+                 * is not included by this TU, and the real-compile reparse
+                 * would fail with `unknown type name 'CCResult_...'`. */
+                size_t cname_len = strlen(pre->concrete_name);
+                int referenced =
+                    (cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                              pre->concrete_name, cname_len) < src_ufcs_len);
+                if (!referenced && pre->ok_type) {
+                    size_t okt_len = strlen(pre->ok_type);
+                    /* Strip pointer/array suffixes so we look up the bare
+                     * type name (e.g. `CCDirIter*` -> `CCDirIter`). */
+                    while (okt_len > 0 && (pre->ok_type[okt_len - 1] == '*' ||
+                                            pre->ok_type[okt_len - 1] == ' ' ||
+                                            pre->ok_type[okt_len - 1] == '\t')) {
+                        okt_len--;
+                    }
+                    if (okt_len > 0 &&
+                        cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                                 pre->ok_type, okt_len) < src_ufcs_len) {
+                        referenced = 1;
+                    }
+                }
+                if (!referenced) {
+                    if (getenv("CC_DEBUG_UW_SEED"))
+                        fprintf(stderr, "uw_seed: skipped %s (not referenced)\n", pre->concrete_name);
+                    continue;
+                }
+                (void)cc_result_spec_table_add(&cc__cg_result_specs,
+                                               pre->ok_type, strlen(pre->ok_type),
+                                               pre->err_type, strlen(pre->err_type),
+                                               pre->mangled_ok, pre->mangled_err);
+                if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: added %s\n", pre->concrete_name);
+            }
+            if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: specs_after=%zu\n", cc__cg_result_specs.count);
+        } else if (getenv("CC_DEBUG_UW_SEED")) {
+            fprintf(stderr, "uw_seed: no uw primitives detected\n");
+        }
         if (cc__cg_result_specs.count > 0) {
             /* Find first usage of any CCResult_T_E type in the source.
              * Comment/string-aware so a type name that appears only in
@@ -4104,7 +4170,48 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     earliest_pos = pos;
                 }
             }
-            
+
+            /* Fallback insertion point: if no `CCResult_T_E` name appears
+             * literally in the source (e.g. the only Result usage is via
+             * UFCS-expanded stdlib macros), insert the `_Generic`
+             * enumeration just after the last top-level `#include` so the
+             * stdlib struct definitions are visible.  Without this
+             * fallback the `#undef __cc_uw_*` block is silently skipped
+             * and the parser-mode default arm wins at TCC compile. */
+            if (earliest_pos >= src_ufcs_len && uses_uw_primitives) {
+                size_t last_include_end = 0;
+                size_t k = 0;
+                int in_lc = 0, in_bc = 0, in_s = 0, in_c = 0;
+                while (k < src_ufcs_len) {
+                    char ch = src_ufcs[k];
+                    char ch2 = (k + 1 < src_ufcs_len) ? src_ufcs[k + 1] : 0;
+                    if (in_lc) { if (ch == '\n') in_lc = 0; k++; continue; }
+                    if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k += 2; continue; } k++; continue; }
+                    if (in_s)  { if (ch == '\\' && k + 1 < src_ufcs_len) { k += 2; continue; } if (ch == '"') in_s = 0; k++; continue; }
+                    if (in_c)  { if (ch == '\\' && k + 1 < src_ufcs_len) { k += 2; continue; } if (ch == '\'') in_c = 0; k++; continue; }
+                    if (ch == '/' && ch2 == '/') { in_lc = 1; k += 2; continue; }
+                    if (ch == '/' && ch2 == '*') { in_bc = 1; k += 2; continue; }
+                    if (ch == '"')  { in_s = 1; k++; continue; }
+                    if (ch == '\'') { in_c = 1; k++; continue; }
+                    if (ch == '#') {
+                        size_t p = k + 1;
+                        while (p < src_ufcs_len && (src_ufcs[p] == ' ' || src_ufcs[p] == '\t')) p++;
+                        if (p + 7 <= src_ufcs_len && memcmp(src_ufcs + p, "include", 7) == 0) {
+                            size_t eol = p + 7;
+                            while (eol < src_ufcs_len && src_ufcs[eol] != '\n') eol++;
+                            if (eol < src_ufcs_len) eol++;
+                            last_include_end = eol;
+                            k = eol;
+                            continue;
+                        }
+                    }
+                    k++;
+                }
+                if (last_include_end > 0 && last_include_end < src_ufcs_len) {
+                    earliest_pos = last_include_end;
+                }
+            }
+
             if (earliest_pos < src_ufcs_len) {
                 /* Back up to start of line */
                 while (earliest_pos > 0 && src_ufcs[earliest_pos - 1] != '\n') {

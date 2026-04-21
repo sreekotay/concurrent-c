@@ -818,6 +818,49 @@ static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* a
     return argv;
 }
 
+/* Scan the preprocessed source for a plausible declaration/definition of
+ * the function `name`.  This is a *hint*, not an authority: we only use
+ * it to choose between two naming conventions when the registered UFCS
+ * hook emitted a snake_case name (e.g. `redis_conn_retain`) that may or
+ * may not match what the user actually declared.  If we can't find the
+ * name, we fall back to the legacy `Type_method` (PascalCase) convention
+ * so existing code that uses PascalCase keeps working alongside the new
+ * snake_case-preferred default.
+ *
+ * We accept any occurrence of `name(` preceded by something that looks
+ * like a declaration context (identifier, `*`, `)` closing a param list,
+ * or whitespace after a type-ish token).  That's slightly permissive —
+ * a stray call site `redis_conn_retain(x)` earlier in the file counts as
+ * "declared" for this heuristic, which is fine because we really just
+ * want to know "is the user using this name anywhere?" so we don't stomp
+ * on their chosen spelling. */
+static int cc__ufcs_fn_name_in_source(const char* name) {
+    const char* src = g_ufcs_source_text;
+    size_t nlen;
+    if (!src || !name || !name[0]) return 0;
+    nlen = strlen(name);
+    for (const char* p = src; *p; ++p) {
+        if (*p != name[0]) continue;
+        if (strncmp(p, name, nlen) != 0) continue;
+        /* Require a word boundary before the match. */
+        if (p != src) {
+            unsigned char pc = (unsigned char)p[-1];
+            if (pc == '_' || (pc >= '0' && pc <= '9') ||
+                (pc >= 'A' && pc <= 'Z') || (pc >= 'a' && pc <= 'z'))
+                continue;
+        }
+        /* Require `(` after the name (possibly after whitespace) to
+           confirm it's used as a callable rather than e.g. a string
+           literal fragment. */
+        {
+            const char* q = p + nlen;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') return 1;
+        }
+    }
+    return 0;
+}
+
 static int cc__emit_registered_callable(char* out,
                                         size_t cap,
                                         const char* recv,
@@ -868,7 +911,7 @@ static int cc__emit_registered_callable(char* out,
     lowered = fn(recv_type_slice, method_slice, mode_slice, argv, arg_types, &arena);
     /* Pass-through sentinel: the hook explicitly declines to handle this
      * (type, method) pair and wants the dispatcher to behave as if no
-     * hook were registered.  Used by the global `CC*` wildcard in
+     * hook were registered.  Used by the global `*` wildcard in
      * cc_arena.cch to defer to the compiler's hardcoded channel / slice
      * dispatch for types whose C API doesn't match the generic naming
      * convention (CCChan / CCChanTx / CCChanRx families).  Distinct from
@@ -901,6 +944,49 @@ static int cc__emit_registered_callable(char* out,
     if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
         fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: receiver type %s lowered %s -> %s\n",
                 recv_type_name, method, lowered_name);
+    }
+    /* Smart fallback: the global `*` registration lowers *every* CamelCase
+     * receiver to snake_case (RedisConn -> redis_conn_<method>), which is
+     * right for code that follows the idiomatic-C snake_case convention
+     * but wrong for existing code that uses PascalCase `Type_method` free
+     * functions (Point_move, Builder_add, ...).  When the emitted callee
+     * is NOT visible in the preprocessed source, drop back to the legacy
+     * dispatch path so the downstream convention-based `Type_method`
+     * emitter (in `cc__dispatch_method_for_recv_type`) gets a chance.
+     *
+     * Only triggers when the hook actually changed the mangling — if the
+     * helper already emitted `Type_method` (e.g. `CCSlice*` family), we
+     * don't re-check; it's authoritative.  `g_ufcs_source_text` is only
+     * set during pass_ufcs rewrites, so other callers keep the hook's
+     * result as-is.
+     *
+     * This is the "both conventions work" policy the global `*`
+     * registration asks for — the compiler picks whichever spelling the
+     * user actually declared, and you don't have to rename your existing
+     * `Type_method` free functions to `type_method` to opt in. */
+    if (g_ufcs_source_text && lowered_len > 0) {
+        char type_method_candidate[256];
+        const char* t = recv_type_name;
+        size_t tlen = strlen(t);
+        /* Strip `struct ` / `union ` qualifiers to match the pattern
+           cc_ufcs_generic_cc_prefix_lower_c already strips, so the
+           two candidates are apples-to-apples. */
+        if (tlen >= 7 && memcmp(t, "struct ", 7) == 0) { t += 7; tlen -= 7; }
+        else if (tlen >= 6 && memcmp(t, "union ", 6) == 0) { t += 6; tlen -= 6; }
+        while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+        if (tlen > 0 && tlen + 1 + strlen(method) + 1 < sizeof(type_method_candidate)) {
+            memcpy(type_method_candidate, t, tlen);
+            type_method_candidate[tlen] = '_';
+            memcpy(type_method_candidate + tlen + 1, method, strlen(method));
+            type_method_candidate[tlen + 1 + strlen(method)] = '\0';
+            if (strcmp(lowered_name, type_method_candidate) != 0 &&
+                !cc__ufcs_fn_name_in_source(lowered_name) &&
+                cc__ufcs_fn_name_in_source(type_method_candidate)) {
+                /* Snake form isn't declared, PascalCase form is — defer to
+                   the fallback dispatcher so `Type_method` emits. */
+                return -1;
+            }
+        }
     }
     if (has_args) {
         if (receiver_by_value) {
@@ -1347,18 +1433,23 @@ static int cc__emit_closure_field_call(char* out,
          * free UFCS function of the same name and we signal FIELD_WINS
          * so the caller leaves `recv.method(args)` untouched.
          *
-         * Opt-out: if the receiver type has a registered UFCS hook
-         * (cc_type_register(".ufcs = ...")), treat that as the user
-         * explicitly taking ownership of method dispatch.  (Historical
-         * note: prior parser-mode-only scaffold fields like `int
-         * (*ping)();` have been removed now that TCC parses UFCS
-         * natively, but the opt-out still matters for user types whose
-         * C bodies genuinely carry a field whose name collides with a
-         * UFCS method the user wants to dispatch via the hook.) */
+         * Opt-out: if the receiver type has a *specifically* registered
+         * UFCS hook (cc_type_register(".ufcs = ...")) — i.e. one whose
+         * pattern names the type with at least one non-wildcard
+         * character — treat that as the user explicitly taking
+         * ownership of method dispatch.  The global `*` catch-all
+         * registration in cc_arena.cch doesn't count: it's a default
+         * that applies to every CamelCase type, and letting it override
+         * field-wins would silently break C-first dispatch for any
+         * user struct with a function-pointer field.  We detect this by
+         * asking the symbol-table lookup for the pattern's specificity
+         * score (length of the literal prefix), which is 0 for bare `*`
+         * and >0 for any named pattern. */
         const void* fn_ptr = NULL;
+        size_t match_score = 0;
         if (g_ufcs_symbols &&
-            cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, type_for_lookup, &fn_ptr) == 0 &&
-            fn_ptr) {
+            cc_symbols_lookup_type_ufcs_callable_ex(g_ufcs_symbols, type_for_lookup, &fn_ptr, &match_score) == 0 &&
+            fn_ptr && match_score > 0) {
             return CC_UFCS_EMIT_UNRESOLVED;
         }
         return CC_UFCS_EMIT_FIELD_WINS;

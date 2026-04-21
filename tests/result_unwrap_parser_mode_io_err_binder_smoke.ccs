@@ -1,0 +1,39 @@
+// Smoke: untyped `!>(e) BODY` binder over a stdlib call that returns
+// `CCResult_bool_CCIoError`, with the binder `e` passed to a parameter
+// typed `CCIoError`.
+//
+// Regression: in parser mode, `_Generic` dispatch for `__cc_uw_err_at` on
+// a Result-struct flattens the error type to `__CCGenericError`.  Without
+// a parser-mode alias of `CCIoError -> __CCGenericError`, the binder `e`
+// fails to type-check at `consume_io_err(e)` during TCC's first parse
+// pass, even though the real compile (with per-spec `_Generic` arms) types
+// `e` as the declared error correctly.
+// See docs/known-bugs/redis_idiomatic_async.md [F8].
+#include <ccc/std/prelude.cch>
+#include <ccc/std/dir.cch>
+#include <stdio.h>
+
+static int last_err_kind = 0;
+
+static void consume_io_err(CCIoError e) {
+    last_err_kind = (int)e.kind;
+}
+
+static bool remove_dir(const char* path) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "outer kind=%d\n", (int)e.kind);
+        return false;
+    }
+    // Expression-position `!>(e)` binder — untyped.  Body passes `e` to
+    // a `CCIoError`-typed parameter.  This is the F8 shape.
+    return cc_dir_remove(path) !>(e) {
+        consume_io_err(e);
+        return false;
+    };
+}
+
+int main(void) {
+    bool ok = remove_dir("/nonexistent_path_for_smoke_test_xyz_123");
+    printf("ok=%d got_err=%d\n", ok ? 1 : 0, last_err_kind != 0 ? 1 : 0);
+    return 0;
+}
