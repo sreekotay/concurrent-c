@@ -53,6 +53,20 @@ CC_DEFINE_SB_APPEND_FMT
 
 static int cc__token_is(const char* s, size_t len, size_t i, const char* tok);
 
+/* True if the token at `i` is not immediately preceded (past ASCII
+ * whitespace) by a C member-access operator (`.` or `->`). Intended for
+ * statement-position keywords like `cancel`, which must not match a method
+ * call named `cancel` (e.g. `obj->chan.cancel()`). */
+static int cc__not_member_access_prefix(const char* s, size_t i) {
+    size_t k = i;
+    while (k > 0 && (s[k - 1] == ' ' || s[k - 1] == '\t' ||
+                     s[k - 1] == '\r' || s[k - 1] == '\n')) k--;
+    if (k == 0) return 1;
+    if (s[k - 1] == '.') return 0;
+    if (k >= 2 && s[k - 2] == '-' && s[k - 1] == '>') return 0;
+    return 1;
+}
+
 static void cc__ensure_line_start(char** out, size_t* out_len, size_t* out_cap) {
     if (!out || !out_len || !out_cap) return;
     if (*out_len == 0) return;
@@ -779,8 +793,12 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             continue;
         }
 
-        /* `cancel ...;` is not implemented: hard error. */
-        if (cc__token_is(in_src, in_len, i, "cancel")) {
+        /* `cancel ...;` is reserved for named-defer cancellation and not
+         * implemented yet: hard error. Do NOT misclassify a method call
+         * named `cancel` (e.g. `chan.cancel()` / `obj->cancel()`) — that's
+         * an ordinary user call and must pass through untouched. */
+        if (cc__token_is(in_src, in_len, i, "cancel") &&
+            cc__not_member_access_prefix(in_src, i)) {
             char rel[1024];
             const char* f = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
             cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
