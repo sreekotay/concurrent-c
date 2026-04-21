@@ -2399,6 +2399,13 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
                 in_src, in_len,
                 ctx ? ctx->input_path : NULL);
             if (ir) {
+                if (getenv("CC_IR_DUMP")) {
+                    fprintf(stderr,
+                            "[CC_IR_DUMP] result_unwrap input for %s (%zu children):\n",
+                            ctx && ctx->input_path ? ctx->input_path : "<input>",
+                            ir->children_len);
+                    cc_ir_dump(ir, stderr);
+                }
                 char*  emit_buf = NULL;
                 size_t emit_len = 0;
                 if (cc_ir_emit_text(ir, &emit_buf, &emit_len) == 0) {

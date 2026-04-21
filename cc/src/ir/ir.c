@@ -9,6 +9,7 @@
 #include <stdio.h>
 
 #include "ast/ast.h"
+#include "util/text.h"
 
 /* ------------------------------------------------------------------- */
 /* Arena                                                                */
@@ -117,10 +118,12 @@ CCIrNode* cc_ir_node_new(CCIrArena* arena, CCIrKind kind, CCIrSpan span) {
     if (!arena) return NULL;
     CCIrNode* n = (CCIrNode*)cc_ir_alloc(arena, sizeof(*n));
     if (!n) return NULL;
-    n->id   = arena->next_id++;
-    n->kind = kind;
-    n->span = span;
-    n->stub = NULL;
+    n->id       = arena->next_id++;
+    n->kind     = kind;
+    n->span     = span;
+    n->stub     = NULL;
+    n->raw_text = NULL;
+    n->raw_len  = 0;
     n->children     = NULL;
     n->children_len = 0;
     n->children_cap = 0;
@@ -150,17 +153,79 @@ int cc_ir_node_append_child(CCIrArena* arena,
 }
 
 /* ------------------------------------------------------------------- */
-/* Build-from-stub (phase-1 minimal)                                    */
+/* Build-from-stub: phase-1a recogniser                                 */
 /* ------------------------------------------------------------------- */
 
-/* For phase 1 we do NOT yet recognise `!>` / `?>` constructs during
- * build — `pass_result_unwrap` will carve them out as it ports.  The
- * initial tree is a single OPAQUE_TEXT child under a FILE root.
+/* Allocate an OPAQUE_TEXT child covering src[byte_start..byte_end) and
+ * append it to `file`.  No-op for empty slices. */
+static int cc_ir_append_opaque(CCIrArena* arena, CCIrNode* file,
+                               const char* src,
+                               size_t byte_start, size_t byte_end) {
+    if (byte_end <= byte_start) return 0;
+    CCIrSpan sp   = {byte_start, byte_end, 0, 0};
+    CCIrNode* t   = cc_ir_node_new(arena, CC_IR_OPAQUE_TEXT, sp);
+    if (!t) return -1;
+    size_t slen   = byte_end - byte_start;
+    t->raw_text   = cc_ir_strndup(arena, src + byte_start, slen);
+    if (!t->raw_text) return -1;
+    t->raw_len    = slen;
+    return cc_ir_node_append_child(arena, file, t);
+}
+
+/* Sigil-token recogniser (step 1.3a).
  *
- * This keeps the invariant "an unported pass can still operate on the
- * equivalent of today's src_ufcs" by consulting the opaque text.  As
- * passes port, they replace their construct's OPAQUE_TEXT slice with
- * typed nodes. */
+ * For every top-level `!>` / `?>` in `src[0..src_len)`, emit a typed
+ * CC_IR_UNWRAP_BANG / CC_IR_UNWRAP_Q node with span covering just the
+ * 2 sigil bytes, interleaved with CC_IR_OPAQUE_TEXT spans for
+ * everything else.
+ *
+ * Phase-1a deliberately records only the sigil position and kind.  The
+ * structured payload (lhs / body / binder / types) is left zero — step
+ * 1.3b will extend the recogniser to walk the construct boundaries and
+ * populate those fields, and only then will the pass-port replace the
+ * legacy text rewriter.
+ *
+ * The value today is two-fold:
+ *   1. Proves the IR can accurately locate every `!>` / `?>` site in
+ *      real source, skipping comments, strings, `!=`, `?:`, and so on
+ *      (via `cc_find_substr_top_level`).  Correctness is verified by
+ *      running `CC_VERIFY_IR=1 tools/cc_test` — the emitter rebuilds
+ *      the text byte-for-byte from the tree, so any mis-identification
+ *      surfaces as a verifier diagnostic.
+ *   2. Gives subsequent passes a structured handle to iterate over
+ *      unwrap sites (`file->children` filtered by kind) instead of
+ *      re-scanning the text from scratch. */
+static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
+                              const char* src, size_t n) {
+    size_t cursor = 0;
+    while (cursor < n) {
+        size_t bang = cc_find_substr_top_level(src, cursor, n, "!>", 2);
+        size_t qmrk = cc_find_substr_top_level(src, cursor, n, "?>", 2);
+        size_t next_sigil = bang < qmrk ? bang : qmrk;
+        if (next_sigil >= n) {
+            /* No more sigils; emit the trailing text slice. */
+            return cc_ir_append_opaque(arena, file, src, cursor, n);
+        }
+        /* Emit opaque prefix before the sigil. */
+        if (cc_ir_append_opaque(arena, file, src, cursor, next_sigil) != 0)
+            return -1;
+        /* Emit the sigil as a typed node.  raw_text carries the 2-byte
+         * sigil so the emitter can reproduce it exactly, structured
+         * payload stays zero-initialised until step 1.3b. */
+        CCIrKind  k  = (src[next_sigil] == '!') ? CC_IR_UNWRAP_BANG
+                                                : CC_IR_UNWRAP_Q;
+        CCIrSpan  sp = {next_sigil, next_sigil + 2, 0, 0};
+        CCIrNode* un = cc_ir_node_new(arena, k, sp);
+        if (!un) return -1;
+        un->raw_text = cc_ir_strndup(arena, src + next_sigil, 2);
+        if (!un->raw_text) return -1;
+        un->raw_len  = 2;
+        if (cc_ir_node_append_child(arena, file, un) != 0) return -1;
+        cursor = next_sigil + 2;
+    }
+    return 0;
+}
+
 CCIrNode* cc_ir_build_from_stub(CCIrArena* arena,
                                 const CCASTRoot* root,
                                 const char* src,
@@ -173,16 +238,17 @@ CCIrNode* cc_ir_build_from_stub(CCIrArena* arena,
     CCIrSpan file_span = {0, src_len, 1, 1};
     CCIrNode* file = cc_ir_node_new(arena, CC_IR_FILE, file_span);
     if (!file) return NULL;
+    /* The root gets an arena copy of the full source too — handy for
+     * debug dumps and emitter fallback paths that need to slice bytes
+     * beyond a specific child's span. */
+    file->raw_text = cc_ir_strndup(arena, src ? src : "", src_len);
+    if (!file->raw_text) return NULL;
+    file->raw_len  = src_len;
 
-    char* buf = cc_ir_strndup(arena, src ? src : "", src_len);
-    if (!buf) return NULL;
-
-    CCIrNode* chunk = cc_ir_node_new(arena, CC_IR_OPAQUE_TEXT, file_span);
-    if (!chunk) return NULL;
-    chunk->as.opaque.text = buf;
-    chunk->as.opaque.len  = src_len;
-
-    if (cc_ir_node_append_child(arena, file, chunk) != 0) return NULL;
+    if (src && src_len > 0) {
+        if (cc_ir_carve_sigils(arena, file, src, src_len) != 0)
+            return NULL;
+    }
     return file;
 }
 
@@ -214,24 +280,24 @@ static int cc_ir_emit_node(const CCIrNode* n,
     if (!n) return 0;
     switch (n->kind) {
         case CC_IR_FILE: {
+            /* The FILE root's own raw_text is not emitted — only its
+             * children contribute bytes to the output.  The raw copy
+             * on the root is for debug/fallback lookups. */
             for (size_t i = 0; i < n->children_len; ++i) {
                 if (cc_ir_emit_node(n->children[i], buf, len, cap) != 0)
                     return -1;
             }
             return 0;
         }
-        case CC_IR_OPAQUE_TEXT: {
-            return cc_ir_emit_append(buf, len, cap,
-                                     n->as.opaque.text,
-                                     n->as.opaque.len);
-        }
+        case CC_IR_OPAQUE_TEXT:
         case CC_IR_UNWRAP_BANG:
-        case CC_IR_UNWRAP_Q:
-            /* Step 1.3+ will implement emitters here.  Until then, a
-             * build that produces these kinds must wrap the emitter or
-             * the phase-1 port isn't complete.  Return an error so the
-             * regression is loud. */
-            return -1;
+        case CC_IR_UNWRAP_Q: {
+            /* Phase-1a: every recognised node carries its literal source
+             * slice in `raw_text`, so the emitter is identical across
+             * kinds.  Structured emitters for UNWRAP_BANG / UNWRAP_Q
+             * will land in step 1.3b and will stop consulting raw_text. */
+            return cc_ir_emit_append(buf, len, cap, n->raw_text, n->raw_len);
+        }
         case CC_IR_INVALID:
         default:
             return -1;
@@ -282,25 +348,30 @@ static void cc_ir_dump_node(const CCIrNode* n, FILE* fp, int depth) {
             (unsigned)n->id, cc_ir_kind_name(n->kind),
             n->span.byte_start, n->span.byte_end,
             n->span.orig_line, n->span.orig_col);
-    if (n->kind == CC_IR_OPAQUE_TEXT) {
-        size_t shown = n->as.opaque.len > 40 ? 40 : n->as.opaque.len;
-        fprintf(fp, " text=%zu:\"", n->as.opaque.len);
+    if (n->raw_text && n->raw_len > 0) {
+        size_t shown = n->raw_len > 40 ? 40 : n->raw_len;
+        fprintf(fp, " raw=%zu:\"", n->raw_len);
         for (size_t i = 0; i < shown; ++i) {
-            char c = n->as.opaque.text[i];
+            char c = n->raw_text[i];
             if (c == '\n') fputs("\\n", fp);
             else if (c == '\t') fputs("\\t", fp);
             else if (c >= 32 && c < 127) fputc(c, fp);
             else fprintf(fp, "\\x%02x", (unsigned char)c);
         }
-        fputs(shown < n->as.opaque.len ? "...\"" : "\"", fp);
-    } else if (n->kind == CC_IR_UNWRAP_BANG || n->kind == CC_IR_UNWRAP_Q) {
-        fprintf(fp, " lhs=%zuB body=%zuB binder=%s err=%s diverges=%d stmt=%d",
-                n->as.unwrap.lhs_len,
-                n->as.unwrap.body_len,
-                n->as.unwrap.binder_name ? n->as.unwrap.binder_name : "-",
-                n->as.unwrap.err_type    ? n->as.unwrap.err_type    : "-",
-                (int)n->as.unwrap.diverges,
-                (int)n->as.unwrap.stmt_position);
+        fputs(shown < n->raw_len ? "...\"" : "\"", fp);
+    }
+    if (n->kind == CC_IR_UNWRAP_BANG || n->kind == CC_IR_UNWRAP_Q) {
+        /* Structured payload (populated starting in step 1.3b). */
+        if (n->as.unwrap.binder_name || n->as.unwrap.err_type ||
+            n->as.unwrap.body_len    || n->as.unwrap.lhs_len) {
+            fprintf(fp, " lhs=%zuB body=%zuB binder=%s err=%s diverges=%d stmt=%d",
+                    n->as.unwrap.lhs_len,
+                    n->as.unwrap.body_len,
+                    n->as.unwrap.binder_name ? n->as.unwrap.binder_name : "-",
+                    n->as.unwrap.err_type    ? n->as.unwrap.err_type    : "-",
+                    (int)n->as.unwrap.diverges,
+                    (int)n->as.unwrap.stmt_position);
+        }
     }
     fputc('\n', fp);
     for (size_t i = 0; i < n->children_len; ++i) {
