@@ -44,6 +44,9 @@ $(OUT_DIR)/redis_hybrid_debug: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DI
 $(OUT_DIR)/redis_hybrid_profile: redis_hybrid.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_hybrid.ccs --release --cc-flags "-g"
 
+$(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "-g"
+
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
@@ -51,6 +54,7 @@ redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_hybrid: $(OUT_DIR)/redis_hybrid
 redis_hybrid_debug: $(OUT_DIR)/redis_hybrid_debug
 redis_hybrid_profile: $(OUT_DIR)/redis_hybrid_profile
+redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_cc: $(OUT_DIR)/redis_cc
 
 all: redis_idiomatic redis_hybrid redis_cc
