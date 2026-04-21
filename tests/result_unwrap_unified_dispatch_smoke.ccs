@@ -1,0 +1,100 @@
+/* Smoke test for the unified `!>` / `?>` lowering pipeline.
+ *
+ * Before the unification, `pass_result_unwrap.c` text-scanned the LHS of
+ * `!>` / `?>` to decide between two different C lowerings:
+ *   - Result-struct LHS -> `.ok` / `.u.value` / `.u.error`
+ *   - Pointer-returning-call LHS -> `== NULL` / identity / synthesized
+ *     `CC_ERR_NULL`
+ *
+ * Now the lowering always emits a single shape:
+ *   `__cc_uw_is_err(tmp)` / `__cc_uw_value(tmp)` / `__cc_uw_err_at(...)`
+ * and the generated C dispatches via `_Generic` — so a single translation
+ * unit can freely mix both LHS kinds through `!>` / `?>` without the
+ * compiler having to guess at pass time.
+ *
+ * This test exercises three of the four call sites in
+ * `pass_result_unwrap.c` on both Result and pointer LHSs:
+ *   - `?>` ternary (expr position)
+ *   - `!>` statement position
+ *   - `!>` expression position with body
+ * (The fourth site — expression-position bare delegate `!>;` — requires
+ * an enclosing `@errhandler` and is covered separately by
+ * result_unwrap_bang_forward_smoke.ccs.)
+ *
+ * If the unified dispatch ever regresses, at least one arm will misfire
+ * (e.g. the Result arm will be lowered as a pointer NULL check, giving
+ * the wrong error/value semantics). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+static CCArena g_arena;
+
+static void init(void) {
+    g_arena = cc_arena_create(4096);
+}
+
+/* -- Result LHS ----------------------------------------------------- */
+static int!>(CCError) r_double(int x) {
+    if (x < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok(x * 2);
+}
+
+/* -- Pointer LHS ---------------------------------------------------- */
+static void* p_alloc(size_t n) {
+    /* `cc_arena_alloc` returns NULL on OOM; for negative `n` we force NULL
+     * to exercise the NULL path without actually allocating. */
+    if (n == 0) return NULL;
+    return cc_arena_alloc(&g_arena, n, 1);
+}
+
+/* 1. `?>` ternary: Result LHS with binder. */
+static int qr_result(int x) {
+    int v = r_double(x) ?>(e) ({ (void)e; -1; });
+    return v;
+}
+
+/* 2. `?>` ternary: pointer LHS with binder. */
+static int qr_pointer(size_t n) {
+    void* p = p_alloc(n) ?>(e) ({ (void)e; NULL; });
+    return p != NULL ? 1 : 0;
+}
+
+/* 3. `!>` statement position: Result LHS, no binder. */
+static int st_result(int x) {
+    r_double(x) !> return 0;
+    return 1;
+}
+
+/* 4. `!>` statement position: pointer LHS, no binder. */
+static int st_pointer(size_t n) {
+    p_alloc(n) !> return 0;
+    return 1;
+}
+
+/* 7. `!>` expr-position with body: Result LHS. */
+static int ex_body_result(int x) {
+    int v = r_double(x) !>(e) { (void)e; return -1; };
+    return v;
+}
+
+/* 8. `!>` expr-position with body: pointer LHS. */
+static int ex_body_pointer(size_t n) {
+    void* p = p_alloc(n) !>(e) { (void)e; return -1; };
+    return p != NULL ? 1 : 0;
+}
+
+int main(void) {
+    init();
+
+    printf("qr result ok=%d err=%d\n", qr_result(3), qr_result(-1));
+    printf("qr pointer ok=%d err=%d\n", qr_pointer(8), qr_pointer(0));
+    printf("st result ok=%d err=%d\n", st_result(3), st_result(-1));
+    printf("st pointer ok=%d err=%d\n", st_pointer(8), st_pointer(0));
+
+    printf("ex_body result ok=%d err=%d\n", ex_body_result(3), ex_body_result(-1));
+    printf("ex_body pointer ok=%d err=%d\n", ex_body_pointer(8), ex_body_pointer(0));
+    printf("unified_dispatch: OK\n");
+    return 0;
+}

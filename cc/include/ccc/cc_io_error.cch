@@ -27,7 +27,7 @@ typedef struct {
 } CCIoError;
 
 // Create CCIoError from a kind (os_code = 0).
-static inline CCIoError cc_io_error(CCIoErrorKind kind) {
+static inline CCIoError __cc_io_error_from_kind(CCIoErrorKind kind) {
     return (CCIoError){kind, 0};
 }
 
@@ -35,6 +35,46 @@ static inline CCIoError cc_io_error(CCIoErrorKind kind) {
 static inline CCIoError cc_io_error_os(CCIoErrorKind kind, int os_code) {
     return (CCIoError){kind, os_code};
 }
+
+/* Map a generic CCError (produced by `!>` on a pointer LHS, or returned
+ * from a CCError-typed fallible function) onto the matching CCIoError.
+ * This is the conversion that makes the idiomatic pattern
+ *     @errhandler(CCError e) { cc_channel_close(tx, cc_io_error(e)); ... }
+ * work cleanly: the `!>` pointer lowering synthesizes a CCError (that's
+ * the one error type every handler can catch), and `cc_io_error(e)`
+ * projects it into the I/O error domain so it can be threaded into
+ * channel-close / result-error sites without manually unpacking
+ * `.kind`.  The mapping is best-effort — errors outside the I/O vocab
+ * (e.g. CC_ERR_INTERNAL) collapse to CC_IO_OTHER. */
+static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
+    CCIoError r = {CC_IO_OTHER, 0};
+    /* Use numeric CCErrorKind values (the enum is hidden behind
+     * CC_PARSER_MODE, so CCError.kind is `int` during parser mode and
+     * the symbolic names may not be in scope at this header's early
+     * include point).  Keep this table in lock-step with the
+     * CCErrorKind enum in cc_result.cch. */
+    switch ((int)e.kind) {
+        case  4 /* CC_ERR_CANCELLED */:      r.kind = CC_IO_CANCELLED; break;
+        case  5 /* CC_ERR_INVALID_ARG */:    r.kind = CC_IO_INVALID_ARGUMENT; break;
+        case  6 /* CC_ERR_OUT_OF_MEMORY */:  r.kind = CC_IO_OUT_OF_MEMORY; break;
+        case  7 /* CC_ERR_NOT_FOUND */:      r.kind = CC_IO_FILE_NOT_FOUND; break;
+        case  8 /* CC_ERR_PERMISSION */:     r.kind = CC_IO_PERMISSION_DENIED; break;
+        case 10 /* CC_ERR_WOULD_BLOCK */:    r.kind = CC_IO_BUSY; break;
+        case 11 /* CC_ERR_CLOSED */:         r.kind = CC_IO_CONNECTION_CLOSED; break;
+        default:                              r.kind = CC_IO_OTHER; break;
+    }
+    return r;
+}
+
+/* `cc_io_error(x)` — overload via `_Generic` so callers can pass either
+ * a `CCIoErrorKind` (direct construction) or a `CCError` (domain
+ * conversion from the generic `!>` pointer-lowering error).  Keeping the
+ * two shapes under one surface means user code doesn't have to switch
+ * helpers based on whether the inbound error came from a typed
+ * Result-returning call or a pointer-returning one. */
+#define cc_io_error(__x__) _Generic((__x__), \
+    CCError:                __cc_io_error_from_cc_error, \
+    default:                __cc_io_error_from_kind)((__x__))
 
 // Map platform errno to our IoError kind.
 static inline CCIoError cc_io_from_errno(int err) {

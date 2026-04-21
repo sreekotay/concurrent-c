@@ -258,6 +258,16 @@ typedef __CCGenericError CCError;
 #define CC_ERROR(err_kind, err_msg) ((CCError){ (int)(err_kind), 0, 0, (err_msg) })
 #endif
 
+/* Parser-mode stubs for the error-kind enum values the lowering passes
+ * synthesize.  The real enum lives behind `#ifndef CC_PARSER_MODE`, so
+ * without these stubs identifiers like `CC_ERR_NULL` in generated code
+ * would be undeclared during parser-mode parse.  Values don't have to
+ * match the real enum — parser mode only needs them to type-check as
+ * integer constants. */
+#ifndef CC_ERR_NULL
+#define CC_ERR_NULL 14
+#endif
+
 /* Generic result placeholder struct - used for ALL result types during parsing.
    Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
    Uses named union 'u' matching the real struct layout.
@@ -424,6 +434,70 @@ typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
 #define __CC_RESULT_OK(T, E, v) cc_ok_CCResult_##T##_##E(v)
 #define __CC_RESULT_ERR(T, E, e) cc_err_CCResult_##T##_##E(e)
 
+#endif /* CC_PARSER_MODE */
+
+/* Synthesized `CC_ERR_NULL` CCError for the !> / ?> / @err pointer-lowering
+ * path.  The message is built by concatenating three string literals at
+ * translation phase 6, so the whole thing is a compile-time constant with
+ * no runtime allocation or formatting.  Used by the lowering passes in
+ * place of hand-stamping `(CCError){ .kind = CC_ERR_NULL, .message = "..." }`
+ * at every call site — changes to the CCError shape only need to be
+ * chased in the `CC_ERROR` macro above, which is parser-mode-aware.
+ *
+ * The `expr_lit` argument should be a C string literal whose contents
+ * have already been sanitized for embedding (whitespace collapsed,
+ * `\` / `"` escaped, overly long snippets truncated) — see
+ * `cc_sb_append_err_null_at` in `cc/src/util/text.h`. */
+#define __cc_err_null_at(expr_lit, file_lit, line_lit) \
+    CC_ERROR(CC_ERR_NULL, \
+             "NULL returned from " expr_lit " at " file_lit ":" line_lit)
+
+/* ============================================================================
+ * Unified unwrap primitives: `__cc_uw_is_err(x)`, `__cc_uw_value(x)`,
+ * `__cc_uw_err_at(x, expr, file, line)`.
+ *
+ * These are the *only* primitives the lowering passes need to emit for the
+ * `!>` / `?>` / `@err` operators — they transparently dispatch at compile
+ * time (via `_Generic`) between:
+ *   - Result-struct shape:  `(x).u.value` / `(x).u.error` / `!(x).ok`
+ *   - Raw-pointer shape:    `(x)` / synthesized CC_ERR_NULL / `(x) == NULL`
+ *
+ * So the lowering pass no longer has to scan the source text of the LHS
+ * to guess whether it's pointer-typed — the generated C code asks the
+ * compiler, which always knows for sure.
+ *
+ * Parser-mode version: all result types are typedef aliases to
+ * `__CCResultGeneric`, so one `_Generic` arm covers them.
+ *
+ * Real-mode version: each `CCResult_T_E` is a distinct struct, so the
+ * codegen pass emits an enumerated `_Generic` with one arm per spec
+ * (see `visit_codegen.c`).  The default arm covers raw pointers and
+ * uses the address-read trick so it type-checks for non-pointer types
+ * too (it won't be selected, but non-selected arms are still parsed).
+ * ============================================================================ */
+#ifdef CC_PARSER_MODE
+#define __cc_uw_is_err(__x__) _Generic((__x__), \
+    __CCResultGeneric: (!((__CCResultGeneric*)(void*)&(__x__))->ok), \
+    default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), \
+    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.value, \
+    default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \
+    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.error, \
+    default: __cc_err_null_at(__e__, __f__, __l__))
+#else /* real compilation mode */
+/* Baseline definitions: pointer-only fallback when the TU declares no
+ * concrete Result types.  If the TU uses `T!>(E)` anywhere, visit_codegen
+ * `#undef`s these and re-emits enumerated versions with one arm per
+ * registered `CCResult_T_E` struct.  Either way, the lowering pass can
+ * always spell `__cc_uw_is_err(tmp)` / `__cc_uw_value(tmp)` /
+ * `__cc_uw_err_at(tmp, expr, file, line)` in generated C.  */
+#define __cc_uw_is_err(__x__) _Generic((__x__), \
+    default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), \
+    default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \
+    default: __cc_err_null_at(__e__, __f__, __l__))
 #endif /* CC_PARSER_MODE */
 
 /*

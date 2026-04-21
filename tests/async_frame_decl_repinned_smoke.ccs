@@ -1,0 +1,60 @@
+// Smoke test: result-typed frame field when the decl's source
+// position has been re-pinned to a use-site by intervening text
+// rewrites.  Before the fix, the DECL_ITEM node for `res` carried a
+// line_start pointing at the USE line (the `if (cc_is_err(res))`
+// condition, which pass_result_unwrap rewrites in place), async_ast's
+// primary line-scan rejected `"if ..."` as control-flow noise, fell
+// back to aux_s2 = "struct __CCResultGeneric" (parser-mode
+// placeholder, only forward-declared in real-compile mode), and the
+// generated frame emitted an incomplete type.  The stmt-list
+// fallback in async_ast.c now recovers the real `bool !>(CCIoError)`
+// prefix from the decl stmt text.
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_io_error.cch>
+#include <stdio.h>
+
+static bool !>(CCIoError) maybe_io(int x) {
+    if (x < 0) {
+        CCIoError e = {0};
+        e.kind = CC_IO_OTHER;
+        return cc_err(e);
+    }
+    return cc_ok(true);
+}
+
+/* The shape that reproduces [F4] is:
+ *   - result-typed decl with `!>(E)` suffix inside an @async body
+ *   - the ident is re-used several times below its decl via
+ *     cc_is_err() / cc_value() / ._unwrap() forms that
+ *     pass_result_unwrap rewrites in place
+ *   - at least one yield point between the decl and the uses, so
+ *     the local must live in the frame
+ *   - several unrelated stmts between the decl and the yield, so
+ *     the DECL_ITEM rebinder prefers the later use-line over the
+ *     real decl line
+ */
+@async int worker(int limit) {
+    int i = 0;
+    while (i < limit) {
+        bool !>(CCIoError) res = maybe_io(i);
+        if (cc_is_err(res)) {
+            (void)res;
+            return 1;
+        }
+        cc_yield();
+        if (!res.value()) {
+            return 2;
+        }
+        i++;
+    }
+    return 0;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(worker(3));
+    cc_nursery_destroy(n);
+    printf("async_frame_decl_repinned: OK\n");
+    return 0;
+}

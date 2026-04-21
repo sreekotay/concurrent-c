@@ -1,0 +1,34 @@
+/* Metaclass regression: the closure-calls scope tracker scans each
+ * declaration line for `;`, `(` and `=` using what used to be
+ * `strchr(p, ';')` / `strchr(p, '(')` / `strchr(p, '=')`.
+ *
+ * Pre-fix: a trailing line comment on a local-variable declaration
+ * that itself contained `;` or `(` would fool the scanner.  For
+ * example:
+ *
+ *     CCSlice s = cc_slice_make_id(..., "stuff"); // (see docs ; ok)
+ *
+ * The `(` / `;` inside the `// ...` suffix comment would lead to the
+ * provenance inference scanning past the real initializer, looking
+ * for `cc_slice_make_id(` / `CC_SLICE_ID_UNIQUE` in the comment
+ * instead of the real expression.
+ *
+ * Post-fix: all three lookups route through
+ * `cc_find_char_top_level` / `cc_find_substr_top_level`
+ * (util/text.h), so trailing line comments can't pull the scan off
+ * the real declarator.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+
+int main(void) {
+    int captured = 7; // note: some (parens) and ; in trailing comment
+    CCClosure0 c = @unsafe () => [&captured] {
+        return (void*)(intptr_t)(captured + 1);
+    };
+    void* r = cc_closure0_call(c);
+    printf("closure_decl_line_comment_semi: %d\n", (int)(intptr_t)r);
+    return 0;
+}

@@ -1,0 +1,62 @@
+/* Smoke: `!>` on a raw-pointer LHS synthesizes a CCError so a generic
+ * `@errhandler(CCError e)` catches it, and `cc_io_error(e)` projects
+ * that CCError onto the matching CCIoError.
+ *
+ * This is the idiomatic pattern that `real_projects/redis/redis_idiomatic.ccs`
+ * relies on for owner-side "queue a reply" sites:
+ *
+ *     @errhandler(CCError e) {
+ *         cc_channel_close(tx, cc_io_error(e));
+ *         return false;
+ *     }
+ *     RedisReply* slot = (RedisReply*)(cc_arena_alloc(...))!>;
+ *
+ * The `!>` pointer lowering emits `__cc_err_null_at(...)` (a CCError) as
+ * its propagated error; the enclosing `@errhandler(CCError e)` matches;
+ * the body then converts `e` into the I/O error domain via the
+ * overloaded `cc_io_error(...)`.  This test fails closed if either:
+ *   - the pointer lowering stops synthesizing CCError, or
+ *   - `cc_io_error` stops accepting CCError (the `_Generic` overload
+ *     that bridges the generic-error vocabulary into the I/O one).
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_io_error.cch>
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <stddef.h>
+
+static CCArena g_arena;
+
+static void* alloc_or_null(int n) {
+    if (n == 0) return NULL;
+    return cc_arena_alloc(&g_arena, (size_t)n, 1);
+}
+
+static CCIoError g_captured;
+static int g_captured_set = 0;
+
+static int do_work(int n) {
+    @errhandler(CCError e) {
+        g_captured = cc_io_error(e);
+        g_captured_set = 1;
+        return -1;
+    }
+    void* p = alloc_or_null(n) !>;
+    (void)p;
+    return 0;
+}
+
+int main(void) {
+    g_arena = cc_arena_create(4096);
+
+    int ok = do_work(8);
+    printf("ok path: rc=%d captured=%d\n", ok, g_captured_set);
+
+    g_captured_set = 0;
+    int err = do_work(0);
+    printf("err path: rc=%d captured=%d kind=%d\n",
+           err, g_captured_set, (int)g_captured.kind);
+
+    printf("ptr_err_to_io: OK\n");
+    return 0;
+}

@@ -31,6 +31,7 @@
 #include "comptime/symbols.h"
 #include "result_spec.h"
 #include "util/path.h"
+#include "util/text.h"
 #include "visitor/pass_common.h"
 
 enum {
@@ -1231,8 +1232,12 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                 memcpy(call_txt, stmt_txt + call_s, call_len);
                 call_txt[call_len] = 0;
 
-                const char* lpar = strchr(call_txt, '(');
-                const char* rpar = strrchr(call_txt, ')');
+                /* Comment/string-aware `(` scan so a block comment
+                 * containing a `(` doesn't pull the scan off the real
+                 * call-opening paren. */
+                size_t lpo = cc_find_char_top_level(call_txt, 0, call_len, '(');
+                const char* lpar = (lpo < call_len) ? (call_txt + lpo) : NULL;
+                const char* rpar = lpar ? strrchr(call_txt, ')') : NULL;
                 if (!lpar || !rpar || rpar <= lpar) { free(call_txt); continue; }
                 size_t args_s = (size_t)(lpar - call_txt) + 1;
                 size_t args_e = (size_t)(rpar - call_txt);
@@ -1292,8 +1297,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     if (call_txt) {
                         memcpy(call_txt, stmt_txt + call_s, call_len);
                         call_txt[call_len] = 0;
-                        const char* lpar = strchr(call_txt, '(');
-                        const char* rpar = strrchr(call_txt, ')');
+                        size_t lpo2 = cc_find_char_top_level(call_txt, 0, call_len, '(');
+                        const char* lpar = (lpo2 < call_len) ? (call_txt + lpo2) : NULL;
+                        const char* rpar = lpar ? strrchr(call_txt, ')') : NULL;
                         if (lpar && rpar && rpar > lpar) {
                             size_t args_s = (size_t)(lpar - call_txt) + 1;
                             size_t args_e = (size_t)(rpar - call_txt);
@@ -1441,9 +1447,10 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         size_t repl_len = 0;
         size_t repl_cap = 0;
 
-        /* Find args inside call_txt. */
-        const char* lpar = strchr(call_txt, '(');
-        const char* rpar = strrchr(call_txt, ')');
+        /* Find args inside call_txt — comment/string-aware. */
+        size_t lpo3 = cc_find_char_top_level(call_txt, 0, call_len, '(');
+        const char* lpar = (lpo3 < call_len) ? (call_txt + lpo3) : NULL;
+        const char* rpar = lpar ? strrchr(call_txt, ')') : NULL;
         if (!lpar || !rpar || rpar <= lpar) {
             free(call_txt);
             free(stmt_txt);

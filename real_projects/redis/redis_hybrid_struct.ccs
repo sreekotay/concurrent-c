@@ -1,5 +1,46 @@
 /*
- * redis_idiomatic.ccs — iteration core.
+ * redis_hybrid_struct.ccs — structured-hybrid baseline.
+ *
+ * Snapshotted from redis_idiomatic.ccs @ 9058871, right before the
+ * @async / spawn_async migration landed.  This file is the
+ * apples-to-apples hybrid baseline the `@async` variant is measured
+ * against: same RESP parser, same owner loop, same per-conn arenas
+ * and reply channels, same batched pipelining — but with
+ * `handle_client` spawned via `spawnhybrid` (full OS thread per
+ * client) and `owner_loop` via `spawn` (ordinary fiber).
+ *
+ * Why two files now:
+ *   - redis_hybrid.ccs         — pre-R3.1 variant (kept for history)
+ *   - redis_hybrid_struct.ccs  — THIS FILE: post-R3.1 structured
+ *                                concurrency + @destroy/@defer, but
+ *                                still hybrid-closure spawn.
+ *   - redis_idiomatic.ccs      — post-R3.1 + @async migration.
+ *
+ * Post-R3.1 shape (unchanged from redis_idiomatic aside from the
+ * spawn primitive):
+ *
+ *   async void main() {
+ *       CCListener ln = cc_tcp_listen(...);
+ *       CCNursery* server = @create(NULL) @destroy;
+ *       DbHandle h = spawn_owner(server);   // owns the RedisDb, drains req chan
+ *       while (accept -> client) server->spawn(handle_client(client, &h, id));
+ *   }
+ *
+ *   void handle_client(CCSocket client, DbHandle* h, uint64_t id) {
+ *       RedisConn* conn = redis_conn_create(id);
+ *       while (fill(socket) && !EOF) {
+ *           // submit batch
+ *           for (each buffered request; submitted < PIPELINE_LIMIT) {
+ *               h->tx.send(req); submitted++;
+ *           }
+ *           // drain that many replies in FIFO order
+ *           for (i = 0; i < submitted; i++) {
+ *               reply_rx.recv(&slot); buffer_write_bytes(sock, conn, slot.data);
+ *           }
+ *           cc_arena_reset(&conn->reply_arena);
+ *           flush_output_buffer(socket, conn);
+ *       }
+ *   }
  *
  * Classic "one db writer" concurrency: a dedicated owner fiber holds the
  * RedisDb exclusively and drains a shared request channel; each client
@@ -17,8 +58,8 @@
  * of pipelined requests collapses into a few scheduler hops rather
  * than per-request round-trips.
  *
- * Build / profile (quick ref):
- *   make redis_idiomatic         → out/redis_idiomatic (--release)
+ * Debug / profile (quick ref):
+ *   make redis_hybrid_struct    → out/redis_hybrid_struct (--release)
  *   bench: ./bench_robust.sh
  */
 
@@ -142,13 +183,18 @@ static void redis_conn_release_request(RedisRequest* req);
     });
 }
 
-/* Known compiler limitations this file still works around (see
- * docs/known-bugs/redis_idiomatic_async.md for the long-form writeup):
- *   - e-bound unwrap binder (Bug [3]) does not propagate the declared
- *     error type, so Phase D below uses the manual res.is_err() shape
- *     instead of `rr_fill(...) !>(e) { ... }`.
- *   - pass_result_unwrap emits a spurious terminating-body warning on
- *     every build (Bug [6]); build still succeeds.  Don't chase it. */
+/* Known compiler limitations this file currently works around (see
+ * docs/known-bugs/redis_idiomatic_async.md for the long-form writeup,
+ * including the minimal repro at /tmp/async_unwrap_repro.ccs).  Short
+ * form:
+ *   - async-body plus unwrap-binder do not compose: blocks the @async
+ *     migration for handle_client and owner_loop, so both stay on the
+ *     hybrid-closure spawn path.
+ *   - e-bound unwrap binder lowers its binder as a generic error type
+ *     regardless of the declared result error type, so Phase D below
+ *     uses the manual res.is_err() shape instead.
+ *   - spurious warning at line 447 from pass_result_unwrap on every
+ *     build; build still succeeds.  Don't chase it. */
 
 static CCError mkerr(int err_kind, const char* msg) {
     CCError err = {0};
@@ -674,31 +720,8 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
 
 /* Owner-private dispatch: only called from owner_loop, so touching the
  * shared db here needs no lock.  Never yields (no awaits), so no other
- * fiber can observe the db mid-mutation.
- *
- * Declared `@noblock` so `pass_autoblock` inlines every call site
- * instead of wrapping it in `cc_run_blocking_task_intptr` — this is a
- * tight in-memory hash op that never blocks, and threadpool bounces
- * here crater per-op latency.
- *
- * The return type is the already-lowered `CCResult_RedisReply_CCError`
- * rather than the nicer `RedisReply !>(CCError)` sugar.  That sidesteps
- * an open preprocessor bug where the `!>` base-type scanner walks
- * backward from `!>` and swallows `@noblock static` into the
- * synthesised result-type name — e.g.
- *
- *     @noblock static RedisReply !>(CCError) execute_request(...)
- *
- * lowers to
- *
- *     CCResult_noblock_static_RedisReply_CCError execute_request(...)
- *
- * losing the decl-attribute entirely.  Confirmed via
- * CC_DEBUG_AUTOBLOCK_CALLS=1: with the sugared form, the autoblock
- * callee lookup reports `noblock=0`; with the pre-lowered form, it
- * reports `noblock=1` and the call is inlined.  When the preprocessor
- * is fixed this can revert to the sugared form. */
-@noblock static CCResult_RedisReply_CCError execute_request(RedisDb* db, RedisRequest* req) {
+ * fiber can observe the db mid-mutation. */
+static RedisReply !>(CCError) db_execute(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
@@ -770,72 +793,86 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
+static CCSlice !>(CCError) reply_alloc_bytes(CCArena* arena, size_t len) {
+    if (!arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply alloc without arena"));
+    char* dst = cc_arena_alloc(arena, len, 1);
+    if (len > 0 && !dst) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
+    }
+    CCSlice slice = { .ptr = dst, .len = len };
+    return cc_ok(slice);
+}
+
 /* Encode the reply into `arena`. On return, reply->kind == REDIS_REPLY_RAW and
  * reply->data points into `arena`. Bytes outlive the call exactly as long as
  * the arena does: for the per-conn reply path that's until the next
- * drain-and-reset; for write_reply_now that's the stack frame.
- *
- * `alloc(n)` expands to `cc_arena_alloc(arena, n, 1)` and bails on OOM. */
+ * drain-and-reset; for write_reply_now that's the stack frame. */
 static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
-    if (!reply || !arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize null arg"));
-
-#define alloc(n) ({ \
-        char* __dst = (char*)cc_arena_alloc(arena, (n), 1); \
-        if ((n) > 0 && !__dst) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode OOM")); \
-        __dst; \
-    })
+    if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without reply"));
+    if (!arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without arena"));
 
     switch (reply->kind) {
         case REDIS_REPLY_RAW: {
-            char* dst = alloc(reply->data.len);
-            if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
-            reply->data = (CCSlice){ .ptr = dst, .len = reply->data.len };
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, reply->data.len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            if (reply->data.len > 0) memcpy(dst.ptr, reply->data.ptr, reply->data.len);
+            reply->data = dst;
             return cc_ok(true);
         }
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
-            size_t n = reply->data.len + 3;
-            char* dst = alloc(n);
-            dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
-            if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
+            size_t len = reply->data.len + 3;
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            char* out = dst.ptr;
+            out[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
+            if (reply->data.len > 0) memcpy(out + 1, reply->data.ptr, reply->data.len);
+            out[1 + reply->data.len] = '\r';
+            out[2 + reply->data.len] = '\n';
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = dst;
             return cc_ok(true);
         }
         case REDIS_REPLY_BULK_STRING: {
-            size_t hdr = resp_bulk_header_len(reply->data.len);
-            size_t n = hdr + reply->data.len + 2;
-            char* dst = alloc(n);
-            resp_encode_bulk_header_into(dst, reply->data.len);
-            if (reply->data.len > 0) memcpy(dst + hdr, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
+            size_t hdr_len = resp_bulk_header_len(reply->data.len);
+            size_t len = hdr_len + reply->data.len + 2;
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            char* out = dst.ptr;
+            resp_encode_bulk_header_into(out, reply->data.len);
+            if (reply->data.len > 0) memcpy(out + hdr_len, reply->data.ptr, reply->data.len);
+            out[hdr_len + reply->data.len] = '\r';
+            out[hdr_len + reply->data.len + 1] = '\n';
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = dst;
             return cc_ok(true);
         }
         case REDIS_REPLY_INTEGER: {
-            size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = alloc(n);
-            resp_encode_integer_into(dst, reply->int_value);
+            size_t len = resp_integer_encoded_len(reply->int_value);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            resp_encode_integer_into(dst.ptr, reply->int_value);
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = dst;
             return cc_ok(true);
         }
         case REDIS_REPLY_NULL_BULK: {
-            CCSlice src = cc_slice_from_cstr("$-1\r\n");
-            char* dst = alloc(src.len);
-            memcpy(dst, src.ptr, src.len);
+            CCSlice data = cc_slice_from_cstr("$-1\r\n");
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, data.len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            memcpy(dst.ptr, data.ptr, data.len);
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = src.len };
+            reply->data = dst;
             return cc_ok(true);
         }
         default:
             return cc_err(mkerr(CC_ERR_INVALID_ARG, "unknown reply kind"));
     }
-#undef alloc
 }
 
 /* Initial reply_arena size: holds up to ~PIPELINE_LIMIT replies'
@@ -875,6 +912,7 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
 }
 
 static void redis_conn_destroy(RedisConn* conn) {
+    if (!conn) return;
     /* We only reach destroy when the last ref drops — handle_client has
      * released its ref (via @destroy body + registered drop) AND the
      * owner has released every per-request ref (via release_request,
@@ -888,10 +926,12 @@ static void redis_conn_destroy(RedisConn* conn) {
 }
 
 static void redis_conn_retain(RedisConn* conn) {
+    if (!conn) return;
     atomic_fetch_add_explicit(&conn->refs, 1, memory_order_relaxed);
 }
 
 static void redis_conn_drop(RedisConn* conn) {
+    if (!conn) return;
     if (atomic_fetch_sub_explicit(&conn->refs, 1, memory_order_acq_rel) == 1) {
         redis_conn_destroy(conn);
     }
@@ -941,28 +981,74 @@ static void redis_conn_release_request(RedisRequest* req) {
     }
 }
 
+/* Best-effort: deliver an I/O error back to the client before we tear down.
+ * Failure is ignored because we're already on the exit path. */
+static void report_io_err(CCSocket* sock, RedisConn* conn, CCIoError err) {
+    (void)write_reply_now(sock, conn, io_err_reply(err));
+}
+
+/* =====================================================================
+ * Owner fiber: single writer for the shared RedisDb.
+ *
+ * All db mutations funnel through this fiber via the shared request
+ * channel.  Clients never touch the db directly — they hand a
+ * RedisRequest* to the owner and await a materialized RedisReply*
+ * on their own conn->reply_rx.
+ *
+ * Why a channel (and not worker-count pinning)?  It types the boundary.
+ * execute_request's signature (DbHandle*, RedisConn*, RedisRequest*)
+ * says "this talks to the db-owner", and nothing else in the program
+ * even has a RedisDb* to race on.  The scheduler can use N workers
+ * without risk; only one fiber — this one — mutates the db.
+ *
+ * Materialization happens HERE (not on the client) because the reply's
+ * data.ptr can alias db-owned storage (e.g. GET returns a slice into
+ * an entry's value bytes).  We must copy into conn->reply_arena before
+ * returning to the recv-next-request loop; otherwise the next request
+ * could mutate the entry and dangle the pointer we just handed out.
+ * ===================================================================== */
+static void fail_reply_stream(RedisConn* conn, CCIoError e) {
+    if (conn) cc_channel_close(conn->reply_tx, e);
+}
+
 /* Owner-side: materialize the reply into conn->reply_arena and publish
  * the slot pointer.  On allocation/send failure, close the reply stream
  * with a structured error so the client's recv surfaces the exact shape
  * (OOM vs CANCELLED) rather than a generic EOF. */
 static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
-    @errhandler(CCError e) { cc_channel_close(conn->reply_tx, cc_io_error(e)); return false; }
     if (!conn || !reply) return false;
     /* Slot + materialized bytes both live in conn->reply_arena; the
      * channel carries just the slot pointer.  Client resets the arena
      * after draining a full batch — safe because owner-side allocs
      * for this conn happen before each send, and the client only
      * resets after it has recv'd exactly `outstanding` slots. */
-    RedisReply* slot = (RedisReply*)(cc_arena_alloc(&conn->reply_arena,
+    RedisReply* slot = (RedisReply*)cc_arena_alloc(&conn->reply_arena,
                                                     sizeof(RedisReply),
-                                                    _Alignof(RedisReply))) !>;
-    *slot = *reply; 
+                                                    _Alignof(RedisReply));
+    if (!slot) {
+        fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
+        return false;
+    }
+    *slot = *reply;
 
-    reply_materialize(slot, &conn->reply_arena) !>;
+    bool !>(CCError) mat_res = reply_materialize(slot, &conn->reply_arena);
+    if (mat_res.is_err()) {
+        fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
+        return false;
+    }
+
     bool !>(CCIoError) send_res = cc_channel_send(conn->reply_tx, slot);
     if (!cc_io_avail(send_res)) {
-        CCIoError e = send_res.ok ? cc_io_error(CC_IO_CONNECTION_CLOSED) : send_res.error();
-        cc_channel_close(conn->reply_tx, e);
+        /* Two failure shapes:
+         *   Err(e)    -> client side already closed with a structured
+         *                error; propagate it so any queued-but-unread
+         *                replies surface the same kind/os_code.
+         *   Ok(false) -> client closed gracefully while we were blocked;
+         *                stamp CONNECTION_CLOSED rather than silently
+         *                erase the failure. */
+        CCIoError e = send_res.ok ? cc_io_error(CC_IO_CONNECTION_CLOSED)
+                                   : send_res.error();
+        fail_reply_stream(conn, e);
         return false;
     }
     return true;
@@ -971,11 +1057,11 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
 /* Owner loop: drain requests, execute, reply.  The RedisDb is owned by
  * this fiber — it's stack-allocated here so it can't outlive the owner
  * and nobody else can take its address. */
-@async int owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
+static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 131072)) {
         fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
-        return 1;
+        return;
     }
     @defer db_free_all(&db);
 
@@ -985,57 +1071,54 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
 
         RedisConn* conn = req->conn;
         @defer redis_conn_release_request(req);
-        /* execute_request is @noblock and returns the already-lowered
-         * CCResult directly — see its header for why it doesn't use the
-         * `RedisReply !>(CCError)` sugar. */
-        CCResult_RedisReply_CCError exec_res = execute_request(&db, req);
-        RedisReply reply = cc_is_err(exec_res)
-                               ? err_reply(CCResult_RedisReply_CCError_error(exec_res))
-                               : CCResult_RedisReply_CCError_unwrap(exec_res);
+        RedisReply !>(CCError) exec_res = db_execute(&db, req);
+        RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error())
+                                             : exec_res.value();
         /* reply.data may alias db storage; owner_queue_reply materializes
          * into conn->reply_arena (a copy) before publishing. */
         (void)owner_queue_reply(conn, &reply);
     }
-    return 0;
 }
 
-/* Per-connection driver.  Each outer iteration is one batch round-trip:
+/* Per-connection driver.  Two-phase batch per outer iteration:
  *
- *   submit  - parse buffered RESP requests and hand them to the owner,
- *             bounded by PIPELINE_LIMIT.
- *   drain   - recv that many replies back, write each into the output
- *             buffer, then reset the reply arena.
- *   flush   - one socket write for the whole batch.
- *   rr_fill - park until more bytes arrive or EOF.
+ *   Phase A (submit):  parse up to PIPELINE_LIMIT requests from the
+ *                      reader's buffered bytes and send them to the
+ *                      owner fiber.  Stops early on buffer-exhausted
+ *                      or cap-reached.
  *
- * bug [F6]: submit and drain would read better as named helpers, but
- *           async_ast's parameter / frame-field scanner leaks text
- *           from neighbouring @async bodies and from `!>` expansions
- *           into the helper's signature, so the four phases stay
- *           inline below until that scanner learns proper bounds.
+ *   Phase B (drain):   recv exactly `submitted` replies back from the
+ *                      per-conn reply channel (FIFO — ordinary channel
+ *                      already preserves send order with a single
+ *                      producer), buffer_write each into out_buf.  The
+ *                      reply_arena is reset once after the whole batch
+ *                      — safe because REPLY_CHAN_CAP=PIPELINE_LIMIT
+ *                      means the owner has already queued every slot
+ *                      into the channel before we reset, so no live
+ *                      pointer points into the arena post-reset.
  *
- * db serialization is by channel topology -- the request channel is
- * multi-producer single-consumer, and the owner fiber is the sole
- * receiver, not by pinning workers; the scheduler is free to use any
- * number of OS threads.
+ *   Phase C (flush):   flush_output_buffer coalesces the batch into a
+ *                      single socket write.
+ *
+ *   Phase D (fill):    rr_fill blocks until the socket has more bytes
+ *                      or signals EOF.
+ *
+ * db serialization is by topology (req channel is N:1, owner is the
+ * only receiver), not by pinning workers; the scheduler is free to
+ * use any number of OS threads.
  *
  * Pipelining comes for free: a client that ships 16 requests in a
- * single RESP burst gets 16 submit/drain hops per outer iteration
- * instead of 16 round-trips. */
-@async int handle_client(CCSocket client, DbHandle* h, uint64_t conn_id) {
+ * single RESP burst gets 16 scheduler-side submit/drain hops instead
+ * of 16 round-trips. */
+static void handle_client(CCSocket client, DbHandle* h, uint64_t conn_id) {
     @defer client.close();
-    /* Teardown order -- cancel the per-conn reply rx first, then
-     * drop the refcount -- is encoded in the @destroy body plus the
-     * registered post-callee redis_conn_drop.  Cancel first so any
-     * owner-side send still in flight completes with a cancelled
-     * CCIoError instead of wedging on a full reply channel; the drop
+    /* Teardown order (cancel-rx, then drop-ref) is encoded in the
+     * @destroy body + registered post-callee (redis_conn_drop).  Cancel
+     * first so any owner-side send still in flight completes with
+     * Err(CANCELLED) instead of wedging on a full reply channel; drop
      * then races the owner's own per-request refs to zero and
-     * redis_conn_destroy fires on the last one out.
-     *
-     * bug: async_ast picks up calls or parentheticals in this comment
-     *      as frame-field declarations -- keep the prose flat here.
-     *      Tracked as [F6]. */
-    RedisConn* conn = redis_conn_create(conn_id) !> { return 1; } @destroy {
+     * redis_conn_destroy fires on the last one out. */
+    RedisConn* conn = redis_conn_create(conn_id) !> { return; } @destroy {
         conn->reply_rx.cancel();
     };
 
@@ -1044,54 +1127,60 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
     while (true) {
-        /* Batch-scope policy: any CCError surfaced via !> (parse error
-         * or owner channel unavailable) becomes one err_reply to the
-         * client and we tear down via the outer @defer. */
+        /* Batch-scope policy: any CCError surfaced via !> becomes one
+         * err_reply to the client and we tear down.  Teardown is
+         * handled by the outer @defer. */
         @errhandler(CCError e) {
             (void)write_reply_now(&client, conn, err_reply(e));
-            return 0;
+            return;
         }
 
-        /* submit: parse up to PIPELINE_LIMIT requests from the
-         * reader's buffered bytes and hand each to the owner. */
+        /* Phase A: submit up to PIPELINE_LIMIT requests. */
         size_t outstanding = 0;
         for (size_t s = 0; s < PIPELINE_LIMIT; s++) {
             RedisRequest* req = NULL;
             bool has = rr_req_iter_next(&req_iter, &req) !>;
-            if (!has) break;
+            if (!has) break;  /* buffered bytes exhausted */
             conn->next_request_id++;
             h->tx.send(req) !> {
                 redis_conn_release_request(req);
                 (void)write_reply_now(&client, conn,
                     reply_error("ERR owner channel unavailable"));
-                return 0;
+                return;
             };
             outstanding++;
         }
 
-        /* drain + flush: REPLY_CHAN_CAP == PIPELINE_LIMIT guarantees
-         * the owner's per-conn sends never block, so draining exactly
+        /* Phase B: drain-and-write.  REPLY_CHAN_CAP == PIPELINE_LIMIT
+         * guarantees the owner's per-conn sends never block (at most
+         * PIPELINE_LIMIT are in flight), so draining exactly
          * `outstanding` replies both pulls each slot for writing AND
-         * drives the arena back to quiescence before the reset. */
+         * drives the arena back to quiescence. */
         while (outstanding > 0) {
             RedisReply* slot = NULL;
-            conn->reply_rx.recv(&slot) !> { return 0; };
+            conn->reply_rx.recv(&slot) !> { return; };
             outstanding--;
-            if (!slot || !write_reply(&client, conn, slot)) return 0;
+            if (!slot || !write_reply(&client, conn, slot)) return;
         }
         cc_arena_reset(&conn->reply_arena);
-        if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
 
-        /* rr_fill parks the fiber until the socket has more bytes or
-         * EOF.  `!>(e) { ... }` would read better here, but the
-         * binder lowers `e` as __CCGenericError rather than the
-         * declared CCIoError, so destructure manually for now. */
+        /* Phase C: flush coalesced replies. */
+        if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return;
+
+        /* Phase D: block for more bytes.
+         *
+         * bug: `rr_fill(...) !>(e) { report_io_err(&client, conn, e); ... }`
+         *      would read better, but the `!>(e)` binder lowers `e` as
+         *      __CCGenericError regardless of the result's declared error
+         *      type (bool !>(CCIoError)), and __CCGenericError won't coerce
+         *      to CCIoError.  Revisit when pass_result_unwrap learns to
+         *      propagate the declared error type through the binder. */
         bool !>(CCIoError) fill_res = rr_fill(&reader, &client);
         if (fill_res.is_err()) {
-            write_reply_now(&client, conn, io_err_reply(fill_res.error()));
-            return 0;
+            report_io_err(&client, conn, fill_res.error());
+            return;
         }
-        if (!fill_res.value()) return 0;  /* clean EOF */
+        if (!fill_res.value()) return;  /* clean EOF */
     }
 }
 
@@ -1137,7 +1226,7 @@ int main(int argc, char** argv) {
         (void)server->close_on(req_tx);
 
         static const int shutdown_sigs[] = { SIGINT, SIGTERM };
-        if (server->cancel_on_signals(shutdown_sigs,
+        if (cc_nursery_cancel_on_signals(server, shutdown_sigs,
                                          sizeof(shutdown_sigs) / sizeof(shutdown_sigs[0])) != 0) {
             fprintf(stderr, "redis_idiomatic: failed to install shutdown handler\n");
             return 1;
@@ -1147,9 +1236,9 @@ int main(int argc, char** argv) {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCNetError aerr = CC_NET_OK;
-                CCSocket client = ln_ptr->accept(&aerr);
+                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
                 if (aerr != CC_NET_OK) {
-                    if (!server->is_cancelled()) {
+                    if (!cc_nursery_is_cancelled(server)) {
                         fprintf(stderr, "redis_idiomatic accept error: %d\n", aerr);
                     }
                     break;
@@ -1166,12 +1255,16 @@ int main(int argc, char** argv) {
                 (void)setsockopt(client.fd, CC_IPPROTO_TCP, CC_TCP_NODELAY, &one, sizeof(one));
 
                 uint64_t id = next_conn_id++;
-                (void)server->spawn_async(handle_client(client, h_ptr, id));
+                server->spawnhybrid(() => [client, h_ptr, id] {
+                    handle_client(client, h_ptr, id);
+                });
             }
             req_ch.close();
         });
 
-        (void)server->spawn_async(owner_loop(req_rx));
+        server->spawn(() => [req_rx] {
+            owner_loop(req_rx);
+        });
     }
 
     return 0;

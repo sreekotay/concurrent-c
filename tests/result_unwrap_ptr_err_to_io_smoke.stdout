@@ -1,0 +1,3 @@
+ok path: rc=0 captured=0
+err path: rc=-1 captured=1 kind=9
+ptr_err_to_io: OK

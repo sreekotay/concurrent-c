@@ -371,6 +371,22 @@ typedef struct {
     CCTask task;
 } cc_nursery_async_spawn;
 
+/* Driver fiber for a `spawn_async`-ed @async task.
+ *
+ * Contract with the @async state-machine lowering in pass `async_ast`:
+ *
+ *   A poll call returns CC_FUTURE_PENDING if and only if the @async body
+ *   is waiting on an awaited task that is not yet ready.  Trivial state
+ *   transitions (loop cond, back-edge, if-branch pick, post-await-success
+ *   bookkeeping, return-through-case-999) stay on-CPU inside the poll
+ *   function via its outer for(;;) + `continue` shape.
+ *
+ * That invariant is what makes the `cc_yield()` below unconditionally
+ * correct: every PENDING we observe here is a real wait, so handing
+ * control back to the scheduler is the right response.  If that ever
+ * stops being true (e.g. a new lowering shape that returns PENDING for
+ * bookkeeping), both the compiler emit and this loop need to change
+ * together. */
 static void* cc__nursery_async_runner(void* arg) {
     cc_nursery_async_spawn* a = (cc_nursery_async_spawn*)arg;
     intptr_t result = 0;

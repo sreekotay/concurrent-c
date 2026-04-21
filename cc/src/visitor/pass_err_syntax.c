@@ -721,10 +721,19 @@ static int cc__rewrite_colon_defaults(const CCVisitorCtx* ctx, const char* s, si
                 i++;
                 continue;
             }
-            if (stmt_start < semi && memchr(s + stmt_start, '@', semi - stmt_start) &&
-                strstr(s + stmt_start, "@err") && !strstr(s + stmt_start, "@errhandler")) {
-                i++;
-                continue;
+            if (stmt_start < semi && memchr(s + stmt_start, '@', semi - stmt_start)) {
+                /* Structural presence-check — a `// @err` or `@err` embedded
+                 * in a string literal upstream of this statement must not
+                 * disable the `<? ... =<! ...` lowering here. */
+                size_t stmt_len = semi - stmt_start;
+                int has_err = cc_find_substr_top_level(s + stmt_start, 0, stmt_len,
+                                                       "@err", 4) < stmt_len;
+                int has_handler = cc_find_substr_top_level(s + stmt_start, 0, stmt_len,
+                                                           "@errhandler", 11) < stmt_len;
+                if (has_err && !has_handler) {
+                    i++;
+                    continue;
+                }
             }
 
             size_t eq = op_at;
@@ -1225,19 +1234,28 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             const char* is_err_fmt_def  = def_is_ptr  ? "); if ((%s) == NULL) "  : "); if (cc_is_err(%s)) ";
             const char* value_fmt_rest_assign = rest_is_ptr ? "%s = (%s); "       : "%s = cc_value(%s); ";
             const char* value_fmt_expr_assign = expr_is_ptr ? "%s = (%s); "       : "%s = cc_value(%s); ";
-            /* Friendly CCError synthesis.  Uses compound-literal so it works
-             * in both designated-init and positional contexts. */
+            /* CCError synthesis for the pointer-err path.  Built once into
+             * `ptr_err_literal` via the shared `cc_sb_append_err_null_at`
+             * helper (see util/text.h) and spliced into each usage site —
+             * the structural `__cc_err_null_at(...)` / `(CCError){...}`
+             * boilerplate lives in the runtime macro in cc_result.cch, so
+             * changes to the CCError shape only need to be chased there. */
             char ptr_err_literal[1024];
             {
                 char rel[1024];
                 const char* f = cc_path_rel_to_repo(
                     ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                /* Keep the call text on the message; trim defensively. */
-                size_t exl = expr_b - expr_a;
-                if (exl > 200) exl = 200;
-                snprintf(ptr_err_literal, sizeof(ptr_err_literal),
-                         "(CCError){ .kind = CC_ERR_NULL, .message = \"NULL returned from %.*s at %s:%d\" }",
-                         (int)exl, in_src + expr_a, f, errl);
+                char* tmp = NULL;
+                size_t tl = 0, tc = 0;
+                cc_sb_append_err_null_at(&tmp, &tl, &tc, in_src, expr_a, expr_b, f, errl);
+                if (tmp) {
+                    size_t n = tl < sizeof(ptr_err_literal) - 1 ? tl : sizeof(ptr_err_literal) - 1;
+                    memcpy(ptr_err_literal, tmp, n);
+                    ptr_err_literal[n] = 0;
+                    free(tmp);
+                } else {
+                    ptr_err_literal[0] = 0;
+                }
             }
 
             if (has_assign && has_colon_def) {

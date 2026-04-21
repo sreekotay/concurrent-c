@@ -1,0 +1,60 @@
+// Follow-up bug [F5] smoke: result-type preprocessor backward-scan must
+// treat `@IDENT` attributes and additional C storage-class / qualifier
+// keywords as decl-specs, not as part of the base type.
+//
+// Pre-fix behavior (metaclass instance of "text-scan lowering that
+// enumerates a hand-rolled keyword list and forgets about new
+// attributes"):
+//
+//   @noblock static int !>(CCError) fast_path(int x) { ... }
+//
+// The backward scan from `!>` stopped at the preceding newline and
+// `cc__skip_leading_decl_specs` didn't recognise `@noblock`, so the
+// span `[ty_start, ty_end)` covered `@noblock static int` and was
+// mangled into the synthesized typedef name:
+//
+//   CCResult_noblock_static_int_CCError fast_path(int x) { ... }
+//
+// The generated typedef body then embedded the raw `@noblock static`
+// text as the ok-type slot, yielding invalid C (TCC rejects `@` in
+// type position).  Also, `@noblock` never reached the decl-attribute
+// hook so `pass_autoblock` wrapped every call site.
+//
+// Post-fix: `cc__skip_leading_decl_specs` generically skips any
+// `@IDENT` attribute plus the full list of C storage-class / type-
+// qualifier keywords, so new attributes require no table updates.
+// The emitted decl is `@noblock static CCResult_int_CCError fn(...)`.
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_result.cch>
+#include <stdio.h>
+
+// The metaclass test: shuffle a handful of decl-spec prefixes in front
+// of the `!>` result type — `@noblock static`, `static @noblock`,
+// bare `@latency_sensitive`, etc. — and assert each one still compiles
+// and the function returns the declared result type.
+@noblock static int !>(CCError) fast_noblock(int x) {
+    if (x < 0) { CCError e = {0}; e.message = "neg"; return cc_err(e); }
+    return cc_ok(x + 1);
+}
+
+static @noblock int !>(CCError) fast_static_first(int x) {
+    if (x < 0) { CCError e = {0}; e.message = "neg"; return cc_err(e); }
+    return cc_ok(x + 2);
+}
+
+@latency_sensitive static int !>(CCError) fast_latsens(int x) {
+    if (x < 0) { CCError e = {0}; e.message = "neg"; return cc_err(e); }
+    return cc_ok(x + 4);
+}
+
+int main(void) {
+    int !>(CCError) a = fast_noblock(10);
+    int !>(CCError) b = fast_static_first(20);
+    int !>(CCError) c = fast_latsens(30);
+    if (cc_is_err(a) || cc_is_err(b) || cc_is_err(c)) return 1;
+    int av = cc_unwrap(a);
+    int bv = cc_unwrap(b);
+    int cv = cc_unwrap(c);
+    printf("f5: %d %d %d\n", av, bv, cv);
+    return 0;
+}

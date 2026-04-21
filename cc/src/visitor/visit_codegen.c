@@ -3116,7 +3116,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
      * against `cc_nursery_spawn_async(CCNursery*, CCTask)`).  async_ast
      * recognises the CCAsyncVoidRet marker and still treats the function
      * as originally void-returning (bare `return;` stays valid). */
-    if (src_ufcs && src_ufcs_len && strstr(src_ufcs, "@async")) {
+    if (src_ufcs && src_ufcs_len && cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@async")) {
         char* rewritten = cc__rewrite_async_void_ret(src_ufcs, src_ufcs_len);
         if (rewritten) {
             if (src_ufcs != src_all) free(src_ufcs);
@@ -3127,7 +3127,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Lower @await fname(...) -> cc_block_on(ReturnType, fname(...)) before
      * any AST reparse, so TCC never sees the @await token. */
-    if (src_ufcs && src_ufcs_len && strstr(src_ufcs, "@await")) {
+    if (src_ufcs && src_ufcs_len && cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@await")) {
         char* rewritten = cc__rewrite_at_await(src_ufcs, src_ufcs_len);
         if (rewritten) {
             if (src_ufcs != src_all) free(src_ufcs);
@@ -3302,14 +3302,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         /* Debug output for await rewrite */
         if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {
             const char* needle = "@async int f";
-            const char* p = strstr(src_ufcs, needle);
-            if (!p) p = strstr(src_ufcs, "@async");
-            if (p) {
+            size_t np = cc_find_substr_top_level(src_ufcs, 0, src_ufcs_len, needle, strlen(needle));
+            if (np >= src_ufcs_len) np = cc_find_substr_top_level(src_ufcs, 0, src_ufcs_len, "@async", 6);
+            if (np < src_ufcs_len) {
                 fprintf(stderr, "CC_DEBUG_AWAIT_REWRITE: ---- snippet ----\n");
-                size_t off = (size_t)(p - src_ufcs);
                 size_t take = 800;
-                if (off + take > src_ufcs_len) take = src_ufcs_len - off;
-                fwrite(p, 1, take, stderr);
+                if (np + take > src_ufcs_len) take = src_ufcs_len - np;
+                fwrite(src_ufcs + np, 1, take, stderr);
                 fprintf(stderr, "\nCC_DEBUG_AWAIT_REWRITE: ---- end ----\n");
             }
         }
@@ -3336,7 +3335,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* Rewrite cc_channel_send_task(ch, closure) BEFORE channel type rewrite.
            This wraps the closure body to store result in fiber-local storage. */
-        if (strstr(src_ufcs, "send_task") != NULL || strstr(src_ufcs, "cc_channel_send_task") != NULL) {
+        if (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "send_task") ||
+            cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_channel_send_task")) {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
             if (st) {
@@ -3405,8 +3405,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
           stable, already-normalised source. */
     int ud_fired = 0;
     if (src_ufcs && src_ufcs_len &&
-        strstr(src_ufcs, "@destroy") != NULL &&
-        (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
+        cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@destroy") &&
+        (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "!>") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "?>"))) {
         char* ud_out = NULL;
         size_t ud_out_len = 0;
         /* Hand the pass our symbol table so bodyless `@destroy;` on
@@ -3440,7 +3441,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
           declaration form before the pointer-fn registry is populated. */
     if (ud_fired && ctx &&
         src_ufcs && src_ufcs_len &&
-        (strstr(src_ufcs, "!>") != NULL || strstr(src_ufcs, "?>") != NULL)) {
+        (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "!>") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "?>"))) {
         char* ru_out = NULL;
         size_t ru_out_len = 0;
         if (cc__rewrite_result_unwrap(ctx, src_ufcs, src_ufcs_len, &ru_out, &ru_out_len) > 0 && ru_out) {
@@ -3497,7 +3499,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
        IMPORTANT: this must run BEFORE async lowering so `@defer` can be made suspend-safe. */
-    if (src_ufcs && (strstr(src_ufcs, "@defer") != NULL || strstr(src_ufcs, "cancel") != NULL)) {
+    if (src_ufcs && (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@defer") ||
+                     cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cancel"))) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
         int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
@@ -3519,7 +3522,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* AST-driven @async lowering (state machine).
        IMPORTANT: run after statement-level lowering so closure rewrites are already reflected. */
     if (src_ufcs && ctx && ctx->symbols &&
-        (strstr(src_ufcs, "@async") != NULL || strstr(src_ufcs, "await") != NULL)) {
+        (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@async") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "await"))) {
         cc__debug_dump_reparse_source("stage2_pre_async", src_ufcs, src_ufcs_len, ctx->input_path);
         CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
                                                      "async-lowering input");
@@ -3689,7 +3693,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = rp_len;
         }
         /* Rewrite cc_channel_send_task(ch, closure) */
-        if (strstr(src_ufcs, "send_task") != NULL || strstr(src_ufcs, "cc_channel_send_task") != NULL) {
+        if (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "send_task") ||
+            cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_channel_send_task")) {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
             if (st) {
@@ -3776,7 +3781,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         /* Lower @err / @errhandler / <? / =<! ... @err for host C emission (parse already
            preprocesses these; src_ufcs is still the on-disk-shaped TU until here). */
         if (src_ufcs && src_ufcs_len &&
-            (strstr(src_ufcs, "?>") != NULL || strstr(src_ufcs, "!>") != NULL)) {
+            (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "?>") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "!>"))) {
             char* ru_out = NULL;
             size_t ru_out_len = 0;
             int ru_r = cc__rewrite_result_unwrap(ctx, src_ufcs, src_ufcs_len, &ru_out, &ru_out_len);
@@ -3794,8 +3800,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
         if (src_ufcs && src_ufcs_len &&
-            (strstr(src_ufcs, "@errhandler") != NULL || strstr(src_ufcs, "@err") != NULL ||
-             strstr(src_ufcs, "=<!") != NULL || strstr(src_ufcs, "<?") != NULL)) {
+            (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@errhandler") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@err") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "=<!") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "<?"))) {
             char* err_out = NULL;
             size_t err_out_len = 0;
             int err_r = cc__rewrite_err_syntax(ctx, src_ufcs, src_ufcs_len, &err_out, &err_out_len);
@@ -3841,7 +3849,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            forms. Normalize them again before the final UFCS reparse so
            expressions like `@defer arena.free();` don't reach strict UFCS
            dispatch with `@defer arena` as the apparent receiver. */
-        if (strstr(src_ufcs, "@defer") != NULL || strstr(src_ufcs, "cancel") != NULL) {
+        if (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@defer") ||
+            cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cancel")) {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
             int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
@@ -3866,7 +3875,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          *   chan.send_task(() => [blk] { blk->arena.free(); })
          * By merging here we make the AST UFCS pass authoritative. */
         if (closure_defs && closure_defs_len > 0) {
-            if (strstr(closure_defs, "@defer") != NULL || strstr(closure_defs, "cancel") != NULL) {
+            if (cc_contains_token_top_level(closure_defs, closure_defs_len, "@defer") ||
+                cc_contains_token_top_level(closure_defs, closure_defs_len, "cancel")) {
                 char* lowered = NULL;
                 size_t lowered_len = 0;
                 if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len,
@@ -3876,8 +3886,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     closure_defs_len = lowered_len;
                 }
             }
-            if (strstr(closure_defs, "send_task") != NULL ||
-                strstr(closure_defs, "cc_channel_send_task") != NULL) {
+            if (cc_contains_token_top_level(closure_defs, closure_defs_len, "send_task") ||
+                cc_contains_token_top_level(closure_defs, closure_defs_len, "cc_channel_send_task")) {
                 size_t rewritten_len = 0;
                 char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs,
                                                                   closure_defs_len, &rewritten_len);
@@ -4079,14 +4089,19 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            They must come AFTER custom type definitions but BEFORE functions that use them.
            Find the first CCResult_ usage and insert before that line (at file scope). */
         if (cc__cg_result_specs.count > 0) {
-            /* Find first usage of any CCResult_T_E type in the source */
+            /* Find first usage of any CCResult_T_E type in the source.
+             * Comment/string-aware so a type name that appears only in
+             * a doc comment (e.g. `// example: CCResult_int_CCError f`)
+             * doesn't anchor the typedef insertion point to the comment. */
             size_t earliest_pos = src_ufcs_len;
             for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                 const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                 const char* pattern = spec ? spec->concrete_name : NULL;
-                const char* found = strstr(src_ufcs, pattern);
-                if (found && (size_t)(found - src_ufcs) < earliest_pos) {
-                    earliest_pos = (size_t)(found - src_ufcs);
+                if (!pattern || !pattern[0]) continue;
+                size_t pos = cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
+                                                    pattern, strlen(pattern));
+                if (pos < src_ufcs_len && pos < earliest_pos) {
+                    earliest_pos = pos;
                 }
             }
             
@@ -4107,9 +4122,68 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     char line[512];
                     if (!spec) continue;
+                    /* Stdlib-predeclared types already have `CC_DECL_RESULT_SPEC`
+                     * expanded by a header (unguarded), so re-emitting would
+                     * duplicate `_unwrap`/`_unwrap_err`/etc. static-inline
+                     * definitions.  We still keep these specs in
+                     * cc__cg_result_specs so the `_Generic` enumeration below
+                     * picks them up — we just skip the struct decl here. */
+                    if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
                     cc_result_spec_emit_decl(spec, line, sizeof(line));
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
+
+                /* Unified unwrap primitives for real compile mode: one arm per
+                 * concrete Result type plus a default arm for raw pointers.
+                 * These mirror the parser-mode definitions in cc_result.cch so
+                 * the lowering pass can emit the same call shape for both
+                 * Result-struct and pointer LHSs without scanning source
+                 * text to guess the LHS type. */
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "/* Unified unwrap primitives (real mode, enumerated per TU). */\n");
+                /* __cc_uw_is_err */
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "#undef __cc_uw_is_err\n#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n");
+                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (!spec) continue;
+                    char line[256];
+                    snprintf(line, sizeof(line),
+                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
+                        spec->concrete_name, spec->concrete_name);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n");
+                /* __cc_uw_value */
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "#undef __cc_uw_value\n#define __cc_uw_value(__x__) _Generic((__x__), \\\n");
+                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (!spec) continue;
+                    char line[256];
+                    snprintf(line, sizeof(line),
+                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
+                        spec->concrete_name, spec->concrete_name);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "    default: (__x__))\n");
+                /* __cc_uw_err_at */
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "#undef __cc_uw_err_at\n#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n");
+                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (!spec) continue;
+                    char line[256];
+                    snprintf(line, sizeof(line),
+                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
+                        spec->concrete_name, spec->concrete_name);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
+
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "#endif /* !CC_PARSER_MODE */\n");
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
@@ -4315,7 +4389,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         if (closure_defs && closure_defs_len > 0) {
             /* Run @defer lowering on closure definitions too (handles @defer inside spawn closures) */
-            if (strstr(closure_defs, "@defer") != NULL || strstr(closure_defs, "cancel") != NULL) {
+            if (cc_contains_token_top_level(closure_defs, closure_defs_len, "@defer") ||
+                cc_contains_token_top_level(closure_defs, closure_defs_len, "cancel")) {
                 char* closure_defs_lowered = NULL;
                 size_t closure_defs_lowered_len = 0;
                 if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len,
@@ -4327,7 +4402,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
 
 
-            if (strstr(closure_defs, "send_task") != NULL || strstr(closure_defs, "cc_channel_send_task") != NULL) {
+            if (cc_contains_token_top_level(closure_defs, closure_defs_len, "send_task") ||
+                cc_contains_token_top_level(closure_defs, closure_defs_len, "cc_channel_send_task")) {
                 size_t rewritten_len = 0;
                 char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs, closure_defs_len, &rewritten_len);
                 if (rewritten) {

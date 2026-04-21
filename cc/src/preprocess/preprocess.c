@@ -714,9 +714,15 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                                 cases[case_n].kind = 2;
                                 cancel_idx = case_n;
                             } else {
-                                /* find ".recv(" or ".send(" */
-                                const char* recv = strstr(hdr, ".recv");
-                                const char* send = strstr(hdr, ".send");
+                                /* find ".recv(" or ".send(" — comment/string-aware,
+                                 * so a case header that starts with a block comment
+                                 * like `/* recv * / chan.recv(&v)` isn't mis-routed
+                                 * by the comment's bytes. */
+                                size_t hdr_len_s = strlen(hdr);
+                                size_t recv_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".recv", 5);
+                                size_t send_p = cc_find_substr_top_level(hdr, 0, hdr_len_s, ".send", 5);
+                                const char* recv = (recv_p < hdr_len_s) ? (hdr + recv_p) : NULL;
+                                const char* send = (send_p < hdr_len_s) ? (hdr + send_p) : NULL;
                                 const char* dot = recv ? recv : send;
                                 int is_recv = (recv != NULL);
                                 int is_send = (send != NULL);
@@ -734,7 +740,10 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                                 memcpy(cases[case_n].ch_expr, hdr, cn);
                                 cases[case_n].ch_expr[cn] = 0;
 
-                                const char* lp = strchr(dot, '(');
+                                size_t dot_off = (size_t)(dot - hdr);
+                                size_t dot_len = hdr_len_s - dot_off;
+                                size_t lp_off = cc_find_char_top_level(dot, 0, dot_len, '(');
+                                const char* lp = (lp_off < dot_len) ? (dot + lp_off) : NULL;
                                 const char* rp = lp ? strrchr(dot, ')') : NULL;
                                 if (!lp || !rp || rp <= lp) {
                                     char rel[1024];
@@ -1203,21 +1212,21 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
 
 static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start);
 
+/* Scan backward from `from` in `s` looking for the start of a type
+ * prefix — i.e. the position right after the most-recent decl-boundary
+ * char at paren-depth 0.  Delimits on `; { } , < \n` (plus a lone
+ * opening `(`, which closes a parenthesized declarator).
+ *
+ * Pre-metaclass this walked backward byte-by-byte with no awareness of
+ * comments or string literals, so a `;` or `(` inside a `// ... \n` or
+ * `/ * ... * /` block upstream of the type position could stop the
+ * scan inside a comment and pull comment bytes into the type prefix.
+ * Route through `cc_rfind_char_top_level` (util/text.h) which does a
+ * forward prepass to label comment/string bytes, then walks backward
+ * over code bytes only with matching bracket semantics. */
 static size_t cc__scan_back_to_delim(const char* s, size_t from) {
-    size_t i = from;
-    int paren_depth = 0;
-    while (i > 0) {
-        char p = s[i - 1];
-        if (p == ')') { paren_depth++; i--; continue; }
-        if (p == '(') {
-            if (paren_depth > 0) { paren_depth--; i--; continue; }
-            break;
-        }
-        if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '<' || p == '\n')) break;
-        i--;
-    }
-    while (s[i] && (s[i] == ' ' || s[i] == '\t')) i++;
-    return i;
+    if (!s) return from;
+    return cc_rfind_char_top_level(s, 0, from, ";{},<\n");
 }
 
 static void cc__sb_append_fmt_local(char** out,
@@ -3792,33 +3801,89 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     return cc__rewrite_generic_family_ufcs_impl(src, n, 1);
 }
 
+/* Skip leading decl-specs (storage-class / type-qualifier keywords and
+ * `@attribute` tokens) that sit in front of a base type, so the
+ * result-type / optional-type prefix scanners land on the first real
+ * type token.
+ *
+ * History (metaclass fix — follow-up bug [F5]):
+ *
+ *   This helper used to enumerate a short list of plain C keywords
+ *   (`typedef static inline extern const volatile`) and nothing else.
+ *   Every time the language grew a new `@attribute` (`@async`,
+ *   `@noblock`, `@latency_sensitive`, `@errhandler`, `@destroy`, ...)
+ *   the caller in `cc__rewrite_result_types` silently pulled the
+ *   attribute INTO the mangled result-type name, so e.g.
+ *     @noblock static RedisReply !>(CCError) fn(...)
+ *   produced `CCResult_noblock_static_RedisReply_CCError fn(...)` and
+ *   `@noblock` never reached the decl-attribute hook — `pass_autoblock`
+ *   then wrapped every call site in `cc_run_blocking_task_intptr`.
+ *
+ *   The zoom-out is that backward-scan-for-type-prefix is a generic
+ *   "walk past leading decl-specs" operation and the set of legal
+ *   decl-specs is: (a) the standard C storage-class / type-qualifier
+ *   keywords, (b) any `@IDENT` attribute (by construction these are
+ *   never part of a type name).  This function now matches both.
+ *   Adding a new `@attribute` to the language requires no change here.
+ */
 static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     size_t p = ty_start;
     if (!s) return p;
+    /* Known C storage-class / type-qualifier keywords.  Attributes
+     * (`@IDENT`) are handled generically below so new ones don't need
+     * to be added here. */
+    static const char* kw[] = {
+        "typedef", "static", "inline", "extern", "const", "volatile",
+        "register", "auto", "restrict", "_Atomic", "_Noreturn",
+        "_Thread_local", "thread_local",
+        NULL
+    };
     while (s[p] == ' ' || s[p] == '\t') p++;
     for (;;) {
         int matched = 0;
-        if (strncmp(s + p, "typedef", 7) == 0 && !cc_is_ident_char_local(s[p + 7])) {
-            p += 7;
+        /* `@IDENT` — any attribute token.  We consume the `@` plus the
+         * identifier that follows; we do NOT consume any `(...)` that
+         * may trail an attribute (e.g. `@errhandler(CCError e)`) — that
+         * argument list belongs to the attribute, not to the type, and
+         * the result-type caller re-emits the entire skipped prefix
+         * verbatim so this is fine either way.  Bare `@IDENT` is the
+         * common case (`@async`, `@noblock`, `@latency_sensitive`,
+         * `@destroy`). */
+        if (s[p] == '@' && cc_is_ident_char_local(s[p + 1]) &&
+            !(s[p + 1] >= '0' && s[p + 1] <= '9')) {
+            p++; /* '@' */
+            while (cc_is_ident_char_local(s[p])) p++;
             matched = 1;
-        } else if (strncmp(s + p, "static", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
-            p += 6;
-            matched = 1;
-        } else if (strncmp(s + p, "inline", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
-            p += 6;
-            matched = 1;
-        } else if (strncmp(s + p, "extern", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
-            p += 6;
-            matched = 1;
-        } else if (strncmp(s + p, "const", 5) == 0 && !cc_is_ident_char_local(s[p + 5])) {
-            p += 5;
-            matched = 1;
-        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc_is_ident_char_local(s[p + 8])) {
-            p += 8;
-            matched = 1;
+        } else {
+            for (int k = 0; kw[k]; k++) {
+                size_t kn = strlen(kw[k]);
+                if (strncmp(s + p, kw[k], kn) == 0 && !cc_is_ident_char_local(s[p + kn])) {
+                    p += kn;
+                    matched = 1;
+                    break;
+                }
+            }
         }
         if (!matched) break;
-        while (s[p] == ' ' || s[p] == '\t') p++;
+        /* Also skip line/block comments between decl-specs so prose
+         * like `static COMMENT int !>(E) ...` (where COMMENT is a
+         * `slash-star ... star-slash` block) doesn't drop us onto the
+         * generic fallback. */
+        for (;;) {
+            while (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n') p++;
+            if (s[p] == '/' && s[p + 1] == '/') {
+                p += 2;
+                while (s[p] && s[p] != '\n') p++;
+                continue;
+            }
+            if (s[p] == '/' && s[p + 1] == '*') {
+                p += 2;
+                while (s[p] && !(s[p] == '*' && s[p + 1] == '/')) p++;
+                if (s[p]) p += 2;
+                continue;
+            }
+            break;
+        }
     }
     return p;
 }
@@ -5068,7 +5133,10 @@ static char* cc__rewrite_defer_syntax(const char* src, size_t n) {
  * anchored on `@async` + an identifier followed by `(`. */
 char* cc__rewrite_async_void_ret(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
-    if (!strstr(src, "@async")) return NULL;
+    /* Early exit if no real `@async` appears outside comments/strings.
+     * Pre-metaclass this used raw `strstr` which returned a hit on the
+     * sigil inside a block comment and forced the full scan every time. */
+    if (!cc_contains_token_top_level(src, n, "@async")) return NULL;
 
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -5230,7 +5298,8 @@ static void cc__collect_async_ret_types(const char* src, size_t n) {
  * already blocking in synchronous context). */
 char* cc__rewrite_at_await(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
-    if (!strstr(src, "@await")) return NULL;
+    /* Early exit only if `@await` is absent outside comments/strings. */
+    if (!cc_contains_token_top_level(src, n, "@await")) return NULL;
 
     cc__collect_async_ret_types(src, n);
 
@@ -6473,7 +6542,8 @@ chain_cleanup:
     free(buf);
     fclose(in);
     fclose(out);
-    unlink(tmp_path);
+    if (!getenv("CC_KEEP_PP")) unlink(tmp_path);
+    else fprintf(stderr, "CC_KEEP_PP: preprocess tmp kept at %s\n", tmp_path);
     return -1;
 }
 
@@ -6601,7 +6671,31 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
      * The latter case synthesizes `CCError` / `CC_ERR_NULL` in the lowered
      * output (see pass_result_unwrap.c / pass_err_syntax.c pointer-path
      * emission); without the include, those symbols would be undeclared. */
-    int uses_unwrap_ops = use && (strstr(use, "!>") != NULL || strstr(use, "?>") != NULL);
+    /* Decide whether to force-include `cc_result.cch`.  Previously this
+     * used a raw `strstr(use, "!>")` presence check, which accidentally
+     * fired on `!>` sigils inside comments — including the top-of-file
+     * doc comment in many tests.  Post-phase-3 the real `!>` / `?>`
+     * sigils have already been lowered away, so a comment-aware check
+     * on those alone would miss tests whose body uses the unwrap ops
+     * but whose lowered output only references the generated symbols
+     * (`CCError`, `CC_ERR_NULL`, `cc_ok`, `cc_err`, `cc_is_err`,
+     * `cc_unwrap`).  Check for either:
+     *   - any pre-lowering sigil that might still be there in passes
+     *     that re-enter (code-aware to not be fooled by comments), or
+     *   - any of the generated Result runtime symbols emitted by
+     *     pass_result_unwrap / pass_err_syntax.
+     * This replaces the previous by-accident behavior with an explicit
+     * signal and removes the hidden dependency on comment contents. */
+    size_t use_len = use ? strlen(use) : 0;
+    int uses_unwrap_ops = use && (
+        cc_contains_token_top_level(use, use_len, "!>") ||
+        cc_contains_token_top_level(use, use_len, "?>") ||
+        cc_contains_token_top_level(use, use_len, "CCError") ||
+        cc_contains_token_top_level(use, use_len, "CC_ERR_NULL") ||
+        cc_contains_token_top_level(use, use_len, "cc_ok") ||
+        cc_contains_token_top_level(use, use_len, "cc_err") ||
+        cc_contains_token_top_level(use, use_len, "cc_is_err") ||
+        cc_contains_token_top_level(use, use_len, "cc_unwrap"));
     if (cc__result_specs.count > 0 || uses_unwrap_ops) {
         fprintf(out, "/* --- CC result type support --- */\n");
         fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -7178,7 +7272,8 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
         const char* strict_env = getenv("CC_STRICT_RESULT_UNWRAP");
         int strict_on = (strict_env && strict_env[0] == '1' && strict_env[1] == 0);
         int has_ops = chain->src && chain->len > 0 &&
-            (strstr(chain->src, "?>") != NULL || strstr(chain->src, "!>") != NULL);
+            (cc_contains_token_top_level(chain->src, chain->len, "?>") ||
+             cc_contains_token_top_level(chain->src, chain->len, "!>"));
         if ((has_ops || strict_on) && chain->src && chain->len > 0) {
             /* Lift any trailing `@destroy { body }` suffix off of `!>` /
              * `?>` statements into a standalone `@defer { body };` placed
@@ -7191,7 +7286,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
              * The same rewrite is also invoked in visit_codegen.c right
              * before the final `!>`/`?>` lowering, because visit_codegen
              * re-reads the raw source for its own text-pass pipeline. */
-            if (strstr(chain->src, "@destroy") != NULL) {
+            if (cc_contains_token_top_level(chain->src, chain->len, "@destroy")) {
                 char* ud_out = NULL;
                 size_t ud_out_len = 0;
                 int ud_r = cc__rewrite_unwrap_destroy_suffix(
@@ -7225,8 +7320,10 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
         }
     }
     if (chain->src && chain->len > 0 &&
-        (strstr(chain->src, "@errhandler") != NULL || strstr(chain->src, "@err") != NULL ||
-         strstr(chain->src, "=<!") != NULL || strstr(chain->src, "<?") != NULL)) {
+        (cc_contains_token_top_level(chain->src, chain->len, "@errhandler") ||
+         cc_contains_token_top_level(chain->src, chain->len, "@err") ||
+         cc_contains_token_top_level(chain->src, chain->len, "=<!") ||
+         cc_contains_token_top_level(chain->src, chain->len, "<?"))) {
         char* err_out = NULL;
         size_t err_out_len = 0;
         CCVisitorCtx err_ctx = {.symbols = NULL, .input_path = input_path};

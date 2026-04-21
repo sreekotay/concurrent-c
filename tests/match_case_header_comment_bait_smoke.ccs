@@ -1,0 +1,42 @@
+/* Metaclass regression: @match-case header parsing must be
+ * comment/string-aware.
+ *
+ * Pre-fix: `pass_match_syntax.c` located the `.recv` / `.send`
+ * discriminator in a case header via raw `strstr(hdr, ".recv")` /
+ * `strstr(hdr, ".send")`, then scanned for the opening `(` via
+ * `strchr(dot, '(')`.  Case headers that embedded a doc comment or
+ * string literal mentioning `.recv(` or `.send(` got the
+ * discriminator pointed into the comment.  `ch_expr` then contained
+ * garbage; `arg_expr` contained the comment's fake argument.
+ *
+ * Post-fix: `pass_match_syntax` routes the `.recv`/`.send` lookup
+ * and the `(` lookup through `cc_find_substr_top_level` /
+ * `cc_find_char_top_level` (util/text.h), which skip comments and
+ * string literals.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <assert.h>
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    cc_channel_pair(&tx, &rx);
+
+    (void)chan_send(tx, 123);
+
+    int out = 0;
+    @match {
+        case rx /* .send(decoy) */ .recv(&out): {
+            /* selected */
+        }
+    }
+
+    assert(out == 123);
+    printf("match_case_header_comment_bait: out=%d OK\n", out);
+
+    chan_close(tx);
+    chan_free(rx);
+    return 0;
+}
