@@ -1,0 +1,68 @@
+/* Regression: closure env synthesizer must not collide with an unrelated
+ * struct that has fields named identically to the captured locals.
+ *
+ * A previous version of the closure-literal AST pass resolved capture
+ * types by textual identifier match, so when handle_client captured
+ * locals named `reader` / `conn` AND an unrelated struct had fields
+ * `.reader` / `.conn`, the env-struct synthesis re-emitted the ambient
+ * struct's declaration inside the closure-env typedef, producing a
+ * "struct already defined" reparse failure.  Guarded by
+ * commit d02a79b ("Fix closure field/capture name collision bug and
+ * harden decl scanner"); keep this test alive so any future rewrite of
+ * the capture-type inference does not regress it.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct ReqIter {
+    /* Field names deliberately chosen to collide with the local names
+     * captured by the closure below. */
+    const char* reader;
+    int         conn;
+} ReqIter;
+
+static ReqIter make_iter(const char* r, int c) {
+    ReqIter it = { .reader = r, .conn = c };
+    return it;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    /* Locals share names with ReqIter fields — this is the collision
+     * shape that used to confuse the closure-env synthesizer. */
+    const char* reader = "hello";
+    int         conn   = 7;
+
+    ReqIter it = make_iter(reader, conn);
+
+    cc_atomic_int hit = 0;
+    cc_atomic_int saw_conn = 0;
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+
+        n->spawn(() => [reader, conn, &saw_conn, &hit] {
+            cc_atomic_fetch_add(&saw_conn, conn);
+            if (reader != NULL) cc_atomic_fetch_add(&hit, 1);
+        });
+    }
+
+    int hit_v = cc_atomic_load(&hit);
+    int saw_v = cc_atomic_load(&saw_conn);
+    if (hit_v != 1 || saw_v != 7) {
+        fprintf(stderr, "expected hit=1 saw=7, got hit=%d saw=%d\n", hit_v, saw_v);
+        return 1;
+    }
+
+    /* Keep `it` referenced so the struct is not elided by the compiler
+     * ahead of the closure-literal AST pass. */
+    if (!it.reader || it.conn != 7) return 2;
+
+    printf("ok\n");
+    return 0;
+}
