@@ -5,12 +5,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "comptime/symbols.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
 
 #define cc__append_n   cc_sb_append
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
+
+/* Ambient symbol table consulted for bodyless `@destroy;` on user types
+ * registered via `@comptime cc_type_register(...)`.  Callers that have a
+ * live `CCSymbolTable*` should call cc_unwrap_destroy_set_symbols() before
+ * invoking cc__rewrite_unwrap_destroy_suffix(); resolver falls back to the
+ * builtin-owned hardcoded list when no table is set.
+ *
+ * Thread-local to stay safe under the compiler's parallel-driver use.  Follows
+ * the same pattern as cc_ufcs_set_symbols() in cc/src/visitor/ufcs.c. */
+static _Thread_local CCSymbolTable* g_ud_symbols = NULL;
+
+void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols) {
+    g_ud_symbols = symbols;
+}
 
 /* Skip C comments and string/char literals starting at `s[*i]`.  Advances
  * `*i` past the skipped region.  Returns 1 if any input was consumed. */
@@ -169,6 +184,144 @@ static int cc__ud_extract_decl_name(const char* s, size_t stmt_a, size_t op_pos,
     if (!(isalpha((unsigned char)s[na]) || s[na] == '_')) return 0;
     *name_a = na;
     *name_b = nb;
+    return 1;
+}
+
+/* Normalize the declared type span `s[type_a .. type_b)` into a lookup
+ * key suitable for `cc_symbols_lookup_type_destroy_call`: strip storage
+ * classes / qualifiers (static/const/volatile/restrict) and collapse
+ * interior whitespace, then copy into `out`.  Out-param `*had_pointer`
+ * is set to 1 if the span contains `*` (so callers can decide whether
+ * the registered destroy callee wants `name` or `&name`).  Returns 0 on
+ * success, -1 if the result would not fit in `out`. */
+static int cc__ud_normalize_type_name(const char* s, size_t type_a, size_t type_b,
+                                      char* out, size_t out_cap,
+                                      int* had_pointer) {
+    if (!out || out_cap == 0) return -1;
+    if (had_pointer) *had_pointer = 0;
+    static const char* const skip_words[] = {
+        "static", "const", "volatile", "restrict", "register", "extern", "inline"
+    };
+    static const int n_skip = (int)(sizeof(skip_words) / sizeof(skip_words[0]));
+
+    size_t o = 0;
+    size_t i = type_a;
+    int last_was_space = 1;
+    while (i < type_b) {
+        char c = s[i];
+        if (isspace((unsigned char)c)) {
+            if (!last_was_space && o > 0 && o + 1 < out_cap) {
+                out[o++] = ' ';
+                last_was_space = 1;
+            }
+            i++;
+            continue;
+        }
+        if (c == '*') {
+            if (had_pointer) *had_pointer = 1;
+            if (o > 0 && out[o - 1] == ' ') o--;
+            if (o + 1 >= out_cap) return -1;
+            out[o++] = '*';
+            last_was_space = 0;
+            i++;
+            continue;
+        }
+        if (isalpha((unsigned char)c) || c == '_') {
+            size_t start = i;
+            while (i < type_b && (isalnum((unsigned char)s[i]) || s[i] == '_')) i++;
+            size_t len = i - start;
+            int skip = 0;
+            for (int k = 0; k < n_skip; k++) {
+                size_t kl = strlen(skip_words[k]);
+                if (len == kl && memcmp(s + start, skip_words[k], kl) == 0) { skip = 1; break; }
+            }
+            if (skip) continue;
+            if (o + len >= out_cap) return -1;
+            memcpy(out + o, s + start, len);
+            o += len;
+            last_was_space = 0;
+            continue;
+        }
+        if (o + 1 >= out_cap) return -1;
+        out[o++] = c;
+        last_was_space = 0;
+        i++;
+    }
+    while (o > 0 && out[o - 1] == ' ') o--;
+    if (o >= out_cap) return -1;
+    out[o] = '\0';
+    return 0;
+}
+
+/* Tighten the declared-type span.  `cc__ud_stmt_start_backward` returns
+ * the start of the enclosing brace scope, which for a declaration like
+ *
+ *     @errhandler(CCError e) { ... }
+ *     MyThing* t = create() !> @destroy;
+ *
+ * points at the start of the function body — so `[type_a .. type_b)` would
+ * engulf the entire `@errhandler { ... }` prelude.  The builtin-hardcoded
+ * resolver papers over this via substring match, but a symbol-table lookup
+ * needs a clean key.
+ *
+ * Walk backward from the declared-name start, collecting contiguous type
+ * tokens (identifiers, `*`, whitespace).  Stop at the first punctuation
+ * that can't be part of a C type (`}`, `;`, `)`, `,`, `=`), which gives
+ * the real start of the type text.  Returns the tightened start offset
+ * (clamped to `type_a` at the low end). */
+static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t name_a) {
+    size_t k = name_a;
+    while (k > type_a && isspace((unsigned char)s[k - 1])) k--;
+    while (k > type_a) {
+        char c = s[k - 1];
+        if (isalnum((unsigned char)c) || c == '_' || c == '*' ||
+            c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            k--;
+            continue;
+        }
+        break;
+    }
+    while (k < name_a && isspace((unsigned char)s[k])) k++;
+    return k;
+}
+
+/* Resolve destroy hooks from a `@comptime cc_type_register(...)` entry on
+ * the ambient symbol table.  Fills `*pre_hook` / `*post_hook` (may be NULL
+ * individually if not registered).  The registered destroy callee for a
+ * pointer type takes `name` directly; for a non-pointer type it takes
+ * `&name` — `*post_pass_address` is set to reflect that.  Returns 1 if
+ * either hook resolved, 0 if neither did. */
+static int cc__ud_symtab_owned_hooks(const char* s, size_t type_a, size_t type_b,
+                                     const char** pre_hook,
+                                     const char** post_hook,
+                                     int* post_pass_address) {
+    *pre_hook = NULL;
+    *post_hook = NULL;
+    *post_pass_address = 0;
+    if (!g_ud_symbols) return 0;
+
+    size_t tight_a = cc__ud_tighten_type_start(s, type_a, type_b);
+    char key[256];
+    int had_ptr = 0;
+    if (cc__ud_normalize_type_name(s, tight_a, type_b, key, sizeof(key), &had_ptr) != 0) {
+        return 0;
+    }
+    if (key[0] == '\0') return 0;
+
+    const char* pre_callee = NULL;
+    const char* post_callee = NULL;
+    (void)cc_symbols_lookup_type_pre_destroy_call(g_ud_symbols, key, &pre_callee);
+    (void)cc_symbols_lookup_type_destroy_call(g_ud_symbols, key, &post_callee);
+
+    if (!pre_callee && !post_callee) return 0;
+
+    *pre_hook = pre_callee;
+    *post_hook = post_callee;
+    /* Registered destroy callees take the raw pointer for pointer types
+     * and `&name` for non-pointer value types — matches the convention
+     * already used by pass_create.c when emitting the @create/@destroy
+     * lowering. */
+    *post_pass_address = had_ptr ? 0 : 1;
     return 1;
 }
 
@@ -355,7 +508,18 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             /* Type span is [stmt_a .. name_a), trimmed of trailing ws. */
             size_t type_b = name_a;
             while (type_b > stmt_a && isspace((unsigned char)src[type_b - 1])) type_b--;
-            cc__ud_builtin_owned_hooks(src, stmt_a, type_b, &pre_hook, &post_hook, &post_pass_addr);
+            /* Prefer `@comptime cc_type_register` hooks over the hardcoded
+             * builtin-owned trio.  The builtin types (CCNursery*, CCArena,
+             * CCChan*) register themselves via cc_type_register too, so
+             * when a symbol table is live the registered entries drive the
+             * lowering uniformly.  The hardcoded list remains as a fallback
+             * for call sites where no symbol table is installed (e.g.
+             * out-of-tree tools invoking the pass directly). */
+            if (!cc__ud_symtab_owned_hooks(src, stmt_a, type_b,
+                                           &pre_hook, &post_hook, &post_pass_addr)) {
+                cc__ud_builtin_owned_hooks(src, stmt_a, type_b,
+                                           &pre_hook, &post_hook, &post_pass_addr);
+            }
         }
 
         /* Bodyless `@destroy;` is only meaningful when the declared type has a

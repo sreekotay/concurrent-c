@@ -1,0 +1,82 @@
+/* Regression test: bodyless `!> @destroy;` resolves destroy hooks from
+ * `@comptime cc_type_register(...)` for user types.
+ *
+ * Previously, cc__rewrite_unwrap_destroy_suffix only honored a hardcoded
+ * trio (CCNursery*, CCArena, CCChan*) and would reject the bodyless form
+ * on any other type:
+ *
+ *     error: @destroy: bodyless `@destroy;` requires a registered
+ *            destructor for type `MyThing*`, but none is known
+ *
+ * forcing users to fall back to an explicit `@defer { my_thing_destroy(x); }`.
+ *
+ * With the symbol-table lookup wired in, the pass now consults the ambient
+ * symbol table (installed by parse.c around the preprocess chain and by
+ * visit_codegen.c around its own re-run) and emits the registered destroy
+ * callee for the declared type.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdlib.h>
+#include <stdio.h>
+
+typedef struct MyThing {
+    int value;
+} MyThing;
+
+static int g_my_thing_live = 0;
+static int g_my_thing_destroyed = 0;
+
+static MyThing* my_thing_create(int v) {
+    MyThing* t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->value = v;
+    g_my_thing_live++;
+    return t;
+}
+
+static void my_thing_destroy(MyThing* t) {
+    if (!t) return;
+    g_my_thing_destroyed++;
+    g_my_thing_live--;
+    free(t);
+}
+
+@comptime {
+    (void)cc_type_register("MyThing*", (CCTypeHooks){
+        .create = cc_type_create_call("my_thing_create"),
+        .destroy = cc_type_destroy_call("my_thing_destroy"),
+    });
+}
+
+/* Bodyless `!> @destroy;` via the unwrap-destroy suffix pass.  Relies on
+ * the registered destroy callee from the comptime block above. */
+static int run_scope(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "unexpected err: %s\n", e.message);
+        return 1;
+    }
+    MyThing* t = my_thing_create(42) !> @destroy;
+    if (!t) return 2;
+    if (t->value != 42) return 3;
+    return 0;
+}
+
+int main(void) {
+    int rc = run_scope();
+    if (rc != 0) {
+        fprintf(stderr, "run_scope returned %d\n", rc);
+        return 1;
+    }
+    if (g_my_thing_destroyed != 1) {
+        fprintf(stderr, "expected 1 destroy, got %d\n", g_my_thing_destroyed);
+        return 2;
+    }
+    if (g_my_thing_live != 0) {
+        fprintf(stderr, "expected 0 live, got %d\n", g_my_thing_live);
+        return 3;
+    }
+    printf("ok\n");
+    return 0;
+}

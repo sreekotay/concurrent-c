@@ -14,6 +14,7 @@
 #include "util/text.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
+#include "visitor/pass_unwrap_destroy.h"
 #include "util/path.h"
 
 static int cc__match_kw_parse(const char* src, size_t n, size_t pos, const char* kw) {
@@ -429,8 +430,15 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         }
     }
 
-    /* Preprocess to string (no temp file) */
+    /* Preprocess to string (no temp file).  Install the symbol table on
+     * the unwrap-destroy pass's ambient slot so bodyless `!> @destroy;`
+     * on user types registered via `@comptime cc_type_register(...)`
+     * resolves to the registered destroy callee (the preprocess chain
+     * doesn't carry a CCSymbolTable parameter today; see
+     * cc/src/visitor/pass_unwrap_destroy.h). */
+    cc_unwrap_destroy_set_symbols(symbols);
     char* pp_buf = cc_preprocess_to_string(file_buf, got, input_path);
+    cc_unwrap_destroy_set_symbols(NULL);
     free(file_buf);
     if (!pp_buf) {
         return -1;

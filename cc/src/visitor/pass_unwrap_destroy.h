@@ -3,6 +3,16 @@
 
 #include <stddef.h>
 
+#include "comptime/symbols.h"
+
+/* Install the ambient symbol table the unwrap-destroy pass consults when
+ * resolving a bodyless `@destroy;` on a user-declared type (via
+ * `@comptime cc_type_register(...)`).  Pass NULL to clear.  Callers that
+ * have a live CCSymbolTable* should set it before invoking the pass so the
+ * bodyless form works for registered types; otherwise the pass falls back
+ * to the hardcoded builtin-owned list (CCNursery*, CCArena, CCChan*). */
+void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols);
+
 /* Rewrite a trailing `@destroy { body }` suffix on a statement that
  * contains a `!>` or `?>` operator into a standalone `@defer { body };`
  * placed immediately after the original statement terminator.
