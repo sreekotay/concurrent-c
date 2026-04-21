@@ -1759,8 +1759,14 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                         cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
                     }
                     cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
-                                   I, reps[ri].lhs_name, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = ", I, reps[ri].lhs_name);
+                    if (reps[ri].ret_is_ptr) {
+                        cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                    } else if (reps[ri].ret_type) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)", reps[ri].ret_type);
+                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                                   reps[ri].line_start);
                 }
             } else if (reps[ri].kind == CC_AB_REWRITE_DECL_INIT_CALL && reps[ri].lhs_name && reps[ri].decl_type) {
                 if (reps[ri].ret_is_structy) {

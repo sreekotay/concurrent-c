@@ -1,0 +1,53 @@
+/* Regression: the autoblock CC_AB_REWRITE_ASSIGN_CALL path used to emit
+ *     req = await cc_run_blocking_task_intptr(...);
+ * without a cast. After async lowering that became
+ *     __f->req = __f->__cc_aw0;
+ * where __f->req is a pointer and __cc_aw0 is intptr_t, so clang rejected
+ * the code with "incompatible integer to pointer conversion" and users
+ * fell back to hand-spawning closures around the @async body.
+ *
+ * The fix adds a (void*) cast for pointer returns and a (ret_type) cast
+ * for scalar returns — mirroring the DECL_INIT_CALL path. This smoke keeps
+ * a minimal direct-@async variant so the cast can't silently regress.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    int id;
+} Item;
+
+static cc_atomic_int g_sum = 0;
+
+@async int producer(int hi) {
+    Item* it = NULL;
+    int sum = 0;
+    for (int i = 1; i <= hi; ++i) {
+        it = malloc(sizeof(Item));
+        if (!it) return 1;
+        it->id = i;
+        sum += it->id;
+        free(it);
+    }
+    cc_atomic_fetch_add(&g_sum, sum);
+    return 0;
+}
+
+int main(void) {
+    cc_atomic_store(&g_sum, 0);
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+        if (n->spawn_async(producer(5)) != 0) return 3;
+        if (n->spawn_async(producer(4)) != 0) return 4;
+    }
+    int sum = cc_atomic_load(&g_sum);
+    if (sum != (1+2+3+4+5) + (1+2+3+4)) return 5;
+    printf("async_ptr_assign_autoblock_smoke: PASS (sum=%d)\n", sum);
+    return 0;
+}
