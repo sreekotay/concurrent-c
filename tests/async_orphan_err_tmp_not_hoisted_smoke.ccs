@@ -1,0 +1,43 @@
+// Follow-up bug [F3] smoke: the legacy @err-syntax expansion emits
+// per-site temporaries named `__cc_er_r_N` / `__cc_er_d_N` at the use
+// site, wrapped in a `{ ... }` block so they never need to cross a
+// yield point.  Pre-fix async_ast saw those names and speculatively
+// reserved `struct __CCResultGeneric __cc_er_r_N;` in the coroutine
+// frame, which is incomplete in real-compile mode and failed with
+//   error: field has incomplete type 'struct __CCResultGeneric'
+//
+// Fix: async_ast's local-hoist pass now skips `__cc_er_*` names the
+// same way it already skips pass_result_unwrap's `__cc_pu_*` temps.
+// Compiling this file end-to-end (Phase 3 reparse + real C compile)
+// is the test.
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static bool !>(CCError) may_fail(int x) {
+    if (x < 0) { CCError e = {0}; e.message = "neg"; return cc_err(e); }
+    return cc_ok(true);
+}
+
+@async int worker(int limit) {
+    @errhandler(CCError e) { (void)e; return 1; }
+    int i = 0;
+    while (i < limit) {
+        /* Statement-position !> expands into a `{ ... }` block that
+         * introduces a `__cc_er_r_N` tmp scoped to that block.  The
+         * tmp must NOT end up in the coroutine frame. */
+        may_fail(i) !> { return 1; };
+        cc_yield();
+        i++;
+    }
+    return 0;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(worker(2));
+    cc_nursery_destroy(n);
+    printf("async_orphan_err_tmp_not_hoisted: OK\n");
+    return 0;
+}

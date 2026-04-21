@@ -1,11 +1,11 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
-**Status:** the six original bugs are fixed and the `@async` migration is
-live in `real_projects/redis/redis_idiomatic.ccs` (handle_client and
-owner_loop now run on `spawn_async` + V2-scheduler fibers).  Three narrow
-follow-up bugs were surfaced while getting the migration to compile; see
-the "Follow-up bugs surfaced during migration" section below.  The
-parser-mode result-type collapse work from Bug [3] is also still a
+**Status:** the six original bugs **and** all three follow-up bugs
+([F1]/[F2]/[F3]) are fixed.  The `@async` migration is live in
+`real_projects/redis/redis_idiomatic.ccs` (handle_client and owner_loop
+now run on `spawn_async` + V2-scheduler fibers) and needs no further
+in-source workarounds for any of these compiler bugs.  The parser-mode
+result-type collapse work from Bug [3] is still deferred as a focused
 follow-up — tracked at the very bottom of this file.
 
 `real_projects/redis/redis_idiomatic.ccs` would ideally look like the
@@ -220,9 +220,9 @@ actually bailed out, not on the no-op path.
 
 These only showed up once the six blocking bugs above were fixed and the
 `@async int handle_client(...)` migration actually started compiling.
-All three have source-side workarounds living in
-`real_projects/redis/redis_idiomatic.ccs`; the workarounds should come
-out once the compiler fixes land.
+All three are now fixed at the compiler level; any remaining
+source-side workarounds in `real_projects/redis/redis_idiomatic.ccs`
+can be removed.
 
 ### [F1] `pass_async` keeps the type prefix on block-scoped decl-inits that cross a yield — FIXED
 
@@ -274,73 +274,84 @@ ws-only skip; if a similar "comment hides syntax" bug surfaces there,
 the same one-line macro swap to `cc_skip_ws_and_comments_ptr` is the
 cheap fix.
 
-### [F2] `pass_async` keeps the type prefix on result-typed decls of any shape
+### [F2] `pass_async` keeps the type prefix on result-typed decls of any shape — FIXED
 
-Even after [F1] is worked around, a local whose type is a result
-(`bool !>(CCIoError) r;` / `RedisReply !>(CCError) r = ...`) emits
+**Status:** Fixed — see `cc/src/visitor/async_ast.c` +
+`tests/async_frame_result_typed_decl_smoke.ccs`.
+
+**Symptom (pre-fix):** a local whose type is a result
+(`bool !>(CCIoError) r;` / `RedisReply !>(CCError) r = ...`) inside an
+`@async` body whose lifetime crosses a yield point emitted
 ```
 CCResult_bool_CCIoError __f->r = init;       (with init)
 CCResult_bool_CCIoError __f->r;               (no init)
 ```
-i.e. the type-strip logic skips result-typed decls entirely, whether
-they have an initializer or not.  This is independent of the block
-nesting in [F1] — even at function scope, a `bool !>(E) x;` is
-mis-emitted.
+The decl is not valid C once the var name has been rewritten to a
+frame member access, and Phase 3 reparse / real compile both fail.
 
-**Workaround in-source:** never let a result-typed local exist inside
-an `@async` function body.  Consume the result entirely in a sync
-helper (`rr_fill_split` / `db_execute_split` near the top of
-`redis_idiomatic.ccs`), exposing value/error as primitive out-params,
-and keep primitives in the async frame.
+**Root cause:** async runs *before* `pass_type_syntax.c` rewrites
+`T !>(E)` to `CCResult_T_E` (see `visit_codegen.c` — async at
+`cc_async_rewrite_state_machine_ast`, result-type rewrite further
+down), so the raw-text decl scanners see shapes like
+`bool !>(CCIoError) r = maybe_io(i)`.  The scalar/array/struct decl
+branches walk ident tokens separated by whitespace to count
+`type_tok_n`; the walker broke at the `!` in `!>`, stopped at one
+token and failed the `>= 2` check, dropping the statement onto the
+generic "emit as-is with ident rewrites" fallback.  `pass_type_syntax`
+then rewrote `bool !>(CCIoError)` -> `CCResult_bool_CCIoError` in-place
+in the already-lowered body, producing the invalid decl above.
 
-**Fix:** extend the strip logic to recognise `CCResult_*_*` /
-`CCRes(...)` / `T !>(E)` as legitimate types to strip on frame move.
-Probably one character's difference from the [F1] fix once it's in
-hand.
+**Fix:** added `cc__skip_ws_and_result_sigil` in `async_ast.c` that,
+after the normal whitespace/comment skip, also consumes any
+`!>(...)` / `?>(...)` result-type suffix (with full paren matching).
+Replaced `q = cc__skip_ws(q)` with `q = cc__skip_ws_and_result_sigil(q)`
+at the six token-loop sites in the three decl-strip branches (scalar,
+array, struct/other).  The walker now steps across the sigil, finds
+the variable-name token on the other side, counts `type_tok_n == 2`
+and emits the correct `__f->r = init;` assignment.
 
-### [F3] Orphan unwrap error-tmps hoisted to the frame as an incomplete type
+Reordering the passes (running `cc__rewrite_result_types_text` before
+async) would also fix this but has a much bigger blast radius — other
+intermediate passes may rely on the `!>(E)` form; the edge patch in
+async keeps the pipeline ordering stable.
 
-`pass_err_syntax` emits per-`!>`-site tmp names like `__cc_er_r_N` /
-`__cc_er_d_N`.  When the unwrap form is inlined at the use site via a
-statement-expression with `__typeof__(expr) __cc_er_r_N = ...`, those
-tmp names never need to escape.  `pass_async` sees the name, though,
-and speculatively reserves a frame field for it as
-`struct __CCResultGeneric __cc_er_r_N;`.
+### [F3] Orphan unwrap error-tmps hoisted to the frame as an incomplete type — FIXED
 
-In parser mode `__CCResultGeneric` is a concrete struct and the field
-compiles away as dead-weight.  In real-compile mode it's only a
-forward declaration (`cc_result.cch` guards the definition behind
-`#ifdef CC_PARSER_MODE`), so the frame struct fails to compile with
+**Status:** Fixed — see `cc/src/visitor/async_ast.c` +
+`tests/async_orphan_err_tmp_not_hoisted_smoke.ccs`.
+
+**Symptom (pre-fix):** a statement-position `!>` inside an `@async`
+body caused async to reserve
+```
+struct __CCResultGeneric __cc_er_r_N;
+```
+in the coroutine frame struct.  In real-compile mode
+`__CCResultGeneric` is only forward-declared (`cc_result.cch` guards
+the definition behind `CC_PARSER_MODE`), so the field has incomplete
+type:
 ```
 error: field has incomplete type 'struct __CCResultGeneric'
 ```
 
-**Workaround in-source:** provide the same layout-compatible stub
-locally in non-parser mode at the top of the `.ccs` file:
-```
-#ifndef CC_PARSER_MODE
-#ifndef __CC_RESULT_GENERIC_DEFINED
-#define __CC_RESULT_GENERIC_DEFINED
-typedef struct __CCGenericError { ... } __CCGenericError;
-typedef struct __CCResultGeneric { bool ok; union { intptr_t value;
-                                                     __CCGenericError error; } u; } __CCResultGeneric;
-#endif
-#endif
-```
-The orphan fields are never read/written, so layout compatibility is
-enough.
+**Root cause:** `pass_err_syntax.c` emits per-site temporaries named
+`__cc_er_r_N` / `__cc_er_d_N` when it processes the legacy `@err`
+surface.  Result-unwrap `!>` lowerings route through this same pass,
+producing the same tmp names.  The expansion lives entirely inside a
+`{ ... }` block at the use site (e.g.
+`{ __typeof__(CALL) __cc_er_r_N = (CALL); if (cc_is_err(...)) { ... } }`),
+so the tmp never needs to cross a yield point.  The async pass's
+local-hoist loop saw the name in the stub AST, though, and
+speculatively reserved a frame field for it.  It had the same issue
+already for `__cc_pu_*` (pass_result_unwrap) and `__cc_ab_*`
+(autoblocking) temps — both already explicitly skipped — but no skip
+existed for the `__cc_er_*` family.
 
-**Fix (pick one):**
-1. Stop emitting the orphan frame fields when the unwrap form is
-   inlined at the use site (no lifetime crosses a yield).
-2. Emit the orphan fields with the concrete `CCResult_T_E` type that
-   the unwrap-expansion actually produces.
-3. Promote the parser-mode `__CCResultGeneric` definition to also be
-   visible in non-parser-mode (it's still used by other unwrap
-   helpers, so the layout is stable).
-
-Option 1 is the cleanest; options 2/3 are trivial but leave dead
-fields in the frame.
+**Fix:** added `if (strncmp(n[i].aux_s1, "__cc_er_", 8) == 0) continue;`
+next to the existing `__cc_pu_` / `__cc_ab_` skips in async_ast's
+local-hoist loop.  Option 1 from the original fix menu ("stop
+emitting orphan frame fields when the unwrap form is inlined at the
+use site"); no frame-field emission path is taken for these tmps at
+all after the skip.
 
 ### Perf note
 

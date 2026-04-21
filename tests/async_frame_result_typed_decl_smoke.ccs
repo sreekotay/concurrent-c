@@ -1,0 +1,42 @@
+// Follow-up bug [F2] smoke: result-typed local decl crossing a yield.
+// See docs/known-bugs/redis_idiomatic_async.md [F2] for root-cause
+// analysis; the short version is that async_ast's type-token walker
+// used to break at the `!` in `bool !>(CCIoError)`, fall onto the
+// generic fallback and emit invalid `CCResult_..._... __f->r = init;`
+// after pass_type_syntax rewrote the prefix in-place.
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_io_error.cch>
+#include <stdio.h>
+
+static bool !>(CCIoError) maybe_io(int x) {
+    if (x < 0) {
+        CCIoError e = {0};
+        e.kind = CC_IO_OTHER;
+        return cc_err(e);
+    }
+    return cc_ok(true);
+}
+
+@async int worker(int limit) {
+    int i = 0;
+    while (i < limit) {
+        /* Block comment before the result-typed decl: this keeps the
+         * auto-blocking pass's single-line heuristic from pulling the
+         * call out of the decl (which would mask the F2 bug).  Pre-fix
+         * async_ast would emit `CCResult_bool_CCIoError __f->r = ...`. */
+        bool !>(CCIoError) r = maybe_io(i);
+        if (cc_is_err(r)) return 1;
+        cc_yield();
+        i++;
+    }
+    return 0;
+}
+
+int main(void) {
+    CCNursery* n = cc_nursery_create(NULL);
+    (void)n->spawn_async(worker(2));
+    cc_nursery_destroy(n);
+    printf("async_frame_result_typed_decl: OK\n");
+    return 0;
+}
