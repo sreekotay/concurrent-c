@@ -110,6 +110,46 @@ static void cc__sb_append_fmt(char** io_s, size_t* io_len, size_t* io_cap, const
     va_end(ap);
 }
 
+/* Advance past whitespace/comments plus any result-type suffix
+ * (`!>(E)` or `?>(E)`) sitting between type tokens.
+ *
+ * Follow-up bug [F2]: async runs before `pass_type_syntax.c` rewrites
+ * `T !>(E)` into `CCResult_T_E`, so the raw-text decl scanners see
+ * shapes like `bool !>(CCIoError) r = init`.  The ident-token walker
+ * used to break at the `!`, setting `type_tok_n == 1`, which fails the
+ * `>= 2` check and drops the statement onto the generic fallback —
+ * leaking the type prefix into the lowered body as
+ *   bool !>(CCIoError) __f->r = init;
+ * (later rewritten to `CCResult_bool_CCIoError __f->r = init;` by
+ * pass_type_syntax, which is no longer a valid C decl).
+ *
+ * Calling this helper where the walker otherwise uses `cc__skip_ws`
+ * lets the loop step across the sigil and resume scanning for the
+ * variable-name token on the other side.  Both `!>(...)` and `?>(...)`
+ * forms are handled for symmetry. */
+static inline const char* cc__skip_ws_and_result_sigil(const char* q) {
+    q = cc__skip_ws(q);
+    while ((q[0] == '!' || q[0] == '?') && q[1] == '>') {
+        const char* save = q;
+        q += 2;
+        q = cc__skip_ws(q);
+        if (*q != '(') {
+            /* `!>` / `?>` without a paren is not a type tail — caller
+             * will see the sigil position unchanged and can handle it. */
+            return save;
+        }
+        int depth = 1;
+        q++;
+        while (*q && depth > 0) {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            q++;
+        }
+        q = cc__skip_ws(q);
+    }
+    return q;
+}
+
 /* Keep local implementations of cc__find_matching_paren/brace to avoid subtle behavioral changes. */
 
 static int cc__find_matching_paren(const char* b, size_t bl, size_t lpar, size_t* out_rpar) {
@@ -1527,7 +1567,7 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
     }
     cc__emit_line_fmt(e, "__f->__t[%d] = (%s);", t, task_ex);
     cc__emit_line_fmt(e, "__f->__st = %d;", poll_state);
-    cc__emit_line(e, "return CC_FUTURE_PENDING;");
+    cc__emit_line(e, "continue;");
     free(task_ex);
     free(ex);
     cc__emit_close_case(e);
@@ -1545,7 +1585,7 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
         cc__emit_line(e, "(void)__v;");
     }
     cc__emit_line_fmt(e, "__f->__st = %d;", cont_state);
-    cc__emit_line(e, "return CC_FUTURE_PENDING;");
+    cc__emit_line(e, "continue;");
     cc__emit_close_case(e);
     cc__emit_open_case(e, cont_state);
     return 1;
@@ -1872,7 +1912,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (e->ret_is_void && rp[0] == 0) {
             cc__emit_line(e, "__f->__r = 0;");
             cc__emit_line(e, "__f->__st = 999;");
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
             *e->finished = 1;
             return 0;
@@ -1897,7 +1937,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
         cc__emit_line_fmt(e, "__f->__r = (intptr_t)(%s);", ex3);
         cc__emit_line(e, "__f->__st = 999;");
-        cc__emit_line(e, "return CC_FUTURE_PENDING;");
+        cc__emit_line(e, "continue;");
         free(ex3);
         cc__emit_close_case(e);
         *e->finished = 1;
@@ -1908,7 +1948,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (e->loop_depth <= 0) return 0;
         int bs = e->break_state[e->loop_depth - 1];
         cc__emit_line_fmt(e, "__f->__st = %d;", bs);
-        cc__emit_line(e, "return CC_FUTURE_PENDING;");
+        cc__emit_line(e, "continue;");
         cc__emit_close_case(e);
         *e->finished = 1;
         return 0;
@@ -1918,7 +1958,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (e->loop_depth <= 0) return 0;
         int cs = e->cont_state[e->loop_depth - 1];
         cc__emit_line_fmt(e, "__f->__st = %d;", cs);
-        cc__emit_line(e, "return CC_FUTURE_PENDING;");
+        cc__emit_line(e, "continue;");
         cc__emit_close_case(e);
         *e->finished = 1;
         return 0;
@@ -2004,7 +2044,10 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
             while (cc__is_ident_start(*q)) {
                 while (cc__is_ident_char(*q)) q++;
                 type_tok_n++;
-                q = cc__skip_ws(q);
+                /* Step across `!>(E)` / `?>(E)` result-type suffixes
+                 * that sit between the base type and the variable name;
+                 * see cc__skip_ws_and_result_sigil for the rationale. */
+                q = cc__skip_ws_and_result_sigil(q);
                 if (!cc__is_ident_start(*q)) break;
             }
             if (type_tok_n >= 2) {
@@ -2015,7 +2058,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                     ns = q;
                     while (cc__is_ident_char(*q)) q++;
                     ne = q;
-                    q = cc__skip_ws(q);
+                    q = cc__skip_ws_and_result_sigil(q);
                     if (!cc__is_ident_start(*q)) break;
                 }
                 if (ns && ne && ne > ns) {
@@ -2089,7 +2132,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         while (cc__is_ident_start(*q)) {
             while (cc__is_ident_char(*q)) q++;
             n_type_tokens++;
-            q = cc__skip_ws(q);
+            q = cc__skip_ws_and_result_sigil(q);
             if (!cc__is_ident_start(*q)) break;
         }
         if (n_type_tokens >= 2) {
@@ -2100,7 +2143,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                 var_start = q;
                 while (cc__is_ident_char(*q)) q++;
                 var_end = q;
-                q = cc__skip_ws(q);
+                q = cc__skip_ws_and_result_sigil(q);
                 if (!cc__is_ident_start(*q)) break;
             }
             if (var_start && var_end) {
@@ -2142,7 +2185,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         while (cc__is_ident_start(*q)) {
             while (cc__is_ident_char(*q)) q++;
             n_type_tokens++;
-            q = cc__skip_ws(q);
+            q = cc__skip_ws_and_result_sigil(q);
             /* Stop if next char is not an ident start (e.g., '=' or ';' or '*') */
             if (!cc__is_ident_start(*q)) break;
         }
@@ -2160,7 +2203,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                 var_start = q;
                 while (cc__is_ident_char(*q)) q++;
                 var_end = q;
-                q = cc__skip_ws(q);
+                q = cc__skip_ws_and_result_sigil(q);
                 if (!cc__is_ident_start(*q)) break;
             }
             /* var_start/var_end is the last identifier; check if it's followed by '=' or ';' */
@@ -2339,7 +2382,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                               then_state,
                               then_state,
                               (s->else_n ? else_state : after_state));
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             free(cond3);
             cc__emit_close_case(e);
 
@@ -2351,7 +2394,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
                     cc__emit_line_fmt(e, "__f->__st = %d;", after_state);
-                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                    cc__emit_line(e, "continue;");
                     cc__emit_close_case(e);
                 }
             }
@@ -2365,7 +2408,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                     (void)cc__emit_stmt_list(&sub, s->else_st, s->else_n);
                     if (!done) {
                         cc__emit_line_fmt(e, "__f->__st = %d;", after_state);
-                        cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                        cc__emit_line(e, "continue;");
                         cc__emit_close_case(e);
                     }
                 }
@@ -2381,7 +2424,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int after_state = cc__alloc_state(e);
 
             cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
 
             /* loop context */
@@ -2413,7 +2456,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 }
                 cc__emit_line_fmt(e, "int __cc_wh_c%d = (%s);", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_wh_c%d ? %d : %d;", cond_state, body_state, after_state);
-                cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                cc__emit_line(e, "continue;");
                 free(cond3);
                 cc__emit_close_case(e);
             }
@@ -2426,7 +2469,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
                     cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
-                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
+                    cc__emit_line(e, "continue;");
                     cc__emit_close_case(e);
                 }
             }
@@ -2444,7 +2487,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int after_state = cc__alloc_state(e);
 
             cc__emit_line_fmt(e, "__f->__st = %d;", init_state);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
 
             /* loop context */
@@ -2460,7 +2503,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 if (!cc__emit_semi_like(e, s->for_init)) return 0;
             }
             cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
-            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_line(e, "continue;");
             cc__emit_close_case(e);
 
             /* cond */
@@ -2832,6 +2875,19 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
              * substitutions emit CCAbIntptr helpers before async lowering).
              * The stmt-expression scope keeps them local to the state body. */
             if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) continue;
+            /* Follow-up bug [F3]: legacy @err-syntax expansion temps
+             * (`__cc_er_r_N`, `__cc_er_d_N`) emitted by pass_err_syntax
+             * always live inside a `{ ... }` expansion block at the use
+             * site, so they never need to cross a yield point.  The stub
+             * AST still sees the name and — pre-fix — speculatively
+             * reserved a frame field typed `struct __CCResultGeneric`,
+             * which in real-compile mode is only forward-declared
+             * (cc_result.cch guards the definition behind
+             * CC_PARSER_MODE).  The frame struct then failed to
+             * compile with "field has incomplete type".  Skip these
+             * orphan tmps the same way as the pass_result_unwrap
+             * `__cc_pu_*` set above. */
+            if (strncmp(n[i].aux_s1, "__cc_er_", 8) == 0) continue;
             if (i == fn->decl_item_idx) continue;
             /* ensure in subtree */
             int p = n[i].parent;
@@ -3110,6 +3166,12 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  (void)__e;\n");
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)__p;\n", frame_ty, frame_ty);
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  if (!__f) return CC_FUTURE_ERR;\n");
+        /* Outer for(;;) lets trivial state transitions use `continue` to re-enter
+         * the switch on-CPU.  The only path that exits this loop is a real wait
+         * (awaited task returned PENDING) via `return CC_FUTURE_PENDING;`, or
+         * completion via `return CC_FUTURE_READY;` in case 999.  Invariant:
+         *   PENDING out of this function <=> an awaited task is not yet ready. */
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  for (;;) {\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  switch (__f->__st) {\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    case 0:\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      __f->__st = 1;\n");
@@ -3146,6 +3208,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    }\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    default:\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      return CC_FUTURE_ERR;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n\n");
 
