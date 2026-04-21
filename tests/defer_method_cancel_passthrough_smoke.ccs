@@ -1,0 +1,19 @@
+/* Minimal regression for defer-pass `cancel` false positive. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    @defer {
+        /* Member-access `cancel` must not be misclassified as the
+         * reserved statement keyword. */
+        rx.cancel();
+        cc_chan_free(ch);
+    };
+
+    printf("ok\n");
+    return 0;
+}
