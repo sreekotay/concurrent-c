@@ -1,6 +1,6 @@
 #!/bin/bash
-# Profile redis_hybrid vs upstream redis-server under the same bench load.
-# Runs redis-benchmark in the background, samples the server for N seconds,
+# Profile redis_hybrid / redis_idiomatic / upstream under the same bench load.
+# Runs redis-benchmark in the background, samples each server for N seconds,
 # then writes call-graph summaries to /tmp/profile_<label>_<cmd>.txt.
 set -euo pipefail
 
@@ -8,9 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 HYBRID_BIN="$SCRIPT_DIR/out/redis_hybrid_profile"
+IDIOMATIC_BIN="$SCRIPT_DIR/out/redis_idiomatic_profile"
 
 UPSTREAM_PORT=6391
 HYBRID_PORT=6392
+IDIOMATIC_PORT=6393
 
 # How long to sample for (seconds). 6s @ 1ms = ~6000 samples; good signal.
 SAMPLE_SEC="${SAMPLE_SEC:-6}"
@@ -83,6 +85,9 @@ profile_server "upstream" "$UPSTREAM_BIN" "$UPSTREAM_PORT" \
 
 # --- hybrid ---
 profile_server "hybrid" "$HYBRID_BIN" "$HYBRID_PORT" "$HYBRID_PORT"
+
+# --- idiomatic ---
+profile_server "idiomatic" "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" "$IDIOMATIC_PORT"
 
 echo
 echo "profiles in $OUT_DIR"
