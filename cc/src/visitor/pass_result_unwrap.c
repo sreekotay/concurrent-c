@@ -69,18 +69,22 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
                                        const char* tmpv, const char* binder,
                                        const char* file, int line) {
     /* Prefer the typed binder path when the callee is a plain name whose
-     * declared error type we tracked in the result-fn registry.  This is
-     * what makes `!>(e) report(e)` type-check in parser mode when `report`
-     * expects the declared error type (e.g. `CCIoError`) rather than the
-     * generic parser-mode error struct. */
+     * declared error type we tracked in the result-fn registry.  Gives
+     * the binder the user-facing error type name (e.g. `CCIoError`) in
+     * diagnostics rather than an anonymous `__typeof__` expansion.
+     *
+     * Since parser-mode Result specs now emit distinct typed structs
+     * (see `cc/include/ccc/cc_result.cch` + preprocess.c), `(tmp).u.error`
+     * already has the declared error type in both parser mode and the
+     * real compile; no `*(E*)(void*)&` through-pointer dance needed. */
     char callee[128];
     char err_type[256];
     if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
         cc_result_fn_registry_get_err_type(callee, strlen(callee),
                                             err_type, sizeof(err_type))) {
         cc_sb_append_fmt(out, ol, oc,
-                         "%s %s = *(%s*)(void*)&((%s).u.error); ",
-                         err_type, binder, err_type, tmpv);
+                         "%s %s = (%s).u.error; ",
+                         err_type, binder, tmpv);
         return;
     }
     /* Fallback: untyped callee (method call, chained expression, or a

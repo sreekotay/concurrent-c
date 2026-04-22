@@ -1,14 +1,37 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
-**Status:** the six original bugs **and** all six follow-up bugs
-([F1]/[F2]/[F3]/[F4]/[F5]/[F6]) are fixed.  The `@async` migration is
-live in `real_projects/redis/redis_idiomatic.ccs` (handle_client and
-owner_loop now run on `spawn_async` + V2-scheduler fibers).  The
-parser-mode result-type collapse work from Bug [3] is still deferred
-as a focused follow-up — tracked at the very bottom of this file.
+**Status:** the six original bugs **and** seven follow-up bugs
+([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]) are fixed, plus the
+parser-mode Result-type collapse called out in Bug [3] is now
+structurally resolved (see "Follow-up: parser-mode result-type
+collapse" at the very bottom of this file).  The `@async` migration
+is live in `real_projects/redis/redis_idiomatic.ccs` (handle_client
+and owner_loop run on `spawn_async` + V2-scheduler fibers).
 
-Two new bugs surfaced while cleaning up the reply path, and a third
-fell out of the [F8] fix:
+Two scanner-level workarounds in `redis_idiomatic.ccs` remain, both
+tracked as OPEN follow-ups below:
+
+- **[F11]** (OPEN) — `@errhandler` with a **multi-line body** inside a
+  sync `!>(E)`-returning function corrupts `async_ast`'s parameter-list
+  scan for the *next* `@async` function in the TU.  Caused a reparse
+  failure where `@async int owner_loop(ReqRx req_rx)` was frame-lifted
+  as `owner_loop(!db_init(&db, 131072))` (picking up the first line of
+  the function body as the parameter list) with a matching invalid
+  frame field `! __p_db_init;`.  Working around in `redis_idiomatic.ccs`
+  by collapsing the handler body onto a single line.  Re-verified open
+  after the parser-mode collapse fix — this is a scanner-offset bug,
+  independent of the type-system work.
+
+- **[F12]** (OPEN) — `cc_channel_pair`'s syntax pass (in
+  `cc/src/visitor/pass_channel_syntax.c`, `cc__find_chan_decl_before`)
+  matches raw endpoint decls structurally (`T[~N >] name;`) and does
+  not resolve typedef aliases.  So even though
+  `typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 >] ReqTx;` is in scope,
+  `ReqTx req_tx; cc_channel_pair(&req_tx, &req_rx);` fails with
+  "could not find declarations for 'req_tx' and 'req_rx'".  Workaround
+  in `redis_idiomatic.ccs`: spell the bracket form at the
+  `cc_channel_pair` call site and use the `ReqTx`/`ReqRx` aliases
+  everywhere else.
 
 - **[F7]** (OPEN) — tcc's parser rejects a statement-expression
   initializer (`T x = ({ ... });`) when it appears as the first
@@ -83,6 +106,196 @@ comment bait) live at:
   pass_closure_calls decl-line `;` / `(` / `=` scan.
 - `tests/autoblock_call_comment_paren_bait_smoke.ccs` —
   pass_autoblock `call_txt` paren span extraction.
+
+---
+
+## [F12] `cc_channel_pair` syntax pass does not resolve typedef aliases for endpoint decls — OPEN
+
+### Symptom
+
+`cc_channel_pair(&tx, &rx)` errors with
+
+```
+error: channel: cc_channel_pair could not find declarations for 'tx' and 'rx'
+  note: ensure both channel handles are declared before this call
+  hint: use 'T[~N >] tx; T[~N <] rx;' to declare send/recv handles
+```
+
+even though `tx` / `rx` are declared at the correct shape via a
+typedef alias that is in scope at the call site.  Concrete repro from
+`redis_idiomatic.ccs`:
+
+```c
+typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 >] ReqTx;
+typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 <] ReqRx;
+...
+ReqTx req_tx;
+ReqRx req_rx;
+CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
+// ^ error: could not find declarations for 'req_tx' and 'req_rx'
+```
+
+### Root cause
+
+`cc__find_chan_decl_before` in
+`cc/src/visitor/pass_channel_syntax.c` scans the source text
+backwards from the call site looking for a decl whose form literally
+contains the `T[~...] NAME;` bracket shape.  When the decl's type is a
+typedef alias (`ReqTx req_tx;`), no `[` appears on the decl line and
+the backward scan fails even though the typedef body has the right
+bracket spec.
+
+### Workaround (applied in `redis_idiomatic.ccs`)
+
+At the `cc_channel_pair` call site, spell the raw `T[~N topology >]`
+form for each endpoint and keep the `ReqTx`/`ReqRx` aliases for all
+other use sites (function signatures, storage in structs, etc.).  The
+scan sees the bracket form at the one place it matters.
+
+### Suggested fix
+
+Teach `cc__find_chan_decl_before` to look at the type token in front
+of the endpoint name.  If that token is a bare identifier (not a
+bracket form), search the TU for `typedef <BODY>[~...] <IDENT>;` and
+use that body's bracket span as if it had been written inline.  The
+scan is already text-based; the typedef lookup is the same idea,
+applied once at the decl resolver rather than at every use site.
+
+---
+
+## [F11] Multi-line `@errhandler` body in a sync `!>(E)` function corrupts `async_ast` parameter scan of the next `@async` function — OPEN
+
+### Symptom
+
+Adding a plain `@errhandler(CCError e) { ...; ...; return cc_err(e); }`
+to a sync `!>(E)`-returning function (`rr_req_iter_next` in
+`real_projects/redis/redis_idiomatic.ccs`) causes a reparse failure on
+an `@async` function defined **later in the same TU**:
+
+```
+cc: internal reparse failed during final-UFCS input for real_projects/redis/redis_idiomatic.ccs
+```
+
+The transformed C dump shows `async_ast` emitted a frame struct and
+wrapper whose parameter list was lifted from the **function body**, not
+the real parameter list:
+
+```c
+typedef struct __cc_async_owner_loop_60001_frame {
+  int __st;
+  intptr_t __r;
+  ! __p_db_init;         /* <- bogus declarator; "type" is `!` */
+  CCTaskIntptr __t[1];
+} __cc_async_owner_loop_60001_frame;
+...
+CCTaskIntptr owner_loop(!db_init(&db, 131072)) {   /* <- body stmt #1 as params */
+  ...
+  __f->__p_db_init = db_init;
+  ...
+}
+```
+
+The real source of `owner_loop` is:
+
+```c
+@async int owner_loop(ReqRx req_rx) {
+    RedisDb db = {0};
+    if (!db_init(&db, 131072)) { ... }
+    ...
+}
+```
+
+so `async_ast` walked past the real `(ReqRx req_rx)` header-paren span
+and picked up the first `if (!db_init(&db, 131072))` expression from
+the body as the parameter list.
+
+### Minimal bisect (inside `rr_req_iter_next`)
+
+- Baseline (no `@errhandler` at all): builds clean.
+- `@errhandler(CCError e) { return cc_err(e); }`: builds clean.
+- `@errhandler(CCError e) { int x = 1; (void)x; return cc_err(e); }`
+  on a **single line**: builds clean.
+- Same two-statement body, but **split across multiple lines**:
+  triggers the reparse failure above.
+
+Concretely, both of these trigger it:
+
+```c
+@errhandler(CCError e) {
+    cc_arena_pool_free(&conn->req_pool, slot);
+    return cc_err(e);
+}
+```
+
+```c
+@errhandler(CCError e) {
+    int x = 1; (void)x;
+    return cc_err(e);
+}
+```
+
+but collapsing either body onto a single line (`@errhandler(CCError e)
+{ ...; ...; return cc_err(e); }`) fixes the build.
+
+Side constraints observed during bisect:
+
+- The failure does **not** depend on the statements referring to
+  `->` member access, arena APIs, or the pool slot — any multi-line
+  body reproduces it.
+- The failure is independent of whether the enclosing function body
+  contains literal `!>` tokens in comments (earlier suspicion — those
+  comments were already rephrased and the failure still reproduces).
+- The failure reliably hits the first `@async` function that follows
+  the offending sync `@errhandler` in the TU (`owner_loop` here).
+
+### Hypothesis
+
+`pass_err_syntax` (or whichever pass expands `@errhandler` into the
+hidden error trampoline) rewrites the handler body *in place* in a way
+that shifts byte offsets but leaves `async_ast`'s cached
+function-span / paren-span indices pointing at stale offsets.  Single-
+line bodies happen to preserve offsets well enough that the scan still
+lands inside the right function header; multi-line bodies shift far
+enough that the scan for `owner_loop`'s `(...)` starts **after** the
+real header `{`, so the first `(...)` it finds inside the body is
+matched as the parameter list.
+
+This is in the same family as [F6] (raw-text scanners in lowering
+passes missing new shapes as the language grows) and [F9] (async_ast
+leaking into binders introduced by a later pass).  The pattern: a
+later pass emits/shifts text and `async_ast`'s indices are not
+recomputed against the rewritten buffer.
+
+### Workaround
+
+Keep the `@errhandler` body on a single line in
+`rr_req_iter_next` — see the `[F11] workaround` comment above the
+handler in `real_projects/redis/redis_idiomatic.ccs`.
+
+### Suggested fix (sketch)
+
+1. Confirm with a minimal test case that **any** sync function with
+   a multi-line `@errhandler` immediately followed by an `@async`
+   function reproduces the scan drift (not specific to
+   `!>(E)`-returning callers).
+2. Trace `pass_err_syntax` → `async_ast` ordering.  Either:
+   - Re-run `async_ast`'s function-span / paren-span index build on
+     the post-`pass_err_syntax` buffer, or
+   - Have `pass_err_syntax` preserve the byte-count of the handler
+     body (rewrite-in-place with equal-length placeholders, then
+     expand in a later pass that doesn't care about offsets), or
+   - Move `@errhandler` expansion **after** `async_ast`, so
+     `async_ast` only ever sees the pre-expanded (stable) source.
+3. Promote the single-line-body test from step 1 to
+   `tests/errhandler_multiline_before_async_smoke.ccs` alongside the
+   existing `async_param_scan_comment_paren_smoke.ccs` coverage.
+
+### Cross-refs
+
+- Related: [F6] (async_ast param-list scanner leaking across function
+  boundaries), [F9] (async_ast frame-lifting binders introduced by a
+  later pass), and the broader *AST-truth* discussion in
+  `docs/refactor-ast-truth.md`.
 
 ---
 
@@ -1032,66 +1245,82 @@ variant).
 
 ---
 
-## Follow-up: parser-mode result-type collapse
+## Follow-up: parser-mode result-type collapse — FIXED
 
-The fix for Bug [3] is a *local* fix in `pass_result_unwrap.c`: the
-unwrap pass extracts the plain callee name from the unwrap call, looks
-up its declared error type in an extended `result_fn_registry`, and
-emits a typed binder of the form
+**Status:** Fixed — see commit `1e3f876 compiler: keep parser-mode
+Result types as distinct typed structs`.  Regression guard:
+`tests/result_struct_unwrap_smoke.ccs`.
 
-```
-E e = *(E*)(void*)&((tmp).u.error);
-```
+### Background
 
-This parses correctly in both modes:
+Bug [3]'s original *local* fix was the unwrap pass extracting a plain
+callee name from the unwrap call, looking its declared error type up in
+an extended `result_fn_registry`, and emitting a typed binder through a
+void-pointer cast (`E e = *(E*)(void*)&((tmp).u.error);`) so it parsed
+in both modes.  Parser mode saw `(tmp).u.error` as `__CCGenericError`
+and the cast recovered the declared `E`; real compilation saw it as `E`
+already and the cast was an identity no-op.
 
-- **Parser mode:** `(tmp).u.error` has type `__CCGenericError` (the
-  layout-compatible placeholder).  The cast through `void*` recovers
-  the declared `E`.  No runtime here — this code exists only for
-  type-checking.
-- **Real compilation:** `(tmp).u.error` already has type `E`.  The
-  cast is an identity no-op.
+The **deeper cause** was general: in `CC_PARSER_MODE` every
+`CCResult_T_E` was collapsed onto a single `__CCResultGeneric` struct
+whose `u.value` was `intptr_t` and whose `u.error` was
+`__CCGenericError`.  The collapse (commit `574471e` "Implement
+macro-based parser-safe result types") let the preprocessor emit
+`typedef __CCResultGeneric CCResult_T_MyError;` up-front without
+requiring `MyError` to be in scope, but it cost type fidelity
+everywhere downstream: `__cc_uw_value(r)` returned `long` rather than
+the declared `T`, so struct-payload `?>(e) handle(e)` ternaries tripped
+"type mismatch in conditional expression (have 'long' and 'struct T')".
 
-The **root cause** behind Bug [3] is more general: in
-`CC_PARSER_MODE`, every `CCResult_T_E` is collapsed to a single
-`__CCResultGeneric` struct whose `u.error` field is
-`__CCGenericError`.  That collapse was introduced deliberately in
-commit `574471e` ("Implement macro-based parser-safe result types")
-to handle the case where a user declares `T !> (MyError)` before
-`MyError` is known to the parser — the preprocessor emits
-`typedef __CCResultGeneric CCResult_T_MyError;` up-front so parsing
-does not require `MyError` to be in scope.
+### What landed
 
-That trade-off is over-eager for result types whose error type *is*
-in scope at declaration time (the common case).  For those, the
-parser-mode struct could be a real distinct type with a typed `u`
-union, and `cc_error(r)`, `cc_value(r)`, and `_Generic` dispatch
-would all behave correctly without the unwrap pass having to
-synthesize typed binders on the side.
+1. `cc/include/ccc/cc_result.cch`: parser-mode `CC_DECL_RESULT_SPEC`
+   now emits a real distinct typed struct with `{ bool ok; union { T
+   value; E error; } u; }`, mirroring the non-parser path.  The
+   pre-declared generic aliases (`typedef __CCResultGeneric
+   CCResult_int_CCError; ...`) and their `cc_ok_*` / `cc_err_*` macros
+   are gone; the parser-mode-only `__CCResultGeneric` arm in
+   `_Generic` is retired in favour of per-type typed arms.
+2. `cc/src/preprocess/preprocess.c`: auto-stubs for user-defined
+   Result specs emit `CC_DECL_RESULT_SPEC(T, E)` after the user's
+   prelude (not `typedef __CCResultGeneric ...`), guarded so
+   stdlib-predeclared specs aren't redeclared.  `_Generic` macro
+   definitions for `__cc_uw_is_err` / `__cc_uw_value` /
+   `__cc_uw_err_at` now emit arms for both user-defined specs and
+   every stdlib-predeclared result spec (e.g. `CCResult_bool_CCIoError`
+   for channel sends), with forward declarations of the stdlib tags so
+   TUs that don't include the owning header still see declared types.
+3. `cc/include/ccc/std/io.cch`: `CCResult_size_t_CCIoError` and
+   `CCResult_CCSlice_CCIoError` are now emitted unconditionally through
+   `CC_DECL_RESULT_SPEC` (no more parser-mode-only aliasing to
+   `__CCResultGeneric`).
+4. `cc/src/visitor/pass_result_unwrap.c`: the `result_fn_registry`-
+   backed binder path dropped the `*(E*)(void*)&` through-pointer cast
+   — `(tmp).u.error` now has the declared type `E` directly in both
+   modes.
 
-**Blast radius of unwinding the collapse:**
+### Bring-forward: the TCC-ext UFCS stub
 
-1. `cc/include/ccc/cc_result.cch` lines 277-309: change parser-mode
-   `CC_DECL_RESULT_SPEC` to emit a real distinct struct with typed
-   union fields (mirror the non-parser path).
-2. Same file lines 381-413: delete the pre-declared generic aliases
-   (`typedef __CCResultGeneric CCResult_int_CCError; ...`) and the
-   `cc_ok_CCResult_*` / `cc_err_CCResult_*` `#define` macros, which
-   would conflict with the inline functions produced by the changed
-   macro.
-3. `cc/src/preprocess/preprocess.c` line 6617: change the auto-stub
-   emission from `typedef __CCResultGeneric CCResult_X_Y;` to either
-   a forward struct declaration (when the error type is not yet in
-   scope) or a full `CC_DECL_RESULT_SPEC` invocation (when it is).
-   This requires ordering the stub emission *after* the user's
-   typedefs for custom error types.
-4. Audit passes that assume `r.u.value` is `intptr_t` in parser mode
-   (notably `cc_unwrap_as` casts and any statement-expression lowering
-   that treats the value as an integer).
+TCC-ext's UFCS parser synthesises channel-method calls
+(`c->tx.send(p)`, `rx.recv(&out)`) as returning `__CCResultGeneric`
+during the initial parser-mode parse (see
+`cc_ufcs_needs_result_generic_stub` in `third_party/tcc/tccgen.c`).
+Removing the `__CCResultGeneric` arm from `_Generic` initially tripped
+"invalid operand types for binary operation" at every channel-side
+`!>`/`?>` in `redis_idiomatic.ccs`.  Fix: keep `__CCResultGeneric`
+forward-declared and give it its own `_Generic` arm that probes the
+shared `.ok` / `.u.value` / `.u.error` layout.  The real compile pass
+rewrites those UFCS calls into typed `cc_channel_send`/`recv`
+invocations before TCC re-parses, so the typed arms win on the real
+path; the `__CCResultGeneric` arm only lands during parser-mode
+typecheck.
 
-Estimated scope: 150-300 lines of source changes plus test auditing.
-Low-risk tests: existing stdlib result types use `CCError` / `CCIoError`
-which have stable layouts.  High-risk areas: anything that does raw
-pointer casts through `r.u` expecting a specific layout.
+### What this did **not** fix
 
-This is a focused follow-up PR, not part of the current bug fixes.
+The parser-mode collapse was a type-fidelity bug.  The remaining
+redis_idiomatic workarounds ([F11] multi-line `@errhandler` corrupts
+`async_ast` param scan, [F12] `cc_channel_pair` doesn't resolve
+typedef aliases, [F7] tcc's stmt-expr initializer at the head of a
+case-block) are all **text-scanner** bugs in downstream passes and
+are not affected by this refactor.  Verified post-fix: both F11 and
+F12 still reproduce exactly as documented.
