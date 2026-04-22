@@ -560,8 +560,107 @@ static int cc__parse_owned_block(const char* src, size_t start, size_t end,
     return 1;
 }
 
+/* Walk `[pos .. 0)` looking for a `[~ ... ]` bracket pair that
+ * (structurally) precedes the handle identifier at `pos`.  Stops at
+ * `;` / `{` / `}` / `\n`.  Returns 1 with `*out_lbr` / `*out_rbr` set
+ * when a bracket pair is found, 0 otherwise.  Shared between the
+ * inline-bracket path and the typedef-resolved path. */
+static int cc__scan_back_for_chan_bracket(const char* src,
+                                          size_t len,
+                                          size_t pos,
+                                          size_t* out_lbr,
+                                          size_t* out_rbr) {
+    size_t rbr = (size_t)-1;
+    size_t lbr = (size_t)-1;
+    for (size_t j = pos; j-- > 0; ) {
+        char c = src[j];
+        if (c == ';' || c == '{' || c == '}' || c == '\n') break;
+        if (c == ']') { rbr = j; continue; }
+        if (c == '[') {
+            size_t k = j + 1;
+            while (k < len && (src[k] == ' ' || src[k] == '\t')) k++;
+            if (k < len && src[k] == '~' && rbr != (size_t)-1 && rbr > j) {
+                lbr = j;
+                break;
+            }
+        }
+    }
+    if (lbr == (size_t)-1 || rbr == (size_t)-1) return 0;
+    if (out_lbr) *out_lbr = lbr;
+    if (out_rbr) *out_rbr = rbr;
+    return 1;
+}
+
+/* Resolve a bare-identifier type alias to its typedef bracket span.
+ *
+ * If the source contains `typedef <BODY>[~ ... > /< ] ALIAS;` (possibly
+ * separated by whitespace / line breaks) somewhere in `src`, resolve
+ * `ALIAS` to the typedef body's bracket pair and return 1 with `[` /
+ * `]` written to `*out_lbr` / `*out_rbr` and the element-type start
+ * (just past `typedef `, skipping whitespace) written to `*out_ty_start`.
+ *
+ * Workaround for `[F12]` in docs/known-bugs/redis_idiomatic_async.md —
+ * before this resolver, `cc__find_chan_decl_before` required the
+ * `[~...]` bracket to appear literally at the decl site; any source
+ * that declared endpoints via a typedef alias (very natural for
+ * named channel types like `ReqTx` / `ReqRx` in `redis_idiomatic.ccs`)
+ * would fail the decl scan. */
+static int cc__resolve_chan_typedef_brackets(const char* src,
+                                             size_t len,
+                                             const char* alias_s,
+                                             size_t alias_n,
+                                             size_t* out_lbr,
+                                             size_t* out_rbr,
+                                             size_t* out_ty_start) {
+    if (!src || !alias_s || alias_n == 0) return 0;
+    for (size_t pos = 0; pos + alias_n <= len; pos++) {
+        if (memcmp(src + pos, alias_s, alias_n) != 0) continue;
+        char pre = (pos == 0) ? 0 : src[pos - 1];
+        char post = (pos + alias_n < len) ? src[pos + alias_n] : 0;
+        if (pre && cc__is_ident_char_local2(pre)) continue;
+        if (post && cc__is_ident_char_local2(post)) continue;
+
+        /* After ALIAS must be optional ws then `;` — rejects all
+         * non-typedef occurrences (call args, later use sites, struct
+         * members, etc.). */
+        size_t after = pos + alias_n;
+        while (after < len && (src[after] == ' ' || src[after] == '\t')) after++;
+        if (after >= len || src[after] != ';') continue;
+
+        size_t lbr = 0, rbr = 0;
+        if (!cc__scan_back_for_chan_bracket(src, len, pos, &lbr, &rbr)) continue;
+
+        /* Require a `typedef` keyword at stmt-start before the
+         * bracket body — this is what makes it an alias definition as
+         * opposed to a plain local decl with the same (alias, bracket)
+         * shape earlier in the TU. */
+        size_t ts = lbr;
+        while (ts > 0) {
+            char c = src[ts - 1];
+            if (c == ';' || c == '{' || c == '}' || c == '\n') break;
+            ts--;
+        }
+        while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t')) ts++;
+        const char* kw = "typedef";
+        size_t kw_n = 7;
+        if (ts + kw_n > lbr) continue;
+        if (memcmp(src + ts, kw, kw_n) != 0) continue;
+        char after_kw = src[ts + kw_n];
+        if (after_kw != ' ' && after_kw != '\t' && after_kw != '\n') continue;
+        ts += kw_n;
+        while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t' || src[ts] == '\n')) ts++;
+
+        if (out_lbr) *out_lbr = lbr;
+        if (out_rbr) *out_rbr = rbr;
+        if (out_ty_start) *out_ty_start = ts;
+        return 1;
+    }
+    return 0;
+}
+
 /* Find channel declaration before a given offset.
- * Searches backwards for `name` with preceding [~ ... ] bracket spec. */
+ * Searches backwards for `name` with a preceding `[~ ... ]` bracket
+ * spec, either inline at the decl or via a typedef alias. */
 static int cc__find_chan_decl_before(const char* src,
                                      size_t len,
                                      size_t search_before_off,
@@ -581,35 +680,53 @@ static int cc__find_chan_decl_before(const char* src,
         if (pre && cc__is_ident_char_local2(pre)) continue;
         if (post && cc__is_ident_char_local2(post)) continue;
 
-        size_t scan = pos;
-        size_t lbr = (size_t)-1;
-        size_t rbr = (size_t)-1;
-        for (size_t j = scan; j-- > 0; ) {
-            char c = src[j];
-            if (c == ';' || c == '{' || c == '}' || c == '\n') break;
-            if (c == ']') { rbr = j; continue; }
-            if (c == '[') {
-                size_t k = j + 1;
-                while (k < len && (src[k] == ' ' || src[k] == '\t')) k++;
-                if (k < len && src[k] == '~' && rbr != (size_t)-1 && rbr > j) {
-                    lbr = j;
-                    break;
-                }
+        size_t lbr = 0, rbr = 0;
+        int have_inline = cc__scan_back_for_chan_bracket(src, len, pos, &lbr, &rbr);
+        if (have_inline) {
+            size_t ts = lbr;
+            while (ts > 0) {
+                char c = src[ts - 1];
+                if (c == ';' || c == '{' || c == '}' || c == ',' || c == '(' || c == ')' || c == '\n') break;
+                ts--;
             }
-        }
-        if (lbr == (size_t)-1 || rbr == (size_t)-1) continue;
+            while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t')) ts++;
 
-        size_t ts = lbr;
-        while (ts > 0) {
-            char c = src[ts - 1];
-            if (c == ';' || c == '{' || c == '}' || c == ',' || c == '(' || c == ')' || c == '\n') break;
-            ts--;
+            *out_lbrack = lbr;
+            *out_rbrack = rbr;
+            *out_ty_start = ts;
+            return 1;
         }
-        while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t')) ts++;
 
-        *out_lbrack = lbr;
-        *out_rbrack = rbr;
-        *out_ty_start = ts;
+        /* Inline bracket absent — the decl might be spelled through a
+         * typedef alias like `ReqTx req_tx;`.  Pull the alias token
+         * out of the decl prefix and look up its typedef body. */
+        size_t type_end = pos;
+        while (type_end > 0 && (src[type_end - 1] == ' ' || src[type_end - 1] == '\t')) type_end--;
+        size_t type_start = type_end;
+        while (type_start > 0 && cc__is_ident_char_local2(src[type_start - 1])) type_start--;
+        if (type_end <= type_start) continue;
+
+        /* The alias token must sit at stmt-start (only ws between it
+         * and the previous `;` / `{` / `}` / `,` / `(` / `\n`).  Anything
+         * else (a type qualifier like `const`, a pointer `*`, a struct
+         * tag prefix, …) means this isn't a plain `ALIAS NAME;` decl
+         * and we should not substitute a typedef body for it. */
+        size_t bnd = type_start;
+        while (bnd > 0 && (src[bnd - 1] == ' ' || src[bnd - 1] == '\t')) bnd--;
+        if (bnd > 0) {
+            char c = src[bnd - 1];
+            if (c != ';' && c != '{' && c != '}' && c != '\n' &&
+                c != ',' && c != '(' && c != ')') continue;
+        }
+
+        size_t td_lbr = 0, td_rbr = 0, td_ts = 0;
+        if (!cc__resolve_chan_typedef_brackets(src, len,
+                                               src + type_start, type_end - type_start,
+                                               &td_lbr, &td_rbr, &td_ts)) continue;
+
+        *out_lbrack = td_lbr;
+        *out_rbrack = td_rbr;
+        *out_ty_start = td_ts;
         return 1;
     }
     return 0;
