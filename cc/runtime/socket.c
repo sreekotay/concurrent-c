@@ -135,15 +135,16 @@ void cc_socket_signal_signal(CCSocketSignal* sig) {
      * of wait_armed=1 has not happened-before us, and by the seq_cst
      * total order the armer's subsequent epoch reload is guaranteed to
      * see our bump and self-wake in the recheck branch of arm().  This
-     * lets a busy producer (redis_hybrid reply channel, etc.) skip the
-     * wait_mu lock/unlock pair on every send when the consumer is
-     * already running — which is the steady state under load.
+     * lets a busy producer (e.g. a reply channel feeding a client fiber
+     * that is already spinning on the next request) skip the wait_mu
+     * lock/unlock pair on every send when the consumer is already
+     * running — which is the steady state under load.
      *
      * Before this fast-path, every successful send on a signal-bearing
      * channel took wait_mu via cc__socket_signal_notify_waiter, which
      * showed up as ~175 leaf samples of pthread_mutex_{lock,unlock} on
-     * redis_hybrid profiles — pure overhead because wait_armed was 0
-     * on the vast majority of sends. */
+     * high-throughput fan-in server profiles — pure overhead because
+     * wait_armed was 0 on the vast majority of sends. */
     atomic_fetch_add_explicit(&impl->epoch, 1, memory_order_seq_cst);
     if (atomic_load_explicit(&impl->wait_armed, memory_order_acquire) == 0) {
         return;
