@@ -763,6 +763,20 @@ static __thread const char* tls_v2_park_reason = NULL;
 static __thread uint64_t tls_v2_dispatch_seq = 0;
 extern __thread CCNursery* cc__tls_current_nursery;
 bool cc_nursery_is_cancelled(const CCNursery* n);
+void cc_nursery_notify_child_done(CCNursery* n);
+
+/* Mirror of nursery.c's CC_NURSERY_WORKER_FREES gate.  Latched on first
+ * read so we never branch on a changing env var in the hot MCO_DEAD
+ * path. */
+static int cc_v2_worker_frees_mode(void) {
+    static _Atomic int cached = -1;
+    int v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_NURSERY_WORKER_FREES");
+    int newv = (s && s[0] && s[0] != '0') ? 1 : 0;
+    atomic_store_explicit(&cached, newv, memory_order_relaxed);
+    return newv;
+}
 
 static void fiber_v2_entry(mco_coro* co) {
     fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
@@ -1148,6 +1162,28 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         }
         wake_primitive_wake_all(&f->done_wake);
         V2_STAT_INC(g_v2_run_dead);
+
+        /* Worker-frees mode (CC_NURSERY_WORKER_FREES=1): nursery-owned
+         * fibers have no external joiner — cc_nursery_wait waits on the
+         * nursery's alive_count barrier, not on individual fibers — so
+         * the worker that observes MCO_DEAD is the last touch point and
+         * owns the release back to the v2 pool.  In classic mode the
+         * join+release lives in cc_nursery_wait, so we leave the fiber
+         * alone here. */
+        if (cc_v2_worker_frees_mode()) {
+            /* NOTE: admission_nursery is cleared by fiber_v2_entry right
+             * before the coroutine returns, so it is guaranteed NULL by
+             * the time we observe MCO_DEAD here.  saved_nursery holds
+             * the same value as admission_nursery at spawn time and is
+             * only cleared by fiber_v2_free/alloc, so it survives
+             * through entry and is the correct handle to identify a
+             * nursery-owned fiber at completion. */
+            CCNursery* adm = f->saved_nursery;
+            if (adm) {
+                fiber_v2_free(f);
+                cc_nursery_notify_child_done(adm);
+            }
+        }
         return;
     }
 
