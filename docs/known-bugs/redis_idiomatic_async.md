@@ -1,18 +1,16 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
-**Status:** the six original bugs **and** nine follow-up bugs
-([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]/[F11]/[F12]) are fixed, plus
-the parser-mode Result-type collapse called out in Bug [3] is now
-structurally resolved (see "Follow-up: parser-mode result-type
-collapse" at the very bottom of this file).  The `@async` migration
-is live in `real_projects/redis/redis_idiomatic.ccs` (handle_client
-and owner_loop run on `spawn_async` + V2-scheduler fibers).  No
-scanner-level workarounds for this family remain in the file.
-
-- **[F7]** (OPEN) — tcc's parser rejects a statement-expression
-  initializer (`T x = ({ ... });`) when it appears as the first
-  statement of a freshly-opened `case LABEL: { ... }` compound.  This
-  blocks the natural `T x = foo() !>;` lowering inside switch arms.
+**Status:** every bug in the original migration list — the six
+originals **and** all eleven follow-ups
+([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F7]/[F8]/[F9]/[F11]/[F12]) — is now
+closed out, plus the parser-mode Result-type collapse called out in
+Bug [3] is structurally resolved (see "Follow-up: parser-mode result-
+type collapse" at the very bottom of this file).  The `@async`
+migration is live in `real_projects/redis/redis_idiomatic.ccs`
+(handle_client and owner_loop run on `spawn_async` + V2-scheduler
+fibers).  No scanner-level workarounds for this family remain
+required — the idiomatic `T x = helper(...) !>;` shape at every
+decl / case-head position builds and runs cleanly.
 - **[F8]** (FIXED) — the `!>(e) BODY` binder form at expression
   position used to lower `e` as `__CCGenericError` instead of the
   declared error arm of the result.  Fixed in
@@ -481,7 +479,27 @@ uses the binder form and builds cleanly.  See [F9] above.
 
 ---
 
-## [F7] tcc rejects `T x = ({ ... });` as the first stmt of a `case L: {` block — OPEN
+## [F7] tcc rejects `T x = ({ ... });` as the first stmt of a `case L: {` block — FIXED
+
+**Status:** fixed upstream as a side-effect of the unified `!>`/`?>`
+lowering refactor (`d9ca37f`) combined with the parser-mode Result-
+type collapse fix (`1e3f876`).  The stmt-expr initializer emitted at
+a case-head `!>` decl position no longer trips tcc's first-stmt-of-
+compound disambiguator — the idiomatic `char* dst = helper(...) !>;`
+shape at every case arm with a function-scope `@errhandler` now
+builds cleanly, and the in-function `#define alloc(n) ({ ... })` macro
+workaround previously required in `real_projects/redis/redis_idiomatic.ccs`
+(`reply_materialize`) can be dropped.
+
+Regression guard:
+`tests/case_head_result_unwrap_init_smoke.ccs` exercises the exact
+shape (pointer-typed result helper, function-scope `@errhandler`, a
+`switch` whose every arm opens with `T x = helper(...) !>;`, plus an
+error-path arm that drives the handler end-to-end).  If the old
+failure mode ever returns — whether at the tcc parser layer or in the
+`pass_result_unwrap` lowering — this test will fail the compile.
+
+Historical notes below, preserved for archaeology.
 
 ### Symptom
 
@@ -1342,7 +1360,11 @@ typecheck.
 The parser-mode collapse was a type-fidelity bug.  The remaining
 redis_idiomatic workarounds ([F11] multi-line `@errhandler` corrupts
 `async_ast` param scan, [F7] tcc's stmt-expr initializer at the head
-of a case-block) are both **text-scanner** bugs in downstream passes
-and are not affected by this refactor.  [F12] (`cc_channel_pair`
-typedef-alias resolution) was in the same family and has since been
-closed out with a targeted resolver — see its section above.
+of a case-block) were both **text-scanner / parser** bugs in the
+downstream lowering + tcc disambiguation path and were not affected
+by this refactor at the time.  Both have since been closed out —
+[F7] by the unified `!>`/`?>` lowering + `_Generic` result arms
+landing together, and [F11] by the `pass_result_unwrap` /
+`pass_err_syntax` handler-body flattener.  [F12] (`cc_channel_pair`
+typedef-alias resolution) was in the same family and has also been
+closed out — see its section above.
