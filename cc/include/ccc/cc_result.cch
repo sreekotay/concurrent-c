@@ -144,10 +144,44 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     (result_var).u.error = (err);                 \
 } while(0)
 
-/* Common result types - defined in non-parser mode only.
-   Parser mode uses typedefs to __CCResultGeneric (defined later in this file).
-   Guards allow codegen to emit these first without conflicts. */
-#ifndef CC_PARSER_MODE
+/* Parser-mode pre-declared error-type stubs.
+ *
+ * The unguarded `CC_DECL_RESULT_SPEC(CCResult_*_CCError, *, CCError)`
+ * invocations below expand right here in parser mode too, so `CCError`
+ * and its backing `__CCGenericError` / `CC_ERR_NULL` stubs have to be
+ * in scope at this point.  The full parser-mode block further down
+ * defines additional stubs (cc_ok/cc_err constructor inference,
+ * `__CCResultGeneric` fallback placeholder) that aren't needed here
+ * and stay at their original location. */
+#ifdef CC_PARSER_MODE
+#ifndef __CC_GENERIC_ERROR_DEFINED
+#define __CC_GENERIC_ERROR_DEFINED
+typedef struct __CCGenericError {
+    int kind;
+    int os_errno;
+    int os_code;
+    const char* message;
+    char __pad[48];
+} __CCGenericError;
+#endif
+#ifndef CC_PARSER_CCERROR_DEFINED
+#define CC_PARSER_CCERROR_DEFINED
+typedef __CCGenericError CCError;
+#endif
+#ifndef CC_ERROR
+#define CC_ERROR(err_kind, err_msg) ((CCError){ (int)(err_kind), 0, 0, (err_msg) })
+#endif
+#ifndef CC_ERR_NULL
+#define CC_ERR_NULL 14
+#endif
+#endif /* CC_PARSER_MODE */
+
+/* Common result types over `CCError` - emitted in both parser mode and
+ * real mode as real distinct typed structs.  `CCError` is defined in
+ * parser mode as an alias to `__CCGenericError` (layout-compatible with
+ * the real `CCError`), so `CC_DECL_RESULT_SPEC` here works in either
+ * mode.  Guards allow codegen to pre-emit specific specs without
+ * duplicate definitions. */
 #ifndef CCResult_int_CCError_DEFINED
 #define CCResult_int_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
@@ -209,7 +243,6 @@ static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
     return CCResult_void_CCError_unwrap_err(r);
 }
 #endif /* CCResult_void_CCError_DEFINED */
-#endif /* CC_PARSER_MODE */
 
 /* cc_try macro: unwrap T!>(E) or return error.
    Must be used in a function that returns the same result type.
@@ -283,40 +316,38 @@ typedef struct __CCResultGeneric {
 } __CCResultGeneric;
 #endif
 
-/* In parser mode, result type declarations use generic placeholder helpers. */
-#undef CC_DECL_RESULT_SPEC
-#define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                     \
-    typedef __CCResultGeneric name;                                    \
-    static inline name (cc_ok_##name)(OkType v) {                      \
-        (void)v;                                                       \
-        return __cc_result_generic_ok();                               \
-    }                                                                  \
-    static inline name (cc_err_##name)(ErrType e) {                    \
-        (void)e;                                                       \
-        return __cc_result_generic_err();                              \
-    }                                                                  \
-    static inline intptr_t name##_value(name r) {                      \
-        return __CCResultGeneric_value(r);                             \
-    }                                                                  \
-    static inline bool name##_is_ok(name r) {                          \
-        return __CCResultGeneric_is_ok(r);                             \
-    }                                                                  \
-    static inline bool name##_is_err(name r) {                         \
-        return __CCResultGeneric_is_err(r);                            \
-    }                                                                  \
-    static inline OkType name##_unwrap_or(name r, OkType def) {        \
-        (void)r;                                                       \
-        return def;                                                    \
-    }                                                                  \
-    static inline ErrType name##_error(name r) {                       \
-        return *(ErrType*)(void*)&r.u.error;                           \
-    }                                                                  \
-    static inline OkType name##_unwrap(name r) {                       \
-        return *(OkType*)(void*)&r.u.value;                            \
-    }                                                                  \
-    static inline ErrType name##_unwrap_err(name r) {                  \
-        return name##_error(r);                                        \
-    }
+/* In parser mode, result type declarations emit real distinct typed structs.
+ *
+ * Historically this redefined `CC_DECL_RESULT_SPEC` to alias every Result
+ * type to `__CCResultGeneric` (whose `u.value` is `intptr_t`).  That gave
+ * TCC a single universal shape so `T!>(E)` types declared before `T` /
+ * `E` were in scope still parsed, but the collapse cost us:
+ *
+ *   - `r.u.value` is `long`, so a struct payload `T` gets reinterpreted
+ *     as an integer by `__cc_uw_value(r)` — the `?>(e) handle(e)` ternary
+ *     in code like `RedisReply reply = execute(req) ?>(e) err_reply(e);`
+ *     tripped "type mismatch in conditional expression (have 'long' and
+ *     'struct RedisReply')".
+ *   - Every pass that touches `.u.error` has to pointer-cast through
+ *     `void*` to recover `E` (see `pass_result_unwrap.c`,
+ *     `pass_err_syntax.c`).
+ *   - The enumerated `_Generic` arms `visit_codegen.c` emits per TU had
+ *     to sit inside `#ifndef CC_PARSER_MODE` and were therefore dead in
+ *     the lowered output (which always `#define`s `CC_PARSER_MODE`).
+ *
+ * The typed emission below mirrors the non-parser path exactly — same
+ * struct layout, same inline helpers — so `_Generic` dispatch, UFCS
+ * method calls, and direct field access all see `OkType` / `ErrType`
+ * rather than `intptr_t` / `__CCGenericError`.  The preprocessor
+ * (see `preprocess.c`) arranges for `CC_DECL_RESULT_SPEC(T, E)` to be
+ * invoked at a program point where `OkType` and `ErrType` are already
+ * in scope, using the `insert_pos` post-typedef anchor.
+ *
+ * `__CCResultGeneric` is kept around as a last-resort placeholder for
+ * the internal pre-parse reparse phase when a forward reference leaves
+ * a payload or error type genuinely undeclared — but it is no longer
+ * the default shape.
+ */
 
 /* In parser mode, preserve the concrete result name so headers that provide
    typed parser-mode declarations (for struct payloads) keep their value shape. */
@@ -387,40 +418,12 @@ static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
 }
 #endif
 
-/* Parser-mode: common result types are aliases to __CCResultGeneric */
-typedef __CCResultGeneric CCResult_int_CCError;
-typedef __CCResultGeneric CCResult_bool_CCError;
-typedef __CCResultGeneric CCResult_size_t_CCError;
-typedef __CCResultGeneric CCResult_voidptr_CCError;
-typedef __CCResultGeneric CCResult_charptr_CCError;
-typedef __CCResultGeneric CCResult_void_CCError;
-typedef __CCResultGeneric CCResult_int_CCIoError;
-typedef __CCResultGeneric CCResult_bool_CCIoError;
-typedef __CCResultGeneric CCResult_size_t_CCIoError;
-typedef __CCResultGeneric CCResult_CCDirIterptr_CCIoError;
-typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
-#define cc_ok_CCResult_int_CCError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_int_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_bool_CCError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_bool_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_size_t_CCError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_size_t_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_voidptr_CCError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_voidptr_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_charptr_CCError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_charptr_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_void_CCError() __cc_result_generic_ok()
-#define cc_err_CCResult_void_CCError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_int_CCIoError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_int_CCIoError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_bool_CCIoError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_bool_CCIoError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_size_t_CCIoError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_size_t_CCIoError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_CCDirIterptr_CCIoError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_CCDirIterptr_CCIoError(e) __cc_result_generic_err()
-#define cc_ok_CCResult_CCDirEntry_CCIoError(v) __cc_result_generic_ok()
-#define cc_err_CCResult_CCDirEntry_CCIoError(e) __cc_result_generic_err()
+/* `CCIoError`-keyed result types are *not* pre-declared here because
+ * `CCIoError` lives in `cc_io_error.cch`, which may or may not be
+ * included by a given TU.  When they are used, `preprocess.c` emits
+ * the typed `CC_DECL_RESULT_SPEC(CCResult_X_CCIoError, X, CCIoError)`
+ * at `insert_pos` in the TU (after the user's `#include` of the
+ * defining header), so `X` and `CCIoError` are both in scope. */
 
 #else /* !CC_PARSER_MODE - real compilation */
 
@@ -466,39 +469,23 @@ typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
  * to guess whether it's pointer-typed — the generated C code asks the
  * compiler, which always knows for sure.
  *
- * Parser-mode version: all result types are typedef aliases to
- * `__CCResultGeneric`, so one `_Generic` arm covers them.
+ * Baseline definitions here are the raw-pointer fallback.  When a TU
+ * uses any `T!>(E)` result type, `visit_codegen.c` `#undef`s these and
+ * re-emits enumerated `_Generic` macros with one arm per concrete
+ * `CCResult_T_E` struct in that TU, plus the pointer default arm.
  *
- * Real-mode version: each `CCResult_T_E` is a distinct struct, so the
- * codegen pass emits an enumerated `_Generic` with one arm per spec
- * (see `visit_codegen.c`).  The default arm covers raw pointers and
- * uses the address-read trick so it type-checks for non-pointer types
- * too (it won't be selected, but non-selected arms are still parsed).
+ * Same shape in both parser mode and real compilation: result structs
+ * are now real distinct typed structs in both modes (see the parser-mode
+ * rework of `CC_DECL_RESULT_SPEC` above), so the enumerated arms
+ * `visit_codegen.c` emits work unchanged in either mode.  The previous
+ * parser-mode-only `__CCResultGeneric` arm has been retired.
  * ============================================================================ */
-#ifdef CC_PARSER_MODE
-#define __cc_uw_is_err(__x__) _Generic((__x__), \
-    __CCResultGeneric: (!((__CCResultGeneric*)(void*)&(__x__))->ok), \
-    default: (*(void* const*)(void*)&(__x__) == (void*)0))
-#define __cc_uw_value(__x__) _Generic((__x__), \
-    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.value, \
-    default: (__x__))
-#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \
-    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.error, \
-    default: __cc_err_null_at(__e__, __f__, __l__))
-#else /* real compilation mode */
-/* Baseline definitions: pointer-only fallback when the TU declares no
- * concrete Result types.  If the TU uses `T!>(E)` anywhere, visit_codegen
- * `#undef`s these and re-emits enumerated versions with one arm per
- * registered `CCResult_T_E` struct.  Either way, the lowering pass can
- * always spell `__cc_uw_is_err(tmp)` / `__cc_uw_value(tmp)` /
- * `__cc_uw_err_at(tmp, expr, file, line)` in generated C.  */
 #define __cc_uw_is_err(__x__) _Generic((__x__), \
     default: (*(void* const*)(void*)&(__x__) == (void*)0))
 #define __cc_uw_value(__x__) _Generic((__x__), \
     default: (__x__))
 #define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \
     default: __cc_err_null_at(__e__, __f__, __l__))
-#endif /* CC_PARSER_MODE */
 
 /*
  * Result constructors - simplified API.
