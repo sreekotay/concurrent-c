@@ -2,44 +2,53 @@
 // forward inside a `!> (e) { ... @err(e); }` body must not shift
 // downstream line/col anchors.
 //
-// Companion guard for [F11] (see errhandler_multiline_body_inline_smoke)
-// covering the second inline site in pass_result_unwrap — the
-// `@err(binder);` forward emitted from within a user-supplied
-// `!> (e) { ... }` body.  Same failure mode: stale AST offsets trick
-// downstream UFCS into the wrong receiver type.
+// Companion guard for [F11] covering the second inline site in
+// pass_result_unwrap — the `@err(binder);` forward emitted from
+// inside a user-supplied `!> (e) { ... }` body.  Same failure mode as
+// the `!>;` bare form: absent the flattening helper, each forward
+// inlines the outer @errhandler body verbatim, pushing every byte
+// below the splice down by (body_lines - 1) lines, and async_ast's
+// parameter-list scan for a later `@async` function walks off the
+// real header into the body.
 
+#include <ccc/std/prelude.cch>
+#include <ccc/std/task.cch>
 #include <stdio.h>
 
-static int g_handler_calls;
+int !> (CCError) step(int x) {
+    (void)x;
+    return cc_err(CC_ERR_NOT_FOUND, "nope");
+}
 
-int !> (CCError) always_err(void) { return cc_err(CC_ERR_NOT_FOUND, "nope"); }
-int !> (CCError) always_ok(int v) { return cc_ok(v); }
-
-int !> (CCError) caller(void) {
+int !> (CCError) sync_caller(int a, int b) {
     @errhandler(CCError outer) {
-        g_handler_calls++;
-        int tmp = 7;
-        (void)tmp;
+        int guard1 = 1;
+        int guard2 = 2;
+        (void)guard1;
+        (void)guard2;
         return cc_err(outer);
     }
 
-    int x = always_err() !> (inner) {
-        /* Forward to the outer multi-line handler via `@err(inner);`.
-         * pass_result_unwrap will splice the outer handler body in at
-         * this exact position. */
-        @err(inner);
-    };
-    (void)x;
+    // Two separate forward splices.  Each one inlines the outer
+    // handler body via @err(inner), so the accumulated drift matches
+    // the 4-splice-site pattern in the bare-form guard.
+    int ra = step(a) !> (inner) { @err(inner); };
+    int rb = step(b) !> (inner) { @err(inner); };
 
-    int !> (CCError) res = always_ok(11);
-    if (res.is_err()) return cc_err(res.error());
+    return cc_ok(ra + rb);
+}
 
-    return cc_ok(cc_value(res));
+// Must follow sync_caller so the drifted offsets hit this parameter
+// scan.
+@async int worker_fn(int param_a, int param_b) {
+    if (param_a < 0) return -1;
+    return param_a + param_b;
 }
 
 int main(void) {
-    int !> (CCError) r = caller();
-    if (!cc_is_err(r)) { printf("expected err\n"); return 1; }
-    printf("handler_calls=%d kind=%d\n", g_handler_calls, r.u.error.kind);
+    int !> (CCError) r = sync_caller(1, 2);
+    // step() always errs, so sync_caller forwards via the handler and
+    // returns a CCError.
+    printf("is_err=%d\n", cc_is_err(r));
     return 0;
 }
