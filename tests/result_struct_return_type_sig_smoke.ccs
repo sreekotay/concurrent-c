@@ -1,0 +1,83 @@
+/* Smoke: user-defined struct as the ok type in a `T !>(E) fn(...)`
+ * signature, possibly prefixed by one or more decl-specs / `@attribute`
+ * tokens.  This is the exact shape the redis_idiomatic owner-dispatch
+ * used to work around by pre-lowering to
+ * `CCResult_RedisReply_CCError`, with the now-stale comment
+ *
+ *     "writing the sugared `RedisReply !>(CCError)` here currently
+ *      trips a parse error on user-defined result types in function
+ *      signatures"
+ *
+ * Regression guard so the workaround can stay deleted — if this ever
+ * fails, the redis workaround comment (and pre-lowered typedef dance)
+ * need to come back.
+ *
+ * Covers signature forms used by real code:
+ *   - bare sugared signature
+ *   - `static` + sugared signature
+ *   - `@noblock static` + sugared signature (redis's actual shape)
+ *
+ * Call sites exercise the redis-style consumption pattern that pairs
+ * with these sigs: declare via `T !>(E) var = ...;`, check `is_err()`,
+ * then propagate.  The `stmt-expr !>` bang-unwrap path on a struct
+ * result is a separate scalar-vs-struct concern and is exercised by
+ * other smoke tests, not this one.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Reply {
+    int kind;
+    int val;
+} Reply;
+
+Reply !>(CCError) make_bare(int v) {
+    Reply r = { .kind = 1, .val = v };
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    return cc_ok(r);
+}
+
+static Reply !>(CCError) make_static(int v) {
+    Reply r = { .kind = 2, .val = v };
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    return cc_ok(r);
+}
+
+@noblock static Reply !>(CCError) make_noblock(int v) {
+    Reply r = { .kind = 3, .val = v };
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    return cc_ok(r);
+}
+
+/* Regression guard for the exact redis_idiomatic shape: a block
+ * comment whose prose literally mentions `Reply !>(CCError)` sits
+ * directly in front of the decl.  The LHS backward-walk collapses
+ * through the `@noblock` attribute (cc__find_bang_lhs_start_ex /
+ * cc_ir_find_lhs_start_ex), the comment body must NOT count toward
+ * the "parenless LHS" check (see cc__bang_lhs_looks_like_decl /
+ * cc_ir_lhs_is_parenless).  Before the fix the `(CCError)` text in
+ * this comment flipped parenless=false, decl-form detection fell
+ * through, and the sigil was rewritten into an orphan `@err;` that
+ * pass_err_syntax then flagged as "`@err` with no local handler". */
+@noblock static Reply !>(CCError) make_noblock_after_prose_comment(int v) {
+    Reply r = { .kind = 4, .val = v };
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    return cc_ok(r);
+}
+
+int main(void) {
+    Reply !>(CCError) a = make_bare(10);
+    if (a.is_err()) return 1;
+
+    Reply !>(CCError) b = make_static(20);
+    if (b.is_err()) return 2;
+
+    Reply !>(CCError) c = make_noblock(30);
+    if (c.is_err()) return 3;
+
+    Reply !>(CCError) d = make_noblock_after_prose_comment(40);
+    if (d.is_err()) return 4;
+
+    printf("ok sugared-struct-sig parses clean\n");
+    return 0;
+}
