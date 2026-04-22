@@ -1,0 +1,45 @@
+// Smoke: multi-line @errhandler body inlined at a `@err(binder);`
+// forward inside a `!> (e) { ... @err(e); }` body must not shift
+// downstream line/col anchors.
+//
+// Companion guard for [F11] (see errhandler_multiline_body_inline_smoke)
+// covering the second inline site in pass_result_unwrap — the
+// `@err(binder);` forward emitted from within a user-supplied
+// `!> (e) { ... }` body.  Same failure mode: stale AST offsets trick
+// downstream UFCS into the wrong receiver type.
+
+#include <stdio.h>
+
+static int g_handler_calls;
+
+int !> (CCError) always_err(void) { return cc_err(CC_ERR_NOT_FOUND, "nope"); }
+int !> (CCError) always_ok(int v) { return cc_ok(v); }
+
+int !> (CCError) caller(void) {
+    @errhandler(CCError outer) {
+        g_handler_calls++;
+        int tmp = 7;
+        (void)tmp;
+        return cc_err(outer);
+    }
+
+    int x = always_err() !> (inner) {
+        /* Forward to the outer multi-line handler via `@err(inner);`.
+         * pass_result_unwrap will splice the outer handler body in at
+         * this exact position. */
+        @err(inner);
+    };
+    (void)x;
+
+    int !> (CCError) res = always_ok(11);
+    if (res.is_err()) return cc_err(res.error());
+
+    return cc_ok(cc_value(res));
+}
+
+int main(void) {
+    int !> (CCError) r = caller();
+    if (!cc_is_err(r)) { printf("expected err\n"); return 1; }
+    printf("handler_calls=%d kind=%d\n", g_handler_calls, r.u.error.kind);
+    return 0;
+}
