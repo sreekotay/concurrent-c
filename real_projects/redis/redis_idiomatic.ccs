@@ -110,13 +110,6 @@ static void redis_conn_release_request(RedisRequest* req);
     });
 }
 
-static CCError mkerr(int err_kind, const char* msg) {
-    CCError err = {0};
-    err.kind = err_kind;
-    err.message = msg;
-    return err;
-}
-
 static CCIoError net_to_io_error(CCNetError err) {
     switch (err) {
         case CC_NET_CONNECTION_CLOSED:
@@ -143,13 +136,13 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 }
 
 static int64_t !>(CCError) parse_i64(char[:] s) {
-    if (s.len == 0) return cc_err(mkerr(CC_ERR_PARSE, "empty integer"));
+    if (s.len == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty integer"));
     int sign = 1;
     size_t i = 0;
     if (((const char*)s.ptr)[0] == '-') {
         sign = -1;
         i = 1;
-        if (s.len == 1) return cc_err(mkerr(CC_ERR_PARSE, "bad integer"));
+        if (s.len == 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "bad integer"));
     }
 
     uint64_t value = 0;
@@ -158,12 +151,12 @@ static int64_t !>(CCError) parse_i64(char[:] s) {
     for (; i < s.len; ++i) {
         char ch = ((const char*)s.ptr)[i];
         if (ch < '0' || ch > '9') {
-            return cc_err(mkerr(CC_ERR_PARSE, "bad integer"));
+            return cc_err(CC_ERROR(CC_ERR_PARSE, "bad integer"));
         }
         uint64_t digit = (uint64_t)(ch - '0');
         if (value > limit / 10 ||
             (value == limit / 10 && digit > (limit % 10))) {
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
         value = value * 10 + digit;
     }
@@ -309,11 +302,11 @@ static bool !>(CCError) decode_request_shape(CCSlice* args,
                                              RedisCommandKind* out_kind,
                                              size_t* out_arg_start,
                                              size_t* out_argc) {
-    if (argc < 1) return cc_err(mkerr(CC_ERR_PARSE, "empty command"));
+    if (argc < 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
 
     if (slice_eq_ignore_case(args[0], "CONFIG")) {
         if (argc != 3 || !slice_eq_ignore_case(args[1], "GET")) {
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
         }
         *out_kind = REDIS_CMD_CONFIG_GET;
         *out_arg_start = 2;
@@ -323,7 +316,7 @@ static bool !>(CCError) decode_request_shape(CCSlice* args,
 
     RedisCommandKind kind = cmd_kind(args[0], argc - 1);
     if ((int)kind < 0) {
-        return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
     }
 
     *out_kind = kind;
@@ -342,7 +335,7 @@ static RedisRequest* !>(CCError) build_request(CCArena* req_arena,
                                                uint64_t request_id) {
     RedisRequest* req = cc_arena_alloc_T(RedisRequest, req_arena);
     if (!req) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request allocation failed"));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request allocation failed"));
     }
 
     memset(req, 0, sizeof(*req));
@@ -354,7 +347,7 @@ static RedisRequest* !>(CCError) build_request(CCArena* req_arena,
     for (size_t i = 0; i < argc; ++i) {
         req->argv[i] = cc_slice_clone(req_arena, args[arg_start + i]);
         if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
-            return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
         }
     }
 
@@ -387,7 +380,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     RedisConn* conn = it->conn;
     void* slot = cc_arena_pool_alloc(&conn->req_pool);
     if (!slot) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
     }
     /* Fast-path root: oversized values (e.g. large SET payloads) spill
      * into a heap slab owned by req_arena; the pool slot itself is
@@ -395,7 +388,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     CCArena req_arena = cc_arena_create_buffer(slot, REQ_BUF_SIZE, CC_ARENA_GROWABLE);
     if (!req_arena.base) {
         cc_arena_pool_free(&conn->req_pool, slot);
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
 
     CCSlice args[4] = {0};
@@ -443,12 +436,12 @@ static bool !>(CCError) db_clone_owned_string(CCString* out,
 
     CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
     if (!arena_storage.base) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
 
     CCString cloned = CCString_from_slice(&arena_storage, src);
     if (src.len > 0 && CCString_len(&cloned) != src.len) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
 
     *out = cloned;
@@ -489,7 +482,7 @@ static bool !>(CCError) db_entry_init(RedisEntry* e, char[:] key, char[:] value)
 }
 
 static bool !>(CCError) db_entry_replace_value(RedisEntry* e, char[:] value) {
-    if (!e) return cc_err(mkerr(CC_ERR_INVALID_ARG, "db replace without entry"));
+    if (!e) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
     if (e->value.data && value.len <= e->value.cap) {
         if (value.len > 0) memcpy(e->value.data, value.ptr, value.len);
         e->value.len = value.len;
@@ -528,12 +521,12 @@ static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
 
 static bool !>(CCError) db_insert_entry(RedisDb* db, RedisEntry* e) {
     if (!db || !db->entries || !e) {
-        return cc_err(mkerr(CC_ERR_INVALID_ARG, "db insert without entry"));
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
 
     Map<char[:], RedisEntry*> entries = db->entries;
     if (entries.insert(CCString_as_slice(&e->key), e) != 0) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
 
     e->next = db->head;
@@ -542,7 +535,7 @@ static bool !>(CCError) db_insert_entry(RedisDb* db, RedisEntry* e) {
 }
 
 static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
-    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
     RedisEntry* e = db_find_entry(db, key);
     if (e) {
@@ -552,7 +545,7 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
     }
 
     RedisEntry* new_entry = calloc(1, sizeof(*new_entry));
-    if (!new_entry) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
+    if (!new_entry) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
 
     bool !>(CCError) init_res = db_entry_init(new_entry, key, value);
     if (init_res.is_err()) {
@@ -588,7 +581,7 @@ static RedisReply db_del(RedisDb* db, char[:] key) {
 }
 
 static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
-    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
     RedisEntry* e = db_find_entry(db, key);
 
@@ -596,10 +589,10 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     if (e) {
         int64_t !>(CCError) parsed = parse_i64(CCString_as_slice(&e->value));
         if (parsed.is_err()) {
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
         if (parsed.value() == INT64_MAX) {
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
         value = parsed.value() + 1;
     }
@@ -621,13 +614,8 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
 
 /* Owner-private dispatch.  Called only from owner_loop, so db access
  * here needs no lock.  `@noblock` forces pass_autoblock to inline
- * each call site rather than bouncing through the threadpool.
- *
- * The pre-lowered CCResult return type is a workaround: writing the
- * sugared `RedisReply !>(CCError)` here currently trips a parse error
- * on user-defined result types in function signatures.  Revert when
- * the parser is fixed. */
-@noblock static CCResult_RedisReply_CCError execute_request(RedisDb* db, RedisRequest* req) {
+ * each call site rather than bouncing through the threadpool. */
+@noblock static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
@@ -643,7 +631,7 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
         case REDIS_CMD_INCR:
             return db_incr(db, req->argv[0]);
         default:
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
     }
 }
 
@@ -703,11 +691,11 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
  * REDIS_REPLY_RAW and reply->data points into `arena`, valid for the
  * arena's lifetime. */
 static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
-    if (!reply || !arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize null arg"));
+    if (!reply || !arena) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply materialize null arg"));
 
 #define alloc(n) ({ \
         char* __dst = (char*)cc_arena_alloc(arena, (n), 1); \
-        if ((n) > 0 && !__dst) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode OOM")); \
+        if ((n) > 0 && !__dst) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM")); \
         __dst; \
     })
 
@@ -759,7 +747,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
             return cc_ok(true);
         }
         default:
-            return cc_err(mkerr(CC_ERR_INVALID_ARG, "unknown reply kind"));
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "unknown reply kind"));
     }
 #undef alloc
 }
@@ -888,10 +876,12 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
         RedisConn* conn = req->conn;
         @defer redis_conn_release_request(req);
 
-        CCResult_RedisReply_CCError exec_res = execute_request(&db, req);
-        RedisReply reply = cc_is_err(exec_res)
-                               ? err_reply(CCResult_RedisReply_CCError_error(exec_res))
-                               : CCResult_RedisReply_CCError_unwrap(exec_res);
+        /*
+        RedisReply !>(CCError) exec_res = execute_request(&db, req);
+        RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error())
+                                             : exec_res.value();
+        */
+        RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
         /* reply.data may alias db storage; queue_reply copies into
          * conn->reply_arena before publishing. */
         (void)conn->queue_reply(&reply);

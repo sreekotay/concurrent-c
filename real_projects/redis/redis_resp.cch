@@ -95,7 +95,7 @@ static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t 
         while (pos < line.len && data[pos] != ' ') pos++;
         args[argc++] = CCSlice_sub(&line, start, pos);
     }
-    if (argc == 0) return cc_err(mkerr(CC_ERR_PARSE, "empty inline command"));
+    if (argc == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty inline command"));
     return cc_ok(argc);
 }
 
@@ -106,7 +106,7 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CC
 
     if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
         r->start = saved_start;
-        *err = mkerr(CC_ERR_PARSE, "expected bulk string");
+        *err = CC_ERROR(CC_ERR_PARSE, "expected bulk string");
         return RESP_PARSE_ERROR;
     }
 
@@ -119,7 +119,7 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CC
     int64_t n = n_res.value();
     if (n < 0) {
         r->start = saved_start;
-        *err = mkerr(CC_ERR_PARSE, "negative bulk length");
+        *err = CC_ERROR(CC_ERR_PARSE, "negative bulk length");
         return RESP_PARSE_ERROR;
     }
 
@@ -131,7 +131,7 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CC
 
     if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
         r->start = saved_start;
-        *err = mkerr(CC_ERR_PARSE, "malformed bulk string");
+        *err = CC_ERROR(CC_ERR_PARSE, "malformed bulk string");
         return RESP_PARSE_ERROR;
     }
 
@@ -172,7 +172,7 @@ static RespParseStatus rr_try_read_args_buffered(RespReader* r,
     int64_t argc_i64 = argc_res_i64.value();
     if (argc_i64 < 1 || argc_i64 > (int64_t)cap) {
         r->start = saved_start;
-        *err = mkerr(CC_ERR_PARSE, "unsupported argument count");
+        *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
         return RESP_PARSE_ERROR;
     }
 
