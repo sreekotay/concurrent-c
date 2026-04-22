@@ -152,8 +152,8 @@ struct CCNursery {
     pthread_mutex_t mu;
     wake_primitive cancel_wake;  /* Broadcast on cancel for O(1) wake */
 
-    /* Worker-frees-on-DEAD path (gated by CC_NURSERY_WORKER_FREES env).
-     * When the gate is off these fields are inert and the classic
+    /* Worker-frees-on-DEAD path (default; CC_NURSERY_WORKER_FREES=0 opts
+     * out). When the gate is off these fields are inert and the classic
      * nursery-wait iterator continues to own per-child join+release.
      * When on, the v2 worker calls cc_nursery_notify_child_done on
      * MCO_DEAD and cc_nursery_wait becomes a barrier on alive_count. */
@@ -161,17 +161,16 @@ struct CCNursery {
     wake_primitive alive_wake;
 };
 
-/* Process-wide gate, latched on first read.  Off by default so the
- * existing join-in-wait ownership path stays unchanged; set
- * CC_NURSERY_WORKER_FREES=1 to route nursery-spawned fibers back to the
- * v2 free list the instant their coroutine reaches MCO_DEAD instead of
- * waiting for cc_nursery_wait. */
+/* Process-wide gate, latched on first read.  On by default: nursery-
+ * spawned fibers go back to the v2 free list the instant a worker
+ * observes MCO_DEAD instead of waiting for cc_nursery_wait. Set
+ * CC_NURSERY_WORKER_FREES=0 to force the classic join-in-wait path. */
 static int cc_nursery_worker_frees_mode(void) {
     static _Atomic int cached = -1;
     int v = atomic_load_explicit(&cached, memory_order_relaxed);
     if (v >= 0) return v;
     const char* s = getenv("CC_NURSERY_WORKER_FREES");
-    int newv = (s && s[0] && s[0] != '0') ? 1 : 0;
+    int newv = !(s && s[0] == '0' && s[1] == 0);
     atomic_store_explicit(&cached, newv, memory_order_relaxed);
     return newv;
 }
