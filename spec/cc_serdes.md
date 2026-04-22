@@ -1,8 +1,8 @@
 # Concurrent-C Grammar and SERDES Specification
 
-**Version:** 0.1-draft  
-**Date:** 2026-04-03  
-**Status:** Draft inclusion-ready language and lowering specification
+**Version:** 0.2-draft  
+**Date:** 2026-04-21  
+**Status:** Concept-phase draft (inclusion-oriented language and lowering intent)
 
 ---
 
@@ -10,54 +10,152 @@
 
 Concurrent-C grammar and SERDES provides lightweight recognition grammars and
 schema-driven parsing and formatting for structured text and binary formats. It
-introduces five related surface forms:
+centers on:
 
-- `@rules` for lightweight recognition and collection grammars
-- `@schema` for structural wire-format declarations
-- `@parse` for schema-driven reading
-- `@format` for schema-driven writing
-- `@string` for lightweight write-only templating without a schema
+1. **One unified declaration family:** `@grammar(fragments)`, `@grammar(rules)`,
+  and `@grammar(schema)` (see [Surface: `@grammar(…)](#surface-grammar)`).
+2. **Runtime operations:** `cc_parse` / `cc_format` for schema-driven I/O, plus
+  companions such as `cc_match` / `cc_collect` for rule entry points when the
+   language contract exposes them.
 
-**Design intent:** keep the schema declarative, keep ownership truthful, keep
-lowering transparent, and keep the generated hot path competitive with
-handwritten code.
+Conceptual names in prose — **fragments**, **rules**, **schema** — map to those
+three `@grammar` modes. Older drafts used type-like spellings (`CCFragments`,
+`CCRules`, `CCSchema`); this document treats them as the same three layers.
 
-**Scope:** This document defines the shared grammar model, the semantic model
-for lightweight rule collection and schema-driven parse and format operations,
-the role of codecs, directionality rules, provenance rules, error behavior, and
-the intended lowering model.
+**Design intent:** keep the grammar declarative, keep ownership truthful, keep
+lowering transparent, and keep the generated hot path competitive with (or
+better than) handwritten C code.
+
+**Scope:** This document defines the shared grammar model, semantic rules for
+recognition and structured SERDES, the role of codecs, directionality,
+provenance, error behavior, and the intended lowering model. Exact concrete
+syntax is still evolving; semantics and layering are the primary contract.
+
+**Related surface:** write-only string templating without a schema (for example
+`@string` in earlier sketches) remains a separate convenience facility and is
+not a `@grammar` kind.
 
 ---
 
 ## Design Principles
 
-1. **One grammar family, two weights.** `@rules` provides lightweight
-   recognition and collection. `@schema` provides typed structural SERDES on
-   the same conceptual foundation.
-2. **One structural schema, two generated operations.** `@schema` describes
-   wire structure from which the compiler may generate both parse and format
-   operations.
+1. **One grammar family, two weights.** Under `@grammar`, **rules** are
+  lightweight recognition and collection; **schema** is typed structural SERDES
+   on the same conceptual foundation. **Fragments** are substitution-only and sit
+   beneath both.
+2. **One structural schema, two generated operations.** `@grammar(schema)`
+  describes wire structure from which the compiler may generate both parse and
+   format code.
 3. **Structure over callbacks.** Grammar semantics belong to rules and schemas,
-   not to codec callbacks.
+  not to codec callbacks.
 4. **Leaf hooks only.** Codecs are lightweight bidirectional escape hatches for
-   primitive/domain details that are easier to express imperatively.
+  primitive or domain-specific behavior.
 5. **Truthful provenance.** Parsed values must accurately reflect whether they
-   borrow from source input or were materialized into an arena.
+  borrow from source input or were materialized into an arena.
 6. **Canonical formatting.** Formatting emits bytes from the schema's output
-   structure; it is not defined as "running the parser backwards".
+  structure; it is never defined as "running the parser backwards".
 7. **Structured errors.** Parse and format failures are positioned, typed, and
-   grammar-aware.
-8. **Transparent lowering.** Implementations should generate direct,
-   specialized ordinary C code with no parser VM requirement in the hot path.
+  grammar-aware.
+8. **Transparent lowering.** Implementations should generate direct, specialized
+  ordinary C code with no parser VM requirement in the hot path.
+
+---
+
+## Surface: `@grammar(…)` {#surface-grammar}
+
+Declarations use a single keyword `**@grammar`** with a **mode** that selects
+semantics. `**@grammar` owns pattern and structure** (what to match, bind,
+repeat, and emit). **Codecs are not `@grammar` blocks** — they remain leaf hooks
+(primitive or domain behavior attached at fields or call sites), not a fourth
+`@grammar` kind.
+
+
+| Mode          | Surface                          | Role                                                                                                                                               |
+| ------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **fragments** | `@grammar(fragments) Name { … }` | Replacement-only snippets (CSS-custom-property spirit). Expanded before semantic analysis. No parse entry points, no match/rollback by themselves. |
+| **rules**     | `@grammar(rules) Name { … }`     | Recognition and collection. Parse-first; `cc_match` / `cc_collect` (or equivalent) over named entries.                                             |
+| **schema**    | `@grammar(schema) Name { … }`    | Typed wire model: named fields, directionality, `**cc_parse`** / `**cc_format**`, provenance-aware output.                                         |
+
+
+**Rule:** `**@grammar` is for declarations.** `**cc_*` is for operations** over
+the types and entry points those declarations introduce.
+
+---
+
+## Conceptual Stack
+
+Read the system bottom-up:
+
+1. **Fragments** (`@grammar(fragments)`) — compile-time substitution only. No
+  match, commit, rollback, provenance, or entry-point semantics by themselves.
+2. **Rules** (`@grammar(rules)`) — runtime recognition and collection on bytes
+  (or a chosen input model). Parse-oriented; no generated format unless a
+   future extension says otherwise.
+3. **Schema** (`@grammar(schema)`) — runtime typed structural parse and
+  canonical format over the same grammar vocabulary, plus named fields and
+   directionality.
+4. `**cc_parse` / `cc_format`** — stable call-site operations over schema types
+  (and companions such as `cc_collect` / `cc_match` for rule entry points, if
+   exposed by the language contract).
+
+**Rule:** After fragment expansion, only **rules** and **schema** contribute
+semantic meaning. Fragments must not be mistaken for named productions with
+independent identity.
+
+---
+
+## Fragments (replacement-only)
+
+**Fragments** (`@grammar(fragments)`) are **named replacement tokens**, analogous
+in spirit to CSS custom properties: they exist to reduce repetition and keep
+grammars readable. They are **not** a parallel grammar language and **not**
+first-class rule definitions.
+
+**Properties:**
+
+- Fragment bodies expand **before** grammar analysis (exact pipeline stage is
+implementation-defined, but expansion is strictly prior to match semantics).
+- They **do not** introduce parse entry points, generated types, or standalone
+productions.
+- They **do not** perform input consumption, backtracking, or collection by
+themselves; the surrounding `@grammar(rules)` or `@grammar(schema)` block does.
+- **Provenance** and **errors** are attributed to the expanded site inside the
+containing rule or schema, not to the fragment definition in isolation.
+
+**Rule:** A `use FragmentName` (or equivalent import) brings names from that
+fragment namespace into scope for substitution. References such as
+`FragmentName.symbol` expand to the fragment's right-hand side at the use site.
+
+**Rule:** If a design needs **runtime** reuse with full grammar semantics (e.g.
+a leaf recognizer referenced from a schema), that is **rules**
+(`@grammar(rules)`), not fragments.
+
+Illustrative shape:
+
+```c
+@grammar(fragments) JsonCommon {
+    ws:    any charset [#' ' #'\t' #'\r' #'\n']
+    digit: charset [#'0' - #'9']
+}
+
+@grammar(rules) JsonLex {
+    use JsonCommon
+    number = [ opt #"-" some digit /* ... */ ];
+}
+```
+
+**Open question (concept):** whether fragments may contain `keep` / `collect` or
+must be restricted to character-level and literal patterns only. A strict
+reading is: fragments are **syntactic** sugar for repeated pattern text;
+collection semantics remain owned by **rules** and **schema**.
 
 ---
 
 ## Shared Grammar Model
 
-`@rules` and `@schema` are not separate parsing worlds. They are two layers of
-the same grammar family.
-
-Both forms should share the same core vocabulary wherever possible, including:
+**Rules** and **schema** (`@grammar(rules)` and `@grammar(schema)`) are two layers
+of the **same** grammar family. They
+should share core vocabulary wherever possible:
 
 - literals
 - named character sets
@@ -65,25 +163,25 @@ Both forms should share the same core vocabulary wherever possible, including:
 - ordered choice
 - repetition (`some`, `any`, `opt`)
 - position/search operators such as `to` and `thru`
-- named rule references
-- collection helpers such as `keep`
+- named **rule** references (`Namespace.rule` for entries declared in
+`@grammar(rules)`)
+- collection helpers (`collect`, `keep`, `skip`)
+- optional binary-oriented primitives such as `bit` and `bits(N)` (concept;
+endian, alignment, and bit ordering require separate normative text)
 
-**Rule:** `@schema` should feel like the typed structural layer built on the
-same matching model as `@rules`, not like a separate ad hoc DSL.
+**Rule:** Schema should feel like the typed structural layer built on the same
+matching model as rules, not like a separate ad hoc DSL.
 
-**Rule:** `@rules` is parse-only by default. `@schema` is the structured layer
-that may participate in both parse and format generation.
+**Rule:** Rules are parse-only by default. Schema is the structured layer that
+participates in both parse and format generation.
 
 ---
 
-## Surface Overview
+## Rules (`@grammar(rules)`)
 
-### `@rules`
-
-`@rules` declares lightweight recognition and collection grammars. It is
-intended for tokenizers, lexers, scanners, comment skipping, span extraction,
-and similar parse-only problems where generated structs would be unnecessary
-weight.
+`@grammar(rules)` declares lightweight recognition and collection grammars: tokenizers,
+lexers, scanners, comment skipping, span extraction, and similar problems where
+generated domain structs would be unnecessary weight.
 
 Rules are:
 
@@ -95,7 +193,7 @@ Rules are:
 Example:
 
 ```c
-@rules CssRules {
+@grammar(rules) CssRules {
     nonascii: complement charset [0 - 177];
     hexa:     charset [#'a' - #'f' #'A' - #'F' #'0' - #'9'];
     nmstart:  charset [#'_' #'a' - #'z' #'A' - #'Z'];
@@ -112,80 +210,63 @@ Example:
 }
 ```
 
-Typical rule-oriented entry points may include:
+Typical rule-oriented entry points:
 
 ```c
-char[:][:] tokens = @collect(src, arena, CssRules.tokenize) ?>(e) return cc_err(e);
-bool ok = @match(src, CssRules.ident) ?>(e) return cc_err(e);
+char[:][:] tokens = cc_collect(src, arena, CssRules.tokenize) ?>(e) return cc_err(e);
+bool ok = cc_match(src, CssRules.ident) ?>(e) return cc_err(e);
 ```
 
-**Rule:** `@rules Name { ... }` introduces a named rule namespace. Individual
-rules within that declaration are referenced as `Name.rule` in grammar and call
-sites.
+**Rule:** `@grammar(rules) Name { ... }` introduces a named rule namespace.
+Individual rules are referenced as `Name.rule` in grammar and call sites.
 
-**Rule:** The `Name.rule` form in this document is not ordinary field access. It
-is grammar-entry selection syntax for named rules declared inside an `@rules`
-block.
+**Rule:** The `Name.rule` form is **grammar-entry selection**, not ordinary field
+access.
 
-### `@rules` Collection Semantics
+### Rules collection semantics
 
-`@rules` is collection-driven:
+Rules are collection-driven:
 
 - if a rule consumes input but is not kept, it does not appear in the output
 - `skip` consumes without output
 - `keep` emits the matched or derived value into the collected result
 - `collect` defines a sequence-producing rule
 
-**Rule:** `@rules` does not generate domain structs by default.
+**Rule:** Rules do not generate domain structs by default.
 
-**Rule:** `@rules` output shape is determined by the kept values of the selected
-entry rule rather than by named fields.
+**Rule:** Output shape is determined by the kept values of the selected entry
+rule, not by named fields.
 
-By default, the most natural output for lightweight tokenization is a
-homogeneous kept sequence such as `char[:][:]`.
+By default, homogeneous kept output (e.g. `char[:][:]` spans) is sufficient for
+many tokenizers.
 
-**Rule:** Homogeneous kept output is sufficient for span-oriented tokenizers,
-lexeme-preserving minifiers, and similar recognition tasks where each emitted
-item is naturally represented as the same value family.
+**Rule:** Heterogeneous collected output is not required for rules v1.
 
-**Rule:** Heterogeneous collected output is not required for `@rules` v1.
+**Future direction:** user-supplied emitted token types for collection (tagged
+tokens) without promoting rules into full schema. Recursive structural domain
+modeling remains the responsibility of schema.
 
-**Future direction:** a later extension may permit user-supplied emitted token
-types for `@rules` collection, such as a tagged token struct containing token
-kind plus matched span, without promoting `@rules` into full `@schema`.
+---
 
-Example future shape:
+## Schema (`@grammar(schema)`)
 
-```c
-typedef struct {
-    CssTokenKind kind;
-    char[:] text;
-} CssToken;
-
-CssToken[:] toks = @collect(src, arena, CssRules.tokenize, CssToken) ?>(e) return cc_err(e);
-```
-
-This future direction is intended for typed token streams. Recursive structural
-domain modeling remains the responsibility of `@schema`.
-
-### `@schema`
-
-`@schema` declares the structural wire model for a format. A schema may be:
+`@grammar(schema)` declares the structural wire model for a format. A schema may be:
 
 - a product/sequence schema
 - an alternation schema
 - a forward declaration for recursive schemas
 
-Example:
+Example (length prefix is parse-visible; value borrows or materializes per
+provenance rules):
 
 ```c
-@schema RespBulkString {
+@grammar(schema) RespBulkString {
     '$' @parse_only len: int "\r\n"
     value: char[:len] "\r\n"
 };
 ```
 
-`@schema` is the heavier structured layer that adds:
+Schema adds:
 
 - named typed fields
 - generated output types
@@ -193,214 +274,158 @@ Example:
 - schema-driven formatting
 - provenance-aware storage semantics
 
-### `@parse`
+---
 
-`@parse(src, arena, Type)` parses bytes from `src` into a value of schema type
+## `cc_parse` and `cc_format`
+
+`cc_parse(src, arena, Type)` parses bytes from `src` into a value of schema type
 `Type`.
 
-Optional parse options may be supplied at the call site. For example:
+Optional parse options may be supplied at the call site, for example borrowing
+hints where legal:
 
 ```c
-RespBulkString s = @parse(src, arena, RespBulkString, .zero_copy) ?>(e) return cc_err(e);
+RespBulkString s = cc_parse(src, arena, RespBulkString, .borrow_from_src) ?>(e) return cc_err(e);
 ```
 
-### `@format`
-
-`@format(value, arena, Type)` formats a schema value into canonical bytes,
-returning a string-like output object chosen by the language/library contract.
-
-Example:
+`cc_format(value, arena, Type)` formats a schema value into **canonical** bytes,
+returning a string-like output type chosen by the language/library contract:
 
 ```c
-CCString out = @format(v, arena, RespValue) ?>(e) return cc_err(e);
+CCString out = cc_format(v, arena, RespValue) ?>(e) return cc_err(e);
 ```
 
-### `@string`
-
-`@string` remains the easy write-only convenience form. It does not require a
-schema and is intentionally simpler than full SERDES.
-
-Example:
-
-```c
-CCString msg = @string(json_codec, `{"name": ${name}}`, arena);
-```
+The concrete return type of `cc_parse` (pointer vs value vs arena-backed handle)
+is a lowering contract; this document requires only that ownership and
+provenance remain explicit in the generated API.
 
 ---
 
-## `@rules` vs `@schema`
+## Rules vs schema
 
-The intended split is:
-
-- `@rules` for recognition, scanning, tokenization, and collection
-- `@schema` for typed structural parse and format generation
-
-`@rules` is appropriate when the output is naturally a flat or lightly-typed
-collection of kept values. `@schema` is appropriate when the output is a
-structured record, union, recursive value, or other domain model.
+- **Rules** (`@grammar(rules)`) — recognition, scanning, tokenization, collection
+- **Schema** (`@grammar(schema)`) — typed structural parse and format generation
 
 **Rule:** An implementation should not force tokenizer-style grammars through
 struct generation when a rule grammar is sufficient.
 
-**Rule:** `@schema` should remain a structured superset in spirit, but it is not
-required to expose every rule-only collection convenience in identical form.
+**Rule:** Schema remains a structured superset in spirit; it need not expose
+every rule-only collection convenience in identical form.
 
-### Cross-Referencing
+### Cross-referencing (not fragments)
 
-The two layers should compose, but composition is directional in v1.
+The two layers compose, but composition is **directional** in v1.
 
-**Rule:** `@schema` may reference `@rules` fragments as parse-side leaf
-recognizers or extractors when the referenced rule has a schema-compatible
-output shape.
+**Rule:** Schema may reference a **rules** entry (`Namespace.rule`) as a
+parse-side leaf recognizer or extractor when that rule's output shape is
+schema-compatible (a real grammar invocation, not fragment expansion).
 
 Example:
 
 ```c
-@schema CssRule {
+@grammar(schema) CssRule {
     selector: CssRules.ident
     '{' props: keep(some) CssProperty '}'
 };
 ```
 
-This allows a schema to reuse lightweight lexical recognition without forcing
-those leaf patterns to become full schemas.
-
-**Rule:** `@rules` does not consume full schemas in v1.
+**Rule:** Rules do not consume full schemas in v1.
 
 **Rule:** Generalized schema parsing over arbitrary token streams is not defined
 in v1. Byte-oriented grammar is the normative input model for this draft.
 
-**Future direction:** multi-phase parsing is expected to be valuable, including
-pipelines such as:
-
-- source bytes -> `@rules` token collection
-- token stream -> later structured parse
-
-but token-stream grammar is a separate semantic layer and should not be implied
-without explicit stream-type rules.
+**Future direction:** multi-phase pipelines (bytes → rule tokens → later parse)
+require an explicit stream-type grammar layer; they are not implied here.
 
 ---
 
 ## Grammar Semantics vs Codec Semantics
 
-**Hard rule:** grammar semantics belong to `@rules` and `@schema`, not to the
-codec.
+**Hard rule:** grammar semantics belong to **rules** and **schema**
+(`@grammar(rules)` and `@grammar(schema)`), not to the codec.
 
 Rules and schemas own:
 
-- sequencing
-- literals
-- ordered choice
-- repetition
-- recursion
-- collection shape
-- field binding
-- structural output layout
+- sequencing, literals, ordered choice, repetition, recursion
+- collection shape, field binding, structural output layout
 
-The codec owns only leaf-level domain behavior, such as:
+The codec owns only **leaf-level** domain behavior, for example:
 
-- primitive number parsing and formatting
+- primitive numeric parse/format
 - string escaping and unescaping
-- whitespace style or skipping policy
+- whitespace policy
 - domain-specific diagnostics
 
-**Rule:** A codec may refine how primitive values are interpreted or emitted,
-but it must not redefine structural parser semantics such as branching,
-rollback, repetition, recursion, or ownership.
+**Rule:** A codec may refine how primitive byte sequences are interpreted or
+emitted, but it must not redefine structural behavior: branching, rollback,
+repetition, recursion, or ownership.
 
-**Rule of thumb:**
-
-- if it changes what a primitive byte sequence means locally, it may belong in
-  the codec
-- if it changes how the grammar matches or how values are stored, it belongs in
-  grammar/runtime semantics instead
+**Rule of thumb:** local meaning of bytes → codec; match structure and storage
+→ grammar and runtime semantics.
 
 ---
 
 ## Codec Model
 
 A codec is the bidirectional domain hook for schema-driven SERDES, analogous in
-spirit to the policy argument used by `@string`.
-
-**Intent:** the codec is a lightweight imperative escape hatch for domain
-details, while the grammar remains the declarative center of the feature.
-
-Typical codec responsibilities include:
-
-- parse primitive numeric forms (`int`, `float`, domain integers)
-- format primitive numeric forms
-- escape or unescape domain strings
-- skip or emit canonical whitespace
-- construct domain-specific errors
+spirit to policy arguments used by lightweight templating APIs. Codecs attach
+at **leaves** (fields, primitives, call-site options), not as `@grammar(…)`
+blocks — see [Surface: `@grammar(…)](#surface-grammar)`.
 
 Codec hooks must not become a second grammar language.
 
-**Rule:** An implementation should reject or warn on codec usage patterns that
-attempt to control general grammar flow instead of leaf behavior.
+**Rule:** Implementations should reject or warn on codec patterns that attempt to
+control general grammar flow instead of leaf behavior.
 
 ---
 
 ## Directionality
 
-Only `@schema` participates in generated formatting. `@rules` is parse-only
-unless a future extension explicitly states otherwise.
+Only `**@grammar(schema)`** participates in generated formatting.
+`**@grammar(rules)**` is parse-only unless a future extension states otherwise.
 
-Schema elements participate in one or both generated directions:
+Schema elements participate in one or both directions:
 
-- `bidirectional` means the element contributes to both parsing and formatting
-- `parse_only` means the element is used only while reading input
-- `format_only` means the element is used only while producing output
+- **bidirectional** — parse and format
+- **parse_only** — read only
+- **format_only** — write only
 
-**Rule:** Directionality is part of schema semantics. An implementation must
-reject a schema that requires write-side behavior for an element that has only
-parse meaning, unless the schema explicitly supplies a format-side rule.
+**Rule:** Directionality is part of schema semantics. A schema used with
+`cc_format` must have a complete format path; ambiguous cases are compile-time
+errors unless explicitly recoverable.
 
-### Legality Table
+### Legality table
 
-| Schema element | Parse | Format | Default direction |
-|--------|--------|--------|--------|
-| Literal char/string/bytes | match exact input | emit exact bytes | bidirectional |
-| Named primitive field | parse field value | format field value | bidirectional |
-| Named nested-schema field | parse nested value | format nested value | bidirectional |
-| Ordered sequence | parse in order | emit in order | bidirectional |
-| Ordered choice `a \| b` | try branches in order | select branch from value/tag | bidirectional |
-| Repetition with explicit count | parse repeated items | emit repeated items | bidirectional |
-| Collection `keep(...)` | collect parsed items | emit contained items | bidirectional if output shape is defined |
-| Hidden driver field | may guide later parse | not emitted unless explicitly mapped | parse_only |
-| `to ...` search | advance scan position | no implicit inverse | parse_only |
-| `thru ...` search | advance through delimiter | no implicit inverse | parse_only |
-| Delimiter-driven extraction | parse by scanning delimiter | no implicit inverse unless format rule is defined | parse_only by default |
-| Whitespace skipping | consume allowed input whitespace | emit only if schema/codec defines it | parse_only by default |
-| Guarded branch `opt (expr)` | controls parse presence | may control emission if evaluable from output value | bidirectional if well-defined |
-| Derived emitted field | not read from input | emitted from value or formatter helper | format_only |
 
-### Directionality Rules
+| Schema element                           | Parse                 | Format                   | Default direction             |
+| ---------------------------------------- | --------------------- | ------------------------ | ----------------------------- |
+| Literal char/string/bytes                | match                 | emit                     | bidirectional                 |
+| Named primitive field                    | parse                 | format                   | bidirectional                 |
+| Named nested-schema field                | parse                 | format                   | bidirectional                 |
+| Ordered sequence                         | in order              | in order                 | bidirectional                 |
+| Ordered choice (PEG alternation)         | try branches in order | branch from tag/value    | bidirectional                 |
+| Repetition with explicit count           | repeat                | emit                     | bidirectional                 |
+| Collection `keep(...)`                   | collect               | emit if shape defined    | bidirectional when defined    |
+| Hidden driver field                      | guide parse           | omit unless mapped       | parse_only                    |
+| `to ...` / `thru ...` / delimiter search | advance/locate        | no implicit inverse      | parse_only                    |
+| Whitespace skipping                      | consume               | emit only if defined     | parse_only by default         |
+| Guarded `opt (expr)`                     | conditional           | conditional if evaluable | bidirectional if well-defined |
+| Derived emitted field                    | skip read             | emit from value          | format_only                   |
 
-1. **Literals are symmetric by default.** A literal token matched during parse
-   is emitted unchanged during format.
-2. **Named value fields are symmetric by default.** A bound field of primitive
-   or schema type participates in both parse and format unless marked
-   otherwise.
-3. **Hidden fields are parse-only by default.** A field used only to drive
-   later parsing, such as a length prefix, is not part of the formatted output
-   value unless explicitly retained or re-derived.
-4. **Search operators are parse-only unless given explicit format meaning.**
-   `to`, `thru`, and delimiter-search extraction describe how to locate input
-   boundaries and do not imply how bytes should be emitted.
-5. **Formatting is structural, not inverse search.** `@format` emits bytes from
-   the schema's output structure and field values. It does not "run parse
-   backwards".
-6. **Choice must be format-resolvable.** A bidirectional alternation must
-   provide a deterministic way to choose the emitted branch, typically from a
-   generated tag or concrete output type.
-7. **Implementations must reject ambiguous format schemas.** If a schema
-   contains parse-only constructs with no format-side meaning but is used with
-   `@format`, the compiler must emit a diagnostic unless the remaining output
-   path is still complete.
 
-### Suggested Surface Markers
+### Directionality rules
 
-Minimal explicit surface markers are sufficient:
+1. Literals and named value fields are symmetric by default.
+2. Hidden fields (e.g. length prefixes) are parse-only by default unless the
+  format path re-derives or maps them.
+3. Search operators do not imply inverse emission; `**cc_format` is structural,
+  not inverse parse.**
+4. **Choice must be format-resolvable** (tag, discriminant, or distinct output
+  types).
+5. **Reject ambiguous format schemas** when `cc_format` cannot emit a unique
+  byte sequence from the value.
+
+### Suggested surface markers
 
 ```c
 @parse_only len: int
@@ -411,185 +436,223 @@ Minimal explicit surface markers are sufficient:
 
 ## Provenance and Materialization
 
-When `@parse` produces slices or nested values, the implementation must
-preserve truthful provenance. Parsed output may either:
+When `cc_parse` produces slices or nested values, the implementation must preserve
+**truthful provenance**: borrow from input or materialize in the arena.
 
-- borrow from the input slice
-- materialize into the provided arena
+**Rule:** Provenance is observable storage truth, not a hint.
 
-**Rule:** provenance is not a hint or optimization detail. It is part of the
-observable storage truth of the produced value.
+### Borrow vs materialize (summary)
 
-### Borrow vs Materialize Table
 
-| Parsed construct | Borrow input | Materialize in arena | Default |
-|--------|--------|--------|--------|
-| Fixed-length slice `char[:len]` with no transform | yes | yes | borrow if legal |
-| Delimiter slice `char[:to x]` with no transform | yes | yes | borrow if legal |
-| Literal token | not applicable | not applicable | matched only |
-| Primitive numeric field | not applicable | value stored directly | value |
-| Charset-captured slice with no transform | yes | yes | borrow if legal |
-| Escaped string requiring unescape | no | yes | materialize |
-| Transcoded or normalized text | no | yes | materialize |
-| Binary integer fields | not applicable | value stored directly | value |
-| Repeated borrowed slices | yes | yes | each element follows own rule |
-| Nested schema with only borrowed leaves | yes | yes | borrow leaves if legal |
-| Recursive structure needing owned node allocation | limited | yes | materialize container as needed |
+| Construct                                     | Default                                     |
+| --------------------------------------------- | ------------------------------------------- |
+| Fixed-length or delimiter slice, no transform | borrow if legal                             |
+| Escaped / decoded / normalized text           | materialize                                 |
+| Primitives / binary integers                  | stored as values                            |
+| Recursive containers                          | may allocate nodes; leaves may still borrow |
 
-### Provenance Rules
 
-1. **Borrowing is allowed only when the parsed value is a direct view of source
-   bytes.** If the output slice can be represented as a contiguous sub-slice of
-   `src` without transformation, it may borrow.
-2. **Transformation requires materialization.** If parsing performs unescaping,
-   decoding, transcoding, normalization, or any byte rewrite, the resulting
-   slice must be materialized in `arena`.
-3. **Codecs do not invent provenance policy.** A codec may request or require
-   transformation for a leaf value, but it may not claim a borrowed slice when
-   the bytes were rewritten.
-4. **Borrowed slices must point into the original input provenance.** If a
-   field borrows, its slice provenance must reflect the input source rather than
-   the arena.
-5. **Materialized slices must reflect arena provenance.** If a field allocates
-   and copies or synthesizes bytes, its provenance must identify destination
-   arena storage.
-6. **`.zero_copy` is advisory only.** A call-site hint such as `.zero_copy`
-   permits borrowing where legal, but must not force borrowing when
-   transformation or ownership rules require materialization.
-7. **Containers do not erase leaf truth.** A parsed struct, array, or union may
-   contain a mix of borrowed and materialized fields. Each field's provenance
-   remains independently truthful.
-8. **Recursive outputs may allocate structure even when leaves borrow.** A
-   recursive parse may require arena allocation for container nodes while still
-   allowing leaf byte views to borrow from input.
+### Provenance rules
+
+1. Borrowing only when the value is a **direct contiguous view** of source bytes
+  without transformation.
+2. Any byte rewrite → materialize in `arena`.
+3. Codecs do not invent borrowed provenance for transformed bytes.
+4. Borrowed slices reference **input** provenance; materialized slices reference
+  **arena** provenance.
+5. Call-site hints such as `.borrow_from_src` are **advisory**: they permit
+  borrowing where legal; they must not override materialization requirements.
+6. Containers preserve per-field provenance independently.
 
 ---
 
 ## Speculative Parsing and Rollback
 
-Ordered choice and repetition require speculative parse behavior. The semantics
-must be explicit.
+Ordered choice and repetition require explicit speculative semantics.
 
-### Rollback Rules
+### Rollback rules
 
-1. **Input position rollback.** If a speculative branch fails, the input slice
-   position must be restored to the position held at branch entry.
-2. **Partial output is invalid on failure.** Values written into an output slot
-   during a failed speculative branch must not be observed after that branch
-   fails.
-3. **Arena checkpoint/rewind is normative.** Speculative parsing must take an
-   arena checkpoint at speculative branch entry and must rewind to that
-   checkpoint if the branch fails.
-4. **No escaping partial references.** A failed branch must not leave behind
-   borrowed or materialized references that appear valid to later branches.
-5. **Ordered choice is PEG-style.** `a | b` tries `a` first. If `a` succeeds,
-   `b` is not attempted. If `a` fails, `b` runs from the original entry
-   position.
-6. **Repetition commits item-by-item.** Repetition forms may commit each
-   successfully parsed element in sequence; the terminating non-match for
-   `any`/`opt` is not an error unless required by surrounding structure.
-7. **Fatal failure propagates.** If the active branch fails in a non-recoverable
-   way and no alternative remains, the generated parse returns an error result.
+1. **Input position** restores on failed speculative branch.
+2. **Partial output** from a failed branch is not observable afterward.
+3. **Arena checkpoint/rewind** at speculative entry is normative on failure.
+4. **No dangling references** after a failed branch.
+5. **Ordered choice is PEG-style:** `a | b` tries `a` first from the same entry
+  cursor.
+6. **Repetition** commits successful items; terminating non-match for `any`/`opt`
+  is not an error unless the surrounding schema requires it.
+7. **Fatal failure** propagates when no alternative remains.
 
-**Implementation note:** These rules constrain observable behavior, not the
-exact lowering strategy. Implementations remain free to generate specialized
-parsers using arena checkpoints, temporary locals, or equivalent direct C
-rewrites, provided the observable semantics remain identical to checkpoint and
-rewind at speculative boundaries.
+Implementations may lower differently if observable behavior matches the above.
 
 ---
 
 ## Error Model
 
-Grammar and SERDES operations produce structured, positioned, typed errors.
+Parse, format, and collection produce **structured, positioned, typed** errors
+(rule/schema-aware).
 
-Rule-oriented and schema-oriented diagnostics should include enough information
-to report:
+Diagnostics should include where possible:
 
 - failure offset
 - expected construct
-- observed input or output context
+- observed context
 - relevant rule or schema production
 
-`@collect ... @err`, `@parse ... @err`, and `@format ... @err` integrate with
-the ordinary CC result and error model.
+`cc_collect`, `cc_parse`, and `cc_format` integrate with the ordinary CC result
+and error model.
 
-### Error Rules
+### Error rules
 
-1. Generated grammar and SERDES functions should return `T!>(E)`-style results
-   using the domain error type named by the grammar/library contract.
-2. A parse failure must not silently consume input beyond the committed parse
-   frontier for the failing production.
-3. Alternation failures should preserve the most useful diagnostic context
-   available, typically the farthest offset reached together with the expected
-   construct at that point.
-4. Local handlers such as `@err(e) { ... }` and scoped defaults such as
-   `@errhandler(E e) { ... }` are surface error-consumption features; they do
-   not change core parser semantics.
+1. Generated entry points return `T!>(E)`-style results per contract.
+2. Parse failure must not silently advance beyond the failing production's
+  committed frontier.
+3. Alternation diagnostics should preserve useful context (e.g. farthest offset
+  and expected construct).
 
 ---
 
 ## Lowering Model
 
-Grammar and SERDES are compile-time features that lower to specialized ordinary
-C code.
+Grammar and SERDES lower to specialized ordinary C: direct helpers, specialized
+generated functions, no parser VM in the hot path.
 
-Implementations should favor:
+1. `@grammar(fragments)` → compile-time expansion only (no standalone runtime
+  entry point; no parser VM).
+2. `@grammar(rules)` → recognition/collection helpers per named entry.
+3. `@grammar(schema)` → generated C types and parse/format helpers.
+4. Non-recursive shapes may fully specialize; recursive shapes may use mutually
+  recursive functions.
+5. `cc_format` → append/emit over the chosen output buffer plus codec leaf
+  encoders.
+6. Write-only templating remains separate from `@grammar(schema)` unless an
+  implementation chooses internal lowering.
 
-- direct helper calls
-- specialized generated functions
-- no virtual dispatch in the hot path
-- no hidden parser VM
+---
 
-### Lowering Rules
+## Protocol Buffers as a Pressure Test
 
-1. `@rules` lowers to reusable recognition and collection helpers for named
-   entry rules.
-2. `@schema` lowers to concrete generated C types and helper functions.
-3. Non-recursive grammars and schemas may lower to fully specialized direct
-   functions with no runtime dispatch.
-4. Recursive grammars and schemas may lower to mutually recursive C functions.
-5. `@format` lowers to direct append or emit operations over the chosen output
-   buffer type together with codec leaf encoders.
-6. `@string` remains a separate write-only facility and is not defined as sugar
-   over `@schema` unless an implementation explicitly chooses to do so
-   internally.
+Protocol Buffers are a useful **benchmark** for whether `@grammar(schema)` plus
+codecs describe real wire formats without becoming a parser library. This section is
+**normative for design intent**, not a promise of full protobuf compatibility in
+v1.
+
+### What protobuf stresses (tier 1)
+
+
+| Protobuf concern                                    | What it tests in this model                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------- |
+| Tag + wire type + payload                           | Structural sequencing vs leaf encoding                           |
+| Varints and zigzag                                  | Variable-width **primitive** behavior (codec / typed leaf)       |
+| Length-delimited submessages and `bytes` / `string` | **Hidden length** + **provenance** (borrow vs copy)              |
+| `oneof` / discriminated unions                      | **Format-resolvable** ordered choice                             |
+| Repeated fields                                     | Repetition termination and emission count                        |
+| Recursion                                           | Forward declarations, arena rollback, container allocation       |
+| Presence / defaults (proto2 vs proto3)              | Whether **optional emission** is a schema/type concern or policy |
+
+
+### Core schema vs codec / primitive (guidance)
+
+**Likely schema (`@grammar(schema)`) — structure, binding, directionality:**
+
+- Field order and nesting as sequencing on the wire.
+- Discriminated unions with a deterministic format branch from the in-memory
+value.
+- Repetition shape (how many times a production runs; what terminates it).
+- Recursive and forward-declared message types.
+- Parse-only vs format-only vs bidirectional annotations on fields.
+
+**Likely codec or fixed primitive family (local byte meaning):**
+
+- Varint encoding, zigzag, fixed-width integers, IEEE floats (unless elevated
+everywhere as first-class schema syntax).
+- UTF-8 validation / string vs raw bytes policy (ties to materialization).
+
+**Gray zone (explicit split recommended in a normative follow-on):**
+
+- Length-delimited framing is often modeled as **schema** (`len` + payload
+slice) for provenance and `cc_format`, while the **varint that encodes the tag
+or length** stays a **leaf** codec concern.
+
+### Minimal protobuf-shaped example (documentation sketch)
+
+A single small message family in the spec should touch each axis once: scalar
+varint leaf, length-delimited bytes, nested message, `oneof`-style union,
+optional presence, repeated field. Exact syntax is illustrative:
+
+```c
+// Illustrative only — not final surface syntax.
+@grammar(schema) ProtoExample {
+    // tag/wire framing: structural sequencing; varint encoding at leaf
+    field_a: sint32_codec   // zigzag + varint as leaf
+    field_b: len_prefixed_bytes_codec  // length + slice provenance
+    field_c: ProtoExample?               // optional nested message
+    union_field: ProtoOneof              // discriminated; format from tag
+    repeated_d: int32_codec[]            // repetition + leaf encoding
+};
+```
+
+The point of the sketch is **separation of concerns**, not literal protobuf
+field declaration syntax.
+
+### Likely v1 deferrals (protobuf-adjacent)
+
+Out of scope or explicitly deferred for an early `@grammar(schema)` /
+`cc_parse` / `cc_format` generation unless later specified:
+
+- **Unknown field preservation** and full round-trip compatibility bags
+- **Extensions**, `**Any`**, and descriptor-driven dynamic messages as first-class
+- `**map**` as a dedicated schema feature (wire shape is repeated pairs; sugar
+can wait)
+- **Packed vs unpacked** compatibility matrix for all scalar repeats (policy
+can be "generated code picks one encoding" until specified)
+- **Full proto2/proto3/editions presence matrix** — document "presence model TBD"
+and prefer explicit `opt` + unions in examples
+- **Services / RPC**
 
 ---
 
 ## MVP Guidance
 
-Grammar and SERDES v1 should prioritize:
+v1 should prioritize:
 
-- shared primitive vocabulary between `@rules` and `@schema`
-- lightweight rule composition
-- clear structural schemas
-- explicit directional semantics
+- shared vocabulary between `@grammar(rules)` and `@grammar(schema)`
+- clear `@grammar(fragments)` vs `@grammar(rules)` boundary (substitution vs runtime grammar)
+- unified `@grammar(fragments|rules|schema)` declaration family
+- explicit directional semantics and format completeness checks
 - codec-as-leaf-hook
-- truthful provenance
-- canonical formatting
-- structured errors
-- transparent lowering
+- truthful provenance and canonical `cc_format`
+- structured errors and transparent lowering
 
-Grammar and SERDES v1 should avoid:
+v1 should avoid:
 
-- codecs acting as general grammar callbacks
+- codecs as general grammar callbacks
 - hidden ownership changes
-- claims that parse and format are exact inverses
-- forcing tokenizer-style grammars through struct generation
-- parser-runtime indirection where direct lowering is practical
+- claiming parse and `cc_format` are exact inverses
+- forcing tokenizer grammars through struct generation
+- parser VMs on the hot path
 
 ---
 
 ## Summary
 
-The intended mental model is:
+- `**@grammar(fragments)`** — replacement-only reuse (CSS-variable spirit), no
+standalone grammar semantics.
+- `**@grammar(rules)**` — lightweight recognition and collection (parse-first).
+- `**@grammar(schema)**` — typed wire structure with `**cc_parse**` and
+`**cc_format**`.
+- `**@grammar` vs codecs** — pattern and structure live in `@grammar`; codecs are
+leaf hooks only, not a `@grammar` mode.
+- **Provenance** — truthful; **errors** — structured; **lowering** — direct C.
 
-- `@rules` declares lightweight recognition and collection grammars
-- `@schema` declares typed structure
-- `@parse` reads according to schema structure
-- `@format` writes canonically according to schema structure
-- codecs customize leaf behavior, not grammar behavior
-- provenance tells the truth
-- errors are structured
-- lowering stays visible and direct
+---
+
+## Note on earlier naming (v0.1)
+
+Earlier drafts used `@rules`, `@schema`, `@parse`, `@format`, and `@string`.
+Conceptually: `@rules` maps to `@grammar(rules)`; `@schema` maps to
+`@grammar(schema)`; `@parse` maps to `cc_parse`; `@format` maps to `cc_format`.
+Fragment reuse was partially conflated with `@schema` referencing `@rules`; that
+split is now explicit via `**@grammar(fragments)`** vs `**@grammar(rules)**`.
+
+The intermediate spellings `CCFragments`, `CCRules`, and `CCSchema` in design
+notes map to the same three `@grammar` modes.
