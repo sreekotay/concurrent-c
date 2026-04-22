@@ -1,11 +1,11 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
 **Status:** every bug in the original migration list — the six
-originals **and** all eleven follow-ups
-([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F7]/[F8]/[F9]/[F11]/[F12]) — is now
-closed out, plus the parser-mode Result-type collapse called out in
-Bug [3] is structurally resolved (see "Follow-up: parser-mode result-
-type collapse" at the very bottom of this file).  The `@async`
+originals **and** all twelve follow-ups
+([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F7]/[F8]/[F9]/[F11]/[F12]/[F13]) — is
+now closed out, plus the parser-mode Result-type collapse called out
+in Bug [3] is structurally resolved (see "Follow-up: parser-mode
+result-type collapse" at the very bottom of this file).  The `@async`
 migration is live in `real_projects/redis/redis_idiomatic.ccs`
 (handle_client and owner_loop run on `spawn_async` + V2-scheduler
 fibers).  No scanner-level workarounds for this family remain
@@ -80,6 +80,89 @@ comment bait) live at:
   pass_closure_calls decl-line `;` / `(` / `=` scan.
 - `tests/autoblock_call_comment_paren_bait_smoke.ccs` —
   pass_autoblock `call_txt` paren span extraction.
+
+---
+
+## [F13] `T !>(E)` UFCS methods (`.value()` / `.error()` / `.is_ok()` / …) lower to undeclared snake-case helper when the global `*` UFCS hook owns the type — FIXED
+
+### Symptom (pre-fix)
+
+The idiomatic shape
+
+```c
+CCSlice !>(CCError) key_res = clone_key(...);
+if (key_res.is_err()) return cc_err(key_res.error());
+entries.insert(key_res.value(), stored_value);
+```
+
+compiled `key_res.value()` into a call to a function that was never
+declared:
+
+```
+error: call to undeclared function 'cc_result__c_c_slice__c_c_error_value';
+   if (... cc_result__c_c_slice__c_c_error_value(&key_res) ...)
+```
+
+`key_res.is_err()` and `key_res.error()` worked fine — only
+`.value()` (and sibling `unwrap` / `unwrap_or` / `unwrap_err`) on a
+`CCResult_T_E` family type tripped.  The `redis_idiomatic.ccs`
+workaround was to hand-materialize `CCSlice owned_key;` through a
+`bool !>(CCError)`-returning helper and use `owned_key` directly; the
+fix lets the direct shape build.
+
+### Root cause
+
+The global `*` UFCS wildcard hook
+(`cc_ufcs_generic_cc_prefix_lower_c`, registered during the
+`@comptime` phase) lowers *every* PascalCase receiver to
+snake_case — `RedisConn.release()` → `redis_conn_release(&recv)` — so
+a single registration covers the whole ecosystem.  To keep existing
+`Type_method` C-style free functions working, `cc__emit_registered_callable`
+does a **fallback** check: if the snake-cased callee is NOT visible
+in the pre-expansion source but the PascalCase `Type_method` form
+IS, it returns -1 and lets the family dispatcher emit `Type_method(&recv)`.
+
+For `CCResult_T_E` types the PascalCase methods (`CCResult_T_E_value`,
+`_error`, `_unwrap`, `_unwrap_or`, …) are generated exclusively by
+the `CC_DECL_RESULT_SPEC` macro at TCC's macro-expansion stage, so
+they never appear literally in `g_ufcs_source_text` (which is the
+post-preprocessor / pre-TCC snapshot).  `cc__ufcs_fn_name_in_source`
+returned 0 for both the snake form *and* the PascalCase candidate,
+so the fallback didn't fire and the hook's snake-cased output
+(`cc_result__c_c_slice__c_c_error_value`) went straight to TCC —
+which rightly complained that no such function existed.
+
+The `CCResult_*` Result methods are already handled correctly by
+`cc__emit_type_driven_dispatch`'s family path (`CCResult_T_E_value`,
+`_error`, `_unwrap_or`, plus the short-circuit macros `cc_is_ok` /
+`cc_is_err`), but the registered-hook path short-circuited it.
+
+### Fix (ufcs.c)
+
+`cc__emit_registered_callable` now detects a `CCResult_` receiver
+type with one of the canonical Result methods (`value` / `error` /
+`is_ok` / `is_err` / `unwrap` / `unwrap_err` / `unwrap_or`) and
+returns -1 **unconditionally**, deferring to the family dispatcher
+that already knows how to emit the macro-generated PascalCase form.
+The generic "PascalCase in source" fallback stays as-is for other
+family types whose methods *are* visible in source (plain
+`Type_method` free functions in user code / headers).
+
+As a defensive secondary improvement, `cc__rewrite_nested_ufcs_args`
+now saves / clears / restores `g_ufcs_recv_type` and
+`g_ufcs_recv_type_is_ptr` around the recursive rewrite call so the
+outer call's receiver-type hint can't leak into nested UFCS calls
+inside the argument list.
+
+### Regression guard
+
+`tests/result_value_struct_type_ufcs_arg_smoke.ccs` — a `CCSlice
+!>(CCError)` returning helper whose `.value()` result is consumed as
+the first argument of `Map.insert(key_res.value(), v)`.  Exercises
+the exact shape that used to fail in `redis_idiomatic.ccs`.
+`real_projects/redis/redis_idiomatic.ccs`'s `db_set` now uses the
+direct `db_clone_key_slice_direct(&arena, key, msg) !>` + `key_res.value()`
+form in-tree so the pattern is covered by the full Redis build too.
 
 ---
 
