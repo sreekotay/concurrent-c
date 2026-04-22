@@ -1,0 +1,27 @@
+sigils=25
+foo() !>;
+foo() !> (e) { return 0; };
+foo() ?> (e);
+@err(e);
+@errhandler(CCError e) { return cc_err(e); }
+@async int worker(int p) { return p; }
+int x = @await task;
+@spawn { worker(); }
+@spawn_async worker(42);
+@nursery { @spawn { worker(); } }
+@noblock int hot_path(void);
+@defer { cleanup(); }
+CCArena a = foo() !> @destroy;
+@with(arena = a) { op(); }
+@with_deadline(ms = 500) { op(); }
+@comptime { cc_type_register("T*", hooks); }
+match x { 1 -> one(), _ -> other() };
+int[~16 1:1 >] tx;
+int[~16 1:1 <] rx;
+MyT*[~8 N:1 >] req_tx;
+return cc_err(CC_ERR_NOT_FOUND, "nope");
+return cc_ok(42);
+CCArena a = foo() !> @destroy @err;
+pre "foo() !>;" post
+back\slash: foo() !>; end
+done

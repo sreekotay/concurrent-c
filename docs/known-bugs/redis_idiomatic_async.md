@@ -180,9 +180,10 @@ Regression guards:
 - `tests/errhandler_multiline_body_forward_smoke` — multi-line
   `@errhandler` + a `!> (e) { ...; @err(e); }` forward inlining the
   outer body at the forward site.
-- `real_projects/redis/redis_idiomatic_f11_test.ccs` — large-TU
-  fixture matching the shape that originally triggered the async_ast
-  parameter-scan drift.
+- `real_projects/redis/redis_idiomatic.ccs` itself — the redis
+  release target builds this file, which now uses a multi-line
+  `@errhandler` in `rr_req_iter_next` followed by `@async` functions
+  that trigger the original failure mode end-to-end.
 
 Historical notes follow, preserved for archaeology.
 

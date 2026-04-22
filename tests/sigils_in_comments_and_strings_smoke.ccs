@@ -1,0 +1,221 @@
+// Smoke: every compiler sigil / attribute / keyword embedded in line
+// comments, block comments, and string literals must be inert.
+//
+// Text-scanning passes (`pass_result_unwrap`, `pass_err_syntax`,
+// `pass_autoblock`, `pass_channel_syntax`, `pass_defer_syntax`,
+// `pass_match_syntax`, `pass_nursery_spawn_ast`, `pass_unwrap_destroy`,
+// `pass_with_deadline_syntax`, `async_ast`, etc.) have historically
+// false-matched their own sigils inside comments and strings — see
+// bug family [F6]/[F11]/[F12] in docs/known-bugs/redis_idiomatic_async.md.
+// This single test doubles as a regression guard across *all* such
+// passes.
+//
+// Shape: for each sigil we embed a commented-out / stringified form
+// directly adjacent to a real working form, so any pass that
+// false-matches on the comment/string will either (a) fail the build
+// or (b) mangle the real form — both surface as a visible failure.
+//
+// When you add a new sigil / attribute / lowering pass, add:
+//   1. A commented-out form in the `// comment-probes` block.
+//   2. A /* block-comment-probes */ form below it.
+//   3. A string-literal probe in `S_*` (printed verbatim at runtime).
+//   4. (Ideally) a live adjacent construct that exercises the sigil.
+
+#include <ccc/std/prelude.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+// -------------------------------------------------------------------
+// Real !> / cc_err / cc_ok / @errhandler, placed *right before* the
+// comment-probes so any scanner that bleeds past a comment will trip
+// on the trailing real `!>;`.
+
+static int g_handler_ran;
+
+int !> (CCError) div_raw(int a, int b) {
+    if (b == 0) return cc_err(CC_ERR_INVALID_ARG, "div-by-zero");
+    return cc_ok(a / b);
+}
+
+int !> (CCError) div_checked(int a, int b) {
+    // comment-probes: a similar `!>;` but in a line comment:
+    //     int x = other() !>;
+    // and a `?>(e);` form: foo() ?> (e);
+    // and an `@err(e);` forward: @err(e);
+    // and an `@errhandler(CCError e) { return cc_err(e); }` decl.
+    @errhandler(CCError e) {
+        g_handler_ran++;
+        return cc_err(e);
+    }
+    int q = div_raw(a, b) !>;
+    /* block-probes: foo() !>;
+     *               foo() !> (e) { return 0; };
+     *               @errhandler(CCError e) { return cc_err(e); }
+     *               @err(e);
+     *               return cc_ok(q);   (the real one is below) */
+    return cc_ok(q);
+}
+
+// -------------------------------------------------------------------
+// Real @async just after another set of comment-probes — guards the
+// [F11] async_ast parameter scan against comment-induced drift.
+
+/* More block comment sigils — multi-line, includes leading `*` that
+ * some scanners might trip on:
+ *   @async int ghost(int a) { return a; }
+ *   int[~16 1:1 >] phantom_tx;
+ *   int[~16 1:1 <] phantom_rx;
+ *   MyT*[~8 N:1 >] ghost_tx;
+ *   CCArena g = cc_arena_create() !> @destroy;
+ *   @spawn { work(); }
+ *   @spawn_async work(42);
+ *   @nursery { @spawn { work(); } }
+ *   @noblock int hot(void);
+ *   @defer { close(); }
+ *   @with(arena = a) { op(); }
+ *   @with_deadline(ms = 500) { op(); }
+ *   @comptime { cc_type_register("T*", hooks); }
+ *   match x { 1 -> one(), _ -> other() };
+ */
+@async int worker_fn(int param_a, int param_b) {
+    if (param_a < 0) return -1;
+    if (param_b < 0) return -2;
+    return param_a + param_b;
+}
+
+// -------------------------------------------------------------------
+// String-literal probes — each sigil quoted verbatim.  The canary is
+// that the runtime prints them byte-for-byte unchanged.
+
+static const char* const S_BANG        = "foo() !>;";
+static const char* const S_BANG_BINDER = "foo() !> (e) { return 0; };";
+static const char* const S_QMARK       = "foo() ?> (e);";
+static const char* const S_ERR         = "@err(e);";
+static const char* const S_ERRHANDLER  = "@errhandler(CCError e) { return cc_err(e); }";
+static const char* const S_ASYNC       = "@async int worker(int p) { return p; }";
+static const char* const S_AWAIT       = "int x = @await task;";
+static const char* const S_SPAWN       = "@spawn { worker(); }";
+static const char* const S_SPAWN_ASYNC = "@spawn_async worker(42);";
+static const char* const S_NURSERY     = "@nursery { @spawn { worker(); } }";
+static const char* const S_NOBLOCK     = "@noblock int hot_path(void);";
+static const char* const S_DEFER       = "@defer { cleanup(); }";
+static const char* const S_DESTROY     = "CCArena a = foo() !> @destroy;";
+static const char* const S_WITH        = "@with(arena = a) { op(); }";
+static const char* const S_WDEADLINE   = "@with_deadline(ms = 500) { op(); }";
+static const char* const S_COMPTIME    = "@comptime { cc_type_register(\"T*\", hooks); }";
+static const char* const S_MATCH       = "match x { 1 -> one(), _ -> other() };";
+static const char* const S_CHAN_TX     = "int[~16 1:1 >] tx;";
+static const char* const S_CHAN_RX     = "int[~16 1:1 <] rx;";
+static const char* const S_CHAN_N1     = "MyT*[~8 N:1 >] req_tx;";
+static const char* const S_CC_ERR      = "return cc_err(CC_ERR_NOT_FOUND, \"nope\");";
+static const char* const S_CC_OK       = "return cc_ok(42);";
+static const char* const S_STACKED     = "CCArena a = foo() !> @destroy @err;";
+
+// -------------------------------------------------------------------
+// Adjacent-code traps: a commented-out sigil on the line immediately
+// *above* a real one.  Scanners that treat the comment as live code
+// will either double-lower or skip the real one.
+
+int !> (CCError) nearby_bang(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    // FALSE: int a = div_checked(x, 2) !>;        (ignore me)
+    /* FALSE: int a = div_checked(x, 2) !>; */
+    int a = div_checked(x, 2) !>;
+    return cc_ok(a);
+}
+
+// Same-line trap: a real `!>;` followed by a `//` comment that also
+// ends in `!>;`.  A scanner that doesn't track line-comment state
+// correctly on the same line will double-lower the same call site.
+int !> (CCError) same_line_trap(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int a = div_checked(x, 2) !>; // trailing: ghost !>;
+    return cc_ok(a);
+}
+
+// Flatten-helper trap: a multi-line @errhandler whose body contains
+// strings with sigils and comments with sigils.  The flatten helpers
+// (`cc__pu_flatten_handler_body`, `cc__es_flatten_body`) must
+// preserve string literals verbatim and collapse comment newlines
+// correctly so the inlined body is one physical line.
+static int g_flat_counter;
+int !> (CCError) flatten_body_trap(int x) {
+    @errhandler(CCError e) {
+        /* sigils in this comment: !>; @err(e); @async */
+        // line comment: !>; @destroy
+        const char* msg = "body-string !>; @err(e);";
+        (void)msg;
+        g_flat_counter++;
+        return cc_err(e);
+    }
+    int a = div_checked(x, 0) !>;
+    return cc_ok(a);
+}
+
+// Escape-in-string trap: embedded escaped quotes around sigils.  A
+// scanner that doesn't track `\\\"` as a no-quote-change will exit
+// the string state early and try to parse `!>;` as code.
+static const char* const S_ESC_QUOTE = "pre \"foo() !>;\" post";
+static const char* const S_ESC_BACKSLASH = "back\\slash: foo() !>; end";
+
+// Nested-comment-looking trap: a line comment that *contains* a `/*`
+// sequence followed by a `*/` and a sigil.  A scanner that flips into
+// block-comment state on `/*` inside a `//` will swallow real code.
+// trap: /* pseudo block */ but still in line comment — !>; ignored.
+int !> (CCError) line_contains_block_open(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    // /* pseudo-block */ int ghost = div_checked(x, 0) !>;
+    int a = div_checked(x, 3) !>;
+    return cc_ok(a);
+}
+
+// Block comment containing a `//` — naive scanner might exit block
+// state on the `//` or trip on the `!>;`.
+/* inside block: // line !>; more block text */
+int !> (CCError) block_contains_line_open(int x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int a = div_checked(x, 4) !>;
+    return cc_ok(a);
+}
+
+int main(void) {
+    int !> (CCError) r = div_checked(10, 2);
+    if (cc_is_err(r)) { printf("div FAIL\n"); return 1; }
+    if (cc_value(r) != 5) { printf("div got %d\n", cc_value(r)); return 2; }
+    if (g_handler_ran != 0) { printf("handler ran spuriously: %d\n", g_handler_ran); return 3; }
+
+    int !> (CCError) r2 = div_checked(9, 0);
+    if (!cc_is_err(r2)) { printf("expected err\n"); return 4; }
+    if (g_handler_ran != 1) { printf("handler=%d want 1\n", g_handler_ran); return 5; }
+
+    int !> (CCError) r3 = nearby_bang(20);
+    if (cc_is_err(r3)) { printf("nearby FAIL\n"); return 6; }
+    if (cc_value(r3) != 10) { printf("nearby got %d\n", cc_value(r3)); return 7; }
+
+    int !> (CCError) r4 = same_line_trap(20);
+    if (cc_is_err(r4) || cc_value(r4) != 10) { printf("same_line FAIL\n"); return 8; }
+
+    int !> (CCError) r5 = line_contains_block_open(30);
+    if (cc_is_err(r5) || cc_value(r5) != 10) { printf("line_contains_block FAIL\n"); return 9; }
+
+    int !> (CCError) r6 = block_contains_line_open(40);
+    if (cc_is_err(r6) || cc_value(r6) != 10) { printf("block_contains_line FAIL\n"); return 10; }
+
+    int !> (CCError) r7 = flatten_body_trap(5);
+    if (!cc_is_err(r7)) { printf("flatten expected err\n"); return 11; }
+    if (g_flat_counter != 1) { printf("flat_counter=%d want 1\n", g_flat_counter); return 12; }
+
+    const char* const sigils[] = {
+        S_BANG, S_BANG_BINDER, S_QMARK, S_ERR, S_ERRHANDLER,
+        S_ASYNC, S_AWAIT, S_SPAWN, S_SPAWN_ASYNC, S_NURSERY,
+        S_NOBLOCK, S_DEFER, S_DESTROY, S_WITH, S_WDEADLINE,
+        S_COMPTIME, S_MATCH, S_CHAN_TX, S_CHAN_RX, S_CHAN_N1,
+        S_CC_ERR, S_CC_OK, S_STACKED,
+        S_ESC_QUOTE, S_ESC_BACKSLASH,
+    };
+    size_t n = sizeof(sigils) / sizeof(sigils[0]);
+    printf("sigils=%zu\n", n);
+    for (size_t i = 0; i < n; i++) printf("%s\n", sigils[i]);
+    printf("done\n");
+    return 0;
+}
