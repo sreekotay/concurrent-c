@@ -370,7 +370,6 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         cc_arena_pool_free(&conn->req_pool, req);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
-    /* [F11] workaround: @errhandler body kept on a single line. */
     @errhandler(CCError e) { redis_conn_release_slot(conn, req); return cc_err(e); }
 
     CCSlice args[4] = {0};

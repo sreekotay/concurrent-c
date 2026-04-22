@@ -1,26 +1,13 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
-**Status:** the six original bugs **and** eight follow-up bugs
-([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]/[F12]) are fixed, plus the
-parser-mode Result-type collapse called out in Bug [3] is now
+**Status:** the six original bugs **and** nine follow-up bugs
+([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]/[F11]/[F12]) are fixed, plus
+the parser-mode Result-type collapse called out in Bug [3] is now
 structurally resolved (see "Follow-up: parser-mode result-type
 collapse" at the very bottom of this file).  The `@async` migration
 is live in `real_projects/redis/redis_idiomatic.ccs` (handle_client
-and owner_loop run on `spawn_async` + V2-scheduler fibers).
-
-One scanner-level workaround in `redis_idiomatic.ccs` remains, tracked
-as an OPEN follow-up below:
-
-- **[F11]** (OPEN) — `@errhandler` with a **multi-line body** inside a
-  sync `!>(E)`-returning function corrupts `async_ast`'s parameter-list
-  scan for the *next* `@async` function in the TU.  Caused a reparse
-  failure where `@async int owner_loop(ReqRx req_rx)` was frame-lifted
-  as `owner_loop(!db_init(&db, 131072))` (picking up the first line of
-  the function body as the parameter list) with a matching invalid
-  frame field `! __p_db_init;`.  Working around in `redis_idiomatic.ccs`
-  by collapsing the handler body onto a single line.  Re-verified open
-  after the parser-mode collapse fix — this is a scanner-offset bug,
-  independent of the type-system work.
+and owner_loop run on `spawn_async` + V2-scheduler fibers).  No
+scanner-level workarounds for this family remain in the file.
 
 - **[F7]** (OPEN) — tcc's parser rejects a statement-expression
   initializer (`T x = ({ ... });`) when it appears as the first
@@ -169,7 +156,35 @@ declare them through `ReqTx`/`ReqRx` like every other use site.
 
 ---
 
-## [F11] Multi-line `@errhandler` body in a sync `!>(E)` function corrupts `async_ast` parameter scan of the next `@async` function — OPEN
+## [F11] Multi-line `@errhandler` body in a sync `!>(E)` function corrupts `async_ast` parameter scan of the next `@async` function — FIXED
+
+**Fixed in** `6bdb353 compiler: fix [F11] multi-line @errhandler body
+corrupting async_ast`.  The two inline sites in `pass_result_unwrap`
+(bare `CALL !>;` and the `@err(binder);` forward inside a
+`!>(e) { ... }` body) and the mirrored sites in `pass_err_syntax`
+(local `@err` handler, outer default `@errhandler` body) now flatten
+the substituted handler body to a single physical line before
+splicing, via `cc__pu_flatten_handler_body` / `cc__es_flatten_body`.
+String and char literals are copied verbatim; block comments are
+preserved with embedded newlines converted to spaces; line comments
+are dropped (replaced with a single space so adjacent tokens do not
+fuse); every other `\n`/`\r` becomes a space.  Downstream AST line
+anchors therefore stay aligned with the rewritten buffer regardless
+of how many lines the user wrote the handler on.
+
+Regression guards:
+- `tests/errhandler_multiline_body_inline_smoke` — multi-line
+  `@errhandler` + two bare `CALL !>;` splice sites + a downstream
+  UFCS on a result value (the exact shape that originally mis-rewrote
+  `res.error()` into `cc_arena_error(&res)` in redis_idiomatic).
+- `tests/errhandler_multiline_body_forward_smoke` — multi-line
+  `@errhandler` + a `!> (e) { ...; @err(e); }` forward inlining the
+  outer body at the forward site.
+- `real_projects/redis/redis_idiomatic_f11_test.ccs` — large-TU
+  fixture matching the shape that originally triggered the async_ast
+  parameter-scan drift.
+
+Historical notes follow, preserved for archaeology.
 
 ### Symptom
 
