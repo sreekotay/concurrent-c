@@ -49,4 +49,4 @@ echo "  $DEST_DIR"
 echo
 echo "Next steps:"
 echo "  make upstream"
-echo "  make redis_idiomatic redis_hybrid redis_cc"
+echo "  make redis_idiomatic redis_cc"
