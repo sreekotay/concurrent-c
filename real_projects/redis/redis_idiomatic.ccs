@@ -86,12 +86,12 @@ typedef struct RedisConn {
     char out_buf[WRITE_BUF_CAP];
 } RedisConn;
 
-/* Client-side handle on the owner fiber: just the send end of the
- * request channel.  Clients hand a RedisRequest* across; the owner
- * replies on conn->reply_rx. */
-typedef struct DbHandle {
-    RedisRequest*[~REQUEST_CHAN_CAP N:1 >] tx;
-} DbHandle;
+/* The shared request channel's two endpoints, named so function
+ * signatures don't have to spell out the channel type.  Clients hand a
+ * RedisRequest* across ReqTx; the owner drains from ReqRx and replies
+ * on the request's originating conn->reply_rx. */
+typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 >] ReqTx;
+typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static RedisConn* redis_conn_retain(RedisConn* conn);
@@ -858,7 +858,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
 
 /* Owner loop: drain requests, execute, reply.  `db` is stack-local so
  * it can't outlive the owner and nobody else can take its address. */
-@async int owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
+@async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 131072)) {
         fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
@@ -883,7 +883,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
 
 /* Per-connection driver.  One outer iteration = one
  * submit / drain / flush / rr_fill batch (phases labeled inline). */
-@async int handle_client(CCSocket client, DbHandle* h, uint64_t conn_id) {
+@async int handle_client(CCSocket client, ReqTx req_tx, uint64_t conn_id) {
     @defer client.close();
     /* Teardown: cancel reply_rx first (unblocks any owner-side send
      * stuck on a full reply channel), then drop the ref.  Encoded via
@@ -911,7 +911,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
             bool has = rr_req_iter_next(&req_iter, &req) !>;
             if (!has) break;
             conn->next_request_id++;
-            h->tx.send(req) !> {
+            req_tx.send(req) !> {
                 redis_conn_release_request(req);
                 (void)write_reply_now(&client, conn,
                     reply_error("ERR owner channel unavailable"));
@@ -961,12 +961,13 @@ int main(int argc, char** argv) {
     if (err != CC_NET_OK) { fprintf(stderr, "listen error: %d\n", err); return 1; }
     @defer ln.close();
 
+    /* cc_channel_pair's syntax pass matches the raw endpoint types
+     * structurally (it doesn't resolve typedefs), so declare in raw
+     * form here and rely on the ReqTx/ReqRx aliases everywhere else. */
     RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;
     RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx;
     CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
 
-    DbHandle h = { .tx = req_tx };
-    DbHandle* h_ptr = &h;
     CCListener* ln_ptr = &ln;
 
     printf("redis_idiomatic listening on %s\n", addr);
@@ -985,7 +986,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        server->spawnhybrid(() => [ln_ptr, h_ptr, req_ch, server] {
+        server->spawnhybrid(() => [ln_ptr, req_tx, req_ch, server] {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCNetError aerr = CC_NET_OK;
@@ -1005,7 +1006,7 @@ int main(int argc, char** argv) {
                 (void)setsockopt(client.fd, CC_IPPROTO_TCP, CC_TCP_NODELAY, &one, sizeof(one));
 
                 uint64_t id = next_conn_id++;
-                (void)server->spawn_async(handle_client(client, h_ptr, id));
+                (void)server->spawn_async(handle_client(client, req_tx, id));
             }
             req_ch.close();
         });
