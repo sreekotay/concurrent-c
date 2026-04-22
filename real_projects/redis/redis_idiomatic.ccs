@@ -876,11 +876,6 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
         RedisConn* conn = req->conn;
         @defer redis_conn_release_request(req);
 
-        /*
-        RedisReply !>(CCError) exec_res = execute_request(&db, req);
-        RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error())
-                                             : exec_res.value();
-        */
         RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
         /* reply.data may alias db storage; queue_reply copies into
          * conn->reply_arena before publishing. */

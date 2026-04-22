@@ -4223,8 +4223,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 size_t decls_len = 0, decls_cap = 0;
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "/* --- CC result type declarations (auto-generated) --- */\n");
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "#ifndef CC_PARSER_MODE\n");
+                /* No longer gated on `CC_PARSER_MODE`.  The typed struct and
+                 * enumerated `_Generic` arms below must be active in the
+                 * *final* lowered compile so `__cc_uw_value(r)` returns the
+                 * declared `OkType` rather than `intptr_t` — that `intptr_t`
+                 * collapse from the old `__CCResultGeneric` arm was the root
+                 * of the "have 'long' and 'struct T'" type-mismatch hits on
+                 * struct payloads in the `?>(e)` ternary lowering (see
+                 * docs/known-bugs/redis_idiomatic_async.md, follow-up
+                 * "parser-mode result-type collapse"). */
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     char line[512];
@@ -4291,8 +4298,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
 
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "#endif /* !CC_PARSER_MODE */\n");
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "/* --- end result type declarations --- */\n\n");
                 

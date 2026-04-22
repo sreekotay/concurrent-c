@@ -41,21 +41,20 @@ typedef struct {
     size_t len;
 } CCBufWriter;
 
-// Result types
-#ifdef CC_PARSER_MODE
+// Result types.  Historically the parser-mode paths aliased
+// CCResult_size_t_CCIoError to __CCResultGeneric so typed ctors didn't need
+// to be synthesised up-front; the full CC_DECL_RESULT_SPEC was only emitted
+// in real-compile mode.  That collapsed all per-type layout information in
+// parser mode and caused the ?>(e) ternary lowering to read intptr_t from
+// u.value for struct payloads (see docs/known-bugs/redis_idiomatic_async.md
+// "parser-mode result-type collapse").  With parser mode now emitting real
+// typed specs, both specs expand unconditionally.
 #ifndef CCResult_CCSlice_CCIoError_DEFINED
 #define CCResult_CCSlice_CCIoError_DEFINED 1
-typedef struct CCResult_CCSlice_CCIoError {
-    bool ok;
-    union { CCSlice value; CCIoError error; } u;
-} CCResult_CCSlice_CCIoError;
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 #endif
 #ifndef CCResult_size_t_CCIoError_DEFINED
 #define CCResult_size_t_CCIoError_DEFINED 1
-typedef __CCResultGeneric CCResult_size_t_CCIoError;
-#endif
-#else
-CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 #endif
 

@@ -6115,7 +6115,18 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
         }
         if (c == '}') {
             brace_depth--;
-            if (fn_brace_depth >= 0 && brace_depth < fn_brace_depth) {
+            /* `fn_brace_depth` holds the depth BEFORE the function body's
+               `{`, so the reset must fire when brace_depth decrements past
+               that value (i.e. the matching `}` closed the body).  The old
+               `brace_depth < fn_brace_depth` check was strictly less-than,
+               which let `current_ok_type` / `current_err_type` leak into
+               the next function.  That was harmless under the previous
+               regime — every `cc_ok`/`cc_err` call was flattened through
+               the `__CC_RESULT_OK(0, 0, v)` placeholder so the stale T/E
+               never reached TCC — but with real typed ctors the stale
+               types now surface as "cannot convert struct CCResult_B_CCError
+               to struct CCResult_A_CCError" between adjacent functions. */
+            if (fn_brace_depth >= 0 && brace_depth <= fn_brace_depth) {
                 current_ok_type[0] = 0;
                 current_err_type[0] = 0;
                 fn_brace_depth = -1;
@@ -6255,16 +6266,35 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                        Shorthand: cc_err(CC_ERR_*, "msg") has 1 comma - expand to CC_ERROR(...) */
                     int is_short = (comma_count == 0);
                     
-                    /* Check for cc_err shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") */
+                    /* cc_err shorthand: any 2-arg cc_err(KIND_EXPR, MSG) inside
+                       a CCError-keyed result function — not just the literal
+                       CC_ERR_* form.  The old check was text-based ("first arg
+                       starts with CC_ERR_"), which let forwarding cases like
+                       `cc_err(e.kind, "fwd")` fall through to the parser-mode
+                       `__CCResultGeneric cc_err(int, const char*)` stub.  That
+                       worked when every Result aliased __CCResultGeneric; now
+                       that parser mode emits real typed Result structs, the
+                       stub's return type no longer converts to the enclosing
+                       function's CCResult_T_CCError and TCC rejects it.  Treat
+                       the 2-arg form as the sugared equivalent of
+                           cc_err_CCResult_T_E(CC_ERROR(KIND, MSG))
+                       for both literal and expression KIND arguments. */
                     int is_err_shorthand = 0;
                     int is_err_shorthand_no_msg = 0;
                     if (is_err && strcmp(current_err_type, "CCError") == 0) {
-                        /* Check if first arg starts with CC_ERR_ */
-                        size_t k = args_start;
-                        while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
-                        if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                        if (comma_count == 1) {
                             is_err_shorthand = 1;
-                            is_err_shorthand_no_msg = (comma_count == 0);
+                        } else if (comma_count == 0) {
+                            /* Single-arg `cc_err(CC_ERR_*)` form — the literal
+                               CC_ERR_* prefix lets us synthesise the default
+                               NULL message.  For non-literal single-arg forms
+                               we still treat it as a plain typed ctor below. */
+                            size_t k = args_start;
+                            while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
+                            if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                                is_err_shorthand = 1;
+                                is_err_shorthand_no_msg = 1;
+                            }
                         }
                     }
                     
@@ -6702,22 +6732,13 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         fprintf(out, "#define CC_PARSER_MODE 1\n");
         fprintf(out, "#endif\n");
         fprintf(out, "#include <ccc/cc_result.cch>\n");
-        /* Emit parse-time stub typedefs and constructors for user-defined Result types.
-           Uses __CCResultGeneric so TCC can parse before actual types are defined.
-           Constructor macros cast away values and call generic helpers.
-           Real type expansion happens in codegen via CC_DECL_RESULT_SPEC. */
-        for (size_t i = 0; i < cc__result_specs.count; i++) {
-            const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-            const char* ok = spec ? spec->mangled_ok : NULL;
-            const char* err = spec ? spec->mangled_err : NULL;
-            if (!ok || !err) continue;
-            /* Emit only the parse-time alias here. Typed helper stubs are inserted
-               after the source's leading includes, once payload/error types exist. */
-            fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
-            fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
-            fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
-            fprintf(out, "#endif\n");
-        }
+        /* User-declared `CCResult_X_Y` specs are emitted later at `insert_pos`
+         * (after the TU's `#include` / `typedef` prelude) as real typed
+         * `CC_DECL_RESULT_SPEC(CCResult_X_Y, X, Y)` expansions.  At that point
+         * both payload and error types are in scope, so the generated struct
+         * carries the declared layout — not the legacy `intptr_t` aliased to
+         * `__CCResultGeneric`.  See docs/known-bugs/redis_idiomatic_async.md
+         * "parser-mode result-type collapse". */
         fprintf(out, "/* --- end result support --- */\n\n");
     }
 
@@ -6807,7 +6828,73 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 break;
             }
             fwrite(use, 1, insert_pos, out);
-            if (cc__result_specs.count > 0) {
+            {
+                /* At `insert_pos` the TU's leading `#include` / `typedef`
+                 * prelude has been emitted, so user-defined payload/error
+                 * types (plus stdlib types pulled in via prelude) are in
+                 * scope.  This is where we synthesize the *real* typed
+                 * `CC_DECL_RESULT_SPEC(CCResult_X_Y, X, Y)` expansions for
+                 * every spec the TU mentions that isn't already declared
+                 * by a header — see the "parser-mode result-type collapse"
+                 * follow-up in docs/known-bugs/redis_idiomatic_async.md.
+                 *
+                 * The `CCResult_%s_%s_DEFINED` header guard matches the
+                 * one cc_result.cch / cc_io_error.cch stamp on their own
+                 * pre-declared specs, so duplicate-definition is avoided
+                 * when both a header and the user TU request the same
+                 * Result type.
+                 *
+                 * We emit this block unconditionally whenever we entered
+                 * the outer branch (Result syntax *or* `!>`/`?>` unwrap
+                 * use), so that the `_Generic` arms below pick up stdlib-
+                 * predeclared Result types (`CCResult_bool_CCIoError`
+                 * returned by channel sends, etc.) even when the source
+                 * never spells the typed `T!>(E)` name. */
+                fprintf(out, "/* --- CC result type declarations (typed, post-prelude) --- */\n");
+                for (size_t i = 0; i < cc__result_specs.count; i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    const char* ok_m = spec ? spec->mangled_ok : NULL;
+                    const char* err_m = spec ? spec->mangled_err : NULL;
+                    const char* ok_ty = spec ? spec->ok_type : NULL;
+                    const char* err_ty = spec ? spec->err_type : NULL;
+                    if (!ok_m || !err_m || !ok_ty || !err_ty) continue;
+                    /* Stdlib-predeclared specs (`CCResult_CCDirIterptr_CCIoError`
+                     * etc.) have their `CC_DECL_RESULT_SPEC` expansion baked
+                     * into the owning `.cch` header (e.g. `dir.cch`), with no
+                     * include-guard around it.  Re-emitting the spec here
+                     * triggers "struct/union/enum already defined" at the
+                     * duplicate typedef.  visit_codegen.c's post-prelude
+                     * emission uses the same `is_stdlib_predeclared_name`
+                     * check to skip them — mirror it here. */
+                    {
+                        char concrete[256];
+                        cc_result_spec_format_name(ok_m, err_m, concrete, sizeof(concrete));
+                        if (cc_result_spec_is_stdlib_predeclared_name(concrete)) continue;
+                    }
+                    int ok_is_void = (strcmp(ok_ty, "void") == 0);
+                    fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok_m, err_m);
+                    fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok_m, err_m);
+                    if (ok_is_void) {
+                        /* Void result: union carries only the error field. */
+                        fprintf(out,
+                            "typedef struct CCResult_%s_%s {\n"
+                            "    bool ok;\n"
+                            "    union { char _dummy; %s error; } u;\n"
+                            "} CCResult_%s_%s;\n",
+                            ok_m, err_m, err_ty, ok_m, err_m);
+                    } else {
+                        fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                                ok_m, err_m, ok_ty, err_ty);
+                    }
+                    fprintf(out, "#endif\n");
+                }
+                /* Legacy parser-helper prototypes below remained useful for
+                 * downstream passes that look for the `__cc_parser_result_*`
+                 * symbols as markers of "this TU uses result types".  With
+                 * the typed structs now in place these prototypes are
+                 * linker-only (never called at runtime) and the stdlib-level
+                 * inline helpers emitted by `CC_DECL_RESULT_SPEC` carry all
+                 * real semantics. */
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
                     const char* ok = spec ? spec->mangled_ok : NULL;
@@ -6818,8 +6905,6 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                             ok, err, ok, err);
                     fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
                             ok, err, ok, err);
-                    /* unwrap/unwrap_or return OkType — skip when OkType is void (can't
-                     * have a void-returning function with a void parameter). */
                     if (!ok_is_void) {
                         fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
                                 spec->ok_type, ok, err, ok, err);
@@ -6831,6 +6916,193 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                                 spec->ok_type, ok, err, ok, err, spec->ok_type);
                     }
                 }
+                /* Parser-mode enumerated `_Generic` arms for the unified
+                 * unwrap primitives.  Without these, `__cc_uw_value(r)`
+                 * falls through to the `default: (__x__)` arm defined in
+                 * cc_result.cch and returns the whole Result struct, so
+                 * a `?>(e) handle(e)` ternary whose handler returns `T`
+                 * fails TCC's conditional type-check with
+                 *   "have 'struct CCResult_T_E' and 'struct T'".
+                 * visit_codegen.c emits the same enumeration for the
+                 * real compile path; we mirror it here so the initial
+                 * parser-mode parse type-checks too.  Every CCResult_T_E
+                 * struct shares layout `{ bool ok; union { T value; E
+                 * error; } u; }`, so the casts pick out the right field
+                 * regardless of T / E. */
+                /* Forward-declare the stdlib-predeclared Result struct tags
+                 * so `_Generic` can reference them by type name even when
+                 * the TU doesn't `#include` the owning header.  `_Generic`
+                 * arm selectors only require a declared type, not a
+                 * complete one — if an arm's body is never evaluated
+                 * (because the controlling expression has a different
+                 * type) the incomplete struct is never accessed.  In TUs
+                 * that *do* include e.g. `ccc/std/io.cch`, the header's
+                 * `CC_DECL_RESULT_SPEC` expansion supplies the full
+                 * definition and the typedef here is benignly repeated. */
+                fprintf(out, "/* Forward-declare stdlib-predeclared Result tags. */\n");
+                /* Also forward-declare `__CCResultGeneric` so TUs that never
+                 * include `ccc/cc_result.cch` (e.g. C-style smoke tests that
+                 * only use raw-pointer `!>` / `?>`) still compile — TCC-ext's
+                 * UFCS stub emits `__CCResultGeneric` as the return type for
+                 * channel-method calls, and `_Generic` arm selectors need the
+                 * tag declared even when no such arm matches. */
+                fprintf(out,
+                    "#ifndef __CC_RESULT_GENERIC_FWD_DECLARED\n"
+                    "#define __CC_RESULT_GENERIC_FWD_DECLARED 1\n"
+                    "typedef struct __CCResultGeneric __CCResultGeneric;\n"
+                    "#endif\n");
+                for (int si = 0; ; si++) {
+                    const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
+                    if (!p) break;
+                    if (!p->concrete_name) continue;
+                    fprintf(out,
+                        "#ifndef %s_FWD_DECLARED\n"
+                        "#define %s_FWD_DECLARED 1\n"
+                        "typedef struct %s %s;\n"
+                        "#endif\n",
+                        p->concrete_name, p->concrete_name,
+                        p->concrete_name, p->concrete_name);
+                }
+
+                /* Helper: has this (ok_m, err_m) pair already been emitted as
+                 * a `_Generic` arm?  Used to avoid duplicate arms when a
+                 * user-defined spec happens to match a stdlib-predeclared
+                 * one (harmless for correctness but breaks `_Generic` arm
+                 * uniqueness). */
+                #define CC_UW_ARM_EMIT_CHECK(tracker, key)                       \
+                    ({ int __dup = 0;                                            \
+                       for (size_t __di = 0; __di < (tracker)->count; __di++) {  \
+                           if (strcmp((tracker)->names[__di], (key)) == 0) {     \
+                               __dup = 1; break;                                 \
+                           }                                                     \
+                       }                                                         \
+                       if (!__dup && (tracker)->count < 256) {                   \
+                           snprintf((tracker)->names[(tracker)->count],          \
+                                    sizeof((tracker)->names[0]), "%s", (key));   \
+                           (tracker)->count++;                                   \
+                       }                                                         \
+                       __dup; })
+                struct { char names[256][192]; size_t count; } seen;
+                seen.count = 0;
+
+                fprintf(out,
+                    "#undef __cc_uw_is_err\n"
+                    "#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n"
+                    /* TCC-ext's UFCS stub synthesises calls like
+                     * `c->tx.send(p)` as returning `__CCResultGeneric`
+                     * during the initial parser-mode parse (see
+                     * `cc_ufcs_needs_result_generic_stub` in
+                     * third_party/tcc/tccgen.c).  The stub shares the
+                     * `{ bool ok; union { intptr_t value; __CCGenericError
+                     * error; } u; }` layout of every typed CCResult_T_E, so
+                     * we dispatch through the same cast-and-probe trick as
+                     * the typed arms.  The arm is harmless in the real
+                     * compile pass because UFCS rewriting replaces the
+                     * stubbed call with a typed cc_channel_send / recv
+                     * invocation whose return type hits a typed arm. */
+                    "    __CCResultGeneric: (!((__CCResultGeneric*)(void*)&(__x__))->ok), \\\n");
+                (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
+                for (size_t i = 0; i < cc__result_specs.count; i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    char key[192];
+                    snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
+                    fprintf(out,
+                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
+                        key, key);
+                }
+                /* Always include arms for stdlib-predeclared Result types
+                 * (e.g. `CCResult_bool_CCIoError` for channel sends,
+                 * `CCResult_size_t_CCIoError` for file reads).  Without
+                 * these, TUs that use `!>`/`?>` on a channel-send result
+                 * but never spell a Result type in source fall through to
+                 * the `default:` pointer-null check and TCC rejects the
+                 * `== (void*)0` on a non-pointer first field. */
+                for (int si = 0; ; si++) {
+                    const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
+                    if (!p) break;
+                    if (!p->concrete_name) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
+                    fprintf(out,
+                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
+                        p->concrete_name, p->concrete_name);
+                }
+                fprintf(out,
+                    "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n");
+
+                seen.count = 0;
+                fprintf(out,
+                    "#undef __cc_uw_value\n"
+                    "#define __cc_uw_value(__x__) _Generic((__x__), \\\n"
+                    /* See note above `__cc_uw_is_err`.  Returning
+                     * `.u.value` (intptr_t) is safe because any consumer
+                     * whose T differs will be rewritten by the real
+                     * compile pass before TCC type-checks it. */
+                    "    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.value, \\\n");
+                (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
+                for (size_t i = 0; i < cc__result_specs.count; i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    /* Void-result types have no `.u.value` field; skip their
+                     * `__cc_uw_value` arm.  The `?>`/`!>` rewriter never
+                     * reads the value on a void result, so this arm being
+                     * absent is fine — `default:` still covers raw pointers
+                     * and typed non-Result LHSs. */
+                    if (spec->ok_type && strcmp(spec->ok_type, "void") == 0) continue;
+                    char key[192];
+                    snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
+                    fprintf(out,
+                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
+                        key, key);
+                }
+                for (int si = 0; ; si++) {
+                    const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
+                    if (!p) break;
+                    if (!p->concrete_name || !p->ok_type) continue;
+                    if (strcmp(p->ok_type, "void") == 0) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
+                    fprintf(out,
+                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
+                        p->concrete_name, p->concrete_name);
+                }
+                fprintf(out, "    default: (__x__))\n");
+
+                seen.count = 0;
+                fprintf(out,
+                    "#undef __cc_uw_err_at\n"
+                    "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n"
+                    /* See note above `__cc_uw_is_err`.  The generic stub's
+                     * `.u.error` is `__CCGenericError` which is layout-
+                     * compatible with `CCError`, so the binder picks up
+                     * usable fields during parser-mode typecheck. */
+                    "    __CCResultGeneric: ((__CCResultGeneric*)(void*)&(__x__))->u.error, \\\n");
+                (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
+                for (size_t i = 0; i < cc__result_specs.count; i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    char key[192];
+                    snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
+                    fprintf(out,
+                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
+                        key, key);
+                }
+                for (int si = 0; ; si++) {
+                    const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
+                    if (!p) break;
+                    if (!p->concrete_name) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
+                    fprintf(out,
+                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
+                        p->concrete_name, p->concrete_name);
+                }
+                fprintf(out,
+                    "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
+                #undef CC_UW_ARM_EMIT_CHECK
+
+                fprintf(out, "/* --- end result type declarations --- */\n");
                 {
                     int resume_line = 1;
                     for (size_t i = 0; i < insert_pos; i++) {
@@ -7330,7 +7602,12 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc__rewrite_match_syntax(chain->src, chain->len, input_path)) < 0) return -1;
     /* (retired) cc__rewrite_optional_constructors used to run here. */
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
-    if (cc_pass_chain_apply(chain, cc__rewrite_result_constructors(chain->src, chain->len)) < 0) return -1;
+    /* (retired) cc__rewrite_result_constructors used to rewrite typed
+       cc_ok_CCResult_T_E(v) calls to the generic __CC_RESULT_OK(0, 0, v)
+       placeholder when every Result aliased __CCResultGeneric in parser
+       mode.  With real typed structs, the typed ctor calls parse and
+       type-check as-is, so the rewrite is both redundant and harmful
+       (it forced a __CCResultGeneric return into a typed Result slot). */
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_try_exprs(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_unwrap(chain->src, chain->len)) < 0) return -1;
@@ -7547,13 +7824,11 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 5b: Rewrite cc_ok_CCResult_T_E(v) -> __cc_result_ok_impl(v) */
-    buffers[buf_idx] = cc__rewrite_result_constructors(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
+    /* Pass 5b: (retired) used to rewrite typed cc_ok_CCResult_T_E(v)
+       to the generic __CC_RESULT_OK(0, 0, v) placeholder.  See the
+       companion comment in cc__run_phase1_canonical_passes for why
+       this pass is obsolete now that parser mode emits real typed
+       result structs. */
     
     /* Pass 5c: Rewrite T!>(E) -> CCResult_T_E */
     buffers[buf_idx] = cc__rewrite_result_types(cur, cur_len, input_path);

@@ -1,0 +1,92 @@
+/* Smoke: user-defined struct payload flowing through the full
+ * `!>` / `?>` / `@err` unwrap pipeline, not just the function signature.
+ *
+ * Guards against the regression that motivated the parser-mode result
+ * collapse refactor: before the fix every `CCResult_T_E` was aliased
+ * to `__CCResultGeneric` in parser mode, whose `u.value` field is
+ * `intptr_t`.  The unified `__cc_uw_value(...)` primitive then expanded
+ * to an `intptr_t` read via its `__CCResultGeneric` `_Generic` arm, and
+ * a `?>(e) handle(e)` ternary whose false branch is a `Reply` struct
+ * produced
+ *
+ *     error: type mismatch in conditional expression (have 'long' and
+ *            'struct Reply')
+ *
+ * from TCC -- exactly the redis_idiomatic.ccs:884 failure.
+ *
+ * Covered shapes:
+ *   1. declaration-form baseline   : T !>(E) x = fn(...);  x.is_err() / x.value()
+ *   2. ternary with value handler  : T x = fn(...) ?>(e) err_reply(e);
+ *   3. ternary on error path       : handler must return a full T, not a scalar
+ *   4. `!>` method-call via UFCS   : res.value() on a struct T
+ *   5. block-form `!>` divergent   : T x = fn(...) !> { return default_reply(); };
+ *
+ * All shapes run make_reply() which returns `Reply !>(CCError)` with
+ * a struct ok type, so the value path must preserve the struct all the
+ * way through.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Reply {
+    int  kind;
+    int  val;
+    char tag[8];
+} Reply;
+
+static Reply default_reply(void) {
+    Reply r = { .kind = -1, .val = 0, .tag = "dflt" };
+    return r;
+}
+
+static Reply err_reply(CCError e) {
+    (void)e;
+    Reply r = { .kind = -2, .val = 0, .tag = "err" };
+    return r;
+}
+
+static Reply !>(CCError) make_reply(int v) {
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    Reply r = { .kind = 1, .val = v, .tag = "ok" };
+    return cc_ok(r);
+}
+
+int main(void) {
+    /* Shape 1: declaration-form baseline. */
+    Reply !>(CCError) a = make_reply(10);
+    if (a.is_err()) return 1;
+    Reply av = a.value();
+    if (av.kind != 1 || av.val != 10) return 2;
+
+    /* Shape 2: ternary with value-returning handler on the ok path.
+     * Before the refactor the ok branch expanded to intptr_t and TCC
+     * rejected the conditional as "have 'long' and 'struct Reply'". */
+    Reply b = make_reply(20) ?>(e) err_reply(e);
+    if (b.kind != 1 || b.val != 20) return 3;
+
+    /* Shape 3: same ternary on the error path.  Handler sees CCError,
+     * must return a full Reply. */
+    Reply c = make_reply(-1) ?>(e) err_reply(e);
+    if (c.kind != -2) return 4;
+
+    /* Shape 4: UFCS method-call unwrap through the typed struct path. */
+    Reply !>(CCError) r2 = make_reply(40);
+    if (r2.is_err()) return 5;
+    Reply d = r2.value();
+    if (d.kind != 1 || d.val != 40) return 6;
+
+    /* Shape 5: block-form `!>` with divergent-return handler.  The ok
+     * branch of the stmt-expr has to produce a full Reply struct, not
+     * an intptr_t, to initialise `e1`.  Handler must diverge via the
+     * enclosing function's return type (int here), so we route through
+     * a plain `return` of an error code. */
+    Reply e1 = make_reply(50) !> {
+        return 7;
+    };
+    if (e1.kind != 1 || e1.val != 50) return 8;
+
+    (void)default_reply;
+
+    printf("ok struct-unwrap-smoke\n");
+    return 0;
+}
