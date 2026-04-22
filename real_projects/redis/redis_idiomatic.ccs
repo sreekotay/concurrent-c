@@ -1,15 +1,12 @@
 /*
  * redis_idiomatic.ccs
  *
- * One-writer concurrency: a dedicated owner fiber holds the RedisDb
- * and drains a shared N:1 request channel; each client fiber sends a
- * batch of requests into that channel and receives the matching batch
- * of replies on its own 1:1 reply channel.  Serialization is by
- * channel topology, not worker pinning — the scheduler can use any
- * number of OS threads because only the owner ever touches the db.
- *
- * Pipeline depth is bounded by PIPELINE_LIMIT: a burst collapses into
- * one submit/drain/flush round-trip.
+ * One-writer concurrency via an N:1 request channel.  Only the owner
+ * fiber touches RedisDb; client fibers submit batches and drain the
+ * matching replies on a per-connection 1:1 reply channel.  Serialization
+ * is by channel topology, not worker pinning, so the scheduler is free
+ * to use any number of OS threads.  Pipeline depth is bounded by
+ * PIPELINE_LIMIT.
  *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
  */
@@ -687,6 +684,11 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
+static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
+    if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
+    return buffer_write_bytes(sock, conn, reply->data);
+}
+
 /* Encode `reply` into `arena`.  On return reply->kind ==
  * REDIS_REPLY_RAW and reply->data points into `arena`, valid for the
  * arena's lifetime. */
@@ -808,11 +810,6 @@ static RedisConn* redis_conn_drop(RedisConn* conn) {
     return conn;
 }
 
-static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
-    return buffer_write_bytes(sock, conn, reply->data);
-}
-
 /* One-shot error-reporting path: materialize into a stack-backed
  * scratch arena that starts on the reply's inline_buf and overflows
  * to heap only for oversize encodings.  Freed on return. */
@@ -884,14 +881,8 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
     return 0;
 }
 
-/* Per-connection driver.  Each outer iteration is one batch:
- *
- *   submit  - parse up to PIPELINE_LIMIT buffered RESP requests and
- *             hand them to the owner.
- *   drain   - recv the matching replies, write them into out_buf,
- *             then reset reply_arena.
- *   flush   - one socket write for the whole batch.
- *   rr_fill - park until more bytes arrive or EOF. */
+/* Per-connection driver.  One outer iteration = one
+ * submit / drain / flush / rr_fill batch (phases labeled inline). */
 @async int handle_client(CCSocket client, DbHandle* h, uint64_t conn_id) {
     @defer client.close();
     /* Teardown: cancel reply_rx first (unblocks any owner-side send
@@ -913,6 +904,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
             return 0;
         }
 
+        /* Submit: up to PIPELINE_LIMIT parsed requests to the owner. */
         size_t outstanding = 0;
         for (size_t s = 0; s < PIPELINE_LIMIT; s++) {
             RedisRequest* req = NULL;
@@ -928,8 +920,8 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
             outstanding++;
         }
 
-        /* Draining exactly `outstanding` replies also drives
-         * reply_arena back to quiescence before the reset. */
+        /* Drain: exactly `outstanding` replies.  This also drives
+         * reply_arena back to quiescence before the reset below. */
         while (outstanding > 0) {
             RedisReply* slot = NULL;
             conn->reply_rx.recv(&slot) !> { return 0; };
@@ -937,8 +929,11 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
             if (!slot || !write_reply(&client, conn, slot)) return 0;
         }
         cc_arena_reset(&conn->reply_arena);
+
+        /* Flush: one socket write for the whole batch. */
         if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
 
+        /* rr_fill: park until more bytes arrive or EOF. */
         bool more = rr_fill(&reader, &client) !>(e) {
             write_reply_now(&client, conn, io_err_reply(e));
             return 0;
