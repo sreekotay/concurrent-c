@@ -262,7 +262,14 @@ static int cc_ir_is_ident(char c) {
  * off the beginning, returns 0 with *out_stmt_pos = 1. */
 static size_t cc_ir_find_lhs_start_ex(const char* s, size_t from_pos,
                                       int* out_stmt_pos) {
-    int par = 0, brk = 0, br = 0;
+    /* Track only paren and bracket depth — `{` / `}` are treated as
+     * statement boundaries at depth 0, NOT as nesting to walk through.
+     * Crossing into a preceding block would bleed the previous
+     * top-level construct into this sigil's LHS (e.g. walking back
+     * from `static bool !>(CCError) fn(...)` through the `}` of the
+     * prior function).  This matches cc__find_bang_lhs_start_ex in
+     * pass_result_unwrap.c; keeping the two in sync is intentional. */
+    int par = 0, brk = 0;
     size_t i = from_pos;
     while (i > 0) {
         i--;
@@ -291,15 +298,10 @@ static size_t cc_ir_find_lhs_start_ex(const char* s, size_t from_pos,
             if (out_stmt_pos) *out_stmt_pos = 0;
             return i + 1;
         }
-        if (c == '}') { br++; continue; }
-        if (c == '{') {
-            if (br > 0) { br--; continue; }
-            if (out_stmt_pos) *out_stmt_pos = 1;
-            return i + 1;
-        }
-        if (par > 0 || brk > 0 || br > 0) continue;
+        if (par > 0 || brk > 0) continue;
 
-        if (c == ';') {
+        /* Statement-position boundaries at depth 0. */
+        if (c == ';' || c == '{' || c == '}') {
             if (out_stmt_pos) *out_stmt_pos = 1;
             return i + 1;
         }
@@ -640,12 +642,17 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
         size_t   sigil_end = next_sigil + 2;
 
         /* Decl-form check: stmt-pos + parenless LHS + post-sigil `(`.
-         * These aren't unwraps — they're declarator syntax.  Leave the
-         * sigil bytes inside OPAQUE_TEXT by simply advancing past the
-         * sigil without carving a node. */
+         * These aren't unwraps — they're declarator syntax.  Flush the
+         * pending opaque bytes up through the sigil and advance cursor
+         * past it so the skipped sigil stays embedded in OPAQUE_TEXT.
+         * Without the flush, subsequent iterations' opaque prefix
+         * emission starts at `sigil_end` and silently drops the
+         * intervening source text (found via real_projects/redis). */
         if (is_stmt && lb > la && cc_ir_lhs_is_parenless(src, la, lb)) {
             size_t post = cc_skip_ws_len(src, n, sigil_end);
             if (post < n && src[post] == '(') {
+                if (cc_ir_append_opaque(arena, file, src, cursor, sigil_end) != 0)
+                    return -1;
                 cursor = sigil_end;
                 continue;
             }

@@ -1,0 +1,45 @@
+/* Smoke: IR preprocessor's decl-form `!>` skip must flush pending
+ * opaque text.  Regression guard for a bug discovered on
+ * real_projects/redis/redis_idiomatic.ccs where a file with many
+ * top-level `T !>(E) fn(...) { body }` declarations followed by a
+ * no-binder stmt-position `!>` caused the IR carver to drop the
+ * source bytes leading up to the decl-form sigils — the decl-form
+ * branch advanced `cursor` past the sigil without emitting the
+ * intervening OPAQUE_TEXT chunk.
+ *
+ * The bug only manifests when the IR no-binder rewriter fires (which
+ * requires at least one plain `!>;` somewhere), so we include both:
+ * three decl-form bangs preceded by full function bodies, plus a
+ * no-binder `!>;` at the call site.  If the skip forgot to flush,
+ * the call-site's opaque prefix collapses and the compile output
+ * gets truncated to ~20% of the real source. */
+#include <stdio.h>
+
+static int g_calls = 0;
+
+bool !>(CCError) f1(int v) {
+    (void)v;
+    return cc_ok(true);
+}
+
+int !>(CCError) f2(int v) {
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok(v);
+}
+
+int* !>(CCError) f3(int* p) {
+    if (!p) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok(p);
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
+    bool a = f1(1) !>;
+    int  b = f2(7) !>;
+    int  base = 42;
+    int* c = f3(&base) !>;
+    if (!a || b != 7 || !c || *c != 42) return 2;
+    g_calls++;
+    printf("ok calls=%d b=%d *c=%d\n", g_calls, b, *c);
+    return 0;
+}
