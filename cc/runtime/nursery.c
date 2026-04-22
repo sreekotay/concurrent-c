@@ -151,7 +151,30 @@ struct CCNursery {
     CCArena closure_env_arena;
     pthread_mutex_t mu;
     wake_primitive cancel_wake;  /* Broadcast on cancel for O(1) wake */
+
+    /* Worker-frees-on-DEAD path (gated by CC_NURSERY_WORKER_FREES env).
+     * When the gate is off these fields are inert and the classic
+     * nursery-wait iterator continues to own per-child join+release.
+     * When on, the v2 worker calls cc_nursery_notify_child_done on
+     * MCO_DEAD and cc_nursery_wait becomes a barrier on alive_count. */
+    _Atomic size_t alive_count;
+    wake_primitive alive_wake;
 };
+
+/* Process-wide gate, latched on first read.  Off by default so the
+ * existing join-in-wait ownership path stays unchanged; set
+ * CC_NURSERY_WORKER_FREES=1 to route nursery-spawned fibers back to the
+ * v2 free list the instant their coroutine reaches MCO_DEAD instead of
+ * waiting for cc_nursery_wait. */
+static int cc_nursery_worker_frees_mode(void) {
+    static _Atomic int cached = -1;
+    int v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* s = getenv("CC_NURSERY_WORKER_FREES");
+    int newv = (s && s[0] && s[0] != '0') ? 1 : 0;
+    atomic_store_explicit(&cached, newv, memory_order_relaxed);
+    return newv;
+}
 
 /* Defined in channel.c (same translation unit via runtime/concurrent_c.c). */
 void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner);
@@ -172,6 +195,8 @@ static CCNursery* cc__nursery_alloc(void) {
     }
     pthread_mutex_init(&n->mu, NULL);
     wake_primitive_init(&n->cancel_wake);
+    wake_primitive_init(&n->alive_wake);
+    atomic_store_explicit(&n->alive_count, 0, memory_order_relaxed);
     n->deadline.tv_sec = 0;
     n->deadline.tv_nsec = 0;
     n->closing = NULL;
@@ -181,6 +206,7 @@ static CCNursery* cc__nursery_alloc(void) {
     if (!n->closure_env_arena.base) {
         pthread_mutex_destroy(&n->mu);
         wake_primitive_destroy(&n->cancel_wake);
+        wake_primitive_destroy(&n->alive_wake);
         free(n->tasks);
         free(n);
         return NULL;
@@ -422,13 +448,32 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     if (timing) t0 = nursery_rdtsc();
     if (timing) t1 = t0;
 
+    /* Worker-frees mode: publish the pending child on alive_count BEFORE
+     * enqueuing so a worker that races us to MCO_DEAD always observes a
+     * matching increment when it calls cc_nursery_notify_child_done.  In
+     * the classic mode this counter is never consulted. */
+    int worker_frees = cc_nursery_worker_frees_mode();
+    if (worker_frees) {
+        atomic_fetch_add_explicit(&n->alive_count, 1, memory_order_relaxed);
+    }
+
     fiber_v2* t = sched_v2_spawn_in_nursery(fn, arg, n);
-    if (!t) return ENOMEM;
+    if (!t) {
+        if (worker_frees) {
+            atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_relaxed);
+        }
+        return ENOMEM;
+    }
 
     if (timing) t2 = nursery_rdtsc();
     cc_nursery_child child = { .kind = 2, .hybrid = t };
     int append_err = cc_nursery_append_child(n, child);
     if (append_err != 0) {
+        if (worker_frees) {
+            /* Fiber is enqueued and the worker will notify alive_count on
+             * completion — do NOT release here (worker owns the release). */
+            return append_err;
+        }
         sched_v2_fiber_release(t);
         return append_err;
     }
@@ -473,6 +518,18 @@ int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {
     return cc_nursery_spawn_async(n, task);
 }
 
+/* Worker-frees mode: v2 worker calls this on MCO_DEAD for every
+ * nursery-owned fiber (the fiber itself was already pushed back onto
+ * g_v2.free_list by the worker).  Tick the barrier; on the last
+ * outstanding child, wake cc_nursery_wait. */
+void cc_nursery_notify_child_done(CCNursery* n) {
+    if (!n) return;
+    size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        wake_primitive_wake_all(&n->alive_wake);
+    }
+}
+
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
@@ -484,33 +541,44 @@ int cc_nursery_wait(CCNursery* n) {
     size_t joined = 0;
     size_t closed = 0;
     if (timing) t0 = nursery_rdtsc();
-    
-    /* Join all tasks - spec: join children first, then close channels.
-     * If cancelled, fibers should exit promptly when they check cc_cancelled()
-     * or when channel operations return ECANCELED. */
-    for (size_t i = 0; i < n->count; ++i) {
-        if (n->tasks[i].kind == 0) continue;
-        uint64_t step0 = timing ? nursery_rdtsc() : 0;
-        int err = 0;
-        if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
-            err = sched_v2_join(n->tasks[i].hybrid, NULL);
+
+    if (cc_nursery_worker_frees_mode()) {
+        /* Barrier on alive_count.  Worker already pushed each fiber back
+         * to the v2 pool on MCO_DEAD; we just wait for the last
+         * notify_child_done to tick the counter to zero. */
+        for (;;) {
+            uint32_t gen = atomic_load_explicit(&n->alive_wake.value, memory_order_acquire);
+            if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0) break;
+            wake_primitive_wait(&n->alive_wake, gen);
         }
-        uint64_t step1 = timing ? nursery_rdtsc() : 0;
-        if (first_err == 0 && err != 0) {
-            first_err = err;
+    } else {
+        /* Classic path: spec says join children first, then close channels.
+         * If cancelled, fibers should exit promptly when they check
+         * cc_cancelled() or when channel ops return ECANCELED. */
+        for (size_t i = 0; i < n->count; ++i) {
+            if (n->tasks[i].kind == 0) continue;
+            uint64_t step0 = timing ? nursery_rdtsc() : 0;
+            int err = 0;
+            if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
+                err = sched_v2_join(n->tasks[i].hybrid, NULL);
+            }
+            uint64_t step1 = timing ? nursery_rdtsc() : 0;
+            if (first_err == 0 && err != 0) {
+                first_err = err;
+            }
+            if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
+                sched_v2_fiber_release(n->tasks[i].hybrid);
+            }
+            uint64_t step2 = timing ? nursery_rdtsc() : 0;
+            if (timing) {
+                join_cycles += step1 - step0;
+                free_cycles += step2 - step1;
+            }
+            memset(&n->tasks[i], 0, sizeof(n->tasks[i]));
+            joined++;
         }
-        if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
-            sched_v2_fiber_release(n->tasks[i].hybrid);
-        }
-        uint64_t step2 = timing ? nursery_rdtsc() : 0;
-        if (timing) {
-            join_cycles += step1 - step0;
-            free_cycles += step2 - step1;
-        }
-        memset(&n->tasks[i], 0, sizeof(n->tasks[i]));
-        joined++;
     }
-    
+
     /* Close registered channels */
     for (size_t i = 0; i < n->closing_count; ++i) {
         if (n->closing[i]) {
@@ -539,12 +607,16 @@ int cc_nursery_wait(CCNursery* n) {
 
 void cc_nursery_free(CCNursery* n) {
     if (!n) return;
-    for (size_t i = 0; i < n->count; ++i) {
-        if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
-            sched_v2_fiber_release(n->tasks[i].hybrid);
+    if (!cc_nursery_worker_frees_mode()) {
+        /* Classic: tasks[] still owns fiber_v2 references until free. */
+        for (size_t i = 0; i < n->count; ++i) {
+            if (n->tasks[i].kind == 2 && n->tasks[i].hybrid) {
+                sched_v2_fiber_release(n->tasks[i].hybrid);
+            }
         }
     }
-    /* Close registered channels as a last step */
+    /* Worker-frees mode: tasks[] entries are stale pointers; the worker
+     * already returned each fiber to the v2 pool on MCO_DEAD. */
     for (size_t i = 0; i < n->closing_count; ++i) {
         if (n->closing[i]) cc_chan_close(n->closing[i]);
     }
@@ -552,6 +624,7 @@ void cc_nursery_free(CCNursery* n) {
     free(n->closing);
     cc_arena_free(&n->closure_env_arena);
     pthread_mutex_destroy(&n->mu);
+    wake_primitive_destroy(&n->alive_wake);
     wake_primitive_destroy(&n->cancel_wake);
     free(n);
 }
