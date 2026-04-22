@@ -247,12 +247,12 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 * idle CPU overhead below 1% per cycle.  Override via env var for I/O-bound
 * workloads that benefit from lower sleep/wake frequency.
 *
-* Note: profiling with macOS `sample` under redis_hybrid shows ~10-15% of
-* one classic worker's active time in swtch_pri (sched_yield) from the loop
-* below, but empirical 10-run sweeps show Y=8 produces higher median
-* throughput and *fewer* tail stalls than Y=0.  The yield-before-park phase
-* appears to have net-positive scheduling effects beyond the raw CPU it
-* consumes — leaving the default at 8.
+* Note: profiling with macOS `sample` under a pipelined request/reply server
+* workload shows ~10-15% of one classic worker's active time in swtch_pri
+* (sched_yield) from the loop below, but empirical 10-run sweeps show Y=8
+* produces higher median throughput and *fewer* tail stalls than Y=0.  The
+* yield-before-park phase appears to have net-positive scheduling effects
+* beyond the raw CPU it consumes — leaving the default at 8.
 * ============================================================================ */
 
 #define SPIN_FAST_ITERS_DEFAULT 128

@@ -288,9 +288,11 @@ static inline int cc__chan_req_wake_trace_enabled(void) {
 /* Hot-path helper: the nursery-closing deadlock guard is opt-in, but the four
  * callsites in cc_chan_send / cc_chan_recv gate it on autoclose_owner + current
  * nursery matching, which is true for any channel transported inside a nursery
- * (e.g. redis_hybrid's request/reply channels).  Without this cache each op
- * calls getenv() once or twice -- ~2M getenv/s at steady state.  Cache the
- * env lookup once and reduce the guard to a relaxed atomic load. */
+ * (e.g. the request/reply channels of a fan-in server where an owner fiber
+ * handles messages from many client fibers under a shared nursery).  Without
+ * this cache each op calls getenv() once or twice -- ~2M getenv/s at steady
+ * state.  Cache the env lookup once and reduce the guard to a relaxed atomic
+ * load. */
 static inline int cc__chan_nursery_closing_guard_enabled(void) {
     static _Atomic int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_relaxed);

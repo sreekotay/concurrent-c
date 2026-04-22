@@ -1,11 +1,13 @@
 // Smoke test: closure stored as a struct field, composed at creation,
 // carrying the cleanup sequence for the enclosing object.
 //
-// Motivating problem (see redis_hybrid.ccs / redis_conn_release_request):
-// a heap object owns multiple resources whose teardown has a strict LIFO
-// ordering constraint.  Today the ordering lives in a hand-written
-// `release()` function that callers must remember to invoke; reordering
-// it (or calling the raw primitives by hand) produces UAF.
+// Motivating problem: a heap object owns multiple resources whose teardown
+// has a strict LIFO ordering constraint (e.g. a per-request arena allocated
+// from an arena pool slot — on release you must reset the arena, return the
+// slot to the pool, then drop the containing connection refcount, in that
+// order).  Today the ordering lives in a hand-written `release()` function
+// that callers must remember to invoke; reordering it (or calling the raw
+// primitives by hand) produces UAF.
 //
 // The pattern under test: the constructor composes a CCClosure0 at
 // acquire-time that captures every resource the object owns, with the
@@ -37,7 +39,8 @@ static int g_destroyed_count = 0;
 static int g_pool_returns = 0;
 
 /* Tiny stand-in for CCArenaPool — just enough to exercise the "capture
- * pool + slot" shape that redis_hybrid's req_pool uses. */
+ * pool + slot" shape used by a per-request arena pool (each in-flight
+ * request owns an arena carved out of a pooled slot). */
 typedef struct Pool {
     int live;
     void* slots[8];
@@ -83,10 +86,11 @@ static Widget* widget_create(Pool* pool, int value) {
      * freed memory, so the body must not touch w->* after that call). */
     w->destroy = () => [w, pool, slot] {
         g_destroyed_count++;
-        /* In the redis_hybrid case this is where the body would run the
-         * LIFO teardown: arena.free(); pool_free(&conn->req_pool, req);
-         * redis_conn_drop(conn); — exactly the sequence we hand-coded
-         * into redis_conn_release_request. */
+        /* In the real per-request-arena case this is where the body
+         * would run the LIFO teardown: arena.free(); pool_free(req-slot);
+         * conn_drop(conn); — the sequence that otherwise has to be
+         * hand-coded in a release() helper and kept in sync with the
+         * acquire path. */
         (void)w;
         pool_free(pool, slot);
         return (void*)0;

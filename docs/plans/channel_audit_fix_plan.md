@@ -165,7 +165,7 @@ Exactly the shape of the recv-side close-drain bug that started this audit: one 
 2. Preserve unbuffered (cap=0) branches untouched — rendezvous completion uses `cond_broadcast(not_full)` with different semantics, separate code path.
 3. Every buffered caller (3 enqueue, 4 dequeue) invokes `cc__chan_post_{enqueue,dequeue}_notify(ch, /*mu_held=*/1)` after the primitive. Document the contract in the primitive comment.
 
-**Validation gate**: C1 through C5 + extended channel smoke suite (`chan_buffered_wakeup_smoke`, `chan_close_err_smoke`, `chan_close_wakeall_idempotent_smoke`, `chan_double_wake_nodup_smoke`, `chan_park_wake_lostwake_stress_smoke`, `chan_post_commit_wake_smoke`, `chan_pre_park_wake_smoke`, `chan_select_cancel_close_stale_smoke`, `chan_timed_ping_pong`) + `redis_hybrid` end-to-end bench.
+**Validation gate**: C1 through C5 + extended channel smoke suite (`chan_buffered_wakeup_smoke`, `chan_close_err_smoke`, `chan_close_wakeall_idempotent_smoke`, `chan_double_wake_nodup_smoke`, `chan_park_wake_lostwake_stress_smoke`, `chan_post_commit_wake_smoke`, `chan_pre_park_wake_smoke`, `chan_select_cancel_close_stale_smoke`, `chan_timed_ping_pong`) + `redis_idiomatic` end-to-end bench.
 
 **Exit criterion**: zero `pthread_cond_signal(&ch->not_{empty,full})` calls inside `cc_chan_enqueue` / `cc_chan_dequeue` buffered branches; zero callers invoke the primitive without a canonical notify helper.
 

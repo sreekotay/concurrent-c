@@ -1,14 +1,15 @@
-/* Regression test for the redis_hybrid "large SET silently fails" bug.
+/* Regression test for the "pooled-slot arena silently truncates on overflow"
+ * bug surfaced by a request-pipelined server under large payloads.
  *
- * Redis uses a CCArenaPool where each slot is sized for the common request
- * (REQ_BUF_SIZE = 512).  The slot is turned into an arena with
- * cc_arena_create_buffer(slot, cap, CC_ARENA_GROWABLE); a RedisRequest struct
- * is placed at offset 0 of the slot and the cloned argv strings go into the
- * same arena.  When a SET's payload is larger than the slot can hold, the
- * arena must transparently spill subsequent allocations into a heap slab
- * without relocating the in-slot struct, and on release cc_arena_free must
- * reclaim the heap slabs while leaving the caller-provided slot intact for
- * pool_free to reclaim.
+ * The pattern: a CCArenaPool hands out fixed-size slots (e.g. 512 bytes) sized
+ * for the common request.  Each slot is turned into an arena with
+ * cc_arena_create_buffer(slot, cap, CC_ARENA_GROWABLE); a request struct is
+ * placed at offset 0 of the slot and variable-length payload (cloned argv
+ * strings, etc.) goes into the same arena.  When a payload is larger than the
+ * slot can hold, the arena must transparently spill subsequent allocations
+ * into a heap slab without relocating the in-slot struct, and on release
+ * cc_arena_free must reclaim the heap slabs while leaving the caller-provided
+ * slot intact for pool_free to reclaim.
  *
  * Prior to the fix, cc_arena_create_buffer defaulted to block_max = 1
  * (fixed), so any request whose total arg bytes exceeded the slot
@@ -46,7 +47,8 @@ int main(void) {
     memset(slot, 0xAB, sizeof(slot));  /* sentinel so we can check it later */
     uint8_t *slot_start = slot;
 
-    /* Same call shape redis_hybrid uses for per-request arenas. */
+    /* Same call shape a pooled per-request arena uses: carve a growable
+     * arena out of a caller-owned slot buffer. */
     CCArena a = cc_arena_create_buffer(slot, sizeof(slot), CC_ARENA_GROWABLE);
     if (!a.base) { printf("FAIL: create_buffer returned empty\n"); return 1; }
     if (a.base != slot_start) { printf("FAIL: arena.base should equal slot\n"); return 1; }

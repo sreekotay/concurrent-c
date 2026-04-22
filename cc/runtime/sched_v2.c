@@ -220,8 +220,8 @@ struct fiber_v2 {
  * macOS (os_unfair_lock) and an atomic-flag spin elsewhere. The previous
  * pthread_mutex-based version showed up in profiles as the top
  * __psynch_mutexwait / _pthread_mutex_firstfit_lock_slow consumer under
- * redis_hybrid load; at ~8M push/pop pairs/sec the uncontended mutex cost
- * alone was a noticeable fraction of total time.
+ * pipelined request/reply server workloads; at ~8M push/pop pairs/sec the
+ * uncontended mutex cost alone was a noticeable fraction of total time.
  * ============================================================================ */
 
 typedef struct {
@@ -523,8 +523,10 @@ static int g_v2_wake_skip_depth = 4;
  * chain-heavy workloads. All three are default-off (legacy behaviour) and
  * opt-in via env var; they compose orthogonally, so you can mix them.
  *
- * The problem they address (observed clearest in redis_hybrid, a chain of
- * ~4 fiber handoffs per request under 50-client pipelined load):
+ * The problem they address (observed clearest in pipelined fan-in servers
+ * where each request chains ~4 fiber handoffs — client fiber → request
+ * channel → owner fiber → reply channel → client fiber — under dozens of
+ * concurrent pipelined clients):
  *
  *   - Eagerly starting N workers and letting them all drain the same global
  *     ready queue produces thundering-herd churn: one pops, N-1 miss and
@@ -636,7 +638,8 @@ static int g_v2_park_extras_at_startup = 0;
  * Practical sizing:
  *   - 1 for chain-heavy I/O workloads where a single hot drainer keeps
  *     the ready queue L1-warm and avoids lock contention on the global
- *     queue (the redis_hybrid shape).
+ *     queue (the fan-in request/reply server shape: many client fibers
+ *     handing off to one owner fiber and back).
  *   - N (CPU count) for CPU-bound parallel workloads (pigz, etc.) that
  *     genuinely want every core drainable.
  *   - 0 = disabled (legacy: all workers always eligible, no gating).

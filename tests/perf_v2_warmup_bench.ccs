@@ -1,7 +1,8 @@
 /* Not a smoke test -- a targeted micro-benchmark that isolates the
  * V2 scheduler warm-up cost from steady-state throughput.
  *
- * Workload shape (mirrors the redis_hybrid pattern):
+ * Workload shape (mirrors a short-lived fan-in request/reply server run
+ * where a burst of client fibers hits a cold scheduler):
  *   1. Spawn the worker pool via the first fiber submission.
  *   2. Measure the latency of a single fiber round-trip (cold: first
  *      first-wake syscall chain kicks in).
@@ -10,9 +11,9 @@
  *   4. Spawn a burst of N fibers from a cold worker pool and measure
  *      wall time until all complete (warm-up-dominated).
  *
- * This lets us quantify what fraction of a redis-benchmark short run
- * (~100ms) is lost to scheduler cold-start, and provides a rerun target
- * for any warm-up optimisations.
+ * This lets us quantify what fraction of a short (~100ms) benchmark run
+ * is lost to scheduler cold-start, and provides a rerun target for any
+ * warm-up optimisations.
  */
 
 #include <ccc/cc_sched.cch>
