@@ -899,11 +899,33 @@ static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
  * LHS comes from a stmt-position back-scan that already stopped at the
  * previous `;`, `{`, or `}`, so any `(` or `)` we see belongs to the LHS
  * itself. */
+/* Comment/string-aware so that a leading block comment like the one in
+ * front of `@noblock static RedisReply !>(CCError) execute_request(...)`
+ * in real_projects/redis/redis_idiomatic.ccs (which happens to mention
+ * `\`RedisReply !>(CCError)\`` in prose) doesn't mask the decl form.
+ * Kept in sync with cc_ir_lhs_is_parenless in cc/src/ir/ir.c. */
 static int cc__bang_lhs_looks_like_decl(const char* s, size_t lhs_a,
                                         size_t lhs_b) {
     if (lhs_b <= lhs_a) return 0;
+    int in_lc = 0, in_bc = 0;
+    int in_str = 0; char q = 0;
     for (size_t i = lhs_a; i < lhs_b; i++) {
-        if (s[i] == '(' || s[i] == ')') return 0;
+        char c  = s[i];
+        char c2 = (i + 1 < lhs_b) ? s[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < lhs_b) { i++; continue; }
+            if (c == q) in_str = 0;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"' || c == '\'') { in_str = 1; q = c; continue; }
+        if (c == '(' || c == ')') return 0;
     }
     return 1;
 }
@@ -1647,6 +1669,22 @@ static size_t cc__find_bang_lhs_start_ex(const char* s, size_t op_at,
         if (c == ';' || c == '{' || c == '}') {
             if (out_is_stmt_pos) *out_is_stmt_pos = 1;
             return i + 1;
+        }
+        /* `@IDENT` decl-specs / statement-tokens (`@noblock`, `@async`,
+         * `@errhandler(...)`, `@destroy`, `@err(...)`, ...) are transparent
+         * to the LHS walk: they sit in front of a return type in a
+         * function signature (`@noblock static Reply !>(CCError) fn(...)`)
+         * or just before a statement, so we keep walking back through the
+         * `@` to find the real statement boundary.  Without this, the `@`
+         * was treated as an expression-position boundary, is_stmt_pos
+         * flipped to 0, decl-form detection was skipped, and the scanner
+         * ran the expression-position `!>` rewriter on a function signature
+         * — tripping "expected ';' terminating '!>' body" from the
+         * forward-scan walking past EOF (see redis_idiomatic
+         * `@noblock static RedisReply !>(CCError) execute_request`). */
+        if (c == '@') {
+            size_t j = i + 1;
+            if (j < op_at && cc_is_ident_start(s[j])) continue;
         }
         /* Expression-position boundaries. */
         if (c == ',' || c == '?' || c == ':' || c == '@') {

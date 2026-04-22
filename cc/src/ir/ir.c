@@ -305,6 +305,16 @@ static size_t cc_ir_find_lhs_start_ex(const char* s, size_t from_pos,
             if (out_stmt_pos) *out_stmt_pos = 1;
             return i + 1;
         }
+        /* `@IDENT` decl-specs / statement-tokens (`@noblock`, `@async`,
+         * `@errhandler(...)`, `@destroy`, `@err(...)`, ...) sit in front
+         * of a return type or a statement — they aren't expression
+         * boundaries.  Walk back through them so the decl-form detection
+         * still sees a parenless LHS.  Kept in sync with the legacy
+         * cc__find_bang_lhs_start_ex in pass_result_unwrap.c. */
+        if (c == '@') {
+            size_t j = i + 1;
+            if (j < from_pos && cc_is_ident_start(s[j])) continue;
+        }
         if (c == ',' || c == '?' || c == ':' || c == '@') {
             if (out_stmt_pos) *out_stmt_pos = 0;
             return i + 1;
@@ -591,10 +601,42 @@ static int cc_ir_append_opaque(CCIrArena* arena, CCIrNode* file,
  * rather than an unwrap operator.  Matches pass_result_unwrap's
  * `cc__bang_lhs_looks_like_decl` so the IR agrees with the legacy
  * pass's skip set. */
+/* True when the LHS span contains no `(` / `)` at the top level.
+ *
+ * Skips bytes inside `/ *...* /` block comments, `//...\n` line
+ * comments, and `"..."` / `'...'` string literals — parens inside those
+ * don't belong to the syntactic LHS and mustn't defeat the decl-form
+ * heuristic.
+ *
+ * Real-world regression: the workaround comment sitting in front of
+ * `@noblock static RedisReply !>(CCError) execute_request(...)` in
+ * real_projects/redis/redis_idiomatic.ccs literally contains the
+ * phrase `\`RedisReply !>(CCError)\``.  Without the comment-aware walk
+ * the pre-ws LHS slice spanning the comment block was treated as
+ * parenful, decl-form skip was skipped, and the sigil was rewritten
+ * into an orphan `@err;` at function scope — which pass_err_syntax
+ * then rightfully flagged as "`@err` with no local handler". */
 static int cc_ir_lhs_is_parenless(const char* s, size_t a, size_t b) {
     if (b <= a) return 0;
+    int in_lc = 0, in_bc = 0;
+    int in_str = 0; char q = 0;
     for (size_t i = a; i < b; i++) {
-        if (s[i] == '(' || s[i] == ')') return 0;
+        char c  = s[i];
+        char c2 = (i + 1 < b) ? s[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < b) { i++; continue; }
+            if (c == q) in_str = 0;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"' || c == '\'') { in_str = 1; q = c; continue; }
+        if (c == '(' || c == ')') return 0;
     }
     return 1;
 }
