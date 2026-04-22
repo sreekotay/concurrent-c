@@ -972,6 +972,89 @@ static char* cc__pu_subst_word(const char* body, size_t bl,
     return r;
 }
 
+/* Flatten a handler body to a single physical line so that inlining it
+ * into a `!>` / `@err(binder)` expansion does not shift the line numbers
+ * of any source text that follows the splice point.  We perform the
+ * transformation on a syntax-aware basis: string and char literals are
+ * copied verbatim (including any embedded `\n`), block comments are
+ * preserved (newlines inside them become spaces so the single-line form
+ * still terminates after `*\/`), line comments `//...\n` are converted
+ * to ` ` (the rest-of-line content is dropped — safe since the new form
+ * has no newline to end the comment at), and any other `\n` becomes a
+ * space.  Called on the result of `cc__pu_subst_word`, which already
+ * performed the `param -> binder` substitution; after this step the
+ * inlined body occupies exactly one source line.
+ *
+ * Preserving line count at the splice site is essential for later
+ * passes (`pass_ufcs`, `async_ast`, TCC's AST offsets, etc.) that read
+ * line numbers out of the rewritten buffer: without it, multi-line
+ * `@errhandler` bodies in sync `!> (E)` functions earlier in a TU
+ * caused every subsequent line to drift by +N, which silently corrupted
+ * UFCS receiver-type resolution (bug [F11] in redis_idiomatic.ccs). */
+static char* cc__pu_flatten_handler_body(const char* in_buf, size_t in_len,
+                                         size_t* out_len) {
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    size_t i = 0;
+    while (i < in_len) {
+        char ch = in_buf[i];
+        if (ch == '"' || ch == '\'') {
+            char quote = ch;
+            size_t start = i;
+            i++;
+            while (i < in_len) {
+                if (in_buf[i] == '\\' && i + 1 < in_len) { i += 2; continue; }
+                if (in_buf[i] == quote) { i++; break; }
+                i++;
+            }
+            cc__append_n(&out, &ol, &oc, in_buf + start, i - start);
+            continue;
+        }
+        if (ch == '/' && i + 1 < in_len && in_buf[i + 1] == '/') {
+            /* Line comment: drop through the trailing newline (which
+             * would otherwise leak the comment into the rest of the
+             * flattened line).  Emit a single space so tokens do not
+             * fuse. */
+            while (i < in_len && in_buf[i] != '\n') i++;
+            if (i < in_len) i++;
+            cc__append_n(&out, &ol, &oc, " ", 1);
+            continue;
+        }
+        if (ch == '/' && i + 1 < in_len && in_buf[i + 1] == '*') {
+            size_t start = i;
+            i += 2;
+            while (i + 1 < in_len && !(in_buf[i] == '*' && in_buf[i + 1] == '/')) i++;
+            if (i + 1 < in_len) i += 2;
+            /* Rewrite any embedded newlines to spaces while preserving
+             * the block-comment frame. */
+            for (size_t k = start; k < i; k++) {
+                char c = in_buf[k];
+                if (c == '\n' || c == '\r') c = ' ';
+                cc__append_n(&out, &ol, &oc, &c, 1);
+            }
+            continue;
+        }
+        if (ch == '\n' || ch == '\r') {
+            cc__append_n(&out, &ol, &oc, " ", 1);
+            i++;
+            continue;
+        }
+        cc__append_n(&out, &ol, &oc, &ch, 1);
+        i++;
+    }
+    if (!out) {
+        out = (char*)malloc(1);
+        if (!out) return NULL;
+        out[0] = 0;
+        if (out_len) *out_len = 0;
+        return out;
+    }
+    cc__append_n(&out, &ol, &oc, "", 1);
+    ol--;
+    if (out_len) *out_len = ol;
+    return out;
+}
+
 /* Extract the last identifier from a textual C parameter-declaration
  * like `CCError e` / `struct foo *err` / `__typeof__(...) e`.  Writes a
  * NUL-terminated name into `name`; empty name on failure. */
@@ -1505,10 +1588,21 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
                     free(out);
                     return -1;
                 }
-                cc__append_str(&out, &ol, &oc, "{ ");
-                cc__append_n(&out, &ol, &oc, subst, sub_len);
-                cc__append_str(&out, &ol, &oc, " }");
+                /* Flatten to a single physical line so we do not shift
+                 * byte/line offsets of any source text after the splice
+                 * point (see cc__pu_flatten_handler_body for rationale,
+                 * bug [F11]). */
+                size_t flat_len = 0;
+                char* flat = cc__pu_flatten_handler_body(subst, sub_len, &flat_len);
                 free(subst);
+                if (!flat) {
+                    free(out);
+                    return -1;
+                }
+                cc__append_str(&out, &ol, &oc, "{ ");
+                cc__append_n(&out, &ol, &oc, flat, flat_len);
+                cc__append_str(&out, &ol, &oc, " }");
+                free(flat);
 
                 i = semi + 1;
                 continue;
@@ -1821,6 +1915,15 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
             (outer_param[0] ? outer_param : ""),
             binder, &sub_len);
         if (!substituted) return -1;
+        /* Flatten to one line — see cc__pu_flatten_handler_body, [F11]. */
+        {
+            size_t flat_len = 0;
+            char* flat = cc__pu_flatten_handler_body(substituted, sub_len, &flat_len);
+            free(substituted);
+            if (!flat) return -1;
+            substituted = flat;
+            sub_len = flat_len;
+        }
 
         static int g_expr_tmp_id = 0;
         int tid = ++g_expr_tmp_id;
