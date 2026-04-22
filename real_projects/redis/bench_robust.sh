@@ -1,6 +1,6 @@
 #!/bin/bash
-# bench_robust.sh — order-free, warmup-discarded bench for upstream / hybrid /
-# idiomatic redis.  All three servers are started once and run concurrently on
+# bench_robust.sh — order-free, warmup-discarded bench for upstream redis-server
+# vs redis_idiomatic.  Both servers are started once and run concurrently on
 # their respective ports; each repeat randomises the binary order for every
 # command so systematic order biases (thermal drift, TIME_WAIT backlog
 # accumulating through the run, scheduler warmup) average out.
@@ -16,7 +16,6 @@
 #   RANDOM_KEYS      keyspace for -r (default 50000)
 #   BENCH_TESTS      comma-separated command list (default set,get,incr)
 #   UPSTREAM_PORT    default 6391
-#   HYBRID_PORT      default 6392
 #   IDIOMATIC_PORT   default 6393
 
 set -euo pipefail
@@ -24,7 +23,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
-HYBRID_BIN="${HYBRID_BIN:-$SCRIPT_DIR/out/redis_hybrid}"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
 
 REPEATS="${REPEATS:-6}"
@@ -34,7 +32,6 @@ PIPELINE="${PIPELINE:-16}"
 RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
-HYBRID_PORT="${HYBRID_PORT:-6392}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 
 need() {
@@ -45,7 +42,6 @@ need() {
 }
 need "$BENCH_BIN" "redis-benchmark"
 need "$UPSTREAM_BIN" "redis-server"
-need "$HYBRID_BIN" "redis_hybrid"
 need "$IDIOMATIC_BIN" "redis_idiomatic"
 
 TMP_DIR="$(mktemp -d -t bench_robust.XXXXXX)"
@@ -70,17 +66,14 @@ sys.exit(1)
 PY
 }
 
-# --- start all three servers concurrently ---
+# --- start both servers concurrently ---
 "$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
 UPSTREAM_PID=$!
-"$HYBRID_BIN"    "$HYBRID_PORT"    >"$TMP_DIR/hybrid.log"    2>&1 &
-HYBRID_PID=$!
 "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
 IDIOMATIC_PID=$!
-ALL_PIDS="$UPSTREAM_PID $HYBRID_PID $IDIOMATIC_PID"
+ALL_PIDS="$UPSTREAM_PID $IDIOMATIC_PID"
 
 wait_port "$UPSTREAM_PORT"
-wait_port "$HYBRID_PORT"
 wait_port "$IDIOMATIC_PORT"
 
 ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
@@ -104,7 +97,6 @@ IFS=',' read -ra CMDS <<< "$BENCH_TESTS"
 port_for() {
     case "$1" in
         upstream)  echo "$UPSTREAM_PORT"  ;;
-        hybrid)    echo "$HYBRID_PORT"    ;;
         idiomatic) echo "$IDIOMATIC_PORT" ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
@@ -121,7 +113,7 @@ for r in $(seq 0 "$REPEATS"); do
     for cmd in "${CMDS[@]}"; do
         # Shuffle binary order for this (round, cmd) using python-backed rng.
         order_str="$(python3 -c "import random, sys
-labels=['upstream','hybrid','idiomatic']
+labels=['upstream','idiomatic']
 random.shuffle(labels)
 print(' '.join(labels))")"
         read -ra ORDER <<< "$order_str"
@@ -154,7 +146,7 @@ for r in rows:
     by[(r["cmd"], r["label"])].append(float(r["rps"]))
 
 cmds = sorted({r["cmd"] for r in rows}, key=lambda c: ["set","get","incr"].index(c) if c in ["set","get","incr"] else 99)
-labels = ["upstream", "hybrid", "idiomatic"]
+labels = ["upstream", "idiomatic"]
 
 def fmt(x): return f"{x/1e6:.3f}M"
 
@@ -174,14 +166,13 @@ for cmd in cmds:
         sd   = statistics.stdev(vals) if len(vals) > 1 else 0.0
         cv   = 100*sd/mean if mean else 0.0
         print(f"  {label:<10} {fmt(mean):>8} {fmt(med):>8} {fmt(min(vals)):>8} {fmt(max(vals)):>8} {fmt(sd):>8} {cv:>5.1f}%")
-    # pairwise ratios (median-of-medians)
-    hy  = by.get((cmd, "hybrid"), [])
+    # pairwise ratio (median-of-medians)
+    ups = by.get((cmd, "upstream"), [])
     idm = by.get((cmd, "idiomatic"), [])
-    if hy and idm:
-        ratio = statistics.median(idm) / statistics.median(hy)
-        # rough significance check: is median(idiomatic) within hybrid's [min,max] range and vice versa?
-        overlap = not (max(idm) < min(hy) or max(hy) < min(idm))
+    if ups and idm:
+        ratio = statistics.median(idm) / statistics.median(ups)
+        overlap = not (max(idm) < min(ups) or max(ups) < min(idm))
         tag = "OVERLAP" if overlap else "SEPARATED"
-        print(f"  idiomatic/hybrid median: {ratio:.3f}x  ({tag})")
+        print(f"  idiomatic/upstream median: {ratio:.3f}x  ({tag})")
     print()
 PY
