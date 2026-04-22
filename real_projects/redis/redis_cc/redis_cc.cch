@@ -14,6 +14,13 @@
 #define REDIS_REPLY_INLINE_CAP 128
 #endif
 
+/* Inline byte budget for argv clones on a freshly-allocated RedisRequest.
+ * Overflow (oversized SET values etc.) spills onto heap blocks owned by
+ * req->arena. */
+#ifndef REDIS_REQUEST_ARGV_BUF_CAP
+#define REDIS_REQUEST_ARGV_BUF_CAP 368
+#endif
+
 typedef struct RedisReplyOutbox RedisReplyOutbox;
 typedef struct RedisConn RedisConn;
 
@@ -43,10 +50,14 @@ typedef struct RedisRequest {
     uint64_t request_id;
     uint32_t shard_id;
     RedisConn* conn;
-    CCArena arena;
     RedisCommandKind kind;
     size_t argc;
     CCSlice argv[3];
+    /* argv-clone scratch: req->arena wraps argv_buf and heap-spills
+     * on overflow.  Pairing kept at the tail so sizeof(RedisRequest)
+     * is the exact pool-slot size. */
+    CCArena arena;
+    char argv_buf[REDIS_REQUEST_ARGV_BUF_CAP];
 } RedisRequest;
 
 typedef struct RedisReply {
