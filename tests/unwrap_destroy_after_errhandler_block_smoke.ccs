@@ -1,0 +1,146 @@
+/* Smoke: `T x = foo() !> @destroy;` immediately after a multi-line
+ * `@errhandler(CCError e) { ... }` block inside the same function
+ * must resolve the declared type correctly.
+ *
+ * Regression guard for the `cc__ud_stmt_start_backward` text-scanner
+ * bug in `cc/src/visitor/pass_unwrap_destroy.c`.
+ *
+ * The backward scanner that recovers the `@destroy` site's enclosing
+ * statement span used to treat every balanced `{ ... }` as part of the
+ * current statement — including a preceding
+ *
+ *     @errhandler(CCError e) {
+ *         ... ;
+ *     }
+ *
+ * block whose closing `}` actually terminates a separate preceding
+ * statement.  That caused the type span reported to the symbol-table
+ * lookup (and to the "unknown registered destructor" diagnostic) to
+ * engulf the whole `@errhandler(...) { ... } MyThing*` prelude, so no
+ * `@comptime cc_type_register("MyThing*", ...)` entry matched and the
+ * compile aborted with:
+ *
+ *     error: @destroy: bodyless `@destroy;` requires a registered
+ *            destructor for type `@errhandler(CCError e) { ... MyThing*`
+ *
+ * With the fix, a stmt-level `}` that is NOT followed by a
+ * continuation token (`@destroy`, `else`, do-while `while`) closes
+ * the preceding statement and the current-statement start is pinned
+ * to the position right after that `}`.  The chained form
+ * `foo() !>(e) { body } @destroy { body };` still works because the
+ * scanner sees `@destroy` right after the binder body `}` and keeps
+ * walking back.
+ *
+ * This test keeps the scanner honest by combining:
+ *   - a preceding `@errhandler(CCError e) { ... }` on its own lines;
+ *   - a `MyThing* t = ... !> @destroy;` bodyless suffix with a type
+ *     registered via `@comptime cc_type_register`;
+ *   - a second scope that uses the chained
+ *     `foo() !>(e) { body } @destroy { body };` shape to prove the
+ *     continuation case still resolves.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdlib.h>
+#include <stdio.h>
+
+typedef struct Widget {
+    int value;
+} Widget;
+
+static int g_widget_live = 0;
+static int g_widget_destroyed = 0;
+
+static Widget* widget_create(int v) {
+    Widget* w = calloc(1, sizeof(*w));
+    if (!w) return NULL;
+    w->value = v;
+    g_widget_live++;
+    return w;
+}
+
+static void widget_destroy(Widget* w) {
+    if (!w) return;
+    g_widget_destroyed++;
+    g_widget_live--;
+    free(w);
+}
+
+@comptime {
+    (void)cc_type_register("Widget*", (CCTypeHooks){
+        .create = cc_type_create_call("widget_create"),
+        .destroy = cc_type_destroy_call("widget_destroy"),
+    });
+}
+
+/* Shape under test:
+ *   1. Multi-line `@errhandler(CCError e) { ... }`.
+ *   2. Immediately followed by `Widget* t = widget_create(...) !> @destroy;`
+ *      — the bodyless suffix.  The backward scanner MUST NOT pull the
+ *      preceding `@errhandler {...}` into this statement's type span. */
+static int scope_after_errhandler(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "scope_after_errhandler: unexpected err: %s\n", e.message);
+        return 1;
+    }
+    Widget* t = widget_create(7) !> @destroy;
+    if (!t) return 2;
+    if (t->value != 7) return 3;
+    return 0;
+}
+
+/* Chained form: `!>(e) { body } @destroy { body };` — the scanner must
+ * see the `@destroy` continuation after the binder body `}` and keep
+ * walking back rather than treating the binder body as a preceding
+ * statement. */
+static int chained_destroy_block(void) {
+    char* p = (char*)widget_create(5) !>(e) {
+        fprintf(stderr, "chained_destroy_block: unexpected: %s\n", e.message);
+        return 1;
+    } @destroy {
+        widget_destroy((Widget*)p);
+    };
+    if (!p) return 2;
+    if (((Widget*)p)->value != 5) return 3;
+    return 0;
+}
+
+int main(void) {
+    int rc;
+
+    rc = scope_after_errhandler();
+    if (rc != 0) {
+        fprintf(stderr, "scope_after_errhandler returned %d\n", rc);
+        return 1;
+    }
+    if (g_widget_destroyed != 1) {
+        fprintf(stderr, "after scope_after_errhandler: want 1 destroyed, got %d\n",
+                g_widget_destroyed);
+        return 2;
+    }
+    if (g_widget_live != 0) {
+        fprintf(stderr, "after scope_after_errhandler: want 0 live, got %d\n",
+                g_widget_live);
+        return 3;
+    }
+
+    rc = chained_destroy_block();
+    if (rc != 0) {
+        fprintf(stderr, "chained_destroy_block returned %d\n", rc);
+        return 4;
+    }
+    if (g_widget_destroyed != 2) {
+        fprintf(stderr, "after chained_destroy_block: want 2 destroyed, got %d\n",
+                g_widget_destroyed);
+        return 5;
+    }
+    if (g_widget_live != 0) {
+        fprintf(stderr, "after chained_destroy_block: want 0 live, got %d\n",
+                g_widget_live);
+        return 6;
+    }
+
+    printf("ok\n");
+    return 0;
+}

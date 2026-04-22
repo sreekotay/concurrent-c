@@ -80,14 +80,84 @@ static int cc__ud_pos_in_line_comment(const char* s, size_t pos) {
     return 0;
 }
 
+/* Is `s[pos]` the start of a token that continues the current statement
+ * through a preceding `}` — i.e. the `}` is NOT a statement boundary
+ * but a component of the same expression / statement as what follows?
+ *
+ * The scanner uses this to distinguish
+ *    foo() !>(e) { body } @destroy { body };   // one chained stmt
+ *    if (cond) { body } else { body }          // same if-stmt
+ * from
+ *    @errhandler(e) { body }                    // preceding stmt
+ *    T x = foo() !> @destroy;                   // current stmt
+ *
+ * A `}` followed (skipping whitespace/comments) by any of these tokens
+ * keeps the scanner walking backward:
+ *    @destroy     — `!>(e) { body } @destroy [{ body }];` chain
+ *    @err / @errhandler  — defensive; no real chain today, but keep the
+ *                          scanner conservative about `@`-keywords it
+ *                          doesn't recognise
+ *    else         — `if ... else ...`
+ *    while        — do-while tail
+ * Any other token (including a bare identifier, `return`, `int`, etc.)
+ * means the preceding `{ ... }` was a standalone preceding statement
+ * and we should stop. */
+static int cc__ud_is_stmt_continuation_after_rbrace(const char* s, size_t n, size_t pos) {
+    size_t j = pos;
+    while (j < n) {
+        if (cc__ud_skip_comment_or_string(s, n, &j)) continue;
+        char c = s[j];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { j++; continue; }
+        break;
+    }
+    if (j >= n) return 0;
+    if (s[j] == '@') {
+        if (j + 8 <= n && memcmp(s + j, "@destroy", 8) == 0) return 1;
+        if (j + 11 <= n && memcmp(s + j, "@errhandler", 11) == 0) return 1;
+        if (j + 4 <= n  && memcmp(s + j, "@err", 4) == 0) return 1;
+    }
+    if (j + 4 <= n && memcmp(s + j, "else", 4) == 0) {
+        char nx = (j + 4 < n) ? s[j + 4] : '\0';
+        if (!(nx == '_' || (nx >= 'a' && nx <= 'z') ||
+              (nx >= 'A' && nx <= 'Z') || (nx >= '0' && nx <= '9')))
+            return 1;
+    }
+    if (j + 5 <= n && memcmp(s + j, "while", 5) == 0) {
+        char nx = (j + 5 < n) ? s[j + 5] : '\0';
+        if (!(nx == '_' || (nx >= 'a' && nx <= 'z') ||
+              (nx >= 'A' && nx <= 'Z') || (nx >= '0' && nx <= '9')))
+            return 1;
+    }
+    return 0;
+}
+
 /* Walk backward from `pos` (exclusive) to find the start of the current
- * statement — right after the nearest enclosing `{`, `}`, `;`, or the
- * start of file.  Balanced `{ ... }` bodies are traversed transparently
- * by counting depth.  String/comment aware. */
-static size_t cc__ud_stmt_start_backward(const char* s, size_t pos) {
+ * statement — right after the nearest enclosing `{`, `;`, or the end of
+ * a preceding brace-balanced block at statement level (e.g.
+ * `@errhandler(...) { ... }`, `if (...) { ... } else { ... }`, or a
+ * plain compound `{ ... }`).  Balanced `{ ... }` bodies traversed while
+ * walking back are skipped transparently by counting depth; the key is
+ * that the `}` that closes a PRECEDING statement's block marks the
+ * start of the current statement, because preceding-statement forms
+ * (`@errhandler(...) {...}`, `if (...) {...}` etc.) have no trailing
+ * `;` of their own.  Chained forms whose `}` is followed by
+ * `@destroy` / `else` / `while (do-tail)` are NOT stmt terminators and
+ * the scanner keeps walking past them — see
+ * `cc__ud_is_stmt_continuation_after_rbrace`.
+ *
+ * String/comment aware (via `cc__ud_pos_in_line_comment` and inline
+ * block-comment skipping below). */
+static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos) {
     size_t i = pos;
     int brace_depth = 0;
     int paren_depth = 0;
+    /* Position immediately after the `}` that closed a stmt-level
+     * balanced block while walking back.  When we later pop that
+     * block's `{` back to depth 0, we return this position — stmt
+     * starts right after the preceding block.  `(size_t)-1` means
+     * "no non-continuation `}` seen yet" and the scanner should not
+     * treat the next popped `{` as a stmt boundary. */
+    size_t post_preceding_block = (size_t)-1;
     while (i > 0) {
         size_t k = i - 1;
         char c = s[k];
@@ -130,9 +200,40 @@ static size_t cc__ud_stmt_start_backward(const char* s, size_t pos) {
             i--;
             continue;
         }
-        if (c == '}') { brace_depth++; i--; continue; }
+        if (c == '}') {
+            /* Only the outermost `}` at stmt level (paren_depth == 0,
+             * brace_depth == 0) marks a preceding-block boundary; any
+             * `}` we hit deeper than that is part of the nested body
+             * we're skipping over.  And we only treat it as a boundary
+             * when the token immediately AFTER the `}` is not a
+             * statement-continuation keyword — otherwise the `{ ... }`
+             * is part of the current stmt (e.g. `!>(e) { body } @destroy`,
+             * `if (...) { body } else { body }`). */
+            if (brace_depth == 0 && paren_depth == 0) {
+                if (!cc__ud_is_stmt_continuation_after_rbrace(s, src_n, i)) {
+                    post_preceding_block = i;
+                }
+            }
+            brace_depth++;
+            i--;
+            continue;
+        }
         if (c == '{') {
-            if (brace_depth > 0) { brace_depth--; i--; continue; }
+            if (brace_depth > 0) {
+                brace_depth--;
+                /* We just closed a balanced `{ ... }` whose opening `{`
+                 * sits at stmt level.  That whole block is a complete
+                 * preceding statement (`@errhandler(...) { ... }`,
+                 * `if (...) { ... } else { ... }`, a plain compound,
+                 * etc.) with no trailing `;`, so the current statement
+                 * starts right after its closing `}`. */
+                if (brace_depth == 0 && paren_depth == 0 &&
+                    post_preceding_block != (size_t)-1) {
+                    return post_preceding_block;
+                }
+                i--;
+                continue;
+            }
             return i; /* stop AFTER the `{` — stmt starts here */
         }
         if (c == ';' && paren_depth == 0 && brace_depth == 0) return i;
@@ -458,7 +559,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
          * statement contains `!>` or `?>`.  `@create(...) @destroy { ... }`
          * lives in statements without those operators, so pass_create
          * continues to own that shape. */
-        size_t stmt_a = cc__ud_stmt_start_backward(src, i);
+        size_t stmt_a = cc__ud_stmt_start_backward(src, n, i);
         if (!cc__ud_range_has_unwrap_op(src, stmt_a, i)) {
             i += 8;
             continue;

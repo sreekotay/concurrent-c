@@ -742,7 +742,18 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
         pp_in = reparse_clean;
         pp_in_len = strlen(reparse_clean);
     }
+    /* Install the symbol table on the unwrap-destroy pass's ambient slot
+     * for the duration of this reparse preprocess.  The preprocess chain
+     * invokes `cc__rewrite_unwrap_destroy_suffix` internally to rewrite
+     * bodyless `!> @destroy;` on user types, and that lookup needs the
+     * symtab hooks from `@comptime cc_type_register(...)` — otherwise the
+     * pass diagnoses the type as having "no registered destructor" and
+     * aborts the reparse even though the outer codegen pipeline already
+     * handled the same site successfully.  Clear on return to avoid
+     * leaking a stale table into later unrelated calls. */
+    cc_unwrap_destroy_set_symbols(symbols);
     char* pp_buf = cc_preprocess_to_string_ex(pp_in, pp_in_len, input_path, 1);
+    cc_unwrap_destroy_set_symbols(NULL);
     if (nursery_rewritten) free(nursery_rewritten);
     if (registered_create) free(registered_create);
     if (family_rewritten) free(family_rewritten);
