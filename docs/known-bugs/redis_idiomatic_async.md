@@ -1,15 +1,15 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
-**Status:** the six original bugs **and** seven follow-up bugs
-([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]) are fixed, plus the
+**Status:** the six original bugs **and** eight follow-up bugs
+([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F8]/[F9]/[F12]) are fixed, plus the
 parser-mode Result-type collapse called out in Bug [3] is now
 structurally resolved (see "Follow-up: parser-mode result-type
 collapse" at the very bottom of this file).  The `@async` migration
 is live in `real_projects/redis/redis_idiomatic.ccs` (handle_client
 and owner_loop run on `spawn_async` + V2-scheduler fibers).
 
-Two scanner-level workarounds in `redis_idiomatic.ccs` remain, both
-tracked as OPEN follow-ups below:
+One scanner-level workaround in `redis_idiomatic.ccs` remains, tracked
+as an OPEN follow-up below:
 
 - **[F11]** (OPEN) — `@errhandler` with a **multi-line body** inside a
   sync `!>(E)`-returning function corrupts `async_ast`'s parameter-list
@@ -21,17 +21,6 @@ tracked as OPEN follow-ups below:
   by collapsing the handler body onto a single line.  Re-verified open
   after the parser-mode collapse fix — this is a scanner-offset bug,
   independent of the type-system work.
-
-- **[F12]** (OPEN) — `cc_channel_pair`'s syntax pass (in
-  `cc/src/visitor/pass_channel_syntax.c`, `cc__find_chan_decl_before`)
-  matches raw endpoint decls structurally (`T[~N >] name;`) and does
-  not resolve typedef aliases.  So even though
-  `typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 >] ReqTx;` is in scope,
-  `ReqTx req_tx; cc_channel_pair(&req_tx, &req_rx);` fails with
-  "could not find declarations for 'req_tx' and 'req_rx'".  Workaround
-  in `redis_idiomatic.ccs`: spell the bracket form at the
-  `cc_channel_pair` call site and use the `ReqTx`/`ReqRx` aliases
-  everywhere else.
 
 - **[F7]** (OPEN) — tcc's parser rejects a statement-expression
   initializer (`T x = ({ ... });`) when it appears as the first
@@ -109,11 +98,11 @@ comment bait) live at:
 
 ---
 
-## [F12] `cc_channel_pair` syntax pass does not resolve typedef aliases for endpoint decls — OPEN
+## [F12] `cc_channel_pair` syntax pass does not resolve typedef aliases for endpoint decls — FIXED
 
-### Symptom
+### Symptom (pre-fix)
 
-`cc_channel_pair(&tx, &rx)` errors with
+`cc_channel_pair(&tx, &rx)` errored with
 
 ```
 error: channel: cc_channel_pair could not find declarations for 'tx' and 'rx'
@@ -121,8 +110,8 @@ error: channel: cc_channel_pair could not find declarations for 'tx' and 'rx'
   hint: use 'T[~N >] tx; T[~N <] rx;' to declare send/recv handles
 ```
 
-even though `tx` / `rx` are declared at the correct shape via a
-typedef alias that is in scope at the call site.  Concrete repro from
+even though `tx` / `rx` were declared at the correct shape via a
+typedef alias that was in scope at the call site.  Concrete repro from
 `redis_idiomatic.ccs`:
 
 ```c
@@ -138,28 +127,45 @@ CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
 ### Root cause
 
 `cc__find_chan_decl_before` in
-`cc/src/visitor/pass_channel_syntax.c` scans the source text
+`cc/src/visitor/pass_channel_syntax.c` scanned the source text
 backwards from the call site looking for a decl whose form literally
-contains the `T[~...] NAME;` bracket shape.  When the decl's type is a
-typedef alias (`ReqTx req_tx;`), no `[` appears on the decl line and
-the backward scan fails even though the typedef body has the right
+contained the `T[~...] NAME;` bracket shape.  When the decl's type was
+a typedef alias (`ReqTx req_tx;`), no `[` appeared on the decl line and
+the backward scan failed even though the typedef body had the right
 bracket spec.
 
-### Workaround (applied in `redis_idiomatic.ccs`)
+### Fix
 
-At the `cc_channel_pair` call site, spell the raw `T[~N topology >]`
-form for each endpoint and keep the `ReqTx`/`ReqRx` aliases for all
-other use sites (function signatures, storage in structs, etc.).  The
-scan sees the bracket form at the one place it matters.
+`cc__find_chan_decl_before` now runs a two-stage scan:
 
-### Suggested fix
+1.  Primary: unchanged backward walk for an inline
+    `<type-prefix>[~ ... ] NAME;`.
+2.  Fallback: if no inline bracket is found, extract the bare-
+    identifier type token sitting in front of `NAME` (rejecting
+    anything preceded by a non-stmt-boundary character so pointer-star
+    prefixes, type qualifiers, struct tags, etc. don't spoof a typedef
+    alias), and call `cc__resolve_chan_typedef_brackets` which searches
+    the TU for `typedef <BODY>[~ ... > /< ] ALIAS;`.  The typedef
+    body's bracket span and element-type start then feed the rest of
+    the channel lowering unchanged.
 
-Teach `cc__find_chan_decl_before` to look at the type token in front
-of the endpoint name.  If that token is a bare identifier (not a
-bracket form), search the TU for `typedef <BODY>[~...] <IDENT>;` and
-use that body's bracket span as if it had been written inline.  The
-scan is already text-based; the typedef lookup is the same idea,
-applied once at the decl resolver rather than at every use site.
+The primary scan still wins when both forms exist, so nothing changes
+for existing code; the fallback is only consulted when the old scan
+would have reported "could not find declarations".
+
+### Test
+
+`tests/channel_pair_typedef_alias_smoke.ccs` declares
+`typedef int[~4 N:1 >/<] WorkerTx/WorkerRx;`, decls endpoints through
+the aliases, and round-trips a value through the resulting channel.
+Asserts the resolver handles the redis shape `T[~N topology >]` with
+optional topology tokens (not just the minimal `[~N >]`).
+
+### redis workaround
+
+`real_projects/redis/redis_idiomatic.ccs` can now drop the raw-bracket
+`req_tx`/`req_rx` pair at `cc_channel_pair(&req_tx, &req_rx)` and
+declare them through `ReqTx`/`ReqRx` like every other use site.
 
 ---
 
@@ -1319,8 +1325,8 @@ typecheck.
 
 The parser-mode collapse was a type-fidelity bug.  The remaining
 redis_idiomatic workarounds ([F11] multi-line `@errhandler` corrupts
-`async_ast` param scan, [F12] `cc_channel_pair` doesn't resolve
-typedef aliases, [F7] tcc's stmt-expr initializer at the head of a
-case-block) are all **text-scanner** bugs in downstream passes and
-are not affected by this refactor.  Verified post-fix: both F11 and
-F12 still reproduce exactly as documented.
+`async_ast` param scan, [F7] tcc's stmt-expr initializer at the head
+of a case-block) are both **text-scanner** bugs in downstream passes
+and are not affected by this refactor.  [F12] (`cc_channel_pair`
+typedef-alias resolution) was in the same family and has since been
+closed out with a targeted resolver — see its section above.

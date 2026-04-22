@@ -1,0 +1,33 @@
+/* Smoke: cc_channel_pair accepts endpoint decls whose type is a typedef
+ * alias, not just the raw `T[~N topology >]` bracket form.  Regression
+ * guard for `[F12]` in docs/known-bugs/redis_idiomatic_async.md —
+ * `cc__find_chan_decl_before` in `pass_channel_syntax.c` now resolves
+ * a bare-identifier type token back to its `typedef <BODY> <NAME>;`
+ * and uses the typedef body's bracket span.
+ *
+ * Before the fix this compiled with:
+ *   error: channel: cc_channel_pair could not find declarations
+ *          for 'tx' and 'rx'
+ *
+ * Real-world caller: `real_projects/redis/redis_idiomatic.ccs`, which
+ * was spelling the raw `RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;`
+ * at every `cc_channel_pair` call site purely to dodge this bug. */
+#include <ccc/cc_runtime.cch>
+
+typedef int[~4 N:1 >] WorkerTx;
+typedef int[~4 N:1 <] WorkerRx;
+
+int main(void) {
+    WorkerTx tx;
+    WorkerRx rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+
+    int v = 7;
+    int out = 0;
+    if (!cc_io_avail(chan_send(tx, v))) return 2;
+    if (!cc_io_avail(chan_recv(rx, &out))) return 3;
+    chan_close(tx);
+    cc_chan_free(ch);
+    return (out == 7) ? 0 : 4;
+}
