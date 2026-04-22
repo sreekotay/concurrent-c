@@ -17,6 +17,7 @@
 #   BENCH_TESTS      comma-separated command list (default set,get,incr)
 #   UPSTREAM_PORT    default 6391
 #   IDIOMATIC_PORT   default 6393
+#   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
 
 set -euo pipefail
 
@@ -33,6 +34,7 @@ RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
+SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 
 need() {
     if [[ ! -x "$1" ]]; then
@@ -69,12 +71,70 @@ PY
 # --- start both servers concurrently ---
 "$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
 UPSTREAM_PID=$!
-"$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+CC_WORKERS_OVERRIDE="${CC_WORKERS:-}"
+WORKER_FREES_OVERRIDE="${CC_NURSERY_WORKER_FREES:-}"
+env_prefix=""
+[[ -n "$CC_WORKERS_OVERRIDE"   ]] && env_prefix+="CC_WORKERS=$CC_WORKERS_OVERRIDE "
+[[ -n "$WORKER_FREES_OVERRIDE" ]] && env_prefix+="CC_NURSERY_WORKER_FREES=$WORKER_FREES_OVERRIDE "
+if [[ -n "$env_prefix" ]]; then
+    env $env_prefix "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+else
+    "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
+fi
 IDIOMATIC_PID=$!
 ALL_PIDS="$UPSTREAM_PID $IDIOMATIC_PID"
 
 wait_port "$UPSTREAM_PORT"
 wait_port "$IDIOMATIC_PORT"
+
+# --- rss/thread sampler (per-server, for the whole benchmark run) ---
+# Writes "<rss_kb> <threads>" lines; final peak is max over the whole run.
+cat > "$TMP_DIR/sampler.py" <<'PY'
+import os, subprocess, sys, time
+pid = int(sys.argv[1])
+out_path = sys.argv[2]
+interval = float(sys.argv[3])
+
+def probe(pid):
+    try:
+        rss = int(subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "rss="],
+            stderr=subprocess.DEVNULL, text=True).strip())
+    except Exception:
+        return None
+    try:
+        if sys.platform == "darwin":
+            lines = subprocess.check_output(
+                ["ps", "-M", str(pid)],
+                stderr=subprocess.DEVNULL, text=True).splitlines()
+            # ps -M: header + USER line + 1 line per thread; thread-count
+            # is the number of stack-indented lines.
+            threads = max(1, sum(1 for ln in lines[1:] if ln.startswith(" ")))
+        else:
+            threads = int(subprocess.check_output(
+                ["ps", "-o", "nlwp=", "-p", str(pid)],
+                stderr=subprocess.DEVNULL, text=True).strip())
+    except Exception:
+        threads = 0
+    return rss, threads
+
+with open(out_path, "w", buffering=1) as f:
+    while True:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        s = probe(pid)
+        if s is not None:
+            f.write(f"{s[0]} {s[1]}\n")
+        time.sleep(interval)
+PY
+
+python3 "$TMP_DIR/sampler.py" "$UPSTREAM_PID"  "$TMP_DIR/upstream_samples.txt"  "$SAMPLE_INTERVAL" &
+UPSTREAM_SAMPLER_PID=$!
+python3 "$TMP_DIR/sampler.py" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic_samples.txt" "$SAMPLE_INTERVAL" &
+IDIOMATIC_SAMPLER_PID=$!
+ALL_PIDS="$ALL_PIDS $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID"
 
 ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
@@ -135,6 +195,12 @@ print(' '.join(labels))")"
     done
 done
 
+# --- stop samplers and let them flush ---
+for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID"; do
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+done
+
 # --- stats ---
 python3 - <<PY
 import csv, statistics
@@ -148,11 +214,38 @@ for r in rows:
 cmds = sorted({r["cmd"] for r in rows}, key=lambda c: ["set","get","incr"].index(c) if c in ["set","get","incr"] else 99)
 labels = ["upstream", "idiomatic"]
 
+def read_samples(path):
+    peaks = {"rss_kb": 0, "threads": 0, "n": 0}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    rss = int(parts[0]); thr = int(parts[1])
+                except ValueError:
+                    continue
+                peaks["rss_kb"] = max(peaks["rss_kb"], rss)
+                peaks["threads"] = max(peaks["threads"], thr)
+                peaks["n"] += 1
+    except FileNotFoundError:
+        pass
+    return peaks
+
+sample_peaks = {
+    "upstream":  read_samples("$TMP_DIR/upstream_samples.txt"),
+    "idiomatic": read_samples("$TMP_DIR/idiomatic_samples.txt"),
+}
+
 def fmt(x): return f"{x/1e6:.3f}M"
+def fmt_mb(kb): return f"{kb/1024:.1f}MB" if kb else "  n/a"
+def fmt_thr(t): return f"{t}" if t else "n/a"
 
 print()
 print("== bench_robust summary ==")
-print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE}")
+print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'} worker_frees={'$WORKER_FREES_OVERRIDE' or '0'}")
+print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: upstream={sample_peaks['upstream']['n']}  idiomatic={sample_peaks['idiomatic']['n']}")
 print()
 for cmd in cmds:
     print(f"[{cmd.upper()}]")
@@ -166,7 +259,6 @@ for cmd in cmds:
         sd   = statistics.stdev(vals) if len(vals) > 1 else 0.0
         cv   = 100*sd/mean if mean else 0.0
         print(f"  {label:<10} {fmt(mean):>8} {fmt(med):>8} {fmt(min(vals)):>8} {fmt(max(vals)):>8} {fmt(sd):>8} {cv:>5.1f}%")
-    # pairwise ratio (median-of-medians)
     ups = by.get((cmd, "upstream"), [])
     idm = by.get((cmd, "idiomatic"), [])
     if ups and idm:
@@ -175,4 +267,11 @@ for cmd in cmds:
         tag = "OVERLAP" if overlap else "SEPARATED"
         print(f"  idiomatic/upstream median: {ratio:.3f}x  ({tag})")
     print()
+
+print("[RESOURCE PEAKS] (sampled every $SAMPLE_INTERVAL s across the whole run)")
+print(f"  {'label':<10} {'peak_rss':>10} {'peak_threads':>14}")
+for label in labels:
+    p = sample_peaks[label]
+    print(f"  {label:<10} {fmt_mb(p['rss_kb']):>10} {fmt_thr(p['threads']):>14}")
+print()
 PY
