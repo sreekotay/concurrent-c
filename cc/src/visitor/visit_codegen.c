@@ -3200,6 +3200,36 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         const CCASTRoot* phase3_root = root;
         CCASTRoot* phase3_owned_root = NULL;
         int phase3_changed = 0;
+        /* The incoming `root` was parsed from `src_all` (the phase-1 canonical
+         * source).  If any phase-2 text pass has rewritten `src_ufcs` since
+         * then — `cc__rewrite_result_unwrap`, `cc__rewrite_err_syntax`,
+         * `cc__rewrite_try_exprs_text`, etc. — the AST's line/col anchors no
+         * longer align with the buffer that UFCS edit collection is about
+         * to scan, and worse, TCC's resolved receiver types in `aux_s2` can
+         * reflect parses where `@errhandler(CCError e) { ... }` was still
+         * a live compound-stmt leaking variable names into the enclosing
+         * scope.  The classic symptom is `[F11]`: a multi-statement
+         * `@errhandler` body earlier in the TU causes UFCS to resolve a
+         * later `res.error()` call against a bogus receiver type (e.g.
+         * `CCArena`), emitting `cc_arena_error(&res)` and failing the
+         * post-UFCS reparse.  Reparse once from the post-phase-2 buffer
+         * before collecting UFCS edits so every downstream coarse pass
+         * works off an AST whose offsets and types match the text it is
+         * actually editing. */
+        if (src_ufcs != src_all) {
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len,
+                                                          ctx->input_path, ctx->symbols,
+                                                          "phase3 after phase-2 rewrites");
+            if (!phase3_owned_root) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            phase3_root = phase3_owned_root;
+        }
         cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
         if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
                                           src_all, cc__collect_ufcs_edits, &phase3_changed) < 0) {

@@ -1,0 +1,55 @@
+// Smoke: multi-line @errhandler body inlined at `!>;` must not
+// shift line offsets of subsequent user source.
+//
+// Regression guard for [F11]: before the fix, pass_result_unwrap /
+// pass_err_syntax inlined the multi-line handler body verbatim at
+// every bare `CALL !>;` splice site, pushing every downstream byte
+// down by (body_lines - 1) lines.  TCC's AST line anchors then no
+// longer matched the rewritten buffer, so pass_ufcs resolved a
+// later `.error()` call against the wrong receiver type and emitted
+// e.g. `cc_arena_error(&res)` — producing a spurious parse error.
+//
+// The flattening helpers (`cc__pu_flatten_handler_body`,
+// `cc__es_flatten_body`) collapse the substituted body to a single
+// physical line at splice time so downstream line/col anchors stay
+// aligned with the rewritten text.
+
+#include <stdio.h>
+
+static int g_handler_ran;
+
+int !> (CCError) sometimes_err(int x) {
+    if (x < 0) return cc_err(CC_ERR_INVALID_ARG, "negative");
+    return cc_ok(x + 1);
+}
+
+int !> (CCError) always_ok(void) { return cc_ok(42); }
+
+int !> (CCError) caller(int x, int y) {
+    @errhandler(CCError e) {
+        g_handler_ran++;
+        int _tmp = 1;
+        (void)_tmp;
+        return cc_err(e);
+    }
+
+    int a = sometimes_err(x) !>;
+    int b = sometimes_err(y) !>;
+
+    // UFCS on a result value AFTER the multi-line handler was inlined
+    // at both `!>;` above.  Pre-fix, this would fall victim to a UFCS
+    // mis-rewrite because the AST line anchors were shifted.
+    int !> (CCError) res = always_ok();
+    if (res.is_err()) return cc_err(res.error());
+
+    return cc_ok(a + b + cc_value(res));
+}
+
+int main(void) {
+    int !> (CCError) r1 = caller(1, 2);
+    if (cc_is_err(r1)) { printf("r1 FAIL\n"); return 1; }
+    int !> (CCError) r2 = caller(-1, 2);
+    if (!cc_is_err(r2)) { printf("r2 FAIL\n"); return 1; }
+    printf("handler_ran=%d r1=%d\n", g_handler_ran, cc_value(r1));
+    return 0;
+}

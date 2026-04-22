@@ -24,6 +24,74 @@ typedef struct {
 
 #define CC_ERR_STK_MAX 64
 
+/* Flatten a handler body to a single physical line.  The body is being
+ * inlined at a `!>`/`@err` splice site that already lives on one source
+ * line; preserving its original multi-line shape would push every
+ * following byte down by N-1 lines, desynchronising TCC's AST offsets
+ * from the rewritten buffer and corrupting downstream passes (UFCS
+ * receiver-type resolution, async lowering parameter scans, etc.).
+ *
+ * This is bug [F11] in docs/known-bugs/redis_idiomatic_async.md — the
+ * exact same transform exists in pass_result_unwrap.c as
+ * cc__pu_flatten_handler_body; keep the two mirrored. */
+static char* cc__es_flatten_body(const char* in_buf, size_t in_len,
+                                 size_t* out_len) {
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    size_t i = 0;
+    while (i < in_len) {
+        char ch = in_buf[i];
+        if (ch == '"' || ch == '\'') {
+            char quote = ch;
+            size_t start = i;
+            i++;
+            while (i < in_len) {
+                if (in_buf[i] == '\\' && i + 1 < in_len) { i += 2; continue; }
+                if (in_buf[i] == quote) { i++; break; }
+                i++;
+            }
+            cc__append_n(&out, &ol, &oc, in_buf + start, i - start);
+            continue;
+        }
+        if (ch == '/' && i + 1 < in_len && in_buf[i + 1] == '/') {
+            while (i < in_len && in_buf[i] != '\n') i++;
+            if (i < in_len) i++;
+            cc__append_n(&out, &ol, &oc, " ", 1);
+            continue;
+        }
+        if (ch == '/' && i + 1 < in_len && in_buf[i + 1] == '*') {
+            size_t start = i;
+            i += 2;
+            while (i + 1 < in_len && !(in_buf[i] == '*' && in_buf[i + 1] == '/')) i++;
+            if (i + 1 < in_len) i += 2;
+            for (size_t k = start; k < i; k++) {
+                char c = in_buf[k];
+                if (c == '\n' || c == '\r') c = ' ';
+                cc__append_n(&out, &ol, &oc, &c, 1);
+            }
+            continue;
+        }
+        if (ch == '\n' || ch == '\r') {
+            cc__append_n(&out, &ol, &oc, " ", 1);
+            i++;
+            continue;
+        }
+        cc__append_n(&out, &ol, &oc, &ch, 1);
+        i++;
+    }
+    if (!out) {
+        out = (char*)malloc(1);
+        if (!out) return NULL;
+        out[0] = 0;
+        if (out_len) *out_len = 0;
+        return out;
+    }
+    cc__append_n(&out, &ol, &oc, "", 1);
+    ol--;
+    if (out_len) *out_len = ol;
+    return out;
+}
+
 static void cc__err_frame_free(CCErrFrame* f) {
     if (!f) return;
     free(f->body);
@@ -1262,7 +1330,13 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                                                 err_file, errl);
                         cc__append_str(&out, &ol, &oc, "; ");
                     }
-                    cc__append_str(&out, &ol, &oc, lb_exp);
+                    {
+                        size_t lb_flat_len = 0;
+                        char* lb_flat = cc__es_flatten_body(lb_exp, strlen(lb_exp), &lb_flat_len);
+                        if (!lb_flat) { free(lb_exp); goto fail; }
+                        cc__append_n(&out, &ol, &oc, lb_flat, lb_flat_len);
+                        free(lb_flat);
+                    }
                     cc__append_str(&out, &ol, &oc, " } ");
                     free(lb_exp);
                 } else {
@@ -1271,7 +1345,13 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                                             in_src, err_span_a, err_span_b,
                                             err_file, errl);
                     cc__append_str(&out, &ol, &oc, "; ");
-                    cc__append_n(&out, &ol, &oc, def->body, def->body_len);
+                    {
+                        size_t def_flat_len = 0;
+                        char* def_flat = cc__es_flatten_body(def->body, def->body_len, &def_flat_len);
+                        if (!def_flat) goto fail;
+                        cc__append_n(&out, &ol, &oc, def_flat, def_flat_len);
+                        free(def_flat);
+                    }
                     cc__append_str(&out, &ol, &oc, " } ");
                 }
             }
