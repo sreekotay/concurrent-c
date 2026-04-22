@@ -14,7 +14,7 @@
 #   CLIENTS          concurrent clients (default 50)
 #   PIPELINE         pipeline depth (default 16)
 #   RANDOM_KEYS      keyspace for -r (default 50000)
-#   BENCH_TESTS      comma-separated command list (default set,get,incr)
+#   BENCH_TESTS      comma-separated command list (default set,get)
 #   UPSTREAM_PORT    default 6391
 #   IDIOMATIC_PORT   default 6393
 #   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
@@ -31,7 +31,7 @@ REQUESTS="${REQUESTS:-500000}"
 CLIENTS="${CLIENTS:-50}"
 PIPELINE="${PIPELINE:-16}"
 RANDOM_KEYS="${RANDOM_KEYS:-50000}"
-BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
+BENCH_TESTS="${BENCH_TESTS:-set,get}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
@@ -72,10 +72,8 @@ PY
 "$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
 UPSTREAM_PID=$!
 CC_WORKERS_OVERRIDE="${CC_WORKERS:-}"
-WORKER_FREES_OVERRIDE="${CC_NURSERY_WORKER_FREES:-}"
 env_prefix=""
 [[ -n "$CC_WORKERS_OVERRIDE"   ]] && env_prefix+="CC_WORKERS=$CC_WORKERS_OVERRIDE "
-[[ -n "$WORKER_FREES_OVERRIDE" ]] && env_prefix+="CC_NURSERY_WORKER_FREES=$WORKER_FREES_OVERRIDE "
 if [[ -n "$env_prefix" ]]; then
     env $env_prefix "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
 else
@@ -244,7 +242,7 @@ def fmt_thr(t): return f"{t}" if t else "n/a"
 
 print()
 print("== bench_robust summary ==")
-print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'} worker_frees={'$WORKER_FREES_OVERRIDE' or '0'}")
+print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
 print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: upstream={sample_peaks['upstream']['n']}  idiomatic={sample_peaks['idiomatic']['n']}")
 print()
 for cmd in cmds:

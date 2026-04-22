@@ -45,20 +45,19 @@
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
 typedef struct RedisEntry RedisEntry;
 
-/* Entries are malloc'd individually (so DEL reclaims the header) but
- * their key and value bytes live in db->arena — a single growable heap
- * arena shared by the whole DB.  That trades the "each entry owns two
- * 128-byte cc_arena_heap allocations" model for one bump allocation
- * per string, collapsing per-key overhead from ~1 KB to string length +
- * a couple bytes of arena header. */
+/* Entries come from a fixed-size arena pool (so DEL can recycle header
+ * storage without per-entry malloc/free churn) while their value bytes
+ * live in db->arena — a single growable heap arena shared by the whole
+ * DB. The map bucket already stores the lookup key slice, so RedisEntry
+ * only needs next + value. */
 struct RedisEntry {
     struct RedisEntry* next;
-    CCString key;
     CCString value;
 };
 
 typedef struct RedisDb {
     CCArena arena;
+    CCArenaPool entry_pool;
     Map<char[:], RedisEntry*> entries;
     RedisEntry* head;
 } RedisDb;
@@ -73,9 +72,10 @@ typedef struct RedisConn {
      * conn->release() that may be last-ref so the pool's backing
      * arena outlives the slot walk in pool_free. */
     CCArenaPool req_pool;
-    /* Owner stacks each batch's replies (slot + serialized bytes)
-     * into this arena; the client resets it once per batch after
-     * draining all `outstanding` slots. */
+    /* Owner stores queued reply slots here. Most replies stay
+     * lightweight and serialize later on the client side; this arena is
+     * only used when a reply needs stable copied bytes (currently the
+     * PING <msg> echo case). Reset once per drained batch. */
     CCArena reply_arena;
     /* Owner → client reply stream (1:1, cap PIPELINE_LIMIT so the
      * owner never blocks publishing a full batch). */
@@ -226,6 +226,14 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 
 #include "redis_resp.cch"
 
+@noblock static RespReader rr_init_nb(char* data, size_t cap) {
+    return rr_init(data, cap);
+}
+
+@noblock static void cc_arena_reset_nb(CCArena* arena) {
+    cc_arena_reset(arena);
+}
+
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
     if (slice_eq_ignore_case(cmd, "GET") && argc == 1) return REDIS_CMD_GET;
@@ -237,12 +245,10 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
 
 /* RedisReply is ~200 bytes (mostly the 128-byte inline_buf scratch).
  * These constructors deliberately leave inline_buf/arena/data_inline
- * uninitialized: the only fields any downstream consumer reads are
- * kind + data + int_value.  inline_buf is used as scratch by
- * write_reply_now (materialize writes before anything reads), and the
- * arena/data_inline fields are vestigial on the owner→client→socket
- * path.  Skipping the per-reply `= {0}` memset saves ~200 B of
- * zero-init on the GET/SET/INCR hot path. */
+ * uninitialized: the only fields the normal path reads are kind + data
+ * + int_value. Stable-storage fallback uses reply_materialize() only
+ * for the rare request-owned reply case, so skipping per-reply `= {0}`
+ * still saves ~200 B of zero-init on the GET/SET/INCR hot path. */
 static RedisReply reply_simple(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_SIMPLE_STRING;
@@ -345,7 +351,7 @@ typedef struct ReqIter {
     RedisConn* conn;
 } ReqIter;
 
-static ReqIter rr_req_iter(RespReader* reader, RedisConn* conn) {
+@noblock static ReqIter rr_req_iter(RespReader* reader, RedisConn* conn) {
     ReqIter it = { .reader = reader, .conn = conn };
     return it;
 }
@@ -407,12 +413,42 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     return cc_ok(true);
 }
 
+static size_t db_string_cap_8x(size_t len) {
+    size_t need = len + 1; /* Keep room for the trailing NUL. */
+    if (need < len) return 0;
+    size_t rem = need & 7;
+    if (rem == 0) return need;
+    size_t rounded = need + (8 - rem);
+    if (rounded < need) return 0;
+    return rounded;
+}
+
 static bool !>(CCError) db_clone_into_arena(CCString* out,
                                             CCArena* arena,
                                             char[:] src,
                                             const char* err_msg) {
-    CCString cloned = CCString_from_slice(arena, src);
-    if (src.len > 0 && CCString_len(&cloned) != src.len) {
+    size_t cap = db_string_cap_8x(src.len);
+    if (cap == 0) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+    CCString cloned = { .len = 0, .cap = 0, .data = NULL, .arena = arena, .provenance = 0 };
+    if (cc_vec_init((CCVec*)&cloned, arena, sizeof(char), _Alignof(char), cap) != 0) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+    if (cap > 0 && !cloned.data) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+    if (CCString_push_slice(&cloned, src) == NULL) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+    *out = cloned;
+    return cc_ok(true);
+}
+
+static bool !>(CCError) db_clone_key_slice(CCSlice* out,
+                                           CCArena* arena,
+                                           char[:] src,
+                                           const char* err_msg) {
+    CCSlice cloned = cc_slice_clone(arena, src);
+    if (src.len > 0 && (!cloned.ptr || cloned.len != src.len)) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
     *out = cloned;
@@ -431,14 +467,24 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
     size_t arena_size = bucket_count * (sizeof(CCSlice) + sizeof(RedisEntry*) + 8);
     db->arena = cc_arena_heap(arena_size);
     if (!db->arena.base) return false;
+    if (cc_arena_pool(&db->entry_pool, sizeof(RedisEntry)) != 0) {
+        db->arena.free();
+        db->arena = (CCArena){0};
+        return false;
+    }
     db->entries = map_new<char[:], RedisEntry*>(&db->arena);
+    if (!db->entries) {
+        cc_arena_pool_destroy(&db->entry_pool);
+        db->entry_pool = (CCArenaPool){0};
+        db->arena.free();
+        db->arena = (CCArena){0};
+        return false;
+    }
     db->head = NULL;
-    return db->entries != NULL;
+    return true;
 }
 
-static bool !>(CCError) db_entry_init(RedisDb* db, RedisEntry* e, char[:] key, char[:] value) {
-    bool !>(CCError) key_res = db_clone_into_arena(&e->key, &db->arena, key, "entry key clone failed");
-    if (key_res.is_err()) return cc_err(key_res.error());
+static bool !>(CCError) db_entry_init(RedisDb* db, RedisEntry* e, char[:] value) {
     bool !>(CCError) value_res = db_clone_into_arena(&e->value, &db->arena, value, "entry value clone failed");
     if (value_res.is_err()) return cc_err(value_res.error());
     return cc_ok(true);
@@ -452,17 +498,21 @@ static bool !>(CCError) db_entry_init(RedisDb* db, RedisEntry* e, char[:] key, c
  * workloads where values tend to be small and replacements rare. */
 static bool !>(CCError) db_entry_replace_value(RedisDb* db, RedisEntry* e, char[:] value) {
     if (!e) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
-    if (e->value.data && value.len <= e->value.cap) {
-        if (value.len > 0) memcpy(e->value.data, value.ptr, value.len);
+    if (e->value.data && value.len + 1 <= e->value.cap) {
+        char* dst = (char*)e->value.data;
+        if (value.len > 0) memcpy(dst, value.ptr, value.len);
         e->value.len = value.len;
+        dst[value.len] = '\0';
         return cc_ok(true);
     }
     return db_clone_into_arena(&e->value, &db->arena, value, "entry value clone failed");
 }
 
-static void db_free_entry(RedisEntry* e) {
+static void db_free_entry(RedisDb* db, RedisEntry* e) {
     /* Key/value bytes are in db->arena and reclaimed on db_free_all. */
-    if (e) free(e);
+    if (!db || !e) return;
+    e->next = NULL;
+    cc_arena_pool_free(&db->entry_pool, e);
 }
 
 static void db_unlink_entry(RedisDb* db, RedisEntry* e) {
@@ -478,13 +528,16 @@ static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
     return (entry_slot && *entry_slot) ? *entry_slot : NULL;
 }
 
-static bool !>(CCError) db_insert_entry(RedisDb* db, RedisEntry* e) {
+static bool !>(CCError) db_insert_entry(RedisDb* db, char[:] key, RedisEntry* e) {
     if (!db || !db->entries || !e) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
 
+    CCSlice owned_key = {0};
+    bool !>(CCError) key_res = db_clone_key_slice(&owned_key, &db->arena, key, "entry key clone failed");
+    if (key_res.is_err()) return cc_err(key_res.error());
     Map<char[:], RedisEntry*> entries = db->entries;
-    if (entries.insert(CCString_as_slice(&e->key), e) != 0) {
+    if (entries.insert(owned_key, e) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
 
@@ -503,18 +556,20 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
         return cc_ok(reply_simple("OK"));
     }
 
-    RedisEntry* new_entry = calloc(1, sizeof(*new_entry));
+    RedisEntry* new_entry = (RedisEntry*)cc_arena_pool_alloc(&db->entry_pool);
     if (!new_entry) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
+    new_entry->next = NULL;
+    new_entry->value = (CCString){0};
 
-    bool !>(CCError) init_res = db_entry_init(db, new_entry, key, value);
+    bool !>(CCError) init_res = db_entry_init(db, new_entry, value);
     if (init_res.is_err()) {
-        free(new_entry);
+        cc_arena_pool_free(&db->entry_pool, new_entry);
         return cc_err(init_res.error());
     }
 
-    bool !>(CCError) insert_res = db_insert_entry(db, new_entry);
+    bool !>(CCError) insert_res = db_insert_entry(db, key, new_entry);
     if (insert_res.is_err()) {
-        db_free_entry(new_entry);
+        db_free_entry(db, new_entry);
         return cc_err(insert_res.error());
     }
     return cc_ok(reply_simple("OK"));
@@ -533,9 +588,8 @@ static RedisReply db_del(RedisDb* db, char[:] key) {
     RedisEntry* e = db_find_entry(db, key);
     if (!e) return reply_integer(0);
     if (!entries.remove(key)) return reply_integer(0);
-
     db_unlink_entry(db, e);
-    db_free_entry(e);
+    db_free_entry(db, e);
     return reply_integer(1);
 }
 
@@ -571,6 +625,33 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     return cc_ok(reply_integer(value));
 }
 
+static int db_preload_key_count(void) {
+    const char* s = getenv("CC_REDIS_PRELOAD_KEYS");
+    if (!s || !s[0]) return 0;
+    char* end = NULL;
+    long n = strtol(s, &end, 10);
+    if (end == s || (end && *end != 0) || n <= 0) return 0;
+    return (int)n;
+}
+
+static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
+    if (!db || count <= 0) return cc_ok(true);
+    static const char preload_value[] = "0";
+    for (int i = 0; i < count; ++i) {
+        char key_buf[32];
+        int n = snprintf(key_buf, sizeof(key_buf), "key:%d", i);
+        if (n <= 0 || (size_t)n >= sizeof(key_buf)) {
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "preload key encode failed"));
+        }
+        RedisReply !>(CCError) set_res =
+            db_set(db,
+                   cc_slice_from_buffer(key_buf, (size_t)n),
+                   cc_slice_from_buffer((void*)preload_value, sizeof(preload_value) - 1));
+        if (set_res.is_err()) return cc_err(set_res.error());
+    }
+    return cc_ok(true);
+}
+
 /* Owner-private dispatch.  Called only from owner_loop, so db access
  * here needs no lock.  `@noblock` forces pass_autoblock to inline
  * each call site rather than bouncing through the threadpool. */
@@ -600,7 +681,7 @@ static void db_free_all(RedisDb* db) {
     RedisEntry* entry = db->head;
     while (entry) {
         RedisEntry* next = entry->next;
-        db_free_entry(entry);
+        db_free_entry(db, entry);
         entry = next;
     }
 
@@ -608,6 +689,8 @@ static void db_free_all(RedisDb* db) {
     entries.destroy();
     db->entries = NULL;
     db->head = NULL;
+    cc_arena_pool_destroy(&db->entry_pool);
+    db->entry_pool = (CCArenaPool){0};
     if (db->arena.base) db->arena.free();
     db->arena = (CCArena){0};
 }
@@ -646,26 +729,98 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
+@noblock static char* reserve_output_bytes(CCSocket* sock, RedisConn* conn, size_t n) {
+    if (!conn || n == 0 || n > WRITE_BUF_CAP) return NULL;
+    if (conn->out_len + n > WRITE_BUF_CAP) {
+        if (!flush_output_buffer(sock, conn)) return NULL;
+    }
+    char* dst = conn->out_buf + conn->out_len;
+    conn->out_len += n;
+    return dst;
+}
+
+@noblock static bool write_reply_structured(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
+    if (!reply) return false;
+    switch (reply->kind) {
+        case REDIS_REPLY_RAW:
+            return buffer_write_bytes(sock, conn, reply->data);
+        case REDIS_REPLY_SIMPLE_STRING:
+        case REDIS_REPLY_ERROR: {
+            size_t n = reply->data.len + 3;
+            /* TODO: mirror BULK_STRING's fallback path if simple/error
+             * replies ever grow beyond WRITE_BUF_CAP. Current Redis
+             * traffic here is expected to stay small. */
+            char* dst = reserve_output_bytes(sock, conn, n);
+            if (!dst) return false;
+            dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
+            if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
+            dst[n - 2] = '\r';
+            dst[n - 1] = '\n';
+            return true;
+        }
+        case REDIS_REPLY_BULK_STRING: {
+            size_t hdr_len = resp_bulk_header_len(reply->data.len);
+            size_t n = hdr_len + reply->data.len + 2;
+            char* dst = reserve_output_bytes(sock, conn, n);
+            if (!dst) {
+                char hdr[32];
+                resp_encode_bulk_header_into(hdr, reply->data.len);
+                CCSlice hdr_s = cc_slice_from_buffer(hdr, hdr_len);
+                CCSlice crlf = cc_slice_from_cstr("\r\n");
+                return buffer_write_bytes(sock, conn, hdr_s) &&
+                       buffer_write_bytes(sock, conn, reply->data) &&
+                       buffer_write_bytes(sock, conn, crlf);
+            }
+            resp_encode_bulk_header_into(dst, reply->data.len);
+            if (reply->data.len > 0) memcpy(dst + hdr_len, reply->data.ptr, reply->data.len);
+            dst[n - 2] = '\r';
+            dst[n - 1] = '\n';
+            return true;
+        }
+        case REDIS_REPLY_INTEGER: {
+            size_t n = resp_integer_encoded_len(reply->int_value);
+            char* dst = reserve_output_bytes(sock, conn, n);
+            if (dst) {
+                resp_encode_integer_into(dst, reply->int_value);
+                return true;
+            }
+            char buf[32];
+            resp_encode_integer_into(buf, reply->int_value);
+            return buffer_write_bytes(sock, conn, cc_slice_from_buffer(buf, n));
+        }
+        case REDIS_REPLY_NULL_BULK: {
+            char* dst = reserve_output_bytes(sock, conn, 5);
+            if (dst) {
+                memcpy(dst, "$-1\r\n", 5);
+                return true;
+            }
+            return buffer_write_bytes(sock, conn, cc_slice_from_cstr("$-1\r\n"));
+        }
+        default:
+            return false;
+    }
+}
+
 static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
-    return buffer_write_bytes(sock, conn, reply->data);
+    return write_reply_structured(sock, conn, reply);
 }
 
 /* Encode `reply` into `arena`.  On return reply->kind ==
  * REDIS_REPLY_RAW and reply->data points into `arena`, valid for the
  * arena's lifetime. */
+static char* !>(CCError) reply_alloc_bytes(CCArena* arena, size_t n) {
+    char* p = (char*)cc_arena_alloc(arena, n, 1);
+    if (n > 0 && !p) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
+    return cc_ok(p);
+}
+
 static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
     if (!reply || !arena) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply materialize null arg"));
-
-#define alloc(n) ({ \
-        char* __dst = (char*)cc_arena_alloc(arena, (n), 1); \
-        if ((n) > 0 && !__dst) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM")); \
-        __dst; \
-    })
+    @errhandler(CCError e) { return cc_err(e); }
 
     switch (reply->kind) {
         case REDIS_REPLY_RAW: {
-            char* dst = alloc(reply->data.len);
+            char* dst = reply_alloc_bytes(arena, reply->data.len) !>;
             if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
             reply->data = (CCSlice){ .ptr = dst, .len = reply->data.len };
             return cc_ok(true);
@@ -673,7 +828,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
             size_t n = reply->data.len + 3;
-            char* dst = alloc(n);
+            char* dst = reply_alloc_bytes(arena, n) !>;
             dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
             if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
             dst[n - 2] = '\r';
@@ -685,7 +840,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
         case REDIS_REPLY_BULK_STRING: {
             size_t hdr = resp_bulk_header_len(reply->data.len);
             size_t n = hdr + reply->data.len + 2;
-            char* dst = alloc(n);
+            char* dst = reply_alloc_bytes(arena, n) !>;
             resp_encode_bulk_header_into(dst, reply->data.len);
             if (reply->data.len > 0) memcpy(dst + hdr, reply->data.ptr, reply->data.len);
             dst[n - 2] = '\r';
@@ -696,7 +851,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
         }
         case REDIS_REPLY_INTEGER: {
             size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = alloc(n);
+            char* dst = reply_alloc_bytes(arena, n) !>;
             resp_encode_integer_into(dst, reply->int_value);
             reply->kind = REDIS_REPLY_RAW;
             reply->data = (CCSlice){ .ptr = dst, .len = n };
@@ -704,7 +859,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
         }
         case REDIS_REPLY_NULL_BULK: {
             CCSlice src = cc_slice_from_cstr("$-1\r\n");
-            char* dst = alloc(src.len);
+            char* dst = reply_alloc_bytes(arena, src.len) !>;
             memcpy(dst, src.ptr, src.len);
             reply->kind = REDIS_REPLY_RAW;
             reply->data = (CCSlice){ .ptr = dst, .len = src.len };
@@ -713,7 +868,6 @@ static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
         default:
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "unknown reply kind"));
     }
-#undef alloc
 }
 
 /* Sized to hold ~PIPELINE_LIMIT replies without growth; oversized
@@ -772,17 +926,10 @@ static RedisConn* redis_conn_release(RedisConn* conn) {
     return conn;
 }
 
-/* One-shot error-reporting path: materialize into a stack-backed
- * scratch arena that starts on the reply's inline_buf and overflows
- * to heap only for oversize encodings.  Freed on return. */
+/* One-shot error-reporting path: serialize directly into conn->out_buf
+ * and flush immediately. */
 static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
-    CCArena scratch = {0};
-    cc_arena_buffer(&scratch, reply.inline_buf, sizeof(reply.inline_buf));
-    scratch.block_max = 0;
-    @defer cc_arena_free(&scratch);
-    bool !>(CCError) mat_res = reply_materialize(&reply, &scratch);
-    bool ok = mat_res.is_ok() &&
-              write_reply(sock, conn, &reply) &&
+    bool ok = write_reply(sock, conn, &reply) &&
               flush_output_buffer(sock, conn);
     return ok;
 }
@@ -808,16 +955,28 @@ static void redis_conn_release_request(RedisRequest* req) {
     if (conn) conn->release();
 }
 
-/* Owner-side: materialize `reply` into conn->reply_arena and publish
- * the slot.  On alloc/send failure, close reply_tx with a structured
- * error so the client's recv surfaces the exact shape (OOM vs
- * CANCELLED) rather than a generic EOF. */
-static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
+@noblock static bool redis_reply_needs_stable_storage(const RedisRequest* req,
+                                                      const RedisReply* reply) {
+    if (!req || !reply) return false;
+    /* PING <msg> echoes request-owned argv bytes; materialize before the
+     * owner releases the request slot. Other current reply shapes are
+     * static, integer-only, or DB-backed and safe to serialize later. */
+    return req->kind == REDIS_CMD_PING && req->argc == 1 && reply->kind == REDIS_REPLY_BULK_STRING;
+}
+
+/* Owner-side: queue a reply slot for the client. Materialize into
+ * conn->reply_arena only when the reply would otherwise alias
+ * request-owned storage. On alloc/send failure, close reply_tx with a
+ * structured error so the client's recv surfaces OOM/CANCELLED rather
+ * than a generic EOF. */
+static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, RedisReply* reply) {
     @errhandler(CCError e) { cc_channel_close(conn->reply_tx, cc_io_error(e)); return false; }
     if (!conn || !reply) return false;
     RedisReply* slot = cc_arena_alloc_T(RedisReply, &conn->reply_arena) !>;
     *slot = *reply;
-    reply_materialize(slot, &conn->reply_arena) !>;
+    if (redis_reply_needs_stable_storage(req, slot)) {
+        reply_materialize(slot, &conn->reply_arena) !>;
+    }
     return conn->reply_tx.send(slot) !>(e) {
         cc_channel_close(conn->reply_tx, e);
         return false;
@@ -828,9 +987,18 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
  * it can't outlive the owner and nobody else can take its address. */
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
-    if (!db_init(&db, 131072)) {
+    if (!db_init(&db, 65536)) {
         fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
         return 1;
+    }
+    int preload_keys = db_preload_key_count();
+    if (preload_keys > 0) {
+        bool !>(CCError) preload_res = db_preload_keys(&db, preload_keys);
+        if (preload_res.is_err()) {
+            fprintf(stderr, "redis_idiomatic: preload failed\n");
+            return 1;
+        }
+        fprintf(stderr, "redis_idiomatic: preloaded %ld keys\n", (long)preload_keys);
     }
     @defer db_free_all(&db);
 
@@ -842,9 +1010,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
         @defer redis_conn_release_request(req);
 
         RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
-        /* reply.data may alias db storage; queue_reply copies into
-         * conn->reply_arena before publishing. */
-        (void)conn->queue_reply(&reply);
+        (void)conn->queue_reply(req, &reply);
     }
     return 0;
 }
@@ -861,7 +1027,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
     };
 
     char read_buf[READ_BUF_CAP];
-    RespReader reader = rr_init(read_buf, sizeof(read_buf));
+    RespReader reader = rr_init_nb(read_buf, sizeof(read_buf));
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
     while (true) {
@@ -896,7 +1062,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
             outstanding--;
             if (!slot || !write_reply(&client, conn, slot)) return 0;
         }
-        cc_arena_reset(&conn->reply_arena);
+        cc_arena_reset_nb(&conn->reply_arena);
 
         /* Flush: one socket write for the whole batch. */
         if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;

@@ -311,9 +311,11 @@ typedef struct {
 struct sched_v2_state {
     thread_v2    threads[V2_MAX_THREADS];
     _Atomic int  num_threads;
+    int          max_threads;
     _Atomic int  running;
     _Atomic int  idle_workers;
     int          allow_expand;
+    pthread_mutex_t start_mu;
 
     /* Single global ready queue */
     v2_queue ready_queue;
@@ -767,13 +769,13 @@ void cc_nursery_notify_child_done(CCNursery* n);
 
 /* Mirror of nursery.c's CC_NURSERY_WORKER_FREES gate.  Latched on first
  * read so we never branch on a changing env var in the hot MCO_DEAD
- * path. */
+ * path. Default-on; CC_NURSERY_WORKER_FREES=0 opts out. */
 static int cc_v2_worker_frees_mode(void) {
     static _Atomic int cached = -1;
     int v = atomic_load_explicit(&cached, memory_order_relaxed);
     if (v >= 0) return v;
     const char* s = getenv("CC_NURSERY_WORKER_FREES");
-    int newv = (s && s[0] && s[0] != '0') ? 1 : 0;
+    int newv = !(s && s[0] == '0' && s[1] == 0);
     atomic_store_explicit(&cached, newv, memory_order_relaxed);
     return newv;
 }
@@ -891,6 +893,20 @@ static void fiber_v2_free(fiber_v2* f) {
 static void* thread_v2_main(void* arg);
 static void sched_v2_wake(int worker_hint);
 
+static void sched_v2_init_worker_slot(int id) {
+    g_v2.threads[id].id = id;
+    atomic_store_explicit(&g_v2.threads[id].is_idle, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[id].alive, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[id].dispatch_epoch, 0,
+                          memory_order_relaxed);
+    /* Initial worker in this slot: generation 0. First eviction will
+     * bump it to 1; the cached tls_v2_my_generation in the orphan
+     * stays at 0 and the mismatch triggers exit. */
+    atomic_store_explicit(&g_v2.threads[id].generation, 0,
+                          memory_order_release);
+    wake_primitive_init(&g_v2.threads[id].wake);
+}
+
 static inline int sched_v2_finish_join(fiber_v2* f, void** out_result) {
     if (out_result) *out_result = f->result;
     return 0;
@@ -916,27 +932,24 @@ static int sched_v2_try_wake_one(void) {
     return 0;
 }
 
-/* Expand thread pool by one. Returns 1 if a thread was created. */
+/* Start one additional worker lazily. Returns 1 if a thread was created. */
 static int sched_v2_try_expand_pool(void) {
     if (!g_v2.allow_expand) return 0;
-    int current = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
-    if (current >= V2_MAX_THREADS) return 0;
-    int new_id = atomic_fetch_add_explicit(&g_v2.num_threads, 1, memory_order_acq_rel);
-    if (new_id >= V2_MAX_THREADS) {
-        atomic_fetch_sub_explicit(&g_v2.num_threads, 1, memory_order_relaxed);
+    pthread_mutex_lock(&g_v2.start_mu);
+    int new_id = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (new_id >= g_v2.max_threads) {
+        pthread_mutex_unlock(&g_v2.start_mu);
         return 0;
     }
-    g_v2.threads[new_id].id = new_id;
-    atomic_store_explicit(&g_v2.threads[new_id].is_idle, 0, memory_order_relaxed);
-    wake_primitive_init(&g_v2.threads[new_id].wake);
-    atomic_store_explicit(&g_v2.threads[new_id].alive, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_v2.threads[new_id].dispatch_epoch, 0,
-                          memory_order_relaxed);
-    /* First worker in this slot: generation starts at 0. */
-    atomic_store_explicit(&g_v2.threads[new_id].generation, 0,
-                          memory_order_release);
-    pthread_create(&g_v2.threads[new_id].handle, NULL,
-                   thread_v2_main, (void*)(intptr_t)new_id);
+    sched_v2_init_worker_slot(new_id);
+    if (pthread_create(&g_v2.threads[new_id].handle, NULL,
+                       thread_v2_main, (void*)(intptr_t)new_id) != 0) {
+        wake_primitive_destroy(&g_v2.threads[new_id].wake);
+        pthread_mutex_unlock(&g_v2.start_mu);
+        return 0;
+    }
+    atomic_store_explicit(&g_v2.num_threads, new_id + 1, memory_order_release);
+    pthread_mutex_unlock(&g_v2.start_mu);
     return 1;
 }
 
@@ -1055,12 +1068,7 @@ static void sched_v2_wake(int worker_hint) {
      * here before the idle_workers check so the pairing is airtight. */
     atomic_thread_fence(memory_order_seq_cst);
 
-    if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
-        V2_STAT_INC(g_v2_wake_no_idle);
-        return;
-    }
-    while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
-           atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) > 0) {
+    while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0) {
         /* Producer-side admission gate: if we're already at the active
          * target, issuing another wake just produces a ulock_wake syscall
          * whose only effect is to make an extra worker cycle through
@@ -1075,8 +1083,14 @@ static void sched_v2_wake(int worker_hint) {
             V2_STAT_INC(g_v2_wake_gated_target);
             break;
         }
+        if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
+            if (!sched_v2_try_expand_pool()) {
+                V2_STAT_INC(g_v2_wake_no_idle);
+            }
+            break;
+        }
         if (!sched_v2_try_wake_one()) {
-            sched_v2_try_expand_pool();
+            (void)sched_v2_try_expand_pool();
             break;
         }
     }
@@ -2041,10 +2055,10 @@ static void sched_v2_init_impl(void) {
             g_v2_spin_before_park = (int)v;
         }
     }
-    const char* pxs_env = getenv("CC_V2_PARK_EXTRAS_AT_STARTUP");
-    if (pxs_env && pxs_env[0] && pxs_env[0] != '0') {
-        g_v2_park_extras_at_startup = 1;
-    }
+    /* Real lazy start supersedes the old "create everything, then park
+     * extras" startup mode. Keep the env knob inert for compatibility:
+     * additional workers are now created only on demand. */
+    g_v2_park_extras_at_startup = 0;
     const char* tgt_env = getenv("CC_V2_TARGET_ACTIVE");
     if (tgt_env) {
         char* end = NULL;
@@ -2054,27 +2068,14 @@ static void sched_v2_init_impl(void) {
         }
     }
 
-    int n = sched_v2_detect_num_threads();
-    atomic_store_explicit(&g_v2.num_threads, n, memory_order_release);
-    /* Keep the default pool fixed for now. The current expansion heuristic
-     * overreacts on I/O-heavy workloads and recreates the worker-thrash we are
-     * trying to avoid. */
-    g_v2.allow_expand = 0;
-
-    for (int i = 0; i < n; i++) {
-        g_v2.threads[i].id = i;
-        atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
-        atomic_store_explicit(&g_v2.threads[i].alive, 0, memory_order_relaxed);
-        atomic_store_explicit(&g_v2.threads[i].dispatch_epoch, 0,
-                              memory_order_relaxed);
-        /* Initial worker in this slot: generation 0. First eviction will
-         * bump it to 1; the cached tls_v2_my_generation in the orphan
-         * stays at 0 and the mismatch triggers exit. */
-        atomic_store_explicit(&g_v2.threads[i].generation, 0,
-                              memory_order_release);
-        wake_primitive_init(&g_v2.threads[i].wake);
-        pthread_create(&g_v2.threads[i].handle, NULL,
-                       thread_v2_main, (void*)(intptr_t)i);
+    g_v2.max_threads = sched_v2_detect_num_threads();
+    atomic_store_explicit(&g_v2.num_threads, 0, memory_order_release);
+    g_v2.allow_expand = 1;
+    pthread_mutex_init(&g_v2.start_mu, NULL);
+    sched_v2_init_worker_slot(0);
+    if (pthread_create(&g_v2.threads[0].handle, NULL,
+                       thread_v2_main, (void*)(intptr_t)0) == 0) {
+        atomic_store_explicit(&g_v2.num_threads, 1, memory_order_release);
     }
 
     pthread_create(&g_v2.sysmon_handle, NULL, sched_v2_sysmon_main, NULL);
@@ -2104,6 +2105,7 @@ void sched_v2_shutdown(void) {
         pthread_join(g_v2.threads[i].handle, NULL);
     }
     pthread_join(g_v2.sysmon_handle, NULL);
+    pthread_mutex_destroy(&g_v2.start_mu);
 
     fiber_v2* f = g_v2.all_fibers;
     while (f) {
