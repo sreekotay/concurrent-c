@@ -1,0 +1,90 @@
+// Smoke: `T x = foo() !>;` at the **first statement position** of a
+// freshly-opened `case LABEL: { ... }` compound must build and run.
+//
+// Regression guard for [F7] in docs/known-bugs/redis_idiomatic_async.md.
+// Historically tcc's statement-vs-declaration disambiguator rejected
+// the `!>` decl lowering
+//
+//     T x = ({ __typeof__(...) __cc_pu_e_1 = (...);
+//              if (cc_is_err(__cc_pu_e_1)) { return cc_err(...); }
+//              cc_value(__cc_pu_e_1); });
+//
+// when it appeared immediately after `case LABEL: {`, with
+//     error: '{' expected (got ';')
+// pointing at the `!>;` source line.  Only the first arm of the switch
+// failed; subsequent arms with the same shape parsed fine.  The redis
+// migration worked around this with an in-function `#define alloc(n)
+// ({...})` macro and plain `char* dst = alloc(n);` decls.
+//
+// Shape we pin:
+//   - a `!>`-returning helper whose return type is a pointer
+//     (`char*`, matching the redis repro of `CCSlice`/`char*` arena
+//     allocators);
+//   - a function-scope `@errhandler` so `!>;` forwards rather than
+//     `return cc_err(...)` at the splice site;
+//   - a `switch` with multiple case arms, each opening a fresh
+//     compound and starting with `T x = helper(...) !>;` as its very
+//     first statement;
+//   - at least one arm that takes the error path, so the inlined
+//     `@errhandler` body runs end-to-end.
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static char g_storage[64];
+static int  g_handler_ran;
+
+static char* !>(CCError) alloc_bytes(size_t n) {
+    if (n == 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "zero-size"));
+    if (n > sizeof g_storage) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "too big"));
+    return cc_ok(g_storage);
+}
+
+static int !>(CCError) encode(int kind) {
+    @errhandler(CCError e) {
+        g_handler_ran++;
+        return cc_err(e);
+    }
+    switch (kind) {
+        case 1: {
+            char* dst = alloc_bytes(4) !>;
+            dst[0] = 'A';
+            return cc_ok((int)dst[0]);
+        }
+        case 2: {
+            char* dst = alloc_bytes(8) !>;
+            dst[0] = 'B';
+            return cc_ok((int)dst[0]);
+        }
+        case 3: {
+            char* dst = alloc_bytes(16) !>;
+            dst[0] = 'C';
+            return cc_ok((int)dst[0]);
+        }
+        case 4: {
+            char* dst = alloc_bytes(0) !>;
+            (void)dst;
+            return cc_ok(0);
+        }
+        default:
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "bad kind"));
+    }
+}
+
+int main(void) {
+    int !>(CCError) r1 = encode(1);
+    if (cc_is_err(r1) || cc_value(r1) != 'A') { printf("case1 FAIL\n"); return 1; }
+    int !>(CCError) r2 = encode(2);
+    if (cc_is_err(r2) || cc_value(r2) != 'B') { printf("case2 FAIL\n"); return 2; }
+    int !>(CCError) r3 = encode(3);
+    if (cc_is_err(r3) || cc_value(r3) != 'C') { printf("case3 FAIL\n"); return 3; }
+
+    if (g_handler_ran != 0) { printf("handler ran early: %d\n", g_handler_ran); return 4; }
+
+    int !>(CCError) r4 = encode(4);
+    if (!cc_is_err(r4)) { printf("case4 expected err\n"); return 5; }
+    if (g_handler_ran != 1) { printf("handler=%d want 1\n", g_handler_ran); return 6; }
+
+    printf("ok\n");
+    return 0;
+}
