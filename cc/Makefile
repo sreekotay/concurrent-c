@@ -63,7 +63,9 @@ OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
 RUNTIME_XJB_OBJ := $(OBJDIR)/runtime/float_format_xjb.o
 DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
-REAL_BINARY := bin/ccc
+REAL_BINARY := bin/.ccc-bin
+CCC_SCRIPT  := bin/ccc
+CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
 WRAPPER := $(OUT_BINDIR)/ccc
 
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
@@ -90,7 +92,7 @@ OUT_INCLUDE := ../out/include
 OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(WRAPPER) $(LOWER_HEADERS_STAMP)
+all: $(CCC_SCRIPT) $(WRAPPER) $(LOWER_HEADERS_STAMP)
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
 .PHONY: lower-headers
@@ -110,7 +112,19 @@ $(REAL_BINARY): $(OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
-$(WRAPPER): $(REAL_BINARY)
+# cc/bin/ccc is now a shell wrapper that auto-lowers .cch headers on demand
+# before dispatching to the real compiled binary (cc/bin/.ccc-bin).  This
+# ensures downstream builds (real_projects/*, tests, perf scripts) that call
+# cc/bin/ccc directly never see a stale out/include/*.h after a .cch edit.
+$(CCC_SCRIPT): $(REAL_BINARY) $(CCC_WRAPPER_TEMPLATE) $(LOWER_HEADERS_BINARY)
+	@mkdir -p $(dir $@)
+	@cp $(CCC_WRAPPER_TEMPLATE) $@
+	@chmod +x $@
+
+# Legacy out/cc/bin/ccc path: keep it as a thin delegator to cc/bin/ccc so
+# the smart-wrapper logic is inherited transitively.  Several perf scripts
+# and real_projects Makefiles still hard-code this path.
+$(WRAPPER): $(CCC_SCRIPT)
 	@mkdir -p $(dir $@)
 	@printf '%s\n' '#!/bin/sh' > $@
 	@printf '%s\n' 'set -e' >> $@
