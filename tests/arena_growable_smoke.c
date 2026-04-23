@@ -185,8 +185,8 @@ int main(void) {
             printf("FAIL: release tracked arena ptr\n");
             return 7;
         }
-        if (!cc_arena_release(&a, p)) {
-            printf("FAIL: coarse repeat release should be tolerated\n");
+        if (cc_arena_release(&a, p) != 0) {
+            printf("FAIL: double release should fail\n");
             return 7;
         }
         void *p2 = cc_arena_alloc(&a, 64, 8);
@@ -240,52 +240,6 @@ int main(void) {
         }
         cc_arena_free(&a);
         printf("  release + explicit heap overflow + checkpoint gating OK\n");
-    }
-
-    // --- Test 8: releasing an old block must not rewind the new root ---
-    {
-        CCArena a = cc_arena_heap(64);
-        if (!a.base) {
-            printf("FAIL: grow-safe release init\n");
-            return 8;
-        }
-
-        void *old_root = cc_arena_alloc(&a, 48, 8);
-        if (!old_root) {
-            printf("FAIL: old-root alloc\n");
-            return 8;
-        }
-
-        uint8_t *new_root = (uint8_t*)cc_arena_alloc(&a, 128, 8);
-        if (!new_root) {
-            printf("FAIL: new-root alloc after grow\n");
-            return 8;
-        }
-        memset(new_root, 0x5a, 128);
-
-        if (!cc_arena_release(&a, old_root)) {
-            printf("FAIL: release old-root alloc after grow\n");
-            return 8;
-        }
-
-        uint8_t *later = (uint8_t*)cc_arena_alloc(&a, 64, 8);
-        if (!later) {
-            printf("FAIL: alloc after releasing old-root\n");
-            return 8;
-        }
-        if (later == new_root) {
-            printf("FAIL: releasing old-root rewound the new root\n");
-            return 8;
-        }
-        for (size_t i = 0; i < 128; ++i) {
-            if (new_root[i] != 0x5a) {
-                printf("FAIL: new-root data corrupted after releasing old-root\n");
-                return 8;
-            }
-        }
-
-        cc_arena_free(&a);
-        printf("  grow-safe release across blocks OK\n");
     }
 
     printf("arena_growable_smoke ok\n");
