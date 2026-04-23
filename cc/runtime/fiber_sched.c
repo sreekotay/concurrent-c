@@ -226,9 +226,7 @@ int    sched_v2_fiber_external_wait_active(fiber_v2* f);
 void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
 void   sched_v2_debug_dump_state(const char* prefix);
 bool cc_nursery_is_cancelled(const CCNursery* n);
-/* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
-* Fibers must restore it on migration; see worker_run_fiber(). */
-extern __thread CCNursery* cc__tls_current_nursery;
+CCNursery* cc__runtime_current_nursery(void);
 
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
 
@@ -1033,7 +1031,7 @@ int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
                                             const char* reason, const char* file, int line) {
     (void)file; (void)line;
     cc_external_wait_enter();
-    CCNursery* cur_nursery = cc__tls_current_nursery;
+    CCNursery* cur_nursery = cc__runtime_current_nursery();
     if (sched_v2_in_context()) {
         sched_v2_set_park_reason(reason);
         while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
