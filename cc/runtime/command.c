@@ -15,12 +15,15 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     if (CCVec_size_t_push(&cmd->offsets, offset) != 0) return -1;
     if (!CCString_push_slice(&cmd->storage, arg)) {
         cmd->offsets.len--;
+        cc_vec_sync_len((CCVec *)&cmd->offsets);
         return -1;
     }
     if (!CCString_push_char(&cmd->storage, '\0')) {
         cmd->storage.len = old_len;
+        cc_vec_sync_len((CCVec *)&cmd->storage);
         if (cmd->storage.data) cmd->storage.data[old_len] = '\0';
         cmd->offsets.len--;
+        cc_vec_sync_len((CCVec *)&cmd->offsets);
         return -1;
     }
     return 0;

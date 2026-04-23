@@ -1,0 +1,180 @@
+/*
+ * Heap-backed khashl map (sidecar experiment).
+ *
+ * Same table layout and hash helpers as <ccc/std/map.cch>, but map metadata
+ * buckets use libc malloc/realloc/free via the shared khashl hook dispatch
+ * (CC__MAP_HEAP_KM sentinel in map.cch).
+ *
+ * Usage:
+ *   #include <ccc/std/map_heap.cch>
+ *   CC_MAP_DECL_HEAP_SLICE(MyVal, MyMap);
+ *   MyMap *m = MyMap_init();
+ *   MyMap_destroy(m);
+ */
+#ifndef CC_STD_MAP_HEAP_H
+#define CC_STD_MAP_HEAP_H
+
+#include <ccc/std/map.cch>
+
+#ifndef CC_PARSER_MODE
+
+/** Public alias for the sentinel passed internally to khashl as `km`. */
+#define CC_MAP_HEAP_KM CC__MAP_HEAP_KM
+
+/*
+ * CC_MAP_DECL_HEAP(K, V, Name, HASH_FN, EQ_FN)
+ *
+ * Like CC_MAP_DECL_ARENA, but Name_init() takes no arena; destroy frees
+ * all map storage with free(3).
+ */
+#define CC_MAP_DECL_HEAP(K, V, Name, HASH_FN, EQ_FN)                          \
+    KHASHL_MAP_INIT(KH_LOCAL, Name##__kh, Name##__kh, K, V, HASH_FN, EQ_FN)    \
+                                                                               \
+    typedef Name##__kh Name;                                                   \
+                                                                               \
+    static inline Name *Name##_init(void) {                                    \
+        return Name##__kh_init2(CC__MAP_HEAP_KM);                              \
+    }                                                                          \
+                                                                               \
+    static inline void Name##_destroy(Name *h) {                               \
+        Name##__kh_destroy(h);                                                 \
+    }                                                                          \
+                                                                               \
+    static inline int Name##_insert(Name *h, K key, V val) {                   \
+        if (!h)                                                                \
+            return -1;                                                         \
+        int absent = 0;                                                        \
+        khint_t k = Name##__kh_put(h, key, &absent);                           \
+        if (absent < 0)                                                        \
+            return -1;                                                         \
+        kh_val(h, k) = val;                                                    \
+        return 0;                                                              \
+    }                                                                          \
+                                                                               \
+    static inline int Name##_put(Name *h, K key, V val, int *ret) {            \
+        if (!h) {                                                              \
+            if (ret)                                                           \
+                *ret = -1;                                                     \
+            return -1;                                                         \
+        }                                                                      \
+        int absent = 0;                                                        \
+        khint_t k = Name##__kh_put(h, key, &absent);                           \
+        if (absent < 0) {                                                      \
+            if (ret)                                                           \
+                *ret = -1;                                                     \
+            return -1;                                                         \
+        }                                                                      \
+        kh_val(h, k) = val;                                                    \
+        if (ret)                                                               \
+            *ret = absent;                                                     \
+        return (int)k;                                                         \
+    }                                                                          \
+                                                                               \
+    static inline V *Name##_get(Name *h, K key) {                              \
+        if (!h)                                                                \
+            return NULL;                                                       \
+        khint_t k = Name##__kh_get(h, key);                                    \
+        if (k == kh_end(h))                                                    \
+            return NULL;                                                       \
+        return &kh_val(h, k);                                                  \
+    }                                                                          \
+                                                                               \
+    static inline V *Name##_get_ptr(Name *h, K key) {                          \
+        return Name##_get(h, key);                                             \
+    }                                                                          \
+                                                                               \
+    static inline bool Name##_remove(Name *h, K key) {                         \
+        if (!h)                                                                \
+            return false;                                                      \
+        khint_t k = Name##__kh_get(h, key);                                    \
+        if (k == kh_end(h))                                                    \
+            return false;                                                      \
+        Name##__kh_del(h, k);                                                  \
+        return true;                                                           \
+    }                                                                          \
+                                                                               \
+    static inline bool Name##_del(Name *h, K key) {                            \
+        return Name##_remove(h, key);                                          \
+    }                                                                          \
+                                                                               \
+    static inline size_t Name##_len(const Name *h) {                           \
+        return h ? kh_size(h) : 0;                                             \
+    }                                                                          \
+                                                                               \
+    static inline void Name##_clear(Name *h) {                                 \
+        if (h)                                                                 \
+            Name##__kh_clear(h);                                               \
+    }
+
+#define CC_MAP_DECL_HEAP_SLICE(V, Name)                                        \
+    CC_MAP_DECL_HEAP(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
+
+#define CC_MAP_DECL_HEAP_INT(V, Name)                                        \
+    CC_MAP_DECL_HEAP(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
+
+#define CC_MAP_DECL_HEAP_U64(V, Name)                                        \
+    CC_MAP_DECL_HEAP(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
+
+#else /* CC_PARSER_MODE */
+
+#define CC_MAP_HEAP_KM ((void *)0)
+
+/*
+ * Parser-mode layout matches khashl's open map header so Concurrent-C can
+ * type-check field accesses (e.g. mem stats on bits/keys/used/count).
+ * Key/value slots are opaque; method bodies delegate to generic map stubs.
+ */
+#define CC_MAP_DECL_HEAP(K, V, Name, HASH_FN, EQ_FN)                           \
+    typedef struct Name {                                                      \
+        void *km;                                                              \
+        unsigned short bits, salt;                                             \
+        uint32_t count;                                                        \
+        uint32_t *used;                                                        \
+        void *keys;                                                            \
+    } Name;                                                                    \
+    static inline Name *Name##_init(void) {                                    \
+        return (Name *)__cc_map_generic_init(NULL);                            \
+    }                                                                          \
+    static inline void Name##_destroy(Name *h) {                               \
+        __cc_map_generic_destroy((__CCMapGeneric *)(h));                       \
+    }                                                                          \
+    static inline int Name##_insert(Name *h, K key, V val) {                   \
+        return __cc_map_generic_insert((__CCMapGeneric *)(h), key, val);       \
+    }                                                                          \
+    static inline int Name##_put(Name *h, K key, V val, int *ret) {             \
+        (void)ret;                                                             \
+        return __cc_map_generic_put((__CCMapGeneric *)(h), key, val, ret);    \
+    }                                                                          \
+    static inline V *Name##_get(Name *h, K key) {                              \
+        (void)key;                                                             \
+        return (V *)__cc_map_generic_get((__CCMapGeneric *)(h));               \
+    }                                                                          \
+    static inline V *Name##_get_ptr(Name *h, K key) {                          \
+        return Name##_get(h, key);                                             \
+    }                                                                          \
+    static inline bool Name##_remove(Name *h, K key) {                         \
+        (void)key;                                                             \
+        return __cc_map_generic_remove((__CCMapGeneric *)(h), key) != 0;       \
+    }                                                                          \
+    static inline bool Name##_del(Name *h, K key) {                            \
+        return Name##_remove(h, key);                                          \
+    }                                                                          \
+    static inline size_t Name##_len(const Name *h) {                           \
+        return __cc_map_generic_len((const __CCMapGeneric *)(h));              \
+    }                                                                          \
+    static inline void Name##_clear(Name *h) {                                 \
+        __cc_map_generic_clear((__CCMapGeneric *)(h));                         \
+    }
+
+#define CC_MAP_DECL_HEAP_SLICE(V, Name)                                        \
+    CC_MAP_DECL_HEAP(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
+
+#define CC_MAP_DECL_HEAP_INT(V, Name)                                          \
+    CC_MAP_DECL_HEAP(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
+
+#define CC_MAP_DECL_HEAP_U64(V, Name)                                        \
+    CC_MAP_DECL_HEAP(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
+
+#endif /* CC_PARSER_MODE */
+
+#endif /* CC_STD_MAP_HEAP_H */
