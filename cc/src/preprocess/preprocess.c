@@ -7805,11 +7805,11 @@ static const char* cc__parse_stubs =
        Field counts must match real headers to allow their initializers. */
     "#define __CC_VEC_GENERIC_DEFINED 1\n"
     "#define __CC_MAP_GENERIC_DEFINED 1\n"
-    "typedef struct { unsigned long len; unsigned long cap; void* data; void* arena; unsigned long long provenance; } __CCVecGeneric;\n"
+    "typedef struct { unsigned long len; unsigned long cap; void* arena; void* data; } __CCVecGeneric;\n"
     "typedef struct { unsigned long count; void* keys; void* vals; void* arena; } __CCMapGeneric;\n"
     "#define __CC_VEC(T) __CCVecGeneric\n"
     "#define __CC_MAP(K, V) __CCMapGeneric\n"
-    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0, 0, 0})\n"
+    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0, 0})\n"
     "#define __CC_MAP_INIT(K, V, arena) ((__CCMapGeneric){0, 0})\n"
     /* Common Vec/Map types */
     "typedef __CCVecGeneric CCVec_int;\n"

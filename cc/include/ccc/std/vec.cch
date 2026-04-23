@@ -48,9 +48,8 @@
 typedef struct __CCVecGeneric {
     size_t len;
     size_t cap;
-    void *data;
     void *arena;  /* CCArena* */
-    uint64_t provenance;
+    void *data;
 } __CCVecGeneric;
 #endif
 
@@ -64,7 +63,7 @@ typedef struct __CCVecGeneric {
 /* Generic constructor - parser mode doesn't actually run,
    so just return a zeroed struct for type checking. */
 static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
-    __CCVecGeneric v = {0, 0, NULL, arena, 0};
+    __CCVecGeneric v = {0, 0, arena, NULL};
     return v;
 }
 
@@ -220,19 +219,17 @@ typedef __CCVecGeneric CCVec_intptr;
     typedef struct {                                                              \
         size_t len;                                                               \
         size_t cap;                                                               \
-        T *data;                                                                  \
         CCArena *arena;                                                           \
-        uint64_t provenance;                                                      \
+        T *data;                                                                  \
     } Name;                                                                       \
                                                                                   \
     static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
-        Name v = {0, 0, NULL, arena, 0};                                          \
+        Name v = {0, 0, arena, NULL};                                             \
         if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
                         initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
             != 0) {                                                               \
             v.cap = 0;                                                            \
             v.data = NULL;                                                        \
-            v.provenance = 0;                                                     \
         }                                                                         \
         return v;                                                                 \
     }                                                                             \
@@ -257,6 +254,7 @@ typedef __CCVecGeneric CCVec_intptr;
     static inline bool Name##_pop(Name *v, T *out) {                              \
         if (!v || v->len == 0) return false;                                      \
         v->len--;                                                                 \
+        cc_vec_sync_len((CCVec *)v);                                              \
         if (out) *out = v->data[v->len];                                          \
         return true;                                                              \
     }                                                                             \
@@ -288,6 +286,10 @@ typedef __CCVecGeneric CCVec_intptr;
                                                                                   \
     static inline CCSlice Name##_as_slice(const Name *v) {                        \
         return cc_vec_as_slice((const CCVec *)v);                                 \
+    }                                                                             \
+                                                                                  \
+    static inline uint64_t Name##_provenance(const Name *v) {                     \
+        return cc_vec_provenance((const CCVec *)v);                               \
     }                                                                             \
                                                                                   \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \

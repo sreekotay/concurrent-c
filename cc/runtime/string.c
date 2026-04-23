@@ -28,6 +28,7 @@ CCString* CCString_push_slice(CCString *str, CCSlice data) {
         memcpy(str->data + str->len, data.ptr, data.len);
     }
     str->len = new_len;
+    cc_vec_sync_len((CCVec *)str);
     str->data[str->len] = '\0';
     return str;
 }
@@ -35,6 +36,7 @@ CCString* CCString_push_slice(CCString *str, CCSlice data) {
 CCString* CCString_clear(CCString *str) {
     if (!str) return NULL;
     str->len = 0;
+    cc_vec_sync_len((CCVec *)str);
     if (str->data) str->data[0] = '\0';
     return str;
 }
@@ -46,7 +48,7 @@ CCSlice CCString_as_slice(const CCString *str) {
     return cc_slice_from_parts(
         str->data,
         str->len,
-        cc_slice_make_id(str->provenance, false, false, false),
+        cc_slice_make_id(cc_vec_provenance((const CCVec *)str), false, false, false),
         str->cap
     );
 }

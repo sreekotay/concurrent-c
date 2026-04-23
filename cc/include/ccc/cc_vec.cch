@@ -6,21 +6,29 @@
 #include <string.h>
 
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_containers.cch>
 #include <ccc/cc_slice.cch>
+
 
 typedef struct CCVec {
     size_t len;
     size_t cap;
-    void *data;
     CCArena *arena;
-    uint64_t provenance;
+    void *data;
 } CCVec;
+
+#ifdef CC_PARSER_MODE
+
+static inline uint64_t cc_vec_provenance(const CCVec *v) {
+    if (!v) return 0;
+    return v->arena ? v->arena->provenance : 0;
+}
 
 static inline CCSlice cc_vec_as_slice(const CCVec *v) {
     if (!v || !v->data) return cc_slice_empty();
     return cc_slice_from_parts(v->data,
                                v->len,
-                               cc_slice_make_id(v->provenance, false, false, false),
+                               cc_slice_make_id(cc_vec_provenance(v), false, false, false),
                                v->cap);
 }
 
@@ -29,10 +37,6 @@ static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
     v->data = slice.ptr;
     v->len = slice.len;
     v->cap = cc_slice_capacity(slice);
-    v->provenance = cc_slice_clear_flags(slice.id,
-                                         CC_SLICE_ID_TRANSFERABLE |
-                                         CC_SLICE_ID_SUBSLICE |
-                                         CC_SLICE_ID_UNIQUE);
 }
 
 static inline int cc_vec_init(CCVec *v,
@@ -40,25 +44,137 @@ static inline int cc_vec_init(CCVec *v,
                               size_t elem_size,
                               size_t elem_align,
                               size_t initial_cap) {
+    (void)elem_size;
+    (void)elem_align;
+    (void)initial_cap;
     if (!v) return -1;
     v->len = 0;
     v->cap = 0;
-    v->data = NULL;
     v->arena = arena;
-    v->provenance = 0;
+    v->data = NULL;
+    return arena ? 0 : -1;
+}
+
+static inline int cc_vec_reserve(CCVec *v,
+                                 size_t elem_size,
+                                 size_t elem_align,
+                                 size_t need) {
+    (void)v;
+    (void)elem_size;
+    (void)elem_align;
+    (void)need;
+    return 0;
+}
+
+static inline void *cc_vec_push_slot(CCVec *v,
+                                     size_t elem_size,
+                                     size_t elem_align) {
+    (void)v;
+    (void)elem_size;
+    (void)elem_align;
+    return NULL;
+}
+
+static inline void *cc_vec_at_grow(CCVec *v,
+                                   size_t elem_size,
+                                   size_t elem_align,
+                                   size_t i) {
+    (void)v;
+    (void)elem_size;
+    (void)elem_align;
+    (void)i;
+    return NULL;
+}
+
+static inline void cc_vec_sync_len(CCVec *v) {
+    (void)v;
+}
+
+static inline void cc_vec_clear(CCVec *v) {
+    if (!v) return;
+    v->len = 0;
+}
+
+#else
+
+static inline void *cc__vec_backend_cntr(const CCVec *v) {
+    if (!v || !v->data || v->cap == 0) return (void *)&ccj_vec_placeholder;
+    return (void *)((uint8_t *)v->data - sizeof(ccj_vec_hdr_ty));
+}
+
+static inline uint64_t cc_vec_provenance(const CCVec *v) {
+    void *cntr;
+    if (!v) return 0;
+    cntr = cc__vec_backend_cntr(v);
+    if (!cntr || cntr == (void *)&ccj_vec_placeholder) {
+        return v->arena ? v->arena->provenance : 0;
+    }
+    return cc__containers_payload_provenance(cntr);
+}
+
+static inline void cc__vec_sync_from_backend(CCVec *v, void *cntr) {
+    if (!v) return;
+    if (!cntr || cntr == (void *)&ccj_vec_placeholder || ccj_vec_cap(cntr) == 0) {
+        v->len = 0;
+        v->cap = 0;
+        v->data = NULL;
+        return;
+    }
+    v->len = ccj_vec_size(cntr);
+    v->cap = ccj_vec_cap(cntr);
+    v->data = (void *)((uint8_t *)cntr + sizeof(ccj_vec_hdr_ty));
+}
+
+static inline void cc_vec_sync_len(CCVec *v) {
+    void *cntr;
+    if (!v) return;
+    cntr = cc__vec_backend_cntr(v);
+    if (!cntr || cntr == (void *)&ccj_vec_placeholder) return;
+    ccj_vec_hdr(cntr)->size = v->len;
+}
+
+static inline CCSlice cc_vec_as_slice(const CCVec *v) {
+    if (!v || !v->data) return cc_slice_empty();
+    return cc_slice_from_parts(v->data,
+                               v->len,
+                               cc_slice_make_id(cc_vec_provenance(v), false, false, false),
+                               v->cap);
+}
+
+static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
+    if (!v) return;
+    v->data = slice.ptr;
+    v->len = slice.len;
+    v->cap = cc_slice_capacity(slice);
+}
+
+static inline int cc_vec_init(CCVec *v,
+                              CCArena *arena,
+                              size_t elem_size,
+                              size_t elem_align,
+                              size_t initial_cap) {
+    ccj_allocing_fn_result_ty result;
+    size_t cap;
+    if (!v) return -1;
+    v->len = 0;
+    v->cap = 0;
+    v->arena = arena;
+    v->data = NULL;
     if (!arena) return -1;
 
-    {
-        size_t cap = initial_cap > 0 ? initial_cap : 8;
-        void *data = cc_arena_alloc(arena, cap * elem_size, elem_align);
-        CCSlice slice;
-        if (!data) return -1;
-        slice = cc_slice_from_parts(data,
-                                    0,
-                                    cc_slice_make_id(arena->provenance, false, false, false),
-                                    cap);
-        cc_vec_apply_slice(v, slice);
-    }
+    cap = initial_cap > 0 ? initial_cap : 8;
+    (void)elem_align;
+    result = ccj_vec_reserve((void *)&ccj_vec_placeholder,
+                             cap,
+                             elem_size,
+                             0,
+                             NULL,
+                             0.0,
+                             cc__containers_realloc,
+                             cc__containers_free,
+                             arena);
+    if (!result.other_ptr) return -1;
+    cc__vec_sync_from_backend(v, result.new_cntr);
     return 0;
 }
 
@@ -66,31 +182,31 @@ static inline int cc_vec_reserve(CCVec *v,
                                  size_t elem_size,
                                  size_t elem_align,
                                  size_t need) {
-    CCSlice slice;
+    ccj_allocing_fn_result_ty result;
+    void *cntr;
     if (!v || !v->arena) return -1;
-    slice = cc_vec_as_slice(v);
-    if (need <= cc_slice_capacity(slice)) return 0;
+    if (need <= v->cap) return 0;
 
-    {
-        size_t new_cap = v->cap ? v->cap : 8;
-        while (new_cap < need) new_cap <<= 1;
-        void *new_data = cc_arena_alloc(v->arena, new_cap * elem_size, elem_align);
-        CCSlice new_slice;
-        if (!new_data) return -1;
-        if (v->data && v->len) memcpy(new_data, v->data, v->len * elem_size);
-        new_slice = cc_slice_from_parts(new_data,
-                                        v->len,
-                                        cc_slice_make_id(v->arena->provenance, false, false, false),
-                                        new_cap);
-        cc_vec_apply_slice(v, new_slice);
-    }
+    cntr = cc__vec_backend_cntr(v);
+    (void)elem_align;
+    result = ccj_vec_reserve(cntr,
+                             need,
+                             elem_size,
+                             0,
+                             NULL,
+                             0.0,
+                             cc__containers_realloc,
+                             cc__containers_free,
+                             v->arena);
+    if (!result.other_ptr) return -1;
+    cc__vec_sync_from_backend(v, result.new_cntr);
     return 0;
 }
 
 static inline void *cc_vec_push_slot(CCVec *v,
                                      size_t elem_size,
                                      size_t elem_align) {
-    CCSlice slice;
+    void *cntr;
     void *slot;
     if (!v) return NULL;
     if (v->len == v->cap) {
@@ -99,10 +215,10 @@ static inline void *cc_vec_push_slot(CCVec *v,
             return NULL;
         }
     }
-    slice = cc_vec_as_slice(v);
-    slot = (char *)slice.ptr + (slice.len * elem_size);
-    slice.len++;
-    cc_vec_apply_slice(v, slice);
+    cntr = cc__vec_backend_cntr(v);
+    slot = (uint8_t *)v->data + (v->len * elem_size);
+    v->len += 1;
+    ccj_vec_hdr(cntr)->size = v->len;
     return slot;
 }
 
@@ -110,27 +226,29 @@ static inline void *cc_vec_at_grow(CCVec *v,
                                    size_t elem_size,
                                    size_t elem_align,
                                    size_t i) {
-    CCSlice slice;
+    void *cntr;
     if (!v) return NULL;
     if (i >= v->cap) {
         size_t new_cap = v->cap ? v->cap : 8;
         while (new_cap <= i) new_cap <<= 1;
         if (cc_vec_reserve(v, elem_size, elem_align, new_cap) != 0) return NULL;
     }
-    slice = cc_vec_as_slice(v);
-    if (i >= slice.len) {
-        slice.len = i + 1;
-        cc_vec_apply_slice(v, slice);
+    cntr = cc__vec_backend_cntr(v);
+    if (i >= v->len) {
+        v->len = i + 1;
+        ccj_vec_hdr(cntr)->size = v->len;
     }
-    return (char *)slice.ptr + (i * elem_size);
+    return (uint8_t *)v->data + (i * elem_size);
 }
 
 static inline void cc_vec_clear(CCVec *v) {
-    CCSlice slice;
+    void *cntr;
     if (!v) return;
-    slice = cc_vec_as_slice(v);
-    slice.len = 0;
-    cc_vec_apply_slice(v, slice);
+    cntr = cc__vec_backend_cntr(v);
+    if (cntr != (void *)&ccj_vec_placeholder) ccj_vec_hdr(cntr)->size = 0;
+    v->len = 0;
 }
+
+#endif
 
 #endif /* CC_VEC_H */

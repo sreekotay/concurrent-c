@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_containers.cch>
 
 /*
  * TCC PARSER MODE: Map types use a generic placeholder during parsing.
@@ -140,14 +141,27 @@ typedef __CCMapGeneric Map_uint64_t_voidptr;
 #endif /* CC_PARSER_MODE */
 
 /*
- * Arena-backed allocator hooks for khashl.
- * - Kmalloc/Kcalloc: allocate from arena
- * - Krealloc: allocate new + copy old payload size (old stays in arena until reset)
- * - Kfree: no-op (arena bulk-frees on reset)
+ * Allocator hooks for khashl (shared by arena- and heap-backed maps).
+ *
+ * Arena maps pass a real CCArena* as khashl's `km` context.
+ * Heap maps use the sentinel CC__MAP_HEAP_KM (see <ccc/std/map_heap.cch>);
+ * those allocations use libc malloc/calloc/realloc/free.
  */
+#define CC__MAP_HEAP_KM ((void *)(uintptr_t)0x1CC0u)
+
+static inline bool cc__map_is_heap_km(const void *km) {
+    return km == CC__MAP_HEAP_KM;
+}
+
 typedef struct cc__map_alloc_header {
     size_t size_bytes;
+    void* raw_alloc;
 } cc__map_alloc_header;
+
+static inline size_t cc__map_storage_align(size_t elem_align) {
+    size_t min_align = _Alignof(max_align_t);
+    return elem_align > min_align ? elem_align : min_align;
+}
 
 static inline void* cc__map_alloc_payload(CCArena* arena, size_t size_bytes, size_t align) {
     if (!arena || size_bytes == 0) return NULL;
@@ -161,7 +175,17 @@ static inline void* cc__map_alloc_payload(CCArena* arena, size_t size_bytes, siz
     uintptr_t aligned = (start + align - 1) & ~(uintptr_t)(align - 1);
     cc__map_alloc_header* header = (cc__map_alloc_header*)(aligned - sizeof(cc__map_alloc_header));
     header->size_bytes = size_bytes;
+    header->raw_alloc = raw;
     return (void*)aligned;
+}
+
+static inline void cc__map_release_payload(CCArena* arena, void* ptr) {
+    if (!arena || !ptr) return;
+    cc__map_alloc_header* header =
+        (cc__map_alloc_header*)((uint8_t*)ptr - sizeof(cc__map_alloc_header));
+    if (header->raw_alloc) {
+        (void)cc_arena_release(arena, header->raw_alloc);
+    }
 }
 
 static inline void* cc__map_realloc_payload(CCArena* arena, void* ptr, size_t size_bytes, size_t align) {
@@ -172,25 +196,73 @@ static inline void* cc__map_realloc_payload(CCArena* arena, void* ptr, size_t si
         (cc__map_alloc_header*)((uint8_t*)ptr - sizeof(cc__map_alloc_header));
     size_t copy_bytes = old_header->size_bytes < size_bytes ? old_header->size_bytes : size_bytes;
     memcpy(out, ptr, copy_bytes);
+    cc__map_release_payload(arena, ptr);
     return out;
 }
 
+static inline void *cc__map_kmalloc(void *km, size_t elem_size, size_t elem_align, size_t count) {
+    if (cc__map_is_heap_km(km)) {
+        (void)elem_align;
+        if (elem_size != 0 && count > SIZE_MAX / elem_size)
+            return NULL;
+        return malloc(elem_size * count);
+    }
+    if (!km)
+        return NULL;
+    return cc__map_alloc_payload((CCArena *)km,
+                                 elem_size * count,
+                                 cc__map_storage_align(elem_align));
+}
+
+static inline void *cc__map_kcalloc(void *km, size_t elem_size, size_t elem_align, size_t count) {
+    if (cc__map_is_heap_km(km))
+        return calloc(count, elem_size);
+    if (!km)
+        return NULL;
+    void *p = cc__map_alloc_payload((CCArena *)km,
+                                    elem_size * count,
+                                    cc__map_storage_align(elem_align));
+    if (p && elem_size > 0 && count > 0)
+        memset(p, 0, elem_size * count);
+    return p;
+}
+
+static inline void *cc__map_krealloc(void *km, void *ptr, size_t elem_size, size_t elem_align,
+                                      size_t count) {
+    if (cc__map_is_heap_km(km)) {
+        (void)elem_align;
+        if (elem_size != 0 && count > SIZE_MAX / elem_size)
+            return NULL;
+        return realloc(ptr, elem_size * count);
+    }
+    if (!km)
+        return NULL;
+    return cc__map_realloc_payload((CCArena *)km,
+                                   ptr,
+                                   elem_size * count,
+                                   cc__map_storage_align(elem_align));
+}
+
+static inline void cc__map_kfree(void *km, void *ptr) {
+    if (!ptr)
+        return;
+    if (cc__map_is_heap_km(km)) {
+        free(ptr);
+        return;
+    }
+    cc__map_release_payload((CCArena *)km, ptr);
+}
+
 #define Kmalloc(km, type, cnt) \
-    ((type*)cc__map_alloc_payload((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)))
+    ((type *)cc__map_kmalloc((km), sizeof(type), _Alignof(type), (size_t)(cnt)))
 
 #define Kcalloc(km, type, cnt) \
-    ((type*)({ \
-        void *__p = cc__map_alloc_payload((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)); \
-        if (__p) memset(__p, 0, (cnt) * sizeof(type)); \
-        __p; \
-    }))
+    ((type *)cc__map_kcalloc((km), sizeof(type), _Alignof(type), (size_t)(cnt)))
 
 #define Krealloc(km, type, ptr, cnt) \
-    ((type*)({ \
-        cc__map_realloc_payload((CCArena*)(km), (void*)(ptr), (cnt) * sizeof(type), _Alignof(type)); \
-    }))
+    ((type *)cc__map_krealloc((km), (void *)(ptr), sizeof(type), _Alignof(type), (size_t)(cnt)))
 
-#define Kfree(km, ptr) ((void)0)  /* no-op: arena manages memory */
+#define Kfree(km, ptr) cc__map_kfree((km), (void *)(ptr))
 
 /* Now include khashl with our allocator hooks */
 #include <ccc/vendor/khashl.h>
@@ -219,88 +291,207 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
 /*
  * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
  *
- * Declares an arena-backed hash map.
- *
- * API:
- * - Name_init(arena) -> Name*
- * - Name_destroy(h)
- * - Name_insert(h, key, val) -> 0 on success, -1 on failure
- * - Name_get(h, key)     -> V* (NULL if not found)
- * - Name_get_ptr(h, key) -> alias for Name_get
- * - Name_remove(h, key)  -> bool (true if existed)
- * - Name_len(h) -> size
- * - Name_clear(h)
+ * Declares an arena-backed hash map on top of the patched `cc_containers`
+ * map core. The outer `Name *` handle is arena-allocated and stable; the
+ * backend table is free to reallocate internally as it grows.
  *
  * HASH_FN: khint_t fn(K key)
- * EQ_FN:   int fn(K a, K b)  (returns non-zero if equal)
+ * EQ_FN:   int fn(K a, K b) (returns non-zero if equal)
  */
-#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                          \
-    KHASHL_MAP_INIT(KH_LOCAL, Name##__kh, Name##__kh, K, V, HASH_FN, EQ_FN)    \
-                                                                               \
-    typedef Name##__kh Name;                                                   \
-                                                                               \
-    static inline Name* Name##_init(CCArena *arena) {                          \
-        return Name##__kh_init2((void*)arena);                                 \
-    }                                                                          \
-                                                                               \
-    static inline void Name##_destroy(Name *h) {                               \
-        Name##__kh_destroy(h);                                                 \
-    }                                                                          \
-                                                                               \
-    /* Insert or update: returns 0 on success, -1 on failure */                \
-    static inline int Name##_insert(Name *h, K key, V val) {                   \
-        if (!h) return -1;                                                     \
-        int absent = 0;                                                        \
-        khint_t k = Name##__kh_put(h, key, &absent);                           \
-        if (absent < 0) return -1;                                             \
-        kh_val(h, k) = val;                                                    \
-        return 0;                                                              \
-    }                                                                          \
-                                                                               \
-    /* Legacy put with absent flag */                                          \
-    static inline int Name##_put(Name *h, K key, V val, int *ret) {            \
-        if (!h) { if (ret) *ret = -1; return -1; }                             \
-        int absent = 0;                                                        \
-        khint_t k = Name##__kh_put(h, key, &absent);                           \
-        if (absent < 0) { if (ret) *ret = -1; return -1; }                     \
-        kh_val(h, k) = val;                                                    \
-        if (ret) *ret = absent;                                                \
-        return (int)k;                                                         \
-    }                                                                          \
-                                                                               \
-    /* Get: returns pointer into the table (NULL if not found). */             \
-    static inline V* Name##_get(Name *h, K key) {                              \
-        if (!h) return NULL;                                                   \
-        khint_t k = Name##__kh_get(h, key);                                    \
-        if (k == kh_end(h)) return NULL;                                       \
-        return &kh_val(h, k);                                                  \
-    }                                                                          \
-                                                                               \
-    /* Alias for callers that spell the pointer form explicitly. */            \
-    static inline V* Name##_get_ptr(Name *h, K key) {                          \
-        return Name##_get(h, key);                                             \
-    }                                                                          \
-                                                                               \
-    /* Remove: returns true if key existed */                                  \
-    static inline bool Name##_remove(Name *h, K key) {                         \
-        if (!h) return false;                                                  \
-        khint_t k = Name##__kh_get(h, key);                                    \
-        if (k == kh_end(h)) return false;                                      \
-        Name##__kh_del(h, k);                                                  \
-        return true;                                                           \
-    }                                                                          \
-                                                                               \
-    /* Legacy del alias */                                                     \
-    static inline bool Name##_del(Name *h, K key) {                            \
-        return Name##_remove(h, key);                                          \
-    }                                                                          \
-                                                                               \
-    static inline size_t Name##_len(const Name *h) {                           \
-        return h ? kh_size(h) : 0;                                             \
-    }                                                                          \
-                                                                               \
-    static inline void Name##_clear(Name *h) {                                 \
-        if (h) Name##__kh_clear(h);                                            \
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \
+    typedef struct Name {                                                            \
+        CCArena *arena;                                                              \
+        void *impl;                                                                  \
+    } Name;                                                                          \
+                                                                                     \
+    static inline uint64_t Name##__layout(void) {                                    \
+        return ccj_layout(                                                           \
+            CC_MAP,                                                                  \
+            sizeof(V),                                                               \
+            _Alignof(V),                                                             \
+            (ccj_key_details_ty){ sizeof(K), _Alignof(K) }                           \
+        );                                                                           \
+    }                                                                                \
+                                                                                     \
+    static inline size_t Name##__hash(void *key) {                                   \
+        return (size_t)(HASH_FN(*(K *)key));                                         \
+    }                                                                                \
+                                                                                     \
+    static inline int Name##__cmpr(void *lhs, void *rhs) {                           \
+        return EQ_FN(*(K *)lhs, *(K *)rhs);                                          \
+    }                                                                                \
+                                                                                     \
+    static inline Name *Name##_init(CCArena *arena) {                                \
+        Name *h;                                                                     \
+        if (!arena) return NULL;                                                     \
+        h = (Name *)cc_arena_alloc(arena, sizeof(Name), _Alignof(Name));             \
+        if (!h) return NULL;                                                         \
+        h->arena = arena;                                                            \
+        h->impl = (void *)&ccj_map_placeholder;                                      \
+        return h;                                                                    \
+    }                                                                                \
+                                                                                     \
+    static inline Name *Name##_init_count(CCArena *arena, size_t count) {            \
+        Name *h = Name##_init(arena);                                                \
+        ccj_allocing_fn_result_ty result;                                            \
+        if (!h) return NULL;                                                         \
+        result = ccj_map_reserve(                                                    \
+            h->impl,                                                                 \
+            count,                                                                   \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            CC_DEFAULT_LOAD,                                                         \
+            cc__containers_realloc,                                                  \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        );                                                                           \
+        if (!result.other_ptr) {                                                     \
+            (void)cc_arena_release(arena, h);                                        \
+            return NULL;                                                             \
+        }                                                                            \
+        h->impl = result.new_cntr;                                                   \
+        return h;                                                                    \
+    }                                                                                \
+                                                                                     \
+    static inline void Name##_destroy(Name *h) {                                     \
+        if (!h) return;                                                              \
+        ccj_map_cleanup(                                                             \
+            h->impl,                                                                 \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            NULL,                                                                    \
+            NULL,                                                                    \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        );                                                                           \
+        (void)cc_arena_release(h->arena, h);                                         \
+    }                                                                                \
+                                                                                     \
+    static inline int Name##_insert(Name *h, K key, V val) {                         \
+        ccj_allocing_fn_result_ty result;                                            \
+        if (!h) return -1;                                                           \
+        result = ccj_map_insert(                                                     \
+            h->impl,                                                                 \
+            &val,                                                                    \
+            &key,                                                                    \
+            true,                                                                    \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            Name##__cmpr,                                                            \
+            CC_DEFAULT_LOAD,                                                         \
+            NULL,                                                                    \
+            NULL,                                                                    \
+            cc__containers_realloc,                                                  \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        );                                                                           \
+        if (!result.other_ptr) return -1;                                            \
+        h->impl = result.new_cntr;                                                   \
+        return 0;                                                                    \
+    }                                                                                \
+                                                                                     \
+    static inline int Name##_put(Name *h, K key, V val, int *ret) {                  \
+        ccj_allocing_fn_result_ty result;                                            \
+        bool existed;                                                                \
+        if (!h) {                                                                    \
+            if (ret) *ret = -1;                                                      \
+            return -1;                                                               \
+        }                                                                            \
+        existed = ccj_map_get(                                                       \
+            h->impl,                                                                 \
+            &key,                                                                    \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            Name##__cmpr                                                             \
+        ) != NULL;                                                                   \
+        result = ccj_map_insert(                                                     \
+            h->impl,                                                                 \
+            &val,                                                                    \
+            &key,                                                                    \
+            true,                                                                    \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            Name##__cmpr,                                                            \
+            CC_DEFAULT_LOAD,                                                         \
+            NULL,                                                                    \
+            NULL,                                                                    \
+            cc__containers_realloc,                                                  \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        );                                                                           \
+        if (!result.other_ptr) {                                                     \
+            if (ret) *ret = -1;                                                      \
+            return -1;                                                               \
+        }                                                                            \
+        h->impl = result.new_cntr;                                                   \
+        if (ret) *ret = existed ? 0 : 1;                                             \
+        return (int)ccj_map_bucket_index_from_itr(                                   \
+            h->impl,                                                                 \
+            result.other_ptr,                                                        \
+            sizeof(V),                                                               \
+            Name##__layout()                                                         \
+        );                                                                           \
+    }                                                                                \
+                                                                                     \
+    static inline V *Name##_get(Name *h, K key) {                                    \
+        if (!h) return NULL;                                                         \
+        return (V *)ccj_map_get(                                                     \
+            h->impl,                                                                 \
+            &key,                                                                    \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            Name##__cmpr                                                             \
+        );                                                                           \
+    }                                                                                \
+                                                                                     \
+    static inline V *Name##_get_ptr(Name *h, K key) {                                \
+        return Name##_get(h, key);                                                   \
+    }                                                                                \
+                                                                                     \
+    static inline bool Name##_remove(Name *h, K key) {                               \
+        if (!h) return false;                                                        \
+        return ccj_map_erase(                                                        \
+            h->impl,                                                                 \
+            &key,                                                                    \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            Name##__hash,                                                            \
+            Name##__cmpr,                                                            \
+            NULL,                                                                    \
+            NULL,                                                                    \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        ) != NULL;                                                                   \
+    }                                                                                \
+                                                                                     \
+    static inline bool Name##_del(Name *h, K key) {                                  \
+        return Name##_remove(h, key);                                                \
+    }                                                                                \
+                                                                                     \
+    static inline size_t Name##_len(const Name *h) {                                 \
+        return h ? ccj_map_size(h->impl) : 0;                                        \
+    }                                                                                \
+                                                                                     \
+    static inline size_t Name##_cap(const Name *h) {                                 \
+        return h ? ccj_map_cap(h->impl) : 0;                                         \
+    }                                                                                \
+                                                                                     \
+    static inline void Name##_clear(Name *h) {                                       \
+        if (!h) return;                                                              \
+        ccj_map_clear(                                                               \
+            h->impl,                                                                 \
+            sizeof(V),                                                               \
+            Name##__layout(),                                                        \
+            NULL,                                                                    \
+            NULL,                                                                    \
+            cc__containers_free,                                                     \
+            h->arena                                                                  \
+        );                                                                           \
     }
 
 /* Backwards-compat: CC_MAP_DECL_ARENA_FULL used to take an extra OptV
@@ -311,10 +502,68 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
     CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
 
 /* Iteration helper: iterates over all (key, val) pairs */
-#define CC_MAP_FOREACH(h, k_var, v_var)                                        \
-    for (khint_t __i = 0; (h) && __i != kh_end(h); ++__i)                      \
-        if (kh_exist((h), __i) &&                                              \
-            ((k_var) = kh_key((h), __i), (v_var) = kh_val((h), __i), 1))
+#define CC_MAP_FOREACH(h, k_var, v_var)                                             \
+    for (void *__cc_map_itr =                                                       \
+             (h) ? ccj_map_first(                                                   \
+                       (h)->impl,                                                   \
+                       sizeof(v_var),                                               \
+                       ccj_layout(                                                  \
+                           CC_MAP,                                                  \
+                           sizeof(v_var),                                           \
+                           _Alignof(CC_TYPEOF_XP(v_var)),                           \
+                           (ccj_key_details_ty){                                    \
+                               sizeof(k_var),                                       \
+                               _Alignof(CC_TYPEOF_XP(k_var))                        \
+                           }                                                        \
+                       )                                                            \
+                   )                                                                \
+                 : NULL,                                                            \
+             *__cc_map_end =                                                        \
+             (h) ? ccj_map_end(                                                     \
+                       (h)->impl,                                                   \
+                       sizeof(v_var),                                               \
+                       ccj_layout(                                                  \
+                           CC_MAP,                                                  \
+                           sizeof(v_var),                                           \
+                           _Alignof(CC_TYPEOF_XP(v_var)),                           \
+                           (ccj_key_details_ty){                                    \
+                               sizeof(k_var),                                       \
+                               _Alignof(CC_TYPEOF_XP(k_var))                        \
+                           }                                                        \
+                       )                                                            \
+                   )                                                                \
+                 : NULL;                                                            \
+         (h) && __cc_map_itr != __cc_map_end;                                       \
+         __cc_map_itr = ccj_map_next(                                               \
+             (h)->impl,                                                             \
+             __cc_map_itr,                                                          \
+             sizeof(v_var),                                                         \
+             ccj_layout(                                                            \
+                 CC_MAP,                                                            \
+                 sizeof(v_var),                                                     \
+                 _Alignof(CC_TYPEOF_XP(v_var)),                                     \
+                 (ccj_key_details_ty){                                              \
+                     sizeof(k_var),                                                 \
+                     _Alignof(CC_TYPEOF_XP(k_var))                                  \
+                 }                                                                  \
+             )                                                                      \
+         )                                                                          \
+    )                                                                               \
+        if (((k_var) = *(CC_TYPEOF_XP(k_var) *)ccj_map_key_for(                     \
+                 __cc_map_itr,                                                      \
+                 sizeof(v_var),                                                     \
+                 ccj_layout(                                                        \
+                     CC_MAP,                                                        \
+                     sizeof(v_var),                                                 \
+                     _Alignof(CC_TYPEOF_XP(v_var)),                                 \
+                     (ccj_key_details_ty){                                          \
+                         sizeof(k_var),                                             \
+                         _Alignof(CC_TYPEOF_XP(k_var))                              \
+                     }                                                              \
+                 )                                                                  \
+             ),                                                                     \
+             (v_var) = *(CC_TYPEOF_XP(v_var) *)__cc_map_itr,                        \
+             1))
 
 /* Convenience: common key types */
 #define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
