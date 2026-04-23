@@ -19,9 +19,16 @@ static CCArena make_fixed_root_arena(void) {
     return cc_arena_create_buffer(buffer, sizeof(buffer), CC_ARENA_FIXED);
 }
 
-static CCArena make_empty_heap_overflow_arena(void) {
+static void test_empty_heap_overflow_rejected(void) {
     CCArena arena = cc_arena_heap(0);
-    arena.block_max = 0;
+    assert(!arena.base);
+    assert(!cc_arena_set_heap_overflow(&arena, true));
+}
+
+static CCArena make_heap_overflow_arena(void) {
+    CCArena arena = cc_arena_heap(8192);
+    assert(arena.base != NULL);
+    arena.block_max = 1;
     assert(cc_arena_set_heap_overflow(&arena, true));
     return arena;
 }
@@ -100,8 +107,8 @@ static void test_map_release_on_resize_and_destroy(ArenaFactory make_arena) {
         assert(value && *value == i + 100);
     }
 
-    /* Live allocations should stabilize at map handle + keys + used bitmap. */
-    assert(cc_atomic_load(&arena.live_allocs) == 3);
+    /* Patched map core keeps one stable handle plus one table allocation. */
+    assert(cc_atomic_load(&arena.live_allocs) == 2);
 
     IntMap_destroy(m);
     assert(cc_atomic_load(&arena.live_allocs) == 0);
@@ -117,8 +124,9 @@ static void run_release_suite(ArenaFactory make_arena) {
 }
 
 int main(void) {
+    test_empty_heap_overflow_rejected();
     run_release_suite(make_fixed_root_arena);
-    run_release_suite(make_empty_heap_overflow_arena);
+    run_release_suite(make_heap_overflow_arena);
     cc_std_out_write(cc_slice_from_buffer("arena release container smoke ok\n", 34));
     return 0;
 }
