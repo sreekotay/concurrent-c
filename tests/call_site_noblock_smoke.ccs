@@ -1,0 +1,57 @@
+/* Phase 3 (spec §8.2.2 rule 1 — call-site annotation wins):
+ *
+ * In a plain `@async` function (ambient = @blocking, the default),
+ * a call-site `@noblock` overrides the ambient and suppresses the
+ * autoblock wrap for that one edge.
+ *
+ * Observable signal: the annotated call runs inline on the poll thread
+ * (main), so its recorded tid equals main's tid.  A peer call on the
+ * line above, without @noblock, goes through run_blocking and lands on
+ * a thread-pool worker with a different tid.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async int serve(intptr_t* wrapped_tid, intptr_t* noblock_tid) {
+    /* Default ambient @blocking: this call SHOULD be autoblock-wrapped. */
+    record_tid(wrapped_tid);
+    /* Explicit call-site @noblock: MUST NOT be wrapped. */
+    @noblock record_tid(noblock_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t wrapped_tid = 0, noblock_tid = 0;
+    (void)cc_block_on(int, serve(&wrapped_tid, &noblock_tid));
+    if (noblock_tid == 0 || wrapped_tid == 0) {
+        fprintf(stderr, "tid capture failed (wrapped=%ld noblock=%ld)\n",
+                (long)wrapped_tid, (long)noblock_tid);
+        return 2;
+    }
+    if (noblock_tid != main_tid) {
+        fprintf(stderr,
+                "call-site @noblock did NOT suppress wrap "
+                "(noblock_tid=%ld main=%ld)\n",
+                (long)noblock_tid, (long)main_tid);
+        return 1;
+    }
+    if (wrapped_tid == main_tid) {
+        fprintf(stderr,
+                "plain call was NOT wrapped (ambient blocking default broken) "
+                "(wrapped_tid=%ld main=%ld)\n",
+                (long)wrapped_tid, (long)main_tid);
+        return 3;
+    }
+    printf("ok\n");
+    return 0;
+}

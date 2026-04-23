@@ -24,7 +24,7 @@ int main(void) {
 
     CCString transient = CCString_new(&arena);
     assert(transient.data != NULL);
-    assert(CCString_push(&transient, "transient") != NULL);
+    assert(CCString_push(&transient, "temp") != NULL);
     CCSlice transient_view = CCString_as_slice(&transient);
     uint64_t transient_id = cc_slice_make_id(transient.provenance, false, false, false);
     assert(transient_view.id == transient_id);

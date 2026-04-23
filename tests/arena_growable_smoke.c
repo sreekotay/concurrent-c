@@ -99,7 +99,7 @@ int main(void) {
 
     // --- Test 5: Fixed arena (block_max=1) never grows ---
     {
-        uint8_t buf[128];
+        uint8_t buf[192];
         CCArena a;
         cc_arena_buffer(&a, buf, sizeof(buf));
         if (a.block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
@@ -161,6 +161,131 @@ int main(void) {
             return 6;
         }
         printf("  stack-first + heap overflow + reset/free OK\n");
+    }
+
+    // --- Test 7: release resets current block and heap-overflow setter is explicit ---
+    {
+        uint8_t buf[256];
+        CCArena a;
+        if (cc_arena_buffer(&a, buf, sizeof(buf)) != 0) {
+            printf("FAIL: release test init\n");
+            return 7;
+        }
+        if (!cc_arena_set_heap_overflow(&a, true)) {
+            printf("FAIL: enable heap overflow\n");
+            return 7;
+        }
+
+        void *p = cc_arena_alloc(&a, 64, 8);
+        if (!p) {
+            printf("FAIL: tracked alloc in fixed arena\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, p)) {
+            printf("FAIL: release tracked arena ptr\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, p)) {
+            printf("FAIL: coarse repeat release should be tolerated\n");
+            return 7;
+        }
+        void *p2 = cc_arena_alloc(&a, 64, 8);
+        if (!p2 || p2 != p) {
+            printf("FAIL: release should make current block reusable\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, p2)) {
+            printf("FAIL: release second tracked ptr\n");
+            return 7;
+        }
+
+        void *spill = cc_arena_alloc(&a, 512, 8);
+        if (!spill) {
+            printf("FAIL: explicit heap overflow fallback\n");
+            return 7;
+        }
+        if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+            printf("FAIL: expected used heap overflow flag\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, spill)) {
+            printf("FAIL: release heap overflow ptr\n");
+            return 7;
+        }
+
+        void *foreign = malloc(24);
+        if (!foreign) {
+            printf("FAIL: foreign alloc\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, foreign)) {
+            printf("FAIL: permissive fallback free\n");
+            return 7;
+        }
+
+        CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
+        if (cp.arena != NULL) {
+            printf("FAIL: checkpoint should be disabled after release/spill\n");
+            return 7;
+        }
+
+        cc_arena_reset(&a);
+        if (a._flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {
+            printf("FAIL: reset should clear non-rewindable flags\n");
+            return 7;
+        }
+        if (cc_arena_checkpoint(&a).arena == NULL) {
+            printf("FAIL: checkpoint should work again after reset\n");
+            return 7;
+        }
+        cc_arena_free(&a);
+        printf("  release + explicit heap overflow + checkpoint gating OK\n");
+    }
+
+    // --- Test 8: releasing an old block must not rewind the new root ---
+    {
+        CCArena a = cc_arena_heap(64);
+        if (!a.base) {
+            printf("FAIL: grow-safe release init\n");
+            return 8;
+        }
+
+        void *old_root = cc_arena_alloc(&a, 48, 8);
+        if (!old_root) {
+            printf("FAIL: old-root alloc\n");
+            return 8;
+        }
+
+        uint8_t *new_root = (uint8_t*)cc_arena_alloc(&a, 128, 8);
+        if (!new_root) {
+            printf("FAIL: new-root alloc after grow\n");
+            return 8;
+        }
+        memset(new_root, 0x5a, 128);
+
+        if (!cc_arena_release(&a, old_root)) {
+            printf("FAIL: release old-root alloc after grow\n");
+            return 8;
+        }
+
+        uint8_t *later = (uint8_t*)cc_arena_alloc(&a, 64, 8);
+        if (!later) {
+            printf("FAIL: alloc after releasing old-root\n");
+            return 8;
+        }
+        if (later == new_root) {
+            printf("FAIL: releasing old-root rewound the new root\n");
+            return 8;
+        }
+        for (size_t i = 0; i < 128; ++i) {
+            if (new_root[i] != 0x5a) {
+                printf("FAIL: new-root data corrupted after releasing old-root\n");
+                return 8;
+            }
+        }
+
+        cc_arena_free(&a);
+        printf("  grow-safe release across blocks OK\n");
     }
 
     printf("arena_growable_smoke ok\n");

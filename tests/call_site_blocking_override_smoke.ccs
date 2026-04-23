@@ -1,0 +1,55 @@
+/* Phase 3 (spec §8.2.2 rule 1 — call-site beats caller ambient):
+ *
+ * In a `@async @noblock` function (ambient = @noblock), an explicit
+ * call-site `@blocking` forces the wrap on one specific edge.
+ *
+ * Observable signal: the annotated call lands on a thread-pool worker
+ * (different tid from main), while the peer un-annotated call runs
+ * inline on the poll thread (same tid as main).
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async @noblock int serve(intptr_t* inline_tid, intptr_t* forced_tid) {
+    /* Inherits ambient @noblock: MUST NOT be wrapped. */
+    record_tid(inline_tid);
+    /* Explicit call-site @blocking: MUST be wrapped despite ambient noblock. */
+    @blocking record_tid(forced_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t inline_tid = 0, forced_tid = 0;
+    (void)cc_block_on(int, serve(&inline_tid, &forced_tid));
+    if (inline_tid == 0 || forced_tid == 0) {
+        fprintf(stderr, "tid capture failed (inline=%ld forced=%ld)\n",
+                (long)inline_tid, (long)forced_tid);
+        return 2;
+    }
+    if (inline_tid != main_tid) {
+        fprintf(stderr,
+                "ambient @noblock edge was wrapped "
+                "(inline_tid=%ld main=%ld)\n",
+                (long)inline_tid, (long)main_tid);
+        return 3;
+    }
+    if (forced_tid == main_tid) {
+        fprintf(stderr,
+                "call-site @blocking did NOT force wrap "
+                "(forced_tid=%ld main=%ld)\n",
+                (long)forced_tid, (long)main_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

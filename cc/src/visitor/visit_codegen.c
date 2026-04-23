@@ -3296,6 +3296,33 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             phase3_root = phase3_owned_root;
         }
+        /* Phase 3 call-site mode rewrite: convert `@blocking f(...)` /
+         * `@noblock f(...)` call-site annotations into surviving block-
+         * comment markers (`/​*@CC_SITE=blocking*​/ f(...)`) so pass_autoblock
+         * can observe them while scanning src_ufcs.  Reparse afterwards so
+         * AST offsets reflect the shifted callee positions. */
+        if (src_ufcs &&
+            (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
+            char* cs = cc__rewrite_at_call_site_mode(src_ufcs, src_ufcs_len);
+            if (cs) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = cs;
+                src_ufcs_len = strlen(cs);
+                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+                phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                              "phase3 after call-site mode rewrite");
+                if (!phase3_owned_root) {
+                    fclose(out);
+                    if (src_ufcs != src_all) free(src_ufcs);
+                    free(src_all);
+                    free(closure_protos);
+                    free(closure_defs);
+                    return EINVAL;
+                }
+                phase3_root = phase3_owned_root;
+            }
+        }
         if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
                                           src_all, cc__collect_autoblocking_edits, &phase3_changed) < 0) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);

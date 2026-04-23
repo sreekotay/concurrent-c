@@ -9,7 +9,7 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
     *out = NULL;
     *out_len = 0;
 
-    /* Remove only these markers: @async, @noblock, @latency_sensitive.
+    /* Remove only these markers: @async, @noblock, @blocking, @latency_sensitive.
        This is a conservative text pass so the generated C compiles; real semantics
        will be implemented by async lowering later.
        
@@ -84,6 +84,7 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
             size_t kw_len = 0;
             if (i + 6 <= in_len && memcmp(in + i + 1, "async", 5) == 0) { kw = "async"; kw_len = 5; }
             else if (i + 8 <= in_len && memcmp(in + i + 1, "noblock", 7) == 0) { kw = "noblock"; kw_len = 7; }
+            else if (i + 9 <= in_len && memcmp(in + i + 1, "blocking", 8) == 0) { kw = "blocking"; kw_len = 8; }
             else if (i + 18 <= in_len && memcmp(in + i + 1, "latency_sensitive", 17) == 0) { kw = "latency_sensitive"; kw_len = 17; }
             if (kw) {
                 size_t j = i + 1 + kw_len;

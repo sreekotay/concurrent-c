@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-/* Marker stripping pass: removes @async, @noblock, @latency_sensitive markers from function declarations */
+/* Marker stripping pass: removes @async, @noblock, @blocking, @latency_sensitive markers from function declarations */
 int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t* out_len);
 
 #endif /* CC_PASS_STRIP_MARKERS_H */

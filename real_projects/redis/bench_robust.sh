@@ -85,6 +85,16 @@ ALL_PIDS="$UPSTREAM_PID $IDIOMATIC_PID"
 wait_port "$UPSTREAM_PORT"
 wait_port "$IDIOMATIC_PORT"
 
+check_server_alive() {
+    local label="$1"
+    local pid="$2"
+    local log="$3"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "$label server exited unexpectedly; log=$log" >&2
+        exit 1
+    fi
+}
+
 # --- rss/thread sampler (per-server, for the whole benchmark run) ---
 # Writes "<rss_kb> <threads>" lines; final peak is max over the whole run.
 cat > "$TMP_DIR/sampler.py" <<'PY'
@@ -177,13 +187,20 @@ print(' '.join(labels))")"
         read -ra ORDER <<< "$order_str"
         for label in "${ORDER[@]}"; do
             out="$TMP_DIR/${label}_${cmd}_r${r}.log"
-            run_one "$label" "$(port_for "$label")" "$cmd" "$out" || true
+            check_server_alive "upstream" "$UPSTREAM_PID" "$TMP_DIR/upstream.log"
+            check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
+            if ! run_one "$label" "$(port_for "$label")" "$cmd" "$out"; then
+                echo >&2 "   $label $cmd: benchmark command failed; log=$out"
+                exit 1
+            fi
+            check_server_alive "upstream" "$UPSTREAM_PID" "$TMP_DIR/upstream.log"
+            check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
             # command is uppercased in bench output (e.g. SET)
             upper="$(echo "$cmd" | tr '[:lower:]' '[:upper:]')"
             rps="$(extract_rps "$upper" "$out" || true)"
             if [[ -z "${rps:-}" ]]; then
                 echo >&2 "   $label $cmd: failed to parse rps; log=$out"
-                continue
+                exit 1
             fi
             printf "   %-9s %-5s rps=%s\n" "$label" "$cmd" "$rps" >&2
             if [[ $r -gt 0 ]]; then

@@ -145,10 +145,14 @@ enum {
     CC_STUB_UNARY = 23,  /* Unary operator (e.g., &, *, !) */
 };
 
+/* Bit positions mirror the TCC cc-ext hook in third_party/tcc/tccgen.c
+ * and the mirror enum in pass_autoblock.c.  Keep the three definitions
+ * in sync. */
 enum {
     CC_FN_ATTR_ASYNC = 1u << 0,
     CC_FN_ATTR_NOBLOCK = 1u << 1,
     CC_FN_ATTR_LATENCY_SENSITIVE = 1u << 2,
+    CC_FN_ATTR_BLOCKING = 1u << 3,
 };
 
 typedef struct {

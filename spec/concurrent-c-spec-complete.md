@@ -100,25 +100,35 @@ FILE* f = fopen(path, "r");
 
 Normative rules in §5.1.
 
-### 1.4 `@async` / `await` — cooperative suspension
+### 1.4 `@async` / `@await` — cooperative suspension
 
-`@async` marks functions that may suspend; `await` marks the suspension
+`@async` marks functions that may suspend; `@await` marks the suspension
 point inside them. The compiler lowers `@async` to an explicit state
-machine, and every `await` is a point where the scheduler may resume a
+machine, and every `@await` is a point where the scheduler may resume a
 different task.
 
 ```c
 @async int echo(CCChanTx tx, CCChanRx rx, int v) {
-    if (await tx.send(v) != 0)       return -1;
+    if (@await tx.send(v) != 0)       return -1;
     int reply;
-    if (await rx.recv(&reply) != 0)  return -2;
+    if (@await rx.recv(&reply) != 0)  return -2;
     return reply;
 }
 ```
 
-`await` is only legal inside `@async`. Synchronous code drives an async
-function with `@await f(...)` or `cc_block_on(f(...))`. Normative rules
-in §8; lowering in Appendix J.
+`@await` is only legal inside `@async`. Synchronous code drives an async
+function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
+
+**Sigil policy:** every CC-introduced keyword carries a leading `@`
+(`@async`, `@await`, `@match`, `@defer`, `@cancel`, `@errhandler`,
+`@destroy`, `@with`, `@with_deadline`, `@nursery`, `@spawn`,
+`@comptime`, `@blocking`, `@noblock`, `@lock`, `@for`). Bare forms are
+reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
+etc. are legal variable / field / function names and never keywords
+without the `@`. This eliminates identifier-collision and
+keyword-in-comment scanning ambiguity across the compiler. See §2.3.
+
+Normative rules in §8; lowering in Appendix J.
 
 ### 1.5 Provenance — arenas, slices, strings
 
@@ -137,14 +147,15 @@ CCString greeting = @string(`hello ${now()}`, &a);   // arena provenance
 
 Strings and vectors build on slices and arenas; see §§3.4–3.5, §5, §9.1.
 
-### 1.6 `comptime` — compile-time evaluation
+### 1.6 `@comptime` — compile-time evaluation
 
-`comptime` admits a restricted evaluation mode at compile time — enough
-for generic dispatch, specialization, and static-assertion-style checks,
-without opening the door to a general compile-time interpreter.
+`@comptime` admits a restricted evaluation mode at compile time —
+enough for generic dispatch, specialization, and static-assertion-style
+checks, without opening the door to a general compile-time
+interpreter.
 
 ```c
-comptime int LANES = 4;
+@comptime int LANES = 4;
 
 @comptime if (sizeof(void*) == 8) {
     typedef long long word;
@@ -160,7 +171,10 @@ Normative rules in §14.
 Everything else in this specification is one of:
 
 - **Sugar** over these primitives (e.g., `CALL() !> @destroy { D };` schedules `D` on scope exit — it is `@defer` at a declaration with error-checked construction; `@lock (m) as g` is `@defer`-shaped).
-- **Attributes** (e.g., `@noblock`, `@latency_sensitive`, `@nonblocking`).
+- **Attributes** (e.g., `@blocking`, `@noblock`, `@latency_sensitive`).
+  `@blocking` / `@noblock` are *dual*: both the function declaration
+  and the individual call site accept them, and they together define
+  the execution-mode contract at every call edge (§8.2).
 - **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
 
 ---
@@ -169,46 +183,69 @@ Everything else in this specification is one of:
 
 Syntax inventory, grouped by purpose. See §1 for the primitive taxonomy and individual sections for normative rules.
 
-### Core Keywords (6)
+### Core Keywords
+
+All CC-introduced keywords carry a leading `@` sigil. Bare identifiers
+(`match`, `await`, `async`, `defer`, `noblock`, `blocking`, `comptime`,
+…) are legal C names and never keywords on their own. This gives the
+lexer an unambiguous sentinel for every CC construct and removes an
+entire class of keyword-in-comment / keyword-in-identifier scanner
+bugs.
 
 
-| Keyword      | Purpose                                                                 | Example                         |
-| ------------ | ----------------------------------------------------------------------- | ------------------------------- |
-| `await`      | Suspend and wait for async operation to complete                        | `data = await read_file(path);` |
-| `defer`      | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();`             |
-| `defer(err)` | Cleanup only if returning error (with `@defer(err)`)                    | `@defer(err) free(ptr);`        |
-| `defer(ok)`  | Cleanup only if returning success (with `@defer(ok)`)                   | `@defer(ok) commit();`          |
-| `unsafe`     | Disable safety checks in a block (e.g., for raw pointer casts)          | `unsafe { ptr_cast(); }`        |
-| `comptime`   | Mark code for compile-time evaluation (with `@comptime if`)             | `@comptime if (DEBUG) { }`      |
+| Keyword        | Purpose                                                                 | Example                                |
+| -------------- | ----------------------------------------------------------------------- | -------------------------------------- |
+| `@async`       | Mark function as asynchronous (state-machine lowered)                   | `@async int handler() { ... }`         |
+| `@await`       | Suspend until an async operation completes                              | `int v = @await fetch();`              |
+| `@defer`       | Schedule cleanup on scope exit                                          | `@defer file.close();`                 |
+| `@defer(err)`  | Cleanup only on error return                                            | `@defer(err) free(ptr);`               |
+| `@defer(ok)`   | Cleanup only on success return                                          | `@defer(ok) commit();`                 |
+| `@cancel`      | Cancel a named `@defer` before it runs                                  | `@cancel cleanup;`                     |
+| `@errhandler`  | Block-scoped default handler for `!>;`                                  | `@errhandler(CCError e) { log(e); }`   |
+| `@err`         | Forward current error to the enclosing handler                          | `@err(e);`                             |
+| `@match`       | Multiplex on channel events / typed variants                            | `@match { case int x = @await ch: … }` |
+| `@with`        | Structured lifetime scope                                               | `@with (open(p)) as f { … }`           |
+| `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
+| `@nursery`     | Structured-concurrency scope                                            | `@nursery(n) { n.spawn(task); }`       |
+| `@spawn`       | Spawn a child task in the current nursery                               | `@spawn worker();`                     |
+| `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
+| `@lock`        | Acquire mutex, bind guard                                               | `@lock (m) as g { g.data++; }`         |
+| `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
+| `@blocking`    | Mark a call edge as going through `run_blocking` (function or site)     | `@blocking f();` — see §8.2            |
+| `@noblock`     | Mark a call edge as non-blocking, bypass `run_blocking` (function or site) | `@noblock f();` — see §8.2          |
+| `@latency_sensitive` | Disable dispatch coalescing for this `@async` fn                  | `@async @latency_sensitive void h() {}`|
+| `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
+| `@for`         | Async iteration over a channel                                          | `@for @await (int x : ch) { … }`       |
+| `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
+| `@string`      | Arena-allocated string / templated string                               | `CCString s = @string("hi", &arena);`  |
+| `unsafe`       | (Bare) disable safety checks in a block                                 | `unsafe { ptr_cast(); }`               |
 
 
-### Contextual Keywords (3)
-
-These are only reserved in specific contexts, so they can be used as identifiers elsewhere:
+### Special Block Forms
 
 
-| Keyword   | Context                           | Purpose                                |
-| --------- | --------------------------------- | -------------------------------------- |
-| `async`   | After `@` (in `@async fn`)        | Mark function as asynchronous          |
-| `lock`    | After `@` (in `@lock (m) as var`) | Acquire mutex guard                    |
-| `noblock` | After `@` (in `@noblock fn`)      | Mark function as provably non-blocking |
+| Form                            | Purpose                                                  | Example                                                  |
+| ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
+| `@async fn() { }`               | Define asynchronous function                             | `@async void handler() { }`                              |
+| `@blocking fn() { }`            | Mark declaration — async callers route through `run_blocking` at call edges (§8.2) | `@blocking FILE* open_config() { … }`                    |
+| `@noblock fn() { }`             | Mark declaration — async callers skip `run_blocking` at call edges (§8.2)          | `@noblock size_t strlen_nb(const char* s) { … }`         |
+| `@latency_sensitive`            | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
+| `@scoped type T`                | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                               |
+| `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
+| `@lock (m) as g { }`            | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
+| `@match { case T x = ... }`     | Multiplex on channel events                              | `@match { case int x = @await ch: ... }`                 |
+| `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
+| `@for @await (T x : ch) { }`    | Async iteration (consume channel)                        | `@for @await (int x : ch) { process(x); }`               |
+| `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
+| `@errhandler(E e) { }`          | Block-scoped default handler for `!>;` / `@err`          | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+
+**Call-site annotation forms** (see §8.2 for precedence):
 
 
-### Special Block Forms (10)
-
-
-| Form                        | Purpose                                                  | Example                                                  |
-| --------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| `@async fn() { }`           | Define asynchronous function                             | `@async void handler() { }`                              |
-| `@latency_sensitive`        | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
-| `@scoped type T`            | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                                 |
-| `CALL() !> @destroy { D };` | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`       |
-| `@lock (m) as g { }`        | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
-| `@match { case T x = ... }` | Multiplex on channel events                              | `@match { case int x = await ch: ... }`                  |
-| `@defer stmt;`              | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
-| `@for await (T x : ch) { }` | Async iteration (consume channel)                        | `@for await (int x : ch) { process(x); }`                |
-| `@comptime if (cond) { }`   | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
-| `@errhandler(E e) { }`      | Block-scoped default handler for `@err` in this block    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+| Form                | Purpose                                                  | Example                    |
+| ------------------- | -------------------------------------------------------- | -------------------------- |
+| `@blocking expr;`   | Force this call edge to route through `run_blocking`     | `@blocking helper();`      |
+| `@noblock expr;`    | Force this call edge to skip `run_blocking`              | `@noblock helper();`       |
 
 
 ### Result unwrap operators (2)
@@ -245,7 +282,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 
 | Form                                                     | Purpose                                                               | Example                                   |
 | -------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
-| `await expr`                                             | Suspend until task completes, unwrap result                           | `int result = await fetch();`             |
+| `@await expr`                                            | Suspend until task completes, unwrap result                           | `int result = @await fetch();`            |
 | `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
 
@@ -255,7 +292,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 
 | Form                              | Purpose                                                  | Example                                                         |
 | --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
-| `@with_deadline(d) { }`           | Apply deadline to block; `await` inside is cancel-aware. | `@with_deadline(seconds(5)) { await op(); }`                    |
+| `@with_deadline(d) { }`           | Apply deadline to block; `@await` inside is cancel-aware. | `@with_deadline(seconds(5)) { @await op(); }`                    |
 | `@with_deadline(d) as handle { }` | Same, with inspectable `CCDeadline` handle inside block. | `@with_deadline(seconds(5)) as dl { if (dl.remaining() < …) …}` |
 
 
@@ -437,7 +474,7 @@ unsafe {
 
 // Example 2: Unique slice from channel
 char[:] x;
-bool !>(CCIoError) got = await ch.recv(&x);   // recv writes into &x
+bool !>(CCIoError) got = @await ch.recv(&x);   // recv writes into &x
 if (cc_is_err(got) || !cc_value(got)) return; // channel closed/drained
 char[:] y = x;                                // ERROR: cannot copy unique slice
 char[:] y = cc_move(x);                       // OK: x is invalid, y owns buffer
@@ -499,7 +536,7 @@ char buf[100];
 char[:] stack_slice = buf[:];
 
 // Channel send: OK (deep-copies bytes into channel buffer)
-await ch.send(stack_slice);
+@await ch.send(stack_slice);
 
 // Thread closure: ERROR (closure copies slice struct, ptr points to dead stack)
 spawn_thread(() => {
@@ -574,6 +611,25 @@ void bad_pattern() {
 ### 2.3 Lexing & Parsing
 
 Concurrent-C extends C syntax with new operators and keywords in specific contexts:
+
+**Keyword sigil policy (normative):** Every CC-introduced keyword
+carries a leading `@` sigil at the lexer level. The set includes
+(non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
+`@match`, `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
+`@errhandler`, `@err`, `@destroy`, `@with`, `@with_deadline`,
+`@nursery`, `@spawn`, `@comptime`, `@lock`, `@for`,
+`@latency_sensitive`, `@scoped`, `@slice`, `@string`. The bare
+identifiers `async`, `await`, `blocking`, `noblock`, `match`, `defer`,
+`nursery`, `spawn`, `lock`, `comptime`, `cancel`, etc. are **not**
+reserved — they may be used freely as variable, field, parameter, or
+function names. Only the `@`-prefixed form triggers the compiler
+construct. The single exception is `unsafe`, which is bare (inherited
+from common C extensions).
+
+This rule eliminates keyword-identifier collisions (e.g., a variable
+named `@match` shadowing the construct) and gives every CC-aware scan
+pass an unambiguous `@`-anchored sentinel, which removes an entire
+class of keyword-in-comment / keyword-in-string false-positive bugs.
 
 **Type-context operators (not valid in expression context):**
 
@@ -1151,7 +1207,7 @@ Subslicing a unique slice produces a **borrowed view**. At runtime, borrows are 
 
 ```c
 char[:] x;
-bool !>(CCIoError) got = await ch.recv(&x);   // x owns unique slice on ok(true)
+bool !>(CCIoError) got = @await ch.recv(&x);   // x owns unique slice on ok(true)
 // Assume got is ok(true) here.
 char[:] borrow = x[0..10];                    // borrow is a view into x
 use(borrow);                                  // OK
@@ -1209,7 +1265,7 @@ The central rule: **No scope-bound value may be held across a suspension point.*
 
 ### 4.1 Scope-Bound Types (`@scoped`)
 
-A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (await, @match, @async call).
+A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (@await, @match, @async call).
 
 **Types that are scope-bound:**
 
@@ -1226,7 +1282,7 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
 
 - Cannot be returned from a function (unless function is `@noawait`)
 - Cannot be stored in a non-scoped struct field
-- Cannot be passed across `await` or `@async` function call boundaries
+- Cannot be passed across `@await` or `@async` function call boundaries
 - Must be released before any suspension point
 - Compiler enforces these restrictions at compile time
 
@@ -1241,13 +1297,13 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
         }  // guard released here
     }
     
-    await io_operation();  // ✅ OK: no @scoped values held
+    @await io_operation();  // ✅ OK: no @scoped values held
 }
 
 @async void!>(Error) bad(Mutex::[int]* m) {
     @lock (m) as guard {
         guard++;
-        await io_operation();  // ❌ ERROR: @scoped value guard held across await
+        @await io_operation();  // ❌ ERROR: @scoped value guard held across @await
     }
 }
 ```
@@ -1287,7 +1343,7 @@ If a function has `@scoped` values in scope at a suspension point, that's a comp
         }  // guard released here
     };
     
-    await operation();  // ✅ OK
+    @await operation();  // ✅ OK
     return cc_ok(val);
 }
 ```
@@ -1302,10 +1358,10 @@ A **suspension point** is any program point at which execution of the current ta
 
 **Suspension points:**
 
-- `await` expression (any await)
+- `@await` expression (any @await)
 - `@match` statement
 - Call to `@async` function
-- Async iteration (`@for await`) (contains an `await` per iteration)
+- Async iteration (`@for @await`) (contains an `@await` per iteration)
 - Call to cancellation-aware channel operation (`recv_cancellable`, `send_cancellable`)
 - Call to `block_on()` (rare, explicit blocking)
 
@@ -1348,7 +1404,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§8.
         }
     };
     
-    await io();  // ✅ No @scoped values held
+    @await io();  // ✅ No @scoped values held
     return cc_ok(val);
 }
 
@@ -1356,9 +1412,9 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§8.
     @lock (m) as g {
         let val = g + 1;
         
-        // ❌ ERROR: guard held across await
+        // ❌ ERROR: guard held across @await
         // This crosses the suspension point with @scoped value
-        // await io();
+        // @await io();
         
         return cc_ok(val);  // OK: return is not a suspension point
     }
@@ -1423,19 +1479,19 @@ struct Container {
 @scoped fn ptr = &my_func;  // ❌ ERROR: meaningless on function types
 ```
 
-**Interaction with @async:** A function parameter marked `@scoped` cannot be held across a suspension point. The compiler enforces that all @scoped values are released before any `await`, `@async` call, or other suspension point.
+**Interaction with @async:** A function parameter marked `@scoped` cannot be held across a suspension point. The compiler enforces that all @scoped values are released before any `@await`, `@async` call, or other suspension point.
 
 ---
 
-All suspension points (both `await` and `@async` function calls) are implicitly cancellation-aware inside a deadline scope:
+All suspension points (both `@await` and `@async` function calls) are implicitly cancellation-aware inside a deadline scope:
 
 ```c
 @async void handler(Duration timeout) {
     @with_deadline(timeout) {
-        await fetch_data();    // ✅ Suspension point: cancellation-aware
+        @await fetch_data();    // ✅ Suspension point: cancellation-aware
         result = compute();    // Non-suspension: safe, CPU work only
         spawn (worker());        // ✅ If worker is @async: suspension point, cancellation-aware
-        await store();         // ✅ Suspension point: cancellation-aware
+        @await store();         // ✅ Suspension point: cancellation-aware
     }
 }
 ```
@@ -1461,7 +1517,7 @@ The compiler checks scope-bound restrictions in several places:
 ```c
 @async void handler() {
     LockGuard::[int] g = ...;
-    await io();  // ❌ ERROR: @scoped value g held across suspension
+    @await io();  // ❌ ERROR: @scoped value g held across suspension
 }
 ```
 
@@ -1493,13 +1549,13 @@ error: scope-bound value `guard` held across suspension point
    |
 9  |     @lock (m) as guard {
    |                 ----- guard declared here
-10 |         await io_operation();
+10 |         @await io_operation();
    |         ^^^^^ suspension point: cannot hold @scoped value
    |
 help: release @scoped value before suspension
    |
    | }
-   | await io_operation();
+   | @await io_operation();
 ```
 
 ---
@@ -1768,25 +1824,25 @@ After detach:
 @defer cleanup: cc_arena_free(&scratch);
 
 // ... later, if ownership is transferred ...
-cancel cleanup;  // defer will not run
+@cancel cleanup;  // defer will not run
 ```
 
-**Rule:** `cancel name;` prevents the named defer from running. It is a compile error to cancel a defer that has already run or been cancelled.
+**Rule:** `@cancel name;` prevents the named defer from running. It is a compile error to `@cancel` a defer that has already run or been cancelled.
 
-**Rule:** The name introduced by `@defer name:` is scoped to the enclosing block, like a local variable declared at the `@defer` statement. Referencing it (including `cancel`) before the `@defer` statement or outside the block is a compile error.
+**Rule:** The name introduced by `@defer name:` is scoped to the enclosing block, like a local variable declared at the `@defer` statement. Referencing it (including `@cancel`) before the `@defer` statement or outside the block is a compile error.
 
 **Lowering (implementation sketch, not surface syntax):**
 
 ```c
 // @defer cleanup: STMT;
 // ...
-// cancel cleanup;
+// @cancel cleanup;
 
 // lowers to:
 bool __cleanup_active = true;
 @defer { if (__cleanup_active) { STMT; } }
 ...
-__cleanup_active = false;  // cancel cleanup;
+__cleanup_active = false;  // @cancel cleanup;
 ```
 
 **Note:** Lowering is conceptual; the backend may implement defers via a hidden stack of cleanup actions, not via nested `@defer` syntax.
@@ -1802,7 +1858,7 @@ void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
     try db.debit(from, amount);
     try db.credit(to, amount);
     
-    cancel rollback;  // success: don't rollback
+    @cancel rollback;  // success: don't rollback
     try db.commit();
 }
 
@@ -1824,7 +1880,7 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 }
 ```
 
-**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
+**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `@await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
 
 ```c
 @async void!>(Error) good(Arena* scratch) {
@@ -1836,13 +1892,13 @@ void!>(IoError) process(char[:] path, CCArena* out) {
     }
     
     // defer has already run
-    await io_operation();
+    @await io_operation();
 }
 
 @async void!>(Error) bad(CCArena* scratch) {
     @defer cleanup: cc_arena_free(scratch);
-    // ❌ ERROR: defer is @scoped and cannot be held across await
-    // await io_operation();
+    // ❌ ERROR: defer is @scoped and cannot be held across @await
+    // @await io_operation();
 }
 ```
 
@@ -1868,7 +1924,7 @@ The identifier `scratch` is in scope only within the block.
 
 ```c
 CCArena scratch = cc_arena_heap(kilobytes(256));
-defer cc_arena_free(&scratch);
+@defer cc_arena_free(&scratch);
 
 for (int i = 0; i < 10; i++) {
     arena(&scratch) {
@@ -1892,14 +1948,14 @@ The reset form is selected when the parenthesized expression has type `Arena*` (
 // lowers to:
 {
     CCArena scratch = cc_arena_heap(size);
-    defer cc_arena_free(&scratch);
+    @defer cc_arena_free(&scratch);
     BODY
 }
 
 // arena(ptr) { BODY }   // where ptr has type Arena*
 // lowers to:
 {
-    defer arena_reset(ptr);
+    @defer arena_reset(ptr);
     BODY
 }
 ```
@@ -2068,7 +2124,13 @@ counter.with_lock(c => {
 
 **Rule:** `Mutex::[T]` is sendable (can be shared across threads).
 
-**Rule:** `Mutex::[T].lock_guard()` and `Mutex::[T].with_lock()` can block the OS thread. They are allowed in `@async` code **only via implicit `run_blocking`** wrapping. The compiler wraps `lock_guard()` / `with_lock()` calls in `@async` code automatically, treating them as non-`@async` function calls. Keep critical sections short since the entire thread pool thread is blocked while the lock is held.
+**Rule:** `Mutex::[T].lock_guard()` and `Mutex::[T].with_lock()` can
+block the OS thread, so they are declared `@blocking` (§8.2). Call
+edges from `@async` bodies therefore lower through
+`cc_run_blocking_submit` (Appendix J.1.1), parking the fiber until a
+pool worker has acquired the lock, run the critical section, and
+released the lock. Keep critical sections short — the entire worker
+thread is blocked while the lock is held.
 
 **Lowering in `@async`:**
 
@@ -2076,15 +2138,19 @@ counter.with_lock(c => {
 @async void good(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
-    }  // lowers to: await __implicit_nursery.run_blocking(() => {
-       //     auto __guard = m.lock_guard();
-       //     int& g = *__guard;
-       //     g++;
-       // })
+    }
+    // The @lock body is a single @blocking edge.  Lowers to:
+    //   @await cc_run_blocking_submit(__cc_implicit_nursery(), ^{
+    //       LockGuard::[int] __g = m->lock_guard();
+    //       int& g = *__g;
+    //       g++;
+    //   }, __waker);
 }
 ```
 
-The `run_blocking` wrapper ensures the lock is acquired and released within a single thread pool dispatch, preventing deadlock from re-entrancy.
+Routing through a single `cc_run_blocking_submit` ensures the lock is
+acquired and released inside one thread-pool dispatch, preventing
+scheduler re-entrancy from splitting the critical section.
 
 ```c
 // ❌ WRONG: direct call to lock_guard() without @lock syntax
@@ -2093,11 +2159,11 @@ The `run_blocking` wrapper ensures the lock is acquired and released within a si
     g++;
 }
 
-// ❌ ALSO WRONG: guard held across await
+// ❌ ALSO WRONG: guard held across @await
 @async void bad_await(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
-        await some_async_work();  // ERROR: guard held across suspension point
+        @await some_async_work();  // ERROR: guard held across suspension point
     }
 }
 
@@ -2105,7 +2171,7 @@ The `run_blocking` wrapper ensures the lock is acquired and released within a si
 @async void good(Mutex::[int]* m) {
     @lock (m) as g {
         g++;
-    }  // implicit run_blocking wraps the lock/unlock
+    }  // single @blocking edge wraps the lock/unlock in one cc_run_blocking_submit
 }
 ```
 
@@ -2128,7 +2194,7 @@ AsyncMutex::[T] async_mutex(T initial);           // create with initial value
 AsyncMutex::[int] counter = async_mutex(0);
 
 @async void increment() {
-    @lock (await counter.lock()) as c {
+    @lock (@await counter.lock()) as c {
         c++;
         c++;
     }  // lock automatically released
@@ -2141,7 +2207,7 @@ AsyncMutex::[int] counter = async_mutex(0);
 AsyncMutex::[int] counter = async_mutex(0);
 
 @async void increment() {
-    auto g = await counter.lock();  // suspends, does NOT block OS thread
+    auto g = @await counter.lock();  // suspends, does NOT block OS thread
     *g += 1;
 }  // unlocks here
 ```
@@ -2163,36 +2229,36 @@ AsyncMutex::[int] counter = async_mutex(0);
 
 ```c
 @async void bad(AsyncMutex::[int]* m, int[~ >]* tx) {
-    auto g = await m.lock();
-    await tx.send(*g);  // ❌ ERROR: @scoped value guard held across suspension
+    auto g = @await m.lock();
+    @await tx.send(*g);  // ❌ ERROR: @scoped value guard held across suspension
 }
 
 @async void good(AsyncMutex::[int]* m, int[~ >]* tx) {
     int val;
     {
-        auto g = await m.lock();
+        auto g = @await m.lock();
         val = *g;
     }  // guard released: scope-bound value is out of scope
-    await tx.send(val);  // ✅ OK: no @scoped value held
+    @await tx.send(val);  // ✅ OK: no @scoped value held
 }
 ```
 
-**Rule (no guard across run_blocking):** No mutex guard (`LockGuard` or `AsyncGuard`) may be live across a call to `run_blocking`. Since guards are `@scoped`, the compiler enforces this automatically. This prevents deadlocks where the blocking closure attempts to acquire the same mutex.
+**Rule (no guard across `@blocking` edge):** No mutex guard (`LockGuard` or `AsyncGuard`) may be live across a `@blocking` call edge (i.e., across a `cc_run_blocking_submit` dispatch; §8.2, J.1.1). Since guards are `@scoped`, the compiler enforces this automatically. This prevents deadlocks where the blocking closure attempts to acquire the same mutex.
 
 ```c
 @async void bad(AsyncMutex::[int]* m) {
-    auto g = await m.lock();
-    // Cannot do any blocking/await operations while guard is held
-    await async_work();  // ERROR: cannot await while holding guard
+    auto g = @await m.lock();
+    // Cannot do any blocking/@await operations while guard is held
+    @await async_work();  // ERROR: cannot @await while holding guard
 }
 
 @async void good(AsyncMutex::[int]* m) {
     int val;
     {
-        auto g = await m.lock();
+        auto g = @await m.lock();
         val = *g;
-    }  // guard released, now we can await
-    await async_work();  // OK: no guard held
+    }  // guard released, now we can @await
+    @await async_work();  // OK: no guard held
 }
 ```
 
@@ -2204,7 +2270,7 @@ AsyncMutex::[int] counter = async_mutex(0);
 | Type            | Use case                                                       |
 | --------------- | -------------------------------------------------------------- |
 | `Mutex::[T]`      | Sync code or functions that can block, short critical sections |
-| `AsyncMutex::[T]` | `@async` code, short critical sections (no await while held)   |
+| `AsyncMutex::[T]` | `@async` code, short critical sections (no @await while held)   |
 
 
 ---
@@ -2329,7 +2395,7 @@ The normative surface form is:
 ```c
 // Native CCC (preferred)
 tx.send(job);
-await rx.recv(&result);
+@await rx.recv(&result);
 rx.close();
 ch.free();
 
@@ -2340,11 +2406,11 @@ holder.handle.close();
 ptr->handle.free();
 ```
 
-**Rule:** `await` is only valid inside `@async` functions.
+**Rule:** `@await` is only valid inside `@async` functions.
 
 **Rule:** `recv(&out)`, `send()`, and `send_take()` are dual-mode operations:
 
-- In `@async` code, they are suspension points and must be written as `await rx.recv(&out)` / `await tx.send(v)` / `await tx.send_take(v)` unless used inside `select` (which implicitly awaits). The compiler may lower these further to task-returning runtime helpers internally, but that is not part of the language-level API.
+- In `@async` code, they are suspension points and must be written as `@await rx.recv(&out)` / `@await tx.send(v)` / `@await tx.send_take(v)` unless used inside `select` (which implicitly awaits). The compiler may lower these further to task-returning runtime helpers internally, but that is not part of the language-level API.
 - In sync code, they block the OS thread.
 
 **Rule:** Channel operations keep the same **surface signatures** in sync and async contexts: `send(v)`, `recv(&out)`, `send_take(v)`, `close()`, and `free()`. The suspension behavior is contextual; the internal runtime lowering may differ, but the user-facing model stays in terms of these receiver-first operations.
@@ -2475,9 +2541,9 @@ CCChan* sync_results_ch = cc_channel_pair(&sync_results_tx, &sync_results_rx);
 - `err(e)` = transport/runtime failure
 
 ```c
-// Async channel: must use await
+// Async channel: must use @await
 int!>(ParseError) r;
-bool !>(CCIoError) got = await results_rx.recv(&r);
+bool !>(CCIoError) got = @await results_rx.recv(&r);
 if (!got) {
     // channel closed+drained
 } else if (r.ok) {
@@ -2486,7 +2552,7 @@ if (!got) {
     ParseError e = r.error;  // application-level error value
 }
 
-// Sync channel: no await
+// Sync channel: no @await
 int!>(ParseError) r2;
 bool !>(CCIoError) got2 = sync_results_rx.recv(&r2);
 if (!got2) {
@@ -2670,12 +2736,12 @@ These conditions are checked using the slice's `id` field directly — **no runt
 
 ```c
 char[:] x;
-bool !>(CCIoError) got = await ch.recv(&x);  // on ok(true): is_unique=1, is_transferable=1, is_subslice=0
-await dst.send_take(x);                      // OK: transfers the unique slice
+bool !>(CCIoError) got = @await ch.recv(&x);  // on ok(true): is_unique=1, is_transferable=1, is_subslice=0
+@await dst.send_take(x);                      // OK: transfers the unique slice
 
 // Derived slices cannot be transferred:
 char[:] view = x[0..x.len];                  // view has is_unique=0 (derived)
-await dst.send_take(view);                   // returns false: is_unique=0
+@await dst.send_take(view);                   // returns false: is_unique=0
 ```
 
 **Why `adopt()` slices cannot use `send_take`:**
@@ -2685,15 +2751,15 @@ await dst.send_take(view);                   // returns false: is_unique=0
 ```c
 // ✓ Channel pipeline - zero copy
 char[:] x;
-bool !>(CCIoError) got = await a.recv(&x);   // on ok(true): is_transferable=1
-await b.send_take(x);                        // OK
+bool !>(CCIoError) got = @await a.recv(&x);   // on ok(true): is_transferable=1
+@await b.send_take(x);                        // OK
 
 // ✗ FFI buffer - must copy
 unsafe {
     char[:] s = adopt(p, 100, custom_free);  // is_transferable=0
 }
-await ch.send(s);                    // OK: copies (safe)
-await ch.send_take(s);               // returns false: is_transferable=0
+@await ch.send(s);                    // OK: copies (safe)
+@await ch.send_take(s);               // returns false: is_transferable=0
 ```
 
 **Rule:** `adopt()` slices are unique (move-only, have destructor) but not transferable. Use `send` to copy them across channels.
@@ -2718,7 +2784,7 @@ int x;
 - In sync code, blocks the OS thread.
 - First ready case wins; if multiple ready, one is chosen non-deterministically.
 
-**Rule:** In `@async` code, `select` is itself a suspension point; channel ops in case headers are implicitly awaited. No explicit `await` appears in case headers.
+**Rule:** In `@async` code, `select` is itself a suspension point; channel ops in case headers are implicitly awaited. No explicit `@await` appears in case headers.
 
 **Rule (select readiness on closed):**
 
@@ -2774,7 +2840,7 @@ bool got = recv_timeout(&ch, 100ms, &v);
 
 // In async code:
 int v2;
-bool got2 = await recv_timeout(&ch, 100ms, &v2);
+bool got2 = @await recv_timeout(&ch, 100ms, &v2);
 
 // Equivalent to:
 int v3 = 0;
@@ -2787,7 +2853,7 @@ bool got3 = false;
 
 **Rule:** `timeout(Duration d)` is a select-only readiness case that becomes ready after duration `d` elapses.
 
-**Rule:** `recv_timeout` follows the same dual-mode rules as `recv`: it requires `await` in `@async` code and blocks in sync code.
+**Rule:** `recv_timeout` follows the same dual-mode rules as `recv`: it requires `@await` in `@async` code and blocks in sync code.
 
 ---
 
@@ -2800,53 +2866,53 @@ int[~10 <] rx;
 cc_channel_pair(&tx, &rx);
 
 // === ASYNC CHANNELS (int[~ ... >] / int[~ ... <]) ===
-// send/recv operations require await in @async code
+// send/recv operations require @await in @async code
 
-// Core operations (must await)
-bool ok = await send(tx, value);       // suspends until sent
+// Core operations (must @await)
+bool ok = @await send(tx, value);       // suspends until sent
 T x;
-bool got = await recv(rx, &x);         // suspends until received
+bool got = @await recv(rx, &x);         // suspends until received
 
-// Slice transfer (must await; send handle only)
-bool ok = await send_take(tx, slice);  // suspends, transfers ownership
+// Slice transfer (must @await; send handle only)
+bool ok = @await send_take(tx, slice);  // suspends, transfers ownership
 
-// Close (no await; send handle only)
-void close(tx);                         // idempotent, no await
+// Close (no @await; send handle only)
+void close(tx);                         // idempotent, no @await
 
-// Cancellation-aware variants (must await)
-bool ok = await send_cancellable(tx, value);    // returns false if cancelled
-T y; bool got = await recv_cancellable(&rx, &y);  // ok(true)=received, ok(false)=cancelled+drained
+// Cancellation-aware variants (must @await)
+bool ok = @await send_cancellable(tx, value);    // returns false if cancelled
+T y; bool got = @await recv_cancellable(&rx, &y);  // ok(true)=received, ok(false)=cancelled+drained
 
-// Non-blocking (no await, either context)
+// Non-blocking (no @await, either context)
 bool ok = try_send(&tx, value);        // returns false if full/closed, never awaits
 T!>(RecvStatus) x = try_recv(&rx);        // returns immediately
 
-// Timeout (must await)
+// Timeout (must @await)
 T z;
-bool !>(CCIoError) got_timed = await recv_timeout(&rx, &z, Duration d);   // ok(false) = timeout/closed+drained
+bool !>(CCIoError) got_timed = @await recv_timeout(&rx, &z, Duration d);   // ok(false) = timeout/closed+drained
 
 // === SYNC CHANNELS (int[~ ... sync ... >] / int[~ ... sync ... <]) ===
-// All operations block, no await allowed
+// All operations block, no @await allowed
 
 int[~10 sync >] stx;
 int[~10 sync <] srx;
 cc_channel_pair(&stx, &srx);
 
-// Core operations (no await, blocks)
+// Core operations (no @await, blocks)
 bool ok = send(&stx, value);            // blocks OS thread until sent
 T x; bool !>(CCIoError) got = recv(&srx, &x);   // blocks OS thread until received; ok(false) = closed+drained
 
-// Slice transfer (no await, blocks; send handle only)
+// Slice transfer (no @await, blocks; send handle only)
 bool ok = send_take(&stx, slice);       // blocks, transfers ownership
 
-// Close (no await; send handle only)
+// Close (no @await; send handle only)
 void close(&stx);                       // idempotent
 
-// Non-blocking (no await, either context)
+// Non-blocking (no @await, either context)
 bool ok = try_send(&stx, value);        // returns false if full/closed
 T!>(RecvStatus) x = try_recv(&srx);        // returns immediately
 
-// Timeout (blocks up to duration, no await)
+// Timeout (blocks up to duration, no @await)
 T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
 ```
 
@@ -2855,23 +2921,23 @@ T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
 
 | Operation                 | Async `T[~ ... >]` / `T[~ ... <]` | Sync `T[~ ... sync ... >]` / `T[~ ... sync ... <]` |
 | ------------------------- | --------------------------------- | -------------------------------------------------- |
-| `send(ch, v)`             | `await send(...)` ✅               | `send(...)` ✅                                      |
-| `recv(ch)`                | `await recv(...)` ✅               | `recv(...)` ✅                                      |
-| `send_take(ch, s)`        | `await send_take(...)` ✅          | `send_take(...)` ✅                                 |
-| `send_cancellable(ch, v)` | `await send_cancellable(...)` ✅   | N/A ❌                                              |
-| `recv_cancellable(ch)`    | `await recv_cancellable(...)` ✅   | N/A ❌                                              |
+| `send(ch, v)`             | `@await send(...)` ✅               | `send(...)` ✅                                      |
+| `recv(ch)`                | `@await recv(...)` ✅               | `recv(...)` ✅                                      |
+| `send_take(ch, s)`        | `@await send_take(...)` ✅          | `send_take(...)` ✅                                 |
+| `send_cancellable(ch, v)` | `@await send_cancellable(...)` ✅   | N/A ❌                                              |
+| `recv_cancellable(ch)`    | `@await recv_cancellable(...)` ✅   | N/A ❌                                              |
 | `try_send(ch, v)`         | `try_send(...)` ✅                 | `try_send(...)` ✅                                  |
 | `try_recv(ch)`            | `try_recv(...)` ✅                 | `try_recv(...)` ✅                                  |
-| `recv_timeout(ch, d)`     | `await recv_timeout(...)` ✅       | `recv_timeout(...)` ✅                              |
+| `recv_timeout(ch, d)`     | `@await recv_timeout(...)` ✅       | `recv_timeout(...)` ✅                              |
 | `close(ch)`               | `close(...)` ✅                    | `close(...)` ✅                                     |
 | `subscribe(ch)`           | `subscribe(...)` ✅                | `subscribe(...)` ✅                                 |
 
 
-**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `await`. These include `send()`, `recv(&out)`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `await` is a compile error.
+**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `@await`. These include `send()`, `recv(&out)`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `@await` is a compile error.
 
-**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `await`. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `await` is a compile error.
+**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `@await`. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `@await` is a compile error.
 
-**Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `await`. They return immediately or have no return value.
+**Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `@await`. They return immediately or have no return value.
 
 **Rule:** Sync channels do not support cancellation-aware variants (`recv_cancellable`, `send_cancellable`). If you need cancellation, use async channels with `@match`.
 
@@ -2885,19 +2951,19 @@ enum RecvStatus { WouldBlock, Closed }
 
 ```c
 char[:] s = ...;
-if (!await ch.send_take(s)) {
+if (!@await ch.send_take(s)) {
     // Channel was closed, but s is still valid
     use(s);  // OK
 }
 // If send_take returned true, s is now invalid
 ```
 
-**Rule (async ownership):** In `@async` code, ownership transfer via `send_take` occurs at the suspension point. After a successful `await send_take`, the source slice is invalidated exactly as if moved synchronously. There is no "partial" or "pending" ownership state across the `await`.
+**Rule (async ownership):** In `@async` code, ownership transfer via `send_take` occurs at the suspension point. After a successful `@await send_take`, the source slice is invalidated exactly as if moved synchronously. There is no "partial" or "pending" ownership state across the `@await`.
 
 ```c
 char[:] x;
-bool !>(CCIoError) got = await ch.recv(&x);  // on ok(true): x owns unique slice
-bool ok = await dst.send_take(x);
+bool !>(CCIoError) got = @await ch.recv(&x);  // on ok(true): x owns unique slice
+bool ok = @await dst.send_take(x);
 if (ok) {
     // x is now invalid, ownership transferred
     use(x);  // ERROR: use after move
@@ -2911,8 +2977,8 @@ if (ok) {
 
 ```c
 char[:] u;
-bool !>(CCIoError) got = await src.recv(&u);   // on ok(true): u owns unique slice
-await dst.send(u);                             // borrows u, copies bytes, u still valid
+bool !>(CCIoError) got = @await src.recv(&u);   // on ok(true): u owns unique slice
+@await dst.send(u);                             // borrows u, copies bytes, u still valid
 use(u);                                        // OK: u still owns the buffer
 ```
 
@@ -3123,7 +3189,7 @@ Concurrent-C provides a single, unified concurrency primitive: the **nursery** (
 This section specifies:
 
 - **§8.1 Structured Concurrency with `CCNursery`** — the primary pattern for all concurrent work
-- **§8.2 Async Functions and Automatic Task Batching** — how `@async` enables non-blocking I/O and automatic blocking call wrapping
+- **§8.2 Blocking and Non-Blocking Call Edges** — how `@blocking` / `@noblock` (function-level and call-site) determine the mode of each call edge from an `@async` body
 - **§8.3 Tasks** — lazy async computations (`Task::[T].start()` is discouraged; use `CCNursery` instead)
 - **§8.4 Channels in Async vs Sync** — context-sensitive channel operations
 - **§8.5 Cancellation** — cooperative task cancellation, automatically propagated through nurseries
@@ -3188,7 +3254,7 @@ n->spawn(() => worker_with_arg(x));      // captured argument
 The compiler enforces the following normative rules:
 
 - **Rule (task handle escape):** A task handle returned by `spawn` may not be stored in a variable that outlives the nursery, returned from the enclosing function, or captured in closures escaping the nursery.
-- **Rule (no peer joins):** A child task may not await or otherwise join another sibling's completion.
+- **Rule (no peer joins):** A child task may not @await or otherwise join another sibling's completion.
 - **Rule (no explicit join):** The nursery's `@destroy` is the only legitimate join point.
 
 ---
@@ -3269,86 +3335,212 @@ A nursery does **not** guarantee:
 
 ---
 
-### 8.2 Async Functions and Automatic Task Batching
+### 8.2 Blocking and Non-Blocking Call Edges
 
-Every `@async` function has the compiler automatically wrap calls to non-`@async` functions in `run_blocking`, dispatching them to the thread pool. This is called **automatic task batching** and allows async code to look synchronous while maintaining non-blocking semantics.
+An `@async` function compiles to a pollable state machine whose body
+may yield cooperatively at every `@await`. When it calls a function
+that may block an OS thread, the compiler wraps the call in
+`run_blocking` (dispatches it to the thread pool and yields until the
+worker returns). The question "does this call edge get wrapped?" is
+answered by two annotations, **`@blocking`** and **`@noblock`**, which
+are *dual*: each one can appear on a function declaration (ambient
+default) **and** on an individual call site (local override).
 
-**One function attribute controls execution behavior:**
+#### 8.2.1 State-machine gating
 
-- `**@async`:** Function may suspend cooperatively via `await`. Compiles to a pollable state machine. Tasks are lazy—nothing runs until awaited or `.start()`ed.
-
-**The core rule:**
-
-**Rule:** `@async` functions can directly call:
-
-- Other `@async` functions (no wrapping needed)
-- Any non-`@async` function (automatically wrapped in `run_blocking`)
-
-All non-`@async` functions may block an OS thread. The compiler **automatically wraps** calls to non-`@async` functions when they appear inside `@async` functions. This is called **implicit `run_blocking` wrapping**.
+**Rule (state machines are gated on `@async`):** Only `@async`
+functions are lowered to a state machine. A sync function labeled
+`@blocking` or `@noblock` is still plain C — no frame lifting, no
+suspension points, no yield mechanics. Its `@blocking` / `@noblock`
+label is a *contract to async callers* describing how their call
+edges should be lowered; it does not change how the function's own
+body is compiled.
 
 ```c
-extern int sys_read(int fd, void* buf, int n);  // non-@async (can block)
+@noblock  void fast_helper(void);  // plain C; contract: async callers skip run_blocking
+@blocking FILE* slow_helper(void); // plain C; contract: async callers wrap in run_blocking
+           void plain_helper(void); // plain C; contract: inherits caller ambient
+```
 
-void helper(int fd, char* buf) {
-    return sys_read(fd, buf, 128);  // OK: helper is non-@async, can block freely
-}
+#### 8.2.2 Call-edge mode resolution (normative)
 
-@async void handler(int fd) {
+At every call site inside an `@async` body, the compiler picks a mode
+— **`@blocking`** (wrap in `run_blocking`, yield) or **`@noblock`**
+(direct call, no yield) — using the following precedence:
+
+1. **Call-site annotation** (highest precedence)
+   - `@blocking f(...)` — force this edge through `run_blocking`.
+   - `@noblock  f(...)` — force this edge to skip `run_blocking`.
+2. **Callee's declaration-level annotation**
+   - `@blocking fn f(...) { … }` → edge mode is `@blocking`.
+   - `@noblock  fn f(...) { … }` → edge mode is `@noblock`.
+3. **Caller's ambient mode** (one-hop only; see §8.2.4)
+   - If the enclosing `@async` function was declared
+     `@async @blocking` → edges default to `@blocking`.
+   - If the enclosing `@async` function was declared
+     `@async @noblock`  → edges default to `@noblock`.
+4. **Callee category fallback** (lowest)
+   - Other `@async` function → no wrapping (the two state machines
+     compose directly via `@await`).
+   - Extern / FFI / unknown indirect (function pointer) call →
+     defaults to `@blocking` (conservative; see §8.2.5).
+   - Non-FFI sync CC function with no annotation and no ambient
+     override → defaults to `@blocking`.
+
+#### 8.2.3 Default ambient for `@async`
+
+**Rule:** A plain `@async fn` with neither `@blocking` nor `@noblock`
+at the declaration resolves ambient to `@blocking` (rule 3 above is
+effectively equivalent to rule 4's FFI/fallback default). This keeps
+async code conservative by default — blocking-looking call sites in
+an `@async` body are bounced to the thread pool unless explicitly
+opted out.
+
+```c
+@async void conservative(int fd) {
     char buf[128];
-    
-    // Both of these calls get auto-wrapped:
-    sys_read(fd, buf, 128);         // direct non-@async call
-    helper(fd, buf);                // indirect non-@async call
-    // Desugars to:
-    // await __implicit_nursery.run_blocking(() => sys_read(...));
-    // await __implicit_nursery.run_blocking(() => helper(...));
+    sys_read(fd, buf, 128);   // FFI → @blocking edge → run_blocking + yield
+    helper(fd, buf);          // sync CC fn w/o annotation → @blocking edge
+}
+
+@async @noblock void hot_path(int fd) {
+    // Ambient is @noblock: every call below is a direct call
+    // unless the callee or site opts back in.
+    some_pure_helper();             // direct call
+    @blocking sys_read(fd, …);      // call-site override: run_blocking + yield
 }
 ```
 
-This transformation makes the code look synchronous while maintaining async safety.
+#### 8.2.4 One-hop inheritance
 
-**Rule (transitive blocking):** Any non-`@async` function (whether it directly calls blocking code or not) may itself block. When an `@async` function calls any non-`@async` function, the compiler automatically wraps that call in `run_blocking`, allowing the code to look synchronous while remaining safe.
+**Rule:** Ambient mode applies only at the **direct** call edges of the
+function where it was declared. It is **not** transitive through the
+call graph.
 
 ```c
-extern int read(int fd, void* buf, int n);  // can block
-
-void helper(int fd, char* buf) {
-    return read(fd, buf, 128);  // OK: not in @async, can block freely
+           fn inner(void);           // no annotation
+@noblock   fn middle(void) {         // ambient @noblock
+    inner();                         // edge at `middle` uses @noblock → direct call
 }
+@async @noblock fn outer(void) {     // ambient @noblock
+    middle();                        // edge at `outer` uses @noblock → direct call
+}
+```
 
-@async void good() {
+Inside `middle`, the call `inner()` is lowered once using `middle`'s
+own ambient. We do **not** re-lower `middle`'s body under `outer`'s
+ambient — `middle` is compiled independently, and the edge into it
+from `outer` is the only edge `outer`'s `@noblock` affects. This is
+what makes `@blocking` / `@noblock` compatible with separate
+compilation.
+
+#### 8.2.5 Call-site overrides
+
+A call-site annotation is the local exception to the ambient policy:
+
+```c
+@async @noblock void serve(CCChanRx rx) {
+    // Hot path: ambient @noblock.  Most calls are direct.
+    while (true) {
+        RedisRequest req;
+        if (@await rx.recv(&req) != 0) break;
+
+        fast_decode(&req);          // direct call (ambient @noblock)
+        fast_dispatch(&req);        // direct call
+
+        if (req.needs_disk) {
+            @blocking write_log(&req);  // one-edge exception: bounce to pool
+        }
+    }
+}
+```
+
+Call-site annotations are the primary ergonomic win: you write the hot
+path in its natural shape and opt individual calls into (or out of)
+thread-pool dispatch without restructuring the surrounding code.
+
+#### 8.2.6 Lowering examples
+
+```c
+extern int           read (int fd, void* buf, int n);   // FFI → default @blocking
+extern @noblock size_t strlen(const char* s);           // FFI + explicit @noblock
+@blocking FILE* open_config(const char* path);          // sync CC fn, @blocking
+@noblock  size_t strlen_nb(const char* s);              // sync CC fn, @noblock
+
+@async void example(int fd, const char* p) {
     char buf[128];
-    helper(0, buf);  // OK: helper is non-@async, auto-wrapped by compiler
-    // Desugars to: await __implicit_nursery.run_blocking(() => helper(0, buf));
+
+    //  edge mode     | reason
+    // ---------------+-------------------------------------------------
+    read(fd, buf, 128);       // @blocking | callee is FFI → fallback
+    strlen("abc");            // @noblock  | callee annotated @noblock
+    open_config(p);           // @blocking | callee annotated @blocking
+    strlen_nb("abc");         // @noblock  | callee annotated @noblock
+    other_async();            // (async)   | callee is @async; uses @await directly
+
+    // Call-site overrides:
+    @noblock  read(fd, buf, 128);    // @noblock  | site beats callee-FFI default
+    @blocking strlen("abc");         // @blocking | site beats callee @noblock
 }
 ```
 
-**Sync code has no restrictions:**
+Concrete C lowering for each edge mode — including the
+`CCRunBlockingHandle` ABI and the per-state frame layout — is
+normative and specified in **Appendix J.1.1**.
+
+#### 8.2.7 FFI default and soundness
+
+**Rule:** All `extern` functions (C FFI) default to `@blocking` at
+call edges from `@async` bodies. Mark them `@noblock` to skip
+wrapping:
 
 ```c
-void sync_code(int fd) {
-    char buf[128];
-    sys_read(fd, buf, 128);  // OK: sync code can block freely
+extern @noblock int    memcmp(const void* a, const void* b, size_t n);
+extern @noblock void   memcpy(void* dst, const void* src, size_t n);
+extern @noblock size_t strlen(const char* s);
+```
+
+**Rule:** Declaring `@noblock` on a function that may actually block
+an OS thread is **undefined behavior**. The compiler may assume the
+annotation is correct and elide wrapping safeguards. In debug builds,
+implementations may add runtime checks; in release builds, violations
+are not recovered.
+
+**Rule:** Declaring `@blocking` on a function that never blocks is
+always safe — it just imposes an unnecessary thread-pool dispatch
+cost at async call edges. `@blocking` is the always-safe direction;
+`@noblock` is the contract obligation.
+
+#### 8.2.8 Indirect / function-pointer calls
+
+**Rule:** When the callee at a call site is a function pointer, the
+compiler cannot see a callee-declaration annotation. Mode resolution
+falls through to the ambient / FFI-fallback steps. Call-site
+annotations still apply and are the recommended way to pin mode for
+indirect dispatch:
+
+```c
+@async void run(Handler* h) {
+    @noblock h->fast(ctx);      // trust the indirect callee; no bounce
+    @blocking h->io(ctx);       // indirect callee; force the bounce
 }
 ```
 
-**FFI and `extern` functions:**
+#### 8.2.9 Summary
 
-**Rule:** All `extern` functions (C FFI) are treated as non-`@async` by default, meaning calls to them from `@async` functions will be auto-wrapped in `run_blocking`.
+| Surface                               | Meaning                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `@blocking fn f() { … }`              | Declaration: at `@async` call edges to `f`, wrap in `run_blocking`.     |
+| `@noblock  fn f() { … }`              | Declaration: at `@async` call edges to `f`, skip `run_blocking`.        |
+| `@async @blocking fn g() { … }`       | `g`'s body has ambient `@blocking`; edges default to wrapping.          |
+| `@async @noblock  fn g() { … }`       | `g`'s body has ambient `@noblock`; edges default to direct calls.       |
+| `@blocking expr;`                     | Call-site: force this one edge to wrap (beats callee + ambient).        |
+| `@noblock  expr;`                     | Call-site: force this one edge to direct-call (beats callee + ambient). |
 
-For FFI functions that are provably non-blocking (like `strlen`, `memcpy`, pure math functions), you can mark them `@noblock` to skip the wrapping:
-
-```c
-extern int read(int fd, void* buf, int n);        // non-@async, auto-wrapped in @async
-extern @noblock int strlen(const char* s);        // explicitly non-blocking, no wrap needed
-extern @noblock void memcpy(void* dst, void* src, size_t n);
-```
-
-**Rule:** Declaring `@noblock` on a function that may actually block is undefined behavior.
-
-**Soundness expectation:** The compiler may assume `@noblock` is correct and eliminate wrapping safeguards. If a function declared `@noblock` actually blocks (e.g., on I/O or a mutex), the calling `@async` function may deadlock or exhibit other undefined behavior. This is a **contract obligation**—violations are not recoverable at runtime. In debug builds, implementations may add runtime checks to catch violations; in release builds, undefined behavior is not checked.
-
-**Compiler enforcement:** The compiler may reorder, inline, or elide safety boundaries based on `@noblock` declarations. Do not lie to the compiler about blocking behavior.
+The composition rule is the "one-hop" principle: **ambient applies
+only at the direct call edges of the function where it was declared,
+never transitively.** Each function is compiled against its own
+annotations; call edges are resolved pointwise.
 
 ---
 
@@ -3362,14 +3554,14 @@ extern @noblock void memcpy(void* dst, void* src, size_t n);
 }
 
 Task::[int] t = work(5);    // created, not running
-int v = await t;          // starts + waits
+int v = @await t;          // starts + waits
 ```
 
 **Detached work:**
 
 ```c
 @async void log_event(Event e) {
-    await write_to_log(e);
+    @await write_to_log(e);
 }
 
 log_event(evt).start();  // fire and forget
@@ -3383,13 +3575,13 @@ log_event(evt).start();  // fire and forget
 | Operation                          | Behavior                                     |
 | ---------------------------------- | -------------------------------------------- |
 | `Task::[T] t = fn(args)`             | Creates task, does not start                 |
-| `await t`                          | Starts (if needed) + waits for result        |
+| `@await t`                          | Starts (if needed) + waits for result        |
 | `t.start()`                        | Starts detached, returns immediately         |
-| `await t` after `.start()`         | Joins detached task, returns result          |
-| `await t` after previous `await t` | Returns cached result (double-await is safe) |
+| `@await t` after `.start()`         | Joins detached task, returns result          |
+| `@await t` after previous `@await t` | Returns cached result (double-@await is safe) |
 
 
-**Rule (double-await):** Awaiting an already-completed task returns the cached result immediately.
+**Rule (double-@await):** Awaiting an already-completed task returns the cached result immediately.
 
 **Rule (detached task errors):** If a detached task returns `T!>(E)` with an error and is never awaited, the error is silently discarded.
 
@@ -3485,7 +3677,7 @@ cc_channel_free(ch);
 
 #### 8.4.2 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
 
-Async channels **suspend cooperatively** and require `await`. They are used in `@async` functions and with `CCNursery`.
+Async channels **suspend cooperatively** and require `@await`. They are used in `@async` functions and with `CCNursery`.
 
 **Operations:**
 
@@ -3494,22 +3686,22 @@ int[~ >] tx;
 int[~ <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx);
 
-// Must use await
+// Must use @await
 int x;
-bool !>(CCIoError) got = await recv(rx, &x);          // suspends until received
-bool !>(CCIoError) ok = await send(tx, 42);           // suspends until sent
+bool !>(CCIoError) got = @await recv(rx, &x);          // suspends until received
+bool !>(CCIoError) ok = @await send(tx, 42);           // suspends until sent
 int y;
-bool !>(Cancelled) got2 = await recv_cancellable(rx, &y);
-bool !>(Cancelled) ok2 = await send_cancellable(tx, 42);
+bool !>(Cancelled) got2 = @await recv_cancellable(rx, &y);
+bool !>(Cancelled) ok2 = @await send_cancellable(tx, 42);
 
-// Cannot use await
-recv(rx, &x);                             // ❌ ERROR: missing await
-send(tx, 42);                             // ❌ ERROR: missing await
+// Cannot use @await
+recv(rx, &x);                             // ❌ ERROR: missing @await
+send(tx, 42);                             // ❌ ERROR: missing @await
 
 cc_channel_free(ch);                      // free the channel when done
 ```
 
-**Rule:** All operations on async channels require `await`. Omitting `await` is a compile error (regardless of context).
+**Rule:** All operations on async channels require `@await`. Omitting `@await` is a compile error (regardless of context).
 
 **Cancellation integration:**
 
@@ -3530,7 +3722,7 @@ Async channels work with `@match` and have implicit cancellation cases.
 
 #### 8.4.3 Sync Channels (`int[~ ... sync ... >]` and `int[~ ... sync ... <]`)
 
-Sync channels **block the OS thread** and do NOT use `await`. They are used for thread coordination and blocking operations.
+Sync channels **block the OS thread** and do NOT use `@await`. They are used for thread coordination and blocking operations.
 
 **Operations:**
 
@@ -3539,18 +3731,18 @@ int[~ sync >] tx;
 int[~ sync <] rx;
 cc_channel_pair(&tx, &rx);
 
-// No await allowed
+// No @await allowed
 int x;
 bool !>(CCIoError) got = recv(rx, &x);    // blocks OS thread
 bool !>(CCIoError) ok = send(tx, 42);     // blocks OS thread
 recv_cancellable(rx, &x);                 // ❌ N/A: sync channels don't auto-support cancellation
 
-// Cannot use await
-await recv(rx, &x);                  // ❌ ERROR: cannot await sync channel
-await send(tx, 42);                  // ❌ ERROR: cannot await sync channel
+// Cannot use @await
+@await recv(rx, &x);                  // ❌ ERROR: cannot @await sync channel
+@await send(tx, 42);                  // ❌ ERROR: cannot @await sync channel
 ```
 
-**Rule:** All operations on sync channels do NOT use `await`. Adding `await` is a compile error.
+**Rule:** All operations on sync channels do NOT use `@await`. Adding `@await` is a compile error.
 
 **No @match on sync channels:**
 
@@ -3587,7 +3779,7 @@ Function signatures make clear what context is required:
 // Clearly async
 @async int!>(Error) async_reader(int[~ <] ch) {
     int x = 0;
-    bool ok = await recv(ch, &x);  // obvious: must await
+    bool ok = @await recv(ch, &x);  // obvious: must @await
     if (!ok) return cc_err(Error_EOF);
     return cc_ok(x);
 }
@@ -3601,7 +3793,7 @@ void sync_worker(int[~ sync <] requests) {
 // Caller knows exactly what to do based on channel type
 ```
 
-**Benefit:** No surprises during refactoring. Change a function to `@async` and the compiler immediately tells you what operations need `await`.
+**Benefit:** No surprises during refactoring. Change a function to `@async` and the compiler immediately tells you what operations need `@await`.
 
 ---
 
@@ -3618,13 +3810,13 @@ void sync_handler(int[~ sync <] requests) {
 
 // Refactored to async with wrong channel type:
 @async void async_handler(int[~ sync <] requests) {
-    // int req = recv(&requests);  // ❌ ERROR: cannot await, but needs to
+    // int req = recv(&requests);  // ❌ ERROR: cannot @await, but needs to
     // This won't compile—we need to change the channel type
 }
 
 // Refactored correctly:
 @async void async_handler(int[~ <] requests) {
-    int req = await recv(&requests);  // ✅ CORRECT
+    int req = @await recv(&requests);  // ✅ CORRECT
     process(req);
 }
 ```
@@ -3639,14 +3831,14 @@ The compiler forces you to fix the channel type when refactoring. No silent beha
 
 ```c
 int x;
-bool !>(CCIoError) got = await recv(&rx, &x);
+bool !>(CCIoError) got = @await recv(&rx, &x);
 if (cc_is_err(got) || !cc_value(got)) {
     // Channel closed and drained (ok(false)) or error
 }
 
 // With error values (element type is itself a result)
 int!>(Error) maybe_x;
-bool !>(CCIoError) got_e = await recv(&error_rx, &maybe_x);
+bool !>(CCIoError) got_e = @await recv(&error_rx, &maybe_x);
 if (cc_is_err(got_e) || !cc_value(got_e)) {
     // Channel closed and drained
 } else if (cc_is_ok(maybe_x)) {
@@ -3675,7 +3867,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 
 | Aspect                   | Async handles (`int[~ ... >]` / `int[~ ... <]`) | Sync handles (`int[~ ... sync ... >]` / `int[~ ... sync ... <]`) |
 | ------------------------ | ----------------------------------------------- | ---------------------------------------------------------------- |
-| **Must await**           | Yes, always                                     | No, never                                                        |
+| **Must @await**           | Yes, always                                     | No, never                                                        |
 | **Blocks OS thread**     | No                                              | Yes                                                              |
 | **Use in `@async` code** | Yes (primary)                                   | No (use async instead)                                           |
 | **Use in sync code**     | No (use task)                                   | Yes (primary)                                                    |
@@ -3697,13 +3889,13 @@ CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
 
 @async void producer() {
     for (int i = 0; i < 100; i++) {
-        await send(&work_tx, i);
+        @await send(&work_tx, i);
     }
 }
 
 @async void consumer() {
     @match {
-        case int work = await recv(&work_rx):
+        case int work = @await recv(&work_rx):
             process(work);
         // implicit cancel case
     }
@@ -3750,7 +3942,7 @@ void main() {
 }
 ```
 
-No `await` anywhere in worker_thread. Blocks OS thread as expected.
+No `@await` anywhere in worker_thread. Blocks OS thread as expected.
 
 **Pattern 3: Async with Timeout (using cancellation)**
 
@@ -3770,7 +3962,7 @@ n->spawn(() => timeout_enforcer());
 
 @async void!>(Error) timeout_enforcer() {
     @match {
-        case await sleep(Duration{5, 0}):
+        case @await sleep(Duration{5, 0}):
             return cc_err(void, Error.Timeout);
         // implicit cancel case
     }
@@ -3790,13 +3982,13 @@ int[~ >] tx;
 int[~ <] rx;
 cc_channel_pair(&tx, &rx);
 
-await rx.recv(&x);        // async receive handle
+@await rx.recv(&x);        // async receive handle
 tx.send(v);               // send handle
 
 int[~ sync >] stx;
 int[~ sync <] srx;
 cc_channel_pair(&stx, &srx);
-srx.recv(&y);             // sync receive handle, no await
+srx.recv(&y);             // sync receive handle, no @await
 ```
 
 The language model does not include a combined send/recv channel handle. A program works with the capability it holds (`tx` or `rx`), and the operation set follows from that handle type.
@@ -3889,7 +4081,7 @@ enum WorkerError {
 
 - Inside an `@async` function that is spawned in a nursery
 - Inside a task with a `Cancelled` error variant
-- At a `@match` statement (not other await operations)
+- At a `@match` statement (not other @await operations)
 
 Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get implicit cancel cases.
 
@@ -3899,7 +4091,7 @@ Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get impl
 
 #### 8.5.2 Cancellation-Aware Operation Variants
 
-For operations **outside `@match`** (single await, channel recv/send, sleep), use explicit cancellation-aware variants.
+For operations **outside `@match`** (single @await, channel recv/send, sleep), use explicit cancellation-aware variants.
 
 **Guidance:** Inside an active `@with_deadline(...)` scope, suspension points are already cancellation-aware per **§4.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
 
@@ -3909,7 +4101,7 @@ bool !>(Cancelled) recv_cancellable(T[~ <]* rx, T* out);   // ok(true)=received,
 bool send_cancellable(T[~ >]* tx, T value);                // returns false if cancelled
 
 // Tasks
-T!>(Cancelled) await task_cancellable::[T](Task::[T!>(Cancelled)] t);
+T!>(Cancelled) @await task_cancellable::[T](Task::[T!>(Cancelled)] t);
 
 // Sleep
 Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
@@ -3924,7 +4116,7 @@ Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, D
 @async void!>(Error) reader(int[~] ch) {
     while (true) {
         int x;
-        bool !>(Cancelled) got = await ch.recv_cancellable(&x);
+        bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
 
         if @try (err = got) {
             if (err == Cancelled) return cc_ok(void);   // task was cancelled
@@ -3941,7 +4133,7 @@ Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, D
 
 **When to use variants:**
 
-- Outside `@match` (single await, sleep, recv)
+- Outside `@match` (single @await, sleep, recv)
 - When you need to distinguish cancellation from other completion reasons
 - When you want explicit control over cancellation handling
 
@@ -3954,7 +4146,7 @@ For cases where neither implicit `@match` nor variants apply, use the polling-ba
 ```c
 @async void!>(Error) work() {
     while (!cc_is_cancelled()) {
-        int x = await long_operation();
+        int x = @await long_operation();
         process(x);
     }
     return cc_err(Cancelled);
@@ -3975,11 +4167,11 @@ This is still supported but should be rare—most code uses `@match` or variants
   - `recv_cancellable()` / `send_cancellable()` (immediate)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
-- Outside an active `@with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `@with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `@with_shield`, **§8.5.10**).
+- Outside an active `@with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `@await ch.recv(&x)` keeps waiting). Inside `@with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `@with_shield`, **§8.5.10**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
-**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `@with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
+**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `@await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `@with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
 
 ---
 
@@ -4082,7 +4274,7 @@ enum TaskError {
 // Bad: no Cancelled variant, so implicit case can't work
 @async int!>(IoError) reader() {
     int x;
-    await ch.recv(&x);  // ❌ can't be cancelled effectively
+    @await ch.recv(&x);  // ❌ can't be cancelled effectively
     return cc_ok(x);
 }
 ```
@@ -4139,9 +4331,9 @@ Duration deadline_remaining(Deadline d);
     // Wrap deadline-sensitive operations
     @with_deadline(deadline) {
         char[:] parsed = parse(req.body);
-        DbResult result = try await db_query(parsed);
+        DbResult result = try @await db_query(parsed);
         Response resp = build_response(result, req_arena);
-        try await send_response(req.fd, &resp);
+        try @await send_response(req.fd, &resp);
     }
     // On deadline exceeded: @with_deadline propagates cancellation
 }
@@ -4243,9 +4435,9 @@ Streaming uses explicit channel parameters:
 
 ```c
 @async void produce(int n, int[~ >]* out) {
-    defer out.close();  // closes the shared channel state when production finishes
+    @defer out.close();  // closes the shared channel state when production finishes
     for (int i = 0; i < n; i++) {
-        await out.send(i);
+        @await out.send(i);
     }
 }
 
@@ -4271,15 +4463,15 @@ Streaming uses explicit channel parameters:
     while (true) {
         char[:] line = try f.readline();
         if (line.len == 0) break;        // EOF: readline returns an empty slice
-        await out.send(line);
+        @await out.send(line);
     }
 }
 
 // Per-item errors: each item can independently fail
 @async void parse_nums(char[:][~]* in, int!>(ParseError)[~]* out) {
     defer out.close();
-    @for await (char[:] line : in) {
-        await out.send(parse_int(line));
+    @for @await (char[:] line : in) {
+        @await out.send(parse_int(line));
     }
 }
 ```
@@ -4300,11 +4492,11 @@ struct Scope {
 // Task control
 Task::[T] task = async_fn(args);         // lazy, not started
 void   Task::[T].start();                // begin execution (detached)
-T      await Task::[T];                  // suspend until complete
+T      @await Task::[T];                  // suspend until complete
 void   Task::[T].cancel();               // request cooperative cancellation
 
 // Cancellation-aware variants (observe cancellation when awaited)
-T!>(Cancelled)   await task_cancellable::[T](Task::[T!>(Cancelled)] t);
+T!>(Cancelled)   @await task_cancellable::[T](Task::[T!>(Cancelled)] t);
 bool !>(Cancelled) recv_cancellable::[T](T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
 bool             send_cancellable::[T](T[~ >]* tx, T value);
 Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
@@ -4330,7 +4522,7 @@ T block_on::[T](Task::[T] t);    // run task to completion, blocking
 
 **Rule:** `block_on` can block the OS thread. It is most commonly used at sync boundaries outside of `@async` code. For sync-to-async bridging within `@async` code, use implicit nursery wrapping or structured concurrency patterns.
 
-**Rule (block_on re-entrancy):** `block_on()` must not be called from within a `run_blocking` worker thread (i.e., from a non-`@async` function that was auto-wrapped inside `@async` code) or from any thread currently executing runtime-managed tasks. Violation causes deadlock or scheduler re-entrancy.
+**Rule (block_on re-entrancy):** `block_on()` must not be called from a thread-pool worker running inside `cc_run_blocking_submit` (i.e., from the body of a `@blocking`-edged call that was issued by an `@async` caller, §8.2 / J.1.1) or from any thread currently executing runtime-managed tasks. Violation causes deadlock or scheduler re-entrancy.
 
 **Detection and behavior:**
 
@@ -4341,7 +4533,7 @@ T block_on::[T](Task::[T] t);    // run task to completion, blocking
 
 ```c
 @async void f() {
-    g();            // non-@async → auto-wrapped in run_blocking
+    g();            // edge mode @blocking → dispatched via cc_run_blocking_submit
 }
 
 void g() {
@@ -4354,8 +4546,8 @@ void g() {
 
 ```c
 @async void f() {
-    // Option 1: avoid block_on entirely by using await
-    int result = await async_work();  // preferred
+    // Option 1: avoid block_on entirely by using @await
+    int result = @await async_work();  // preferred
     
     // Option 2: move block_on to sync boundary
     // (don't call block_on from inside @async, even via nesting)
@@ -4389,14 +4581,14 @@ An `@async` function is `@nonblocking` if it contains no channel operations insi
 
 **Inference rules (automatic):**
 
-1. No `await ch.send()` or `await ch.recv(&x)` inside `for`, `while`, or `do-while` loops
+1. No `@await ch.send()` or `@await ch.recv(&x)` inside `for`, `while`, or `do-while` loops
 2. All called `@async` functions are also `@nonblocking`
 3. Any loop with channel operations makes the function **not** `@nonblocking`
 
 ```c
 // Inferred @nonblocking - no loops with channel ops
 @async int send_one(CCChanTx tx, int v) {
-    await tx.send(v);  // OK: not in a loop
+    @await tx.send(v);  // OK: not in a loop
     return 0;
 }
 
@@ -4410,7 +4602,7 @@ An `@async` function is `@nonblocking` if it contains no channel operations insi
 // NOT @nonblocking - loop with channel send
 @async int producer(CCChanTx tx, int count) {
     for (int i = 0; i < count; i++) {
-        await tx.send(i);  // In loop → not @nonblocking
+        @await tx.send(i);  // In loop → not @nonblocking
     }
     return 0;
 }
@@ -4429,7 +4621,7 @@ Functions can be explicitly marked `@nonblocking` to override inference (for exp
 // Explicit: "I know this won't deadlock because buffer is always large enough"
 @async @nonblocking int bounded_producer(CCChanTx tx) {
     for (int i = 0; i < 3; i++) {  // Only 3 sends, buffer assumed >= 3
-        await tx.send(i);
+        @await tx.send(i);
     }
     return 0;
 }
@@ -4689,7 +4881,7 @@ enum IoError {
                     if (++retry_count > 3) {
                         return cc_err(IoError::Busy);
                     }
-                    await sleep(milliseconds(10 * retry_count));
+                    @await sleep(milliseconds(10 * retry_count));
                 }
             }
         }
@@ -4778,11 +4970,12 @@ This includes:
 
 Calling a non-`@async` function from within an `@async` function must not block the async scheduler.
 
-To satisfy this rule:
+To satisfy this rule (see §8.2 / Appendix J.1.1):
 
-- The compiler or runtime must automatically wrap such calls using a blocking execution mechanism (e.g., `run_blocking`).
-- Multiple consecutive non-`@async` calls **may** be coalesced into a single blocking dispatch.
-- The wrapping mechanism is an implementation detail and is not observable at the language level.
+- Each such call edge is resolved to mode `@blocking` or `@noblock` by the four-step precedence chain (call site → callee decl → caller ambient → FFI/fallback default).
+- `@blocking` edges dispatch through `cc_run_blocking_submit` on the implicit thread-pool nursery; the caller fiber parks until the worker returns.
+- `@noblock` edges compile to a direct C call — the callee is contractually non-blocking (§8.2.7).
+- Adjacent `@blocking` edges MAY be coalesced into a single dispatch (Appendix C.1).
 
 **Coalescing Semantics:** Consecutive non-`@async` calls within the same lexical scope may be dispatched as one blocking unit. If an error occurs (exception, early return, propagated error), remaining calls in the unit are not executed.
 
@@ -4841,11 +5034,11 @@ The compiler (translator) enforces a lint rule to catch latency violations:
 
 - `@noblock` functions (guaranteed non-blocking, inline)
 - `@async` functions (must be awaited)
-- Any function within `await` context
+- Any function within `@await` context
 
 **Violations (Compiler Warning/Error):**
 
-Calling a non-`@async`, non-`@noblock` function without `await` in a `@latency_sensitive` function is a compiler error or warning (depending on lint level).
+Calling a non-`@async`, non-`@noblock` function without `@await` in a `@latency_sensitive` function is a compiler error or warning (depending on lint level).
 
 **Example:**
 
@@ -4859,11 +5052,11 @@ void process_logs(int count);           // Must be awaited or marked @noblock
 @async @latency_sensitive void handler(Request req) {
     int count = parse_count(req.body);  // ✅ OK (@noblock, guaranteed fast)
     
-    try await db_query(count);          // ✅ OK (awaited)
+    try @await db_query(count);          // ✅ OK (awaited)
     
-    process_logs(count);                // ❌ ERROR: blocking call in latency_sensitive
+    process_logs(count);                // ❌ ERROR: blocking call in @latency_sensitive
     
-    // Fix: Either await it or mark it @noblock
+    // Fix: Either @await it or mark it @noblock
 }
 ```
 
@@ -4986,7 +5179,7 @@ The blocking model is intentionally conservative:
 
 Errors in Concurrent-C are **value-based**, not exceptions. `T!>(E)` is the return type for functions that can fail; unwrap and handling syntax is defined normatively in §3.1 (`?>`, `!>`, `@err(e);`, `@errhandler`). `@defer` always runs; there is no unwinding.
 
-Error handling in `@async` functions and nurseries uses the operators defined in **§3.1** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or nursery-specific error construct exists; everything composes through the same surface.
+Error handling in `@async` functions and nurseries uses the operators defined in **§3.1** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `@await`- or nursery-specific error construct exists; everything composes through the same surface.
 
 **Async call with default.**
 
@@ -4994,7 +5187,7 @@ Error handling in `@async` functions and nurseries uses the operators defined in
 @async int!>(IoError) fetch(char[:] url);
 
 @async void handler(char[:] url) {
-    int len = (await fetch(url)) ?> 0;   // default on error
+    int len = (@await fetch(url)) ?> 0;   // default on error
     use(len);
 }
 ```
@@ -5005,7 +5198,7 @@ Error handling in `@async` functions and nurseries uses the operators defined in
 @async int!>(IoError) process(char[:] url) {
     CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => subtask_a(url));
-    int v = (await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
+    int v = (@await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
     return cc_ok(0);
 }
 ```
@@ -5136,7 +5329,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 - `recv_type` is the resolved receiver type name used for dispatch.
 - `method` is the invoked method name.
-- `mode` is an optional lowering mode chosen by the language surface. For example, async-aware families may distinguish ordinary calls from `await`-driven lowering here. If unused, handlers should ignore it.
+- `mode` is an optional lowering mode chosen by the language surface. For example, async-aware families may distinguish ordinary calls from `@await`-driven lowering here. If unused, handlers should ignore it.
 - `argv` is the rewritten argument-expression list only. It does not include the receiver.
 - `arg_types` is the compile-time inferred type list for `argv`, positionally aligned with it.
 - `arena` is temporary compile-time storage for constructing the returned callee name.
@@ -5438,8 +5631,8 @@ unsafe {
 ```c
 unsafe {
     char[:] s = adopt(c_alloc(1000), 1000, c_free);
-    await ch.send(s);       // OK: copies data, s still valid
-    await ch.send_take(s);  // ERROR: adopt() slices not transferable
+    @await ch.send(s);       // OK: copies data, s still valid
+    @await ch.send_take(s);  // ERROR: adopt() slices not transferable
 }
 // c_free called here
 ```
@@ -5512,7 +5705,7 @@ Traditional C `for(;;)` is unchanged.
 
 ```c
 for (T x : slice) { ... }       // range-for over slice
-@for await (T x : ch) { ... }    // async iteration over channel
+@for @await (T x : ch) { ... }    // async iteration over channel
 ```
 
 **Range-for lowering:**
@@ -5526,14 +5719,14 @@ for (size_t __i = 0; __i < slice.len; __i++) {
 }
 ```
 
-`**@for await` lowering:**
+**`@for @await` lowering:**
 
 ```c
-// @for await (T x : expr) { BODY }
+// @for @await (T x : expr) { BODY }
 // lowers to:
 while (true) {
     T x;
-    bool !>(CCIoError) __got = try await expr.next(&x);
+    bool !>(CCIoError) __got = try @await expr.next(&x);
     if (!cc_value(__got)) break;   // ok(false) indicates end-of-stream (EOF)
     BODY
 }
@@ -5545,9 +5738,9 @@ while (true) {
 - Errors propagate normally via the `bool !>(E)` result.
 - Suspension points inside async iteration are subject to **§4.2.2** and **§8.5.10**.
 
-`**@for await` on pointers:**
+**`@for @await` on pointers:**
 
-`@for await (T x : c)` accepts `c` of type `T[~...]` or `T[~...]`*. Pointer form is implicitly dereferenced.
+`@for @await (T x : c)` accepts `c` of type `T[~...]` or `T[~...]`*. Pointer form is implicitly dereferenced.
 
 **Slicing:**
 
@@ -5765,7 +5958,7 @@ struct Pair::[A, B] { A a; B b; }
 **Comptime value parameters (for sizes/layout):**
 
 ```c
-struct SmallVec::[T, comptime int N] {
+struct SmallVec::[T, @comptime int N] {
     T[N] inline_buf;
     int len;
 }
@@ -5776,16 +5969,16 @@ struct SmallVec::[T, comptime int N] {
 ```
 generic_params := '::' '[' generic_param (',' generic_param)* ']'
 generic_param  := ident
-               | 'comptime' type ident
+               | '@comptime' type ident
 ```
 
 - A type parameter is an identifier with no prefix: `T`.
-- A value parameter is introduced with `comptime <type> <name>`: `comptime int N`.
+- A value parameter is introduced with `@comptime <type> <name>`: `@comptime int N`.
 - The `::` prefix before `[` disambiguates generic parameters from array/slice/channel syntax.
 
 Built-in generic families such as `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
 
-**Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
+**Rule:** A `@comptime` value parameter is always a compile-time constant and may be used in:
 
 - array lengths `T[N]`
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
@@ -5804,7 +5997,7 @@ Generic instantiation uses compile-time monomorphization.
 - `swap::[int]` and `swap::[u64]` are different instantiations.
 - `SmallVec::[int, 8]` and `SmallVec::[int, 16]` are different instantiations.
 
-**Rule (identity):** Two instantiations are the "same" only if all type arguments are identical and all comptime value arguments are equal.
+**Rule (identity):** Two instantiations are the "same" only if all type arguments are identical and all `@comptime` value arguments are equal.
 
 **Lowering (normative for built-in generic families):**
 
@@ -5834,11 +6027,11 @@ swap(&a, &b);     // infers T from a/b pointer types
 swap::[int](&a, &b);
 ```
 
-**Rule (partial explicit):** If some arguments are explicit and others omitted, omitted type parameters are inferred (if possible). Comptime value parameters must be explicit unless inferable from a dependent type.
+**Rule (partial explicit):** If some arguments are explicit and others omitted, omitted type parameters are inferred (if possible). `@comptime` value parameters must be explicit unless inferable from a dependent type.
 
 ```c
 // N inferable from SmallVec::[int, 8]*:
-void push::[T, comptime int N](SmallVec::[T, N]* v, T x);
+void push::[T, @comptime int N](SmallVec::[T, N]* v, T x);
 
 SmallVec::[int, 8] v;
 push(&v, 3);   // infers T=int, N=8
@@ -5876,7 +6069,7 @@ Generic code obeys the same copy/move rules as non-generic code.
 void take::[T](T x) { use(x); }
 
 char[:] u;
-await ch.recv(&u);             // u contains move-only slice
+@await ch.recv(&u);             // u contains move-only slice
 take(u);                       // moves u into take(), OK
 ```
 
@@ -5929,18 +6122,18 @@ m.remove(key);
 
 ---
 
-## 14. Compile-Time Evaluation (`comptime`)
+## 14. Compile-Time Evaluation (`@comptime`)
 
 This section defines compile-time computation as a restricted evaluation mode used for constants, specialization, and generic metaprogramming.
 
 - **§14.1 Constant expressions** — what counts as compile-time
-- **§14.2 `comptime` declarations** — compile-time storage
-- **§14.3 `comptime` parameters** — compile-time arguments
+- **§14.2 `@comptime` declarations** — compile-time storage
+- **§14.3 `@comptime` parameters** — compile-time arguments
 - **§14.4 `@comptime if`** — compile-time branching
-- **§14.5 `comptime {}` blocks** — compile-time execution for initialization
+- **§14.5 `@comptime {}` blocks** — compile-time execution for initialization
 - **§14.6 Built-ins** — minimal type/ABI queries
 - **§14.7 Static assertions** — compile-time invariants
-- **§14.8 Restrictions** — what comptime cannot do
+- **§14.8 Restrictions** — what `@comptime` cannot do
 
 ---
 
@@ -5954,76 +6147,76 @@ Constant expressions may use:
 - `sizeof(T)`, `alignof(T)`, `offsetof(T, field)`
 - Arithmetic/bitwise/boolean operations
 - Casts between integer types (if no overflow beyond target width)
-- References to other `comptime` values
-- Calls to `comptime` functions (see §14.2), if all arguments are constant expressions
+- References to other `@comptime` values
+- Calls to `@comptime` functions (see §14.2), if all arguments are constant expressions
 - Enum values
 
-**Rule:** A constant expression must not depend on runtime state (globals with runtime initialization, function calls without `comptime`, I/O, allocation, atomics, mutexes, channels, tasks).
+**Rule:** A constant expression must not depend on runtime state (globals with runtime initialization, function calls without `@comptime`, I/O, allocation, atomics, mutexes, channels, tasks).
 
 ---
 
-### 14.2 `comptime` Declarations
+### 14.2 `@comptime` Declarations
 
-`comptime` on a variable requires compile-time evaluation and gives it static storage duration.
+`@comptime` on a variable requires compile-time evaluation and gives it static storage duration.
 
 ```c
-comptime int A = 1 + 2;
-comptime size_t PAGE = kilobytes(4);
-comptime char[:] VERSION = "1.0.0";
+@comptime int A = 1 + 2;
+@comptime size_t PAGE = kilobytes(4);
+@comptime char[:] VERSION = "1.0.0";
 ```
 
 **Rule:** The initializer must be a constant expression.
 
-**Rule:** `comptime` variables are immutable.
+**Rule:** `@comptime` variables are immutable.
 
-`**comptime` functions:**
+**`@comptime` functions:**
 
-Functions marked `comptime` can be evaluated at compile time:
+Functions marked `@comptime` can be evaluated at compile time:
 
 ```c
-comptime int fib(int n) {
+@comptime int fib(int n) {
     if (n <= 1) return n;
     return fib(n - 1) + fib(n - 2);
 }
 
-comptime size_t align_up(size_t n, size_t align) {
+@comptime size_t align_up(size_t n, size_t align) {
     return (n + align - 1) & ~(align - 1);
 }
 
-comptime int mask(comptime int bits) {
+@comptime int mask(@comptime int bits) {
     return (1 << bits) - 1;
 }
 ```
 
-**Rule:** `comptime` functions may only call other `comptime` functions, use `comptime`-safe operations (arithmetic, comparisons, control flow), and access `comptime` values.
+**Rule:** `@comptime` functions may only call other `@comptime` functions, use `@comptime`-safe operations (arithmetic, comparisons, control flow), and access `@comptime` values.
 
-**Rule:** `comptime` functions cannot perform I/O, allocate memory, or have side effects.
+**Rule:** `@comptime` functions cannot perform I/O, allocate memory, or have side effects.
 
-**Rule:** `comptime` functions can also be called at runtime (they are valid runtime functions too).
+**Rule:** `@comptime` functions can also be called at runtime (they are valid runtime functions too).
 
 ---
 
-### 14.3 `comptime` Parameters
+### 14.3 `@comptime` Parameters
 
 Functions may take compile-time parameters explicitly:
 
 ```c
-comptime int mask(comptime int bits) {
+@comptime int mask(@comptime int bits) {
     return (1 << bits) - 1;
 }
 
-comptime int M = mask(8);  // M = 255
+@comptime int M = mask(8);  // M = 255
 ```
 
-**Rule:** Arguments passed to a `comptime` parameter must be constant expressions.
+**Rule:** Arguments passed to a `@comptime` parameter must be constant expressions.
 
-**Rule:** A `comptime` parameter may be used wherever a constant expression is required (array lengths, channel capacities, switch case values, etc.).
+**Rule:** A `@comptime` parameter may be used wherever a constant expression is required (array lengths, channel capacities, switch case values, etc.).
 
-**Important interaction with generics:** `comptime` parameters are the standard way to express lightweight "value generics" (Zig-style) without introducing a separate template system.
+**Important interaction with generics:** `@comptime` parameters are the standard way to express lightweight "value generics" (Zig-style) without introducing a separate template system.
 
 ```c
-// Comptime parameter drives array size
-int sum_n(comptime int N, int[N] xs) {
+// @comptime parameter drives array size
+int sum_n(@comptime int N, int[N] xs) {
     int sum = 0;
     for (int i = 0; i < N; i++) sum += xs[i];
     return sum;
@@ -6062,14 +6255,14 @@ void serialize::[T](T value, char[~]* out) {
 
 ---
 
-### 14.5 `comptime {}` Blocks
+### 14.5 `@comptime {}` Blocks
 
-A `comptime { ... }` block runs during compilation and may be used to initialize `comptime` variables and static data.
+A `@comptime { ... }` block runs during compilation and may be used to initialize `@comptime` variables and static data.
 
 ```c
-comptime u32 CRC_TABLE[256];
+@comptime u32 CRC_TABLE[256];
 
-comptime {
+@comptime {
     for (int i = 0; i < 256; i++) {
         CRC_TABLE[i] = crc32_seeded(i);
     }
@@ -6089,32 +6282,32 @@ comptime {
 2. Execute compile-time code and collect registrations for the whole translation unit, including included local headers.
 3. Lower the translation unit to ordinary C using the collected registrations.
 
-**Rule:** A `comptime {}` block may assign only to:
+**Rule:** A `@comptime {}` block may assign only to:
 
-- `comptime` variables
+- `@comptime` variables
 - Compile-time-known static storage declared in the same translation unit
 
-**Rule:** Control flow inside `comptime {}` is allowed (`if`, `for`, `while`) as long as all conditions are constant-expression decidable.
+**Rule:** Control flow inside `@comptime {}` is allowed (`if`, `for`, `while`) as long as all conditions are constant-expression decidable.
 
 ---
 
-### 14.6 Built-in `comptime` Queries
+### 14.6 Built-in `@comptime` Queries
 
 The following are available in constant expressions:
 
 ```c
-comptime size_t sizeof(type T);
-comptime size_t alignof(type T);
-comptime size_t offsetof(type T, field F);
+@comptime size_t sizeof(type T);
+@comptime size_t alignof(type T);
+@comptime size_t offsetof(type T, field F);
 
-comptime bool is_pointer(type T);
-comptime bool is_slice(type T);
-comptime bool is_optional(type T);
-comptime bool is_result(type T);
+@comptime bool is_pointer(type T);
+@comptime bool is_slice(type T);
+@comptime bool is_optional(type T);
+@comptime bool is_result(type T);
 
 // Helpful for specialization:
-comptime bool is_sendable(type T);
-comptime bool is_copyable(type T);
+@comptime bool is_sendable(type T);
+@comptime bool is_copyable(type T);
 ```
 
 **Rule (`is_sendable` / `is_copyable`):** These are defined by the same structural rules as §2.1 and §2.2. They are compile-time predicates over types.
@@ -6123,12 +6316,12 @@ comptime bool is_copyable(type T);
 
 ### 14.7 Static Assertions
 
-`comptime_assert` checks conditions at compile time:
+`@comptime_assert` checks conditions at compile time:
 
 ```c
-comptime_assert(sizeof(int) == 4, "expected 32-bit int");
-comptime_assert(alignof(void*) >= 4, "pointer alignment too small");
-comptime_assert(BUFFER_SIZE >= 1024, "buffer too small");
+@comptime_assert(sizeof(int) == 4, "expected 32-bit int");
+@comptime_assert(alignof(void*) >= 4, "pointer alignment too small");
+@comptime_assert(BUFFER_SIZE >= 1024, "buffer too small");
 ```
 
 **Rule:** If the condition is false, compilation fails with the provided message.
@@ -6143,7 +6336,7 @@ At compile time, the following are forbidden:
 - Heap allocation (including arena creation/allocation)
 - Touching channels, tasks, thread primitives
 - Atomics/mutex operations
-- Calling non-`comptime` functions
+- Calling non-`@comptime` functions
 - Taking addresses of runtime locals (no "pointer into runtime")
 - Relying on undefined behavior
 
@@ -6264,10 +6457,10 @@ unsafe {
     );
     
     // Copy (safe): data is copied into channel
-    await ch.send(file_data);
+    @await ch.send(file_data);
     
     // ERROR: adopted slices not transferable
-    // await ch.send_take(file_data);
+    // @await ch.send_take(file_data);
     
     // file_data destroyed here, free_buffer called
 }
@@ -6377,15 +6570,15 @@ The following must be diagnosed at compile time:
 | Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | §2.2, §8.3 |
 | Ownership errors                                              | Copy of unique slice, use after move                                                                                 | §2.1, §3.5 |
 | Borrow errors                                                 | Borrow outlives owner (statically provable)                                                                          | §4.2        |
-| Async errors                                                  | Missing `await`, invalid suspension point                                                                            | §8.2        |
-| Blocking context errors                                       | Blocking call in @async where auto-wrap unavailable                                                                  | §8.8        |
+| Async errors                                                  | Missing `@await`, invalid suspension point                                                                            | §8.2        |
+| Blocking context errors                                       | `@blocking`-edged call in @async where `cc_run_blocking_submit` is unavailable (e.g., from a pool worker)            | §8.8        |
 | @latency_sensitive violations                                 | Blocking call in @latency_sensitive function                                                                         | §8.8.3.1    |
-| Comptime errors                                               | Non-constant in `comptime` context                                                                                   | §14         |
+| Comptime errors                                               | Non-constant in `@comptime` context                                                                                  | §14         |
 | Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | §11         |
 | Optional unwrap                                               | `*x` without proven Some branch                                                                                      | §3.1        |
 | Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | §3.1        |
 | Use after move                                                | Accessing move-only value after transfer                                                                             | §2.1        |
-| Guard across suspension                                       | Guard held across `await` or `run_blocking`                                                                          | §8.8        |
+| Guard across suspension                                       | Guard held across `@await` or `run_blocking`                                                                          | §8.8        |
 | Unsafe adoption                                               | `adopt()` outside `unsafe {}`                                                                                        | § G.2        |
 | Result unwrap — missing default                               | `expr ?>` / `expr ?>(e)` with nothing on RHS                                                                         | §3.1        |
 | Result unwrap — '?>' misuse for error handling                | `?>` RHS is a divergent statement, a `{ ... }` block, or the bare `?>;` shorthand; use `!>` for error-handling logic | §3.1        |
@@ -6443,63 +6636,62 @@ The following are undefined behavior in release builds (no diagnostic required):
 
 This appendix provides guidance for implementers of the CC-to-C translator. All guidance is non-normative; implementations may use different strategies as long as semantic guarantees are met.
 
-### C.1 Automatic Wrapping of Blocking Calls in `@async` Functions
+### C.1 Coalescing Contiguous `@blocking` Edges
 
-**Problem:** When an `@async` function calls a non-`@async` (blocking) function, the call must be dispatched to the blocking thread pool, not inlined.
+**Context:** Edge-mode resolution and the one-state-per-edge C lowering
+of `@blocking` / `@noblock` / `async→async` are specified normatively
+in **§8.2** and **Appendix J.1.1**. This appendix describes an
+optional implementation optimization: coalescing adjacent `@blocking`
+edges into a single thread-pool dispatch.
 
-**Solution:** The compiler batches contiguous non-`@async` calls and wraps each batch in a single `await run_blocking(...)`.
+**Optimization:** A compiler MAY merge two or more lexically adjacent
+`@blocking` call edges into a single `cc_run_blocking_submit` closure
+when **all** of the following hold:
 
-**Algorithm:**
+1. The edges are not separated by an `@await`, a `async→async`
+   edge, a `@noblock` edge, a suspension-capable statement, a
+   label, or a scope boundary.
+2. None of the merged calls is marked `@latency_sensitive`
+   (see C.2).
+3. No merged call observes a side-effect ordering dependency the
+   compiler can't preserve locally (aliasing through escaped
+   pointers, volatile loads, atomic operations with non-relaxed
+   ordering).
+4. The merge does not extend a captured-frame field's lifetime
+   across a suspension point it would not otherwise cross.
 
-1. Scan the `@async` function body for contiguous sequences of non-`@async` calls
-2. A **batching boundary** is:
-  - Function boundary
-  - Await or other suspension point
-  - `@async` function call
-  - Variable declaration/assignment that depends on I/O
-3. Group calls before each boundary into batches
-4. Emit one `await run_blocking(closure)` per batch
+**Observable effect:** Coalescing is a pure performance optimization.
+It preserves the happens-before ordering of the individual calls
+(they run serially on a single worker) and yields exactly one yield
+point for the caller instead of N.
 
 **Example:**
 
 ```c
-@async void process() {
-    int a = compute1();     // non-@async call (batch 1)
-    int b = compute2();     // non-@async call (batch 1)
-    
-    // [batching boundary: suspension point]
-    int c = await fetch_data();
-    
-    // [batching boundary: start new batch]
-    int d = compute3();     // non-@async call (batch 2)
-    
-    // [function exit boundary]
+@async void process(int fd) {
+    int a = compute1();     // edge 1: @blocking (FFI default)
+    int b = compute2();     // edge 2: @blocking
+    int c = @await fetch_data();
+    int d = compute3();     // edge 3: @blocking
 }
 ```
 
-Lowers to:
+A conforming implementation MAY lower edges 1 and 2 into a single
+closure (one submit, one park, one take) while keeping edge 3 as
+its own submit. A conforming implementation MAY also emit three
+separate submits — both are correct with respect to §8.2 / J.1.1.
 
 ```c
-@async void process() {
-    int a, b, c, d;
-    
-    // Batch 1: awaits run_blocking
-    await run_blocking(() => {
-        a = compute1();
-        b = compute2();
-    });
-    
-    // Suspension point
-    c = await fetch_data();
-    
-    // Batch 2: awaits run_blocking
-    await run_blocking(() => {
-        d = compute3();
-    });
-}
+// One legal lowering (coalesced edges 1+2):
+@await cc_run_blocking_submit(__imp, ^{ a = compute1(); b = compute2(); }, w);
+c = @await fetch_data();
+@await cc_run_blocking_submit(__imp, ^{ d = compute3(); }, w);
 ```
 
-**Variable hoisting:** Variables assigned in batches must be declared before the batch and remain in scope after.
+**Variable hoisting:** Locals written inside a coalesced closure must
+still live on the `@async` frame (§J.1 / J.1.1); coalescing does not
+change frame layout beyond collapsing per-edge handle/return-slot
+fields where safe.
 
 ### C.2 Batching Performance & @latency_sensitive
 
@@ -6513,7 +6705,7 @@ Lowers to:
 @async @latency_sensitive void fast_handler() {
     setup();          // bounded work
     data = process(); // bounded work (latency-sensitive)
-    await send(result);
+    @await send(result);
 }
 ```
 
@@ -6666,7 +6858,7 @@ Use a condition variable + mutex for synchronization. Simpler than async channel
 // CC code:
 @async void process() {
     int a = compute();
-    int b = await fetch();
+    int b = @await fetch();
 }
 
 // Generated C:
@@ -6789,7 +6981,7 @@ struct Duration {
 - `Task::[T]` is an opaque pointer-sized handle (typically a `void`* pointing to heap-allocated state)
 - The state includes registers (local variables), current PC, and result storage
 - Calling an `@async` function allocates and initializes state but does not start execution
-- Execution begins on first `await` of the returned task
+- Execution begins on first `@await` of the returned task
 
 **Channel operations:**
 
@@ -6859,11 +7051,11 @@ A function marked `@noblock` asserts it will never block:
     return (int)atoi(s.ptr);  // via FFI
 }
 
-@async void db_query(int count);  // Must await
+@async void db_query(int count);  // Must @await
 
 @async @latency_sensitive void handler(Request req) {
     int count = parse_count(req.body);  // ✅ OK (@noblock)
-    try await db_query(count);          // ✅ OK (awaited)
+    try @await db_query(count);          // ✅ OK (awaited)
 }
 ```
 
@@ -6885,7 +7077,7 @@ void process_logs(int count);  // Unknown: might block
 
 @async @latency_sensitive void handler(Request req) {
     int count = parse(req.body);  // ✅ OK (CPU)
-    try await db_get(count);      // ✅ OK (awaited)
+    try @await db_get(count);      // ✅ OK (awaited)
     process_logs(count);          // ❌ ERROR: might block
 }
 ```
@@ -6896,7 +7088,7 @@ void process_logs(int count);  // Unknown: might block
 error: non-@noblock, non-@async call in @latency_sensitive function
   → process_logs(count);
   
-  Fix: Mark process_logs @noblock, or make it @async and await it
+  Fix: Mark process_logs @noblock, or make it @async and @await it
 ```
 
 ---
@@ -6957,7 +7149,7 @@ enum BoundsError {
     Parsed p = parse(req.body);
     
     // Stalling I/O: separate dispatch (visible latency)
-    DbResult res = try await db_get(p.id, a);
+    DbResult res = try @await db_get(p.id, a);
     
     // CPU work: encode (inline)
     Response resp = {
@@ -7008,7 +7200,7 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
         .handler = my_handler,
     };
     
-    try await server_loop(cfg);
+    try @await server_loop(cfg);
 }
 ```
 
@@ -7038,7 +7230,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 @async void!>(IoError) handle_conn(Duplex* conn, Arena* conn_arena) {
     // 1) Handshake (short deadline)
     @with_deadline(deadline_after(seconds(3))) {
-        try await protocol_handshake(conn, conn_arena);
+        try @await protocol_handshake(conn, conn_arena);
     }
 
     // 2) Serve (long-lived). Any child failure/close cancels siblings;
@@ -7049,8 +7241,8 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 
     // 3) Teardown (bounded, shielded)
     @with_shield {
-        try await protocol_close(conn);              // best-effort protocol close
-        try await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
+        try @await protocol_close(conn);              // best-effort protocol close
+        try @await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
     }
 
     return cc_ok(void);
@@ -7098,7 +7290,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `@match`             | Pattern matching                           | Multiplex on channels       |
 | `spawn`              | Create task                                | Method on `CCNursery`       |
 | `defer`              | Defer cleanup                              | Guarantee execution         |
-| `await`              | Suspend on async                           | Call @async functions       |
+| `@await`              | Suspend on async                           | Call @async functions       |
 | `CCNursery`          | Structured concurrency                     | Scope with tasks            |
 | `@with_deadline`      | Apply timeout                              | Enforce deadline            |
 | `@with_shield`        | Suppress deadline cancellation observation | Bounded teardown/cleanup    |
@@ -7132,7 +7324,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
     UserId user_id = try parse_user_id(req.path);
     
     // Stalling I/O: fetch from database (separate dispatch, observable)
-    User user = try await db_get_user(user_id, a);
+    User user = try @await db_get_user(user_id, a);
     
     // CPU work: encode (inlined)
     char[:] json = try encode_user_json(&user, a);
@@ -7155,7 +7347,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
         .handler = api_handler,
     };
     
-    try await server_loop(cfg);
+    try @await server_loop(cfg);
 }
 ```
 
@@ -7183,7 +7375,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 @async void!>(IoError) connection_handler(Duplex* conn, Arena* conn_arena) {
     @with_deadline(deadline_after(seconds(30))) {
         while (true) {
-            char[:] msg = try await conn.read(conn_arena);
+            char[:] msg = try @await conn.read(conn_arena);
             if (msg.len == 0) break;       // EOF
             process(msg);
         }
@@ -7193,12 +7385,12 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 
 **Current behavior (§8.5, §4.2):** Inside an active `@with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
 
-**Possible direction:** Inside an active `@with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
+**Possible direction:** Inside an active `@with_deadline()` scope, all @await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
 
 **Motivation:**
 
 - Every long-lived loop (WebSocket, gRPC bidirectional stream, streaming read) needs this
-- Correct-by-default: deadline semantics + await = safe cancellation
+- Correct-by-default: deadline semantics + @await = safe cancellation
 - Eliminates boilerplate `@select` in read/write loops
 - Aligns with your existing deadline-aware cancellation semantics (§4.2, §8.5)
 
@@ -7215,7 +7407,7 @@ Many operations produce sequences of items asynchronously: request body chunks, 
 ```c
 // Request body
 while (true) {
-    char[:] chunk = try await req.body.read_chunk(arena);
+    char[:] chunk = try @await req.body.read_chunk(arena);
     if (chunk.len == 0) break;        // EOF
     process(chunk);
 }
@@ -7223,35 +7415,35 @@ while (true) {
 // Response body
 while (true) {
     char[:] chunk;
-    bool got = try await resp_iter.next(arena, &chunk);
+    bool got = try @await resp_iter.next(arena, &chunk);
     if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
 
 // WebSocket frames
 while (true) {
-    char[:] frame = try await ws.read_frame(arena);
+    char[:] frame = try @await ws.read_frame(arena);
     if (frame.len == 0) break;        // EOF
     process(frame);
 }
 ```
 
-**Possible direction:** A language-level async iterator protocol and declarative for-await syntax:
+**Possible direction:** A language-level async iterator protocol and declarative for-@await syntax:
 
 ```c
 struct AsyncIterator::[T] {
     @async bool !>(E) next(Arena* a, T* out);
 };
 
-// Declarative for await
-for await (char[:] chunk in req.body) {
+// Declarative for @await
+for @await (char[:] chunk in req.body) {
     process(chunk);
 }
 
 // Desugars to:
 while (true) {
     char[:] chunk;
-    bool got = try await req.body.next(arena, &chunk);
+    bool got = try @await req.body.next(arena, &chunk);
     if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
@@ -7260,7 +7452,7 @@ while (true) {
 **Motivation:**
 
 - Appears in every streaming example: requests, responses, WebSocket, gRPC, file I/O
-- Unifies mental model: "async iteration is like sync iteration, just with await"
+- Unifies mental model: "async iteration is like sync iteration, just with @await"
 - Reduces boilerplate `while` loops across all protocol stacks
 - Aligns with Go (context propagation + range over channels) and Zig (iterator protocol)
 
@@ -7336,7 +7528,7 @@ Each @async function `T fn(Args...)` is compiled to:
 ```c
 // Frame state for fn
 typedef struct {
-    int __state;           // Current state (0=start, 1=after first await, etc.)
+    int __state;           // Current state (0=start, 1=after first @await, etc.)
     // Locals live here (persist across suspensions)
     T __retval;
     ArgType1 arg1;
@@ -7359,14 +7551,14 @@ Task_T fn__poll(Frame_fn* frame, Waker* waker) {
     state_0: {
         // Original function body from start
         frame->arg1 = /* ... */;
-        // First await:
+        // First @await:
         // Save locals, increment state, return to scheduler
         frame->__state = 1;
         return Task_Pending();
     }
     
     state_1: {
-        // Resume after first await
+        // Resume after first @await
         T result = get_await_result();
         frame->__retval = result;
         frame->__state = 2;
@@ -7386,12 +7578,159 @@ Task_T fn(Args... args) {
 **Key rules:**
 
 - Locals are stored on the frame struct, not the stack
-- Each await introduces a new state number
+- Each @await introduces a new state number
 - Control flow uses switch + goto (readable, compiles to jump table)
 - Dropping frame performs drop glue for move-only locals
 - No hidden stack allocation; frame size is compile-time determinable
 
 **Why stackless:** Enables bounded memory per task, no stack growth surprises, and clean C mapping.
+
+---
+
+### J.1.1 Call-Edge Lowering (`@blocking` / `@noblock`)
+
+**Normative lowering:** Every call site inside an `@async` body is
+resolved to one of three edge kinds (see §8.2.2). The C lowering is
+fixed and part of the ABI:
+
+**Edge mode 1 — `async → async` (callee is `@async`):** direct state-machine composition via `@await`.
+
+```c
+// Source
+@async int caller(void) {
+    int v = @await other_async(arg);
+    return v;
+}
+
+// Lowered frame + poll (Appendix J.1 shape, stripped to the one edge)
+typedef struct {
+    int __state;
+    Task_int __child;
+    int v;
+} Frame_caller;
+
+Task_int caller__poll(Frame_caller* f, Waker* w) {
+    switch (f->__state) { case 0: goto s0; case 1: goto s1; }
+    s0: {
+        f->__child = other_async(arg);      // create child frame, not yet run
+        f->__state = 1;
+        // FALLTHROUGH into first poll of child
+    }
+    s1: {
+        Poll_int p = Task_int_poll(&f->__child, w);
+        if (p.pending) return Task_int_Pending();
+        f->v = p.value;
+        return Task_int_Completed(f->v);
+    }
+}
+```
+
+**Edge mode 2 — `async → @blocking` (callee sync, edge mode `@blocking`):** wrap in `run_blocking`; schedule closure on the implicit thread-pool nursery; yield until the worker returns.
+
+```c
+// Source
+@async void caller(int fd) {
+    char buf[128];
+    read(fd, buf, 128);                     // edge mode = @blocking (FFI default)
+    // or explicit site override:
+    // @blocking helper(fd, buf);
+}
+
+// Lowered (one-state expansion per @blocking edge)
+typedef struct {
+    int __state;
+    int fd;
+    char buf[128];
+    CCRunBlockingHandle __rb0;              // thread-pool handle for this edge
+    int __rb0_rv;                           // captured return value
+} Frame_caller;
+
+void caller__poll(Frame_caller* f, Waker* w) {
+    switch (f->__state) { case 0: goto s0; case 1: goto s1; }
+    s0: {
+        // Enqueue closure onto the implicit-nursery thread pool.
+        // Closure captures call args by value from the frame.
+        f->__rb0 = cc_run_blocking_submit(
+            __cc_implicit_nursery(),
+            /* closure */ ^int(void) {
+                return read(f->fd, f->buf, 128);
+            },
+            w);
+        f->__state = 1;
+        return;                             // pending; scheduler parks caller
+    }
+    s1: {
+        f->__rb0_rv = cc_run_blocking_take(&f->__rb0);
+        (void)f->__rb0_rv;                  // void-returning edge discards
+        // ... continue ...
+    }
+}
+```
+
+ABI contract of the `run_blocking` helpers used by the lowering:
+
+```c
+// concurrent_c.h (library ABI; see also Appendix D)
+typedef struct CCRunBlockingHandle CCRunBlockingHandle;
+
+// Submit a zero-argument closure to the implicit thread-pool nursery.
+// Returns a handle whose completion wakes `w`.  The closure runs on a
+// pool worker; the caller fiber is parked until take() is called.
+CCRunBlockingHandle cc_run_blocking_submit(
+    CCNursery* implicit, CCClosure closure, Waker* w);
+
+// Retrieve the closure's return value.  Called exactly once from the
+// resumed state-machine arm.  Asserts the handle has completed.
+int  cc_run_blocking_take_int  (CCRunBlockingHandle* h);
+void cc_run_blocking_take_void (CCRunBlockingHandle* h);
+// (one take_T per lowered return-type family)
+```
+
+**Edge mode 3 — `async → @noblock` (callee sync, edge mode `@noblock`):** direct C call. No frame fields, no state transition.
+
+```c
+// Source
+@async @noblock void caller(const char* s) {
+    size_t n = strlen(s);                   // edge mode = @noblock (callee marked)
+    use(n);
+}
+
+// Lowered
+typedef struct {
+    int __state;
+    const char* s;
+    size_t n;
+} Frame_caller;
+
+void caller__poll(Frame_caller* f, Waker* w) {
+    (void)w;
+    switch (f->__state) { case 0: goto s0; }
+    s0: {
+        f->n = strlen(f->s);                // plain C call, no yield, no state change
+        use(f->n);
+        f->__state = 1;
+        return;
+    }
+}
+```
+
+**Summary of the three shapes:**
+
+| Edge mode      | Frame fields added           | States added | C call emitted                                  |
+| -------------- | ---------------------------- | ------------ | ----------------------------------------------- |
+| `async→async`  | `Task_T __child;` + retval slot | 1 extra | `Task_T_poll(&child, w)` in a pending loop      |
+| `@blocking`    | `CCRunBlockingHandle __rb<i>;` + retval slot | 1 extra | `cc_run_blocking_submit(...)` / `cc_run_blocking_take_T(...)` |
+| `@noblock`     | none                         | 0            | direct C call, inlined at the current state      |
+
+**Sync callers (non-`@async`)** do no lowering at all — `@blocking` /
+`@noblock` annotations on a call inside a sync function are advisory
+and emit a direct C call regardless of mode (sync functions have no
+fiber to park; see §8.2.1).
+
+**Indirect calls** (function pointers) with no call-site annotation
+lower as edge mode `@blocking` by default (§8.2.8). With
+`@noblock f()` or `@blocking f()` at the site, the indirect form
+lowers exactly as above using the site's edge mode.
 
 ---
 
@@ -7408,8 +7747,8 @@ For full deadline semantics and cancellation behavior, see **language spec §8.5
 @with_deadline(deadline_after(seconds(5))) {
     // Token is now active; compiler pushes pointer to token into frame context
     
-    while (try await conn.read(...)) {
-        // Before await: check cancellation
+    while (try @await conn.read(...)) {
+        // Before @await: check cancellation
         if (unlikely(token->cancelled)) {
             return cc_err(Cancelled);
         }
@@ -7417,7 +7756,7 @@ For full deadline semantics and cancellation behavior, see **language spec §8.5
         // Await (suspension point)
         // Compiler generates: save state, return Pending
         
-        // After await: check cancellation
+        // After @await: check cancellation
         if (unlikely(token->cancelled)) {
             return cc_err(Cancelled);
         }
@@ -7438,7 +7777,7 @@ For full deadline semantics and cancellation behavior, see **language spec §8.5
 
 **Implementation notes:**
 
-- Token is stored in thread-local or frame-local context (not a parameter to every await)
+- Token is stored in thread-local or frame-local context (not a parameter to every @await)
 - Cancelled flag is a simple boolean or atomically-read flag
 - Cost is single memory load + branch per suspension point
 
@@ -7476,14 +7815,14 @@ For full deadline semantics and cancellation behavior, see **language spec §8.5
 
 ---
 
-### J.4 @for await Lowering (One Await Per Iteration)
+### J.4 @for @await Lowering (One Await Per Iteration)
 
-**Rule:** `for await` must lower to exactly one `await` per loop iteration, with no hidden buffering or double-await.
+**Rule:** `for @await` must lower to exactly one `@await` per loop iteration, with no hidden buffering or double-@await.
 
 **Lowering:**
 
 ```c
-for await (char[:] chunk in req.body) {
+for @await (char[:] chunk in req.body) {
     process(chunk);
 }
 ```
@@ -7494,13 +7833,13 @@ Desugars to:
 {
     AsyncIterator::[char[:]] iter = req.body;
     while (true) {
-        char[:] !>(IoError) next_result = await iter.next(arena);
+        char[:] !>(IoError) next_result = @await iter.next(arena);
 
         if @try (char[:] chunk = next_result) {
             if (chunk.len == 0) break;   // EOF: empty slice
             // Chunk is valid here; process it
             process(chunk);
-            // No re-evaluation of condition; straight back to await
+            // No re-evaluation of condition; straight back to @await
         } else {
             // Error; exit loop
             break;
@@ -7511,7 +7850,7 @@ Desugars to:
 
 **Key constraints:**
 
-- Exactly one `await` per iteration (at `iter.next()`)
+- Exactly one `@await` per iteration (at `iter.next()`)
 - `next_result` variable is allocated on frame; reused each iteration
 - Compiler must not buffer or cache results across iterations
 - If `next_result` is an error, `try` propagates; loop does not continue
@@ -7646,7 +7985,7 @@ Consequences (normative):
 
 - Control flow is never implicit. Error propagation uses visible operators (`!>`, `?>`, `@err(e);`); there are no exceptions.
 - Allocation is never implicit. Every allocation takes an explicit arena; there is no garbage collector.
-- Suspension is never implicit. `await` marks every suspension point; `@async` marks every function that may suspend.
+- Suspension is never implicit. `@await` marks every suspension point; `@async` marks every function that may suspend.
 - Destruction ordering is never implicit. `@defer` statements run in reverse-declaration order at scope exit; nothing runs at scope exit without a `@defer` / `@destroy` in source.
 - Dispatch at types that admit multiple implementations is visible. UFCS dispatches on the resolved type of the receiver expression at the call site.
 
@@ -7690,7 +8029,7 @@ Consequences (normative):
 | @async functions    | Stackless state machines (switch + goto)         | ✅ Normative      |
 | Cancellation checks | Single branch, optimizable (unlikely())          | ✅ Normative      |
 | Slice ownership     | Frame-local; borrow checker enforces             | ✅ Normative      |
-| @for await          | One await per iteration                          | ✅ Normative      |
+| @for @await          | One @await per iteration                          | ✅ Normative      |
 | Interface ABI       | Two-pointer layout {void*, vtable*}              | ✅ Normative      |
 | Readable C          | Named structs, labeled states, explicit cleanups | ✅ Principle      |
 | -emit-lowered-c     | Optional debug mode with source mapping          | ✅ Recommendation |
