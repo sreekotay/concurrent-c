@@ -114,25 +114,12 @@ This is separate from whole-arena teardown:
 
 The intended semantics are:
 
-- if the pointer falls inside one of the arena's blocks, coarse arena-backed release is currently allowed,
-- if the pointer does not fall inside an arena block and heap-overflow mode is enabled, the current experiment simply calls `free(ptr)`,
+- if the arena recognizes the pointer as one of its tracked live allocations, release it,
+- if the pointer corresponds to heap-fallback allocation owned by the arena, reclaim it,
 - if heap-overflow mode is enabled and the pointer is not tracked as arena-backed, permissive fallback behavior is currently allowed in the prototype,
-- exact start-pointer validation and double-release detection are explicitly deferred in the current experiment.
+- bad inputs and double-release should be surfaced via runtime reporting/assert-style diagnostics.
 
 This part is explicitly still experimental.
-
-### 4a. Release tracking must survive arena growth correctly
-
-Early real-world testing exposed an important structural rule:
-
-- if an allocation was made from an older arena block,
-- and that block later became an extent after arena growth,
-- releasing that allocation must affect the frozen old block,
-- not the mutable current root.
-
-Otherwise a release from an old block can incorrectly rewind or otherwise disturb the new root, corrupting still-live allocations.
-
-So even the coarse version of the draft is not just "pointer inside some arena somewhere". It also requires the release side effects to apply to the correct block after growth.
 
 ### 5. Rewind semantics are weakened once release/spill behavior is used
 
@@ -197,6 +184,10 @@ Current direction:
 
 This is important because `Map` is one of the main motivations for avoiding a full “replace all containers now” rewrite.
 
+**Heap sidecar map (`<ccc/std/map_heap.cch>`):** khashl’s `km` context is overloaded with a reserved sentinel (`CC__MAP_HEAP_KM` in `map.cch`) so the same vendor header and hook macros can route map bucket storage to `malloc`/`realloc`/`free` while arena-backed maps still pass a real `CCArena*`. Declarations use `CC_MAP_DECL_HEAP` / `CC_MAP_DECL_HEAP_SLICE`; see `tests/map_heap_smoke.c`.
+
+**Redis Jackson Allan CC experiment (user space):** `scripts/cc_vendor_jackson_namespace.py` generates `third_party/jackson-allan-cc/cc_for_ccc.h` from upstream `cc.h` by renaming every `cc_` API token to `ccj_`, eliminating clashes with Concurrent-C’s own `cc_*` / `cc_vec_*` runtime. `real_projects/redis/map_heap_jackson.cch` is the single user-facing map header beside `redis_idiomatic.ccs`; `redis_cc/redis_jackson_map.c` includes that same header and is still built as its own `.o` linked into `redis_idiomatic`.
+
 ### Clear vs destroy
 
 This draft does not require every container operation to eagerly release all backing storage immediately.
@@ -208,33 +199,6 @@ In particular:
 - growth/reallocation paths should release superseded storage.
 
 This matches the current stdlib direction better than forcing every `clear()` to become a hard allocator event.
-
-## Provenance Lessons From The Prototype
-
-The Redis push clarified that provenance is useful here, but not sufficient by itself.
-
-What provenance already helps with:
-
-- arena-backed cloned slices should carry arena provenance rather than `CC_SLICE_ID_UNTRACKED`,
-- checkpoint/reset epochs remain meaningful because post-reset allocations naturally get a fresh provenance id,
-- debug reasoning gets much clearer when slices truthfully say "this came from this arena epoch".
-
-What provenance does not currently solve by itself:
-
-- `cc_arena_release(...)` still accepts a raw pointer, not a slice,
-- release correctness still depends on correct runtime block ownership,
-- provenance alone cannot tell the runtime which concrete block should absorb the release side effects,
-- provenance alone cannot validate arbitrary foreign pointers handed to `release(...)`.
-
-So the current lesson is:
-
-- provenance is excellent as a truthfulness/debugging signal,
-- but release semantics still need runtime ownership rules beyond provenance alone.
-
-That suggests a good division of responsibility:
-
-- provenance tracks allocation epoch and stale-slice safety,
-- runtime release logic tracks block ownership and a coarse "outside arena blocks => free(ptr)" spill rule.
 
 ## Relationship to a Future `CCAlloc`
 
@@ -290,10 +254,9 @@ The following remain intentionally unresolved:
 
 1. How permissive should `cc_arena_release()` be for foreign pointers in non-debug builds?
 2. Should release tracking remain out-of-line, or move to inline metadata later if performance or memory pressure demands it?
-3. Should provenance become part of release-time validation/debug checks, even if it is not the primary ownership mechanism?
-4. Should heap-fallback allocations be tracked more strictly instead of permitting libc-style fallback in the prototype?
-5. Should block-level recycling become part of ordinary `CCArena`, or a distinct scratch-arena mode?
-6. How much of this should eventually become normative in `concurrent-c-stdlib-spec.md` and `concurrent-c-spec-complete.md`?
+3. Should heap-fallback allocations be tracked more strictly instead of permitting libc-style fallback in the prototype?
+4. Should block-level recycling become part of ordinary `CCArena`, or a distinct scratch-arena mode?
+5. How much of this should eventually become normative in `concurrent-c-stdlib-spec.md` and `concurrent-c-spec-complete.md`?
 
 ## Current Implementation Notes
 
@@ -302,11 +265,8 @@ As of this draft:
 - `CCArena` has explicit heap-overflow opt-in,
 - `CCArena` has `release(...)`,
 - checkpointing is gated once release/spill semantics are active,
-- coarse arena-block release now uses block membership, while heap-overflow fallback is direct aligned libc allocation plus `release(...)->free(ptr)`,
-- release logic has to preserve correct block ownership across growth/extents,
 - `Vec` releases superseded storage on growth,
 - `Map` allocator hooks route old storage through arena release semantics,
-- arena-backed `cc_slice_clone(...)` now produces tracked arena provenance instead of untracked slices,
 - the public `Vec`, `Map`, and `String` APIs remain arena-based.
 
 Those implementation details are useful for discussion, but this file is primarily intended to record the design direction rather than freeze every exact runtime detail.
