@@ -139,6 +139,11 @@ typedef struct {
    Used by optional runtime deadlock guard in channel.c. */
 __thread CCNursery* cc__tls_current_nursery = NULL;
 
+CCNursery* cc__runtime_current_nursery(void) {
+    CCNursery* v2 = sched_v2_current_nursery();
+    return v2 ? v2 : cc__tls_current_nursery;
+}
+
 struct CCNursery {
     cc_nursery_child* tasks; /* Tasks spawned in this nursery */
     size_t count;
@@ -347,7 +352,7 @@ bool cc_nursery_is_cancelled(const CCNursery* n) {
 
 /* Check if current fiber's nursery is cancelled (convenience for user code). */
 bool cc_cancelled(void) {
-    return cc_nursery_is_cancelled(cc__tls_current_nursery);
+    return cc_nursery_is_cancelled(cc__runtime_current_nursery());
 }
 
 /* Get the cancel wake generation for the current nursery (0 if none).

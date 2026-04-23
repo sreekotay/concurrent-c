@@ -66,12 +66,18 @@
 #include "fiber_sched_boundary.h"
 #include "wait_select_internal.h"
 #include "channel_wait_internal.h"
+#include "sched_v2.h"
 /* fiber_sched.c is now included in concurrent_c.c */
 
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
-extern __thread CCNursery* cc__tls_current_nursery;
+CCNursery* cc__runtime_current_nursery(void);
 /* Thread-local current deadline scope (set by with_deadline lowering). */
 __thread CCDeadline* cc__tls_current_deadline = NULL;
+
+static inline CCDeadline* cc__runtime_current_deadline(void) {
+    CCDeadline* v2 = (CCDeadline*)sched_v2_current_deadline_scope();
+    return v2 ? v2 : cc__tls_current_deadline;
+}
 
 
 static int cc_channel_recv_dedupe_enabled(void) {
@@ -499,25 +505,34 @@ static inline int cc__chan_lf_count(CCChan* ch);
  * ============================================================================ */
 
 CCDeadline* cc_current_deadline(void) {
-    return cc__tls_current_deadline;
+    return cc__runtime_current_deadline();
 }
 
 CCDeadline* cc_deadline_push(CCDeadline* d) {
+    if (sched_v2_in_context()) {
+        return (CCDeadline*)sched_v2_deadline_scope_push(d);
+    }
     CCDeadline* prev = cc__tls_current_deadline;
     cc__tls_current_deadline = d;
     return prev;
 }
 
 void cc_deadline_pop(CCDeadline* prev) {
+    if (sched_v2_in_context()) {
+        sched_v2_deadline_scope_pop(prev);
+        return;
+    }
     cc__tls_current_deadline = prev;
 }
 
 void cc_cancel_current(void) {
-    if (cc__tls_current_deadline) cc__tls_current_deadline->cancelled = 1;
+    CCDeadline* d = cc__runtime_current_deadline();
+    if (d) d->cancelled = 1;
 }
 
 bool cc_is_cancelled_current(void) {
-    return cc__tls_current_deadline && cc__tls_current_deadline->cancelled;
+    CCDeadline* d = cc__runtime_current_deadline();
+    return d && d->cancelled;
 }
 
 /* Forward declarations */
@@ -2138,7 +2153,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         /* Fiber-aware blocking */
         while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap) {
             /* Check if current nursery is cancelled - unblock so the fiber can exit */
-            CCNursery* cur_nursery = cc__tls_current_nursery;
+            CCNursery* cur_nursery = cc__runtime_current_nursery();
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
                 return ECANCELED;
             }
@@ -2277,10 +2292,12 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 
     /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
-    if (!deadline && !ch->closed && ch->count == 0 &&
-        ch->autoclose_owner && cc__tls_current_nursery &&
-        ch->autoclose_owner == cc__tls_current_nursery &&
-        cc__chan_nursery_closing_guard_enabled()) {
+    {
+        CCNursery* cur_nursery = cc__runtime_current_nursery();
+        if (!deadline && !ch->closed && ch->count == 0 &&
+            ch->autoclose_owner && cur_nursery &&
+            ch->autoclose_owner == cur_nursery &&
+            cc__chan_nursery_closing_guard_enabled()) {
         {
             if (!ch->warned_autoclose_block) {
                 ch->warned_autoclose_block = 1;
@@ -2290,6 +2307,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             }
             return EDEADLK;
         }
+        }
     }
 
     
@@ -2297,9 +2315,10 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         /* Fiber-aware blocking */
         while (!ch->closed && ch->count == 0) {
             /* Re-check deadlock guard inside loop (same as initial guard above) */
+            CCNursery* cur_nursery = cc__runtime_current_nursery();
             if (!deadline && !ch->closed && ch->count == 0 &&
-                ch->autoclose_owner && cc__tls_current_nursery &&
-                ch->autoclose_owner == cc__tls_current_nursery &&
+                ch->autoclose_owner && cur_nursery &&
+                ch->autoclose_owner == cur_nursery &&
                 cc__chan_nursery_closing_guard_enabled()) {
                 {
                     if (!ch->warned_autoclose_block) {
@@ -3532,8 +3551,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Deadline scope: if caller installed a current deadline, use deadline-aware send. */
-    if (cc__tls_current_deadline) {
-        return cc_chan_deadline_send(ch, value, value_size, cc__tls_current_deadline);
+    CCDeadline* current_deadline = cc__runtime_current_deadline();
+    if (current_deadline) {
+        return cc_chan_deadline_send(ch, value, value_size, current_deadline);
     }
     
     /* Lock-free fast path for buffered channels.
@@ -3832,8 +3852,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     }
     
     /* Deadline scope: if caller installed a current deadline, use deadline-aware recv. */
-    if (cc__tls_current_deadline) {
-        return cc_chan_deadline_recv(ch, out_value, value_size, cc__tls_current_deadline);
+    CCDeadline* current_deadline = cc__runtime_current_deadline();
+    if (current_deadline) {
+        return cc_chan_deadline_recv(ch, out_value, value_size, current_deadline);
     }
     
     /* Lock-free fast path for buffered channels.
@@ -3887,9 +3908,11 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     
     /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
-    if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
-        ch->autoclose_owner == cc__tls_current_nursery &&
-        cc__chan_nursery_closing_guard_enabled()) {
+    {
+        CCNursery* cur_nursery = cc__runtime_current_nursery();
+        if (!ch->closed && ch->autoclose_owner && cur_nursery &&
+            ch->autoclose_owner == cur_nursery &&
+            cc__chan_nursery_closing_guard_enabled()) {
         {
             if (!ch->warned_autoclose_block) {
                 ch->warned_autoclose_block = 1;
@@ -3899,6 +3922,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
             pthread_mutex_unlock(&ch->mu);
             return EDEADLK;
+        }
         }
     }
     
@@ -3917,7 +3941,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         
         /* Check if current nursery is cancelled - unblock so the fiber can exit */
         {
-            CCNursery* cur_nursery = cc__tls_current_nursery;
+            CCNursery* cur_nursery = cc__runtime_current_nursery();
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
                 pthread_mutex_unlock(&ch->mu);
                 return ECANCELED;
@@ -3927,9 +3951,11 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         /* Re-check deadlock guard inside the loop: the initial guard above
          * may have passed when items were still available.  Now the buffer is
          * empty and the producer may be done -- detect the foot-gun. */
-        if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
-            ch->autoclose_owner == cc__tls_current_nursery &&
-            cc__chan_nursery_closing_guard_enabled()) {
+        {
+            CCNursery* cur_nursery = cc__runtime_current_nursery();
+            if (!ch->closed && ch->autoclose_owner && cur_nursery &&
+                ch->autoclose_owner == cur_nursery &&
+                cc__chan_nursery_closing_guard_enabled()) {
             {
                 if (!ch->warned_autoclose_block) {
                     ch->warned_autoclose_block = 1;
@@ -3939,6 +3965,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 }
                 pthread_mutex_unlock(&ch->mu);
                 return EDEADLK;
+            }
             }
         }
         

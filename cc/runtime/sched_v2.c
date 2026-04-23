@@ -204,6 +204,7 @@ struct fiber_v2 {
 
     wake_primitive done_wake;
     cc__fiber* _Atomic join_waiter_fiber;
+    void* current_deadline_scope;
     CCNursery* saved_nursery;
     CCNursery* admission_nursery;
 
@@ -757,13 +758,11 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
 static __thread int tls_v2_thread_id = -1;
 static __thread uint64_t tls_v2_my_generation = 0;
 static __thread fiber_v2* tls_v2_current_fiber = NULL;
-static __thread const char* tls_v2_park_reason = NULL;
 /* Per-worker monotonic dispatch counter, incremented before each fiber
  * run. Published to slot.dispatch_epoch so sysmon can detect "same fiber
  * still running after one tick" without any wall-clock read on the hot
  * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
 static __thread uint64_t tls_v2_dispatch_seq = 0;
-extern __thread CCNursery* cc__tls_current_nursery;
 bool cc_nursery_is_cancelled(const CCNursery* n);
 void cc_nursery_notify_child_done(CCNursery* n);
 
@@ -784,8 +783,6 @@ static void fiber_v2_entry(mco_coro* co) {
     fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
     if (!f) return;
     atomic_thread_fence(memory_order_acquire);
-    CCNursery* prev_nursery = cc__tls_current_nursery;
-    cc__tls_current_nursery = f->saved_nursery;
     if (f->entry_fn) {
         if (f->admission_nursery && cc_nursery_is_cancelled(f->admission_nursery)) {
             f->result = NULL;
@@ -796,7 +793,6 @@ static void fiber_v2_entry(mco_coro* co) {
         f->result = NULL;
     }
     f->admission_nursery = NULL;
-    cc__tls_current_nursery = prev_nursery;
 }
 
 /* ============================================================================
@@ -825,6 +821,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             atomic_store_explicit(&f->done, 0, memory_order_relaxed);
             atomic_store_explicit(&f->wait_ticket, 0, memory_order_relaxed);
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
+            f->current_deadline_scope = NULL;
             f->yield_kind = V2_YIELD_PARK;
             f->park_reason = NULL;
             f->park_obj = NULL;
@@ -842,6 +839,7 @@ static fiber_v2* fiber_v2_alloc(void) {
     f->coro = NULL;
     f->last_thread_id = -1;
     f->park_reason = NULL;
+    f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
     atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
@@ -862,6 +860,7 @@ static void fiber_v2_free(fiber_v2* f) {
     f->entry_fn = NULL;
     f->entry_arg = NULL;
     f->result = NULL;
+    f->current_deadline_scope = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
     /* Clear detector metadata so the next spawn starts clean and the
@@ -1346,7 +1345,6 @@ void sched_v2_park(void) {
     if (!f) return;
 
     V2_STAT_INC(g_v2_parks);
-    f->park_reason = tls_v2_park_reason;
     f->yield_kind = V2_YIELD_PARK;
     mco_result res = mco_yield(co);
     if (res != MCO_SUCCESS) {
@@ -1371,7 +1369,9 @@ void sched_v2_yield(void) {
 }
 
 void sched_v2_set_park_reason(const char* reason) {
-    tls_v2_park_reason = reason;
+    fiber_v2* f = sched_v2_current_fiber();
+    if (!f) return;
+    f->park_reason = reason;
 }
 
 /* ============================================================================
@@ -1502,11 +1502,40 @@ int sched_v2_fiber_external_wait_active(fiber_v2* f) {
  * ============================================================================ */
 
 int sched_v2_in_context(void) {
-    return tls_v2_current_fiber != NULL;
+    return mco_running() != NULL || tls_v2_current_fiber != NULL;
 }
 
 fiber_v2* sched_v2_current_fiber(void) {
+    mco_coro* co = mco_running();
+    if (co) {
+        fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
+        if (f) return f;
+    }
     return tls_v2_current_fiber;
+}
+
+CCNursery* sched_v2_current_nursery(void) {
+    fiber_v2* f = sched_v2_current_fiber();
+    return f ? f->saved_nursery : NULL;
+}
+
+void* sched_v2_current_deadline_scope(void) {
+    fiber_v2* f = sched_v2_current_fiber();
+    return f ? f->current_deadline_scope : NULL;
+}
+
+void* sched_v2_deadline_scope_push(void* d) {
+    fiber_v2* f = sched_v2_current_fiber();
+    if (!f) return NULL;
+    void* prev = f->current_deadline_scope;
+    f->current_deadline_scope = d;
+    return prev;
+}
+
+void sched_v2_deadline_scope_pop(void* prev) {
+    fiber_v2* f = sched_v2_current_fiber();
+    if (!f) return;
+    f->current_deadline_scope = prev;
 }
 
 int sched_v2_current_worker_id(void) {

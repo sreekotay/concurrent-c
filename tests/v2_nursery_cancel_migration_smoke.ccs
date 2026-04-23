@@ -1,0 +1,110 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <stdio.h>
+
+#define NUM_WORKERS 4
+#define ROUNDS 40
+#define PRE_CANCEL_GLOBAL_YIELDS 2000
+
+/* Private runtime probe used only by scheduler/runtime regressions. */
+int cc__sched_current_worker_id(void);
+void cc__fiber_yield_global(void);
+
+static cc_atomic_int g_ready = 0;
+static cc_atomic_int g_before_worker = -1;
+static cc_atomic_int g_after_worker = -1;
+static cc_atomic_int g_cancel_worker = -1;
+static cc_atomic_int g_saw_migration = 0;
+static cc_atomic_int g_seen_cancelled = 0;
+static cc_atomic_int g_loop_iters = 0;
+
+int main(void) {
+    cc_sched_set_num_workers(NUM_WORKERS);
+
+    int migrated_rounds = 0;
+    for (int rep = 0; rep < ROUNDS; rep++) {
+        cc_atomic_store(&g_ready, 0);
+        cc_atomic_store(&g_before_worker, -1);
+        cc_atomic_store(&g_after_worker, -1);
+        cc_atomic_store(&g_cancel_worker, -1);
+        cc_atomic_store(&g_saw_migration, 0);
+        cc_atomic_store(&g_seen_cancelled, 0);
+        cc_atomic_store(&g_loop_iters, 0);
+
+        {
+            CCNursery* n = @create(NULL) @destroy;
+            if (!n) return 2;
+
+            if (n->spawnhybrid(() => {
+                    int first = cc__sched_current_worker_id();
+                    int migrated = 0;
+                    int iters = 0;
+                    cc_atomic_store(&g_before_worker, first);
+                    cc_atomic_store(&g_ready, 1);
+
+                    while (!cc_cancelled()) {
+                        int wid = cc__sched_current_worker_id();
+                        if (wid >= 0 && first >= 0 && wid != first) {
+                            migrated = 1;
+                        }
+                        iters++;
+                        cc__fiber_yield_global();
+                    }
+
+                    cc_atomic_store(&g_after_worker, cc__sched_current_worker_id());
+                    cc_atomic_store(&g_saw_migration, migrated);
+                    cc_atomic_store(&g_loop_iters, iters);
+                    cc_atomic_store(&g_seen_cancelled, 1);
+                }) != 0) {
+                return 3;
+            }
+
+            if (n->spawnhybrid(() => [n] {
+                    while (cc_atomic_load(&g_ready) == 0) {
+                        cc_yield();
+                    }
+                    for (int i = 0; i < PRE_CANCEL_GLOBAL_YIELDS; i++) {
+                        cc__fiber_yield_global();
+                    }
+                    cc_atomic_store(&g_cancel_worker, cc__sched_current_worker_id());
+                    cc_nursery_cancel(n);
+                }) != 0) {
+                return 4;
+            }
+        }
+        int before = cc_atomic_load(&g_before_worker);
+        int after = cc_atomic_load(&g_after_worker);
+
+        if (!cc_atomic_load(&g_seen_cancelled)) {
+            fprintf(stderr,
+                    "FAIL v2_nursery_cancel_migration: iter=%d cc_cancelled() was false after nursery cancel\n",
+                    rep);
+            return 10;
+        }
+        if (before < 0 || after < 0) {
+            fprintf(stderr,
+                    "FAIL v2_nursery_cancel_migration: iter=%d invalid worker ids before=%d after=%d cancel_worker=%d\n",
+                    rep, before, after, cc_atomic_load(&g_cancel_worker));
+            return 11;
+        }
+        if (cc_atomic_load(&g_loop_iters) <= 0) {
+            fprintf(stderr,
+                    "FAIL v2_nursery_cancel_migration: iter=%d loop did not execute\n",
+                    rep);
+            return 12;
+        }
+        if (cc_atomic_load(&g_saw_migration)) {
+            migrated_rounds++;
+        }
+    }
+
+    if (migrated_rounds == 0) {
+        fprintf(stderr,
+                "FAIL v2_nursery_cancel_migration: saw no worker migration across %d rounds (%d global yields each)\n",
+                ROUNDS, PRE_CANCEL_GLOBAL_YIELDS);
+        return 13;
+    }
+
+    return 0;
+}
