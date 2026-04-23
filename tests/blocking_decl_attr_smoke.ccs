@@ -1,0 +1,37 @@
+/* Phase 1: verify that `@blocking` parses as a function-level decl attribute
+ * and round-trips through the compiler:
+ *   - TCC cc-ext hook records bit 1u<<3 in aux2
+ *   - pass_autoblock observes CC_FN_ATTR_BLOCKING on the owner
+ *   - pass_strip_markers removes `@blocking` from the emitted C
+ *
+ * This smoke test only checks the end-to-end compile + run-to-success.
+ * `@blocking` has no normative semantic effect at the decl level today
+ * (it's the default for @async functions), so the test program just
+ * confirms the attribute does not break the compile and the function
+ * is callable normally.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+/* Plain @blocking on a sync function.  Must compile and run. */
+@blocking int helper(int x) {
+    return x + 1;
+}
+
+/* @async @blocking on an async function (redundant with the default,
+ * but must parse cleanly). */
+@async @blocking int async_fn(int x) {
+    return x + 10;
+}
+
+int main(void) {
+    int a = helper(41);
+    if (a != 42) { fprintf(stderr, "helper: got %d\n", a); return 1; }
+    int b = (int)cc_block_on(int, async_fn(32));
+    if (b != 42) { fprintf(stderr, "async_fn: got %d\n", b); return 2; }
+    printf("ok\n");
+    return 0;
+}

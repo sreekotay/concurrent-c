@@ -34,11 +34,67 @@
 #include "util/text.h"
 #include "visitor/pass_common.h"
 
+/* Bit positions mirror the TCC cc-ext hook in third_party/tcc/tccgen.c
+ * (see the `case '@':` block).  Keep them in sync. */
 enum {
     CC_FN_ATTR_ASYNC = 1u << 0,
     CC_FN_ATTR_NOBLOCK = 1u << 1,
     CC_FN_ATTR_LATENCY_SENSITIVE = 1u << 2,
+    CC_FN_ATTR_BLOCKING = 1u << 3,
 };
+
+/* Call-edge modes.  Spec §8.2.1: every direct call edge resolves to
+ * exactly one of these modes at compile time. */
+typedef enum {
+    CC_CALL_MODE_ASYNC,    /* callee is @async — require await, no wrap */
+    CC_CALL_MODE_NOBLOCK,  /* edge runs inline on the caller's thread */
+    CC_CALL_MODE_BLOCKING, /* edge must be wrapped via cc_run_blocking */
+} CCCallEdgeMode;
+
+/* Resolve the mode of a direct call edge per spec §8.2.2 precedence:
+ *
+ *   1. Call-site annotation wins.  (@blocking/@noblock at the call site)
+ *   2. Else callee decl annotation wins.  (@async, @noblock, @blocking)
+ *   3. Else if callee is undecorated CC: inherit the caller's ambient
+ *      mode (taken from owner_attrs).
+ *   4. Else (FFI / unknown indirect / unresolved): default @blocking.
+ *
+ * Inputs:
+ *   owner_attrs   — CC_FN_ATTR_* bits on the enclosing @async function
+ *   callee_attrs  — CC_FN_ATTR_* bits on the callee's declaration
+ *   callee_known  — 1 iff we found a CC decl or symbol table entry for
+ *                   the callee in this TU (header-declared plain C and
+ *                   bare externs are "unknown" for this purpose)
+ *   site_attrs    — CC_FN_ATTR_* bits supplied at the call site
+ *                   (0 today; Phase 3 wires call-site @blocking/@noblock)
+ *
+ * NOTE: This helper assumes the owner is @async (i.e. autoblock is
+ * considering the edge).  For non-@async owners, autoblock does not
+ * run and this function is not consulted. */
+static CCCallEdgeMode cc_resolve_call_edge_mode(unsigned int owner_attrs,
+                                                unsigned int callee_attrs,
+                                                int callee_known,
+                                                unsigned int site_attrs) {
+    /* 1. Call-site wins. */
+    if (site_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
+    if (site_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
+
+    /* 2. Callee decl wins. */
+    if (callee_attrs & CC_FN_ATTR_ASYNC)    return CC_CALL_MODE_ASYNC;
+    if (callee_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
+    if (callee_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
+
+    /* 3. Undecorated CC: inherit caller ambient. */
+    if (callee_known) {
+        if (owner_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
+        if (owner_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
+        /* Spec §8.2.3: @async defaults to @blocking ambient. */
+        return CC_CALL_MODE_BLOCKING;
+    }
+
+    /* 4. FFI / unknown: default @blocking. */
+    return CC_CALL_MODE_BLOCKING;
+}
 
 /* Alias shared types for local use */
 typedef CCNodeView NodeView;
@@ -608,18 +664,67 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
         /* Only skip known-nonblocking callees; if we don't know attrs, assume blocking. */
         unsigned int callee_attrs = 0;
-        if (!cc__lookup_func_attrs(root, ctx, n[i].aux_s1, &callee_attrs)) {
-            (void)cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs);
+        int callee_known = cc__lookup_func_attrs(root, ctx, n[i].aux_s1, &callee_attrs);
+        if (!callee_known) {
+            if (cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs) == 0) {
+                callee_known = 1;
+            }
         }
+        /* Phase 3: pull call-site attrs from the @CC_SITE marker
+         * comment left by cc__rewrite_at_call_site_mode.  TCC
+         * sometimes reports col_start at `(`; walk backward past the
+         * callee identifier first so the scan begins right before the
+         * name, then walk backward through whitespace / block comments
+         * only — any other token terminates the scan so the marker
+         * only applies to the call it directly prefixes. */
+        unsigned int site_attrs = 0;
+        if (n[i].line_start > 0 && n[i].col_start > 0) {
+            size_t call_name_pos = cc__offset_of_line_col_1based(
+                in_src, in_len, n[i].line_start, n[i].col_start);
+            if (call_name_pos > 0 && call_name_pos <= in_len) {
+                size_t p = call_name_pos;
+                /* Skip through identifier chars to land before the callee name. */
+                while (p > 0 && (isalnum((unsigned char)in_src[p - 1]) || in_src[p - 1] == '_')) p--;
+                while (p > 0) {
+                    char ch = in_src[p - 1];
+                    if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') { p--; continue; }
+                    if (ch == '/' && p >= 2 && in_src[p - 2] == '*') {
+                        size_t q = p - 2;
+                        while (q > 0 && !(in_src[q - 1] == '/' && in_src[q] == '*')) q--;
+                        if (q == 0) break;
+                        size_t c_start = q + 1;
+                        size_t c_end = p - 2;
+                        if (c_end > c_start) {
+                            size_t body_len = c_end - c_start;
+                            if (body_len == 17 &&
+                                memcmp(in_src + c_start, "@CC_SITE=blocking", 17) == 0) {
+                                site_attrs |= CC_FN_ATTR_BLOCKING;
+                            } else if (body_len == 16 &&
+                                       memcmp(in_src + c_start, "@CC_SITE=noblock", 16) == 0) {
+                                site_attrs |= CC_FN_ATTR_NOBLOCK;
+                            }
+                        }
+                        p = q - 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        /* Spec §8.2.2: resolve the call-edge mode via the one precedence
+         * chain.  Anything non-blocking skips the autoblock wrap. */
+        CCCallEdgeMode edge_mode = cc_resolve_call_edge_mode(
+            owner_attrs, callee_attrs, callee_known, site_attrs);
         if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
-            fprintf(stderr, "  attrs async=%d noblock=%d under_await=%d chan=%d\n",
-                    (callee_attrs & CC_FN_ATTR_ASYNC) != 0,
-                    (callee_attrs & CC_FN_ATTR_NOBLOCK) != 0,
-                    is_under_await,
-                    is_chan_op);
+            const char* mode_name =
+                (edge_mode == CC_CALL_MODE_ASYNC) ? "async" :
+                (edge_mode == CC_CALL_MODE_NOBLOCK) ? "noblock" : "blocking";
+            fprintf(stderr, "  edge_mode=%s site_attrs=0x%x callee_attrs=0x%x owner_attrs=0x%x callee_known=%d under_await=%d chan=%d\n",
+                    mode_name, site_attrs, callee_attrs, owner_attrs, callee_known,
+                    is_under_await, is_chan_op);
         }
-        if (callee_attrs & CC_FN_ATTR_ASYNC) continue;
-        if (callee_attrs & CC_FN_ATTR_NOBLOCK) continue;
+        if (edge_mode != CC_CALL_MODE_BLOCKING) continue;
         if (strcmp(n[i].aux_s1, "cc_channel_pair") == 0) continue;
 
         /* Compute span offsets in the CURRENT input buffer using line/col. */
@@ -1028,12 +1133,20 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
 
         if (kind == CC_AB_REWRITE_STMT_CALL) {
-            /* plain statement call: require call begins statement token */
+            /* plain statement call: require call begins statement token.
+             * Allow whitespace and block comments (e.g. `/*@CC_SITE=...*\/`
+             * call-site markers dropped by cc__rewrite_at_call_site_mode). */
             if (is_stmt_form) {
                 int ok = 1;
                 for (size_t k = first; k < call_start; k++) {
                     char ch = in_src[k];
-                    if (ch == ' ' || ch == '\t') continue;
+                    if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
+                    if (ch == '/' && k + 1 < call_start && in_src[k + 1] == '*') {
+                        size_t m = k + 2;
+                        while (m + 1 < call_start &&
+                               !(in_src[m] == '*' && in_src[m + 1] == '/')) m++;
+                        if (m + 1 < call_start) { k = m + 1; continue; }
+                    }
                     ok = 0;
                     break;
                 }

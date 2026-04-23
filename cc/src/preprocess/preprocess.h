@@ -104,6 +104,16 @@ char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src,
 // Returns newly allocated string on change, NULL if no @await present.
 char* cc__rewrite_at_await(const char* src, size_t n);
 
+// Rewrite call-site `@blocking callee(args)` / `@noblock callee(args)` to
+// leave a survivable marker comment for pass_autoblock:
+//   @blocking callee(args)  -> /*@CC_SITE=blocking*/ callee(args)
+//   @noblock callee(args)   -> /*@CC_SITE=noblock*/ callee(args)
+// This only fires at call-expression positions; decl-level `@blocking` /
+// `@noblock` (e.g. `@blocking int foo(...)`) is left intact so the TCC
+// cc-ext hook can record the bit on the function decl node.
+// Returns newly allocated string on change, NULL if no rewrite applied.
+char* cc__rewrite_at_call_site_mode(const char* src, size_t n);
+
 // Rewrite `@async [<attrs>] void <name>(...)` to `@async [<attrs>] CCAsyncVoidRet <name>(...)`.
 // Keeps the function visible to phase-3 reparse as a CCTaskIntptr-returning
 // function (needed so that call-sites like `n->spawn_async(fn(args))` type-check

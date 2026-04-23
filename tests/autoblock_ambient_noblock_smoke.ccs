@@ -1,0 +1,57 @@
+/* Phase 4 (spec §8.2.3-§8.2.4 — ambient one-hop inheritance):
+ *
+ * When an @async function is declared @noblock, undecorated CC callees
+ * inherit the ambient @noblock mode at each direct call edge and are
+ * NOT wrapped by the autoblock pass.  FFI / unknown callees do NOT
+ * inherit (spec §8.2.7 defaults them to @blocking), so we observe the
+ * policy via a TU-local CC helper.
+ *
+ * Observable signal: main captures its tid, calls an @async @noblock
+ * function via cc_block_on (which drives the poll on the main thread).
+ * The helper records the tid it actually ran on.
+ *
+ *   - with Phase 4 + @noblock: the helper call is NOT wrapped, so it
+ *     runs inline on the poll thread == main thread.
+ *
+ *   - without Phase 4 (or without @noblock): the helper call is
+ *     autoblock-wrapped into cc_run_blocking_task_intptr(...), which
+ *     dispatches the call to a thread-pool worker, so the recorded
+ *     tid differs from main's.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* TU-local plain CC helper.  No attrs -> undecorated CC, eligible
+ * for ambient inheritance at @noblock call sites. */
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async @noblock int serve(intptr_t* helper_tid) {
+    record_tid(helper_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "ambient @noblock: tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid != main_tid) {
+        fprintf(stderr,
+                "ambient @noblock: helper ran on a different thread (wrapped) "
+                "helper=%ld main=%ld\n",
+                (long)helper_tid, (long)main_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

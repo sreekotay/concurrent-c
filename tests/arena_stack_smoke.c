@@ -52,17 +52,17 @@ int main(void) {
 
     // --- CC_ARENA_STACK + block_max=1: stack-only, no overflow) ---
     {
-        CC_ARENA_STACK(fix, 64);
+        CC_ARENA_STACK(fix, 96);
         fix.block_max = 1;
         if (!fix.base || fix.block_max != 1) {
             printf("FAIL: stack fixed init\n");
             return 2;
         }
-        if (!cc_arena_alloc(&fix, 32, 8)) {
+        if (!cc_arena_alloc(&fix, 16, 8)) {
             printf("FAIL: first alloc fixed stack\n");
             return 2;
         }
-        if (cc_arena_alloc(&fix, 64, 8) != NULL) {
+        if (cc_arena_alloc(&fix, 96, 8) != NULL) {
             printf("FAIL: block_max=1 must not grow to heap\n");
             return 2;
         }
@@ -71,17 +71,17 @@ int main(void) {
 
     // --- CC_ARENA_STACK + block_max=2: 2 slabs then allocation fails ---
     {
-        CC_ARENA_STACK(b, 32);
+        CC_ARENA_STACK(b, 96);
         b.block_max = 2;
         if (!b.base || b.block_max != 2) {
             printf("FAIL: stack two-block init\n");
             return 3;
         }
-        if (!cc_arena_alloc(&b, 32, 8)) {
+        if (!cc_arena_alloc(&b, 16, 8)) {
             printf("FAIL: fill first slab\n");
             return 3;
         }
-        if (!cc_arena_alloc(&b, 64, 8)) {
+        if (!cc_arena_alloc(&b, 96, 8)) {
             printf("FAIL: grow to second slab\n");
             return 3;
         }

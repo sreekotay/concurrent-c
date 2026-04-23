@@ -5292,6 +5292,117 @@ static void cc__collect_async_ret_types(const char* src, size_t n) {
     }
 }
 
+/* Rewrite call-site `@blocking callee(args)` / `@noblock callee(args)`.
+ *
+ * Leaves a comment-marker form that survives TCC parsing as whitespace
+ * but can be recovered by pass_autoblock by scanning source text
+ * immediately before each CALL node:
+ *
+ *   @blocking foo(x)  ->  /*@CC_SITE=blocking*\/ foo(x)
+ *   @noblock  foo(x)  ->  /*@CC_SITE=noblock*\/ foo(x)
+ *
+ * Decl-level attrs (`@blocking int foo(...)`) are *not* rewritten: the
+ * decl-form has a type token between `@blocking` and the name, so the
+ * pattern `@blocking IDENT (` does not match.  Function definitions
+ * (where the closing `)` is followed by `{`) are also skipped — the
+ * TCC cc-ext hook handles those.  Spec §8.2.2 precedence rule 1. */
+char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    /* Early exit if neither `@blocking` nor `@noblock` appears outside
+     * comments/strings.  The cheap pre-check avoids building the output
+     * buffer in the common case. */
+    if (!cc_contains_token_top_level(src, n, "@blocking") &&
+        !cc_contains_token_top_level(src, n, "@noblock")) {
+        return NULL;
+    }
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+
+    for (size_t i = 0; i < n; ) {
+        char c = src[i], c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        if (c != '@') { i++; continue; }
+
+        const char* mode = NULL;
+        size_t kw_len = 0;
+        if (i + 9 <= n && memcmp(src + i + 1, "blocking", 8) == 0 &&
+            (i + 9 == n || !cc_is_ident_char(src[i + 9]))) {
+            mode = "blocking"; kw_len = 8;
+        } else if (i + 8 <= n && memcmp(src + i + 1, "noblock", 7) == 0 &&
+                   (i + 8 == n || !cc_is_ident_char(src[i + 8]))) {
+            mode = "noblock"; kw_len = 7;
+        }
+        if (!mode) { i++; continue; }
+
+        /* Need: `@<mode> IDENT (<balanced>) <not-'{'>` to call this a call-site.
+         * Probe ahead without committing. */
+        size_t p = i + 1 + kw_len;
+        while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
+        if (p >= n || !cc_is_ident_start(src[p])) { i++; continue; }
+        size_t id_s = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        size_t id_e = p;
+        size_t after_id = p;
+        while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
+        if (p >= n || src[p] != '(') { i++; continue; }
+
+        /* Find matching ')' respecting strings/chars. */
+        size_t m = p;
+        int depth = 0;
+        int in_s = 0, in_q = 0;
+        while (m < n) {
+            char mc = src[m];
+            if (in_s) { if (mc == '\\' && m + 1 < n) { m += 2; continue; } if (mc == '"') in_s = 0; m++; continue; }
+            if (in_q) { if (mc == '\\' && m + 1 < n) { m += 2; continue; } if (mc == '\'') in_q = 0; m++; continue; }
+            if (mc == '"') { in_s = 1; m++; continue; }
+            if (mc == '\'') { in_q = 1; m++; continue; }
+            if (mc == '(') depth++;
+            else if (mc == ')') { depth--; if (depth == 0) { m++; break; } }
+            m++;
+        }
+        if (depth != 0) { i++; continue; }
+        size_t rparen_end = m;
+
+        /* Lookahead: if next non-ws char is `{`, it's a function
+         * definition — leave the marker intact for TCC cc-ext. */
+        size_t q = rparen_end;
+        while (q < n && (src[q] == ' ' || src[q] == '\t' || src[q] == '\r' || src[q] == '\n')) q++;
+        if (q < n && src[q] == '{') { i++; continue; }
+
+        /* Emit everything before `@<mode>`, then our marker + original
+         * call expression text verbatim.  Using a block comment keeps
+         * TCC happy (treated as whitespace) and preserves text layout
+         * reasonably well for source-position-based passes. */
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        if (strcmp(mode, "blocking") == 0) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "/*@CC_SITE=blocking*/ ");
+        } else {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "/*@CC_SITE=noblock*/ ");
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + id_s, rparen_end - id_s);
+        last_emit = rparen_end;
+        i = rparen_end;
+        changed = 1;
+        (void)id_e; (void)after_id;
+    }
+
+    if (!changed) { free(out); return NULL; }
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite @await <expr> in any context.
  * If <expr> is a call to a known @async function, emit cc_block_on(T, expr).
  * Otherwise strip @await and keep the expression (channel ops etc. are
@@ -7518,6 +7629,10 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
      * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check).
      * async_ast recognises CCAsyncVoidRet as an originally-void declaration. */
     if (cc_pass_chain_apply(chain, cc__rewrite_async_void_ret(chain->src, chain->len)) < 0) return -1;
+    /* Call-site `@blocking f(...)` / `@noblock f(...)` annotations
+     * (spec §8.2.2 rule 1).  Runs before @await so an `@await`-wrapping
+     * is not accidentally treated as a call-site mode host. */
+    if (cc_pass_chain_apply(chain, cc__rewrite_at_call_site_mode(chain->src, chain->len)) < 0) return -1;
     /* @await fname(...) -> cc_block_on(ReturnType, fname(...)).  Runs after
      * result-type rewriting so the return types are already in canonical form. */
     if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;

@@ -79,5 +79,50 @@ echo "-- print cflags/libs"
 "$CCC" --print-libs | grep "\.c" >/dev/null
 
 ###############################################################################
+# 5) ccc wrapper auto-re-lowers stale .cch headers on the next invocation.
+#
+# Regression: a .cch edit was silently ignored by downstream builds that
+# called cc/bin/ccc directly because the headers-lowered stamp under
+# out/include/ was only regenerated when someone remembered to run
+# `make -C cc lower-headers`.  cc/bin/ccc is now a shell wrapper that
+# checks .cch mtimes against the stamp and re-runs lower_headers on demand.
+###############################################################################
+echo "-- stale-header auto-lower"
+STAMP="$ROOT/out/include/.headers_lowered.stamp"
+LOWERED_ARENA="$ROOT/out/include/ccc/cc_arena.h"
+CCH_ARENA="$ROOT/cc/include/ccc/cc_arena.cch"
+if [ -f "$STAMP" ] && [ -f "$CCH_ARENA" ] && [ -f "$LOWERED_ARENA" ]; then
+  # Age the stamp so the .cch is provably newer without modifying the
+  # source file itself.
+  touch -t 200001010000 "$STAMP"
+  cp "$LOWERED_ARENA" "$tmpdir/cc_arena.h.before"
+
+  # Use --print-cflags so ccc exits immediately; the wrapper check runs
+  # regardless of the subcommand.
+  CCC_LOWER_QUIET=1 "$CCC" --print-cflags >/dev/null
+
+  # Stamp must have been refreshed past the 2000-01-01 age.
+  stamp_epoch="$(stat -f %m "$STAMP" 2>/dev/null || stat -c %Y "$STAMP")"
+  now_epoch="$(date +%s)"
+  age=$((now_epoch - stamp_epoch))
+  test "$age" -lt 120 || {
+    echo "stamp not refreshed (age=${age}s)" >&2
+    exit 1
+  }
+
+  # Subsequent invocation with no source change must NOT re-touch the stamp.
+  fresh_stamp_epoch="$stamp_epoch"
+  sleep 1
+  CCC_LOWER_QUIET=1 "$CCC" --print-cflags >/dev/null
+  stamp_epoch2="$(stat -f %m "$STAMP" 2>/dev/null || stat -c %Y "$STAMP")"
+  test "$stamp_epoch2" = "$fresh_stamp_epoch" || {
+    echo "stamp re-lowered on a clean run (before=$fresh_stamp_epoch after=$stamp_epoch2)" >&2
+    exit 1
+  }
+else
+  echo "(skipping: stamp or lowered header missing)" >&2
+fi
+
+###############################################################################
 echo "OK"
 

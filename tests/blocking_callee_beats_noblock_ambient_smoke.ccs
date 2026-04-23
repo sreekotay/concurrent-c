@@ -1,0 +1,44 @@
+/* Phase 1 + spec §8.2.2 precedence rule 2 (callee-decl wins):
+ *
+ * An explicit callee-decl `@blocking` overrides the caller's ambient
+ * `@noblock` mode.  The call edge must still be autoblock-wrapped
+ * because the callee explicitly opts into blocking semantics.
+ *
+ * Observable signal: recorded tid differs from main's tid (the
+ * callee runs on a thread-pool worker, not the poll thread).
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+@blocking void blocking_helper(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async @noblock int serve(intptr_t* helper_tid) {
+    blocking_helper(helper_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid == main_tid) {
+        fprintf(stderr,
+                "callee @blocking did NOT override ambient @noblock "
+                "(helper ran on main thread) tid=%ld\n",
+                (long)helper_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}
