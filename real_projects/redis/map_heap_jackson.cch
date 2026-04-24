@@ -15,14 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ccc/std/map.cch>
-
-/* Slim stored value layout used by redis_idiomatic instead of full CCSlice. */
-typedef struct {
-    void *ptr;
-    uint32_t len;
-    uint32_t alen;
-    uint64_t id;
-} CCCompactSlice;
+#include <ccc/std/string.cch>
 
 typedef struct CCArena CCArena;
 
@@ -43,7 +36,7 @@ typedef struct CCMapSegmentedSliceCompactNode {
         uint32_t len;
         uint32_t _pad;
     } key;
-    CCCompactSlice value;
+    CCString value;
 } CCMapSegmentedSliceCompactNode;
 
 typedef struct CCMapSegmentedSliceCompactBlock {
@@ -179,7 +172,7 @@ static inline void CCMapSegmentedSliceCompact_clear(CCMapSegmentedSliceCompact* 
     map->live_bytes = sizeof(*map) + map->segment_count * sizeof(*map->segments);
 }
 
-static inline CCCompactSlice* CCMapSegmentedSliceCompact_get(CCMapSegmentedSliceCompact* map, CCSlice key) {
+static inline CCString* CCMapSegmentedSliceCompact_get(CCMapSegmentedSliceCompact* map, CCSlice key) {
     if (!map || !map->segments || map->bucket_count == 0) return NULL;
     size_t bucket_idx = ccmap_segmented_bucket_index(map, key);
     size_t segment_idx = bucket_idx / REDIS_DB_SEGMENT_BUCKETS;
@@ -192,13 +185,13 @@ static inline CCCompactSlice* CCMapSegmentedSliceCompact_get(CCMapSegmentedSlice
     return NULL;
 }
 
-static inline CCCompactSlice* CCMapSegmentedSliceCompact_get_ptr(CCMapSegmentedSliceCompact* map, CCSlice key) {
+static inline CCString* CCMapSegmentedSliceCompact_get_ptr(CCMapSegmentedSliceCompact* map, CCSlice key) {
     return CCMapSegmentedSliceCompact_get(map, key);
 }
 
 static inline int CCMapSegmentedSliceCompact_insert(CCMapSegmentedSliceCompact* map,
                                                     CCSlice key,
-                                                    CCCompactSlice value) {
+                                                    CCString value) {
     if (!map || !map->segments || map->bucket_count == 0) return -1;
     size_t bucket_idx = ccmap_segmented_bucket_index(map, key);
     size_t segment_idx = bucket_idx / REDIS_DB_SEGMENT_BUCKETS;
@@ -279,7 +272,7 @@ typedef __CCMapGeneric RedisDbMap;
 #define RedisDbMap_init_count(arena, bucket_count) ((void)(bucket_count), __cc_map_generic_init((void *)(arena)))
 #define RedisDbMap_init(arena) RedisDbMap_init_count((arena), REDIS_DB_MAP_DEFAULT_BUCKETS)
 #define RedisDbMap_destroy(map) __cc_map_generic_destroy((__CCMapGeneric *)(map))
-#define RedisDbMap_get_ptr(map, key) ((void)(key), (CCCompactSlice *)__cc_map_generic_get((__CCMapGeneric *)(map)))
+#define RedisDbMap_get_ptr(map, key) ((void)(key), (CCString *)__cc_map_generic_get((__CCMapGeneric *)(map)))
 #define RedisDbMap_insert(map, key, value) __cc_map_generic_insert((__CCMapGeneric *)(map), (key), (value))
 #define RedisDbMap_remove(map, key) (__cc_map_generic_remove((__CCMapGeneric *)(map), (key)) != 0)
 #define RedisDbMap_len(map) __cc_map_generic_len((const __CCMapGeneric *)(map))
@@ -287,14 +280,14 @@ typedef __CCMapGeneric RedisDbMap;
 #define RedisDbMap_live_bytes(map) RedisDbMap_len((map))
 #else
 #define REDIS_DB_DECLARE_MAP()                                                    \
-    CC_MAP_DECL_SLICE(CCCompactSlice, RedisDbMap)                                 \
+    CC_MAP_DECL_SLICE(CCString, RedisDbMap)                                       \
     static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {             \
         size_t cap;                                                               \
         if (!m) return 0;                                                         \
         cap = RedisDbMap_cap(m);                                                  \
         if (cap == 0) return sizeof(*m);                                          \
         return sizeof(*m) +                                                       \
-               cap * (sizeof(CCSlice) + sizeof(CCCompactSlice)) +                 \
+               cap * (sizeof(CCSlice) + sizeof(CCString)) +                       \
                sizeof(uint16_t) * (cap + 4u) +                                    \
                128u;                                                              \
     }

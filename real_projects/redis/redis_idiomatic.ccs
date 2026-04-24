@@ -493,27 +493,7 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             key_live + value_live + map_live);
 }
 
-@noblock static CCSlice cc_compact_slice_as_slice(CCCompactSlice s) {
-    return cc_slice_from_parts(s.ptr, (size_t)s.len, s.id, (size_t)s.alen);
-}
-
-static bool !>(CCError) cc_compact_slice_from_slice(CCCompactSlice* out,
-                                                    CCSlice s,
-                                                    const char* err_msg) {
-    if (!out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, err_msg));
-    if (s.len > UINT32_MAX || cc_slice_capacity(s) > UINT32_MAX) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
-    }
-    *out = (CCCompactSlice){
-        .ptr = s.ptr,
-        .len = (uint32_t)s.len,
-        .alen = (uint32_t)cc_slice_capacity(s),
-        .id = s.id,
-    };
-    return cc_ok(true);
-}
-
-static bool !>(CCError) db_clone_value_into_arena(CCCompactSlice* out,
+static bool !>(CCError) db_clone_value_into_arena(CCString* out,
                                                   CCArena* arena,
                                                   char[:] src,
                                                   const char* err_msg) {
@@ -530,7 +510,9 @@ static bool !>(CCError) db_clone_value_into_arena(CCCompactSlice* out,
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
     db_mem_stats_note_value_alloc(cap);
-    return cc_compact_slice_from_slice(out, CCString_as_slice(&cloned), err_msg);
+    if (!out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, err_msg));
+    *out = cloned;
+    return cc_ok(true);
 }
 
 static bool !>(CCError) db_clone_key_slice(CCSlice* out,
@@ -575,12 +557,12 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
     return true;
 }
 
-static void db_release_value(RedisDb* db, CCCompactSlice* value) {
+static void db_release_value(RedisDb* db, CCString* value) {
     if (!db || !value) return;
-    if (value->ptr) {
-        db_mem_stats_note_value_release(value->alen);
-        (void)cc_arena_release(&db->arena, value->ptr);
-        *value = (CCCompactSlice){0};
+    if (value->data) {
+        db_mem_stats_note_value_release(value->cap);
+        (void)cc_arena_release(&db->arena, value->data);
+        *value = (CCString){0};
     }
 }
 
@@ -588,31 +570,32 @@ static void db_release_value(RedisDb* db, CCCompactSlice* value) {
  * capacity — the happy case for same-length INCR or constant-width
  * SET benchmarks.  Growing values clone a replacement into db->arena
  * and release the superseded buffer. */
-static bool !>(CCError) db_value_replace(RedisDb* db, CCCompactSlice* cell, char[:] value) {
+static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] value) {
     if (!cell) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
-    CCSlice current = cc_compact_slice_as_slice(*cell);
-    if (current.ptr && value.len + 1 <= cc_slice_capacity(current)) {
-        char* dst = (char*)current.ptr;
-        if (value.len > 0) memcpy(dst, value.ptr, value.len);
-        cell->len = (uint32_t)value.len;
-        dst[value.len] = '\0';
+    if (cell->data && value.len + 1 <= cell->cap) {
+        if (!CCString_clear(cell)) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value clear failed"));
+        }
+        if (!CCString_push_slice(cell, value)) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value replace failed"));
+        }
         return cc_ok(true);
     }
-    CCCompactSlice replacement = {0};
+    CCString replacement = {0};
     bool !>(CCError) clone_res =
         db_clone_value_into_arena(&replacement, &db->arena, value, "entry value clone failed");
     if (clone_res.is_err()) return cc_err(clone_res.error());
-    if (cell->ptr) (void)cc_arena_release(&db->arena, cell->ptr);
+    if (cell->data) (void)cc_arena_release(&db->arena, cell->data);
     *cell = replacement;
     return cc_ok(true);
 }
 
-static CCCompactSlice* db_find_value(RedisDb* db, char[:] key) {
+static CCString* db_find_value(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return NULL;
     return RedisDbMap_get_ptr(db->entries, key);
 }
 
-static bool !>(CCError) db_insert_value(RedisDb* db, CCSlice key, CCCompactSlice value) {
+static bool !>(CCError) db_insert_value(RedisDb* db, CCSlice key, CCString value) {
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
@@ -625,7 +608,7 @@ static bool !>(CCError) db_insert_value(RedisDb* db, CCSlice key, CCCompactSlice
 static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
     if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    CCCompactSlice* cell = db_find_value(db, key);
+    CCString* cell = db_find_value(db, key);
     if (cell) {
         bool !>(CCError) replace_res = db_value_replace(db, cell, value);
         if (replace_res.is_err()) return cc_err(replace_res.error());
@@ -636,7 +619,7 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
     bool !>(CCError) key_res =
         db_clone_key_slice(&owned_key, &db->arena, key, "entry key clone failed");
     if (key_res.is_err()) return cc_err(key_res.error());
-    CCCompactSlice owned_value = {0};
+    CCString owned_value = {0};
     bool !>(CCError) init_res = db_clone_value_into_arena(&owned_value, &db->arena, value, "entry value clone failed");
     if (init_res.is_err()) return cc_err(init_res.error());
 
@@ -651,17 +634,17 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
 }
 
 static RedisReply db_get(RedisDb* db, char[:] key) {
-    CCCompactSlice* cell = db_find_value(db, key);
+    CCString* cell = db_find_value(db, key);
     if (!cell) return reply_null();
-    return reply_bulk(cc_compact_slice_as_slice(*cell));
+    return reply_bulk(CCString_as_slice(cell));
 }
 
 static RedisReply db_del(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return reply_integer(0);
 
-    CCCompactSlice* cell = db_find_value(db, key);
+    CCString* cell = db_find_value(db, key);
     if (!cell) return reply_integer(0);
-    CCCompactSlice doomed = *cell;
+    CCString doomed = *cell;
     if (!RedisDbMap_remove(db->entries, key)) return reply_integer(0);
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
@@ -671,11 +654,11 @@ static RedisReply db_del(RedisDb* db, char[:] key) {
 static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    CCCompactSlice* cell = db_find_value(db, key);
+    CCString* cell = db_find_value(db, key);
 
     int64_t value = 1;
     if (cell) {
-        int64_t !>(CCError) parsed = parse_i64(cc_compact_slice_as_slice(*cell));
+        int64_t !>(CCError) parsed = parse_i64(CCString_as_slice(cell));
         if (parsed.is_err()) {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
