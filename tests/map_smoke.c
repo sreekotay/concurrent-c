@@ -2,9 +2,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
-/* Hash/eq functions for khashl: take values, not pointers */
-static inline khint_t hash_i32(int k) {
-    return kh_hash_uint32((khint_t)k);
+/* Hash/eq functions take values, not pointers. */
+static inline size_t hash_i32(int k) {
+    return cc_map_hash_i32(k);
 }
 static inline int eq_i32(int a, int b) { return a == b; }
 

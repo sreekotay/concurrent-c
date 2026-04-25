@@ -36,11 +36,6 @@
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_type.cch>
 
-/* Redis DB experiments:
- *   REDIS_DB_USE_HEAP_OVERFLOW => 1 for fixed-root+overflow on map/key/value arenas;
- *                                 0 for three separate growable arenas (default)
- *   REDIS_DB_{MAP,KEY,VALUE}_ARENA_ROOT — initial slab sizes when growable */
-
 /* TCP_NODELAY/IPPROTO_TCP constants for setsockopt below.  Including
  * <netinet/tcp.h>/<sys/socket.h> here conflicts with the prelude's `accept`
  * declaration, so inline the POSIX-defined values. */
@@ -49,48 +44,38 @@
 
 #define DEFAULT_PORT 6380
 #define READ_CHUNK 4096
-#define READ_BUF_CAP (16 * 1024)
-#define WRITE_BUF_CAP (16 * 1024)
+#define READ_BUF_CAP (1 * 1024)
+#define WRITE_BUF_CAP (1 * 1024)
 /* DB arena layout:
  *   - Three arenas: map (RedisDbMap blob + handle), key (cloned key bytes),
  *     value (CCString backing for DB values).  Mem report prints
  *     cc_arena_committed_gross_bytes per pool (slab chain + overflow + extent
  *     wrapper structs); see cc_arena.cch.
- *   REDIS_DB_USE_HEAP_OVERFLOW:
- *   1 => each of the three arenas is a small fixed root + heap overflow
- *   0 => each is an ordinary growable heap arena (default for tuning). */
+ *   - Map/value arenas use small fixed roots + heap overflow.
+ *   - Key arena remains growable because key bytes are many small persistent
+ *     allocations, which fit the slab model better than per-key malloc. */
 
-#ifndef REDIS_DB_USE_HEAP_OVERFLOW
-#define REDIS_DB_USE_HEAP_OVERFLOW 0
-#endif
 #ifndef REDIS_DB_OVERFLOW_ARENA_ROOT
 #define REDIS_DB_OVERFLOW_ARENA_ROOT 1024
 #endif
-#ifndef REDIS_DB_GROWABLE_ARENA_ROOT
-#define REDIS_DB_GROWABLE_ARENA_ROOT 4096
-#endif
-#ifndef REDIS_DB_MAP_ARENA_ROOT
-#define REDIS_DB_MAP_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
-#endif
 #ifndef REDIS_DB_KEY_ARENA_ROOT
-#define REDIS_DB_KEY_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
-#endif
-#ifndef REDIS_DB_VALUE_ARENA_ROOT
-#define REDIS_DB_VALUE_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
+#define REDIS_DB_KEY_ARENA_ROOT 4096
 #endif
 /* Hash table bucket count at DB startup (Jackson map).  Small values
  * lower idle RSS; a keyspace much larger than this triggers growth
  * (rehash) and peak RSS under load can exceed a single large upfront
  * table.  Override: -DREDIS_DB_INITIAL_BUCKETS=<N>. */
 #ifndef REDIS_DB_INITIAL_BUCKETS
-#define REDIS_DB_INITIAL_BUCKETS 128
+#define REDIS_DB_INITIAL_BUCKETS 150000
 #endif
 /* Max requests packed into one submit/drain/flush cycle. */
+#ifndef PIPELINE_LIMIT
 #define PIPELINE_LIMIT 16
+#endif
 /* Shared request channel capacity.  Sized well above PIPELINE_LIMIT so
  * bursts from many connections don't serialise senders; once full,
  * backpressure propagates naturally. */
-#define REQUEST_CHAN_CAP 512
+#define REQUEST_CHAN_CAP 256
 /* Per-conn reply channel capacity.  Matching PIPELINE_LIMIT lets the
  * owner publish a whole batch without blocking. */
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
@@ -586,17 +571,10 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
                 cap,
                 map_alloc,
                 map_alloc / (1024.0 * 1024.0));
-#if REDIS_DB_USE_HEAP_OVERFLOW
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] model: map/key/value arenas fixed root+overflow — large allocs use "
-                "heap-overflow malloc; bump uses slab pointer ranges + live_allocs (no per-alloc malloc metadata)\n",
+                "redis_idiomatic: mem[%s] model: map/value arenas fixed root+overflow; "
+                "key arena growable — large map/value allocs use heap-overflow malloc\n",
                 tag ? tag : "?");
-#else
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] model: three growable arenas (map/key/value) — cc__arena_grow slabs; "
-                "bump uses slab pointer ranges + live_allocs (no per-alloc malloc metadata)\n",
-                tag ? tag : "?");
-#endif
         /* Same logical_live as db_dump_mem_stats: keys + heap values + map model bytes. */
         {
             size_t map_live = redis_map_live_payload_bytes(db->entries);
@@ -673,19 +651,12 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             map_live,
             key_live + value_live + map_live);
     if (db) {
-#if REDIS_DB_USE_HEAP_OVERFLOW
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_initial_root_B (heap_overflow=%u each pool)\n",
+                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(growable) value=%u(heap_overflow)\n",
                 tag ? tag : "db",
-                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT);
-#else
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u key=%u value=%u\n",
-                tag ? tag : "db",
-                (unsigned)REDIS_DB_MAP_ARENA_ROOT,
+                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT,
                 (unsigned)REDIS_DB_KEY_ARENA_ROOT,
-                (unsigned)REDIS_DB_VALUE_ARENA_ROOT);
-#endif
+                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT);
         redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
         redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);
         redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
@@ -789,10 +760,9 @@ static void db_free_arenas_only(RedisDb* db) {
 
 static bool db_init(RedisDb* db, size_t bucket_count) {
     if (!db || bucket_count == 0) return false;
-#if REDIS_DB_USE_HEAP_OVERFLOW
-    /* Each pool: small fixed root + heap overflow (see file header). */
     if (!db_init_overflow_arena(&db->map_arena)) return false;
-    if (!db_init_overflow_arena(&db->key_arena)) {
+    db->key_arena = cc_arena_heap(REDIS_DB_KEY_ARENA_ROOT);
+    if (!db->key_arena.base) {
         db_free_arenas_only(db);
         return false;
     }
@@ -800,15 +770,6 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
         db_free_arenas_only(db);
         return false;
     }
-#else
-    db->map_arena = cc_arena_heap(REDIS_DB_MAP_ARENA_ROOT);
-    db->key_arena = cc_arena_heap(REDIS_DB_KEY_ARENA_ROOT);
-    db->value_arena = cc_arena_heap(REDIS_DB_VALUE_ARENA_ROOT);
-    if (!db->map_arena.base || !db->key_arena.base || !db->value_arena.base) {
-        db_free_arenas_only(db);
-        return false;
-    }
-#endif
     db->entries = RedisDbMap_init_count(&db->map_arena, bucket_count);
     if (!db->entries) {
         db_free_arenas_only(db);
@@ -1372,8 +1333,10 @@ static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, Red
         }
 
         /* Submit: up to PIPELINE_LIMIT parsed requests to the owner. */
+        size_t batch_cap = PIPELINE_LIMIT;
         size_t outstanding = 0;
-        for (size_t s = 0; s < PIPELINE_LIMIT; s++) {
+        size_t submitted = 0;
+        for (size_t s = 0; s < batch_cap; s++) {
             RedisRequest* req = NULL;
             bool has = rr_req_iter_next(&req_iter, &req) !>;
             if (!has) break;
@@ -1385,6 +1348,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, Red
                 return 0;
             };
             outstanding++;
+            submitted++;
         }
 
         /* Drain: exactly `outstanding` replies.  This also drives
@@ -1399,6 +1363,13 @@ static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, Red
 
         /* Flush: one socket write for the whole batch. */
         if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
+
+        /* If the socket read already buffered more complete/partial commands
+         * and this batch stopped only because of PIPELINE_LIMIT, keep parsing
+         * before parking on another read.  Otherwise -P larger than the server
+         * batch cap can leave commands stranded in read_buf while the fiber
+         * waits for new socket readiness that may never arrive. */
+        if (submitted == batch_cap && reader.start < reader.end) continue;
 
         /* rr_fill: park until more bytes arrive or EOF. */
         bool more = rr_fill(&reader, &client) !>(e) { write_reply_now(&client, conn, io_err_reply(e)); return 0; };

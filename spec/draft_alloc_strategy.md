@@ -166,14 +166,7 @@ This preserves the current public API while making transient growth buffers rele
 
 ### Map
 
-The khashl-backed map implementation already has allocator hooks:
-
-- `Kmalloc`
-- `Kcalloc`
-- `Krealloc`
-- `Kfree`
-
-Under this draft, those hooks should flow through arena release semantics where possible.
+The arena-backed map implementation uses the `cc_containers` map core and routes backing storage through the arena container allocator helpers.
 
 Current direction:
 
@@ -183,8 +176,6 @@ Current direction:
 - map destroy also routes allocator teardown through the arena path.
 
 This is important because `Map` is one of the main motivations for avoiding a full “replace all containers now” rewrite.
-
-**Heap sidecar map (`<ccc/std/map_heap.cch>`):** khashl’s `km` context is overloaded with a reserved sentinel (`CC__MAP_HEAP_KM` in `map.cch`) so the same vendor header and hook macros can route map bucket storage to `malloc`/`realloc`/`free` while arena-backed maps still pass a real `CCArena*`. Declarations use `CC_MAP_DECL_HEAP` / `CC_MAP_DECL_HEAP_SLICE`; see `tests/map_heap_smoke.c`.
 
 **Redis Jackson Allan CC experiment (user space):** `scripts/cc_vendor_jackson_namespace.py` generates `third_party/jackson-allan-cc/cc_for_ccc.h` from upstream `cc.h` by renaming every `cc_` API token to `ccj_`, eliminating clashes with Concurrent-C’s own `cc_*` / `cc_vec_*` runtime. The Redis DB map declaration now lives directly in `real_projects/redis/redis_idiomatic.ccs`.
 

@@ -345,6 +345,7 @@ extern void cc__io_wait_dump_kq_diag(void);
 extern void cc__fiber_dump_unpark_reason_stats(void);
 extern void cc_sched_wait_many_dump_diag(void);
 extern void cc__socket_wait_dump_diag(void);
+extern _Atomic size_t g_external_wait_threads;
 
 /* Diagnostic counters */
 static _Atomic uint64_t g_v2_fibers_alive = 0;
@@ -697,6 +698,9 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
                                       uint64_t* parked_wait,
                                       uint64_t* parked_other,
                                       uint64_t* parked_unknown,
+                                      uint64_t* parked_internal,
+                                      uint64_t* parked_external_wait,
+                                      uint64_t* parked_deadlock_suppressed,
                                       park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS],
                                       size_t* reason_bucket_count) {
     for (int i = 0; i < FIBER_V2_STATE_COUNT; ++i) {
@@ -706,6 +710,9 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
     *parked_wait = 0;
     *parked_other = 0;
     *parked_unknown = 0;
+    *parked_internal = 0;
+    *parked_external_wait = 0;
+    *parked_deadlock_suppressed = 0;
     if (reason_buckets) {
         for (size_t i = 0; i < V2_DIAG_REASON_BUCKETS; ++i) {
             reason_buckets[i].reason = NULL;
@@ -721,6 +728,13 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
             state_counts[state]++;
             if (state == FIBER_V2_PARKED) {
                 const char* r = f->park_reason;
+                if (f->external_wait_depth > 0) {
+                    (*parked_external_wait)++;
+                } else if (f->deadlock_suppress_depth > 0) {
+                    (*parked_deadlock_suppressed)++;
+                } else {
+                    (*parked_internal)++;
+                }
                 if (!r) {
                     (*parked_unknown)++;
                 } else if (strcmp(r, "cc_sched_fiber_wait_many") == 0) {
@@ -1909,6 +1923,9 @@ static void* sched_v2_sysmon_main(void* arg) {
                 uint64_t parked_wait = 0;
                 uint64_t parked_other = 0;
                 uint64_t parked_unknown = 0;
+                uint64_t parked_internal = 0;
+                uint64_t parked_external_wait = 0;
+                uint64_t parked_deadlock_suppressed = 0;
                 park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS];
                 size_t reason_bucket_count = 0;
                 sched_v2_diag_scan_fibers(state_counts,
@@ -1916,8 +1933,13 @@ static void* sched_v2_sysmon_main(void* arg) {
                                           &parked_wait,
                                           &parked_other,
                                           &parked_unknown,
+                                          &parked_internal,
+                                          &parked_external_wait,
+                                          &parked_deadlock_suppressed,
                                           reason_buckets,
                                           &reason_bucket_count);
+                size_t external_threads = atomic_load_explicit(&g_external_wait_threads,
+                                                               memory_order_relaxed);
                 fprintf(stderr, "[sched_v2 sysmon] STALL #%d: threads=%d idle=%d global_q=%zu fibers_alive=%llu\n",
                         stall_ticks / STALL_DIAG_TICKS, n, idle_n, gq, (unsigned long long)alive);
                 fprintf(stderr, "  signals: ok=%llu pending=%llu dropped=%llu  parks: total=%llu\n",
@@ -1963,6 +1985,16 @@ static void* sched_v2_sysmon_main(void* arg) {
                         (unsigned long long)parked_wait,
                         (unsigned long long)parked_other,
                         (unsigned long long)parked_unknown);
+                fprintf(stderr,
+                        "  deadlock classification: internal=%llu external_wait=%llu "
+                        "deadlock_suppressed=%llu external_wait_threads=%zu%s\n",
+                        (unsigned long long)parked_internal,
+                        (unsigned long long)parked_external_wait,
+                        (unsigned long long)parked_deadlock_suppressed,
+                        external_threads,
+                        (parked_external_wait || external_threads)
+                            ? " (external waits can suppress deadlock verdicts)"
+                            : "");
                 if (reason_bucket_count > 0) {
                     fprintf(stderr, "  park reason histogram:");
                     for (size_t i = 0; i < reason_bucket_count; ++i) {
@@ -2291,7 +2323,6 @@ void sched_v2_debug_dump_state(const char* prefix) {
  * IDLE + empty ready queue" is an equivalent latch.
  * ============================================================================ */
 
-extern _Atomic size_t g_external_wait_threads;
 int cc__chan_debug_is_open(void* ch_obj);
 void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
 

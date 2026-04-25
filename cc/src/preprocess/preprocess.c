@@ -4461,7 +4461,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                 } else {
-                    /* Map uses pointers (khashl returns ptr from init) */
+                    /* Map uses pointers (the generated init returns a stable handle). */
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
@@ -6613,16 +6613,16 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             for (size_t i = 0; i < n_map; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                 if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                    const char* hash_fn = "cc_kh_hash_i32";
-                    const char* eq_fn = "cc_kh_eq_i32";
+                    const char* hash_fn = "cc_map_hash_i32";
+                    const char* eq_fn = "cc_map_eq_i32";
                     if (strcmp(inst->type1, "int") == 0) {
-                        hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
                     } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
                         hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
                     } else if (strstr(inst->type1, "64") != NULL) {
-                        hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                        hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
                     }
                     /* Optionals retired — always use the 5-arg macro. */
                     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
@@ -6768,16 +6768,16 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
             for (size_t i = 0; i < n_map; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                 if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                    const char* hash_fn = "cc_kh_hash_i32";
-                    const char* eq_fn = "cc_kh_eq_i32";
+                    const char* hash_fn = "cc_map_hash_i32";
+                    const char* eq_fn = "cc_map_eq_i32";
                     if (strcmp(inst->type1, "int") == 0) {
-                        hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
                     } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
                         hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
                     } else if (strstr(inst->type1, "64") != NULL) {
-                        hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                        hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
                     }
                     /* Optionals retired — always use the 5-arg macro. */
                     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",

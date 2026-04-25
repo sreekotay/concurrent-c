@@ -2,8 +2,7 @@ CCC = ../../out/cc/bin/ccc
 OUT_DIR = out
 REPO_ROOT = ../..
 CC_LOCAL ?= cc
-REDIS_DB_USE_HEAP_OVERFLOW ?= 0
-REDIS_IDIOMATIC_DEFS = -DREDIS_DB_USE_HEAP_OVERFLOW=$(REDIS_DB_USE_HEAP_OVERFLOW)
+REDIS_IDIOMATIC_DEFS ?=
 REDIS_SRC_DIR = redis_c
 REDIS_VERSION := $(shell tr -d '\n' < REDIS_VERSION)
 
@@ -62,6 +61,6 @@ print-config:
 	@echo "REDIS_VERSION=$(REDIS_VERSION)"
 	@echo "REDIS_URL=$(REDIS_URL)"
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
-	@echo "REDIS_DB_USE_HEAP_OVERFLOW=$(REDIS_DB_USE_HEAP_OVERFLOW)"
+	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
 .PHONY: setup upstream redis_idiomatic redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config

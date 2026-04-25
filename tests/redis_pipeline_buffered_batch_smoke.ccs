@@ -1,0 +1,54 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+typedef struct FakeRespReader {
+    size_t start;
+    size_t end;
+} FakeRespReader;
+
+typedef enum BatchAction {
+    BATCH_ACTION_FILL,
+    BATCH_ACTION_PARSE_BUFFERED,
+} BatchAction;
+
+static BatchAction next_batch_action(size_t submitted,
+                                     size_t batch_cap,
+                                     const FakeRespReader* reader) {
+    if (submitted == batch_cap && reader->start < reader->end) {
+        return BATCH_ACTION_PARSE_BUFFERED;
+    }
+    return BATCH_ACTION_FILL;
+}
+
+int main(void) {
+    const size_t batch_cap = 8;
+
+    FakeRespReader buffered_after_capped_batch = {
+        .start = 96,
+        .end = 192,
+    };
+    assert(next_batch_action(batch_cap,
+                             batch_cap,
+                             &buffered_after_capped_batch) == BATCH_ACTION_PARSE_BUFFERED);
+
+    FakeRespReader empty_after_capped_batch = {
+        .start = 192,
+        .end = 192,
+    };
+    assert(next_batch_action(batch_cap,
+                             batch_cap,
+                             &empty_after_capped_batch) == BATCH_ACTION_FILL);
+
+    FakeRespReader buffered_after_short_batch = {
+        .start = 96,
+        .end = 192,
+    };
+    assert(next_batch_action(batch_cap - 1,
+                             batch_cap,
+                             &buffered_after_short_batch) == BATCH_ACTION_FILL);
+
+    printf("redis_pipeline_buffered_batch_smoke: PASS\n");
+    return 0;
+}
