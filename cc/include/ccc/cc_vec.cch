@@ -6,7 +6,15 @@
 #include <string.h>
 
 #include <ccc/cc_arena.cch>
+#ifndef CC_NO_SHORT_NAMES
+#define CC__VEC_RESTORE_SHORT_NAMES 1
+#define CC_NO_SHORT_NAMES
+#endif
 #include <ccc/cc_containers.cch>
+#ifdef CC__VEC_RESTORE_SHORT_NAMES
+#undef CC_NO_SHORT_NAMES
+#undef CC__VEC_RESTORE_SHORT_NAMES
+#endif
 #include <ccc/cc_slice.cch>
 
 
