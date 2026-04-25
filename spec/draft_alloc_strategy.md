@@ -186,7 +186,7 @@ This is important because `Map` is one of the main motivations for avoiding a fu
 
 **Heap sidecar map (`<ccc/std/map_heap.cch>`):** khashl’s `km` context is overloaded with a reserved sentinel (`CC__MAP_HEAP_KM` in `map.cch`) so the same vendor header and hook macros can route map bucket storage to `malloc`/`realloc`/`free` while arena-backed maps still pass a real `CCArena*`. Declarations use `CC_MAP_DECL_HEAP` / `CC_MAP_DECL_HEAP_SLICE`; see `tests/map_heap_smoke.c`.
 
-**Redis Jackson Allan CC experiment (user space):** `scripts/cc_vendor_jackson_namespace.py` generates `third_party/jackson-allan-cc/cc_for_ccc.h` from upstream `cc.h` by renaming every `cc_` API token to `ccj_`, eliminating clashes with Concurrent-C’s own `cc_*` / `cc_vec_*` runtime. `real_projects/redis/map_heap_jackson.cch` is the single user-facing map header beside `redis_idiomatic.ccs`; `redis_cc/redis_jackson_map.c` includes that same header and is still built as its own `.o` linked into `redis_idiomatic`.
+**Redis Jackson Allan CC experiment (user space):** `scripts/cc_vendor_jackson_namespace.py` generates `third_party/jackson-allan-cc/cc_for_ccc.h` from upstream `cc.h` by renaming every `cc_` API token to `ccj_`, eliminating clashes with Concurrent-C’s own `cc_*` / `cc_vec_*` runtime. The Redis DB map declaration now lives directly in `real_projects/redis/redis_idiomatic.ccs`.
 
 ### Clear vs destroy
 

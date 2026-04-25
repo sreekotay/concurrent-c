@@ -4097,15 +4097,6 @@ static void cc__trim_type_string(char* type) {
     type[len - start] = '\0';
 }
 
-static int cc__is_stdlib_container_alias(const char* type_name, char* out, size_t out_sz) {
-    if (!type_name || !out || out_sz == 0) return 0;
-    if (strcmp(type_name, "CCString") == 0) {
-        snprintf(out, out_sz, "CCVec_char");
-        return 1;
-    }
-    return 0;
-}
-
 static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
     char inner[256];
     char canonical_key[256];
@@ -4119,11 +4110,6 @@ static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
     if (!type || type_sz == 0) return;
     cc__trim_type_string(type);
     cc__normalize_slice_in_type(type, type_sz);
-
-    if (cc__is_stdlib_container_alias(type, inner, sizeof(inner))) {
-        snprintf(type, type_sz, "%s", inner);
-        return;
-    }
 
     if ((strncmp(type, "Vec::[", 6) == 0 && type[strlen(type) - 1] == ']') ||
         (strncmp(type, "Vec<", 4) == 0 && type[strlen(type) - 1] == '>') ||
@@ -6631,6 +6617,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                     const char* eq_fn = "cc_kh_eq_i32";
                     if (strcmp(inst->type1, "int") == 0) {
                         hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
+                        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
                     } else if (strstr(inst->type1, "64") != NULL) {
                         hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
@@ -6784,6 +6772,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     const char* eq_fn = "cc_kh_eq_i32";
                     if (strcmp(inst->type1, "int") == 0) {
                         hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
+                        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
                     } else if (strstr(inst->type1, "64") != NULL) {
                         hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
                     } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {

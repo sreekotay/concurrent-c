@@ -17,7 +17,6 @@
 typedef struct CCArena CCArena;
 typedef struct CCArenaPool CCArenaPool;
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
-typedef struct CCArenaAllocRecord CCArenaAllocRecord;
 typedef struct CCArenaHeapAlloc CCArenaHeapAlloc;
 
 #include <ccc/cc_slice.cch>
@@ -39,17 +38,11 @@ typedef struct CCArenaHeapAlloc CCArenaHeapAlloc;
 
 #define CC_ARENA_POOL_FLAG_OWNED  0x1  // Pool owns its arena (should free it)
 
-struct CCArenaAllocRecord {
-    struct CCArenaAllocRecord* next;
-    void* payload;
-    CCArena* block;
-    int released;
-};
-
 struct CCArenaHeapAlloc {
     struct CCArenaHeapAlloc* next;
     void* payload;
     void* raw;
+    size_t raw_bytes; /* malloc(raw) size (includes align padding); 0 after raw freed */
     int released;
 };
 
@@ -63,7 +56,6 @@ struct CCArena {
     uint16_t block_idx;       // current block index (0 = initial)
     uint16_t block_max;       // budget: 0 = unbounded, 1 = fixed, N = max blocks
     struct CCArena* prev;     // points to the previous full block (NULL if none)
-    CCArenaAllocRecord* alloc_head; // tracked block allocations for cc_arena_release
     CCArenaHeapAlloc* overflow_head; // heap-fallback allocations tracked for reset/destroy
 };
 
@@ -134,33 +126,6 @@ static inline void cc__arena_report_release_error(const char* msg, const void* p
     fprintf(stderr, "cc_arena_release: %s (%p)\n", msg, ptr);
 }
 
-static inline CCArenaAllocRecord* cc__arena_alloc_record(void) {
-    CCArenaAllocRecord* rec = (CCArenaAllocRecord*)malloc(sizeof(CCArenaAllocRecord));
-    if (rec) memset(rec, 0, sizeof(*rec));
-    return rec;
-}
-
-static inline void cc__arena_cleanup_alloc_records(CCArena* arena) {
-    if (!arena) return;
-    CCArenaAllocRecord* cur = arena->alloc_head;
-    while (cur) {
-        CCArenaAllocRecord* next = cur->next;
-        free(cur);
-        cur = next;
-    }
-    arena->alloc_head = NULL;
-}
-
-static inline void cc__arena_link_record(CCArena* arena, CCArenaAllocRecord* rec, void* payload, CCArena* block) {
-    if (!arena || !rec || !payload || !block) return;
-    rec->payload = payload;
-    rec->block = block;
-    rec->released = 0;
-    rec->next = arena->alloc_head;
-    arena->alloc_head = rec;
-    CC_ATOMIC_FETCH_ADD(&block->live_allocs, 1);
-}
-
 static inline void cc__arena_cleanup_overflow_allocs(CCArena* arena) {
     if (!arena) return;
     CCArenaHeapAlloc* cur = arena->overflow_head;
@@ -188,6 +153,7 @@ static inline void* cc__arena_alloc_heap_overflow(CCArena* arena, size_t size, s
     uintptr_t payload_addr = cc__align_up((size_t)(uintptr_t)raw, a);
     node->payload = (void*)payload_addr;
     node->raw = raw;
+    node->raw_bytes = total;
     node->released = 0;
     node->next = arena->overflow_head;
     arena->overflow_head = node;
@@ -213,7 +179,6 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
     arena->block_idx = 0;
     arena->block_max = 1;  // fixed by default
     arena->prev = NULL;
-    arena->alloc_head = NULL;
     arena->overflow_head = NULL;
     return 0;
 }
@@ -225,17 +190,14 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
 // For the same fast path then heap spill, use cc_arena_alloc_local_grow.
 static inline void *cc_arena_alloc_local(CCArena *arena, size_t size, size_t align) {
     if (!arena || !arena->base || size == 0) return NULL;
-    CCArenaAllocRecord* rec = cc__arena_alloc_record();
-    if (!rec) return NULL;
     size_t off = *(size_t *)&arena->offset;  // non-atomic read (single-owner fast path)
     size_t aligned = cc__align_up(off, align);
     if (aligned + size > arena->capacity) {
-        free(rec);
         return NULL;
     }
     *(size_t *)&arena->offset = aligned + size;  // non-atomic write
     void* payload = arena->base + aligned;
-    cc__arena_link_record(arena, rec, payload, arena);
+    CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
     return payload;
 }
 
@@ -274,7 +236,6 @@ static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
     size_t min_cap = aligned + size;
 
     size_t old_cap = arena->capacity;
-    uint8_t *old_base = arena->base;
     size_t bumped = old_cap + old_cap / 2;
     if (bumped < old_cap) bumped = SIZE_MAX;
     size_t new_cap = bumped;
@@ -302,22 +263,11 @@ static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
     extent->block_idx = arena->block_idx;
     extent->block_max = arena->block_max;
     extent->prev = arena->prev;
-    extent->alloc_head = NULL;
     extent->overflow_head = NULL;
 
-    /* Existing allocation records are anchored on the root arena object.
-     * When growth pushes the old root buffer into an extent, any record that
-     * still names `arena` but whose payload lives in the old buffer must be
-     * rebound to the new extent. Otherwise later cc_arena_release() calls
-     * decrement/rewind the new root instead of the historical block that
-     * actually owns the allocation. */
-    for (CCArenaAllocRecord* rec = arena->alloc_head; rec; rec = rec->next) {
-        if (rec->released || rec->block != arena || !rec->payload) continue;
-        const uint8_t* payload = (const uint8_t*)rec->payload;
-        if (old_base && payload >= old_base && payload < old_base + old_cap) {
-            rec->block = extent;
-        }
-    }
+    /* cc_arena_release finds the owning slab via cc__arena_find_block (pointer
+     * range over root + prev chain), so payloads in this extent decrement
+     * extent->live_allocs — no per-allocation side metadata. */
 
     // Update root with new buffer
     arena->prev = extent;
@@ -339,29 +289,22 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
         return NULL;
     }
 
-    CCArenaAllocRecord* rec = cc__arena_alloc_record();
-    if (!rec) return NULL;
-
-    // Fast path: try current block
     void *ptr = cc__arena_alloc_fast(arena, size, align);
     if (ptr) {
-        cc__arena_link_record(arena, rec, ptr, arena);
+        CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
         return ptr;
     }
 
-    // Slow path: try to grow
     if (arena->block_max != 1) {
-        // Slow path: grow once to fit this request (retry loop for races / OOM retry)
         while (cc__arena_grow(arena, size, align) == 0) {
             ptr = cc__arena_alloc_fast(arena, size, align);
             if (ptr) {
-                cc__arena_link_record(arena, rec, ptr, arena);
+                CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
                 return ptr;
             }
         }
     }
 
-    free(rec);
     return cc__arena_alloc_heap_overflow(arena, size, align);  // budget exhausted or OOM
 }
 
@@ -645,32 +588,18 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
     if (!arena || !ptr) return false;
 
     CCArena* block = cc__arena_find_block(arena, ptr);
-    if (1 && block) {
-        /* TEMP no-op guard: the tracking scheme below is unsound across block
-        * growth (alloc records captured `arena` as their `block` before
-        * cc__arena_grow() pushed the old root into an extent, so a later
-        * release would rewind the *new* root's offset and trample live data —
-        * e.g. a map's freshly-grown bucket array).  Under load this reliably
-        * blew up redis_idiomatic with SIGBUS.  Bail early until we rebuild
-        * release on top of per-block records with correct reset integration;
-        * bump arenas rely on cc_arena_reset / cc_arena_free for reclamation
-        * anyway, so losing individual releases only leaks within a batch. */
-        for (CCArenaAllocRecord* rec = arena->alloc_head; rec; rec = rec->next) {
-            if (rec->payload != ptr) continue;
-            if (rec->released) {
-                cc__arena_report_release_error("double release detected", ptr);
-                return false;
-            }
-            rec->released = 1;
-            size_t prev_live = CC_ATOMIC_FETCH_SUB(&rec->block->live_allocs, 1);
-            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
-            if (rec->block == arena && prev_live == 1) {
-                CC_ATOMIC_STORE(&arena->offset, 0);
-            }
-            return true;
+    if (block) {
+        size_t prev_live = CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
+        if (prev_live == 0) {
+            CC_ATOMIC_FETCH_ADD(&block->live_allocs, 1);
+            cc__arena_report_release_error("double release or live_allocs mismatch", ptr);
+            return false;
         }
-        cc__arena_report_release_error("pointer does not match arena allocation", ptr);
-        return false;
+        arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
+        if (block == arena && prev_live == 1) {
+            CC_ATOMIC_STORE(&arena->offset, 0);
+        }
+        return true;
     }
 
     for (CCArenaHeapAlloc* node = arena->overflow_head; node; node = node->next) {
@@ -683,14 +612,15 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
         if (node->raw) {
             free(node->raw);
             node->raw = NULL;
+            node->raw_bytes = 0;
         }
         arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
         return true;
     }
 
     if (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
-        printf("freeing heap overflow ptr %p\n", ptr);
-        arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+        free(ptr);
+        arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
         return true;
     }
 
@@ -705,7 +635,6 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
 static inline void cc_arena_free(CCArena* a) {
     if (!a) return;
 
-    cc__arena_cleanup_alloc_records(a);
     cc__arena_cleanup_overflow_allocs(a);
 
     CCArena *cur = a->prev;
@@ -729,7 +658,6 @@ static inline void cc_arena_free(CCArena* a) {
     a->_flags = 0;
     a->block_idx = 0;
     a->block_max = 0;
-    a->alloc_head = NULL;
     a->overflow_head = NULL;
 
     if (base && (flags & CC_ARENA_FLAG_HEAP_OWNED)) {
@@ -763,7 +691,6 @@ static inline CCArena cc_arena_detach(CCArena* a) {
         a->block_idx = 0;
         a->block_max = 0;
         a->prev = NULL;
-        a->alloc_head = NULL;
         a->overflow_head = NULL;
     }
     return taken;
@@ -776,7 +703,6 @@ static inline CCArena cc_arena_detach(CCArena* a) {
 static inline void cc_arena_reset(CCArena *arena) {
     if (!arena) return;
 
-    cc__arena_cleanup_alloc_records(arena);
     cc__arena_cleanup_overflow_allocs(arena);
 
     // If we have grown extents, unwind the chain back to the original block.
@@ -923,6 +849,49 @@ static inline size_t cc_arena_remaining(const CCArena *arena) {
     size_t off = CC_ATOMIC_LOAD(&arena->offset);
     if (arena->capacity < off) return 0;
     return arena->capacity - off;
+}
+
+/* --- Committed backing (for memory accounting / diagnostics) ----------------
+ * Slab chain: every heap-owned bump block (current root + each extent in ->prev).
+ * Overflow: sum of raw malloc sizes for live heap-overflow nodes on this root.
+ * Extent meta: malloc(CCArena) wrappers for retired slabs (not the root struct).
+ * Gross is the arena-owned malloc total from these sources (excludes
+ * caller-owned initial buffers without HEAP_OWNED). Bump accounting uses
+ * slab membership (pointer range) + per-slab live_allocs, not per-alloc nodes. */
+
+static inline size_t cc_arena_slab_chain_bytes(const CCArena* arena) {
+    size_t sum = 0;
+    const CCArena* cur = arena;
+    while (cur && cur->base) {
+        sum += cur->capacity;
+        cur = cur->prev;
+    }
+    return sum;
+}
+
+static inline size_t cc_arena_overflow_raw_bytes(const CCArena* arena) {
+    size_t sum = 0;
+    CCArena* a;
+    if (!arena) return 0;
+    a = (CCArena*)(uintptr_t)(const void*)arena;
+    for (CCArenaHeapAlloc* n = a->overflow_head; n; n = n->next) {
+        if (!n->released) sum += n->raw_bytes;
+    }
+    return sum;
+}
+
+static inline size_t cc_arena_extent_struct_bytes(const CCArena* arena) {
+    size_t n = 0;
+    CCArena* a;
+    if (!arena) return 0;
+    a = (CCArena*)(uintptr_t)(const void*)arena;
+    for (CCArena* cur = a->prev; cur; cur = cur->prev) n++;
+    return n * sizeof(CCArena);
+}
+
+static inline size_t cc_arena_committed_gross_bytes(const CCArena* arena) {
+    return cc_arena_slab_chain_bytes(arena) + cc_arena_overflow_raw_bytes(arena) +
+           cc_arena_extent_struct_bytes(arena);
 }
 
 // Allocate a tracked slice of raw bytes from the arena. Returns an empty slice on failure.

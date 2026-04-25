@@ -29,7 +29,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ccc/cc_arena.cch>
+#ifndef CC_NO_SHORT_NAMES
+#define CC__MAP_RESTORE_SHORT_NAMES 1
+#define CC_NO_SHORT_NAMES
+#endif
 #include <ccc/cc_containers.cch>
+#ifdef CC__MAP_RESTORE_SHORT_NAMES
+#undef CC_NO_SHORT_NAMES
+#undef CC__MAP_RESTORE_SHORT_NAMES
+#endif
 
 /*
  * TCC PARSER MODE: Map types use a generic placeholder during parsing.
@@ -288,6 +296,18 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
+/* Same FNV-1a / byte-eq as cc_kh_hash_slice / cc_kh_eq_slice for untracked {ptr,len} keys. */
+static inline khint_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
+    khint_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char *)sh.ptr;
+    for (size_t i = 0; i < sh.len; ++i)
+        h ^= p[i], h *= 16777619;
+    return h;
+}
+static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
+    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+}
+
 /*
  * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
  *
@@ -298,6 +318,64 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
  * HASH_FN: khint_t fn(K key)
  * EQ_FN:   int fn(K a, K b) (returns non-zero if equal)
  */
+#ifdef CC_PARSER_MODE
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \
+    typedef __CCMapGeneric Name;                                                     \
+                                                                                     \
+    static inline uint64_t Name##__layout(void) {                                    \
+        return 0;                                                                    \
+    }                                                                                \
+                                                                                     \
+    static inline Name *Name##_init(CCArena *arena) {                                \
+        return (Name *)__cc_map_generic_init((void *)(arena));                       \
+    }                                                                                \
+                                                                                     \
+    static inline Name *Name##_init_count(CCArena *arena, size_t count) {            \
+        (void)count;                                                                 \
+        return Name##_init(arena);                                                   \
+    }                                                                                \
+                                                                                     \
+    static inline void Name##_destroy(Name *h) {                                     \
+        __cc_map_generic_destroy((__CCMapGeneric *)(h));                             \
+    }                                                                                \
+                                                                                     \
+    static inline int Name##_insert(Name *h, K key, V val) {                         \
+        return __cc_map_generic_insert((__CCMapGeneric *)(h), key, val);             \
+    }                                                                                \
+                                                                                     \
+    static inline int Name##_put(Name *h, K key, V val, int *ret) {                  \
+        return __cc_map_generic_put((__CCMapGeneric *)(h), key, val, ret);           \
+    }                                                                                \
+                                                                                     \
+    static inline V *Name##_get(Name *h, K key) {                                    \
+        (void)key;                                                                   \
+        return (V *)__cc_map_generic_get((__CCMapGeneric *)(h));                     \
+    }                                                                                \
+                                                                                     \
+    static inline V *Name##_get_ptr(Name *h, K key) {                                \
+        return Name##_get(h, key);                                                   \
+    }                                                                                \
+                                                                                     \
+    static inline bool Name##_remove(Name *h, K key) {                               \
+        return __cc_map_generic_remove((__CCMapGeneric *)(h), key) != 0;             \
+    }                                                                                \
+                                                                                     \
+    static inline bool Name##_del(Name *h, K key) {                                  \
+        return Name##_remove(h, key);                                                \
+    }                                                                                \
+                                                                                     \
+    static inline size_t Name##_len(const Name *h) {                                 \
+        return __cc_map_generic_len((const __CCMapGeneric *)(h));                    \
+    }                                                                                \
+                                                                                     \
+    static inline size_t Name##_cap(const Name *h) {                                 \
+        return Name##_len(h);                                                        \
+    }                                                                                \
+                                                                                     \
+    static inline void Name##_clear(Name *h) {                                       \
+        __cc_map_generic_clear((__CCMapGeneric *)(h));                               \
+    }
+#else
 #define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \
     typedef struct Name {                                                            \
         CCArena *arena;                                                              \
@@ -493,6 +571,7 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
             h->arena                                                                  \
         );                                                                           \
     }
+#endif
 
 /* Backwards-compat: CC_MAP_DECL_ARENA_FULL used to take an extra OptV
    parameter for the optional return type. Optionals are retired; the OptV

@@ -9,29 +9,37 @@
  * PIPELINE_LIMIT.
  *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
+ * Memory: CC_REDIS_MEM_REPORT=1 logs Mach footprint, logical_db_live vs
+ * mach_phys_footprint, db_dump_mem_stats (per-arena map, key, value slabs).
+ * CC.MEMLOG command prints arena + accounting without restart; see bench_then_memlog.sh.
+ * mem_account.sh runs vmmap summary idle vs load vs upstream.
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
+#include <ccc/std/map.cch>
 #include <ccc/std/string.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/task_info.h>
+#endif
 #include "redis_cc/redis_cc.cch"
 #include <ccc/std/task.cch>
+#include <ccc/cc_sched.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_type.cch>
 
-/* Redis DB experiments now expose only two compile-time switches:
- *   REDIS_DB_USE_SEGMENTED     => 1 for segmented prototype, 0 for Jackson base map
- *   REDIS_DB_USE_HEAP_OVERFLOW => 1 for arena heap-overflow mode, 0 for growable arena */
-#ifndef REDIS_DB_USE_SEGMENTED
-#define REDIS_DB_USE_SEGMENTED 0
-#endif
-#include "map_heap_jackson.cch"
-REDIS_DB_DECLARE_MAP();
+/* Redis DB experiments:
+ *   REDIS_DB_USE_HEAP_OVERFLOW => 1 for fixed-root+overflow on map/key/value arenas;
+ *                                 0 for three separate growable arenas (default)
+ *   REDIS_DB_{MAP,KEY,VALUE}_ARENA_ROOT — initial slab sizes when growable */
 
 /* TCP_NODELAY/IPPROTO_TCP constants for setsockopt below.  Including
  * <netinet/tcp.h>/<sys/socket.h> here conflicts with the prelude's `accept`
@@ -43,18 +51,39 @@ REDIS_DB_DECLARE_MAP();
 #define READ_CHUNK 4096
 #define READ_BUF_CAP (16 * 1024)
 #define WRITE_BUF_CAP (16 * 1024)
-/* Single switch for the DB arena experiment:
- *   1 => small fixed root + heap overflow via CCArena
- *   0 => ordinary growable arena from a small root slab */
+/* DB arena layout:
+ *   - Three arenas: map (RedisDbMap blob + handle), key (cloned key bytes),
+ *     value (CCString backing for DB values).  Mem report prints
+ *     cc_arena_committed_gross_bytes per pool (slab chain + overflow + extent
+ *     wrapper structs); see cc_arena.cch.
+ *   REDIS_DB_USE_HEAP_OVERFLOW:
+ *   1 => each of the three arenas is a small fixed root + heap overflow
+ *   0 => each is an ordinary growable heap arena (default for tuning). */
 
 #ifndef REDIS_DB_USE_HEAP_OVERFLOW
-#define REDIS_DB_USE_HEAP_OVERFLOW 1
+#define REDIS_DB_USE_HEAP_OVERFLOW 0
 #endif
 #ifndef REDIS_DB_OVERFLOW_ARENA_ROOT
 #define REDIS_DB_OVERFLOW_ARENA_ROOT 1024
 #endif
 #ifndef REDIS_DB_GROWABLE_ARENA_ROOT
 #define REDIS_DB_GROWABLE_ARENA_ROOT 4096
+#endif
+#ifndef REDIS_DB_MAP_ARENA_ROOT
+#define REDIS_DB_MAP_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
+#endif
+#ifndef REDIS_DB_KEY_ARENA_ROOT
+#define REDIS_DB_KEY_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
+#endif
+#ifndef REDIS_DB_VALUE_ARENA_ROOT
+#define REDIS_DB_VALUE_ARENA_ROOT REDIS_DB_GROWABLE_ARENA_ROOT
+#endif
+/* Hash table bucket count at DB startup (Jackson map).  Small values
+ * lower idle RSS; a keyspace much larger than this triggers growth
+ * (rehash) and peak RSS under load can exceed a single large upfront
+ * table.  Override: -DREDIS_DB_INITIAL_BUCKETS=<N>. */
+#ifndef REDIS_DB_INITIAL_BUCKETS
+#define REDIS_DB_INITIAL_BUCKETS 128
 #endif
 /* Max requests packed into one submit/drain/flush cycle. */
 #define PIPELINE_LIMIT 16
@@ -66,10 +95,20 @@ REDIS_DB_DECLARE_MAP();
  * owner publish a whole batch without blocking. */
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
 
-/* User-space experiment: see map_heap_jackson.cch. */
+CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, cc_map_hash_slice_hdr, cc_map_eq_slice_hdr);
+
+static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
+    size_t cap;
+    if (!m) return 0;
+    cap = RedisDbMap_cap(m);
+    if (cap == 0) return sizeof(*m);
+    return sizeof(*m) + cap * (sizeof(CCSliceHdr) + sizeof(CCString)) + sizeof(uint16_t) * (cap + 4u) + 128u;
+}
 
 typedef struct RedisDb {
-    CCArena arena;
+    CCArena map_arena;
+    CCArena key_arena;
+    CCArena value_arena;
     RedisDbMap* entries;
 } RedisDb;
 
@@ -264,6 +303,7 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "SET") && argc == 2) return REDIS_CMD_SET;
     if (slice_eq_ignore_case(cmd, "DEL") && argc == 1) return REDIS_CMD_DEL;
     if (slice_eq_ignore_case(cmd, "INCR") && argc == 1) return REDIS_CMD_INCR;
+    if (slice_eq_ignore_case(cmd, "CC.MEMLOG") && argc == 0) return REDIS_CMD_CC_MEMLOG;
     return (RedisCommandKind)-1;
 }
 
@@ -471,6 +511,147 @@ static void db_mem_stats_note_value_release(size_t bytes) {
     g_db_mem_stats.value_release_bytes += bytes;
 }
 
+static void db_dump_mem_stats(RedisDb* db, const char* tag);
+
+static size_t redis_mem_worker_hint(void) {
+    const char* s = getenv("CC_WORKERS");
+    size_t w;
+    if (s && s[0]) {
+        char* end = NULL;
+        unsigned long n = strtoul(s, &end, 10);
+        if (end != s && (!end || *end == 0) && n > 0 && n < 4096) return (size_t)n;
+    }
+    w = cc_sched_get_num_workers();
+    if (w > 0) return w;
+    {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n > 0) return (size_t)n;
+    }
+    return 1;
+}
+
+/* Mach / map summary to stderr (no getenv gate).  Caller may follow with db_dump_mem_stats for arena slab lines. */
+static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
+    struct rusage ru;
+    uint64_t mach_phys_footprint = 0;
+    int have_mach_footprint = 0;
+    memset(&ru, 0, sizeof(ru));
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] getrusage maxrss=%ld (bytes on Darwin)\n",
+                tag ? tag : "?",
+                (long)ru.ru_maxrss);
+    }
+#if defined(__APPLE__)
+    {
+        struct task_vm_info vm_info;
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm_info, &count) ==
+            KERN_SUCCESS) {
+            mach_phys_footprint = (uint64_t)vm_info.phys_footprint;
+            have_mach_footprint = 1;
+            fprintf(stderr,
+                    "redis_idiomatic: mem[%s] mach resident=%llu phys_footprint=%llu\n",
+                    tag ? tag : "?",
+                    (unsigned long long)vm_info.resident_size,
+                    (unsigned long long)vm_info.phys_footprint);
+        }
+    }
+#endif
+    fprintf(stderr,
+            "redis_idiomatic: mem[%s] worker_hint=%zu sched_workers=%zu (fiber stacks: VM reserve "
+            "~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)\n",
+            tag ? tag : "?",
+            redis_mem_worker_hint(),
+            cc_sched_get_num_workers());
+    if (db && db->entries) {
+        size_t cap = RedisDbMap_cap(db->entries);
+        size_t n = RedisDbMap_len(db->entries);
+        size_t meta_off = 0;
+        size_t map_alloc = 0;
+        /* One contiguous Jackson map blob: header + (CCSliceHdr+CCString)/slot +
+         * uint16_t metadata[cap+4].  Explains most MALLOC_LARGE under key load. */
+        if (cap > 0) {
+            ccj_map_allocation_details(cap,
+                                       sizeof(CCString),
+                                       RedisDbMap__layout(),
+                                       &meta_off,
+                                       &map_alloc);
+        }
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] map len=%zu cap=%zu ccj_map_allocation=%zu "
+                "(~%.2fMiB primary table; doubles by cap until load)\n",
+                tag ? tag : "?",
+                n,
+                cap,
+                map_alloc,
+                map_alloc / (1024.0 * 1024.0));
+#if REDIS_DB_USE_HEAP_OVERFLOW
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] model: map/key/value arenas fixed root+overflow — large allocs use "
+                "heap-overflow malloc; bump uses slab pointer ranges + live_allocs (no per-alloc malloc metadata)\n",
+                tag ? tag : "?");
+#else
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] model: three growable arenas (map/key/value) — cc__arena_grow slabs; "
+                "bump uses slab pointer ranges + live_allocs (no per-alloc malloc metadata)\n",
+                tag ? tag : "?");
+#endif
+        /* Same logical_live as db_dump_mem_stats: keys + heap values + map model bytes. */
+        {
+            size_t map_live = redis_map_live_payload_bytes(db->entries);
+            size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
+            size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+            size_t logical_live = key_live + value_live + map_live;
+            if (have_mach_footprint) {
+                if (logical_live > 0) {
+                    double ratio = (double)mach_phys_footprint / (double)logical_live;
+                    int64_t gap = (int64_t)mach_phys_footprint - (int64_t)logical_live;
+                    fprintf(stderr,
+                            "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B "
+                            "logical_db_live=%zu B (ratio %.1fx; gap=%lld B ≈ runtime+fibers+libc; "
+                            "current_map_blob=%zu B)\n",
+                            tag ? tag : "?",
+                            (unsigned long long)mach_phys_footprint,
+                            logical_live,
+                            ratio,
+                            (long long)gap,
+                            map_alloc);
+                } else {
+                    fprintf(stderr,
+                            "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B logical_db_live=0 "
+                            "(empty db; ccj_map_blob=%zu B)\n",
+                            tag ? tag : "?",
+                            (unsigned long long)mach_phys_footprint,
+                            map_alloc);
+                }
+            }
+        }
+    }
+}
+
+/* Set CC_REDIS_MEM_REPORT=1 to print Mach + map summary and db_dump_mem_stats at owner startup. */
+static void redis_mem_report(const RedisDb* db, const char* tag) {
+    const char* want = getenv("CC_REDIS_MEM_REPORT");
+    if (!want || !want[0]) return;
+    redis_mem_report_impl(db, tag);
+    if (db && db->entries) {
+        db_dump_mem_stats((RedisDb*)(void*)db, tag);
+    }
+}
+
+/* Print each bump slab's capacity for `a`, newest (current root) first, then each
+ * older extent via ->prev.  Matches cc_arena_slab_chain_bytes (sum of these). */
+static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, const CCArena* a) {
+    const CCArena* cur = a;
+    fprintf(stderr, "redis_idiomatic: mem[%s] arena_%s_slab_sizes_B (root_first", tag ? tag : "db", pool);
+    while (cur && cur->base) {
+        fprintf(stderr, " %zu", cur->capacity);
+        cur = cur->prev;
+    }
+    fprintf(stderr, ") sum=%zu\n", cc_arena_slab_chain_bytes(a));
+}
+
 static void db_dump_mem_stats(RedisDb* db, const char* tag) {
     size_t map_live = db ? redis_map_live_payload_bytes(db->entries) : 0;
     size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
@@ -491,6 +672,56 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             value_live,
             map_live,
             key_live + value_live + map_live);
+    if (db) {
+#if REDIS_DB_USE_HEAP_OVERFLOW
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] arena_initial_root_B (heap_overflow=%u each pool)\n",
+                tag ? tag : "db",
+                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT);
+#else
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u key=%u value=%u\n",
+                tag ? tag : "db",
+                (unsigned)REDIS_DB_MAP_ARENA_ROOT,
+                (unsigned)REDIS_DB_KEY_ARENA_ROOT,
+                (unsigned)REDIS_DB_VALUE_ARENA_ROOT);
+#endif
+        redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
+        redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);
+        redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
+        size_t m_slab = cc_arena_slab_chain_bytes(&db->map_arena);
+        size_t m_ovf = cc_arena_overflow_raw_bytes(&db->map_arena);
+        size_t m_ext = cc_arena_extent_struct_bytes(&db->map_arena);
+        size_t m_gross = cc_arena_committed_gross_bytes(&db->map_arena);
+        size_t k_slab = cc_arena_slab_chain_bytes(&db->key_arena);
+        size_t k_ovf = cc_arena_overflow_raw_bytes(&db->key_arena);
+        size_t k_ext = cc_arena_extent_struct_bytes(&db->key_arena);
+        size_t k_gross = cc_arena_committed_gross_bytes(&db->key_arena);
+        size_t v_slab = cc_arena_slab_chain_bytes(&db->value_arena);
+        size_t v_ovf = cc_arena_overflow_raw_bytes(&db->value_arena);
+        size_t v_ext = cc_arena_extent_struct_bytes(&db->value_arena);
+        size_t v_gross = cc_arena_committed_gross_bytes(&db->value_arena);
+        fprintf(stderr,
+                "redis_idiomatic: mem[%s] arena_committed_B "
+                "map slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
+                "key slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
+                "value slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
+                "db_arenas_gross_sum=%zu\n",
+                tag ? tag : "db",
+                m_slab,
+                m_ovf,
+                m_ext,
+                m_gross,
+                k_slab,
+                k_ovf,
+                k_ext,
+                k_gross,
+                v_slab,
+                v_ovf,
+                v_ext,
+                v_gross,
+                m_gross + k_gross + v_gross);
+    }
 }
 
 static bool !>(CCError) db_clone_value_into_arena(CCString* out,
@@ -499,17 +730,17 @@ static bool !>(CCError) db_clone_value_into_arena(CCString* out,
                                                   const char* err_msg) {
     size_t cap = db_string_cap_8x(src.len);
     if (cap == 0) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
-    CCString cloned = { .len = 0, .cap = 0, .arena = arena, .data = NULL };
-    if (cc_vec_init((CCVec*)&cloned, arena, sizeof(char), _Alignof(char), cap) != 0) {
+    CCString cloned = CCString_new(arena);
+    if (!cloned.arena) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
-    if (cap > 0 && !cloned.data) {
+    if (CCString_reserve(&cloned, cap) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
     if (CCString_push_slice(&cloned, src) == NULL) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
-    db_mem_stats_note_value_alloc(cap);
+    if (cc_string_heap_data(&cloned)) db_mem_stats_note_value_alloc(CCString_cap(&cloned));
     if (!out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, err_msg));
     *out = cloned;
     return cc_ok(true);
@@ -528,51 +759,83 @@ static bool !>(CCError) db_clone_key_slice(CCSlice* out,
     return cc_ok(true);
 }
 
+static bool db_init_overflow_arena(CCArena* a) {
+    *a = cc_arena_heap(REDIS_DB_OVERFLOW_ARENA_ROOT);
+    if (!a->base) return false;
+    a->block_max = 1;
+    if (!cc_arena_set_heap_overflow(a, true)) {
+        a->free();
+        *a = (CCArena){0};
+        return false;
+    }
+    return true;
+}
+
+static void db_free_arenas_only(RedisDb* db) {
+    if (!db) return;
+    if (db->map_arena.base) {
+        db->map_arena.free();
+        db->map_arena = (CCArena){0};
+    }
+    if (db->key_arena.base) {
+        db->key_arena.free();
+        db->key_arena = (CCArena){0};
+    }
+    if (db->value_arena.base) {
+        db->value_arena.free();
+        db->value_arena = (CCArena){0};
+    }
+}
+
 static bool db_init(RedisDb* db, size_t bucket_count) {
     if (!db || bucket_count == 0) return false;
 #if REDIS_DB_USE_HEAP_OVERFLOW
-    /* Long-lived DB allocations (entry headers, keys, values, and map
-     * storage) use a small root slab plus heap-overflow fallback. This
-     * keeps the setup easy to toggle while still exercising the draft
-     * release/overflow path under real mutable DB workloads. */
-    db->arena = cc_arena_heap(REDIS_DB_OVERFLOW_ARENA_ROOT);
-    db->arena.block_max = 1;
-    if (!cc_arena_set_heap_overflow(&db->arena, true)) {
-        db->arena.free();
-        db->arena = (CCArena){0};
+    /* Each pool: small fixed root + heap overflow (see file header). */
+    if (!db_init_overflow_arena(&db->map_arena)) return false;
+    if (!db_init_overflow_arena(&db->key_arena)) {
+        db_free_arenas_only(db);
+        return false;
+    }
+    if (!db_init_overflow_arena(&db->value_arena)) {
+        db_free_arenas_only(db);
         return false;
     }
 #else
-    /* Start from a small heap slab and let the DB arena grow on demand
-     * so we can observe the natural extent pattern under real load. */
-    db->arena = cc_arena_heap(REDIS_DB_GROWABLE_ARENA_ROOT);
-    if (!db->arena.base) return false;
+    db->map_arena = cc_arena_heap(REDIS_DB_MAP_ARENA_ROOT);
+    db->key_arena = cc_arena_heap(REDIS_DB_KEY_ARENA_ROOT);
+    db->value_arena = cc_arena_heap(REDIS_DB_VALUE_ARENA_ROOT);
+    if (!db->map_arena.base || !db->key_arena.base || !db->value_arena.base) {
+        db_free_arenas_only(db);
+        return false;
+    }
 #endif
-    db->entries = RedisDbMap_init_count(&db->arena, bucket_count);
+    db->entries = RedisDbMap_init_count(&db->map_arena, bucket_count);
     if (!db->entries) {
-        db->arena.free();
-        db->arena = (CCArena){0};
+        db_free_arenas_only(db);
         return false;
     }
     return true;
 }
 
 static void db_release_value(RedisDb* db, CCString* value) {
+    char *heap_data;
     if (!db || !value) return;
-    if (value->data) {
-        db_mem_stats_note_value_release(value->cap);
-        (void)cc_arena_release(&db->arena, value->data);
+    heap_data = cc_string_heap_data(value);
+    if (heap_data) {
+        db_mem_stats_note_value_release(CCString_cap(value));
+        CCString_release_heap(value);
         *value = (CCString){0};
     }
 }
 
 /* Replace path.  In-place overwrite when the new value fits the old
  * capacity — the happy case for same-length INCR or constant-width
- * SET benchmarks.  Growing values clone a replacement into db->arena
+ * SET benchmarks.  Growing values clone a replacement into db->value_arena
  * and release the superseded buffer. */
 static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] value) {
+    char *heap_data;
     if (!cell) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
-    if (cell->data && value.len + 1 <= cell->cap) {
+    if (value.len + 1 <= CCString_cap(cell)) {
         if (!CCString_clear(cell)) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value clear failed"));
         }
@@ -583,23 +846,28 @@ static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
     }
     CCString replacement = {0};
     bool !>(CCError) clone_res =
-        db_clone_value_into_arena(&replacement, &db->arena, value, "entry value clone failed");
+        db_clone_value_into_arena(&replacement, &db->value_arena, value, "entry value clone failed");
     if (clone_res.is_err()) return cc_err(clone_res.error());
-    if (cell->data) (void)cc_arena_release(&db->arena, cell->data);
+    heap_data = cc_string_heap_data(cell);
+    if (heap_data) CCString_release_heap(cell);
     *cell = replacement;
     return cc_ok(true);
 }
 
 static CCString* db_find_value(RedisDb* db, char[:] key) {
+    CCSliceHdr kh;
     if (!db || !db->entries) return NULL;
-    return RedisDbMap_get_ptr(db->entries, key);
+    kh = key.hdr();
+    return RedisDbMap_get_ptr(db->entries, kh);
 }
 
-static bool !>(CCError) db_insert_value(RedisDb* db, CCSlice key, CCString value) {
+static bool !>(CCError) db_insert_value(RedisDb* db, char[:] owned_key, CCString value) {
+    CCSliceHdr map_key;
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    if (RedisDbMap_insert(db->entries, key, value) != 0) {
+    map_key = owned_key.hdr();
+    if (RedisDbMap_insert(db->entries, map_key, value) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok(true);
@@ -617,17 +885,18 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
 
     CCSlice owned_key = {0};
     bool !>(CCError) key_res =
-        db_clone_key_slice(&owned_key, &db->arena, key, "entry key clone failed");
+        db_clone_key_slice(&owned_key, &db->key_arena, key, "entry key clone failed");
     if (key_res.is_err()) return cc_err(key_res.error());
     CCString owned_value = {0};
-    bool !>(CCError) init_res = db_clone_value_into_arena(&owned_value, &db->arena, value, "entry value clone failed");
+    bool !>(CCError) init_res =
+        db_clone_value_into_arena(&owned_value, &db->value_arena, value, "entry value clone failed");
     if (init_res.is_err()) return cc_err(init_res.error());
 
     bool !>(CCError) insert_res = db_insert_value(db, owned_key, owned_value);
     if (insert_res.is_err()) {
         db_release_value(db, &owned_value);
         db_mem_stats_note_key_release(owned_key.len);
-        (void)cc_arena_release(&db->arena, owned_key.ptr);
+        (void)cc_arena_release(&db->key_arena, owned_key.ptr);
         return cc_err(insert_res.error());
     }
     return cc_ok(reply_simple("OK"));
@@ -640,12 +909,14 @@ static RedisReply db_get(RedisDb* db, char[:] key) {
 }
 
 static RedisReply db_del(RedisDb* db, char[:] key) {
+    CCSliceHdr kh;
     if (!db || !db->entries) return reply_integer(0);
 
     CCString* cell = db_find_value(db, key);
     if (!cell) return reply_integer(0);
     CCString doomed = *cell;
-    if (!RedisDbMap_remove(db->entries, key)) return reply_integer(0);
+    kh = key.hdr();
+    if (!RedisDbMap_remove(db->entries, kh)) return reply_integer(0);
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
     return reply_integer(1);
@@ -728,6 +999,11 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
             return cc_ok(db_del(db, req->argv[0]));
         case REDIS_CMD_INCR:
             return db_incr(db, req->argv[0]);
+        case REDIS_CMD_CC_MEMLOG:
+            /* After redis-benchmark: arena slab lines + Mach/logical accounting on stderr. */
+            db_dump_mem_stats(db, "cc-memlog");
+            redis_mem_report_impl(db, "cc-memlog");
+            return cc_ok(reply_simple("OK"));
         default:
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
     }
@@ -739,8 +1015,7 @@ static void db_free_all(RedisDb* db) {
         RedisDbMap_destroy(db->entries);
         db->entries = NULL;
     }
-    db->arena.free();
-    db->arena = (CCArena){0};
+    db_free_arenas_only(db);
 }
 
 static bool write_all(CCSocket* sock, CCSlice data) {
@@ -1035,7 +1310,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, Red
  * it can't outlive the owner and nobody else can take its address. */
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
-    if (!db_init(&db, 65536)) {
+    if (!db_init(&db, REDIS_DB_INITIAL_BUCKETS)) {
         fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
         return 1;
     }
@@ -1057,6 +1332,7 @@ static bool redis_conn_queue_reply(RedisConn* conn, const RedisRequest* req, Red
         }
         db_dump_mem_stats(&db, "post-preload");
     }
+    redis_mem_report(&db, "owner-ready");
     @defer db_free_all(&db);
 
     RedisRequest* req = NULL;

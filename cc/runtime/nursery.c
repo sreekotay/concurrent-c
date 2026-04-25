@@ -163,6 +163,7 @@ struct CCNursery {
      * When on, the v2 worker calls cc_nursery_notify_child_done on
      * MCO_DEAD and cc_nursery_wait becomes a barrier on alive_count. */
     _Atomic size_t alive_count;
+    fiber_v2* _Atomic alive_waiter;
     wake_primitive alive_wake;
 };
 
@@ -201,6 +202,7 @@ static CCNursery* cc__nursery_alloc(void) {
     wake_primitive_init(&n->cancel_wake);
     wake_primitive_init(&n->alive_wake);
     atomic_store_explicit(&n->alive_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&n->alive_waiter, NULL, memory_order_relaxed);
     n->deadline.tv_sec = 0;
     n->deadline.tv_nsec = 0;
     n->closing = NULL;
@@ -530,6 +532,8 @@ void cc_nursery_notify_child_done(CCNursery* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
     if (prev == 1) {
+        fiber_v2* waiter = atomic_exchange_explicit(&n->alive_waiter, NULL, memory_order_acq_rel);
+        if (waiter) sched_v2_signal(waiter);
         wake_primitive_wake_all(&n->alive_wake);
     }
 }
@@ -550,10 +554,23 @@ int cc_nursery_wait(CCNursery* n) {
         /* Barrier on alive_count.  Worker already pushed each fiber back
          * to the v2 pool on MCO_DEAD; we just wait for the last
          * notify_child_done to tick the counter to zero. */
-        for (;;) {
-            uint32_t gen = atomic_load_explicit(&n->alive_wake.value, memory_order_acquire);
-            if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0) break;
-            wake_primitive_wait(&n->alive_wake, gen);
+        fiber_v2* self = sched_v2_current_fiber();
+        if (self) {
+            atomic_store_explicit(&n->alive_waiter, self, memory_order_release);
+            while (atomic_load_explicit(&n->alive_count, memory_order_acquire) != 0) {
+                sched_v2_set_park_reason("nursery_wait");
+                sched_v2_park();
+                sched_v2_set_park_reason(NULL);
+            }
+            fiber_v2* expected = self;
+            (void)atomic_compare_exchange_strong_explicit(&n->alive_waiter, &expected, NULL,
+                    memory_order_acq_rel, memory_order_relaxed);
+        } else {
+            for (;;) {
+                uint32_t gen = atomic_load_explicit(&n->alive_wake.value, memory_order_acquire);
+                if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0) break;
+                wake_primitive_wait(&n->alive_wake, gen);
+            }
         }
     } else {
         /* Classic path: spec says join children first, then close channels.
