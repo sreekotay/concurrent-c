@@ -52,6 +52,24 @@ typedef struct {
    - legacy `T[:!]` still lowers to `CCSliceUnique` (ABI-identical to CCSlice) */
 typedef CCSlice CCSliceUnique;
 
+/* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
+ * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
+typedef struct {
+    void *ptr;
+    size_t len;
+} CCSliceHdr;
+
+static inline CCSliceHdr cc_slice_hdr(CCSlice *s) {
+    CCSliceHdr h = {0};
+    if (!s) return h;
+    h.ptr = s->ptr;
+    h.len = s->len;
+    return h;
+}
+
+/* UFCS: `slice.hdr()` lowers to `CCSlice_hdr(&slice)` (slice-family hook). */
+static inline CCSliceHdr CCSlice_hdr(CCSlice *s) { return cc_slice_hdr(s); }
+
 static inline CCSlice cc_slice_empty(void) {
     CCSlice s = {0};
     return s;
@@ -85,6 +103,11 @@ static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
     // stack buffers that outlive all uses. Avoid for heap/arena allocations.
     CCSlice s = {ptr, len, CC_SLICE_ID_UNTRACKED, len};
     return s;
+}
+
+static inline CCSlice cc_slice_hdr_slice(CCSliceHdr *sh) {
+    if (!sh) return cc_slice_empty();
+    return cc_slice_from_buffer(sh->ptr, sh->len);
 }
 
 static inline CCSlice cc_slice_from_parts(void *ptr,

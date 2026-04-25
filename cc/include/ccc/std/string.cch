@@ -21,13 +21,36 @@
 #include <ccc/cc_ufcs.cch>
 #include <ccc/std/vec.cch>
 
-/* In parser mode, CCVec_char is already typedef'd to __CCVecGeneric in vec.cch.
-   Only emit the real declaration in non-parser (codegen) mode. */
+/* In parser mode, keep CCString field-compatible with the surface API.
+   Real compilation overlays the trailing storage for inline bytes. */
 #ifndef CC_PARSER_MODE
 CC_VEC_DECL_ARENA(char, CCVec_char)
+typedef struct CCString {
+    uint32_t len;
+    uint32_t cap;
+    CCArena *arena;
+    union {
+        char *data;
+        char inline_buf[sizeof(uint64_t) * 2];
+        uint64_t _inline_words[2];
+    };
+} CCString;
+#else
+typedef struct CCString {
+    uint32_t len;
+    uint32_t cap;
+    void *arena;
+    char *data;
+} CCString;
 #endif
 
-typedef CCVec_char CCString;
+#ifndef CC_STRING_INLINE_CAP
+#define CC_STRING_INLINE_CAP (sizeof(uint64_t) * 2)
+#endif
+
+#if !defined(CC_PARSER_MODE) && UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(CCString) == 32, "CCString should stay compact on 64-bit targets");
+#endif
 
 // ------------------------- Parse error enums ------------------------------
 typedef enum {
@@ -149,8 +172,10 @@ CCString CCString_from_slice(CCArena *arena, CCSlice slice);
 CCString* CCString_push_slice(CCString *str, CCSlice data);
 CCString* CCString_clear(CCString *str);
 CCSlice CCString_as_slice(const CCString *str);
+static inline CCSlice CCString_persist_slice(CCArena *arena, const CCString *str);
 #define cc_string_as_slice CCString_as_slice
 const char *CCString_cstr(CCString *str);
+uint64_t CCString_provenance(const CCString *str);
 /* @string(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
 #ifndef CC_ENABLE_XJB_FLOAT_FMT
@@ -173,6 +198,147 @@ static inline size_t CCString_cap(const CCString *str) {
     return str ? str->cap : 0;
 }
 
+static inline bool cc_string_is_inline(const CCString *str) {
+#ifdef CC_PARSER_MODE
+    (void)str;
+    return false;
+#else
+    return str && str->cap > 0 && str->cap <= CC_STRING_INLINE_CAP;
+#endif
+}
+
+static inline const char *cc_string_data_const(const CCString *str) {
+    if (!str) return NULL;
+#ifdef CC_PARSER_MODE
+    return str->data;
+#else
+    if (cc_string_is_inline(str)) return str->inline_buf;
+    return str->data;
+#endif
+}
+
+static inline char *cc_string_data(CCString *str) {
+    return (char *)cc_string_data_const((const CCString *)str);
+}
+
+static inline const char *cc_string_heap_data_const(const CCString *str) {
+    if (!str) return NULL;
+#ifdef CC_PARSER_MODE
+    return str->data;
+#else
+    return cc_string_is_inline(str) ? NULL : str->data;
+#endif
+}
+
+static inline char *cc_string_heap_data(CCString *str) {
+    return (char *)cc_string_heap_data_const((const CCString *)str);
+}
+
+static inline CCVec cc__string_heap_view(const CCString *str) {
+    CCVec v = {0};
+    if (!str) return v;
+    v.len = (size_t)str->len;
+    v.cap = cc_string_is_inline(str) ? 0u : (size_t)str->cap;
+    v.arena = (CCArena *)str->arena;
+    v.data = (void *)cc_string_heap_data_const(str);
+    return v;
+}
+
+static inline void cc__string_apply_heap_view(CCString *str, const CCVec *v) {
+    if (!str || !v) return;
+    str->len = (uint32_t)v->len;
+    str->cap = (uint32_t)v->cap;
+    str->arena = v->arena;
+    str->data = (char *)v->data;
+}
+
+static inline void cc__string_sync_heap_len(CCString *str) {
+    CCVec v;
+    if (!str || cc_string_is_inline(str) || !cc_string_heap_data(str)) return;
+    v = cc__string_heap_view(str);
+    cc_vec_sync_len(&v);
+}
+
+static inline int CCString_reserve(CCString *str, size_t need) {
+    size_t new_cap;
+    char saved[CC_STRING_INLINE_CAP];
+    size_t saved_len;
+    CCVec heap;
+    if (!str || !str->arena) return -1;
+    if (need > UINT32_MAX) return -1;
+    if (cc_string_is_inline(str) && need <= CC_STRING_INLINE_CAP) return 0;
+    if (!cc_string_is_inline(str) && cc_string_heap_data(str) && need <= str->cap) return 0;
+#ifndef CC_PARSER_MODE
+    if (need <= CC_STRING_INLINE_CAP) {
+        if (str->cap == 0) {
+            str->cap = CC_STRING_INLINE_CAP;
+            memset(str->inline_buf, 0, sizeof(str->inline_buf));
+        }
+        return 0;
+    }
+#endif
+    new_cap = str->cap ? str->cap : CC_STRING_INLINE_CAP;
+    if (new_cap < CC_STRING_INLINE_CAP) new_cap = CC_STRING_INLINE_CAP;
+    while (new_cap < need) new_cap <<= 1;
+    if (new_cap > UINT32_MAX) return -1;
+#ifndef CC_PARSER_MODE
+    if (cc_string_is_inline(str) || !cc_string_heap_data(str)) {
+        saved_len = str->len + 1;
+        if (saved_len > sizeof(saved)) saved_len = sizeof(saved);
+        memset(saved, 0, sizeof(saved));
+        if (saved_len > 0) memcpy(saved, str->inline_buf, saved_len);
+        heap = cc__string_heap_view(str);
+        heap.cap = 0;
+        heap.data = NULL;
+        if (cc_vec_reserve(&heap, sizeof(char), _Alignof(char), new_cap) != 0) {
+            return -1;
+        }
+        if (saved_len > 0 && heap.data) {
+            memcpy(heap.data, saved, saved_len);
+            heap.len = saved_len - 1;
+            cc_vec_sync_len(&heap);
+        }
+        cc__string_apply_heap_view(str, &heap);
+        return cc_string_heap_data(str) ? 0 : -1;
+    }
+#endif
+    heap = cc__string_heap_view(str);
+    if (cc_vec_reserve(&heap, sizeof(char), _Alignof(char), new_cap) != 0) return -1;
+    cc__string_apply_heap_view(str, &heap);
+    return 0;
+}
+
+/* Frees out-of-line storage for strings that left the inline buffer (same
+ * backing path as CCString_reserve / cc_vec_*).  Heap `data` sits after
+ * `ccj_vec_hdr_ty`; the slab that cc__containers_release_payload expects is
+ * the vec backend counter (see cc__vec_backend_cntr), not `str->data` and not
+ * the raw cc_arena_alloc pointer.  Caller should clear *str after this if the
+ * struct is discarded. */
+static inline void CCString_release_heap(CCString *str) {
+    CCVec v;
+    void *cntr;
+    if (!str || !str->arena) return;
+    if (cc_string_is_inline(str)) return;
+    if (!cc_string_heap_data(str)) return;
+#ifndef CC_PARSER_MODE
+    v = cc__string_heap_view(str);
+    cntr = cc__vec_backend_cntr(&v);
+    if (!cntr || cntr == (void *)&ccj_vec_placeholder) return;
+    cc__containers_release_payload(str->arena, cntr);
+#endif
+}
+
+static inline CCSlice cc__string_persist_slice(CCArena *arena, const CCString *str) {
+    CCSlice slice = CCString_as_slice(str);
+    if (!str || !slice.ptr || slice.len == 0) return slice;
+    if (cc_string_is_inline(str) && arena) return cc_slice_clone(arena, slice);
+    return slice;
+}
+
+static inline CCSlice CCString_persist_slice(CCArena *arena, const CCString *str) {
+    return cc__string_persist_slice(arena, str);
+}
+
 static inline CCString* CCString_push_char(CCString *str, char c) {
     CCSlice s = cc_slice_from_buffer(&c, 1);
     return CCString_push_slice(str, s);
@@ -190,10 +356,12 @@ static inline CCString* cc__string_append_u64_impl(CCString *str, uint64_t v) {
         v = q;
     } while (v != 0);
     out_len = sizeof(buf) - pos;
-    if (CCVec_char_reserve(str, str->len + out_len + 1) != 0) return NULL;
-    dst = (char*)str->data;
+    if (CCString_reserve(str, str->len + out_len + 1) != 0) return NULL;
+    dst = cc_string_data(str);
+    if (!dst) return NULL;
     memcpy(dst + str->len, buf + pos, out_len);
     str->len += out_len;
+    cc__string_sync_heap_len(str);
     dst[str->len] = '\0';
     return str;
 }
@@ -250,7 +418,10 @@ static inline CCString* CCString_push_cstr(CCString *str, const char *cstr) {
 }
 
 static inline CCSlice CCString_apply_policy(CCStringPolicy policy, CCArena *arena, CCSlice tag, CCSlice value) {
-    return policy ? policy(arena, tag, value) : value;
+    CCSlice out = policy ? policy(arena, tag, value) : value;
+    if (!policy || !arena || !out.ptr || out.len == 0) return out;
+    if (out.id == CC_SLICE_ID_UNTRACKED) return cc_slice_clone(arena, out);
+    return out;
 }
 
 static inline CCString* CCString_push_policy(CCString *str,
@@ -263,28 +434,28 @@ static inline CCString* CCString_push_policy(CCString *str,
 
 static inline CCString cc__string_from_signed_impl(CCArena *arena, long long v) {
     CCString s = CCString_new(arena);
-    if (!s.data) return s;
+    if (!s.arena) return s;
     (void)CCString_push_int(&s, (int64_t)v);
     return s;
 }
 
 static inline CCString cc__string_from_unsigned_impl(CCArena *arena, unsigned long long v) {
     CCString s = CCString_new(arena);
-    if (!s.data) return s;
+    if (!s.arena) return s;
     (void)CCString_push_uint(&s, (uint64_t)v);
     return s;
 }
 
 static inline CCString cc__string_from_float32_impl(CCArena *arena, float v) {
     CCString s = CCString_new(arena);
-    if (!s.data) return s;
+    if (!s.arena) return s;
     (void)CCString_push_f32(&s, v);
     return s;
 }
 
 static inline CCString cc__string_from_float64_impl(CCArena *arena, double v) {
     CCString s = CCString_new(arena);
-    if (!s.data) return s;
+    if (!s.arena) return s;
     (void)CCString_push_f64(&s, v);
     return s;
 }
@@ -295,7 +466,7 @@ static inline CCString cc__string_from_bool_impl(CCArena *arena, bool v) {
 
 static inline CCString cc__string_from_char_impl(CCArena *arena, char v) {
     CCString s = CCString_new(arena);
-    if (!s.data) return s;
+    if (!s.arena) return s;
     (void)CCString_push_char(&s, v);
     return s;
 }
@@ -354,8 +525,7 @@ static inline CCSlice cc__string_slot_from_slice(CCSlice s, CCArena *arena) {
 }
 
 static inline CCSlice cc__string_slot_from_string(CCString s, CCArena *arena) {
-    (void)arena;
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_string_ptr(const CCString *s, CCArena *arena) {
@@ -365,122 +535,122 @@ static inline CCSlice cc__string_slot_from_string_ptr(const CCString *s, CCArena
 
 static inline CCSlice cc__string_slot_from_char(char v, CCArena *arena) {
     CCString s = char_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_signed_char(signed char v, CCArena *arena) {
     CCString s = signed_char_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_unsigned_char(unsigned char v, CCArena *arena) {
     CCString s = unsigned_char_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_short(short v, CCArena *arena) {
     CCString s = short_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_unsigned_short(unsigned short v, CCArena *arena) {
     CCString s = unsigned_short_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_int(int v, CCArena *arena) {
     CCString s = int_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_unsigned(unsigned v, CCArena *arena) {
     CCString s = unsigned_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_long(long v, CCArena *arena) {
     CCString s = long_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_unsigned_long(unsigned long v, CCArena *arena) {
     CCString s = unsigned_long_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_long_long(long long v, CCArena *arena) {
     CCString s = long_long_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_unsigned_long_long(unsigned long long v, CCArena *arena) {
     CCString s = unsigned_long_long_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_int8_t(int8_t v, CCArena *arena) {
     CCString s = int8_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_uint8_t(uint8_t v, CCArena *arena) {
     CCString s = uint8_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_int16_t(int16_t v, CCArena *arena) {
     CCString s = int16_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_uint16_t(uint16_t v, CCArena *arena) {
     CCString s = uint16_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_int32_t(int32_t v, CCArena *arena) {
     CCString s = int32_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_uint32_t(uint32_t v, CCArena *arena) {
     CCString s = uint32_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_int64_t(int64_t v, CCArena *arena) {
     CCString s = int64_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_uint64_t(uint64_t v, CCArena *arena) {
     CCString s = uint64_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_intptr_t(intptr_t v, CCArena *arena) {
     CCString s = intptr_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_uintptr_t(uintptr_t v, CCArena *arena) {
     CCString s = uintptr_t_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_float(float v, CCArena *arena) {
     CCString s = float_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_double(double v, CCArena *arena) {
     CCString s = double_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCSlice cc__string_slot_from_bool(bool v, CCArena *arena) {
     CCString s = bool_to_str(v, arena);
-    return CCString_as_slice(&s);
+    return cc__string_persist_slice(arena, &s);
 }
 
 static inline CCString* cc__string_slot_push_from_cstr(CCString *str, const char *cstr, CCArena *arena) {
@@ -637,32 +807,35 @@ static inline CCString* string_append(CCString *str, const char *cstr) {
 }
 static inline CCSlice string_as_slice(const CCString *str) { return CCString_as_slice(str); }
 
-static inline CCSlice cc__concat_from_cstr(const char *cstr) {
+static inline CCSlice cc__concat_from_cstr(const char *cstr, CCArena *arena) {
+    (void)arena;
     return cc_slice_from_cstr(cstr);
 }
 
-static inline CCSlice cc__concat_from_slice(CCSlice s) {
+static inline CCSlice cc__concat_from_slice(CCSlice s, CCArena *arena) {
+    (void)arena;
     return s;
 }
 
-static inline CCSlice cc__concat_from_string_value(CCString str) {
-    return CCString_as_slice(&str);
+static inline CCSlice cc__concat_from_string_value(CCString str, CCArena *arena) {
+    return cc__string_persist_slice(arena, &str);
 }
 
-static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
+static inline CCSlice cc__concat_from_string_ptr(const CCString *str, CCArena *arena) {
+    (void)arena;
     return CCString_as_slice(str);
 }
 
-#define cc__concat_arg(x) _Generic((x), \
+#define cc__concat_arg(x, arena) _Generic((x), \
     CCSlice: cc__concat_from_slice, \
     char *: cc__concat_from_cstr, \
     const char *: cc__concat_from_cstr, \
     CCString: cc__concat_from_string_value, \
     CCString *: cc__concat_from_string_ptr, \
     const CCString *: cc__concat_from_string_ptr \
-)(x)
+)((x), (arena))
 
-#define CCString_push(str, data) CCString_push_slice((str), cc__concat_arg(data))
+#define CCString_push(str, data) CCString_push_slice((str), cc__concat_arg((data), ((str) ? (str)->arena : NULL)))
 #define CCString_append(str, data) CCString_push((str), (data))
 
 #define CCString_from(data, arena) _Generic((data), \
@@ -734,22 +907,22 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
     bool: cc__string_slot_push_from_bool \
 )((str), (data), (arena))
 
-#define cc__concat_args_1(a1) \
-    cc__concat_arg(a1)
-#define cc__concat_args_2(a1, a2) \
-    cc__concat_arg(a1), cc__concat_arg(a2)
-#define cc__concat_args_3(a1, a2, a3) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3)
-#define cc__concat_args_4(a1, a2, a3, a4) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4)
-#define cc__concat_args_5(a1, a2, a3, a4, a5) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5)
-#define cc__concat_args_6(a1, a2, a3, a4, a5, a6) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6)
-#define cc__concat_args_7(a1, a2, a3, a4, a5, a6, a7) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6), cc__concat_arg(a7)
-#define cc__concat_args_8(a1, a2, a3, a4, a5, a6, a7, a8) \
-    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6), cc__concat_arg(a7), cc__concat_arg(a8)
+#define cc__concat_args_1(arena, a1) \
+    cc__concat_arg(a1, arena)
+#define cc__concat_args_2(arena, a1, a2) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena)
+#define cc__concat_args_3(arena, a1, a2, a3) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena)
+#define cc__concat_args_4(arena, a1, a2, a3, a4) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena), cc__concat_arg(a4, arena)
+#define cc__concat_args_5(arena, a1, a2, a3, a4, a5) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena), cc__concat_arg(a4, arena), cc__concat_arg(a5, arena)
+#define cc__concat_args_6(arena, a1, a2, a3, a4, a5, a6) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena), cc__concat_arg(a4, arena), cc__concat_arg(a5, arena), cc__concat_arg(a6, arena)
+#define cc__concat_args_7(arena, a1, a2, a3, a4, a5, a6, a7) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena), cc__concat_arg(a4, arena), cc__concat_arg(a5, arena), cc__concat_arg(a6, arena), cc__concat_arg(a7, arena)
+#define cc__concat_args_8(arena, a1, a2, a3, a4, a5, a6, a7, a8) \
+    cc__concat_arg(a1, arena), cc__concat_arg(a2, arena), cc__concat_arg(a3, arena), cc__concat_arg(a4, arena), cc__concat_arg(a5, arena), cc__concat_arg(a6, arena), cc__concat_arg(a7, arena), cc__concat_arg(a8, arena)
 
 #define cc__concat_pick(_1, _2, _3, _4, _5, _6, _7, _8, NAME, ...) NAME
 #define cc__concat_args(...) \
@@ -761,7 +934,7 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
         cc__concat_args_4, \
         cc__concat_args_3, \
         cc__concat_args_2, \
-        cc__concat_args_1)(__VA_ARGS__)
+        cc__concat_args_1)
 
 #define cc__concat_count_pick(_1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
 #define cc__concat_count(...) \
@@ -769,7 +942,7 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
 
 #define cc_concat(arena, ...) \
     cc_slice_concat_many((arena), \
-        (CCSlice[]){ cc__concat_args(__VA_ARGS__) }, \
+        (CCSlice[]){ cc__concat_args(__VA_ARGS__)((arena), __VA_ARGS__) }, \
         cc__concat_count(__VA_ARGS__))
 
 // ------------------------- Parse helpers ----------------------------------

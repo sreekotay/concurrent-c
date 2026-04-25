@@ -18,6 +18,7 @@
 #   UPSTREAM_PORT    default 6391
 #   IDIOMATIC_PORT   default 6393
 #   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
+#   MEMLOG_ON_EXIT   request idiomatic CC.MEMLOG before summary (default 1)
 
 set -euo pipefail
 
@@ -30,11 +31,12 @@ REPEATS="${REPEATS:-6}"
 REQUESTS="${REQUESTS:-500000}"
 CLIENTS="${CLIENTS:-50}"
 PIPELINE="${PIPELINE:-16}"
-RANDOM_KEYS="${RANDOM_KEYS:-50000}"
+RANDOM_KEYS="${RANDOM_KEYS:-150000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
+MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
 
 need() {
     if [[ ! -x "$1" ]]; then
@@ -160,6 +162,20 @@ run_one() {
         >"$4" 2>&1
 }
 
+request_idiomatic_memlog() {
+    [[ "$MEMLOG_ON_EXIT" == "0" ]] && return 0
+    check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
+    python3 - "$IDIOMATIC_PORT" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+payload = b"*1\r\n$9\r\nCC.MEMLOG\r\n"
+with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
+    s.sendall(payload)
+    s.settimeout(2.0)
+    s.recv(1024)
+PY
+}
+
 IFS=',' read -ra CMDS <<< "$BENCH_TESTS"
 
 port_for() {
@@ -216,10 +232,13 @@ for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID"; do
     wait "$p" 2>/dev/null || true
 done
 
+request_idiomatic_memlog || echo "warning: failed to request idiomatic CC.MEMLOG; see $TMP_DIR/idiomatic.log" >&2
+
 # --- stats ---
 python3 - <<PY
 import csv, statistics
 from collections import defaultdict
+import re
 
 rows = list(csv.DictReader(open("$RESULT_CSV")))
 by = defaultdict(list)
@@ -256,6 +275,43 @@ sample_peaks = {
 def fmt(x): return f"{x/1e6:.3f}M"
 def fmt_mb(kb): return f"{kb/1024:.1f}MB" if kb else "  n/a"
 def fmt_thr(t): return f"{t}" if t else "n/a"
+def fmt_b(n):
+    n = int(n)
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.2f}MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n}B"
+
+def read_idiomatic_memlog(path):
+    try:
+        text = open(path).read()
+    except FileNotFoundError:
+        return None
+    committed_re = re.compile(
+        r"arena_committed_B "
+        r"map slabs=(\d+) ovf=(\d+) ext_meta=(\d+) gross=(\d+) \| "
+        r"key slabs=(\d+) ovf=(\d+) ext_meta=(\d+) gross=(\d+) \| "
+        r"value slabs=(\d+) ovf=(\d+) ext_meta=(\d+) gross=(\d+) \| "
+        r"db_arenas_gross_sum=(\d+)"
+    )
+    entries_re = re.compile(
+        r"entries=(\d+) buckets=(\d+) .*? keys .*? live=(\d+) \| "
+        r"values .*? live=(\d+) \| map_live=(\d+) \| total_live=(\d+)"
+    )
+    committed = committed_re.findall(text)
+    entries = entries_re.findall(text)
+    if not committed:
+        return None
+    c = tuple(int(x) for x in committed[-1])
+    e = tuple(int(x) for x in entries[-1]) if entries else None
+    return {
+        "map":   {"slabs": c[0], "ovf": c[1], "meta": c[2], "gross": c[3]},
+        "key":   {"slabs": c[4], "ovf": c[5], "meta": c[6], "gross": c[7]},
+        "value": {"slabs": c[8], "ovf": c[9], "meta": c[10], "gross": c[11]},
+        "gross_sum": c[12],
+        "entries": e,
+    }
 
 print()
 print("== bench_robust summary ==")
@@ -289,4 +345,27 @@ for label in labels:
     p = sample_peaks[label]
     print(f"  {label:<10} {fmt_mb(p['rss_kb']):>10} {fmt_thr(p['threads']):>14}")
 print()
+
+mem = read_idiomatic_memlog("$TMP_DIR/idiomatic.log")
+if mem:
+    print("[IDIOMATIC DB ARENAS] (final CC.MEMLOG)")
+    if mem["entries"]:
+        entries, buckets, key_live, value_live, map_live, total_live = mem["entries"]
+        print(
+            f"  entries={entries} buckets={buckets} "
+            f"live: map={fmt_b(map_live)} key={fmt_b(key_live)} "
+            f"value={fmt_b(value_live)} total={fmt_b(total_live)}"
+        )
+    print(f"  {'arena':<8} {'slabs':>10} {'overflow':>10} {'metadata':>10} {'gross':>10}")
+    for name in ("map", "key", "value"):
+        row = mem[name]
+        print(
+            f"  {name:<8} {fmt_b(row['slabs']):>10} {fmt_b(row['ovf']):>10} "
+            f"{fmt_b(row['meta']):>10} {fmt_b(row['gross']):>10}"
+        )
+    print(f"  {'sum':<8} {'':>10} {'':>10} {'':>10} {fmt_b(mem['gross_sum']):>10}")
+    print()
+else:
+    print("[IDIOMATIC DB ARENAS] final CC.MEMLOG unavailable; see idiomatic.log")
+    print()
 PY

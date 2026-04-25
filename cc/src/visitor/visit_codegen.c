@@ -3715,16 +3715,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 for (size_t i = 0; i < n_map; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                     if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                        const char* hash_fn = "cc_kh_hash_i32";
-                        const char* eq_fn = "cc_kh_eq_i32";
+                        const char* hash_fn = "cc_map_hash_i32";
+                        const char* eq_fn = "cc_map_eq_i32";
                         if (strcmp(inst->type1, "int") == 0) {
-                            hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                            hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
                         } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
                             hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
                         } else if (strstr(inst->type1, "64") != NULL) {
-                            hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                            hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
                         } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                            hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                            hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
                         }
                         char line[512];
                         snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",

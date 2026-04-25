@@ -208,8 +208,34 @@ int main(void) {
             printf("FAIL: expected used heap overflow flag\n");
             return 7;
         }
-        if (!cc_arena_release(&a, spill)) {
+        size_t spill_bytes = cc_arena_overflow_raw_bytes(&a);
+        if (spill_bytes < 512) {
+            printf("FAIL: expected overflow byte accounting\n");
+            return 7;
+        }
+        memset(spill, 0x5a, 512);
+        void *bigger_spill = cc_arena_realloc(&a, spill, 512, 1024, 8);
+        if (!bigger_spill) {
+            printf("FAIL: overflow realloc\n");
+            return 7;
+        }
+        unsigned char *bp = (unsigned char*)bigger_spill;
+        for (size_t i = 0; i < 512; ++i) {
+            if (bp[i] != 0x5a) {
+                printf("FAIL: overflow realloc preserved bytes\n");
+                return 7;
+            }
+        }
+        if (cc_arena_overflow_raw_bytes(&a) < 1024) {
+            printf("FAIL: overflow byte accounting after realloc\n");
+            return 7;
+        }
+        if (!cc_arena_release(&a, bigger_spill)) {
             printf("FAIL: release heap overflow ptr\n");
+            return 7;
+        }
+        if (cc_arena_overflow_raw_bytes(&a) != 0) {
+            printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
 

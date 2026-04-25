@@ -1444,7 +1444,7 @@ int* val = CCVec_int_get(&v, 0);
 CC_VEC_DECL_ARENA(int, CCVec_int)
 
 // Automatically generated for Map<int, char*> usage
-CC_MAP_DECL_ARENA(int, char_ptr, Map_int_char_ptr, cc_kh_hash_i32, cc_kh_eq_i32)
+CC_MAP_DECL_ARENA(int, char_ptr, Map_int_char_ptr, cc_map_hash_i32, cc_map_eq_i32)
 ```
 
 ### Testing

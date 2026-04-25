@@ -6,6 +6,7 @@
 static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     size_t old_len;
     size_t offset;
+    char *storage;
 
     if (!cmd || !cmd->arena || !cmd->storage.arena || !cmd->offsets.arena) return -1;
 
@@ -20,8 +21,9 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     }
     if (!CCString_push_char(&cmd->storage, '\0')) {
         cmd->storage.len = old_len;
-        cc_vec_sync_len((CCVec *)&cmd->storage);
-        if (cmd->storage.data) cmd->storage.data[old_len] = '\0';
+        cc__string_sync_heap_len(&cmd->storage);
+        storage = cc_string_data(&cmd->storage);
+        if (storage) storage[old_len] = '\0';
         cmd->offsets.len--;
         cc_vec_sync_len((CCVec *)&cmd->offsets);
         return -1;
@@ -52,8 +54,11 @@ size_t cc_command_argc(const CCCommand *cmd) {
 }
 
 const char *cc_command_get(const CCCommand *cmd, size_t idx) {
-    if (!cmd || idx >= cmd->offsets.len || !cmd->storage.data || !cmd->offsets.data) return NULL;
-    return cmd->storage.data + cmd->offsets.data[idx];
+    const char *storage;
+    if (!cmd || idx >= cmd->offsets.len || !cmd->offsets.data) return NULL;
+    storage = cc_string_data_const(&cmd->storage);
+    if (!storage) return NULL;
+    return storage + cmd->offsets.data[idx];
 }
 
 const char *cc_command_program(const CCCommand *cmd) {
@@ -143,15 +148,18 @@ const char **cc_command_argv(CCCommand *cmd) {
     const char **argv;
     size_t argc;
     size_t i;
+    const char *storage;
 
-    if (!cmd || !cmd->arena || !cmd->storage.data || !cmd->offsets.data) return NULL;
+    if (!cmd || !cmd->arena || !cmd->offsets.data) return NULL;
+    storage = cc_string_data_const(&cmd->storage);
+    if (!storage) return NULL;
 
     argc = cmd->offsets.len;
     argv = (const char**)cc_arena_alloc(cmd->arena, (argc + 1) * sizeof(const char*), _Alignof(const char*));
     if (!argv) return NULL;
 
     for (i = 0; i < argc; ++i) {
-        argv[i] = cmd->storage.data + cmd->offsets.data[i];
+        argv[i] = storage + cmd->offsets.data[i];
     }
     argv[argc] = NULL;
     return argv;

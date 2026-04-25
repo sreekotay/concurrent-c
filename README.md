@@ -103,8 +103,7 @@ $PREFIX/
 ├── bin/ccc                      # compiler binary
 ├── include/ccc/                 # headers
 │   ├── cc_runtime.cch
-│   ├── std/prelude.cch
-│   └── vendor/khashl.h
+│   └── std/prelude.cch
 └── lib/ccc/runtime/             # runtime source
     └── concurrent_c.c
 ```

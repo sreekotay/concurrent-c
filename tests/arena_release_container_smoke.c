@@ -4,8 +4,8 @@
 
 Vec(int, IntVec);
 
-static inline khint_t hash_i32(int k) {
-    return kh_hash_uint32((khint_t)k);
+static inline size_t hash_i32(int k) {
+    return cc_map_hash_i32(k);
 }
 
 static inline int eq_i32(int a, int b) { return a == b; }
@@ -76,15 +76,15 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     CCArena arena = make_arena();
 
     CCString s = CCString_new(&arena);
-    assert(s.data != NULL);
-    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert(s.arena == &arena);
+    assert(cc_atomic_load(&arena.live_allocs) == 0);
 
-    void *initial_data = s.data;
+    void *initial_data = cc_string_data(&s);
     assert(CCString_push(&s, "ab") != NULL);
     assert(CCString_push(&s, "cdefghijklmnop") != NULL); /* forces growth */
 
-    assert(s.data != NULL);
-    assert(s.data != initial_data);
+    assert(cc_string_data(&s) != NULL);
+    assert(cc_string_data(&s) != initial_data);
     assert(strcmp(CCString_cstr(&s), "abcdefghijklmnop") == 0);
     assert(cc_atomic_load(&arena.live_allocs) == 1);
 

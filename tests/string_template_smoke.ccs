@@ -11,7 +11,7 @@ static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
     out.append("=");
     out.append(value);
     out.append("]");
-    return out.as_slice();
+    return CCString_persist_slice(arena, &out);
 }
 
 static void assert_switch_template_as_slice(int64_t value) {

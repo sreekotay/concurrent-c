@@ -1,11 +1,7 @@
 /*
  * Arena-backed hash map for Concurrent-C stdlib.
  *
- * Built on khashl (MIT, Attractive Chaos) with these benefits:
- * - 1-bit per bucket flags (32x smaller than naive)
- * - No tombstones (backshift deletion)
- * - Fibonacci hashing (better distribution)
- * - Linear probing (cache-friendly)
+ * Built on the patched cc_containers map core.
  *
  * API:
  * - Name_get(h, key)     returns V* (mutable access; NULL if not found)
@@ -14,7 +10,7 @@
  * - Name_remove(h, key)  returns bool (true if existed)
  *
  * Usage:
- *   CC_MAP_DECL_ARENA(int, int, IntMap, cc_kh_hash_i32, cc_kh_eq_i32)
+ *   CC_MAP_DECL_ARENA(int, int, IntMap, cc_map_hash_i32, cc_map_eq_i32)
  *   IntMap *m = IntMap_init(&arena);
  *   IntMap_insert(m, 42, 100);
  *   int* val = IntMap_get(m, 42);  // returns pointer; NULL if absent
@@ -149,156 +145,42 @@ typedef __CCMapGeneric Map_uint64_t_voidptr;
 #endif /* CC_PARSER_MODE */
 
 /*
- * Allocator hooks for khashl (shared by arena- and heap-backed maps).
- *
- * Arena maps pass a real CCArena* as khashl's `km` context.
- * Heap maps use the sentinel CC__MAP_HEAP_KM (see <ccc/std/map_heap.cch>);
- * those allocations use libc malloc/calloc/realloc/free.
- */
-#define CC__MAP_HEAP_KM ((void *)(uintptr_t)0x1CC0u)
-
-static inline bool cc__map_is_heap_km(const void *km) {
-    return km == CC__MAP_HEAP_KM;
-}
-
-typedef struct cc__map_alloc_header {
-    size_t size_bytes;
-    void* raw_alloc;
-} cc__map_alloc_header;
-
-static inline size_t cc__map_storage_align(size_t elem_align) {
-    size_t min_align = _Alignof(max_align_t);
-    return elem_align > min_align ? elem_align : min_align;
-}
-
-static inline void* cc__map_alloc_payload(CCArena* arena, size_t size_bytes, size_t align) {
-    if (!arena || size_bytes == 0) return NULL;
-    if (align < _Alignof(cc__map_alloc_header)) align = _Alignof(cc__map_alloc_header);
-
-    size_t total = sizeof(cc__map_alloc_header) + align - 1 + size_bytes;
-    uint8_t* raw = (uint8_t*)cc_arena_alloc(arena, total, _Alignof(max_align_t));
-    if (!raw) return NULL;
-
-    uintptr_t start = (uintptr_t)(raw + sizeof(cc__map_alloc_header));
-    uintptr_t aligned = (start + align - 1) & ~(uintptr_t)(align - 1);
-    cc__map_alloc_header* header = (cc__map_alloc_header*)(aligned - sizeof(cc__map_alloc_header));
-    header->size_bytes = size_bytes;
-    header->raw_alloc = raw;
-    return (void*)aligned;
-}
-
-static inline void cc__map_release_payload(CCArena* arena, void* ptr) {
-    if (!arena || !ptr) return;
-    cc__map_alloc_header* header =
-        (cc__map_alloc_header*)((uint8_t*)ptr - sizeof(cc__map_alloc_header));
-    if (header->raw_alloc) {
-        (void)cc_arena_release(arena, header->raw_alloc);
-    }
-}
-
-static inline void* cc__map_realloc_payload(CCArena* arena, void* ptr, size_t size_bytes, size_t align) {
-    void* out = cc__map_alloc_payload(arena, size_bytes, align);
-    if (!out || !ptr) return out;
-
-    cc__map_alloc_header* old_header =
-        (cc__map_alloc_header*)((uint8_t*)ptr - sizeof(cc__map_alloc_header));
-    size_t copy_bytes = old_header->size_bytes < size_bytes ? old_header->size_bytes : size_bytes;
-    memcpy(out, ptr, copy_bytes);
-    cc__map_release_payload(arena, ptr);
-    return out;
-}
-
-static inline void *cc__map_kmalloc(void *km, size_t elem_size, size_t elem_align, size_t count) {
-    if (cc__map_is_heap_km(km)) {
-        (void)elem_align;
-        if (elem_size != 0 && count > SIZE_MAX / elem_size)
-            return NULL;
-        return malloc(elem_size * count);
-    }
-    if (!km)
-        return NULL;
-    return cc__map_alloc_payload((CCArena *)km,
-                                 elem_size * count,
-                                 cc__map_storage_align(elem_align));
-}
-
-static inline void *cc__map_kcalloc(void *km, size_t elem_size, size_t elem_align, size_t count) {
-    if (cc__map_is_heap_km(km))
-        return calloc(count, elem_size);
-    if (!km)
-        return NULL;
-    void *p = cc__map_alloc_payload((CCArena *)km,
-                                    elem_size * count,
-                                    cc__map_storage_align(elem_align));
-    if (p && elem_size > 0 && count > 0)
-        memset(p, 0, elem_size * count);
-    return p;
-}
-
-static inline void *cc__map_krealloc(void *km, void *ptr, size_t elem_size, size_t elem_align,
-                                      size_t count) {
-    if (cc__map_is_heap_km(km)) {
-        (void)elem_align;
-        if (elem_size != 0 && count > SIZE_MAX / elem_size)
-            return NULL;
-        return realloc(ptr, elem_size * count);
-    }
-    if (!km)
-        return NULL;
-    return cc__map_realloc_payload((CCArena *)km,
-                                   ptr,
-                                   elem_size * count,
-                                   cc__map_storage_align(elem_align));
-}
-
-static inline void cc__map_kfree(void *km, void *ptr) {
-    if (!ptr)
-        return;
-    if (cc__map_is_heap_km(km)) {
-        free(ptr);
-        return;
-    }
-    cc__map_release_payload((CCArena *)km, ptr);
-}
-
-#define Kmalloc(km, type, cnt) \
-    ((type *)cc__map_kmalloc((km), sizeof(type), _Alignof(type), (size_t)(cnt)))
-
-#define Kcalloc(km, type, cnt) \
-    ((type *)cc__map_kcalloc((km), sizeof(type), _Alignof(type), (size_t)(cnt)))
-
-#define Krealloc(km, type, ptr, cnt) \
-    ((type *)cc__map_krealloc((km), (void *)(ptr), sizeof(type), _Alignof(type), (size_t)(cnt)))
-
-#define Kfree(km, ptr) cc__map_kfree((km), (void *)(ptr))
-
-/* Now include khashl with our allocator hooks */
-#include <ccc/vendor/khashl.h>
-
-/*
  * Hash function helpers
  */
-static inline khint_t cc_kh_hash_i32(int x) { return kh_hash_uint32((khint_t)x); }
-static inline int cc_kh_eq_i32(int a, int b) { return a == b; }
+static inline size_t cc_map_hash_i32(int x) {
+    uint32_t h = (uint32_t)x;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return (size_t)h;
+}
+static inline int cc_map_eq_i32(int a, int b) { return a == b; }
 
-static inline khint_t cc_kh_hash_u64(uint64_t x) { return kh_hash_uint64(x); }
-static inline int cc_kh_eq_u64(uint64_t a, uint64_t b) { return a == b; }
+static inline size_t cc_map_hash_u64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return (size_t)(x ^ (x >> 31));
+}
+static inline int cc_map_eq_u64(uint64_t a, uint64_t b) { return a == b; }
 
 /* Slice hashing (FNV-1a) */
-static inline khint_t cc_kh_hash_slice(CCSlice s) {
-    khint_t h = 2166136261U;
+static inline size_t cc_map_hash_slice(CCSlice s) {
+    size_t h = 2166136261U;
     const unsigned char *p = (const unsigned char*)s.ptr;
     for (size_t i = 0; i < s.len; ++i)
         h ^= p[i], h *= 16777619;
     return h;
 }
-static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
+static inline int cc_map_eq_slice(CCSlice a, CCSlice b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
-/* Same FNV-1a / byte-eq as cc_kh_hash_slice / cc_kh_eq_slice for untracked {ptr,len} keys. */
-static inline khint_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
-    khint_t h = 2166136261U;
+/* Same FNV-1a / byte-eq as cc_map_hash_slice / cc_map_eq_slice for untracked {ptr,len} keys. */
+static inline size_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
+    size_t h = 2166136261U;
     const unsigned char *p = (const unsigned char *)sh.ptr;
     for (size_t i = 0; i < sh.len; ++i)
         h ^= p[i], h *= 16777619;
@@ -315,7 +197,7 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
  * map core. The outer `Name *` handle is arena-allocated and stable; the
  * backend table is free to reallocate internally as it grows.
  *
- * HASH_FN: khint_t fn(K key)
+ * HASH_FN: size_t fn(K key)
  * EQ_FN:   int fn(K a, K b) (returns non-zero if equal)
  */
 #ifdef CC_PARSER_MODE
@@ -645,14 +527,14 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
              1))
 
 /* Convenience: common key types */
-#define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
-#define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
-#define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
+#define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
+#define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
+#define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
 
 /* Legacy *_FULL aliases (OptV arg accepted and ignored). */
-#define CC_MAP_DECL_INT_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
-#define CC_MAP_DECL_U64_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
-#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV_ignored)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
+#define CC_MAP_DECL_INT_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
+#define CC_MAP_DECL_U64_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
+#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV_ignored)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
 
 /* Legacy alias for compatibility */
 #define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)

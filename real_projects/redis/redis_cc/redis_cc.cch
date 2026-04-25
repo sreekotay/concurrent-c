@@ -34,6 +34,8 @@ typedef enum RedisCommandKind {
     REDIS_CMD_INCR,
     REDIS_CMD_EXPIRE,
     REDIS_CMD_TTL,
+    /* Concurrent-C: dump arena / mem stats to stderr; reply +OK. */
+    REDIS_CMD_CC_MEMLOG,
 } RedisCommandKind;
 
 typedef enum RedisReplyKind {
@@ -98,6 +100,7 @@ static inline const char* redis_command_name(RedisCommandKind kind) {
         case REDIS_CMD_INCR: return "INCR";
         case REDIS_CMD_EXPIRE: return "EXPIRE";
         case REDIS_CMD_TTL: return "TTL";
+        case REDIS_CMD_CC_MEMLOG: return "CC_MEMLOG";
         default: return "UNKNOWN";
     }
 }

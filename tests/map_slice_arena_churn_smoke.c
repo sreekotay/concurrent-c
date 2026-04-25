@@ -1,6 +1,5 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/std/map.cch>
-#include <ccc/std/map_heap.cch>
 #include <ccc/std/string.cch>
 
 #include <stdio.h>
@@ -14,7 +13,6 @@ typedef struct {
 } CompactSlice;
 
 CC_MAP_DECL_SLICE(CompactSlice, SliceCompactMap);
-CC_MAP_DECL_HEAP_SLICE(CompactSlice, SliceCompactHeapMap);
 
 static inline CCSlice compact_as_slice(CompactSlice s) {
     return cc_slice_from_parts(s.ptr, (size_t)s.len, s.id, (size_t)s.alen);
@@ -89,56 +87,8 @@ static int run_arena_map(void) {
     return 0;
 }
 
-static int run_heap_map(void) {
-    CCArena arena = cc_arena_heap(1024 * 64);
-    if (!arena.base) return 21;
-
-    SliceCompactHeapMap *m = SliceCompactHeapMap_init();
-    if (!m) return 22;
-
-    for (int i = 0; i < 2000; i++) {
-        char key_buf[32];
-        snprintf(key_buf, sizeof(key_buf), "key:%d", i);
-        CCSlice key = clone_cstr(&arena, key_buf);
-        CompactSlice value = clone_value(&arena, "seed");
-        if (!key.ptr || !value.ptr) return 23;
-        if (SliceCompactHeapMap_insert(m, key, value) != 0) return 24;
-    }
-
-    for (int rep = 0; rep < 200000; rep++) {
-        char key_buf[32];
-        snprintf(key_buf, sizeof(key_buf), "key:%d", rep % 2000);
-        CCSlice query = cc_slice_from_cstr(key_buf);
-        CompactSlice *cell = SliceCompactHeapMap_get_ptr(m, query);
-        if (!cell) {
-            fprintf(stderr, "heap map: missing cell at rep=%d\n", rep);
-            return 25;
-        }
-
-        CompactSlice replacement = clone_value(&arena, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-        if (!replacement.ptr) return 26;
-        if (cell->ptr) (void)cc_arena_release(&arena, cell->ptr);
-        *cell = replacement;
-
-        cell = SliceCompactHeapMap_get_ptr(m, query);
-        if (!cell) {
-            fprintf(stderr, "heap map: missing cell after replace at rep=%d\n", rep);
-            return 27;
-        }
-        CCSlice s = compact_as_slice(*cell);
-        if (s.len == 0 || !s.ptr) {
-            fprintf(stderr, "heap map: bad replacement slice at rep=%d\n", rep);
-            return 28;
-        }
-    }
-
-    return 0;
-}
-
 int main(void) {
     int rc = run_arena_map();
-    if (rc != 0) return rc;
-    rc = run_heap_map();
     if (rc != 0) return rc;
     printf("map_slice_arena_churn_smoke: PASS\n");
     return 0;
