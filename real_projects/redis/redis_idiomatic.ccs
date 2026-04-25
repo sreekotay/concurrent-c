@@ -66,7 +66,7 @@
  * (rehash) and peak RSS under load can exceed a single large upfront
  * table.  Override: -DREDIS_DB_INITIAL_BUCKETS=<N>. */
 #ifndef REDIS_DB_INITIAL_BUCKETS
-#define REDIS_DB_INITIAL_BUCKETS 150000
+#define REDIS_DB_INITIAL_BUCKETS 1024
 #endif
 /* Max requests packed into one submit/drain/flush cycle. */
 #ifndef PIPELINE_LIMIT
