@@ -4373,9 +4373,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     if (!spec) continue;
                     char line[256];
-                    snprintf(line, sizeof(line),
-                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
-                        spec->concrete_name, spec->concrete_name);
+                    if (strcmp(spec->ok_type, "void") == 0) {
+                        snprintf(line, sizeof(line),
+                            "    %s: ((void)0), \\\n",
+                            spec->concrete_name);
+                    } else {
+                        snprintf(line, sizeof(line),
+                            "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
+                            spec->concrete_name, spec->concrete_name);
+                    }
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,

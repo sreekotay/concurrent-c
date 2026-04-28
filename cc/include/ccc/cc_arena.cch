@@ -108,6 +108,10 @@ static inline int cc__arena_ptr_in_block(const CCArena* block, const void* ptr) 
     return block && block->base && p >= block->base && p < (block->base + block->capacity);
 }
 
+static inline bool cc_arena_valid(const CCArena* arena) {
+    return arena && arena->base != NULL;
+}
+
 static inline CCArena* cc__arena_find_block(CCArena* arena, const void* ptr) {
     if (!arena || !ptr) return NULL;
     if (cc__arena_ptr_in_block(arena, ptr)) return arena;
@@ -845,6 +849,10 @@ static inline void cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
     cc_arena_restore(*cp);
 }
 
+static inline void cc_arena_checkpoint_destroy(CCArenaCheckpoint* cp) {
+    cc_arena_checkpoint_restore(cp);
+}
+
 // True (non-zero) iff the current slab can satisfy this alloc without growing
 // (same condition as cc__arena_alloc_fast). Does not observe future growth; use
 // cc_arena_remaining for raw tail space ignoring alignment.
@@ -940,6 +948,9 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
          * directly with CC_ARENA_GROWABLE. */
         .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
+    });
+    (void)cc_type_register("CCArenaCheckpoint", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_arena_checkpoint_destroy"),
     });
 }
 #endif

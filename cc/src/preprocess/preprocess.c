@@ -256,6 +256,7 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
                                        int* out_pass_address) {
     int saw_nursery = 0;
     int saw_arena = 0;
+    int saw_checkpoint = 0;
     int saw_chan = 0;
     int saw_star = 0;
     size_t i = 0;
@@ -279,6 +280,9 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
             if (len == sizeof("CCArena") - 1 &&
                 memcmp(declared_type + start, "CCArena", len) == 0) {
                 saw_arena = 1;
+            } else if (len == sizeof("CCArenaCheckpoint") - 1 &&
+                       memcmp(declared_type + start, "CCArenaCheckpoint", len) == 0) {
+                saw_checkpoint = 1;
             } else if (len == sizeof("CCNursery") - 1 &&
                        memcmp(declared_type + start, "CCNursery", len) == 0) {
                 saw_nursery = 1;
@@ -292,6 +296,11 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
     }
     if (saw_arena && !saw_nursery && !saw_chan && !saw_star) {
         if (out_callee) *out_callee = "cc_arena_destroy";
+        if (out_pass_address) *out_pass_address = 1;
+        return 1;
+    }
+    if (saw_checkpoint && !saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+        if (out_callee) *out_callee = "cc_arena_checkpoint_destroy";
         if (out_pass_address) *out_pass_address = 1;
         return 1;
     }
@@ -2627,6 +2636,60 @@ static int cc__ufcs_fn_name_in_text(const char* src, size_t n, const char* name)
     return 0;
 }
 
+static int cc__match_kw_at(const char* src, size_t n, size_t pos, const char* kw) {
+    size_t klen;
+    if (!src || !kw) return 0;
+    klen = strlen(kw);
+    if (pos + klen > n || memcmp(src + pos, kw, klen) != 0) return 0;
+    if (pos > 0 && cc_is_ident_char(src[pos - 1])) return 0;
+    if (pos + klen < n && cc_is_ident_char(src[pos + klen])) return 0;
+    return 1;
+}
+
+static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* type_name) {
+    char base[128];
+    size_t tlen;
+    if (!src || !type_name || !type_name[0]) return 0;
+    while (*type_name == ' ' || *type_name == '\t') type_name++;
+    if (strncmp(type_name, "struct ", 7) == 0) type_name += 7;
+    else if (strncmp(type_name, "union ", 6) == 0) type_name += 6;
+    tlen = strlen(type_name);
+    while (tlen > 0 && (type_name[tlen - 1] == '*' || type_name[tlen - 1] == ' ' || type_name[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0 || tlen >= sizeof(base)) return 0;
+    memcpy(base, type_name, tlen);
+    base[tlen] = '\0';
+    for (size_t i = 0; i + strlen("CC_MAP_DECL_UFCS") < n; ++i) {
+        size_t p;
+        size_t ident_start;
+        size_t ident_end;
+        if (!cc__match_kw_at(src, n, i, "CC_MAP_DECL_UFCS")) continue;
+        p = cc_skip_ws_and_comments(src, n, i + strlen("CC_MAP_DECL_UFCS"));
+        if (p >= n || src[p] != '(') continue;
+        p = cc_skip_ws_and_comments(src, n, p + 1);
+        ident_start = p;
+        if (p >= n || !cc_is_ident_start(src[p])) continue;
+        p++;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        ident_end = p;
+        p = cc_skip_ws_and_comments(src, n, p);
+        if (p >= n || src[p] != ')') continue;
+        if (ident_end - ident_start == tlen && memcmp(src + ident_start, base, tlen) == 0) return 1;
+    }
+    {
+        char marker[192];
+        int mlen = snprintf(marker, sizeof(marker), "__cc_map_decl_ufcs__%s", base);
+        if (mlen > 0 && (size_t)mlen < sizeof(marker)) {
+            for (size_t i = 0; i + (size_t)mlen <= n; ++i) {
+                if (memcmp(src + i, marker, (size_t)mlen) != 0) continue;
+                if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
+                if (i + (size_t)mlen < n && cc_is_ident_char(src[i + (size_t)mlen])) continue;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int cc__is_slice_ufcs_method(const char* method_name) {
     return method_name &&
            (strcmp(method_name, "to_str") == 0 ||
@@ -3759,6 +3822,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int nursery_like = 0;
         int chan_tx = 0;
         int chan_rx = 0;
+        int map_decl_like = 0;
         int wildcard_like = 0;
         int recv_addressable = 1;
         char wildcard_callee[256];
@@ -3851,10 +3915,11 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         chan_rx = (strncmp(recv_type_base, "CCChanRx_", 9) == 0 ||
                    strcmp(recv_type_base, "CCChanRx") == 0 ||
                    strcmp(recv_type_base, "CCChanRx*") == 0);
+        map_decl_like = cc__source_declares_map_ufcs(src, n, recv_type_base);
         if (!(strncmp(recv_type_base, "CCVec_", 6) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
-              chan_tx || chan_rx ||
+              chan_tx || chan_rx || map_decl_like ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             if (!cc__lookup_ufcs_field_type(fields, field_count, recv_type_base, method_name) &&
                 cc_ufcs_compose_default_callee(wildcard_callee, sizeof(wildcard_callee),
@@ -3896,7 +3961,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             continue;
         }
         family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0);
-        family_pass_direct = parser_map || (strncmp(recv_type_base, "Map_", 4) == 0);
+        family_pass_direct = parser_map || map_decl_like || (strncmp(recv_type_base, "Map_", 4) == 0);
         if (strncmp(recv_type_base, "CCResult_", 9) == 0) {
             if (!(strcmp(method_name, "value") == 0 ||
                   strcmp(method_name, "error") == 0 ||
@@ -4033,6 +4098,10 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (map_decl_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (wildcard_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, wildcard_callee);
