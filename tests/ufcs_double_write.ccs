@@ -5,8 +5,8 @@ int main(void) {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
         if (!arena_storage.base) abort();
         CCArena* arena = &arena_storage;
-        CCString s = CCString_new(arena);
-        s.append("double\n");
+        CCString s = cc_string_new();
+        s.append("double\n", arena);
 
         // Two UFCS calls with the same method in the same "window".
         cc_std_out.write("A\n");

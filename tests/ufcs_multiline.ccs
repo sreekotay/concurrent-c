@@ -8,11 +8,12 @@ int main(void) {
         CCArena arena_storage = @create(kilobytes(4)) @destroy;
         if (!arena_storage.base) abort();
         CCArena* arena = &arena_storage;
-        CCString s = CCString_new(arena);
+        CCString s = cc_string_new();
 
         // Multi-line UFCS call (args across lines)
         s.append(
-            "multi-line\n"
+            "multi-line\n",
+            arena
         );
 
         cc_std_out.write("literal\n");

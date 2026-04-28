@@ -7,11 +7,11 @@ int main(void) {
     if (!arena_storage.base) return 1;
     CCArena* arena = &arena_storage;
     {
-        CCString s = CCString_new(arena);
+        CCString s = cc_string_new();
         int v = helper_add(2, 5);
-        s.append("mixed_c helper_add(2,5)=");
-        CCString_push_int(&s, v);
-        s.append("\n");
+        s.append("mixed_c helper_add(2,5)=", arena);
+        cc_string_push_int(&s, v, arena);
+        s.append("\n", arena);
         cc_std_out.write(s);
     }
     return 0;

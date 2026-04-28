@@ -478,7 +478,6 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
         if (!alias || !alias[0] || strcmp(alias, work) == 0) break;
         snprintf(work, sizeof(work), "%s", alias);
     }
-
     if ((strncmp(work, "Vec::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "Vec<", 4) == 0 && work[strlen(work) - 1] == '>') ||
         (strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
@@ -669,7 +668,56 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '{') {
-            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            int new_scope_id = next_scope_id++;
+            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = new_scope_id;
+            {
+                size_t close = i;
+                while (close > 0 && isspace((unsigned char)src[close - 1])) close--;
+                if (close > 0 && src[close - 1] == ')') {
+                    size_t open = close - 1;
+                    int depth = 1;
+                    while (open > 0 && depth > 0) {
+                        open--;
+                        if (src[open] == ')') depth++;
+                        else if (src[open] == '(') depth--;
+                    }
+                    if (depth == 0) {
+                        size_t param_start = open + 1;
+                        size_t p = param_start;
+                        int par = 0, br = 0;
+                        while (p <= close - 1) {
+                            if (p == close - 1 || (src[p] == ',' && par == 0 && br == 0)) {
+                                char decl_name[128];
+                                char decl_type[256];
+                                cc_parse_decl_name_and_type(src + param_start, src + p,
+                                                            decl_name, sizeof(decl_name),
+                                                            decl_type, sizeof(decl_type));
+                                if (decl_name[0] &&
+                                    strcmp(decl_name, var_name) == 0 &&
+                                    strcmp(decl_type, "void") != 0 &&
+                                    !cc_is_non_decl_stmt_type(decl_type) &&
+                                    decl_count < MAX_DECLS) {
+                                    decls[decl_count].scope_id = new_scope_id;
+                                    cc__normalize_local_decl_type(decls[decl_count].type_name,
+                                                                  sizeof(decls[decl_count].type_name),
+                                                                  decl_type);
+                                    decl_count++;
+                                }
+                                param_start = p + 1;
+                            } else if (src[p] == '(') {
+                                par++;
+                            } else if (src[p] == ')' && par > 0) {
+                                par--;
+                            } else if (src[p] == '[') {
+                                br++;
+                            } else if (src[p] == ']' && br > 0) {
+                                br--;
+                            }
+                            p++;
+                        }
+                    }
+                }
+            }
             stmt_start = i + 1;
             i++;
             continue;

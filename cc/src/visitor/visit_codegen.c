@@ -421,23 +421,23 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
         if (c == '\'') { in_chr = 1; i++; continue; }
 
         if ((i == 0 || !cc_is_ident_char(src[i - 1])) &&
-            i + 9 < n && memcmp(src + i, "CCString_", 9) == 0) {
-            size_t method_start = i + 9;
+            i + 10 < n && memcmp(src + i, "cc_string_", 10) == 0) {
+            size_t method_start = i + 10;
             size_t method_end = method_start;
             const char* replacement = NULL;
             while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
             if (method_end < n && src[method_end] == '(') {
                 size_t method_len = method_end - method_start;
-                if (method_len == 6 && memcmp(src + method_start, "append", 6) == 0) replacement = "CCString_push";
-                else if (method_len == 4 && memcmp(src + method_start, "push", 4) == 0) replacement = "CCString_push";
-                else if (method_len == 8 && memcmp(src + method_start, "as_slice", 8) == 0) replacement = "CCString_as_slice";
-                else if (method_len == 5 && memcmp(src + method_start, "clear", 5) == 0) replacement = "CCString_clear";
-                else if (method_len == 4 && memcmp(src + method_start, "cstr", 4) == 0) replacement = "CCString_cstr";
-                else if (method_len == 3 && memcmp(src + method_start, "len", 3) == 0) replacement = "CCString_len";
-                else if (method_len == 3 && memcmp(src + method_start, "cap", 3) == 0) replacement = "CCString_cap";
+                if (method_len == 6 && memcmp(src + method_start, "append", 6) == 0) replacement = "cc_string_push";
+                else if (method_len == 4 && memcmp(src + method_start, "push", 4) == 0) replacement = "cc_string_push";
+                else if (method_len == 8 && memcmp(src + method_start, "as_slice", 8) == 0) replacement = "cc_string_as_slice";
+                else if (method_len == 5 && memcmp(src + method_start, "clear", 5) == 0) replacement = "cc_string_clear";
+                else if (method_len == 4 && memcmp(src + method_start, "cstr", 4) == 0) replacement = "cc_string_cstr";
+                else if (method_len == 3 && memcmp(src + method_start, "len", 3) == 0) replacement = "cc_string_len";
+                else if (method_len == 3 && memcmp(src + method_start, "cap", 3) == 0) replacement = "cc_string_cap";
                 else if (method_len > 0) {
                     static _Thread_local char buf[128];
-                    snprintf(buf, sizeof(buf), "CCString_%.*s", (int)method_len, src + method_start);
+                    snprintf(buf, sizeof(buf), "cc_string_%.*s", (int)method_len, src + method_start);
                     replacement = buf;
                 }
                 if (replacement) {
@@ -972,7 +972,7 @@ static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t l
     return 0;
 }
 
-static const char* cc__canonicalize_string_type_codegen(const char* type_name) {
+static const char* cc__canonicalize_type_alias_codegen(const char* type_name) {
     if (!type_name) return NULL;
     if (strcmp(type_name, "CCVec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
         return "CCString";
@@ -1670,7 +1670,7 @@ static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_s
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!type_name || !type_name[0]) return;
-    type_name = cc__canonicalize_string_type_codegen(type_name);
+    type_name = cc__canonicalize_type_alias_codegen(type_name);
     bang = strchr(type_name, '!');
     if (!bang || bang[1] == '=') {
         strncpy(out, type_name, out_sz - 1);
@@ -1797,7 +1797,7 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
     strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
     {
-        const char* canon = cc__canonicalize_string_type_codegen(out_type);
+        const char* canon = cc__canonicalize_type_alias_codegen(out_type);
         if (canon != out_type) {
             strncpy(out_type, canon, out_type_sz - 1);
             out_type[out_type_sz - 1] = '\0';
@@ -2115,8 +2115,8 @@ static void cc__trim_expr_parens_codegen(const char** start, const char** end) {
 
 static const char* cc__string_helper_for_type_codegen(const char* family, const char* type_name) {
     if (!family || !type_name || !type_name[0]) return NULL;
-    type_name = cc__canonicalize_string_type_codegen(type_name);
-    if (strcmp(family, "CCString_from") == 0) {
+    type_name = cc__canonicalize_type_alias_codegen(type_name);
+    if (strcmp(family, "cc_string_from") == 0) {
         if (strcmp(type_name, "char") == 0) return "char_to_str";
         if (strcmp(type_name, "signed char") == 0) return "signed_char_to_str";
         if (strcmp(type_name, "unsigned char") == 0) return "unsigned_char_to_str";
@@ -2173,30 +2173,30 @@ static const char* cc__string_helper_for_type_codegen(const char* family, const 
         return NULL;
     }
     if (strcmp(family, "cc__string_slot_push") == 0) {
-        if (strcmp(type_name, "char") == 0) return "cc__string_slot_push_from_char";
-        if (strcmp(type_name, "signed char") == 0) return "cc__string_slot_push_from_signed_char";
-        if (strcmp(type_name, "unsigned char") == 0) return "cc__string_slot_push_from_unsigned_char";
-        if (strcmp(type_name, "short") == 0) return "cc__string_slot_push_from_short";
-        if (strcmp(type_name, "unsigned short") == 0) return "cc__string_slot_push_from_unsigned_short";
-        if (strcmp(type_name, "int") == 0) return "cc__string_slot_push_from_int";
-        if (strcmp(type_name, "unsigned") == 0) return "cc__string_slot_push_from_unsigned";
-        if (strcmp(type_name, "long") == 0) return "cc__string_slot_push_from_long";
-        if (strcmp(type_name, "unsigned long") == 0) return "cc__string_slot_push_from_unsigned_long";
-        if (strcmp(type_name, "long long") == 0) return "cc__string_slot_push_from_long_long";
-        if (strcmp(type_name, "unsigned long long") == 0) return "cc__string_slot_push_from_unsigned_long_long";
-        if (strcmp(type_name, "int8_t") == 0) return "cc__string_slot_push_from_int8_t";
-        if (strcmp(type_name, "uint8_t") == 0) return "cc__string_slot_push_from_uint8_t";
-        if (strcmp(type_name, "int16_t") == 0) return "cc__string_slot_push_from_int16_t";
-        if (strcmp(type_name, "uint16_t") == 0) return "cc__string_slot_push_from_uint16_t";
-        if (strcmp(type_name, "int32_t") == 0) return "cc__string_slot_push_from_int32_t";
-        if (strcmp(type_name, "uint32_t") == 0) return "cc__string_slot_push_from_uint32_t";
-        if (strcmp(type_name, "int64_t") == 0) return "cc__string_slot_push_from_int64_t";
-        if (strcmp(type_name, "uint64_t") == 0) return "cc__string_slot_push_from_uint64_t";
-        if (strcmp(type_name, "intptr_t") == 0) return "cc__string_slot_push_from_intptr_t";
-        if (strcmp(type_name, "uintptr_t") == 0) return "cc__string_slot_push_from_uintptr_t";
-        if (strcmp(type_name, "size_t") == 0) return "cc__string_slot_push_from_size_t";
-        if (strcmp(type_name, "float") == 0) return "cc__string_slot_push_from_float";
-        if (strcmp(type_name, "double") == 0) return "cc__string_slot_push_from_double";
+        if (strcmp(type_name, "char") == 0) return "cc_string_push_char";
+        if (strcmp(type_name, "signed char") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "unsigned char") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "short") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "unsigned short") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "int") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "unsigned") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "long") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "unsigned long") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "long long") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "unsigned long long") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "int8_t") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "uint8_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "int16_t") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "uint16_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "int32_t") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "uint32_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "int64_t") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "uint64_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "intptr_t") == 0) return "cc_string_push_int";
+        if (strcmp(type_name, "uintptr_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "size_t") == 0) return "cc_string_push_uint";
+        if (strcmp(type_name, "float") == 0) return "cc_string_push_f32";
+        if (strcmp(type_name, "double") == 0) return "cc_string_push_f64";
         if (strcmp(type_name, "bool") == 0) return "cc__string_slot_push_from_bool";
         return NULL;
     }
@@ -2484,8 +2484,8 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
         while (i < n && cc_is_ident_char(src[i])) i++;
         ident_end = i;
         family_len = ident_end - ident_start;
-        if (family_len == 13 && memcmp(src + ident_start, "CCString_from", 13) == 0) {
-            family = "CCString_from";
+        if (family_len == 13 && memcmp(src + ident_start, "cc_string_from", 13) == 0) {
+            family = "cc_string_from";
         } else if (family_len == 19 && memcmp(src + ident_start, "cc__string_slot_arg", 19) == 0) {
             family = "cc__string_slot_arg";
         } else if (family_len == 20 && memcmp(src + ident_start, "cc__string_slot_push", 20) == 0) {
@@ -3197,6 +3197,19 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Normalize parser-safe UFCS before any phase3 reparse. This catches
+       registered/default method calls whose receivers are known from local
+       declarations or function parameters, so TCC does not have to accept a
+       temporary `recv.method(...)` spelling just to let later passes run. */
+    if (src_ufcs && ctx) {
+        char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+        if (rew) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew;
+            src_ufcs_len = strlen(src_ufcs);
+        }
+    }
+
     /* Produced by the closure-literal AST pass (emitted into the output TU). */
     char* closure_protos = NULL;
     size_t closure_protos_len = 0;
@@ -3639,6 +3652,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* NOTE: slice move/provenance checking is now handled by the stub-AST checker pass
        (`cc/src/visitor/checker.c`) before visitor lowering. */
+
+    /* Last-chance UFCS normalization before writing C. Earlier AST/text passes
+       can rewrite large source regions from parser snapshots and leave a
+       member-call spelling behind. Do not let `recv.method(...)` survive to
+       the host compiler when the receiver type is one of the registered
+       parser-safe UFCS families. */
+    if (src_ufcs && ctx) {
+        char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+        if (rew) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew;
+            src_ufcs_len = strlen(src_ufcs);
+        }
+    }
 
     fprintf(out, "/* CC lowered C output */\n");
     fprintf(out, "#include <stdlib.h>\n");
@@ -4636,10 +4663,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 "#include \"std/prelude.h\"\n"
                 "int main(void) {\n"
                 "  CCArena a = cc_heap_arena(kilobytes(1));\n"
-                "  CCString s = CCString_new(&a);\n"
-                "  CCString_push(&s, cc_slice_from_buffer(\"Hello, \", sizeof(\"Hello, \") - 1));\n"
-                "  CCString_push(&s, cc_slice_from_buffer(\"Concurrent-C via UFCS!\\n\", sizeof(\"Concurrent-C via UFCS!\\n\") - 1));\n"
-                "  cc_std_out_write(CCString_as_slice(&s));\n"
+                "  CCString s = cc_string_new();\n"
+                "  cc_string_push(&s, cc_slice_from_buffer(\"Hello, \", sizeof(\"Hello, \") - 1), &a);\n"
+                "  cc_string_push(&s, cc_slice_from_buffer(\"Concurrent-C via UFCS!\\n\", sizeof(\"Concurrent-C via UFCS!\\n\") - 1), &a);\n"
+                "  cc_std_out_write(cc_string_as_slice(&s));\n"
                 "  return 0;\n"
                 "}\n");
     }

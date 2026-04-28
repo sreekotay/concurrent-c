@@ -5,7 +5,7 @@
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
-    CCString s = CCString_from_slice(&arena, @slice("hello"));
+    CCString s = cc_string_from_slice(&arena, @slice("hello"));
 
     CCSlice sl = s.as_slice();
 

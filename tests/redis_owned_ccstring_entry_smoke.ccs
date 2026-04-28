@@ -18,8 +18,8 @@ static int clone_owned_string(CCString* out, CCArena* out_arena, CCSlice src) {
     CCArena arena = cc_arena_heap(arena_size) @destroy;
     if (!arena.base) return -1;
 
-    CCString s = CCString_from_slice(&arena, src);
-    if (src.len > 0 && CCString_len(&s) != src.len) return -2;
+    CCString s = cc_string_from_slice(&arena, src);
+    if (src.len > 0 && cc_string_len(&s) != src.len) return -2;
 
     *out = s;
     *out_arena = arena.detach();
@@ -65,28 +65,28 @@ int main(void) {
         CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
         assert(req_arena.base);
 
-        CCString req_key = CCString_new(&req_arena);
-        CCString req_value = CCString_new(&req_arena);
-        CCString_push_cstr(&req_key, "alpha");
-        CCString_push_cstr(&req_value, "one");
+        CCString req_key = cc_string_new();
+        CCString req_value = cc_string_new();
+        cc_string_push_cstr(&req_key, "alpha", &req_arena);
+        cc_string_push_cstr(&req_value, "one", &req_arena);
 
         assert(owned_entry_init(&entry, req_key.as_slice(), req_value.as_slice()) == 0);
     }
 
-    assert(strcmp(CCString_cstr(&entry.key), "alpha") == 0);
-    assert(strcmp(CCString_cstr(&entry.value), "one") == 0);
+    assert(strcmp(cc_string_cstr(&entry.key, &entry.key_arena), "alpha") == 0);
+    assert(strcmp(cc_string_cstr(&entry.value, &entry.value_arena), "one") == 0);
 
     {
         CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
         assert(req_arena.base);
 
-        CCString next_value = CCString_new(&req_arena);
-        CCString_push_cstr(&next_value, "two");
+        CCString next_value = cc_string_new();
+        cc_string_push_cstr(&next_value, "two", &req_arena);
         assert(owned_entry_replace_value(&entry, next_value.as_slice()) == 0);
     }
 
-    assert(strcmp(CCString_cstr(&entry.key), "alpha") == 0);
-    assert(strcmp(CCString_cstr(&entry.value), "two") == 0);
+    assert(strcmp(cc_string_cstr(&entry.key, &entry.key_arena), "alpha") == 0);
+    assert(strcmp(cc_string_cstr(&entry.value, &entry.value_arena), "two") == 0);
 
     owned_entry_free(&entry);
     return 0;

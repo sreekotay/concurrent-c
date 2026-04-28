@@ -121,8 +121,8 @@ function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
 (`@async`, `@await`, `@match`, `@defer`, `@cancel`, `@errhandler`,
-`@destroy`, `@with`, `@with_deadline`, `@nursery`, `@spawn`,
-`@comptime`, `@blocking`, `@noblock`, `@lock`, `@for`). Bare forms are
+`@destroy`, `@with_deadline`, `@comptime`, `@blocking`,
+`@noblock`, `@lock`, `@for`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
 etc. are legal variable / field / function names and never keywords
 without the `@`. This eliminates identifier-collision and
@@ -204,10 +204,7 @@ bugs.
 | `@errhandler`  | Block-scoped default handler for `!>;`                                  | `@errhandler(CCError e) { log(e); }`   |
 | `@err`         | Forward current error to the enclosing handler                          | `@err(e);`                             |
 | `@match`       | Multiplex on channel events / typed variants                            | `@match { case int x = @await ch: … }` |
-| `@with`        | Structured lifetime scope                                               | `@with (open(p)) as f { … }`           |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
-| `@nursery`     | Structured-concurrency scope                                            | `@nursery(n) { n.spawn(task); }`       |
-| `@spawn`       | Spawn a child task in the current nursery                               | `@spawn worker();`                     |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@lock`        | Acquire mutex, bind guard                                               | `@lock (m) as g { g.data++; }`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
@@ -221,7 +218,7 @@ bugs.
 | `unsafe`       | (Bare) disable safety checks in a block                                 | `unsafe { ptr_cast(); }`               |
 
 
-### Special Block Forms
+### Declaration and Statement Forms
 
 
 | Form                            | Purpose                                                  | Example                                                  |
@@ -287,7 +284,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
 
 
-### Block Forms (1)
+### Deadline Scope Forms
 
 
 | Form                              | Purpose                                                  | Example                                                         |
@@ -616,9 +613,9 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
 `@match`, `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
-`@errhandler`, `@err`, `@destroy`, `@with`, `@with_deadline`,
-`@nursery`, `@spawn`, `@comptime`, `@lock`, `@for`,
-`@latency_sensitive`, `@scoped`, `@slice`, `@string`. The bare
+`@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
+`@lock`, `@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`.
+The bare
 identifiers `async`, `await`, `blocking`, `noblock`, `match`, `defer`,
 `nursery`, `spawn`, `lock`, `comptime`, `cancel`, etc. are **not**
 reserved — they may be used freely as variable, field, parameter, or
@@ -1490,7 +1487,7 @@ All suspension points (both `@await` and `@async` function calls) are implicitly
     @with_deadline(timeout) {
         @await fetch_data();    // ✅ Suspension point: cancellation-aware
         result = compute();    // Non-suspension: safe, CPU work only
-        spawn (worker());        // ✅ If worker is @async: suspension point, cancellation-aware
+        @await worker();        // ✅ Suspension point: cancellation-aware
         @await store();         // ✅ Suspension point: cancellation-aware
     }
 }
@@ -1566,7 +1563,7 @@ This section defines the allocation model and lifetime boundaries:
 
 - **Arena API** — creation, allocation, lifecycle
 - **§5.1 `@defer`** — scoped cleanup
-- **§5.2 Arena blocks** — structured arena lifetime
+- **§5.2 Scoped arena lifetimes** — ordinary lexical scopes with `@destroy`
 
 ---
 
@@ -1904,63 +1901,47 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 
 ---
 
-### 5.2 Arena blocks
+### 5.2 Scoped Arena Lifetimes
 
-Arena blocks provide scoped arena lifetime (create form) and scoped reset (reset form).
+Arena lifetime is expressed with ordinary C scopes and declaration-attached
+cleanup. There is no dedicated arena block form in the language surface.
 
 **Create + free:**
 
 ```c
-arena scratch(kilobytes(64)) {
+{
+    CCArena scratch = cc_arena_heap(kilobytes(64)) @destroy;
     char[:] tmp = read_file(&scratch, "x");
     use(tmp);
 }
 // scratch is freed here
 ```
 
-The identifier `scratch` is in scope only within the block.
+The identifier `scratch` follows ordinary C lexical scoping. The `@destroy`
+annotation on the declaration schedules `cc_arena_destroy(&scratch)` at scope
+exit, including on `return` or result propagation.
 
 **Scoped reset:**
 
 ```c
-CCArena scratch = cc_arena_heap(kilobytes(256));
-@defer cc_arena_free(&scratch);
+CCArena scratch = cc_arena_heap(kilobytes(256)) @destroy;
 
 for (int i = 0; i < 10; i++) {
-    arena(&scratch) {
-        char[:] tmp = arena_alloc<char>(&scratch, 1024);
-        process(tmp);
-    }
-    // scratch is reset here (memory reclaimed, slices invalidated)
+    CCArenaCheckpoint cp = cc_arena_checkpoint(&scratch);
+    char[:] tmp = arena_alloc(char, &scratch, 1024);
+    process(tmp);
+    cc_arena_restore(cp);  // memory reclaimed; post-checkpoint slices invalidated
 }
 ```
 
-The reset form is selected when the parenthesized expression has type `Arena*` (after applying `&` as usual in C). Both `arena(&a)` (where `a` is `Arena`) and `arena(ptr)` (where `ptr` is `Arena*`) are valid.
+Use checkpoints when a long-lived arena needs repeated scratch regions. A
+checkpoint/restore pair is explicit and composes with ordinary control flow;
+`@defer` may be used to restore on all exits from a nested scope when needed.
 
-**Rule:** `arena(ptr) { ... }` resets `*ptr` exactly once at block exit, including on `return` or `try` propagation.
-
-**Rule:** Arena blocks are scoped lifetime/reset sugar around a named arena.
-
-**Lowering:**
-
-```c
-// arena scratch(size) { BODY }
-// lowers to:
-{
-    CCArena scratch = cc_arena_heap(size);
-    @defer cc_arena_free(&scratch);
-    BODY
-}
-
-// arena(ptr) { BODY }   // where ptr has type Arena*
-// lowers to:
-{
-    @defer arena_reset(ptr);
-    BODY
-}
-```
-
-**Rule:** Any slice derived from an arena that is freed or reset by an arena block is treated as potentially invalid after the block. Using it after the block is a compile error unless it is proven independent (e.g., copied to longer-lived storage).
+**Rule:** Any slice derived from an arena that is freed by `@destroy`, reset by
+`cc_arena_reset`, or invalidated by `cc_arena_restore` is treated as potentially
+invalid after that operation. Using it afterward is a compile error unless it is
+proven independent (e.g., copied to longer-lived storage).
 
 ---
 
@@ -2001,21 +1982,22 @@ void   Thread.join();                    // wait for completion
 
 ```c
 int x = 0;
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 // Value capture (default): x is copied, immutable in closure
-spawn(() => { printf("%d", x); });       // ✅ OK
-spawn(() => { x++; });                   // ❌ ERROR: value capture is immutable
+n->spawn(() => { printf("%d", x); });       // ✅ OK
+n->spawn(() => { x++; });                   // ❌ ERROR: value capture is immutable
 
 // Reference capture: explicit sharing with mutation check
-spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
-spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
+n->spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
+n->spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
 
 // Safe wrappers: mutation allowed
 Atomic::[int] counter = atomic_new(0);
-spawn(() => [&counter] { counter++; }); // ✅ OK: Atomic is thread-safe
+n->spawn(() => [&counter] { counter++; }); // ✅ OK: Atomic is thread-safe
 
 // Escape hatch: @unsafe bypasses check
-spawn(@unsafe () => [&x] { x++; });     // ⚠️ OK: explicit unsafe
+n->spawn(@unsafe () => [&x] { x++; });     // ⚠️ OK: explicit unsafe
 ```
 
 This prevents data races while allowing explicit shared state through safe wrappers.
@@ -3196,7 +3178,7 @@ This section specifies:
 - **§8.6 Streaming** — channel-based producers
 - **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
-- **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async and nursery forms
+- **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 
 ---
 
@@ -3207,14 +3189,19 @@ A **nursery** is a scope-bound handle that manages the lifetime, cancellation, a
 `CCNursery` is a library type constructed with `cc_nursery_create(NULL)` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
 
 ```c
-CCNursery* n = cc_nursery_create(NULL) !> @destroy {
-    // runs after all children have joined
-};
-n->spawn(() => work1());
-n->spawn(() => work2());
+{
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy {
+        // runs after all children have joined
+    };
+    n->spawn(() => work1());
+    n->spawn(() => work2());
+}
 ```
 
 The `@destroy` clause on the declaration schedules nursery teardown (which joins all children) at scope exit. Nothing in the lowered form runs implicitly — `@defer`-shaped lifetime (§5.1) is the normative mechanism.
+
+Ordinary lexical blocks create nested nursery lifetimes; `n->spawn(...)` is
+UFCS on the explicit nursery handle.
 
 **Properties:**
 
@@ -4483,7 +4470,6 @@ Streaming uses explicit channel parameters:
 ```c
 // Internal Scope (created implicitly in @async functions for batching/wrapping)
 struct Scope {
-    void spawn(expr);                              // (internal) spawn async work
     @async T!>(E) run_blocking::[T, E](() => T!>(E));  // (internal) run closure on thread pool
     void cancel();                                 // (internal) cancel all spawned work
     bool cancelled();                              // (internal) check cancellation
@@ -4676,13 +4662,13 @@ CC_DEADLOCK_DETECT=0 ./my_program
   Thread 1: blocked on recv (channel empty, waiting for sender)
 
 Common causes:
-  • cc_block_on() inside spawn() or a nursery child
+  • cc_block_on() inside a nursery child
   • Producer/consumer mismatch (sends without receivers)
   • Missing channel close (receiver waiting forever)
 
 Suggested fixes:
   • Use cc_block_all() to run multiple async tasks concurrently
-  • Use sync channel ops in spawn() instead of async
+  • Use sync channel ops in nursery children instead of async
   • Ensure channels are closed when producers finish
 ```
 
@@ -5798,29 +5784,30 @@ For thread/task closures, reference captures (`[&x]`) are checked for mutation:
 
 ```c
 int counter = 0;
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 // ✅ OK: read value-captured variable
-spawn(() => { printf("%d", counter); });
+n->spawn(() => { printf("%d", counter); });
 
 // ❌ ERROR: cannot modify value-captured variable
-spawn(() => { counter++; });
+n->spawn(() => { counter++; });
 // error: cannot modify value-captured variable 'counter'
 // help: use [&counter] for reference capture
 
 // ✅ OK: read-only reference capture
-spawn(() => [&counter] { printf("%d", counter); });
+n->spawn(() => [&counter] { printf("%d", counter); });
 
 // ❌ ERROR: mutation of shared reference
-spawn(() => [&counter] { counter++; });
+n->spawn(() => [&counter] { counter++; });
 // error: mutation of shared reference 'counter' in spawned task
 // help: use Atomic::[int], Mutex::[int], or @unsafe [&counter]
 
 // ✅ OK: safe wrapper
 Atomic::[int] safe_counter = atomic_new(0);
-spawn(() => [&safe_counter] { safe_counter++; });
+n->spawn(() => [&safe_counter] { safe_counter++; });
 
 // ⚠️ OK: explicit unsafe (you own this race)
-spawn(@unsafe () => [&counter] { counter++; });
+n->spawn(@unsafe () => [&counter] { counter++; });
 ```
 
 **Mutation patterns detected:**
@@ -6387,7 +6374,7 @@ struct NonSendable { pthread_t tid; };
 
 unsafe {
     NonSendable ns = get_non_sendable();
-    spawn (() => { use(ns); });  // ERROR still: closure escapes
+    spawn_thread(() => { use(ns); });  // ERROR still: closure escapes
 }
 ```
 

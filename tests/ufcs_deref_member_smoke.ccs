@@ -13,8 +13,8 @@ int main(void) {
     assert(arena.base);
 
     Entry e = {0};
-    e.key = CCString_from_slice(&arena, @slice("hello"));
-    e.value = CCString_from_slice(&arena, @slice("world"));
+    e.key = cc_string_from_slice(&arena, @slice("hello"));
+    e.value = cc_string_from_slice(&arena, @slice("world"));
 
     Entry* p = &e;
     Entry** link = &p;
