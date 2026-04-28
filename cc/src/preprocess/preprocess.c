@@ -2608,6 +2608,25 @@ static void cc__normalize_bool_family_type(char* type_name, size_t type_name_sz)
 
 static int cc__type_is_known_ufcs_family_base(const char* type_name);
 
+static int cc__ufcs_fn_name_in_text(const char* src, size_t n, const char* name) {
+    size_t nlen;
+    if (!src || !name || !name[0]) return 0;
+    nlen = strlen(name);
+    if (nlen == 0 || nlen >= n) return 0;
+    for (size_t i = 0; i + nlen < n; ++i) {
+        if (src[i] != name[0]) continue;
+        if (memcmp(src + i, name, nlen) != 0) continue;
+        if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
+        {
+            size_t j = i + nlen;
+            if (j < n && cc_is_ident_char(src[j])) continue;
+            j = cc_skip_ws_and_comments(src, n, j);
+            if (j < n && src[j] == '(') return 1;
+        }
+    }
+    return 0;
+}
+
 static int cc__is_slice_ufcs_method(const char* method_name) {
     return method_name &&
            (strcmp(method_name, "to_str") == 0 ||
@@ -3515,6 +3534,29 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         root[rn] = '\0';
         p += rn;
     }
+    {
+        const char* call_p = p;
+        while (*call_p == ' ' || *call_p == '\t') call_p++;
+        if (*call_p == '(') {
+            const char* q = call_p;
+            int depth = 0;
+            do {
+                if (*q == '(') depth++;
+                else if (*q == ')') depth--;
+                q++;
+            } while (*q && depth > 0);
+            while (*q == ' ' || *q == '\t') q++;
+            /* Parser-survival bridge for the preceding pass's `key.hdr()`
+               rewrite. The real fix is to let the parser/AST retry a missing
+               member-call parse through registered UFCS dispatch, then this
+               text pass no longer needs to preserve intermediate UFCS types. */
+            if (depth == 0 && *q == '\0' && strcmp(root, "cc_slice_hdr") == 0) {
+                snprintf(out_type, out_type_sz, "CCSliceHdr");
+                if (out_recv_is_ptr) *out_recv_is_ptr = 0;
+                return 1;
+            }
+        }
+    }
     type_name = NULL;
     if (source_text) {
         type_name = cc__lookup_scoped_ufcs_var_type(source_text, use_offset, root,
@@ -3591,10 +3633,35 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
         cc__copy_type_base(base_type, sizeof(base_type), out_type);
         if (is_arrow && base_type[0] == '\0') return 0;
-        type_name = cc__lookup_ufcs_field_type(fields, field_count, base_type, field_name);
-        if (!type_name) return 0;
-        strncpy(out_type, type_name, out_type_sz - 1);
-        out_type[out_type_sz - 1] = '\0';
+        {
+            const char* after_member = p;
+            while (*after_member == ' ' || *after_member == '\t') after_member++;
+            if (*after_member == '(') {
+                const char* q = after_member;
+                int depth = 0;
+                do {
+                    if (*q == '(') depth++;
+                    else if (*q == ')') depth--;
+                    q++;
+                } while (*q && depth > 0);
+                if (depth != 0) return 0;
+                if (cc__lookup_ufcs_field_type(fields, field_count, base_type, field_name)) return 0;
+                if ((strcmp(base_type, "CCSlice") == 0 ||
+                     strcmp(base_type, "CCSliceUnique") == 0 ||
+                     strcmp(base_type, "CCSliceShared") == 0) &&
+                    strcmp(field_name, "hdr") == 0) {
+                    snprintf(out_type, out_type_sz, "CCSliceHdr");
+                    p = q;
+                } else {
+                    return 0;
+                }
+            } else {
+                type_name = cc__lookup_ufcs_field_type(fields, field_count, base_type, field_name);
+                if (!type_name) return 0;
+                strncpy(out_type, type_name, out_type_sz - 1);
+                out_type[out_type_sz - 1] = '\0';
+            }
+        }
         cc__resolve_registered_alias_type_name(reg, out_type, out_type, out_type_sz);
         {
             char normalized_recv_type[256];
@@ -3629,6 +3696,29 @@ static int cc__ufcs_preceded_by_await(const char* src, size_t recv_start) {
     if (memcmp(src + j - 5, "await", 5) != 0) return 0;
     if (j > 5 && cc_is_ident_char(src[j - 6])) return 0;
     return 1;
+}
+
+static int cc__ufcs_recv_expr_is_addressable(const char* recv) {
+    const char* p = recv;
+    if (!p) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!cc_is_ident_start(*p)) return 0;
+    while (cc_is_ident_char(*p)) p++;
+    for (;;) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '.') {
+            p++;
+        } else if (p[0] == '-' && p[1] == '>') {
+            p += 2;
+        } else {
+            break;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        if (!cc_is_ident_start(*p)) return 0;
+        while (cc_is_ident_char(*p)) p++;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    return *p == '\0';
 }
 
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
@@ -3669,12 +3759,20 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int nursery_like = 0;
         int chan_tx = 0;
         int chan_rx = 0;
+        int wildcard_like = 0;
+        int recv_addressable = 1;
+        char wildcard_callee[256];
         const char* channel_callee = NULL;
+        wildcard_callee[0] = '\0';
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &method_start, &method_end,
                                              &recv_start, &paren_pos, &paren_end,
                                              method_name, sizeof(method_name),
                                              recv_expr, sizeof(recv_expr))) {
+            i++;
+            continue;
+        }
+        if (recv_start < last_emit) {
             i++;
             continue;
         }
@@ -3758,8 +3856,15 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
-            i++;
-            continue;
+            if (!cc__lookup_ufcs_field_type(fields, field_count, recv_type_base, method_name) &&
+                cc_ufcs_compose_default_callee(wildcard_callee, sizeof(wildcard_callee),
+                                               recv_type_base, method_name) &&
+                cc__ufcs_fn_name_in_text(src, n, wildcard_callee)) {
+                wildcard_like = 1;
+            } else {
+                i++;
+                continue;
+            }
         }
         if ((chan_tx || chan_rx) && cc__ufcs_preceded_by_await(src, recv_start)) {
             i++;
@@ -3806,6 +3911,45 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             } else if (strcmp(method_name, "error") == 0) {
                 strcpy(method_name, "error");
             }
+        }
+        recv_addressable = cc__ufcs_recv_expr_is_addressable(recv_expr);
+        if (wildcard_like && !recv_is_ptr && !recv_addressable) {
+            static int g_wildcard_recv_tmp_id = 0;
+            int tmp_id = ++g_wildcard_recv_tmp_id;
+            char tmp_name[64];
+            char* lowered_recv = cc__rewrite_generic_family_ufcs_impl(recv_expr, strlen(recv_expr), parser_safe);
+            const char* emit_recv = lowered_recv ? lowered_recv : recv_expr;
+            size_t args_start = paren_pos + 1;
+            size_t args_end = paren_end;
+            snprintf(tmp_name, sizeof(tmp_name), "__cc_ufcs_recv_%d", tmp_id);
+            while (args_start < args_end &&
+                   (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n' || src[args_start] == '\r')) {
+                args_start++;
+            }
+            while (args_end > args_start &&
+                   (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
+                args_end--;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_name);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, " = ");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, emit_recv);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "; ");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, wildcard_callee);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_name);
+            if (args_end > args_start) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "); })");
+            free(lowered_recv);
+            last_emit = paren_end + 1;
+            i = paren_end + 1;
+            continue;
         }
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
         {
@@ -3890,6 +4034,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             } else if (nursery_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (wildcard_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, wildcard_callee);
             } else {
                 cc__copy_type_base(callee_family, sizeof(callee_family), recv_type_base);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, callee_family[0] ? callee_family : recv_type_base);
@@ -3933,7 +4079,20 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
    stub parse sees lowered receiver forms for fragile nested contexts; the AST
    UFCS pass remains authoritative for everything else. */
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
-    return cc__rewrite_generic_family_ufcs_impl(src, n, 1);
+    char* cur = NULL;
+    size_t cur_len = n;
+    if (!src || n == 0) return NULL;
+    for (int iter = 0; iter < 4; ++iter) {
+        const char* in = cur ? cur : src;
+        char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
+        if (!next) {
+            return cur;
+        }
+        if (cur) free(cur);
+        cur = next;
+        cur_len = strlen(cur);
+    }
+    return cur;
 }
 
 /* Skip leading decl-specs (storage-class / type-qualifier keywords and

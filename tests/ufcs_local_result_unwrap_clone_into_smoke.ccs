@@ -1,0 +1,59 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static CCSliceHdr !>(CCError) cc_slice_hdr_clone_into(CCSliceHdr* src, CCArena* arena) {
+    if (!src || !arena) return cc_err(CC_ERR_INVALID_ARG, "clone_into without arena");
+    if (src->len == 0) {
+        CCSliceHdr empty = {0};
+        return cc_ok(empty);
+    }
+
+    void* stable = cc_arena_alloc(arena, src->len, _Alignof(char));
+    if (!stable) return cc_err(CC_ERR_OUT_OF_MEMORY, "clone slice hdr");
+
+    memcpy(stable, src->ptr, src->len);
+    CCSliceHdr out = { .ptr = stable, .len = src->len };
+    return cc_ok(out);
+}
+
+static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena* arena) {
+    CCSliceHdr source = key.hdr();
+    CCSliceHdr stable = source.clone_into(arena) !>(e) { return cc_err(e); };
+    if (stable.len != key.len || memcmp(stable.ptr, key.ptr, key.len) != 0) {
+        return cc_err(CC_ERR_INVALID_ARG, "split clone mismatch");
+    }
+    return cc_ok(true);
+}
+
+static bool !>(CCError) check_chained_decl_unwrap(CCSlice key, CCArena* arena) {
+    CCSliceHdr stable = key.hdr().clone_into(arena) !>(e) { return cc_err(e); };
+    if (stable.len != key.len || memcmp(stable.ptr, key.ptr, key.len) != 0) {
+        return cc_err(CC_ERR_INVALID_ARG, "chained clone mismatch");
+    }
+    return cc_ok(true);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "error: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!arena.base) return 2;
+
+    CCSlice key = cc_slice_from_cstr("local-ufcs");
+    CCSliceHdr source = key.hdr();
+    CCSliceHdr !>(CCError) direct = source.clone_into(&arena);
+    if (cc_is_err(direct)) return 3;
+    if (CCResult_CCSliceHdr_CCError_unwrap(direct).len != key.len) return 4;
+
+    bool !>(CCError) split = check_split_decl_unwrap(key, &arena);
+    if (cc_is_err(split)) return 5;
+    bool !>(CCError) chained = check_chained_decl_unwrap(key, &arena);
+    if (cc_is_err(chained)) return 6;
+
+    printf("ok len=%zu\n", key.len);
+    return 0;
+}

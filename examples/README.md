@@ -24,7 +24,8 @@ New to Concurrent-C? Work through these in order:
 | 7  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 8  | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 9  | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
-| 10 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
+| 10 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
+| 11 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
 
 After these, explore the remaining recipes and build system examples.
 
@@ -43,6 +44,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_async_await.ccs` | Async/Await | `@async`, `await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_arena_scope.ccs` | Scoped memory | Arena reset per iteration |
+| `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
 | `recipe_result_error_handling.ccs` | Results | `T!>(E)`, `@errhandler`, `!>;`, `?>` |
