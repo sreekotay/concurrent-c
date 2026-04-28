@@ -634,6 +634,57 @@ static int cc__parse_helper_call_2(const char* src,
     return 1;
 }
 
+static int cc__parse_ident_call_1_reg(const char* src,
+                                      size_t n,
+                                      size_t* io_pos,
+                                      const char* callee,
+                                      char* out_ident,
+                                      size_t out_ident_sz) {
+    size_t p = io_pos ? *io_pos : 0;
+    size_t lpar = 0;
+    size_t rpar = 0;
+    size_t ident_start;
+    size_t ident_end;
+    if (!src || !io_pos || !callee || !out_ident || out_ident_sz == 0) return 0;
+    out_ident[0] = '\0';
+    if (!cc__match_kw_reg(src, n, p, callee)) return 0;
+    p += strlen(callee);
+    p = cc__skip_ws_reg(src, n, p);
+    if (p >= n || src[p] != '(') return 0;
+    lpar = p;
+    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
+    p = cc__skip_ws_reg(src, rpar, lpar + 1);
+    ident_start = p;
+    if (p >= rpar || !(src[p] == '_' || isalpha((unsigned char)src[p]))) return 0;
+    p++;
+    while (p < rpar && (src[p] == '_' || isalnum((unsigned char)src[p]))) p++;
+    ident_end = p;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p != rpar) return 0;
+    if (ident_end - ident_start >= out_ident_sz) return 0;
+    memcpy(out_ident, src + ident_start, ident_end - ident_start);
+    out_ident[ident_end - ident_start] = '\0';
+    *io_pos = rpar + 1;
+    return 1;
+}
+
+static int cc__record_map_decl_ufcs(CCSymbolTable* t, const char* map_name) {
+    static const char* methods[] = {
+        "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy", "len", "cap"
+    };
+    char pattern[256];
+    char callee[256];
+    if (!t || !map_name || !map_name[0]) return EINVAL;
+    if (snprintf(pattern, sizeof(pattern), "%s*", map_name) >= (int)sizeof(pattern)) return ENAMETOOLONG;
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        if (snprintf(callee, sizeof(callee), "%s_%s", map_name, methods[i]) >= (int)sizeof(callee)) {
+            return ENAMETOOLONG;
+        }
+        if (cc_symbols_add_type_ufcs_value(t, pattern, methods[i], callee) != 0) return ENOMEM;
+    }
+    return 0;
+}
+
 static int cc__parse_type_hooks_object(CCSymbolTable* t,
                                        const char* input_path,
                                        const char* logical_file,
@@ -897,6 +948,41 @@ int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
         if (c == '"') { in_str = 1; continue; }
         if (c == '\'') { in_chr = 1; continue; }
         line_start = (c == '\n');
+        if (i + strlen("__cc_map_decl_ufcs__") < n &&
+            memcmp(src + i, "__cc_map_decl_ufcs__", strlen("__cc_map_decl_ufcs__")) == 0 &&
+            (i == 0 || !isalnum((unsigned char)src[i - 1])) && (i == 0 || src[i - 1] != '_')) {
+            char map_name[256];
+            size_t p = i + strlen("__cc_map_decl_ufcs__");
+            size_t s = p;
+            while (p < n && (src[p] == '_' || isalnum((unsigned char)src[p]))) p++;
+            if (p > s && p - s < sizeof(map_name)) {
+                int rc;
+                memcpy(map_name, src + s, p - s);
+                map_name[p - s] = '\0';
+                rc = cc__record_map_decl_ufcs(t, map_name);
+                if (rc != 0) {
+                    fprintf(stderr, "%s: error: failed to record map UFCS declaration for '%s'\n",
+                            input_path ? input_path : "<input>", map_name);
+                    return -1;
+                }
+                i = p;
+                continue;
+            }
+        }
+        if (cc__match_kw_reg(src, n, i, "CC_MAP_DECL_UFCS")) {
+            char map_name[256];
+            size_t p = i;
+            if (cc__parse_ident_call_1_reg(src, n, &p, "CC_MAP_DECL_UFCS", map_name, sizeof(map_name))) {
+                int rc = cc__record_map_decl_ufcs(t, map_name);
+                if (rc != 0) {
+                    fprintf(stderr, "%s: error: failed to record map UFCS declaration for '%s'\n",
+                            input_path ? input_path : "<input>", map_name);
+                    return -1;
+                }
+                i = p;
+                continue;
+            }
+        }
         if (c != '@' || !cc__match_kw_reg(src, n, i + 1, "comptime")) continue;
         {
             size_t body_l = cc__skip_ws_reg(src, n, i + 1 + strlen("comptime"));

@@ -96,6 +96,7 @@ static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
 }
 
 CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, db_map_hash_key, db_map_eq_key);
+CC_MAP_DECL_UFCS(RedisDbMap);
 
 static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
     size_t cap;
@@ -565,8 +566,8 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
             redis_mem_worker_hint(),
             cc_sched_get_num_workers());
     if (db && db->entries) {
-        size_t cap = RedisDbMap_cap(db->entries);
-        size_t n = RedisDbMap_len(db->entries);
+        size_t cap = db->entries->cap();
+        size_t n = db->entries->len();
         size_t meta_off = 0;
         size_t map_alloc = 0;
         /* One contiguous Jackson map blob: header + (CCSliceHdr+CCString)/slot +
@@ -649,8 +650,8 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
     size_t map_live = db ? redis_map_live_payload_bytes(db->entries) : 0;
     size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
     size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-    size_t map_count = (db && db->entries) ? RedisDbMap_len(db->entries) : 0;
-    size_t map_buckets = (db && db->entries) ? RedisDbMap_cap(db->entries) : 0;
+    size_t map_count = (db && db->entries) ? db->entries->len() : 0;
+    size_t map_buckets = (db && db->entries) ? db->entries->cap() : 0;
     fprintf(stderr,
             "redis_idiomatic: mem[%s] entries=%zu buckets=%zu keys allocs=%zu bytes=%zu live=%zu | "
             "values allocs=%zu bytes=%zu live=%zu | map_live=%zu | total_live=%zu\n",
@@ -812,7 +813,7 @@ static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
 static CCString* db_find_value(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return NULL;
     CCSliceHdr kh = db_key_hdr_view(key);
-    return RedisDbMap_get_ptr(db->entries, kh);
+    return db->entries->get_ptr(kh);
 }
 
 static bool !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key, CCSliceHdr* out) {
@@ -831,7 +832,7 @@ static bool !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCStr
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    if (RedisDbMap_insert(db->entries, owned_key, value) != 0) {
+    if (db->entries->insert(owned_key, value) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok(true);
@@ -879,7 +880,7 @@ static RedisReply db_del(RedisDb* db, char[:] key) {
     if (!cell) return reply_integer(0);
     CCString doomed = *cell;
     CCSliceHdr kh = db_key_hdr_view(key);
-    if (!RedisDbMap_remove(db->entries, kh)) return reply_integer(0);
+    if (!db->entries->del(kh)) return reply_integer(0);
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
     return reply_integer(1);
@@ -975,7 +976,7 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
 static void db_free_all(RedisDb* db) {
     if (!db) return;
     if (db->entries) {
-        RedisDbMap_destroy(db->entries);
+        db->entries->destroy();
         db->entries = NULL;
     }
     db_free_arenas_only(db);

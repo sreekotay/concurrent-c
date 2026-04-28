@@ -190,6 +190,12 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
+/* Compiler-recognized marker: opt a generated map type into UFCS lowering.
+ * `CC_MAP_DECL_UFCS(StoreMap);` records `StoreMap* + get_ptr -> StoreMap_get_ptr`
+ * and friends.  The macro is a C no-op after the compiler has collected the
+ * metadata. */
+#define CC_MAP_DECL_UFCS(Name) typedef char __cc_map_decl_ufcs__##Name
+
 /*
  * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
  *

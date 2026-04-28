@@ -1,0 +1,32 @@
+/* Test UFCS opt-in for CC_MAP_DECL_ARENA-generated map types. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static inline size_t hash_int_key(int key) {
+    return (size_t)key * 2654435761u;
+}
+
+static inline int eq_int_key(int a, int b) {
+    return a == b;
+}
+
+CC_MAP_DECL_ARENA(int, int, SmokeMap, hash_int_key, eq_int_key);
+CC_MAP_DECL_UFCS(SmokeMap);
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    SmokeMap* map = SmokeMap_init(&arena);
+    if (!map) return 1;
+
+    if (map->insert(7, 42) != 0) return 2;
+    int* value = map->get_ptr(7);
+    if (!value || *value != 42) return 3;
+    if (map->len() != 1) return 4;
+    if (!map->remove(7)) return 5;
+    if (map->get_ptr(7)) return 6;
+
+    map->destroy();
+    cc_arena_destroy(&arena);
+    printf("ok\n");
+    return 0;
+}
