@@ -25,6 +25,8 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/tcp.h>
 #include <sys/resource.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -35,12 +37,6 @@
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_type.cch>
-
-/* TCP_NODELAY/IPPROTO_TCP constants for setsockopt below.  Including
- * <netinet/tcp.h>/<sys/socket.h> here conflicts with the prelude's `accept`
- * declaration, so inline the POSIX-defined values. */
-#define CC_IPPROTO_TCP 6
-#define CC_TCP_NODELAY 1
 
 #define DEFAULT_PORT 6380
 #define READ_CHUNK 4096
@@ -80,7 +76,26 @@
  * owner publish a whole batch without blocking. */
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
 
-CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, cc_map_hash_slice_hdr, cc_map_eq_slice_hdr);
+static inline CCSliceHdr db_key_hdr_view(char[:] key) {
+    CCSliceHdr h = {0};
+    h.ptr = key.ptr;
+    h.len = key.len;
+    return h;
+}
+
+static inline size_t db_map_hash_key(CCSliceHdr key) {
+    size_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char *)key.ptr;
+    for (size_t i = 0; i < key.len; ++i)
+        h ^= p[i], h *= 16777619;
+    return h;
+}
+
+static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
+    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+}
+
+CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, db_map_hash_key, db_map_eq_key);
 
 static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
     size_t cap;
@@ -558,7 +573,7 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
          * uint16_t metadata[cap+4].  Explains most MALLOC_LARGE under key load. */
         if (cap > 0) {
             ccj_map_allocation_details(cap,
-                                       sizeof(CCString),
+                                       sizeof(CCSliceHdr),
                                        RedisDbMap__layout(),
                                        &meta_off,
                                        &map_alloc);
@@ -701,31 +716,15 @@ static bool !>(CCError) db_clone_value_into_arena(CCString* out,
                                                   const char* err_msg) {
     size_t cap = db_string_cap_8x(src.len);
     if (cap == 0) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
-    CCString cloned = CCString_new(arena);
-    if (!cloned.arena) {
+    CCString cloned = cc_string_new();
+    if (!cloned.reserve(cap, arena)) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
-    if (CCString_reserve(&cloned, cap) != 0) {
+    if (cloned.push_slice(src, arena) == NULL) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
-    if (CCString_push_slice(&cloned, src) == NULL) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
-    }
-    if (cc_string_heap_data(&cloned)) db_mem_stats_note_value_alloc(CCString_cap(&cloned));
+    if (cloned.heap_data()) db_mem_stats_note_value_alloc(cloned.cap());
     if (!out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, err_msg));
-    *out = cloned;
-    return cc_ok(true);
-}
-
-static bool !>(CCError) db_clone_key_slice(CCSlice* out,
-                                           CCArena* arena,
-                                           char[:] src,
-                                           const char* err_msg) {
-    CCSlice cloned = cc_slice_clone(arena, src);
-    if (src.len > 0 && (!cloned.ptr || cloned.len != src.len)) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
-    }
-    db_mem_stats_note_key_alloc(src.len);
     *out = cloned;
     return cc_ok(true);
 }
@@ -779,14 +778,11 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
 }
 
 static void db_release_value(RedisDb* db, CCString* value) {
-    char *heap_data;
     if (!db || !value) return;
-    heap_data = cc_string_heap_data(value);
-    if (heap_data) {
-        db_mem_stats_note_value_release(CCString_cap(value));
-        CCString_release_heap(value);
-        *value = (CCString){0};
+    if (value->heap_data()) {
+        db_mem_stats_note_value_release(value->cap());
     }
+    value->release(&db->value_arena);
 }
 
 /* Replace path.  In-place overwrite when the new value fits the old
@@ -794,13 +790,12 @@ static void db_release_value(RedisDb* db, CCString* value) {
  * SET benchmarks.  Growing values clone a replacement into db->value_arena
  * and release the superseded buffer. */
 static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] value) {
-    char *heap_data;
     if (!cell) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
-    if (value.len + 1 <= CCString_cap(cell)) {
-        if (!CCString_clear(cell)) {
+    if (value.len + 1 <= cell->cap()) {
+        if (!cell->clear()) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value clear failed"));
         }
-        if (!CCString_push_slice(cell, value)) {
+        if (!cell->push_slice(value, &db->value_arena)) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value replace failed"));
         }
         return cc_ok(true);
@@ -809,26 +804,34 @@ static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
     bool !>(CCError) clone_res =
         db_clone_value_into_arena(&replacement, &db->value_arena, value, "entry value clone failed");
     if (clone_res.is_err()) return cc_err(clone_res.error());
-    heap_data = cc_string_heap_data(cell);
-    if (heap_data) CCString_release_heap(cell);
+    cell->release(&db->value_arena);
     *cell = replacement;
     return cc_ok(true);
 }
 
 static CCString* db_find_value(RedisDb* db, char[:] key) {
-    CCSliceHdr kh;
     if (!db || !db->entries) return NULL;
-    kh = key.hdr();
+    CCSliceHdr kh = db_key_hdr_view(key);
     return RedisDbMap_get_ptr(db->entries, kh);
 }
 
-static bool !>(CCError) db_insert_value(RedisDb* db, char[:] owned_key, CCString value) {
-    CCSliceHdr map_key;
+static bool !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key, CCSliceHdr* out) {
+    if (!db || !out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without output"));
+    *out = (CCSliceHdr){0};
+    if (key.len == 0) return cc_ok(true);
+    void* copy = cc_arena_alloc(&db->key_arena, key.len, _Alignof(char));
+    if (!copy) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry key clone failed"));
+    memcpy(copy, key.ptr, key.len);
+    out->ptr = copy;
+    out->len = key.len;
+    return cc_ok(true);
+}
+
+static bool !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCString value) {
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    map_key = owned_key.hdr();
-    if (RedisDbMap_insert(db->entries, map_key, value) != 0) {
+    if (RedisDbMap_insert(db->entries, owned_key, value) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok(true);
@@ -844,39 +847,38 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
         return cc_ok(reply_simple("OK"));
     }
 
-    CCSlice owned_key = {0};
-    bool !>(CCError) key_res =
-        db_clone_key_slice(&owned_key, &db->key_arena, key, "entry key clone failed");
+    CCSliceHdr owned_key = {0};
+    bool !>(CCError) key_res = db_clone_key_hdr(db, key, &owned_key);
     if (key_res.is_err()) return cc_err(key_res.error());
     CCString owned_value = {0};
     bool !>(CCError) init_res =
         db_clone_value_into_arena(&owned_value, &db->value_arena, value, "entry value clone failed");
-    if (init_res.is_err()) return cc_err(init_res.error());
+    if (init_res.is_err()) {
+        return cc_err(init_res.error());
+    }
 
     bool !>(CCError) insert_res = db_insert_value(db, owned_key, owned_value);
     if (insert_res.is_err()) {
         db_release_value(db, &owned_value);
-        db_mem_stats_note_key_release(owned_key.len);
-        (void)cc_arena_release(&db->key_arena, owned_key.ptr);
         return cc_err(insert_res.error());
     }
+    db_mem_stats_note_key_alloc(key.len);
     return cc_ok(reply_simple("OK"));
 }
 
 static RedisReply db_get(RedisDb* db, char[:] key) {
     CCString* cell = db_find_value(db, key);
     if (!cell) return reply_null();
-    return reply_bulk(CCString_as_slice(cell));
+    return reply_bulk(cell->as_slice());
 }
 
 static RedisReply db_del(RedisDb* db, char[:] key) {
-    CCSliceHdr kh;
     if (!db || !db->entries) return reply_integer(0);
 
     CCString* cell = db_find_value(db, key);
     if (!cell) return reply_integer(0);
     CCString doomed = *cell;
-    kh = key.hdr();
+    CCSliceHdr kh = db_key_hdr_view(key);
     if (!RedisDbMap_remove(db->entries, kh)) return reply_integer(0);
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
@@ -890,7 +892,7 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
 
     int64_t value = 1;
     if (cell) {
-        int64_t !>(CCError) parsed = parse_i64(CCString_as_slice(cell));
+        int64_t !>(CCError) parsed = parse_i64(cell->as_slice());
         if (parsed.is_err()) {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
@@ -1436,9 +1438,8 @@ int main(int argc, char** argv) {
                 /* TCP_NODELAY: redis-benchmark's pipelined pattern
                  * (write N, read N, repeat) interacts with Nagle +
                  * delayed-ACK to produce multi-second stalls. */
-                extern int setsockopt(int, int, int, const void*, unsigned int);
                 int one = 1;
-                (void)setsockopt(client.fd, CC_IPPROTO_TCP, CC_TCP_NODELAY, &one, sizeof(one));
+                (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
                 uint64_t id = next_conn_id++;
                 (void)server->spawn_async(handle_client(client, req_tx, id));

@@ -8,20 +8,19 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     size_t offset;
     char *storage;
 
-    if (!cmd || !cmd->arena || !cmd->storage.arena || !cmd->offsets.arena) return -1;
+    if (!cmd || !cmd->arena || !cc_vec_arena((const CCVec *)&cmd->offsets)) return -1;
 
     old_len = cmd->storage.len;
     offset = old_len;
 
     if (CCVec_size_t_push(&cmd->offsets, offset) != 0) return -1;
-    if (!CCString_push_slice(&cmd->storage, arg)) {
+    if (!cc_string_push_slice(&cmd->storage, arg, cmd->arena)) {
         cmd->offsets.len--;
         cc_vec_sync_len((CCVec *)&cmd->offsets);
         return -1;
     }
-    if (!CCString_push_char(&cmd->storage, '\0')) {
+    if (!cc_string_push_char(&cmd->storage, '\0', cmd->arena)) {
         cmd->storage.len = old_len;
-        cc__string_sync_heap_len(&cmd->storage);
         storage = cc_string_data(&cmd->storage);
         if (storage) storage[old_len] = '\0';
         cmd->offsets.len--;
@@ -34,10 +33,10 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
 CCCommand cc_command_new(CCArena *arena, const char *program) {
     CCCommand cmd = {0};
     cmd.arena = arena;
-    cmd.storage = CCString_new(arena);
+    cmd.storage = cc_string_new();
     cmd.offsets = CCVec_size_t_init(arena, 0);
 
-    if (!arena || !cmd.storage.arena || !cmd.offsets.arena) {
+    if (!arena || !cc_vec_arena((const CCVec *)&cmd.offsets)) {
         CCCommand empty = {0};
         return empty;
     }

@@ -1507,18 +1507,52 @@ static void cc__append_c_string_escaped(char** out,
     cc_sb_append(out, out_len, out_cap, "\"", 1);
 }
 
+static size_t cc__template_literal_decoded_len(const char* src, size_t len) {
+    size_t out = 0;
+    size_t i = 0;
+    if (!src) return 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\' && i + 1 < len) {
+            unsigned char next = (unsigned char)src[i + 1];
+            switch (next) {
+                case 'n':
+                case 'r':
+                case 't':
+                case '\\':
+                case '"':
+                case '`':
+                case '$':
+                    out++;
+                    i += 2;
+                    continue;
+                default:
+                    break;
+            }
+        }
+        out++;
+        i++;
+    }
+    return out;
+}
+
 static void cc__emit_template_literal_push(char** out,
                                            size_t* out_len,
                                            size_t* out_cap,
                                            const char* builder_name,
+                                           const char* arena_name,
                                            const char* src,
                                            size_t len) {
+    size_t decoded_len;
     if (!builder_name || !src || len == 0) return;
+    decoded_len = cc__template_literal_decoded_len(src, len);
     cc__sb_append_fmt_local(out, out_len, out_cap,
-                            "CCString_push_slice(&%s, cc_slice_from_cstr(",
+                            "cc_string_push_buffer(&%s, ",
                             builder_name);
     cc__append_c_string_escaped(out, out_len, out_cap, src, len);
-    cc_sb_append_cstr(out, out_len, out_cap, ")); ");
+    cc__sb_append_fmt_local(out, out_len, out_cap, ", %zu, ", decoded_len);
+    cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+    cc_sb_append_cstr(out, out_len, out_cap, "); ");
 }
 
 static int cc__rewrite_template_body(char** out,
@@ -1559,14 +1593,14 @@ static int cc__rewrite_template_body(char** out,
                 continue;
             }
             if (lit_start < i) {
-                cc__emit_template_literal_push(out, out_len, out_cap, builder_name, src + lit_start, i - lit_start);
+                cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name, src + lit_start, i - lit_start);
             }
             {
                 size_t expr_end = 0;
                 if (cc__scan_interp_body(src, n, brace_pos, &expr_end) != 0) return -1;
                 if (policy_name && policy_name[0]) {
                     cc__sb_append_fmt_local(out, out_len, out_cap,
-                                            "CCString_push_policy(&%s, %s, %s, ",
+                                            "cc_string_push_policy(&%s, %s, %s, ",
                                             builder_name, policy_name, arena_name);
                     if (tagged) {
                         cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
@@ -1598,7 +1632,7 @@ static int cc__rewrite_template_body(char** out,
         i++;
     }
     if (lit_start < body_e) {
-        cc__emit_template_literal_push(out, out_len, out_cap, builder_name, src + lit_start, body_e - lit_start);
+        cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name, src + lit_start, body_e - lit_start);
     }
     return 0;
 }
@@ -1699,9 +1733,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CCString_new(");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = cc_string_new(); ");
                     {
                         int tpl_rc = cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
                                                                arg1_s + 1, tick_e, builder_name,
@@ -1769,9 +1801,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CCString_new(");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = cc_string_new(); ");
                     if (cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
                                                   arg2_s + 1, tick_e, builder_name,
                                                   policy_name, arena_name) != 0) {
@@ -1796,7 +1826,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                         free(out);
                         return (char*)-1;
                     }
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString_from((");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_from((");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "), (");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg2_s, arg2_e - arg2_s);
@@ -2578,6 +2608,25 @@ static void cc__normalize_bool_family_type(char* type_name, size_t type_name_sz)
 
 static int cc__type_is_known_ufcs_family_base(const char* type_name);
 
+static int cc__is_slice_ufcs_method(const char* method_name) {
+    return method_name &&
+           (strcmp(method_name, "to_str") == 0 ||
+            strcmp(method_name, "hdr") == 0 ||
+            strcmp(method_name, "len") == 0 ||
+            strcmp(method_name, "trim") == 0 ||
+            strcmp(method_name, "trim_left") == 0 ||
+            strcmp(method_name, "trim_right") == 0 ||
+            strcmp(method_name, "is_empty") == 0 ||
+            strcmp(method_name, "at") == 0 ||
+            strcmp(method_name, "sub") == 0 ||
+            strcmp(method_name, "starts_with") == 0 ||
+            strcmp(method_name, "ends_with") == 0 ||
+            strcmp(method_name, "eq") == 0 ||
+            strcmp(method_name, "eq_cstr") == 0 ||
+            strcmp(method_name, "str") == 0 ||
+            strcmp(method_name, "bytes") == 0);
+}
+
 static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* type_name) {
     const char* start;
     const char* end;
@@ -2612,6 +2661,20 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         break;
     }
     while (base_end > start && (base_end[-1] == ' ' || base_end[-1] == '\t')) base_end--;
+    {
+        const char* slice_l = memchr(start, '[', (size_t)(base_end - start));
+        if (slice_l) {
+            const char* slice_r = memchr(slice_l, ']', (size_t)(base_end - slice_l));
+            const char* colon = memchr(slice_l, ':', slice_r ? (size_t)(slice_r - slice_l) : 0);
+            if (slice_r && slice_r + 1 == base_end && colon) {
+                const char* bang = memchr(slice_l, '!', (size_t)(slice_r - slice_l));
+                snprintf(out, out_sz, "%s%.*s",
+                         bang ? "CCSliceUnique" : "CCSlice",
+                         ptr_count, "********");
+                return;
+            }
+        }
+    }
     chan_l = memchr(start, '[', (size_t)(base_end - start));
     if (chan_l) {
         chan_r = memchr(chan_l, ']', (size_t)(base_end - chan_l));
@@ -2755,6 +2818,9 @@ static int cc__type_is_known_ufcs_family_base(const char* type_name) {
     return strncmp(type_name, "CCVec_", 6) == 0 ||
            strncmp(type_name, "Map_", 4) == 0 ||
            strcmp(type_name, "CCString") == 0 ||
+           strcmp(type_name, "CCSlice") == 0 ||
+           strcmp(type_name, "CCSliceUnique") == 0 ||
+           strcmp(type_name, "CCSliceShared") == 0 ||
            strcmp(type_name, "CCArena") == 0 ||
            strcmp(type_name, "CCNursery") == 0 ||
            strcmp(type_name, "CCCommand") == 0 ||
@@ -3162,6 +3228,51 @@ static void cc__collect_generic_ufcs_types(const char* src,
     cc_scanner_init(&scan);
     while (i < n) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') {
+            size_t close = i;
+            while (close > 0 && isspace((unsigned char)src[close - 1])) close--;
+            if (close > 0 && src[close - 1] == ')') {
+                size_t open = close - 1;
+                int depth = 1;
+                while (open > 0 && depth > 0) {
+                    open--;
+                    if (src[open] == ')') depth++;
+                    else if (src[open] == '(') depth--;
+                }
+                if (depth == 0) {
+                    size_t param_start = open + 1;
+                    size_t p = param_start;
+                    int par = 0, br = 0;
+                    while (p <= close - 1) {
+                        if (p == close - 1 || (src[p] == ',' && par == 0 && br == 0)) {
+                            char decl_name[128];
+                            char decl_type[256];
+                            cc_parse_decl_name_and_type(src + param_start, src + p,
+                                                        decl_name, sizeof(decl_name),
+                                                        decl_type, sizeof(decl_type));
+                            if (decl_name[0] &&
+                                strcmp(decl_type, "void") != 0 &&
+                                !cc_is_non_decl_stmt_type(decl_type)) {
+                                cc__record_ufcs_var(vars, var_count, var_cap, decl_name, decl_type);
+                                if (reg && !cc_type_registry_lookup_var(reg, decl_name)) {
+                                    cc_type_registry_add_var(reg, decl_name, decl_type);
+                                }
+                            }
+                            param_start = p + 1;
+                        } else if (src[p] == '(') {
+                            par++;
+                        } else if (src[p] == ')' && par > 0) {
+                            par--;
+                        } else if (src[p] == '[') {
+                            br++;
+                        } else if (src[p] == ']' && br > 0) {
+                            br--;
+                        }
+                        p++;
+                    }
+                }
+            }
+        }
         if (typedef_start == (size_t)-1 &&
             i + 7 <= n &&
             memcmp(src + i, "typedef", 7) == 0 &&
@@ -3417,6 +3528,11 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
     strncpy(out_type, type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
     cc__resolve_registered_alias_type_name(reg, out_type, out_type, out_type_sz);
+    {
+        char normalized_recv_type[256];
+        cc__normalize_ufcs_type_name(normalized_recv_type, sizeof(normalized_recv_type), out_type);
+        if (normalized_recv_type[0]) snprintf(out_type, out_type_sz, "%s", normalized_recv_type);
+    }
     if (source_text) {
         char base_type[256];
         char alias_type[256];
@@ -3480,6 +3596,11 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         strncpy(out_type, type_name, out_type_sz - 1);
         out_type[out_type_sz - 1] = '\0';
         cc__resolve_registered_alias_type_name(reg, out_type, out_type, out_type_sz);
+        {
+            char normalized_recv_type[256];
+            cc__normalize_ufcs_type_name(normalized_recv_type, sizeof(normalized_recv_type), out_type);
+            if (normalized_recv_type[0]) snprintf(out_type, out_type_sz, "%s", normalized_recv_type);
+        }
         if (source_text) {
             char resolved_base[256];
             char alias_type[256];
@@ -3544,6 +3665,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int file_like = 0;
         int arena_like = 0;
         int string_like = 0;
+        int slice_like = 0;
         int nursery_like = 0;
         int chan_tx = 0;
         int chan_rx = 0;
@@ -3613,6 +3735,16 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                       strcmp(recv_type_base, "CCArena*") == 0);
         string_like = (strcmp(recv_type_base, "CCString") == 0 ||
                        strcmp(recv_type_base, "CCString*") == 0);
+        slice_like = (strcmp(recv_type_base, "CCSlice") == 0 ||
+                      strcmp(recv_type_base, "CCSlice*") == 0 ||
+                      strcmp(recv_type_base, "CCSliceUnique") == 0 ||
+                      strcmp(recv_type_base, "CCSliceUnique*") == 0 ||
+                      strcmp(recv_type_base, "CCSliceShared") == 0 ||
+                      strcmp(recv_type_base, "CCSliceShared*") == 0);
+        if (slice_like && !cc__is_slice_ufcs_method(method_name)) {
+            i++;
+            continue;
+        }
         nursery_like = (strcmp(recv_type_base, "CCNursery") == 0 ||
                         strcmp(recv_type_base, "CCNursery*") == 0);
         chan_tx = (strncmp(recv_type_base, "CCChanTx_", 9) == 0 ||
@@ -3623,7 +3755,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                    strcmp(recv_type_base, "CCChanRx*") == 0);
         if (!(strncmp(recv_type_base, "CCVec_", 6) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
-              parser_vec || parser_map || command_like || file_like || arena_like || string_like || nursery_like ||
+              parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             i++;
@@ -3750,8 +3882,11 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             } else if (string_like) {
                 const char* string_method = method_name;
                 if (strcmp(method_name, "append") == 0) string_method = "push";
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, string_method);
+            } else if (slice_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_slice_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);

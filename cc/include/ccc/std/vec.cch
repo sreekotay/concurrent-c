@@ -41,15 +41,13 @@
 #ifdef CC_PARSER_MODE
 
 /* Generic Vec placeholder struct for parser mode - any element type.
-   Field names match real Vec layout so field access compiles.
+   Field names match real Vec value layout so field access compiles.
    Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_VEC_GENERIC_DEFINED
 #define __CC_VEC_GENERIC_DEFINED
 typedef struct __CCVecGeneric {
-    size_t len;
-    size_t cap;
-    void *arena;  /* CCArena* */
     void *data;
+    size_t len;
 } __CCVecGeneric;
 #endif
 
@@ -63,7 +61,8 @@ typedef struct __CCVecGeneric {
 /* Generic constructor - parser mode doesn't actually run,
    so just return a zeroed struct for type checking. */
 static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
-    __CCVecGeneric v = {0, 0, arena, NULL};
+    __CCVecGeneric v = {NULL, 0};
+    (void)arena;
     return v;
 }
 
@@ -107,7 +106,7 @@ static inline size_t __cc_vec_generic_len(const __CCVecGeneric *v) {
     return v ? v->len : 0;
 }
 static inline size_t __cc_vec_generic_cap(const __CCVecGeneric *v) {
-    return v ? v->cap : 0;
+    return v ? v->len : 0;
 }
 static inline void* __cc_vec_generic_begin(__CCVecGeneric *v) {
     return v ? v->data : NULL;
@@ -120,7 +119,7 @@ static inline void* __cc_vec_generic_data(__CCVecGeneric *v) {
 }
 static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     if (!v || !v->data) return cc_slice_empty();
-    return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->cap);
+    return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->len);
 }
 
 /* Parser-mode: common CCVec types are aliases to __CCVecGeneric */
@@ -217,18 +216,15 @@ typedef __CCVecGeneric CCVec_intptr;
  */
 #define CC_VEC_DECL_ARENA(T, Name)                                                \
     typedef struct {                                                              \
-        size_t len;                                                               \
-        size_t cap;                                                               \
-        CCArena *arena;                                                           \
         T *data;                                                                  \
+        size_t len;                                                               \
     } Name;                                                                       \
                                                                                   \
     static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
-        Name v = {0, 0, arena, NULL};                                             \
+        Name v = {NULL, 0};                                                       \
         if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
                         initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
             != 0) {                                                               \
-            v.cap = 0;                                                            \
             v.data = NULL;                                                        \
         }                                                                         \
         return v;                                                                 \
@@ -293,7 +289,9 @@ typedef __CCVecGeneric CCVec_intptr;
     }                                                                             \
                                                                                   \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
-    static inline size_t Name##_cap(const Name *v) { return v ? v->cap : 0; }     \
+    static inline size_t Name##_cap(const Name *v) {                              \
+        return cc_vec_cap((const CCVec *)v);                                       \
+    }                                                                             \
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }

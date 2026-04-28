@@ -301,36 +301,53 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
 static inline bool cc_arena_release(CCArena* arena, void* ptr);
 
 // Reallocate a pointer previously returned by cc_arena_alloc.
-// Slab-backed pointers allocate/copy/release; heap-overflow pointers use realloc.
-static inline void *cc_arena_realloc(CCArena *arena, void *ptr, size_t old_size, size_t new_size, size_t align) {
-    if (!arena) return NULL;
-    if (!ptr) return cc_arena_alloc(arena, new_size, align);
+// Slab-backed pointers allocate/copy/release. Heap-overflow pointers use realloc
+// only when ownership stays in the same arena; cross-arena moves allocate in the
+// new arena and release through the old one.
+static inline void *cc_arena_realloc(CCArena *old_arena,
+                                     CCArena *new_arena,
+                                     void *ptr,
+                                     size_t old_size,
+                                     size_t new_size,
+                                     size_t align) {
+    if (!new_arena && new_size != 0) return NULL;
+    if (!ptr) return cc_arena_alloc(new_arena, new_size, align);
     if (new_size == 0) {
-        (void)cc_arena_release(arena, ptr);
+        if (old_arena) (void)cc_arena_release(old_arena, ptr);
         return NULL;
     }
+    if (!old_arena) return NULL;
 
-    CCArena* block = cc__arena_find_block(arena, ptr);
-    if (block) {
-        void* out = cc_arena_alloc(arena, new_size, align);
+    if (old_arena != new_arena) {
+        void* out = cc_arena_alloc(new_arena, new_size, align);
         if (!out) return NULL;
         size_t copy_bytes = old_size < new_size ? old_size : new_size;
         memcpy(out, ptr, copy_bytes);
-        (void)cc_arena_release(arena, ptr);
+        (void)cc_arena_release(old_arena, ptr);
         return out;
     }
 
-    if (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
+    CCArena* block = cc__arena_find_block(old_arena, ptr);
+    if (block) {
+        void* out = cc_arena_alloc(new_arena, new_size, align);
+        if (!out) return NULL;
+        size_t copy_bytes = old_size < new_size ? old_size : new_size;
+        memcpy(out, ptr, copy_bytes);
+        (void)cc_arena_release(old_arena, ptr);
+        return out;
+    }
+
+    if (old_arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
         size_t old_bytes = cc__arena_malloc_usable_bytes(ptr);
         void* out = realloc(ptr, new_size);
         if (!out) return NULL;
         size_t new_bytes = cc__arena_malloc_usable_bytes(out);
-        size_t cur = CC_ATOMIC_LOAD(&arena->overflow_bytes);
+        size_t cur = CC_ATOMIC_LOAD(&old_arena->overflow_bytes);
         if (old_bytes > 0 && cur >= old_bytes) {
-            CC_ATOMIC_FETCH_SUB(&arena->overflow_bytes, old_bytes);
+            CC_ATOMIC_FETCH_SUB(&old_arena->overflow_bytes, old_bytes);
         }
-        CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, new_bytes);
-        arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+        CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
+        old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
         return out;
     }
 
@@ -370,13 +387,11 @@ static inline void *cc_arena_realloc(CCArena *arena, void *ptr, size_t old_size,
  * this file, so every CamelCase type that follows the snake-case naming
  * convention gets UFCS dispatch for free — no per-type opt-in, no need
  * to rename existing C functions to match a PascalCase UFCS mangling.
- * Types whose C API diverges from this convention (CCSlice /
- * CCSliceUnique / CCSliceShared keep the CamelCase `CCSlice_<method>`
- * names, CCNursery and the channel families rename methods to
- * distinguish arities) register a more specific pattern to override the
- * default — longest-prefix match wins in the symbol-table lookup (see
- * cc__ufcs_pattern_matches in symbols.c), so `CC*` (2-char prefix) beats
- * bare `*` (0-char prefix) and `CCSlice*` (7-char prefix) beats `CC*`.
+ * Types whose C API diverges from this convention (CCNursery and the
+ * channel families rename methods to distinguish arities) register a more
+ * specific pattern to override the default — longest-prefix match wins in
+ * the symbol-table lookup (see cc__ufcs_pattern_matches in symbols.c), so
+ * `CC*` (2-char prefix) beats bare `*` (0-char prefix).
  *
  * Lives in cc_arena.cch (rather than cc_ufcs.cch) because the body needs
  * `cc_arena_alloc` and cc_ufcs.cch is the one that #includes this header;
@@ -436,11 +451,10 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     if (!((t[0] >= 'A' && t[0] <= 'Z') || (t[0] >= 'a' && t[0] <= 'z') || t[0] == '_'))
         return cc_slice_empty();
     /* Pass-through for types whose C API doesn't match the stdlib
-       `cc_<snake_type>_<method>` convention.  The compiler's hardcoded
-       dispatch paths (cc_ufcs_channel_callee for the CCChan family,
-       the CCSlice switch in ufcs.c) handle these — returning the
-       sentinel here lets those paths run even though this generic hook
-       is registered globally via `cc_type_register("*", ...)`.
+       `cc_<snake_type>_<method>` convention.  The compiler's channel
+       dispatch path handles these — returning the sentinel here lets
+       that path run even though this generic hook is registered globally
+       via `cc_type_register("*", ...)`.
 
        CCChanTx / CCChanRx (bare + typed family `CCChanTx_int`, etc.)
        already have dedicated hooks registered in cc_channel.cch;
@@ -491,21 +505,17 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     return cc_slice_from_buffer(buf, total);
 }
 
-/* Slice-family name composer: every variant in the slice family (plain
- * CCSlice, CCSliceUnique, CCSliceShared, ...) dispatches through the
- * canonical `CCSlice_<method>` entry points — there is no
- * `CCSliceUnique_len` or `CCSliceShared_eq_cstr`, only `CCSlice_*`.
- * This hook therefore emits `CCSlice_<method>` regardless of the
- * concrete receiver subtype.  Registered globally for `CCSlice*` at
- * the bottom of this file so the whole family opts into the right
- * callee without per-type boilerplate. */
-static inline CCSlice cc_ufcs_generic_cc_camel_same_c(CCSlice recv_type,
-                                                      CCSlice method,
-                                                      CCSlice mode,
-                                                      CCSliceArray argv,
-                                                      CCSliceArray arg_types,
-                                                      CCArena *arena) {
-    static const char prefix[] = "CCSlice_";
+/* Slice marker types (`CCSliceUnique`, `CCSliceShared`) are ABI-compatible
+ * typedefs of `CCSlice`, but their type names are intentionally distinct so
+ * the compiler can reason about ownership/transfer semantics.  UFCS should
+ * still target the shared `cc_slice_*` function family. */
+static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
+                                                        CCSlice method,
+                                                        CCSlice mode,
+                                                        CCSliceArray argv,
+                                                        CCSliceArray arg_types,
+                                                        CCArena *arena) {
+    static const char prefix[] = "cc_slice_";
     size_t prefix_len = sizeof(prefix) - 1;
     size_t total;
     char *buf;
@@ -521,7 +531,6 @@ static inline CCSlice cc_ufcs_generic_cc_camel_same_c(CCSlice recv_type,
     if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
     return cc_slice_from_buffer(buf, total);
 }
-
 
 // Allocate a growable arena with heap-backed storage of given initial size.
 // block_max = 0 means unbounded growth (the default for heap-created arenas).
@@ -1047,24 +1056,20 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
  *                 maps to `cc_foo_<method>` for the stdlib convention,
  *                 while bare user types like `RedisConn` map directly to
  *                 `redis_conn_<method>` with no synthetic prefix).
- *   `CCSlice*` -> cc_ufcs_generic_cc_camel_same_c    (CCSlice family keeps
- *                 the CamelCase `CCSlice_<method>` spelling).
- *
- * Longest-pattern-prefix wins in the symbol-table lookup
- * (cc__ufcs_pattern_matches in cc/src/comptime/symbols.c), so `CCSlice*`
- * (7-char prefix) overrides bare `*` (0-char prefix) for CCSlice /
- * CCSliceUnique / CCSliceShared receivers.  Types whose C API diverges
- * further (CCNursery, CCChanTx/Rx families with renamed methods) can
- * still register their own specific pattern with a bespoke rewrite to
- * win over either generic default.  Per-type `.ufcs = ...` opt-ins
- * in the std headers are no longer needed and have been removed. */
+ * Types whose C API diverges further (CCNursery, CCChanTx/Rx families with
+ * renamed methods) can still register their own specific pattern with a
+ * bespoke rewrite to win over the generic default.  Per-type `.ufcs = ...`
+ * opt-ins in the std headers are no longer needed and have been removed. */
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("*", (CCTypeHooks){
         .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
-    (void)cc_type_register("CCSlice*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_camel_same_c,
+    (void)cc_type_register("CCSliceUnique*", (CCTypeHooks){
+        .ufcs = cc_ufcs_generic_cc_slice_family_c,
+    });
+    (void)cc_type_register("CCSliceShared*", (CCTypeHooks){
+        .ufcs = cc_ufcs_generic_cc_slice_family_c,
     });
 }
 #endif

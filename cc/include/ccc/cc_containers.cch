@@ -88,7 +88,7 @@ static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_byt
         copy_bytes = old_header->size_bytes < size_bytes ? old_header->size_bytes : size_bytes;
         old_payload_offset = (size_t)((uint8_t *)ptr - old_raw);
 
-        raw = (uint8_t *)cc_arena_realloc(arena, old_raw, old_total, new_total, _Alignof(max_align_t));
+        raw = (uint8_t *)cc_arena_realloc(arena, arena, old_raw, old_total, new_total, _Alignof(max_align_t));
         if (!raw) return NULL;
 
         start = (uintptr_t)(raw + sizeof(CCContainersAllocHeader));

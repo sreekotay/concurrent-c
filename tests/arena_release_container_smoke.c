@@ -75,17 +75,16 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
 static void test_string_release_on_growth(ArenaFactory make_arena) {
     CCArena arena = make_arena();
 
-    CCString s = CCString_new(&arena);
-    assert(s.arena == &arena);
+    CCString s = cc_string_new();
     assert(cc_atomic_load(&arena.live_allocs) == 0);
 
     void *initial_data = cc_string_data(&s);
-    assert(CCString_push(&s, "ab") != NULL);
-    assert(CCString_push(&s, "cdefghijklmnop") != NULL); /* forces growth */
+    assert(cc_string_push(&s, "ab", &arena) != NULL);
+    assert(cc_string_push(&s, "cdefghijklmnop", &arena) != NULL); /* forces growth */
 
     assert(cc_string_data(&s) != NULL);
     assert(cc_string_data(&s) != initial_data);
-    assert(strcmp(CCString_cstr(&s), "abcdefghijklmnop") == 0);
+    assert(strcmp(cc_string_cstr(&s, &arena), "abcdefghijklmnop") == 0);
     assert(cc_atomic_load(&arena.live_allocs) == 1);
 
     cc_arena_free(&arena);

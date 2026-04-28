@@ -214,7 +214,7 @@ int main(void) {
             return 7;
         }
         memset(spill, 0x5a, 512);
-        void *bigger_spill = cc_arena_realloc(&a, spill, 512, 1024, 8);
+        void *bigger_spill = cc_arena_realloc(&a, &a, spill, 512, 1024, 8);
         if (!bigger_spill) {
             printf("FAIL: overflow realloc\n");
             return 7;
@@ -238,6 +238,31 @@ int main(void) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
+
+        void *moved_src = cc_arena_alloc(&a, 64, 8);
+        CCArena moved_dst = cc_arena_heap(1024);
+        if (!moved_src || !moved_dst.base) {
+            printf("FAIL: cross-arena realloc setup\n");
+            return 7;
+        }
+        memset(moved_src, 0xa5, 64);
+        void *moved = cc_arena_realloc(&a, &moved_dst, moved_src, 64, 96, 8);
+        if (!moved) {
+            printf("FAIL: cross-arena realloc\n");
+            return 7;
+        }
+        unsigned char *mp = (unsigned char*)moved;
+        for (size_t i = 0; i < 64; ++i) {
+            if (mp[i] != 0xa5) {
+                printf("FAIL: cross-arena realloc preserved bytes\n");
+                return 7;
+            }
+        }
+        if (cc__arena_find_block(&a, moved) || !cc__arena_find_block(&moved_dst, moved)) {
+            printf("FAIL: cross-arena realloc ownership\n");
+            return 7;
+        }
+        cc_arena_free(&moved_dst);
 
         void *foreign = malloc(24);
         if (!foreign) {

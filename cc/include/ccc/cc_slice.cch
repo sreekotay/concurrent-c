@@ -49,8 +49,11 @@ typedef struct {
    - `T[n:]`  lowers to `CCSlice`
    - `T[:k]`  lowers to `CCSlice`
    - `T[:k!]` lowers to `CCSliceUnique`
-   - legacy `T[:!]` still lowers to `CCSliceUnique` (ABI-identical to CCSlice) */
+   - legacy `T[:!]` still lowers to `CCSliceUnique` (ABI-identical to CCSlice)
+   - `CCSliceShared` is a semantic marker for shared tracked slices; both
+     marker types use the common `cc_slice_*` ABI. */
 typedef CCSlice CCSliceUnique;
+typedef CCSlice CCSliceShared;
 
 /* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
  * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
@@ -130,12 +133,13 @@ static inline CCSlice cc_slice_from_cstr(const char *cstr) {
 static inline bool CCSlice_is_empty(CCSlice* s) {
     return !s || s->len == 0;
 }
+static inline bool cc_slice_is_empty(CCSlice* s) { return CCSlice_is_empty(s); }
 
 static inline size_t cc_slice_capacity(CCSlice s) {
     return s.alen ? s.alen : s.len;
 }
 
-static inline CCSlice cc_slice_sub(CCSlice s, size_t start, size_t end) {
+static inline CCSlice cc__slice_sub_value(CCSlice s, size_t start, size_t end) {
     if (start > end || end > s.len) {
         return cc_slice_empty();
     }
@@ -220,7 +224,7 @@ static inline size_t cc_slice_count(CCSlice s, CCSlice needle) {
     bool found = false;
     size_t idx = 0, cnt = 0;
     while (idx < s.len) {
-        size_t pos = cc_slice_index_of(cc_slice_sub(s, idx, s.len), needle, &found);
+        size_t pos = cc_slice_index_of(cc__slice_sub_value(s, idx, s.len), needle, &found);
         if (!found) break;
         cnt++;
         idx += pos + (needle.len ? needle.len : 1);
@@ -259,7 +263,7 @@ static inline CCSlice cc_slice_trim_set(CCSlice s, CCSlice chars) {
     const char *p = (const char *)s.ptr;
     while (start < end && cc__in_set(p[start], chars)) start++;
     while (end > start && cc__in_set(p[end-1], chars)) end--;
-    return cc_slice_sub(s, start, end);
+    return cc__slice_sub_value(s, start, end);
 }
 
 /* ---- Hash and equality ---- */
@@ -288,53 +292,65 @@ static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
 
 /* ---- UFCS methods (receiver is CCSlice*) ---- */
 
-static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
+static inline size_t cc_slice_len(CCSlice* s) { return s ? s->len : 0; }
+static inline size_t CCSlice_len(CCSlice* s) { return cc_slice_len(s); }
 
-static inline CCSlice CCSlice_trim(CCSlice* s) {
+static inline CCSlice cc_slice_trim(CCSlice* s) {
     if (!s) return cc_slice_empty();
     size_t start = cc__trim_left_idx(*s);
-    CCSlice sub = cc_slice_sub(*s, start, s->len);
+    CCSlice sub = cc__slice_sub_value(*s, start, s->len);
     size_t end = cc__trim_right_idx(sub);
-    return cc_slice_sub(sub, 0, end);
+    return cc__slice_sub_value(sub, 0, end);
 }
+static inline CCSlice CCSlice_trim(CCSlice* s) { return cc_slice_trim(s); }
 
-static inline CCSlice CCSlice_trim_left(CCSlice* s) {
+static inline CCSlice cc_slice_trim_left(CCSlice* s) {
     if (!s) return cc_slice_empty();
-    return cc_slice_sub(*s, cc__trim_left_idx(*s), s->len);
+    return cc__slice_sub_value(*s, cc__trim_left_idx(*s), s->len);
 }
+static inline CCSlice CCSlice_trim_left(CCSlice* s) { return cc_slice_trim_left(s); }
 
-static inline CCSlice CCSlice_trim_right(CCSlice* s) {
+static inline CCSlice cc_slice_trim_right(CCSlice* s) {
     if (!s) return cc_slice_empty();
     size_t end = cc__trim_right_idx(*s);
-    return cc_slice_sub(*s, 0, end);
+    return cc__slice_sub_value(*s, 0, end);
 }
+static inline CCSlice CCSlice_trim_right(CCSlice* s) { return cc_slice_trim_right(s); }
 
-static inline char CCSlice_at(CCSlice* s, size_t idx) {
+static inline char cc_slice_at(CCSlice* s, size_t idx) {
     if (!s || idx >= s->len || !s->ptr) return 0;
     return ((char*)s->ptr)[idx];
 }
+static inline char CCSlice_at(CCSlice* s, size_t idx) { return cc_slice_at(s, idx); }
 
-static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
-    return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
+static inline CCSlice cc__slice_sub_ptr(CCSlice* s, size_t start, size_t end) {
+    return s ? cc__slice_sub_value(*s, start, end) : cc_slice_empty();
 }
+static inline CCSlice cc__slice_sub_const_ptr(const CCSlice* s, size_t start, size_t end) {
+    return s ? cc__slice_sub_value(*s, start, end) : cc_slice_empty();
+}
+static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) { return cc__slice_sub_ptr(s, start, end); }
 
-static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
+static inline bool cc_slice_starts_with(CCSlice* s, CCSlice prefix) {
     if (!s) return false;
     return s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
 }
+static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) { return cc_slice_starts_with(s, prefix); }
 
-static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
+static inline bool cc_slice_ends_with(CCSlice* s, CCSlice suffix) {
     if (!s) return false;
     return s->len >= suffix.len &&
         memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
 }
+static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) { return cc_slice_ends_with(s, suffix); }
 
-static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
+static inline bool cc_slice_eq(CCSlice* s, CCSlice other) {
     if (!s) return false;
     return cc__slice_eq(*s, other);
 }
+static inline bool CCSlice_eq(CCSlice* s, CCSlice other) { return cc_slice_eq(s, other); }
 
-static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) {
+static inline bool cc_slice_eq_cstr(CCSlice* s, const char* cstr) {
     if (!s) return false;
     size_t len = cstr ? strlen(cstr) : 0;
     if (!cstr) return false;
@@ -343,5 +359,13 @@ static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) {
     if (!s->ptr) return false;
     return memcmp(s->ptr, cstr, len) == 0;
 }
+static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) { return cc_slice_eq_cstr(s, cstr); }
+
+#define cc_slice_sub(s, start, end) \
+    _Generic((s), \
+        CCSlice*: cc__slice_sub_ptr, \
+        const CCSlice*: cc__slice_sub_const_ptr, \
+        default: cc__slice_sub_value \
+    )((s), (start), (end))
 
 #endif // CC_SLICE_H

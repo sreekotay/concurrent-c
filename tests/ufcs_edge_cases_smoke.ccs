@@ -23,8 +23,8 @@ int main(void) {
         cc_std_out.write("case1:");
         
         // Case 2: Simple CCString identifier
-        CCString s = CCString_new(arena);
-        s.append("case2:");
+        CCString s = cc_string_new();
+        s.append("case2:", arena);
         cc_std_out.write(s);
         
         // Case 3: Field receivers respect value vs pointer type

@@ -8,10 +8,10 @@ int main(void) {
     if (!arena_storage.base) return 1;
     CCArena* arena = &arena_storage;
     {
-        CCString s = CCString_new(arena);
-        s.append("multi ok: ");
-        CCString_push_int(&s, v);
-        s.append("\n");
+        CCString s = cc_string_new();
+        s.append("multi ok: ", arena);
+        cc_string_push_int(&s, v, arena);
+        s.append("\n", arena);
         cc_std_out.write(s);
     }
     return 0;

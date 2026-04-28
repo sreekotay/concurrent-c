@@ -1678,9 +1678,12 @@ struct ServerConfig {
 @async void !>(CCIoError) server_loop(ServerConfig cfg) {
     int listener = try listen(cfg.port);
 
-    @nursery {
+    CCNursery* n = cc_nursery_create(NULL)
+        !>(e) { return cc_err(CCIoError::OutOfMemory); }
+        @destroy;
+    {
         for (size_t i = 0; i < cfg.max_workers; i++) {
-            spawn (server_worker(&cfg, listener));
+            n->spawn(() => server_worker(&cfg, listener));
         }
     }
 }
@@ -2170,10 +2173,13 @@ enum CCNetError {
     CCListener ln = try cc_tcp_listen("0.0.0.0:9000");
     @defer ln.close();
 
-    @nursery {
+    CCNursery* n = cc_nursery_create(NULL)
+        !>(e) { return cc_err(CCNetError::Other(0)); }
+        @destroy;
+    {
         while (true) {
             CCSocket conn = try await ln.accept();
-            spawn(() => handle_echo(conn));
+            n->spawn(() => handle_echo(conn));
         }
     }
 }
@@ -2722,10 +2728,11 @@ struct Node* pop(void) {
 cc_atomic_int g_sum = 0;
 
 int main(void) {
-    @nursery {
+    CCNursery* n = cc_nursery_create(NULL) !>(e) { return 1; } @destroy;
+    {
         for (int i = 0; i < 100; i++) {
             int val = i;
-            spawn(() => {
+            n->spawn(() => {
                 cc_atomic_fetch_add(&g_sum, val);
             });
         }
@@ -2748,7 +2755,7 @@ int main(void) {
 **Prefer channels and nurseries when:**
 - Coordinating producer/consumer patterns → use channel `send`/`recv` UFCS
 - Aggregating results from tasks → use channels or return values
-- Synchronizing task completion → use `@nursery` structured concurrency
+- Synchronizing task completion → use `CCNursery* n = ... !> @destroy`
 
 **Avoid atomics when:**
 - A simple mutex would be clearer (atomics are hard to get right)

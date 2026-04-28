@@ -55,8 +55,8 @@ int main(void) {
         if (!arena_storage.base) abort();
         CCArena* arena = &arena_storage;
         // Mixed inputs stay ergonomic: literals + CCString + literals.
-        CCString suffix = CCString_new(arena);
-        suffix.append("send");
+        CCString suffix = cc_string_new();
+        suffix.append("send", arena);
 
         CCSlice channel_send = cc_concat(arena, "cc_channel_", &suffix, "_task");
         assert(channel_send.len == sizeof("cc_channel_send_task") - 1);

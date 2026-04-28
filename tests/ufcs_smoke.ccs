@@ -5,11 +5,11 @@ int main(void) {
         CCArena __cc_arena11 = @create(kilobytes(8)) @destroy;
         if (!__cc_arena11.base) abort();
         CCArena* a = &__cc_arena11;
-        CCString s = string_new(a);
-        s.append("UFCS smoke\n");
+        CCString s = cc_string_new();
+        s.append("UFCS smoke\n", a);
 
         CCString *sp = &s;
-        sp->append("pointer receiver ok\n");
+        sp->append("pointer receiver ok\n", a);
 
         // Nested UFCS: inner call rewritten inside outer call.
         cc_std_out_write_string(&s);
