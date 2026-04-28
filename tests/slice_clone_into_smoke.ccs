@@ -1,0 +1,28 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!arena.valid()) return 1;
+
+    CCSlice src = cc_slice_from_cstr("hello");
+    CCResult_CCSlice_CCError cloned_res = cc_slice_clone_into(&src, &arena);
+    if (cloned_res.is_err()) return 2;
+    CCSlice cloned = CCResult_CCSlice_CCError_value(cloned_res);
+    if (cloned.len != 5 || memcmp(cloned.ptr, "hello", 5) != 0) return 3;
+
+    CCSliceHdr hdr = src.hdr();
+    CCResult_CCSliceHdr_CCError hdr_res = hdr.clone_into(&arena);
+    if (hdr_res.is_err()) return 4;
+    CCSliceHdr cloned_hdr = CCResult_CCSliceHdr_CCError_value(hdr_res);
+    if (cloned_hdr.len != 5 || memcmp(cloned_hdr.ptr, "hello", 5) != 0) return 5;
+
+    printf("ok\n");
+    return 0;
+}

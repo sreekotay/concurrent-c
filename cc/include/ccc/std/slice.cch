@@ -1,0 +1,59 @@
+/*
+ * Arena-backed slice helpers.
+ *
+ * Pure slice view operations live in cc_slice.cch.  Helpers here need CCArena
+ * and Result, so they live in std where the dependency direction is clean.
+ */
+#ifndef CC_STD_SLICE_H
+#define CC_STD_SLICE_H
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <string.h>
+
+#ifndef CCResult_CCSlice_CCError_DEFINED
+#define CCResult_CCSlice_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCError, CCSlice, CCError)
+#endif
+
+#ifndef CCResult_CCSliceHdr_CCError_DEFINED
+#define CCResult_CCSliceHdr_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSliceHdr_CCError, CCSliceHdr, CCError)
+#endif
+
+static inline CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice* src, CCArena* arena) {
+    if (!src || !arena) {
+        return cc_err_CCResult_CCSlice_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "clone_into without arena"));
+    }
+    if (src->len == 0) {
+        return cc_ok_CCResult_CCSlice_CCError(cc_slice_empty());
+    }
+
+    CCSlice stable = cc_arena_alloc_slice_bytes(arena, src->len);
+    if (!stable.ptr) {
+        return cc_err_CCResult_CCSlice_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "clone slice"));
+    }
+
+    memcpy(stable.ptr, src->ptr, src->len);
+    return cc_ok_CCResult_CCSlice_CCError(stable);
+}
+
+static inline CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr* src, CCArena* arena) {
+    if (!src || !arena) {
+        return cc_err_CCResult_CCSliceHdr_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "clone_into without arena"));
+    }
+    if (src->len == 0) {
+        CCSliceHdr empty = {0};
+        return cc_ok_CCResult_CCSliceHdr_CCError(empty);
+    }
+
+    CCSlice stable = cc_arena_alloc_slice_bytes(arena, src->len);
+    if (!stable.ptr) {
+        return cc_err_CCResult_CCSliceHdr_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "clone slice hdr"));
+    }
+
+    memcpy(stable.ptr, src->ptr, src->len);
+    return cc_ok_CCResult_CCSliceHdr_CCError((CCSliceHdr){ .ptr = stable.ptr, .len = stable.len });
+}
+
+#endif /* CC_STD_SLICE_H */

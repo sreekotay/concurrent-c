@@ -816,16 +816,11 @@ static CCString* db_find_value(RedisDb* db, char[:] key) {
     return db->entries->get_ptr(kh);
 }
 
-static bool !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key, CCSliceHdr* out) {
-    if (!db || !out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without output"));
-    *out = (CCSliceHdr){0};
-    if (key.len == 0) return cc_ok(true);
-    void* copy = cc_arena_alloc(&db->key_arena, key.len, _Alignof(char));
-    if (!copy) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry key clone failed"));
-    memcpy(copy, key.ptr, key.len);
-    out->ptr = copy;
-    out->len = key.len;
-    return cc_ok(true);
+static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
+    if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
+    CCSliceHdr view = db_key_hdr_view(key);
+    CCSliceHdr stable = cc_slice_hdr_clone_into(&view, &db->key_arena) !>(e) { return cc_err(e); };
+    return cc_ok(stable);
 }
 
 static bool !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCString value) {
@@ -848,9 +843,7 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
         return cc_ok(reply_simple("OK"));
     }
 
-    CCSliceHdr owned_key = {0};
-    bool !>(CCError) key_res = db_clone_key_hdr(db, key, &owned_key);
-    if (key_res.is_err()) return cc_err(key_res.error());
+    CCSliceHdr owned_key = db_clone_key_hdr(db, key) !>(e) { return cc_err(e); };
     CCString owned_value = {0};
     bool !>(CCError) init_res =
         db_clone_value_into_arena(&owned_value, &db->value_arena, value, "entry value clone failed");
