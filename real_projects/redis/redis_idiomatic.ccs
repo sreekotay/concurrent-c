@@ -98,6 +98,14 @@ static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
 CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, db_map_hash_key, db_map_eq_key);
 CC_MAP_DECL_UFCS(RedisDbMap);
 
+/* TODO(compiler): this should be `static CCString !>(CCError) ...` below.
+ * In this larger TU, a surface result return for CCString currently trips a
+ * phase3 reparse/coarse-UFCS edge, so use the concrete result type directly. */
+#ifndef CCResult_CCString_CCError_DEFINED
+#define CCResult_CCString_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCString_CCError, CCString, CCError)
+#endif
+
 static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
     size_t cap;
     if (!m) return 0;
@@ -416,18 +424,47 @@ typedef struct ReqIter {
     RedisConn* conn;
 } ReqIter;
 
+typedef struct RedisRequestSlot {
+    RedisConn* conn;
+    RedisRequest* req;
+} RedisRequestSlot;
+
+/* TODO(compiler): this should be `RedisRequestSlot !>(CCError)`, but result
+ * spec emission currently runs before local typedefs like RedisRequestSlot are
+ * visible in this TU. Keep the concrete result local and explicit for now. */
+#ifndef CCResult_RedisRequestSlot_CCError_DEFINED
+#define CCResult_RedisRequestSlot_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_RedisRequestSlot_CCError, RedisRequestSlot, CCError)
+#endif
+
 @noblock static ReqIter rr_req_iter(RespReader* reader, RedisConn* conn) {
     ReqIter it = { .reader = reader, .conn = conn };
     return it;
 }
 
-static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
-    RedisConn* conn = it->conn;
+static void redis_request_slot_release(RedisRequestSlot* slot) {
+    if (!slot || !slot->req) return;
+    redis_conn_release_slot(slot->conn, slot->req);
+    slot->conn = NULL;
+    slot->req = NULL;
+}
+
+static RedisRequest* redis_request_slot_commit(RedisRequestSlot* slot) {
+    if (!slot || !slot->conn || !slot->req) return NULL;
+    RedisRequest* req = slot->req;
+    /* Commit: req takes a ref on conn; release_request owns both from here. */
+    req->conn = slot->conn->addref();
+    slot->conn = NULL;
+    slot->req = NULL;
+    return req;
+}
+
+static CCResult_RedisRequestSlot_CCError redis_conn_request_slot(RedisConn* conn) {
     /* The pool slot IS a RedisRequest; req->arena wraps the trailing
      * req->argv_buf for argv clones (heap-spills on overflow). */
     RedisRequest* req = (RedisRequest*)cc_arena_pool_alloc(&conn->req_pool);
     if (!req) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
+        return cc_err_CCResult_RedisRequestSlot_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
     }
     /* No full-struct memset: sizeof(RedisRequest) is ~450 B (dominated
      * by the 368-byte argv_buf scratch) and zeroing it per-request
@@ -437,21 +474,26 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     req->arena = cc_arena_create_buffer(req->argv_buf,
                                         sizeof(req->argv_buf),
                                         CC_ARENA_GROWABLE);
-    if (!req->arena.base) {
+    if (!req->arena.valid()) {
         cc_arena_pool_free(&conn->req_pool, req);
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
+        return cc_err_CCResult_RedisRequestSlot_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
-    @errhandler(CCError e) {
-        redis_conn_release_slot(conn, req);
-        return cc_err(e);
-    }
+    return cc_ok_CCResult_RedisRequestSlot_CCError((RedisRequestSlot){ .conn = conn, .req = req });
+}
+
+static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
+    RedisConn* conn = it->conn;
+    CCResult_RedisRequestSlot_CCError slot_res = redis_conn_request_slot(conn);
+    if (slot_res.is_err()) return cc_err(slot_res.u.error);
+    RedisRequestSlot slot = CCResult_RedisRequestSlot_CCError_value(slot_res);
+    @defer redis_request_slot_release(&slot);
+    RedisRequest* req = slot.req;
 
     CCSlice args[4] = {0};
     size_t argc = 0;
     CCError perr = {0};
     RespParseStatus argc_status = rr_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
     if (argc_status == RESP_PARSE_INCOMPLETE) {
-        redis_conn_release_slot(conn, req);
         return cc_ok(false);
     }
     if (argc_status == RESP_PARSE_ERROR) return cc_err(perr);
@@ -459,7 +501,11 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     RedisCommandKind kind = REDIS_CMD_PING;
     size_t arg_start = 0;
     size_t req_argc = 0;
-    decode_request_shape(args, argc, &kind, &arg_start, &req_argc) !>;
+    /* TODO(compiler): statement-form unwrap with local cleanup/defer in this
+     * function currently survives into phase3. Use an explicit result until
+     * parser-safe UFCS/result lowering handles this shape. */
+    bool !>(CCError) shape_res = decode_request_shape(args, argc, &kind, &arg_start, &req_argc);
+    if (shape_res.is_err()) return cc_err(shape_res.error());
 
     req->conn_id = conn->conn_id;
     req->request_id = conn->next_request_id;
@@ -472,9 +518,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         }
     }
 
-    /* Commit: req takes a ref on conn; release_request owns both from here. */
-    req->conn = conn->addref();
-    *out = req;
+    *out = redis_request_slot_commit(&slot);
     return cc_ok(true);
 }
 
@@ -711,32 +755,28 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
     }
 }
 
-static bool !>(CCError) db_clone_value_into_arena(CCString* out,
-                                                  CCArena* arena,
-                                                  char[:] src,
-                                                  const char* err_msg) {
+static CCResult_CCString_CCError db_clone_value_into_arena(CCArena* arena,
+                                                           char[:] src,
+                                                           const char* err_msg) {
     size_t cap = db_string_cap_8x(src.len);
-    if (cap == 0) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+    if (cap == 0) return cc_err_CCResult_CCString_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     CCString cloned = cc_string_new();
     if (!cloned.reserve(cap, arena)) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+        return cc_err_CCResult_CCString_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
     if (cloned.push_slice(src, arena) == NULL) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
+        return cc_err_CCResult_CCString_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
     if (cloned.heap_data()) db_mem_stats_note_value_alloc(cloned.cap());
-    if (!out) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, err_msg));
-    *out = cloned;
-    return cc_ok(true);
+    return cc_ok_CCResult_CCString_CCError(cloned);
 }
 
 static bool db_init_overflow_arena(CCArena* a) {
     *a = cc_arena_heap(REDIS_DB_OVERFLOW_ARENA_ROOT);
-    if (!a->base) return false;
+    if (!a->valid()) return false;
     a->block_max = 1;
     if (!cc_arena_set_heap_overflow(a, true)) {
-        a->free();
-        *a = (CCArena){0};
+        a->destroy();
         return false;
     }
     return true;
@@ -744,25 +784,16 @@ static bool db_init_overflow_arena(CCArena* a) {
 
 static void db_free_arenas_only(RedisDb* db) {
     if (!db) return;
-    if (db->map_arena.base) {
-        db->map_arena.free();
-        db->map_arena = (CCArena){0};
-    }
-    if (db->key_arena.base) {
-        db->key_arena.free();
-        db->key_arena = (CCArena){0};
-    }
-    if (db->value_arena.base) {
-        db->value_arena.free();
-        db->value_arena = (CCArena){0};
-    }
+    db->map_arena.destroy();
+    db->key_arena.destroy();
+    db->value_arena.destroy();
 }
 
 static bool db_init(RedisDb* db, size_t bucket_count) {
     if (!db || bucket_count == 0) return false;
     if (!db_init_overflow_arena(&db->map_arena)) return false;
     db->key_arena = cc_arena_heap(REDIS_DB_KEY_ARENA_ROOT);
-    if (!db->key_arena.base) {
+    if (!db->key_arena.valid()) {
         db_free_arenas_only(db);
         return false;
     }
@@ -790,7 +821,7 @@ static void db_release_value(RedisDb* db, CCString* value) {
  * capacity — the happy case for same-length INCR or constant-width
  * SET benchmarks.  Growing values clone a replacement into db->value_arena
  * and release the superseded buffer. */
-static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] value) {
+static void !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] value) {
     if (!cell) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db replace without entry"));
     if (value.len + 1 <= cell->cap()) {
         if (!cell->clear()) {
@@ -799,15 +830,18 @@ static bool !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
         if (!cell->push_slice(value, &db->value_arena)) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "entry value replace failed"));
         }
-        return cc_ok(true);
+        return cc_ok();
     }
-    CCString replacement = {0};
-    bool !>(CCError) clone_res =
-        db_clone_value_into_arena(&replacement, &db->value_arena, value, "entry value clone failed");
-    if (clone_res.is_err()) return cc_err(clone_res.error());
+    CCResult_CCString_CCError clone_res =
+        db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed");
+    /* TODO(compiler): `clone_res.error()` / generated `_error(...)` should
+     * work here; with this concrete, locally declared result type they
+     * currently resolve through the wrong parser-mode generic path. */
+    if (clone_res.is_err()) return cc_err(clone_res.u.error);
+    CCString replacement = CCResult_CCString_CCError_value(clone_res);
     cell->release(&db->value_arena);
     *cell = replacement;
-    return cc_ok(true);
+    return cc_ok();
 }
 
 static CCString* db_find_value(RedisDb* db, char[:] key) {
@@ -823,14 +857,14 @@ static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
     return cc_ok(stable);
 }
 
-static bool !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCString value) {
+static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCString value) {
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
     if (db->entries->insert(owned_key, value) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
-    return cc_ok(true);
+    return cc_ok();
 }
 
 static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
@@ -838,20 +872,21 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
 
     CCString* cell = db_find_value(db, key);
     if (cell) {
-        bool !>(CCError) replace_res = db_value_replace(db, cell, value);
+        /* TODO(compiler): statement-form `db_value_replace(...) !>(e) { ... };`
+         * currently survives into phase3 in this large TU and breaks reparse. */
+        void !>(CCError) replace_res = db_value_replace(db, cell, value);
         if (replace_res.is_err()) return cc_err(replace_res.error());
         return cc_ok(reply_simple("OK"));
     }
 
     CCSliceHdr owned_key = db_clone_key_hdr(db, key) !>(e) { return cc_err(e); };
-    CCString owned_value = {0};
-    bool !>(CCError) init_res =
-        db_clone_value_into_arena(&owned_value, &db->value_arena, value, "entry value clone failed");
-    if (init_res.is_err()) {
-        return cc_err(init_res.error());
-    }
+    CCResult_CCString_CCError value_res =
+        db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed");
+    /* TODO(compiler): same concrete-result `.error()` issue as above. */
+    if (value_res.is_err()) return cc_err(value_res.u.error);
+    CCString owned_value = CCResult_CCString_CCError_value(value_res);
 
-    bool !>(CCError) insert_res = db_insert_value(db, owned_key, owned_value);
+    void !>(CCError) insert_res = db_insert_value(db, owned_key, owned_value);
     if (insert_res.is_err()) {
         db_release_value(db, &owned_value);
         return cc_err(insert_res.error());
@@ -901,7 +936,8 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     encode_i64_decimal_into(buf, value);
     char[:] encoded = cc_slice_from_buffer(buf, encoded_len);
     if (cell) {
-        bool !>(CCError) replace_res = db_value_replace(db, cell, encoded);
+        /* TODO(compiler): same statement-form void-result unwrap issue as db_set. */
+        void !>(CCError) replace_res = db_value_replace(db, cell, encoded);
         if (replace_res.is_err()) return cc_err(replace_res.error());
     } else {
         RedisReply !>(CCError) set_res = db_set(db, key, encoded);
