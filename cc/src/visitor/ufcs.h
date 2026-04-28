@@ -44,6 +44,55 @@ int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap,
 void cc_ufcs_set_symbols(CCSymbolTable* symbols);
 void cc_ufcs_set_source_context(const char* source_text, size_t source_offset);
 
+/* Compose the callee name used by the global `cc_type_register("*", ...)`
+ * default UFCS hook: `CCFoo.bar()` -> `cc_foo_bar(...)`, and bare CamelCase
+ * user types like `RedisConn.retain()` -> `redis_conn_retain(...)`.
+ *
+ * This is a text-only mirror of cc_ufcs_generic_cc_prefix_lower_c for parser
+ * survival paths that cannot invoke comptime hooks yet. Authoritative UFCS
+ * lowering still goes through the registered hook machinery. */
+static inline int cc_ufcs_compose_default_callee(char* out,
+                                                 size_t out_sz,
+                                                 const char* type_name,
+                                                 const char* method_name) {
+    const char* t = type_name;
+    size_t tlen;
+    size_t wi = 0;
+    size_t body_start = 0;
+    int has_cc_prefix = 0;
+    if (!out || out_sz == 0 || !type_name || !method_name || !method_name[0]) return 0;
+    out[0] = '\0';
+    while (*t == ' ' || *t == '\t') t++;
+    if (strncmp(t, "struct ", 7) == 0) t += 7;
+    else if (strncmp(t, "union ", 6) == 0) t += 6;
+    tlen = strlen(t);
+    while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0) return 0;
+    has_cc_prefix = (tlen > 2 && t[0] == 'C' && t[1] == 'C' && t[2] >= 'A' && t[2] <= 'Z');
+    if (!((t[0] >= 'A' && t[0] <= 'Z') || (t[0] >= 'a' && t[0] <= 'z') || t[0] == '_')) return 0;
+    if (has_cc_prefix) {
+        if (wi + 3 >= out_sz) return 0;
+        out[wi++] = 'c';
+        out[wi++] = 'c';
+        out[wi++] = '_';
+        body_start = 2;
+    }
+    for (size_t ri = body_start; ri < tlen; ++ri) {
+        char c = t[ri];
+        int is_upper = (c >= 'A' && c <= 'Z');
+        if (is_upper && ri > body_start) {
+            if (wi + 1 >= out_sz) return 0;
+            out[wi++] = '_';
+        }
+        if (wi + 1 >= out_sz) return 0;
+        out[wi++] = is_upper ? (char)(c + ('a' - 'A')) : c;
+    }
+    if (wi + 1 + strlen(method_name) + 1 > out_sz) return 0;
+    out[wi++] = '_';
+    strcpy(out + wi, method_name);
+    return 1;
+}
+
 /* Resolve builtin channel UFCS lowering from receiver type + method + mode. */
 static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
                                                  const char* method,
