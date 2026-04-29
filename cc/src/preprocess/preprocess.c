@@ -3935,23 +3935,18 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             i++;
             continue;
         }
-        if (nursery_like || arena_like) {
-            /* CCNursery and CCArena have registered @comptime hooks
-               (cc_nursery_lower_c, cc_arena_lower_c) whose return values are
-               ordinary struct/scalar-typed C, so the CC_PARSER_MODE stub
-               member signatures are compatible with the real lowered
-               callables. Skip rewriting here so the hook is authoritative:
-               rewriting would bypass the hook and silently produce default
-               `cc_<family>_<method>` callees that may not exist (e.g.
-               comptime_type_arena_hooks_smoke block 2: `arena.avail()` must
-               lower via the hook to `arena_avail`, not `cc_arena_avail`).
-               CCFile/CCCommand/CCString also have hooks now (Phase 1b/1c)
-               but their real methods return structured types (CCResult
-               families, CCString*) that the default parser-mode member
-               stubs can't model without a wider type-registry upgrade; for
-               now the preprocess-text path keeps eagerly lowering them to
-               avoid parser-mode stub/signature mismatches. See the
-               `file-command-string-skip` follow-up for the larger fix. */
+        if (arena_like) {
+            /* CCArena has a registered @comptime hook (cc_arena_lower_c).
+               Skip rewriting here so the hook is authoritative: rewriting
+               would bypass it and silently produce default `cc_arena_<method>`
+               callees that may not exist (e.g. comptime_type_arena_hooks_smoke
+               block 2: `arena.avail()` must lower via the hook to
+               `arena_avail`, not `cc_arena_avail`).
+
+               CCNursery also has a hook, but closure literal lowering can run
+               after the AST UFCS pass and leave `n->spawn(__cc_closure_make_N())`
+               behind. The parser-safe fallback below mirrors that nursery hook's
+               fixed mappings so these calls do not survive to emitted C. */
             i++;
             continue;
         }
@@ -4102,8 +4097,16 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_slice_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+                if (strcmp(method_name, "spawn") == 0) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_closure0");
+                } else if (strcmp(method_name, "spawnhybrid") == 0) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawnhybrid_closure0");
+                } else if (strcmp(method_name, "close_on") == 0) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_add_closing_tx");
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+                }
             } else if (map_decl_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "_");

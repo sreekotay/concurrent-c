@@ -317,6 +317,15 @@ static void cc__report_reparse_failure(const char* stage,
             (stage && stage[0]) ? stage : "unknown stage",
             shown ? shown : "<input>");
     fprintf(stderr, "cc: parser diagnostics above refer to transformed compiler output, not raw user source\n");
+    if (stage && strcmp(stage, "final-UFCS input") == 0 && transformed_src &&
+        (strstr(transformed_src, "__typeof__(cc_channel_send(") ||
+         strstr(transformed_src, "__typeof__(cc_channel_recv("))) {
+        fprintf(stderr,
+                "cc: note: this looks like result-unwrapping a direct channel send/recv after async lowering\n");
+        fprintf(stderr,
+                "cc: note: a common cause is a channel operation inside an @async @noblock function; "
+                "remove the function-level @noblock or mark that call site @blocking\n");
+    }
     if (transformed_lines > 0) {
         if (prepared_lines > transformed_lines) {
             fprintf(stderr, "cc: transformed source is %d lines (%d lines after parser prelude/normalization)\n",
