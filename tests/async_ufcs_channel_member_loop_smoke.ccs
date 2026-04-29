@@ -1,0 +1,65 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct WriterConn {
+    int*[~4 1:1 <] writer_reply_rx;
+    int*[~4 1:1 >] reply_tx;
+} WriterConn;
+
+@async int reply_writer(WriterConn* conn) {
+    if (!conn) return 0;
+    int* slot = NULL;
+    while (cc_io_avail(conn->writer_reply_rx.recv(&slot))) {
+        if (!slot) continue;
+        conn->reply_tx.send(slot) !>(e) {
+            (void)e;
+            cc_channel_close(conn->reply_tx);
+            break;
+        };
+    }
+    cc_channel_close(conn->reply_tx);
+    return 0;
+}
+
+int main(void) {
+    int*[~4 1:1 >] owner_tx;
+    int*[~4 1:1 <] writer_rx;
+    CCChan* owner_ch = cc_channel_pair(&owner_tx, &writer_rx);
+    if (!owner_ch) return 1;
+    @defer owner_ch.free();
+    (void)owner_ch;
+
+    int*[~4 1:1 >] reply_tx;
+    int*[~4 1:1 <] reply_rx;
+    CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
+    if (!reply_ch) return 1;
+    @defer reply_ch.free();
+    (void)reply_ch;
+
+    int a = 2;
+    int b = 5;
+    if (!cc_io_avail(cc_channel_send(owner_tx, &a))) return 1;
+    if (!cc_io_avail(cc_channel_send(owner_tx, &b))) return 1;
+    cc_channel_close(owner_tx);
+
+    WriterConn conn = { writer_rx, reply_tx };
+    int rc = cc_block_on(int, reply_writer(&conn));
+    if (rc != 0) {
+        printf("async_ufcs_channel_member_loop_smoke: FAIL writer rc=%d\n", rc);
+        return 1;
+    }
+
+    int total = 0;
+    int* got = NULL;
+    while (cc_io_avail(cc_channel_recv(reply_rx, &got))) {
+        if (got) total += *got;
+    }
+
+    if (total != 7) {
+        printf("async_ufcs_channel_member_loop_smoke: FAIL total=%d\n", total);
+        return 1;
+    }
+
+    printf("async_ufcs_channel_member_loop_smoke: PASS\n");
+    return 0;
+}

@@ -3956,9 +3956,14 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             continue;
         }
         if (chan_tx || chan_rx) {
-            /* Channel UFCS now stays alive for the parser/TCC + later type-owned path. */
-            i++;
-            continue;
+            if (chan_tx && strcmp(method_name, "send") == 0) {
+                channel_callee = "cc_channel_send";
+            } else if (chan_rx && strcmp(method_name, "recv") == 0) {
+                channel_callee = "cc_channel_recv";
+            } else {
+                i++;
+                continue;
+            }
         }
         family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0);
         family_pass_direct = parser_map || map_decl_like || (strncmp(recv_type_base, "Map_", 4) == 0);
@@ -4147,6 +4152,82 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
 /* Parser-survival text rewriter for concrete family UFCS. Kept narrow so TCC's
    stub parse sees lowered receiver forms for fragile nested contexts; the AST
    UFCS pass remains authoritative for everything else. */
+static int cc__channel_ufcs_recv_expr_char(char c) {
+    return cc_is_ident_char(c) || c == '.' || c == '-' || c == '>' || c == ']' || c == ')';
+}
+
+static char* cc__rewrite_channel_send_recv_ufcs_parser_safe(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0;
+    size_t out_cap = 0;
+    size_t last_emit = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    for (size_t i = 0; i + 6 < n; ) {
+        const char* fn = NULL;
+        size_t method_len = 0;
+        size_t recv_start;
+        size_t open;
+        size_t close = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (memcmp(src + i, ".send(", 6) == 0) {
+            fn = "cc_channel_send";
+            method_len = 5;
+        } else if (memcmp(src + i, ".recv(", 6) == 0) {
+            fn = "cc_channel_recv";
+            method_len = 5;
+        } else {
+            i++;
+            continue;
+        }
+        recv_start = i;
+        while (recv_start > 0 && cc__channel_ufcs_recv_expr_char(src[recv_start - 1])) recv_start--;
+        if (recv_start == i) {
+            i++;
+            continue;
+        }
+        if (cc__ufcs_preceded_by_await(src, recv_start)) {
+            i++;
+            continue;
+        }
+        {
+            int has_member_chain = memchr(src + recv_start, '.', i - recv_start) != NULL;
+            if (!has_member_chain) {
+                for (size_t q = recv_start; q + 1 < i; q++) {
+                    if (src[q] == '-' && src[q + 1] == '>') {
+                        has_member_chain = 1;
+                        break;
+                    }
+                }
+            }
+            if (!has_member_chain) {
+                i++;
+                continue;
+            }
+        }
+        open = i + method_len;
+        if (open >= n || src[open] != '(' || !cc_find_matching_paren(src, n, open, &close)) {
+            i++;
+            continue;
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, fn);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+        cc_sb_append(&out, &out_len, &out_cap, src + recv_start, i - recv_start);
+        if (close > open + 1) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+            cc_sb_append(&out, &out_len, &out_cap, src + open + 1, close - open - 1);
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last_emit = close + 1;
+        i = close + 1;
+    }
+    if (!out) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     char* cur = NULL;
     size_t cur_len = n;
@@ -4155,11 +4236,19 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
         const char* in = cur ? cur : src;
         char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
         if (!next) {
-            return cur;
+            break;
         }
         if (cur) free(cur);
         cur = next;
         cur_len = strlen(cur);
+    }
+    {
+        const char* in = cur ? cur : src;
+        char* chan = cc__rewrite_channel_send_recv_ufcs_parser_safe(in, cur_len);
+        if (chan) {
+            if (cur) free(cur);
+            cur = chan;
+        }
     }
     return cur;
 }
