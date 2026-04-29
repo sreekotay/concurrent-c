@@ -6707,6 +6707,8 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     size_t args_start = paren_pos + 1;
                     size_t j = args_start;
                     int depth = 1;
+                    int brace_depth = 0;
+                    int bracket_depth = 0;
                     int comma_count = 0;
                     int in_s = 0, in_c = 0;
                     while (j < n && depth > 0) {
@@ -6715,9 +6717,13 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         if (in_c) { if (ch == '\\' && j+1<n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
                         if (ch == '"') { in_s = 1; j++; continue; }
                         if (ch == '\'') { in_c = 1; j++; continue; }
-                        if (ch == '(') depth++;
-                        else if (ch == ')') { depth--; if (depth == 0) break; }
-                        else if (ch == ',' && depth == 1) comma_count++;
+                        if (ch == '{') brace_depth++;
+                        else if (ch == '}') { if (brace_depth > 0) brace_depth--; }
+                        else if (ch == '[') bracket_depth++;
+                        else if (ch == ']') { if (bracket_depth > 0) bracket_depth--; }
+                        else if (ch == '(') depth++;
+                        else if (ch == ')' && brace_depth == 0 && bracket_depth == 0) { depth--; if (depth == 0) break; }
+                        else if (ch == ',' && depth == 1 && brace_depth == 0 && bracket_depth == 0) comma_count++;
                         j++;
                     }
                     
@@ -7041,6 +7047,110 @@ chain_cleanup:
 
 // Preprocess source string to output string (no temp files).
 // skip_checks: if true, skip validation checks (use for reparse passes).
+static size_t cc__find_ident_top_level_pp(const char* src, size_t start, size_t len, const char* ident) {
+    size_t ident_len = ident ? strlen(ident) : 0;
+    size_t pos = start;
+    if (!src || !ident || ident_len == 0 || start >= len) return len;
+    while (pos + ident_len <= len) {
+        pos = cc_find_substr_top_level(src, pos, len, ident, ident_len);
+        if (pos >= len) return len;
+        int left_ok = (pos == 0) || !cc_is_ident_char(src[pos - 1]);
+        int right_ok = (pos + ident_len >= len) || !cc_is_ident_char(src[pos + ident_len]);
+        if (left_ok && right_ok) return pos;
+        pos++;
+    }
+    return len;
+}
+
+static size_t cc__line_start_before_pp(const char* src, size_t pos) {
+    if (!src) return 0;
+    while (pos > 0 && src[pos - 1] != '\n') pos--;
+    return pos;
+}
+
+static size_t cc__type_decl_end_top_level_pp(const char* src, size_t len, const char* type_name) {
+    size_t p = 0;
+    if (!src || !type_name || !type_name[0]) return 0;
+    if (strcmp(type_name, "void") == 0 ||
+        strcmp(type_name, "bool") == 0 ||
+        strcmp(type_name, "char") == 0 ||
+        strcmp(type_name, "short") == 0 ||
+        strcmp(type_name, "int") == 0 ||
+        strcmp(type_name, "long") == 0 ||
+        strcmp(type_name, "float") == 0 ||
+        strcmp(type_name, "double") == 0 ||
+        strcmp(type_name, "size_t") == 0 ||
+        strcmp(type_name, "ssize_t") == 0 ||
+        strcmp(type_name, "CCError") == 0) {
+        return 0;
+    }
+    while (p < len) {
+        size_t line_start = p;
+        size_t line_end = line_start;
+        while (line_end < len && src[line_end] != '\n') line_end++;
+        size_t s = line_start;
+        while (s < line_end && (src[s] == ' ' || src[s] == '\t' || src[s] == '\r')) s++;
+        int is_type_decl =
+            (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) ||
+            (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ||
+            (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ||
+            (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4]));
+        if (!is_type_decl) {
+            p = (line_end < len) ? line_end + 1 : line_end;
+            continue;
+        }
+
+        size_t q = s;
+        int brace_depth = 0;
+        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+        for (; q < len; q++) {
+            char c = src[q];
+            char c2 = (q + 1 < len) ? src[q + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; q++; } continue; }
+            if (in_str) { if (c == '\\' && c2) { q++; continue; } if (c == '"') in_str = 0; continue; }
+            if (in_chr) { if (c == '\\' && c2) { q++; continue; } if (c == '\'') in_chr = 0; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; q++; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; q++; continue; }
+            if (c == '"') { in_str = 1; continue; }
+            if (c == '\'') { in_chr = 1; continue; }
+            if (c == '{') { brace_depth++; continue; }
+            if (c == '}') { if (brace_depth > 0) brace_depth--; continue; }
+            if (c == ';' && brace_depth == 0) {
+                size_t end = q + 1;
+                int declares_type = 0;
+                if (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) {
+                    size_t e = q;
+                    while (e > s && (src[e - 1] == ' ' || src[e - 1] == '\t' || src[e - 1] == '\r' || src[e - 1] == '\n')) e--;
+                    size_t b = e;
+                    while (b > s && cc_is_ident_char(src[b - 1])) b--;
+                    size_t type_len = strlen(type_name);
+                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
+                } else {
+                    size_t kw_len =
+                        (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ? 6 :
+                        (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ? 5 :
+                        (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4])) ? 4 : 0;
+                    size_t b = s + kw_len;
+                    while (b < end && (src[b] == ' ' || src[b] == '\t' || src[b] == '\r' || src[b] == '\n')) b++;
+                    size_t e = b;
+                    while (e < end && cc_is_ident_char(src[e])) e++;
+                    size_t type_len = strlen(type_name);
+                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
+                }
+                if (declares_type) {
+                    if (end < len && src[end] == '\n') end++;
+                    return end;
+                }
+                p = (end < len && src[end] == '\n') ? end + 1 : end;
+                break;
+            }
+        }
+        if (q >= len) return 0;
+    }
+    return 0;
+}
+
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks) {
     if (!input || input_len == 0) return NULL;
 
@@ -7216,6 +7326,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         {
             size_t use_len = strlen(use);
             size_t insert_pos = 0;
+            size_t delayed_insert_pos = use_len;
+            unsigned char delayed_result_specs[512] = {0};
             while (insert_pos < use_len) {
                 size_t line_start = insert_pos;
                 size_t line_end = line_start;
@@ -7291,6 +7403,25 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 }
                 break;
             }
+            for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
+                const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                size_t ok_decl_end = spec ? cc__type_decl_end_top_level_pp(use, use_len, spec->ok_type) : 0;
+                size_t err_decl_end = spec ? cc__type_decl_end_top_level_pp(use, use_len, spec->err_type) : 0;
+                size_t decl_end = ok_decl_end > err_decl_end ? ok_decl_end : err_decl_end;
+                if (!spec || decl_end <= insert_pos) continue;
+
+                char concrete[256];
+                cc_result_spec_format_name(spec->mangled_ok, spec->mangled_err,
+                                           concrete, sizeof(concrete));
+                size_t first_use = cc__find_ident_top_level_pp(use, decl_end, use_len, concrete);
+                delayed_result_specs[i] = 1;
+                if (first_use < use_len) {
+                    size_t pos = cc__line_start_before_pp(use, first_use);
+                    if (pos < delayed_insert_pos) delayed_insert_pos = pos;
+                } else if (decl_end < delayed_insert_pos) {
+                    delayed_insert_pos = decl_end;
+                }
+            }
             fwrite(use, 1, insert_pos, out);
             {
                 /* At `insert_pos` the TU's leading `#include` / `typedef`
@@ -7321,6 +7452,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     const char* err_m = spec ? spec->mangled_err : NULL;
                     const char* ok_ty = spec ? spec->ok_type : NULL;
                     const char* err_ty = spec ? spec->err_type : NULL;
+                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
                     if (!ok_m || !err_m || !ok_ty || !err_ty) continue;
                     /* Stdlib-predeclared specs (`CCResult_CCDirIterptr_CCIoError`
                      * etc.) have their `CC_DECL_RESULT_SPEC` expansion baked
@@ -7363,6 +7495,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
                     const char* ok = spec ? spec->mangled_ok : NULL;
                     const char* err = spec ? spec->mangled_err : NULL;
+                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
                     if (!ok || !err) continue;
                     int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
                     fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
@@ -7468,7 +7601,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     char key[192];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
@@ -7507,13 +7641,14 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     /* Void-result types have no `.u.value` field; skip their
                      * `__cc_uw_value` arm.  The `?>`/`!>` rewriter never
                      * reads the value on a void result, so this arm being
                      * absent is fine — `default:` still covers raw pointers
                      * and typed non-Result LHSs. */
-                    if (spec->ok_type && strcmp(spec->ok_type, "void") == 0) continue;
+                    if (strcmp(spec->ok_type, "void") == 0) continue;
                     char key[192];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
@@ -7545,7 +7680,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (!spec || !spec->mangled_ok || !spec->mangled_err) continue;
+                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     char key[192];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
@@ -7575,7 +7711,62 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
                 }
             }
-            fputs(use + insert_pos, out);
+            if (delayed_insert_pos < use_len && delayed_insert_pos > insert_pos) {
+                fwrite(use + insert_pos, 1, delayed_insert_pos - insert_pos, out);
+                fprintf(out, "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
+                for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    if (!delayed_result_specs[i] || !spec) continue;
+                    if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
+                    int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
+                    fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
+                    fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
+                    if (ok_is_void) {
+                        fprintf(out,
+                            "typedef struct CCResult_%s_%s {\n"
+                            "    bool ok;\n"
+                            "    union { char _dummy; %s error; } u;\n"
+                            "} CCResult_%s_%s;\n",
+                            spec->mangled_ok, spec->mangled_err, spec->err_type,
+                            spec->mangled_ok, spec->mangled_err);
+                    } else {
+                        fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                                spec->mangled_ok, spec->mangled_err,
+                                spec->ok_type, spec->err_type);
+                    }
+                    fprintf(out, "#endif\n");
+                    fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            spec->mangled_ok, spec->mangled_err,
+                            spec->mangled_ok, spec->mangled_err);
+                    fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            spec->mangled_ok, spec->mangled_err,
+                            spec->mangled_ok, spec->mangled_err);
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                spec->mangled_ok, spec->mangled_err);
+                    }
+                    fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            spec->err_type, spec->mangled_ok, spec->mangled_err,
+                            spec->mangled_ok, spec->mangled_err);
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
+                                spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                spec->mangled_ok, spec->mangled_err, spec->ok_type);
+                    }
+                }
+                fprintf(out, "/* --- end delayed result type declarations --- */\n");
+                {
+                    int resume_line = 1;
+                    for (size_t i = 0; i < delayed_insert_pos; i++) {
+                        if (use[i] == '\n') resume_line++;
+                    }
+                    fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+                }
+                fputs(use + delayed_insert_pos, out);
+            } else {
+                fputs(use + insert_pos, out);
+            }
         }
         free(lowered_system_use);
     }
