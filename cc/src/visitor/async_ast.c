@@ -568,6 +568,52 @@ static void cc__collect_decl_names_from_stmt_list(const Stmt* st, int n, char** 
     }
 }
 
+static void cc__collect_channel_pu_temps_from_stmt_list(const Stmt* st, int n,
+                                                        char** out_names,
+                                                        char** out_tys,
+                                                        char** out_sufs,
+                                                        int* io_n,
+                                                        int cap) {
+    if (!st || !out_names || !out_tys || !out_sufs || !io_n) return;
+    for (int i = 0; i < n; i++) {
+        const Stmt* s = &st[i];
+        if (s->kind == ST_BLOCK || s->kind == ST_IF || s->kind == ST_WHILE || s->kind == ST_FOR) {
+            cc__collect_channel_pu_temps_from_stmt_list(s->then_st, s->then_n, out_names, out_tys, out_sufs, io_n, cap);
+            cc__collect_channel_pu_temps_from_stmt_list(s->else_st, s->else_n, out_names, out_tys, out_sufs, io_n, cap);
+            continue;
+        }
+        if (s->kind != ST_SEMI || !s->text) continue;
+        if (!strstr(s->text, "__typeof__") ||
+            (!strstr(s->text, "cc_channel_send") && !strstr(s->text, "cc_channel_recv"))) {
+            continue;
+        }
+        const char* p = strstr(s->text, "__cc_pu_s_");
+        if (!p) continue;
+        size_t nn = 0;
+        while (cc__is_ident_char(p[nn])) nn++;
+        if (nn == 0 || nn >= 128) continue;
+        char nm[128];
+        memcpy(nm, p, nn);
+        nm[nn] = 0;
+        int dup = 0;
+        for (int k = 0; k < *io_n; k++) {
+            if (out_names[k] && strcmp(out_names[k], nm) == 0) { dup = 1; break; }
+        }
+        if (dup || *io_n >= cap) continue;
+        out_names[*io_n] = strdup(nm);
+        out_tys[*io_n] = strdup("CCResult_bool_CCIoError");
+        out_sufs[*io_n] = NULL;
+        if (out_names[*io_n] && out_tys[*io_n]) {
+            (*io_n)++;
+        } else {
+            free(out_names[*io_n]);
+            free(out_tys[*io_n]);
+            out_names[*io_n] = NULL;
+            out_tys[*io_n] = NULL;
+        }
+    }
+}
+
 /* forward decls (used by text-based helpers below) */
 static int cc__trim_trailing_semicolon(char* s);
 static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_n);
@@ -2370,6 +2416,50 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
     }
 
+    /* Rewriter-introduced `__typeof__(expr) tmp = expr` declarations can be
+       frame-lifted when the value must survive a state split. Emit only the
+       assignment; the frame field carries the concrete type. */
+    if (strncmp(p, "__typeof__", 10) == 0) {
+        size_t plen = strlen(p);
+        size_t lpo = cc_find_char_top_level(p, 0, plen, '(');
+        size_t rpo = 0;
+        if (lpo < plen && cc__find_matching_paren(p, plen, lpo, &rpo)) {
+            const char* q = cc__skip_ws(p + rpo + 1);
+            if (cc__is_ident_start(*q)) {
+                const char* ns = q++;
+                while (cc__is_ident_char(*q)) q++;
+                size_t nn = (size_t)(q - ns);
+                if (nn > 0 && nn < 128) {
+                    char nm[128];
+                    int is_frame = 0;
+                    memcpy(nm, ns, nn);
+                    nm[nn] = 0;
+                    for (int k = 0; k < e->map_n; k++) {
+                        if (e->map_names[k] && strcmp(e->map_names[k], nm) == 0) { is_frame = 1; break; }
+                    }
+                    if (is_frame) {
+                        q = cc__skip_ws(q);
+                        if (*q != '=') return 1;
+                        q++;
+                        q = cc__skip_ws(q);
+                        int aw_next = 0;
+                        char* rhs = cc__emit_awaits_in_expr(e, q, &aw_next);
+                        char* lhs2 = NULL;
+                        char* rhs2 = NULL;
+                        if (!rhs) return 0;
+                        lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
+                        rhs2 = cc__rewrite_idents(rhs, e->map_names, e->map_repls, e->map_n);
+                        free(rhs);
+                        if (lhs2 && rhs2) cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                        free(lhs2);
+                        free(rhs2);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
     /* declaration-like (int/intptr_t/CCAbIntptr) -> hoisted; emit initializer as assignment */
     if (strncmp(p, "int ", 4) == 0 || strncmp(p, "intptr_t ", 9) == 0 || strncmp(p, "CCAbIntptr ", 10) == 0) {
         /* parse name */
@@ -2994,13 +3084,27 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             /* Avoid hoisting compiler-introduced temporaries / closure locals; keep them as locals in the current state. */
             if (strncmp(n[i].aux_s1, "__cc_ab_", 8) == 0) continue;
             if (strncmp(n[i].aux_s1, "__cc_ns_c", 9) == 0) continue;  /* nursery spawn closure temps */
-            /* result-unwrap temporaries live inside `({ __typeof__(CALL) tmp = ...; ... })`
-             * stmt-expressions and must not be hoisted out — their
-             * `__typeof__(CALL)` type depends on a call that in general
-             * isn't well-formed at struct-field position (e.g. autoblocking
-             * substitutions emit CCAbIntptr helpers before async lowering).
-             * The stmt-expression scope keeps them local to the state body. */
-            if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) continue;
+            /* Most result-unwrap temporaries live inside `({ __typeof__(CALL) tmp = ...; ... })`
+             * stmt-expressions and must not be hoisted out — their `__typeof__(CALL)`
+             * type is often not well-formed at struct-field position. The exception is
+             * a channel send/recv temporary whose error arm can be split into another
+             * state by async lowering; that value must survive across the split. */
+            if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) {
+                int keep_channel_result_tmp = 0;
+                if (strncmp(n[i].aux_s1, "__cc_pu_s_", 11) == 0 && n[i].line_start > 0) {
+                    size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start);
+                    size_t hi = cc__offset_of_line_1based(cur, cur_len, n[i].line_start + 1);
+                    if (hi > cur_len) hi = cur_len;
+                    if (lo < hi) {
+                        const char* line = cur + lo;
+                        size_t line_len = hi - lo;
+                        keep_channel_result_tmp =
+                            cc__range_contains_token(line, line_len, "cc_channel_send") ||
+                            cc__range_contains_token(line, line_len, "cc_channel_recv");
+                    }
+                }
+                if (!keep_channel_result_tmp) continue;
+            }
             /* Follow-up bug [F3]: legacy @err-syntax expansion temps
              * (`__cc_er_r_N`, `__cc_er_d_N`) emitted by pass_err_syntax
              * always live inside a `{ ... }` expansion block at the use
@@ -3132,6 +3236,14 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 if (!local_tys[local_n - 1] && n[i].aux_s2) {
                     local_tys[local_n - 1] = strdup(n[i].aux_s2);
                 }
+                if (n[i].aux_s1 && strncmp(n[i].aux_s1, "__cc_pu_s_", 11) == 0 &&
+                    local_tys[local_n - 1] &&
+                    strstr(local_tys[local_n - 1], "__typeof__") != NULL &&
+                    (strstr(local_tys[local_n - 1], "cc_channel_send") != NULL ||
+                     strstr(local_tys[local_n - 1], "cc_channel_recv") != NULL)) {
+                    free(local_tys[local_n - 1]);
+                    local_tys[local_n - 1] = strdup("CCResult_bool_CCIoError");
+                }
                 /* Guard against emitting a parser-mode placeholder.  The
                  * line-scan above takes everything on the decl's source
                  * line before the ident as the type prefix; that prefix
@@ -3168,6 +3280,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
            This picks up rewrite-introduced temps like `intptr_t __cc_ab_expr_*` / `intptr_t __cc_aw_l*_N`
            that are not present in the stub-AST DECL_ITEM stream but must live in the frame across awaits. */
         cc__collect_decl_names_from_stmt_list(st, st_n, locals, &local_n, 256);
+        cc__collect_channel_pu_temps_from_stmt_list(st, st_n, locals, local_tys, local_sufs, &local_n, 256);
 
         /* Count awaits in subtree; add __cc_awN temps (also bounds task slots). */
         int aw_total = 0;
