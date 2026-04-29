@@ -99,6 +99,85 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
     cc__append_str(out, ol, oc, "; ");
 }
 
+static int cc__ru_find_callee_result_type(const char* s, size_t n,
+                                          size_t call_a, size_t call_b,
+                                          char* out, size_t out_sz) {
+    char callee[128];
+    if (!out || out_sz == 0) return 0;
+    out[0] = 0;
+    if (!cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee))) {
+        return 0;
+    }
+
+    size_t callee_len = strlen(callee);
+    size_t pos = 0;
+    while (pos < n) {
+        size_t hit = cc_find_ident_top_level(s, pos, n, callee, callee_len);
+        if (hit >= n) return 0;
+        size_t after = cc__skip_ws_comments_forward(s, n, hit + callee_len);
+        if (after < n && s[after] == '(') {
+            size_t p = hit;
+            while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+            size_t end = p;
+            while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
+            size_t len = end - p;
+            if (len > 9 && memcmp(s + p, "CCResult_", 9) == 0 && len + 1 <= out_sz) {
+                memcpy(out, s + p, len);
+                out[len] = 0;
+                return 1;
+            }
+            {
+                size_t line_a = p;
+                while (line_a > 0 && s[line_a - 1] != '\n' && s[line_a - 1] != ';' && s[line_a - 1] != '}') {
+                    line_a--;
+                }
+                size_t bang = cc_find_substr_top_level(s, line_a, hit, "!>", 2);
+                if (bang < hit) {
+                    size_t err_l = cc_skip_ws_and_comments(s, n, bang + 2);
+                    size_t err_r = 0;
+                    if (err_l < hit && s[err_l] == '(' &&
+                        cc_find_matching_paren(s, n, err_l, &err_r) &&
+                        err_r < hit) {
+                        size_t ok_b = bang;
+                        while (ok_b > line_a && isspace((unsigned char)s[ok_b - 1])) ok_b--;
+                        size_t ok_a = ok_b;
+                        while (ok_a > line_a && cc_is_ident_char(s[ok_a - 1])) ok_a--;
+                        size_t err_a = err_l + 1, err_b = err_r;
+                        while (err_a < err_b && isspace((unsigned char)s[err_a])) err_a++;
+                        while (err_b > err_a && isspace((unsigned char)s[err_b - 1])) err_b--;
+                        if (ok_b > ok_a && err_b > err_a) {
+                            char ok_m[96];
+                            char err_m[96];
+                            size_t ok_len = ok_b - ok_a;
+                            size_t err_len = err_b - err_a;
+                            if (ok_len == 5 && memcmp(s + ok_a, "_Bool", 5) == 0) {
+                                memcpy(ok_m, "bool", 5);
+                            } else if (ok_len < sizeof(ok_m)) {
+                                memcpy(ok_m, s + ok_a, ok_len);
+                                ok_m[ok_len] = 0;
+                            } else {
+                                ok_m[0] = 0;
+                            }
+                            if (err_len < sizeof(err_m)) {
+                                memcpy(err_m, s + err_a, err_len);
+                                err_m[err_len] = 0;
+                            } else {
+                                err_m[0] = 0;
+                            }
+                            if (ok_m[0] && err_m[0]) {
+                                int wrote = snprintf(out, out_sz, "CCResult_%s_%s", ok_m, err_m);
+                                if (wrote > 0 && (size_t)wrote < out_sz) return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pos = hit + callee_len;
+    }
+    return 0;
+}
+
 /* Mangle the user's `!>(e) BODY` binder into a `__cc_pu_bind_<id>_<name>`
  * identifier.  The `__cc_pu_` prefix already matches `async_ast`'s
  * no-frame-lift rule for unwrap-pass temporaries, so the mangled binder
@@ -503,6 +582,26 @@ static void cc__trim_range(const char* s, size_t* a, size_t* b) {
     }
 }
 
+static void cc__ru_emit_is_err(char** out, size_t* ol, size_t* oc,
+                               const char* result_type,
+                               const char* tmpv) {
+    if (result_type && result_type[0]) {
+        cc_sb_append_fmt(out, ol, oc, "%s_is_err(%s)", result_type, tmpv);
+    } else {
+        cc_sb_append_fmt(out, ol, oc, "__cc_uw_is_err(%s)", tmpv);
+    }
+}
+
+static void cc__ru_emit_value(char** out, size_t* ol, size_t* oc,
+                              const char* result_type,
+                              const char* tmpv) {
+    if (result_type && result_type[0]) {
+        cc_sb_append_fmt(out, ol, oc, "%s_unwrap(%s)", result_type, tmpv);
+    } else {
+        cc_sb_append_fmt(out, ol, oc, "__cc_uw_value(%s)", tmpv);
+    }
+}
+
 /* Return 1 if the substring s[i..i+strlen(kw)) is exactly `kw` with no
  * identifier characters immediately before or after (word-boundary match). */
 static int cc__match_ident_kw(const char* s, size_t n, size_t i, const char* kw) {
@@ -707,7 +806,11 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     static int g_unwrap_id = 0;
     int id = ++g_unwrap_id;
     char tmpv[48];
+    char result_type[256];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_r_%d", id);
+    result_type[0] = 0;
+    (void)cc__ru_find_callee_result_type(s, n, lhs_a, lhs_b,
+                                         result_type, sizeof(result_type));
 
     char* out = NULL;
     size_t ol = 0, oc = 0;
@@ -726,13 +829,19 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     const char* f = cc_path_rel_to_repo(
         ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
 
-    cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+    if (result_type[0]) {
+        cc_sb_append_fmt(&out, &ol, &oc, "({ %s %s = (", result_type, tmpv);
+    } else {
+        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+        cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
+        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+    }
     cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-    cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-    cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-    cc_sb_append_fmt(&out, &ol, &oc,
-                     "); !__cc_uw_is_err(%s) ? __cc_uw_value(%s) : ",
-                     tmpv, tmpv);
+    cc__append_str(&out, &ol, &oc, "); !");
+    cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
+    cc__append_str(&out, &ol, &oc, " ? ");
+    cc__ru_emit_value(&out, &ol, &oc, result_type, tmpv);
+    cc__append_str(&out, &ol, &oc, " : ");
     if (has_binder) {
         /* Mangle user binder -> `__cc_pu_bind_<id>_<name>` and rewrite
          * the RHS expression accordingly (bug [F9]).  The mangled name
@@ -1696,11 +1805,20 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     char rel[1024];
     const char* f = cc_path_rel_to_repo(
         ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-    cc__append_str(&out, &ol, &oc, "{ __typeof__(");
+    char result_type[256];
+    result_type[0] = 0;
+    if (cc__ru_find_callee_result_type(s, n, call_a, call_b,
+                                       result_type, sizeof(result_type))) {
+        cc_sb_append_fmt(&out, &ol, &oc, "{ %s %s = (", result_type, tmpv);
+    } else {
+        cc__append_str(&out, &ol, &oc, "{ __typeof__(");
+        cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+    }
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-    cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+    cc__append_str(&out, &ol, &oc, "); if (");
+    cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
+    cc__append_str(&out, &ol, &oc, ") { ");
     cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, op_line);
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
@@ -1867,6 +1985,12 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
                               : "expected body after '!>'");
         return -1;
     }
+    if ((scan + 8 <= n && memcmp(s + scan, "@destroy", 8) == 0 &&
+         (scan + 8 == n || !cc_is_ident_char(s[scan + 8]))) ||
+        (scan + 6 <= n && memcmp(s + scan, "@defer", 6) == 0 &&
+         (scan + 6 == n || !cc_is_ident_char(s[scan + 6])))) {
+        return 0;
+    }
 
     /* Locate the nearest enclosing @errhandler (needed for bare form and
      * for any `@err(binder);` forwards inside a user-provided body). */
@@ -1928,7 +2052,11 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         static int g_expr_tmp_id = 0;
         int tid = ++g_expr_tmp_id;
         char tmpv[48];
+        char result_type[256];
         snprintf(tmpv, sizeof(tmpv), "__cc_pu_e_%d", tid);
+        result_type[0] = 0;
+        (void)cc__ru_find_callee_result_type(s, n, call_a, call_b,
+                                             result_type, sizeof(result_type));
 
         /* Leave the source `;` in place: in `int v = f() !>;` it terminates
          * the enclosing declaration.  The generated expression is a
@@ -1942,14 +2070,22 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         char* out = NULL;
         size_t ol = 0, oc = 0;
         cc__append_n(&out, &ol, &oc, s, call_start);
-        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+        if (result_type[0]) {
+            cc_sb_append_fmt(&out, &ol, &oc, "({ %s %s = (", result_type, tmpv);
+        } else {
+            cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+            cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+            cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+        }
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-        cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-        cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+        cc__append_str(&out, &ol, &oc, "); if (");
+        cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
+        cc__append_str(&out, &ol, &oc, ") { ");
         cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, ff, line_no);
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
-        cc_sb_append_fmt(&out, &ol, &oc, " } __cc_uw_value(%s); })", tmpv);
+        cc__append_str(&out, &ol, &oc, " } ");
+        cc__ru_emit_value(&out, &ol, &oc, result_type, tmpv);
+        cc__append_str(&out, &ol, &oc, "; })");
         free(substituted);
         if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
         *out_buf = out;
@@ -2020,7 +2156,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     static int g_expr_tmp_id2 = 0;
     int tid = ++g_expr_tmp_id2;
     char tmpv[48];
+    char result_type[256];
     snprintf(tmpv, sizeof(tmpv), "__cc_pu_x_%d", tid);
+    result_type[0] = 0;
 
     /* Mangle user binder to `__cc_pu_bind_<id>_<name>` (bug [F9]). */
     char mangled_binder[256];
@@ -2040,11 +2178,18 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     char* out = NULL;
     size_t ol = 0, oc = 0;
     cc__append_n(&out, &ol, &oc, s, call_start);
-    cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+    if (cc__ru_find_callee_result_type(s, n, call_a, call_b,
+                                       result_type, sizeof(result_type))) {
+        cc_sb_append_fmt(&out, &ol, &oc, "({ %s %s = (", result_type, tmpv);
+    } else {
+        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+        cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+    }
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-    cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc_sb_append_fmt(&out, &ol, &oc, "); if (__cc_uw_is_err(%s)) { ", tmpv);
+    cc__append_str(&out, &ol, &oc, "); if (");
+    cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
+    cc__append_str(&out, &ol, &oc, ") { ");
     if (has_binder) {
         cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, line_no);
     }
@@ -2055,7 +2200,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
          * processed already ends with `;` — skip). */
         (void)0;
     }
-    cc_sb_append_fmt(&out, &ol, &oc, " } __cc_uw_value(%s); })", tmpv);
+    cc__append_str(&out, &ol, &oc, " } ");
+    cc__ru_emit_value(&out, &ol, &oc, result_type, tmpv);
+    cc__append_str(&out, &ol, &oc, "; })");
     free(processed);
     if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
     *out_buf = out;
@@ -2071,7 +2218,8 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
                                  const char* s,
                                  size_t n,
                                  char** out_buf,
-                                 size_t* out_len) {
+                                 size_t* out_len,
+                                 int skip_statement_bang) {
     size_t op_at = 0;
     size_t search_from = 0;
     int is_stmt_pos = 1;
@@ -2127,6 +2275,18 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
             size_t lhs_a = call_start, lhs_b = op_at;
             cc__trim_range(s, &lhs_a, &lhs_b);
             if (cc__bang_lhs_looks_like_decl(s, lhs_a, lhs_b)) {
+                search_from = op_at + 2;
+                continue;
+            }
+        }
+        if (skip_statement_bang && is_stmt_pos) {
+            search_from = op_at + 2;
+            continue;
+        }
+        {
+            size_t after_op = cc_skip_ws_and_comments(s, n, op_at + 2);
+            if (after_op + 8 <= n && memcmp(s + after_op, "@destroy", 8) == 0 &&
+                (after_op + 8 == n || !cc_is_ident_char(s[after_op + 8]))) {
                 search_from = op_at + 2;
                 continue;
             }
@@ -2676,11 +2836,12 @@ out:
     return rc;
 }
 
-int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
-                              const char* in_src,
-                              size_t in_len,
-                              char** out_src,
-                              size_t* out_len) {
+int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
+                                           const char* in_src,
+                                           size_t in_len,
+                                           char** out_src,
+                                           size_t* out_len,
+                                           int skip_statement_bang) {
     if (!out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -2805,7 +2966,8 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
         for (int iter = 0; iter < 64; iter++) {
             char* next = NULL;
             size_t nl = 0;
-            int r = cc__rewrite_bang_once(ctx, cur, curlen, &next, &nl);
+            int r = cc__rewrite_bang_once(ctx, cur, curlen, &next, &nl,
+                                          skip_statement_bang);
             if (r < 0) {
                 free(cur);
                 return -1;
@@ -2835,4 +2997,14 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
     *out_src = cur;
     *out_len = curlen;
     return 1;
+}
+
+int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
+                              const char* in_src,
+                              size_t in_len,
+                              char** out_src,
+                              size_t* out_len) {
+    return cc__rewrite_result_unwrap_with_options(ctx, in_src, in_len,
+                                                  out_src, out_len,
+                                                  0);
 }

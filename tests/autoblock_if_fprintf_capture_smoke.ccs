@@ -1,0 +1,44 @@
+/* Smoke: autoblock-generated closures inside an if-body must resolve capture
+ * temps declared immediately before the generated CCClosure0 declaration. */
+#include <ccc/std/prelude.h>
+#include <stdio.h>
+
+typedef struct TinyDb {
+    int ok;
+} TinyDb;
+
+@noblock static bool tiny_db_init(TinyDb* db) {
+    if (db) db->ok = 1;
+    return false;
+}
+
+static int !>(CCError) fallible_value(void) {
+    return cc_ok(1);
+}
+
+static bool queue_like(void) {
+    return fallible_value() !>(e) {
+        (void)e;
+        return false;
+    };
+}
+
+@async int owner_loop(void) {
+    TinyDb db = {0};
+    if (!tiny_db_init(&db)) {
+        fprintf(stderr, "tiny init failed\n");
+        return 1;
+    }
+    char preload_msg[96];
+    int preload_msg_len = snprintf(preload_msg, sizeof(preload_msg), "preloaded %ld keys\n", (long)db.ok);
+    if (preload_msg_len > 0) {
+        fwrite(preload_msg, 1, (size_t)preload_msg_len, stderr);
+    }
+    return 0;
+}
+
+int main(void) {
+    (void)queue_like;
+    (void)owner_loop;
+    return 0;
+}

@@ -75,6 +75,29 @@ static size_t cc__node_end_off(const char* src, size_t len, const NodeView* nd) 
     return cc__offset_of_line_col_1based(src, len, nd->line_end, nd->col_end > 0 ? nd->col_end : 1);
 }
 
+static int cc__split_trailing_array_suffix(const char* ty,
+                                           char* out_ty, size_t out_ty_cap,
+                                           char* out_suffix, size_t out_suffix_cap) {
+    if (!ty || !out_ty || out_ty_cap == 0 || !out_suffix || out_suffix_cap == 0) return 0;
+    size_t end = strlen(ty);
+    while (end > 0 && (ty[end - 1] == ' ' || ty[end - 1] == '\t')) end--;
+    if (end == 0 || ty[end - 1] != ']') return 0;
+    size_t open = end;
+    while (open > 0 && ty[open - 1] != '[') open--;
+    if (open == 0) return 0;
+    open--;
+    size_t base_end = open;
+    while (base_end > 0 && (ty[base_end - 1] == ' ' || ty[base_end - 1] == '\t')) base_end--;
+    if (base_end == 0) return 0;
+    size_t suffix_len = end - open;
+    if (base_end + 1 > out_ty_cap || suffix_len + 1 > out_suffix_cap) return 0;
+    memcpy(out_ty, ty, base_end);
+    out_ty[base_end] = 0;
+    memcpy(out_suffix, ty + open, suffix_len);
+    out_suffix[suffix_len] = 0;
+    return 1;
+}
+
 /* Local aliases for the shared helpers */
 #define cc__is_ident_start cc_is_ident_start
 #define cc__is_ident_char cc_is_ident_char
@@ -3015,7 +3038,29 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                         const char* hit = NULL;
                         /* Find the name within the line; don't trust col_start for macro/pinned nodes. */
                         size_t nn = strlen(n[i].aux_s1);
+                        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
                         for (size_t q = 0; q + nn <= ln; q++) {
+                            char ch = ls[q];
+                            char ch2 = (q + 1 < ln) ? ls[q + 1] : 0;
+                            if (in_lc) break;
+                            if (in_bc) {
+                                if (ch == '*' && ch2 == '/') { in_bc = 0; q++; }
+                                continue;
+                            }
+                            if (in_str) {
+                                if (ch == '\\' && q + 1 < ln) { q++; continue; }
+                                if (ch == '"') in_str = 0;
+                                continue;
+                            }
+                            if (in_chr) {
+                                if (ch == '\\' && q + 1 < ln) { q++; continue; }
+                                if (ch == '\'') in_chr = 0;
+                                continue;
+                            }
+                            if (ch == '/' && ch2 == '/') { in_lc = 1; break; }
+                            if (ch == '/' && ch2 == '*') { in_bc = 1; q++; continue; }
+                            if (ch == '"') { in_str = 1; continue; }
+                            if (ch == '\'') { in_chr = 1; continue; }
                             if (memcmp(ls + q, n[i].aux_s1, nn) != 0) continue;
                             if (q > 0 && cc__is_ident_char(ls[q - 1])) continue;
                             if (q + nn < ln && cc__is_ident_char(ls[q + nn])) continue;
@@ -3303,11 +3348,21 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  intptr_t __r;\n");
         for (int k = 0; k < local_n; k++) {
             /* Use actual type if known, otherwise fall back to intptr_t for primitives. */
-            if (local_tys[k] && local_tys[k][0]) {
-                if (local_sufs[k] && local_sufs[k][0]) {
-                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s%s;\n", local_tys[k], locals[k], local_sufs[k]);
+            const char* emit_ty = local_tys[k];
+            const char* emit_suf = local_sufs[k];
+            char split_ty[256];
+            char split_suf[64];
+            if (emit_ty && emit_ty[0] && (!emit_suf || !emit_suf[0]) &&
+                cc__split_trailing_array_suffix(emit_ty, split_ty, sizeof(split_ty),
+                                                split_suf, sizeof(split_suf))) {
+                emit_ty = split_ty;
+                emit_suf = split_suf;
+            }
+            if (emit_ty && emit_ty[0]) {
+                if (emit_suf && emit_suf[0]) {
+                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s%s;\n", emit_ty, locals[k], emit_suf);
                 } else {
-                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", local_tys[k], locals[k]);
+                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", emit_ty, locals[k]);
                 }
             } else {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", locals[k]);

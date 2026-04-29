@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static CCSliceHdr !>(CCError) cc_slice_hdr_clone_into(CCSliceHdr* src, CCArena* arena) {
+static CCSliceHdr !>(CCError) CCSliceHdr_clone_into(CCSliceHdr* src, CCArena* arena) {
     if (!src || !arena) return cc_err(CC_ERR_INVALID_ARG, "clone_into without arena");
     if (src->len == 0) {
         CCSliceHdr empty = {0};
@@ -19,7 +19,9 @@ static CCSliceHdr !>(CCError) cc_slice_hdr_clone_into(CCSliceHdr* src, CCArena* 
 
 static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena* arena) {
     CCSliceHdr source = key.hdr();
-    CCSliceHdr stable = source.clone_into(arena) !>(e) { return cc_err(e); };
+    CCSliceHdr !>(CCError) stable_res = source.clone_into(arena);
+    if (stable_res.is_err()) return cc_err(stable_res.error());
+    CCSliceHdr stable = stable_res.value();
     if (stable.len != key.len || memcmp(stable.ptr, key.ptr, key.len) != 0) {
         return cc_err(CC_ERR_INVALID_ARG, "split clone mismatch");
     }
@@ -27,7 +29,10 @@ static bool !>(CCError) check_split_decl_unwrap(CCSlice key, CCArena* arena) {
 }
 
 static bool !>(CCError) check_chained_decl_unwrap(CCSlice key, CCArena* arena) {
-    CCSliceHdr stable = key.hdr().clone_into(arena) !>(e) { return cc_err(e); };
+    CCSliceHdr source = key.hdr();
+    CCSliceHdr !>(CCError) stable_res = source.clone_into(arena);
+    if (stable_res.is_err()) return cc_err(stable_res.error());
+    CCSliceHdr stable = stable_res.value();
     if (stable.len != key.len || memcmp(stable.ptr, key.ptr, key.len) != 0) {
         return cc_err(CC_ERR_INVALID_ARG, "chained clone mismatch");
     }

@@ -1,0 +1,35 @@
+/* Local typedef result payloads should work without hand-written CCResult_* specs. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) earlier_result_fn(void) {
+    return cc_ok(7);
+}
+
+typedef struct LocalPayload {
+    int a;
+    int b;
+} LocalPayload;
+
+static LocalPayload !>(CCError) make_payload(int a, int b) {
+    if (a < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+    return cc_ok((LocalPayload){ .a = a, .b = b });
+}
+
+int main(void) {
+    int !>(CCError) earlier = earlier_result_fn();
+    if (earlier.is_err()) return 1;
+    if (earlier.value() != 7) return 2;
+
+    LocalPayload !>(CCError) res = make_payload(3, 4);
+    if (res.is_err()) return 3;
+    LocalPayload payload = res.value();
+    if (payload.a != 3 || payload.b != 4) return 4;
+
+    LocalPayload !>(CCError) err = make_payload(-1, 4);
+    if (!err.is_err()) return 5;
+    if (err.error().kind != CC_ERR_INVALID_ARG) return 6;
+
+    printf("ok\n");
+    return 0;
+}

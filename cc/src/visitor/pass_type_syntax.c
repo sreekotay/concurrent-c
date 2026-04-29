@@ -952,6 +952,8 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                     size_t args_start = paren_pos + 1;
                     size_t j = args_start;
                     int depth = 1;
+                    int brace_depth = 0;
+                    int bracket_depth = 0;
                     int comma_count = 0;
                     int in_s = 0, in_c = 0;
                     while (j < n && depth > 0) {
@@ -960,9 +962,13 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         if (in_c) { if (ch == '\\' && j+1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
                         if (ch == '"') { in_s = 1; j++; continue; }
                         if (ch == '\'') { in_c = 1; j++; continue; }
-                        if (ch == '(') depth++;
-                        else if (ch == ')') { depth--; if (depth == 0) break; }
-                        else if (ch == ',' && depth == 1) comma_count++;
+                        if (ch == '{') brace_depth++;
+                        else if (ch == '}') { if (brace_depth > 0) brace_depth--; }
+                        else if (ch == '[') bracket_depth++;
+                        else if (ch == ']') { if (bracket_depth > 0) bracket_depth--; }
+                        else if (ch == '(') depth++;
+                        else if (ch == ')' && brace_depth == 0 && bracket_depth == 0) { depth--; if (depth == 0) break; }
+                        else if (ch == ',' && depth == 1 && brace_depth == 0 && bracket_depth == 0) comma_count++;
                         j++;
                     }
                     

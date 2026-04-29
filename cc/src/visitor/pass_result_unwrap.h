@@ -28,4 +28,11 @@ int cc__rewrite_result_unwrap(const CCVisitorCtx* ctx,
                               char** out_src,
                               size_t* out_len);
 
+int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
+                                           const char* in_src,
+                                           size_t in_len,
+                                           char** out_src,
+                                           size_t* out_len,
+                                           int skip_statement_bang);
+
 #endif /* CC_PASS_RESULT_UNWRAP_H */

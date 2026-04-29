@@ -2787,10 +2787,15 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             size_t scan_lim = start_off + 256;
             if (scan_lim > in_len) scan_lim = in_len;
             int has_arrow = 0;
+            int saw_stmt_boundary = 0;
             for (size_t q = start_off; q + 1 < scan_lim; q++) {
+                if (in_src[q] == ';' || in_src[q] == '{' || in_src[q] == '}') {
+                    saw_stmt_boundary = 1;
+                    break;
+                }
                 if (in_src[q] == '=' && in_src[q + 1] == '>') { has_arrow = 1; break; }
             }
-            if (!has_arrow) be_ok = 0;
+            if (!has_arrow || saw_stmt_boundary) be_ok = 0;
         }
         if (be_ok) {
             for (int kk = 0; kk < k; kk++) {

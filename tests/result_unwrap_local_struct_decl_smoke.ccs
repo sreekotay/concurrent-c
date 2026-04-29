@@ -1,0 +1,34 @@
+/* Smoke: value-producing `!>` declaration initializers with a local struct
+ * payload type must parse and lower like scalar/pointer payloads. */
+#include <stdio.h>
+
+typedef struct LocalSlot {
+    int x;
+} LocalSlot;
+
+static void release_slot(LocalSlot* slot) {
+    if (slot) slot->x += 0;
+}
+
+static LocalSlot !>(CCError) make_slot(int x) {
+    if (x < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok((LocalSlot){ .x = x });
+}
+
+static bool !>(CCError) next_slot(LocalSlot* out) {
+    @errhandler(CCError e) { return cc_err(e); }
+    LocalSlot slot = make_slot(42) !>;
+    @defer release_slot(&slot);
+    if (slot.x != 42) return cc_ok(false);
+    *out = slot;
+    return cc_ok(true);
+}
+
+int main(void) {
+    LocalSlot slot = {0};
+    bool !>(CCError) ok = next_slot(&slot);
+    if (ok.is_err()) return 1;
+    if (!ok.value() || slot.x != 42) return 2;
+    printf("slot=%d\n", slot.x);
+    return 0;
+}
