@@ -1,12 +1,12 @@
 /*
  * Recipe: Fan-Out with Per-Task Capture
  *
- * When spawning tasks in a loop, each closure must capture its own
- * copy of the loop variable. Otherwise every task sees the final
- * value of the loop variable.
+ * When spawning tasks in a loop, capture each task's inputs by value.
+ * Avoid reference-capturing the changing loop variable, because tasks
+ * may run after the loop has advanced.
  *
- * Correct idiom: copy the loop variable to a fresh local before
- * creating the closure.
+ * Correct idiom: choose the per-task value first, then list it in the
+ * closure capture list.
  */
 
 #include <ccc/cc_runtime.cch>
@@ -32,9 +32,9 @@ int main(void) {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
         for (int i = 0; i < NUM_TASKS; i++) {
-            int task_id = i;                    /* fresh local per iteration */
+            int task_id = i;                    /* per-task value */
 
-            n->spawn(() => {
+            n->spawn(() => [task_id] {
                 int r = compute(task_id);
                 printf("  task %d: compute(%d) = %d\n", task_id, task_id, r);
                 results[task_id] = r;           /* disjoint write, no race */
