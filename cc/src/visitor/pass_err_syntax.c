@@ -445,6 +445,34 @@ static void cc__extract_param_name(const char* decl, char* name, size_t nc) {
     }
 }
 
+static int cc__extract_async_frame_lvalue_from_decl(const char* decl, char* out, size_t out_sz) {
+    const char* p = NULL;
+    const char* end = NULL;
+    size_t n = 0;
+    if (!decl || !out || out_sz == 0) return 0;
+    out[0] = 0;
+
+    p = strstr(decl, "__f->");
+    if (!p) return 0;
+    end = decl + strlen(decl);
+    while (end > p && isspace((unsigned char)end[-1])) end--;
+    n = (size_t)(end - p);
+    if (n == 0 || n >= out_sz) return 0;
+    memcpy(out, p, n);
+    out[n] = 0;
+    return 1;
+}
+
+static void cc__append_err_binder_prefix(char** out, size_t* ol, size_t* oc,
+                                         const char* decl) {
+    char frame_lvalue[192];
+    if (cc__extract_async_frame_lvalue_from_decl(decl, frame_lvalue, sizeof(frame_lvalue))) {
+        cc_sb_append_fmt(out, ol, oc, "%s = ", frame_lvalue);
+        return;
+    }
+    cc_sb_append_fmt(out, ol, oc, "%s = ", decl);
+}
+
 static int cc__lhs_is_decl_like(const char* s, size_t a, size_t b, char* name, size_t nc) {
     size_t id_a = a, id_b = b;
     cc__trim_slice(s, a, b, &a, &b);
@@ -1324,7 +1352,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     }
                     cc__append_str(&out, &ol, &oc, "{ ");
                     if (local_decl[0]) {
-                        cc_sb_append_fmt(&out, &ol, &oc, "%s = ", local_decl);
+                        cc__append_err_binder_prefix(&out, &ol, &oc, local_decl);
                         cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
                                                 in_src, err_span_a, err_span_b,
                                                 err_file, errl);
@@ -1340,7 +1368,8 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     cc__append_str(&out, &ol, &oc, " } ");
                     free(lb_exp);
                 } else {
-                    cc_sb_append_fmt(&out, &ol, &oc, "{ %s = ", def->param_decl);
+                    cc__append_str(&out, &ol, &oc, "{ ");
+                    cc__append_err_binder_prefix(&out, &ol, &oc, def->param_decl);
                     cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
                                             in_src, err_span_a, err_span_b,
                                             err_file, errl);

@@ -2824,7 +2824,11 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     if (st_guess < in_len && st_guess + 1 < in_len) {
                         int claimed = 0;
                         for (int kk = 0; kk < k; kk++) {
-                            if (descs[kk].start_off == st_guess) { claimed = 1; break; }
+                            if (descs[kk].start_off == st_guess ||
+                                (descs[kk].start_off <= st_guess && st_guess < descs[kk].end_off)) {
+                                claimed = 1;
+                                break;
+                            }
                         }
                         if (!claimed) {
                             start_off = st_guess;

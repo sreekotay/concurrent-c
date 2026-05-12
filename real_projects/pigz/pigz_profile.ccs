@@ -48,6 +48,7 @@ cc_atomic_int g_blocks_done = 0;
 cc_atomic_i64 g_queue_wait_ns = 0;
 cc_atomic_i64 g_compress_ns = 0;
 cc_atomic_i64 g_end_to_end_ns = 0;
+cc_atomic_int g_pipeline_error = 0;
 
 CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
@@ -108,15 +109,34 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     }
 }
 
+static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
+    CCResult_size_t_CCIoError wr = cc_file_write(f, data);
+    if (cc_is_err(wr)) {
+        CCIoError err = cc_unwrap_err_as(wr, CCIoError);
+        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.kind, err.os_code);
+        cc_atomic_store(&g_pipeline_error, 1);
+        return false;
+    }
+    size_t n = cc_unwrap_as(wr, size_t);
+    if (n != data.len) {
+        fprintf(stderr, "%s short write %zu/%zu\n", what, n, data.len);
+        cc_atomic_store(&g_pipeline_error, 1);
+        return false;
+    }
+    return true;
+}
+
 typedef struct {
     Block*   blk;
     unsigned long long spawn_ns;
+    int level;
 } TaskArg;
 
 void* compress_task_wrapper(void* arg) {
     TaskArg* ta = (TaskArg*)arg;
     Block* blk = ta->blk;
     unsigned long long spawn_ns = ta->spawn_ns;
+    int level = ta->level;
     free(ta);
 
     struct timespec start_ts;
@@ -125,7 +145,7 @@ void* compress_task_wrapper(void* arg) {
         (unsigned long long)start_ts.tv_sec * 1000000000ULL +
         (unsigned long long)start_ts.tv_nsec;
 
-    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+    CompressedResult* !>(CCIoError) res = compress_block(blk, level);
     cc_arena_free(&blk->arena);
 
     struct timespec done_ts;
@@ -159,7 +179,7 @@ static void print_stats(const char* label) {
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
-    (void)level;
+    cc_atomic_store(&g_pipeline_error, 0);
     cc_atomic_store(&g_queue_wait_ns, 0);
     cc_atomic_store(&g_compress_ns, 0);
     cc_atomic_store(&g_end_to_end_ns, 0);
@@ -191,7 +211,10 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         while (ordered_recv(tasks_rx, &result) == 1) {
             CompressedResult* r = (CompressedResult*)result;
             if (r) {
-                cc_file_write(out_ptr, r->data);
+                if (!write_all_or_fail(out_ptr, r->data, "compressed output")) {
+                    cc_arena_free(&r->arena);
+                    break;
+                }
                 cc_arena_free(&r->arena);
             }
         }
@@ -201,7 +224,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         return 1;
     }
 
-    CCNursery* producer = @create(consumer, () => [in_ptr, tasks_tx] {
+    int comp_level = level;
+    CCNursery* producer = @create(consumer, () => [in_ptr, tasks_tx, comp_level] {
         long seq = 0;
         while (true) {
             CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
@@ -227,6 +251,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             struct timespec spawn_ts;
             clock_gettime(CLOCK_MONOTONIC, &spawn_ts);
             ta->blk = blk;
+            ta->level = comp_level;
             ta->spawn_ns =
                 (unsigned long long)spawn_ts.tv_sec * 1000000000ULL +
                 (unsigned long long)spawn_ts.tv_nsec;
@@ -246,6 +271,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     }
 
     cc_file_sync(&out_file);
+    if (cc_atomic_load(&g_pipeline_error)) return 1;
     return 0;
 }
 

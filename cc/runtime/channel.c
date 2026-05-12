@@ -5415,19 +5415,20 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
            (deadline is handled at outer scope). */
         if (cc__fiber_in_context()) {
             CCChan* ch = f->ch;
+            struct timespec ts;
+            const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
             int err;
             if (ch->cap == 0) {
                 /* Unbuffered: both _send_unbuffered and _recv_unbuffered own
                  * their unlock on every return path. */
                 cc_chan_lock(ch);
                 err = f->is_send
-                    ? cc_chan_send_unbuffered(ch, f->buf, NULL)
-                    : cc_chan_recv_unbuffered(ch, f->buf, NULL);
+                    ? cc_chan_send_unbuffered(ch, f->buf, p)
+                    : cc_chan_recv_unbuffered(ch, f->buf, p);
             } else {
-                /* Buffered: use timed send/recv with NULL deadline for fiber blocking */
                 err = f->is_send
-                    ? cc_chan_timed_send(ch, f->buf, f->elem_size, NULL)
-                    : cc_chan_timed_recv(ch, f->buf, f->elem_size, NULL);
+                    ? cc_chan_timed_send(ch, f->buf, f->elem_size, p)
+                    : cc_chan_timed_recv(ch, f->buf, f->elem_size, p);
             }
             wake_batch_flush();
             f->completed = 1;
@@ -5485,17 +5486,26 @@ static int cc__chan_task_wait(void* frame) {
         wake_batch_flush();
         return err;
     }
+    struct timespec ts;
+    const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
+    int err = 0;
     if (f->is_send) {
-        while (!ch->closed && ch->count == ch->cap) {
-            pthread_cond_wait(&ch->not_full, &ch->mu);
+        while (!ch->closed && ch->count == ch->cap && err == 0) {
+            err = p ? pthread_cond_timedwait(&ch->not_full, &ch->mu, p)
+                    : pthread_cond_wait(&ch->not_full, &ch->mu);
         }
     } else {
-        while (!ch->closed && ch->count == 0) {
-            pthread_cond_wait(&ch->not_empty, &ch->mu);
+        while (!ch->closed && ch->count == 0 && err == 0) {
+            err = p ? pthread_cond_timedwait(&ch->not_empty, &ch->mu, p)
+                    : pthread_cond_wait(&ch->not_empty, &ch->mu);
         }
     }
     pthread_mutex_unlock(&ch->mu);
-    return 0;
+    if (err == ETIMEDOUT) {
+        f->completed = 1;
+        f->result = ETIMEDOUT;
+    }
+    return err;
 }
 
 static void cc__chan_task_drop(void* frame) {

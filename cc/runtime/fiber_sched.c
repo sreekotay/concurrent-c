@@ -30,6 +30,7 @@
 /* Note: We access minicoro internals (_mco_context, _mco_ctxbuf, _mco_wrap_main, _mco_main)
 * for fast coroutine reset. These are defined in minicoro.h when MINICORO_IMPL is set. */
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -1041,6 +1042,48 @@ int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
                 return ECANCELED;
             }
             sched_v2_park();
+        }
+        sched_v2_set_park_reason(NULL);
+    }
+    cc_external_wait_leave();
+    return 0;
+}
+
+static int cc__fiber_deadline_expired(const struct timespec* abs_deadline) {
+    if (!abs_deadline || abs_deadline->tv_sec == 0) return 0;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    return now.tv_sec > abs_deadline->tv_sec ||
+           (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec);
+}
+
+int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expected,
+                                                  const struct timespec* abs_deadline,
+                                                  const char* reason,
+                                                  const char* file,
+                                                  int line) {
+    (void)file; (void)line;
+    if (!abs_deadline) return cc__fiber_suspend_until_ready_or_cancel(flag, expected, reason, file, line);
+
+    cc_external_wait_enter();
+    CCNursery* cur_nursery = cc__runtime_current_nursery();
+    if (sched_v2_in_context()) {
+        fiber_v2* self = sched_v2_current_fiber();
+        sched_v2_set_park_reason(reason);
+        while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
+            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+                sched_v2_set_park_reason(NULL);
+                cc_external_wait_leave();
+                return ECANCELED;
+            }
+            if (cc__fiber_deadline_expired(abs_deadline)) {
+                sched_v2_set_park_reason(NULL);
+                cc_external_wait_leave();
+                return ETIMEDOUT;
+            }
+            if (self) sched_v2_fiber_set_park_deadline(self, abs_deadline);
+            sched_v2_park();
+            if (self) sched_v2_fiber_clear_park_deadline(self);
         }
         sched_v2_set_park_reason(NULL);
     }

@@ -1,0 +1,64 @@
+/*
+ * A socket read deadline should turn a silent peer into a bounded timeout.
+ */
+#include <ccc/std/net.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+static cc_atomic_int g_timed_out = 0;
+static cc_atomic_int g_errors = 0;
+
+static void reader_task(int fd) {
+    CCSocket sock = { .fd = fd };
+    char buf[16];
+    CCNetError err = CC_NET_OK;
+    CCDeadline deadline = cc_deadline_after_ms(50);
+    size_t n = cc_socket_read_into_deadline(&sock, buf, sizeof(buf), &err, &deadline);
+    if (n == 0 && err == CC_NET_TIMED_OUT) {
+        cc_atomic_store(&g_timed_out, 1);
+    } else {
+        fprintf(stderr, "socket_read_deadline_smoke: n=%zu err=%d\n", n, err);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+    cc_socket_close(&sock);
+}
+
+int main(void) {
+    cc_atomic_store(&g_timed_out, 0);
+    cc_atomic_store(&g_errors, 0);
+
+    int fds[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        perror("socketpair");
+        return 1;
+    }
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) {
+            close(fds[0]);
+            close(fds[1]);
+            return 2;
+        }
+        int reader_fd = fds[0];
+        fds[0] = -1;
+        n->spawn(() => [reader_fd] { reader_task(reader_fd); });
+    }
+    close(fds[1]);
+
+    if (cc_atomic_load(&g_errors) != 0 || cc_atomic_load(&g_timed_out) == 0) {
+        fprintf(stderr,
+                "socket_read_deadline_smoke: FAIL timed_out=%d errors=%d\n",
+                cc_atomic_load(&g_timed_out),
+                cc_atomic_load(&g_errors));
+        return 3;
+    }
+
+    printf("socket_read_deadline_smoke: PASS\n");
+    return 0;
+}

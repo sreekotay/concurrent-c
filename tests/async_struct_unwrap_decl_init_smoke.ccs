@@ -1,0 +1,55 @@
+/* Smoke: `@async` local declaration initialized from a fallible
+ * user-struct-returning call must keep the declaration shape intact while
+ * lowering bare expression-position `!>;`.
+ *
+ * Regression guard for the redis_idiomatic owner_loop shape:
+ *
+ *     Reply rep = reply_create(...) !>;
+ *
+ * where reply_create returns `Reply !>(CCError)`.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static int prelude_function_before_local_result_types(void) {
+    return 0;
+}
+
+typedef struct Slot {
+    int id;
+} Slot;
+
+@noblock static inline Slot !>(CCError) slot_create(int id) {
+    if (id < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "bad slot"));
+    return cc_ok((Slot){ .id = id });
+}
+
+typedef struct Reply {
+    int tag;
+    int value;
+} Reply;
+
+@noblock static inline Reply !>(CCError) reply_create(int tag, int value) {
+    if (tag < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "bad tag"));
+    return cc_ok((Reply){ .tag = tag, .value = value });
+}
+
+@async int work(void) {
+    @errhandler(CCError e) { (void)e; return 99; }
+
+    Slot slot = slot_create(3) !>;
+    if (slot.id != 3) return 2;
+
+    Reply rep = reply_create(7,
+                             35) !>;
+    if (rep.tag != 7 || rep.value != 35) return 1;
+    return prelude_function_before_local_result_types();
+}
+
+int main(void) {
+    CCTaskIntptr task = work();
+    intptr_t rc = cc_block_on_intptr(task);
+    printf("rc=%ld\n", (long)rc);
+    return (int)rc;
+}

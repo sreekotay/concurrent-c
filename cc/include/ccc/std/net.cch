@@ -12,6 +12,7 @@
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_sched.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include "io.cch"
@@ -126,6 +127,11 @@ CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetEr
 /* Read up to max_bytes directly into caller buffer. Returns bytes read.
  * Returns 0 with CC_NET_CONNECTION_CLOSED on EOF. */
 size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err);
+size_t cc_socket_read_into_deadline(CCSocket* sock,
+                                    char* buf,
+                                    size_t max_bytes,
+                                    CCNetError* out_err,
+                                    const CCDeadline* deadline);
 
 /* Non-blocking read into caller buffer.
  * On EAGAIN/EWOULDBLOCK, returns 0 with *out_would_block=true and CC_NET_OK. */
@@ -140,6 +146,11 @@ size_t cc_socket_try_read_into(CCSocket* sock,
 
 /* Write data. Returns bytes written. */
 size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err);
+size_t cc_socket_write_deadline(CCSocket* sock,
+                                const char* data,
+                                size_t len,
+                                CCNetError* out_err,
+                                const CCDeadline* deadline);
 
 /* Async write */
 /* @async size_t cc_socket_write_async(CCSocket* sock, const char* data, size_t len, CCNetError* out_err); */
