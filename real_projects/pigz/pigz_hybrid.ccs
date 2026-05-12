@@ -1,11 +1,11 @@
 /*
  * pigz_hybrid.ccs -- Parallel gzip on the V2 hybrid scheduler.
  *
- * Identical in shape to pigz_idiomatic.ccs, but each compression task is
- * spawned through send_task_hybrid (see call site below), which lowers to
- * cc_fiber_spawn_closure0_v2 so the child fiber runs on the V2 hybrid
- * scheduler. Ordered channel semantics (FIFO task delivery via ordered recv)
- * are preserved.
+ * Same pipeline shape as pigz_idiomatic.ccs: ordered channel of plain
+ * CompressedResult* (NULL from a task means compression failed; the consumer
+ * closes the receive side). Tasks use send_task_hybrid so each compression
+ * fiber runs on the V2 hybrid scheduler (cc_fiber_spawn_closure0_v2) while
+ * CCTask handles still flow through the ordered results channel.
  */
 
 #include <ccc/std/prelude.cch>
@@ -41,15 +41,16 @@ cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
 cc_atomic_int g_pipeline_error = 0;
 
-CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
+/* Returns NULL on allocation or zlib failure. */
+static CompressedResult* compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
-    
+
     CCArena res_arena_storage = @create(arena_size) @destroy;
-    if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+    if (!res_arena_storage.base) return NULL;
     CCArena* res_arena = &res_arena_storage;
     CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
-    if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-    
+    if (!res) return NULL;
+
     res->seq = blk->seq;
     res->is_last = blk->is_last;
     res->original_len = blk->data.len;
@@ -57,7 +58,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
 
     size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
     unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
-    if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+    if (!out_buf) return NULL;
 
     unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
     memcpy(out_buf, header, 10);
@@ -65,18 +66,18 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
 
     z_stream strm = {0};
     if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        return cc_err(cc_io_error(CC_IO_OTHER));
+        return NULL;
     }
     strm.next_in = (Bytef*)blk->data.ptr;
     strm.avail_in = (uInt)blk->data.len;
     strm.next_out = out_buf + pos;
     strm.avail_out = (uInt)(max_out - pos - 8);
-    
+
     int ret = deflate(&strm, Z_FINISH);
     pos += strm.total_out;
     deflateEnd(&strm);
-    
-    if (ret != Z_STREAM_END) return cc_err(cc_io_error(CC_IO_OTHER));
+
+    if (ret != Z_STREAM_END) return NULL;
     
     unsigned long crc = res->crc;
     size_t in_len = blk->data.len;
@@ -95,7 +96,14 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     cc_atomic_fetch_add(&g_blocks_done, 1);
 
     res->arena = res_arena->detach();
-    return cc_ok(res);
+    return res;
+}
+
+/* Owns `blk` (including blk->arena); frees block storage after compression. */
+static CompressedResult* compress_owned_block(Block* blk) {
+    CompressedResult* out = compress_block(blk, 6);
+    blk->arena.free();
+    return out;
 }
 
 static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
@@ -132,11 +140,9 @@ int compress_file(const char* in_path, const char* out_path) {
     }
     @defer out_file.close();
 
-    /* Ordered channel of CompressedResult* !>(CCIoError).  'ordered' is a recv-side flag:
-     * recv awaits queued tasks in FIFO submission order. The tx handle
-     * is a plain sender — ordering is irrelevant at the send site. */
-    CompressedResult* !>(CCIoError)[~CHAN_CAP >] results_tx;
-    CompressedResult* !>(CCIoError)[~CHAN_CAP ordered <] results_rx;
+    /* Ordered channel of CompressedResult* (NULL from a task means compress failed). */
+    CompressedResult*[~CHAN_CAP >] results_tx;
+    CompressedResult*[~CHAN_CAP ordered <] results_rx;
     CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
     @defer ch.free();
 
@@ -146,15 +152,15 @@ int compress_file(const char* in_path, const char* out_path) {
     /* Keep the consumer outside the producer scope so results_tx closes when the
      * producer task exits, not later during nursery teardown. */
     CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
-        CompressedResult* !>(CCIoError) r;
+        CompressedResult* item = NULL;
         long expect_seq = 0;
-        while (cc_io_avail(results_rx.recv(&r))) {
-            if (r.is_err()) {
-                CCIoError err = r.error();
-                fprintf(stderr, "compress error kind=%d os=%d\n", err.kind, err.os_code);
-                continue;
+        while (cc_io_avail(results_rx.recv(&item))) {
+            if (!item) {
+                fprintf(stderr, "compress task failed (OOM or zlib error)\n");
+                cc_atomic_store(&g_pipeline_error, 1);
+                cc_channel_close(results_rx, cc_io_error(CC_IO_OTHER));
+                break;
             }
-            CompressedResult* item = r.value();
             if (item->seq != expect_seq) {
                 fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
                 cc_atomic_store(&g_pipeline_error, 1);
@@ -182,6 +188,8 @@ int compress_file(const char* in_path, const char* out_path) {
     producer->spawn(() => [in_ptr, results_tx] {
         long seq = 0;
         while (true) {
+            if (cc_atomic_load(&g_pipeline_error)) break;
+
             CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
             CCSlice data;
             bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
@@ -190,29 +198,22 @@ int compress_file(const char* in_path, const char* out_path) {
                 break;
             }
 
-            void* blk_raw = (void*)0;
-            blk_raw = cc_arena_alloc_T(Block, &blk_arena);
-            if (!blk_raw) {
+            Block* cap = NULL;
+            cap = cc_arena_alloc_T(Block, &blk_arena);
+            if (!cap) {
                 break;
             }
 
-            ((Block*)blk_raw)->seq = seq++;
-            ((Block*)blk_raw)->data = data;
-            ((Block*)blk_raw)->is_last = (data.len < BLOCK_SIZE);
-            ((Block*)blk_raw)->arena = blk_arena.detach();
+            cap->seq = seq++;
+            cap->data = data;
+            cap->is_last = (data.len < BLOCK_SIZE);
+            cap->arena = blk_arena.detach();
 
-            bool is_last = ((Block*)blk_raw)->is_last;
-            /* send_task_hybrid lowers to cc_fiber_spawn_closure0_v2, so the
-             * compression fiber is scheduled on the V2 hybrid scheduler while
-             * the resulting CCTask handle still flows through the ordered
-             * results channel. */
-            intptr_t blk_bits = 0;
-            blk_bits = (intptr_t)blk_raw;
-            results_tx.send_task_hybrid(() => [blk_bits] {
-                Block* task_blk = (Block*)blk_bits;
-                CompressedResult* !>(CCIoError) res = compress_block(task_blk, 6);
-                task_blk->arena.free();
-                return res;
+            bool is_last = cap->is_last;
+            /* send_task_hybrid: compression runs on V2 hybrid scheduler; result
+             * is still an ordered CCTask on this channel. */
+            results_tx.send_task_hybrid(() => [cap] {
+                return compress_owned_block(cap);
             });
 
             if (is_last) break;

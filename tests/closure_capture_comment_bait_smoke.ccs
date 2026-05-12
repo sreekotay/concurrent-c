@@ -1,0 +1,53 @@
+/* Regression: closure capture inference must ignore closure-shaped text in
+ * block comments earlier in the file (see pass_closure_literal_ast decl_carry
+ * and brace-depth scanning).
+ *
+ * The following lines are intentionally comment-only bait (not compiled):
+ *   tx.send_task(() => [bait_name] {
+ *     bait_name = bait_name + 1;
+ *   });
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    int ok = 1;
+
+    {
+        CCNursery* __cc_nursery_outer = @create(NULL) @destroy;
+        if (!__cc_nursery_outer) abort();
+
+        {
+            CCNursery* __cc_nursery_inner = @create(NULL) @destroy;
+            if (!__cc_nursery_inner) abort();
+            (void)__cc_nursery_inner->close_on(tx);
+
+            CCNursery* producer = @create(NULL, () => [tx] {
+                int i = 0;
+                while (i < 1) {
+                    intptr_t bait_name = 7;
+                    bait_name = bait_name + 1;
+                    tx.send_task(() => [bait_name] {
+                        bait_name * 3;
+                    });
+                    i = i + 1;
+                }
+                return NULL;
+            }) @destroy;
+
+            if (!producer) ok = 0;
+        }
+    }
+
+    cc_chan_free(ch);
+    if (!ok) {
+        printf("closure_capture_comment_bait_smoke: FAIL\n");
+        return 1;
+    }
+    printf("closure_capture_comment_bait_smoke: PASS\n");
+    return 0;
+}

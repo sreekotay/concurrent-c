@@ -1067,6 +1067,8 @@ static char* cc__lookup_decl_type_by_text_fallback(const char* src,
     if (!src || !name || !name[0]) return NULL;
     size_t src_len = strlen(src);
     if (before_off > src_len) before_off = src_len;
+    char* clean = cc__src_strip_comments_and_strings(src, before_off);
+    if (!clean) return NULL;
     char** scope_names[2] = {0};
     char** scope_types[2] = {0};
     unsigned char* scope_flags[2] = {0};
@@ -1077,15 +1079,15 @@ static char* cc__lookup_decl_type_by_text_fallback(const char* src,
     size_t off = 0;
     while (off < before_off) {
         size_t line_end = off;
-        while (line_end < before_off && src[line_end] != '\n') line_end++;
+        while (line_end < before_off && clean[line_end] != '\n') line_end++;
         size_t line_len = line_end - off;
         {
-            const char* line_s = src + off;
-            const char* line_e = src + line_end;
+            const char* line_s = clean + off;
+            const char* line_e = clean + line_end;
             while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
             if (line_s < line_e && *line_s == '#') {
                 if (decl_carry) decl_carry[0] = '\0';
-                off = line_end < before_off && src[line_end] == '\n' ? line_end + 1 : line_end;
+                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
                 continue;
             }
         }
@@ -1097,7 +1099,7 @@ static char* cc__lookup_decl_type_by_text_fallback(const char* src,
             break;
         }
         decl_carry = next_carry;
-        memcpy(decl_carry + carry_len, src + off, line_len);
+        memcpy(decl_carry + carry_len, clean + off, line_len);
         decl_carry[carry_len + line_len] = '\n';
         decl_carry[carry_len + line_len + 1] = '\0';
         cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, 1, decl_carry);
@@ -1123,7 +1125,7 @@ static char* cc__lookup_decl_type_by_text_fallback(const char* src,
                 decl_carry[0] = '\0';
             }
         }
-        off = line_end < before_off && src[line_end] == '\n' ? line_end + 1 : line_end;
+        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
     }
     for (int i = 0; i < scope_counts[1]; i++) free(scope_names[1][i]);
     free(scope_names[1]);
@@ -1131,6 +1133,7 @@ static char* cc__lookup_decl_type_by_text_fallback(const char* src,
     free(scope_types[1]);
     free(scope_flags[1]);
     free(decl_carry);
+    free(clean);
     if (found_type && out_flags) *out_flags = found_flags;
     return found_type;
 }
@@ -1152,18 +1155,20 @@ static char* cc__lookup_top_level_decl_type_by_text(const char* src,
     if (out_flags) *out_flags = 0;
     if (!src || !name || !name[0]) return NULL;
     if (before_off > strlen(src)) before_off = strlen(src);
+    char* clean = cc__src_strip_comments_and_strings(src, before_off);
+    if (!clean) return NULL;
 
     while (off < before_off) {
         size_t line_end = off;
-        while (line_end < before_off && src[line_end] != '\n') line_end++;
+        while (line_end < before_off && clean[line_end] != '\n') line_end++;
         size_t line_len = line_end - off;
         {
-            const char* line_s = src + off;
-            const char* line_e = src + line_end;
+            const char* line_s = clean + off;
+            const char* line_e = clean + line_end;
             while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
             if (line_s < line_e && *line_s == '#') {
                 if (decl_carry) decl_carry[0] = '\0';
-                off = line_end < before_off && src[line_end] == '\n' ? line_end + 1 : line_end;
+                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
                 continue;
             }
         }
@@ -1176,7 +1181,7 @@ static char* cc__lookup_top_level_decl_type_by_text(const char* src,
                 break;
             }
             decl_carry = next_carry;
-            memcpy(decl_carry + carry_len, src + off, line_len);
+            memcpy(decl_carry + carry_len, clean + off, line_len);
             decl_carry[carry_len + line_len] = '\n';
             decl_carry[carry_len + line_len + 1] = '\0';
             cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, 0, decl_carry);
@@ -1205,10 +1210,10 @@ static char* cc__lookup_top_level_decl_type_by_text(const char* src,
         }
 
         for (size_t i = off; i < line_end; i++) {
-            if (src[i] == '{') depth++;
-            else if (src[i] == '}' && depth > 0) depth--;
+            if (clean[i] == '{') depth++;
+            else if (clean[i] == '}' && depth > 0) depth--;
         }
-        off = line_end < before_off && src[line_end] == '\n' ? line_end + 1 : line_end;
+        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
     }
 
     for (int i = 0; i < scope_counts[0]; i++) free(scope_names[0][i]);
@@ -1217,6 +1222,7 @@ static char* cc__lookup_top_level_decl_type_by_text(const char* src,
     free(scope_types[0]);
     free(scope_flags[0]);
     free(decl_carry);
+    free(clean);
     if (found_type && out_flags) *out_flags = found_flags;
     return found_type;
 }
@@ -1423,15 +1429,17 @@ static void cc__collect_decl_names_from_block_text(const char* block,
             scan_len = hi - lo - 2;
         }
     }
+    char* scan_clean = cc__src_strip_comments_and_strings(scan, scan_len);
+    if (!scan_clean) return;
     while (off < scan_len) {
         size_t line_end = off;
-        while (line_end < scan_len && scan[line_end] != '\n') line_end++;
+        while (line_end < scan_len && scan_clean[line_end] != '\n') line_end++;
         size_t line_len = line_end - off;
         size_t carry_len = decl_carry ? strlen(decl_carry) : 0;
         char* next_carry = (char*)realloc(decl_carry, carry_len + line_len + 2);
         if (!next_carry) break;
         decl_carry = next_carry;
-        memcpy(decl_carry + carry_len, scan + off, line_len);
+        memcpy(decl_carry + carry_len, scan_clean + off, line_len);
         decl_carry[carry_len + line_len] = '\n';
         decl_carry[carry_len + line_len + 1] = '\0';
         cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, 1, decl_carry);
@@ -1444,8 +1452,9 @@ static void cc__collect_decl_names_from_block_text(const char* block,
                 decl_carry[0] = '\0';
             }
         }
-        off = (line_end < scan_len && scan[line_end] == '\n') ? line_end + 1 : line_end;
+        off = (line_end < scan_len && scan_clean[line_end] == '\n') ? line_end + 1 : line_end;
     }
+    free(scan_clean);
     if (scope_counts[1] > 0) {
         *out_names = cc__dup_string_list(scope_names[1], scope_counts[1]);
         *out_n = *out_names ? scope_counts[1] : 0;
@@ -2925,6 +2934,15 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     int cur_closure = 0;
     int line_num = 1;  /* Current line number (1-based) for function param registration */
 
+    char* in_src_decl_scan = cc__src_strip_comments_and_strings(in_src, in_len);
+    if (!in_src_decl_scan) {
+        for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+        free(descs);
+        free(idxs);
+        cc__free_func_sigs(sigs, sig_n);
+        return -1;
+    }
+
     const char* cur = in_src;
     char* decl_carry = NULL;
     size_t off = 0;
@@ -2951,10 +2969,11 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 }
                 free(idxs);
                 cc__free_func_sigs(sigs, sig_n);
+                free(in_src_decl_scan);
                 return -1;
             }
             decl_carry = next_carry;
-            memcpy(decl_carry + carry_len, line_start, line_len);
+            memcpy(decl_carry + carry_len, in_src_decl_scan + off, line_len);
             decl_carry[carry_len + line_len] = '\n';
             decl_carry[carry_len + line_len + 1] = '\0';
             cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, depth, decl_carry);
@@ -2990,6 +3009,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     free(scope_flags[dd]);
                 }
                 free(idxs);
+                free(in_src_decl_scan);
                 return -1;
             }
             if (d->body_text) {
@@ -3122,6 +3142,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                 free(scope_flags[dd]);
                             }
                             free(idxs);
+                            free(in_src_decl_scan);
                             return -1;
                         }
                     }
@@ -3214,6 +3235,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                             free(scope_flags[dd]);
                         }
                         free(idxs);
+                        free(in_src_decl_scan);
                         cc__free_func_sigs(sigs, sig_n);
                         return -1;
                     }
@@ -3223,7 +3245,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
 
         /* Update brace depth and clear scope on close (best-effort, same as old scanner). */
-        for (const char* x = line_start; x < line_end; x++) {
+        for (const char* x = in_src_decl_scan + off; x < in_src_decl_scan + off + line_len; x++) {
             if (*x == '{') {
                 depth++;
                 /* When entering a new scope, check if this is a function body and register its parameters.
@@ -3232,10 +3254,10 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     if (sigs[si].line_start == line_num && sigs[si].param_names && sigs[si].name) {
                         size_t fname_len = strlen(sigs[si].name);
                         int name_found = 0;
-                        for (const char* q = line_start; q + fname_len <= line_end; q++) {
+                        for (const char* q = in_src_decl_scan + off; q + fname_len <= in_src_decl_scan + off + line_len; q++) {
                             if (memcmp(q, sigs[si].name, fname_len) == 0 &&
-                                (q == line_start || !cc__is_ident_char2(q[-1])) &&
-                                (q + fname_len >= line_end || !cc__is_ident_char2(q[fname_len]))) {
+                                (q == in_src_decl_scan + off || !cc__is_ident_char2(q[-1])) &&
+                                (q + fname_len >= in_src_decl_scan + off + line_len || !cc__is_ident_char2(q[fname_len]))) {
                                 name_found = 1;
                                 break;
                             }
@@ -3279,6 +3301,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         off = (size_t)(cur - in_src);
         line_num++;  /* Advance line counter for function param registration */
     }
+    free(in_src_decl_scan);
 
     /* Emit protos/defs and build rewrite edits for all closure literals. */
     char* protos = NULL;

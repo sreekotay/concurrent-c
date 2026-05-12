@@ -1,9 +1,10 @@
 /*
  * pigz_pthread.ccs -- Parallel gzip using cc_thread_spawn (OS threads)
  *
- * Identical to pigz_idiomatic.ccs except compression tasks are dispatched
- * to OS threads via cc_thread_spawn instead of M:N fibers via cc_fiber_spawn_task.
- * This isolates fiber scheduler overhead from compression throughput.
+ * Same compression and handoff semantics as pigz_idiomatic.ccs: compress_block
+ * returns a plain CompressedResult* (NULL on failure); the consumer treats NULL
+ * as a pipeline error. The transport is an ordered CCTask channel (OS-thread
+ * workers) instead of send_task on fibers.
  */
 
 #include <ccc/std/prelude.cch>
@@ -37,72 +38,95 @@ typedef struct {
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
+cc_atomic_int g_pipeline_error = 0;
 static int g_compress_level = 6;
 
-CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
+/* Returns NULL on allocation or zlib failure. */
+static CompressedResult* compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
-    
-    {
-        CCArena res_arena_storage = @create(arena_size) @destroy;
-        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-        CCArena* res_arena = &res_arena_storage;
-        CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
-        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-        
-        res->seq = blk->seq;
-        res->is_last = blk->is_last;
-        res->original_len = blk->data.len;
-        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
-        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+    CCArena res_arena_storage = @create(arena_size) @destroy;
+    if (!res_arena_storage.base) return NULL;
+    CCArena* res_arena = &res_arena_storage;
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
+    if (!res) return NULL;
 
-        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
-        memcpy(out_buf, header, 10);
-        size_t pos = 10;
+    res->seq = blk->seq;
+    res->is_last = blk->is_last;
+    res->original_len = blk->data.len;
+    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-        z_stream strm = {0};
-        if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            return cc_err(cc_io_error(CC_IO_OTHER));
-        }
-        strm.next_in = (Bytef*)blk->data.ptr;
-        strm.avail_in = (uInt)blk->data.len;
-        strm.next_out = out_buf + pos;
-        strm.avail_out = (uInt)(max_out - pos - 8);
-        
-        int ret = deflate(&strm, Z_FINISH);
-        pos += strm.total_out;
-        deflateEnd(&strm);
-        
-        if (ret != Z_STREAM_END) return cc_err(cc_io_error(CC_IO_OTHER));
-        
-        unsigned long crc = res->crc;
-        size_t in_len = blk->data.len;
-        out_buf[pos++] = crc & 0xff;
-        out_buf[pos++] = (crc >> 8) & 0xff;
-        out_buf[pos++] = (crc >> 16) & 0xff;
-        out_buf[pos++] = (crc >> 24) & 0xff;
-        out_buf[pos++] = in_len & 0xff;
-        out_buf[pos++] = (in_len >> 8) & 0xff;
-        out_buf[pos++] = (in_len >> 16) & 0xff;
-        out_buf[pos++] = (in_len >> 24) & 0xff;
+    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
+    if (!out_buf) return NULL;
 
-        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
-        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
-        cc_atomic_fetch_add(&g_bytes_out, pos);
-        cc_atomic_fetch_add(&g_blocks_done, 1);
+    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
 
-        res->arena = cc_arena_detach(res_arena);
-        return cc_ok(res);
+    z_stream strm = {0};
+    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return NULL;
     }
+    strm.next_in = (Bytef*)blk->data.ptr;
+    strm.avail_in = (uInt)blk->data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);
+
+    int ret = deflate(&strm, Z_FINISH);
+    pos += strm.total_out;
+    deflateEnd(&strm);
+
+    if (ret != Z_STREAM_END) return NULL;
+
+    unsigned long crc = res->crc;
+    size_t in_len = blk->data.len;
+    out_buf[pos++] = crc & 0xff;
+    out_buf[pos++] = (crc >> 8) & 0xff;
+    out_buf[pos++] = (crc >> 16) & 0xff;
+    out_buf[pos++] = (crc >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+    cc_atomic_fetch_add(&g_bytes_out, pos);
+    cc_atomic_fetch_add(&g_blocks_done, 1);
+
+    res->arena = cc_arena_detach(res_arena);
+    return res;
+}
+
+/* Frees block arena after compression (thread entry uses this). */
+static CompressedResult* compress_owned_block(Block* blk) {
+    CompressedResult* out = compress_block(blk, g_compress_level);
+    cc_arena_free(&blk->arena);
+    return out;
+}
+
+static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
+    CCResult_size_t_CCIoError wr = cc_file_write(f, data);
+    if (cc_is_err(wr)) {
+        CCIoError err = cc_unwrap_err_as(wr, CCIoError);
+        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.kind, err.os_code);
+        cc_atomic_store(&g_pipeline_error, 1);
+        return false;
+    }
+    size_t n = cc_unwrap_as(wr, size_t);
+    if (n != data.len) {
+        fprintf(stderr, "%s short write %zu/%zu\n", what, n, data.len);
+        cc_atomic_store(&g_pipeline_error, 1);
+        return false;
+    }
+    return true;
 }
 
 void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
-    CompressedResult* !>(CCIoError) res = compress_block(blk, g_compress_level);
-    cc_arena_free(&blk->arena);
-    
+    CompressedResult* res = compress_owned_block(blk);
+
     typedef struct { CompressedResult* __result; } __result_t;
     __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
     if (!storage) {
@@ -111,13 +135,14 @@ void* compress_task_wrapper(void* arg) {
         storage = (__result_t*)malloc(sizeof(__result_t));
         if (!storage) return NULL;
     }
-    
-    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
+
+    storage->__result = res;
     return storage;
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
     g_compress_level = level;
+    cc_atomic_store(&g_pipeline_error, 0);
     
     CCFile in_file;
     if (cc_file_open(&in_file, in_path, "rb") != 0) {
@@ -143,12 +168,24 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
     CCNursery* consumer = @create(NULL, () => [out_ptr, tasks_rx] {
         void* result;
+        long expect_seq = 0;
         while (ordered_recv(tasks_rx, &result) == 1) {
             CompressedResult* r = (CompressedResult*)result;
-            if (r) {
-                cc_file_write(out_ptr, r->data);
-                cc_arena_free(&r->arena);
+            if (!r) {
+                fprintf(stderr, "compress task failed (OOM or zlib error)\n");
+                cc_atomic_store(&g_pipeline_error, 1);
+                break;
             }
+            if (r->seq != expect_seq) {
+                fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, r->seq);
+                cc_atomic_store(&g_pipeline_error, 1);
+            }
+            expect_seq++;
+            if (!write_all_or_fail(out_ptr, r->data, "compressed output")) {
+                cc_arena_free(&r->arena);
+                break;
+            }
+            cc_arena_free(&r->arena);
         }
     }) @destroy;
     if (!consumer) {
@@ -159,6 +196,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCNursery* producer = @create(consumer, () => [in_ptr, tasks_tx] {
         long seq = 0;
         while (true) {
+            if (cc_atomic_load(&g_pipeline_error)) break;
+
             CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
             CCSlice data;
             bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
@@ -197,7 +236,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     }
 
     cc_file_sync(&out_file);
-    return 0;
+    return cc_atomic_load(&g_pipeline_error) ? 1 : 0;
 }
 
 int main(int argc, char *argv[]) {
