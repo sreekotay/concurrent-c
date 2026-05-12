@@ -4891,8 +4891,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 while (earliest_pos > 0 && src_ufcs[earliest_pos - 1] != '\n') {
                     earliest_pos--;
                 }
-                size_t delayed_insert_pos = src_ufcs_len;
                 unsigned char delayed_result_specs[512] = {0};
+                size_t delayed_result_pos[512];
+                for (size_t ri = 0; ri < sizeof(delayed_result_pos) / sizeof(delayed_result_pos[0]); ri++) {
+                    delayed_result_pos[ri] = src_ufcs_len + 1;
+                }
                 for (size_t ri = 0; ri < cc__cg_result_specs.count && ri < sizeof(delayed_result_specs); ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     size_t ok_decl_end = spec ? cc__cg_type_decl_end_top_level(src_ufcs, src_ufcs_len, spec->ok_type) : 0;
@@ -4904,10 +4907,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                                                strlen(spec->concrete_name));
                     delayed_result_specs[ri] = 1;
                     if (first_use < src_ufcs_len) {
-                        size_t pos = cc__cg_line_start_before(src_ufcs, first_use);
-                        if (pos < delayed_insert_pos) delayed_insert_pos = pos;
-                    } else if (decl_end < delayed_insert_pos) {
-                        delayed_insert_pos = decl_end;
+                        delayed_result_pos[ri] = cc__cg_line_start_before(src_ufcs, first_use);
+                    } else {
+                        delayed_result_pos[ri] = decl_end;
                     }
                 }
                 
@@ -5009,26 +5011,36 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 size_t new_len = 0, new_cap = 0;
                 cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, earliest_pos);
                 cc__sb_append_local(&new_src, &new_len, &new_cap, decls, decls_len);
-                if (delayed_insert_pos < src_ufcs_len && delayed_insert_pos > earliest_pos) {
-                    cc__sb_append_local(&new_src, &new_len, &new_cap,
-                                        src_ufcs + earliest_pos, delayed_insert_pos - earliest_pos);
-                    cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
-                        "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
-                    for (size_t ri = 0; ri < cc__cg_result_specs.count && ri < sizeof(delayed_result_specs); ri++) {
-                        const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
-                        char line[512];
-                        if (!delayed_result_specs[ri] || !spec) continue;
-                        if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
-                        cc_result_spec_emit_decl(spec, line, sizeof(line));
-                        cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, line);
+                {
+                    size_t delayed_cursor = earliest_pos;
+                    for (;;) {
+                        size_t next_pos = src_ufcs_len + 1;
+                        for (size_t ri = 0; ri < cc__cg_result_specs.count && ri < sizeof(delayed_result_specs); ri++) {
+                            if (!delayed_result_specs[ri]) continue;
+                            if (delayed_result_pos[ri] > delayed_cursor && delayed_result_pos[ri] < next_pos) {
+                                next_pos = delayed_result_pos[ri];
+                            }
+                        }
+                        if (next_pos > src_ufcs_len) break;
+
+                        cc__sb_append_local(&new_src, &new_len, &new_cap,
+                                            src_ufcs + delayed_cursor, next_pos - delayed_cursor);
+                        cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
+                            "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
+                        for (size_t ri = 0; ri < cc__cg_result_specs.count && ri < sizeof(delayed_result_specs); ri++) {
+                            const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                            char line[512];
+                            if (!delayed_result_specs[ri] || delayed_result_pos[ri] != next_pos || !spec) continue;
+                            if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
+                            cc_result_spec_emit_decl(spec, line, sizeof(line));
+                            cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, line);
+                        }
+                        cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
+                            "/* --- end delayed result type declarations --- */\n\n");
+                        delayed_cursor = next_pos;
                     }
-                    cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
-                        "/* --- end delayed result type declarations --- */\n\n");
                     cc__sb_append_local(&new_src, &new_len, &new_cap,
-                                        src_ufcs + delayed_insert_pos, src_ufcs_len - delayed_insert_pos);
-                } else {
-                    cc__sb_append_local(&new_src, &new_len, &new_cap,
-                                        src_ufcs + earliest_pos, src_ufcs_len - earliest_pos);
+                                        src_ufcs + delayed_cursor, src_ufcs_len - delayed_cursor);
                 }
                 
                 free(decls);

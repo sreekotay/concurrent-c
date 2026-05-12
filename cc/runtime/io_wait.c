@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -36,6 +37,8 @@ typedef struct cc_io_waiter {
     void* select_group;
     size_t select_index;
 } cc_io_waiter;
+
+static int cc__io_wait_ready_deadline(int fd, short events, const struct timespec* abs_deadline);
 
 #if CC_IO_WAIT_HAS_KQUEUE
 typedef struct cc_io_kqueue_slot {
@@ -751,16 +754,22 @@ void cc__io_wait_forget_fd(int fd) {
 }
 
 int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
+    return cc__io_watcher_wait_deadline(watcher, events, NULL);
+}
+
+int cc__io_watcher_wait_deadline(cc__io_owned_watcher* watcher,
+                                 short events,
+                                 const struct timespec* abs_deadline) {
     if (!watcher || watcher->fd < 0) return EINVAL;
     if (!cc__fiber_in_context()) {
-        return cc__io_wait_ready(watcher->fd, events);
+        return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
     }
     if (cc__io_wait_force_direct()) {
-        return cc__io_wait_ready(watcher->fd, events);
+        return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
     }
 
     int init_err = cc__io_wait_ensure_running();
-    if (init_err != 0) return cc__io_wait_ready(watcher->fd, events);
+    if (init_err != 0) return cc__io_wait_ready_deadline(watcher->fd, events, abs_deadline);
     if (cc__io_wait_stats_enabled()) {
         cc__io_wait_stats_init();
         atomic_fetch_add_explicit(&g_cc_io_wait_stats.wait_async_calls, 1, memory_order_relaxed);
@@ -777,7 +786,7 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
         if (events == POLLIN) persistent_read = 1;
         cc_io_kqueue_slot* slot = cc__io_wait_kqueue_bind_cached_slot(cached_slot, watcher->fd, events, fiber, wait_ticket, persistent_read);
         if (!slot) {
-            return cc__io_wait_fd(watcher->fd, events);
+            return cc__io_wait_fd_deadline(watcher->fd, events, abs_deadline);
         }
         if (cc__io_wait_stats_enabled()) {
             atomic_fetch_add_explicit(&g_cc_io_wait_stats.waiter_adds, 1, memory_order_relaxed);
@@ -811,7 +820,9 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
             }
         }
         cc__fiber_set_park_obj(slot);
-        int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
+        int wait_err = abs_deadline
+            ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&slot->ready, 0, abs_deadline, "io_ready")
+            : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
         cc__fiber_set_park_obj(NULL);
         if (persistent_read) {
             (void)atomic_exchange_explicit(&slot->ready, 0, memory_order_acq_rel);
@@ -829,7 +840,7 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
 #endif
     }
 
-    return cc__io_wait_fd(watcher->fd, events);
+    return cc__io_wait_fd_deadline(watcher->fd, events, abs_deadline);
 }
 
 int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
@@ -952,21 +963,54 @@ int cc__io_wait_ready(int fd, short events) {
     }
 }
 
+static int cc__io_wait_deadline_timeout_ms(const struct timespec* abs_deadline) {
+    if (!abs_deadline || abs_deadline->tv_sec == 0) return -1;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    int64_t sec = (int64_t)abs_deadline->tv_sec - (int64_t)now.tv_sec;
+    int64_t nsec = (int64_t)abs_deadline->tv_nsec - (int64_t)now.tv_nsec;
+    int64_t ms = sec * 1000 + nsec / 1000000;
+    if (nsec > 0 && (nsec % 1000000) != 0) ms++;
+    if (ms <= 0) return 0;
+    if (ms > INT_MAX) return INT_MAX;
+    return (int)ms;
+}
+
+static int cc__io_wait_ready_deadline(int fd, short events, const struct timespec* abs_deadline) {
+    struct pollfd pfd = {.fd = fd, .events = events};
+    while (1) {
+        int timeout_ms = cc__io_wait_deadline_timeout_ms(abs_deadline);
+        int rc = poll(&pfd, 1, timeout_ms);
+        if (rc > 0) {
+            if (pfd.revents & POLLNVAL) return EBADF;
+            if (pfd.revents & (POLLERR | POLLHUP)) return EIO;
+            return 0;
+        }
+        if (rc == 0) return ETIMEDOUT;
+        if (errno == EINTR) continue;
+        return errno;
+    }
+}
+
 int cc__io_wait_fd(int fd, short events) {
+    return cc__io_wait_fd_deadline(fd, events, NULL);
+}
+
+int cc__io_wait_fd_deadline(int fd, short events, const struct timespec* abs_deadline) {
     if (!cc__fiber_in_context()) {
         /* Direct thread waits here are driven by kernel I/O readiness, so mark
          * this call site as external to the scheduler dependency graph. */
         cc_external_wait_enter();
-        int rc = cc__io_wait_ready(fd, events);
+        int rc = cc__io_wait_ready_deadline(fd, events, abs_deadline);
         cc_external_wait_leave();
         return rc;
     }
     if (cc__io_wait_force_direct()) {
-        return cc__io_wait_ready(fd, events);
+        return cc__io_wait_ready_deadline(fd, events, abs_deadline);
     }
 
     int init_err = cc__io_wait_ensure_running();
-    if (init_err != 0) return cc__io_wait_ready(fd, events);
+    if (init_err != 0) return cc__io_wait_ready_deadline(fd, events, abs_deadline);
     if (cc__io_wait_stats_enabled()) {
         cc__io_wait_stats_init();
         atomic_fetch_add_explicit(&g_cc_io_wait_stats.wait_async_calls, 1, memory_order_relaxed);
@@ -978,7 +1022,7 @@ int cc__io_wait_fd(int fd, short events) {
         uint64_t wait_ticket = cc__fiber_publish_wait_ticket(fiber);
         cc_io_kqueue_slot* slot = cc__io_wait_kqueue_acquire_slot(fd, events, fiber, wait_ticket);
         if (!slot) {
-            return cc__io_wait_ready(fd, events);
+            return cc__io_wait_ready_deadline(fd, events, abs_deadline);
         }
         if (cc__io_wait_stats_enabled()) {
             atomic_fetch_add_explicit(&g_cc_io_wait_stats.waiter_adds, 1, memory_order_relaxed);
@@ -1001,7 +1045,9 @@ int cc__io_wait_fd(int fd, short events) {
             }
         }
         cc__fiber_set_park_obj(slot);
-        int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
+        int wait_err = abs_deadline
+            ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&slot->ready, 0, abs_deadline, "io_ready")
+            : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
         cc__fiber_set_park_obj(NULL);
         atomic_store_explicit(&slot->active, 0, memory_order_release);
         slot->fiber = NULL;
@@ -1017,7 +1063,7 @@ int cc__io_wait_fd(int fd, short events) {
     }
 
     cc_io_waiter* waiter = (cc_io_waiter*)calloc(1, sizeof(*waiter));
-    if (!waiter) return cc__io_wait_ready(fd, events);
+    if (!waiter) return cc__io_wait_ready_deadline(fd, events, abs_deadline);
 
     waiter->fd = fd;
     waiter->events = events;
@@ -1042,7 +1088,9 @@ int cc__io_wait_fd(int fd, short events) {
     cc__io_waiter_notify();
 
     cc__fiber_set_park_obj(waiter);
-    int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&waiter->ready, 0, "io_ready");
+    int wait_err = abs_deadline
+        ? CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(&waiter->ready, 0, abs_deadline, "io_ready")
+        : CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&waiter->ready, 0, "io_ready");
     cc__fiber_set_park_obj(NULL);
 
     atomic_store_explicit(&waiter->cancelled, 1, memory_order_release);

@@ -1,0 +1,75 @@
+/*
+ * A socket write deadline should turn a non-draining peer into a bounded
+ * timeout, not an indefinitely parked writer fiber.
+ */
+#include <ccc/std/net.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+static cc_atomic_int g_timed_out = 0;
+static cc_atomic_int g_errors = 0;
+
+static void writer_task(int fd) {
+    CCSocket sock = { .fd = fd };
+    char buf[4096];
+    memset(buf, 'x', sizeof(buf));
+
+    CCDeadline deadline = cc_deadline_after_ms(50);
+    while (true) {
+        CCNetError err = CC_NET_OK;
+        size_t n = cc_socket_write_deadline(&sock, buf, sizeof(buf), &err, &deadline);
+        if (err == CC_NET_TIMED_OUT) {
+            cc_atomic_store(&g_timed_out, 1);
+            break;
+        }
+        if (err != CC_NET_OK || n == 0) {
+            fprintf(stderr, "socket_write_deadline_smoke: unexpected write err=%d n=%zu\n", err, n);
+            cc_atomic_fetch_add(&g_errors, 1);
+            break;
+        }
+    }
+    cc_socket_close(&sock);
+}
+
+int main(void) {
+    cc_atomic_store(&g_timed_out, 0);
+    cc_atomic_store(&g_errors, 0);
+
+    int fds[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        perror("socketpair");
+        return 1;
+    }
+
+    int sndbuf = 4096;
+    (void)setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) {
+            close(fds[0]);
+            close(fds[1]);
+            return 2;
+        }
+        int writer_fd = fds[0];
+        fds[0] = -1;
+        n->spawn(() => [writer_fd] { writer_task(writer_fd); });
+    }
+
+    close(fds[1]);
+    if (cc_atomic_load(&g_errors) != 0 || cc_atomic_load(&g_timed_out) == 0) {
+        fprintf(stderr,
+                "socket_write_deadline_smoke: FAIL timed_out=%d errors=%d\n",
+                cc_atomic_load(&g_timed_out),
+                cc_atomic_load(&g_errors));
+        return 3;
+    }
+
+    printf("socket_write_deadline_smoke: PASS\n");
+    return 0;
+}

@@ -173,6 +173,31 @@ static inline const char* cc__skip_ws_and_result_sigil(const char* q) {
     return q;
 }
 
+static char* cc__normalize_generic_error_type_text(const char* type_text) {
+    const char* p = NULL;
+    size_t prefix_len = 0;
+    size_t suffix_off = 0;
+    size_t out_len = 0;
+    char* out = NULL;
+    if (!type_text) return NULL;
+    p = strstr(type_text, "struct __CCGenericError");
+    if (p) {
+        suffix_off = strlen("struct __CCGenericError");
+    } else {
+        p = strstr(type_text, "__CCGenericError");
+        if (!p) return NULL;
+        suffix_off = strlen("__CCGenericError");
+    }
+    prefix_len = (size_t)(p - type_text);
+    out_len = prefix_len + strlen("CCError") + strlen(p + suffix_off);
+    out = (char*)malloc(out_len + 1);
+    if (!out) return NULL;
+    memcpy(out, type_text, prefix_len);
+    memcpy(out + prefix_len, "CCError", strlen("CCError"));
+    strcpy(out + prefix_len + strlen("CCError"), p + suffix_off);
+    return out;
+}
+
 /* Keep local implementations of cc__find_matching_paren/brace to avoid subtle behavioral changes. */
 
 static int cc__find_matching_paren(const char* b, size_t bl, size_t lpar, size_t* out_rpar) {
@@ -3243,6 +3268,14 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                      strstr(local_tys[local_n - 1], "cc_channel_recv") != NULL)) {
                     free(local_tys[local_n - 1]);
                     local_tys[local_n - 1] = strdup("CCResult_bool_CCIoError");
+                }
+                if (local_tys[local_n - 1] &&
+                    strstr(local_tys[local_n - 1], "__CCGenericError") != NULL) {
+                    char* norm_ty = cc__normalize_generic_error_type_text(local_tys[local_n - 1]);
+                    if (norm_ty) {
+                        free(local_tys[local_n - 1]);
+                        local_tys[local_n - 1] = norm_ty;
+                    }
                 }
                 /* Guard against emitting a parser-mode placeholder.  The
                  * line-scan above takes everything on the decl's source

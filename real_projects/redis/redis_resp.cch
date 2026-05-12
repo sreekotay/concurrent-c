@@ -54,7 +54,8 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
         if (net_err != CC_NET_OK) return cc_err(net_to_io_error(net_err));
     } else {
         CCNetError err = CC_NET_OK;
-        n = cc_socket_read_into(sock, r->data + r->end, max_bytes, &err);
+        CCDeadline deadline = cc_deadline_after_ms(REDIS_SOCKET_READ_TIMEOUT_MS);
+        n = cc_socket_read_into_deadline(sock, r->data + r->end, max_bytes, &err, &deadline);
         if (err != CC_NET_OK) return cc_err(net_to_io_error(err));
     }
     if (n == 0) return cc_ok(false);
@@ -120,6 +121,12 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CC
     if (n < 0) {
         r->start = saved_start;
         *err = CC_ERROR(CC_ERR_PARSE, "negative bulk length");
+        return RESP_PARSE_ERROR;
+    }
+
+    if ((uint64_t)n > (uint64_t)SIZE_MAX - 2u || (size_t)n + 2u > r->cap) {
+        r->start = saved_start;
+        *err = CC_ERROR(CC_ERR_INVALID_ARG, "ERR bulk string too large");
         return RESP_PARSE_ERROR;
     }
 

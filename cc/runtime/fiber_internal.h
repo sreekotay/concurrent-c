@@ -41,6 +41,11 @@ void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
                                    const char* reason, const char* file, int line);
 int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
                                             const char* reason, const char* file, int line);
+int cc__fiber_suspend_until_ready_or_cancel_until(_Atomic int* flag, int expected,
+                                                  const struct timespec* abs_deadline,
+                                                  const char* reason,
+                                                  const char* file,
+                                                  int line);
 void cc__fiber_unpark(void* fiber);
 typedef enum {
     CC_FIBER_UNPARK_REASON_GENERIC = 0,
@@ -88,5 +93,7 @@ void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
     cc__fiber_suspend_until_ready(flag, expected, reason, __FILE__, __LINE__)
 #define CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(flag, expected, reason) \
     cc__fiber_suspend_until_ready_or_cancel(flag, expected, reason, __FILE__, __LINE__)
+#define CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL_UNTIL(flag, expected, deadline, reason) \
+    cc__fiber_suspend_until_ready_or_cancel_until(flag, expected, deadline, reason, __FILE__, __LINE__)
 
 #endif /* CC_FIBER_INTERNAL_H */

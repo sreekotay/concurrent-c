@@ -37,6 +37,7 @@ typedef struct {
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
+static int g_compress_level = 6;
 
 CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
@@ -99,7 +100,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
 
 void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
-    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+    CompressedResult* !>(CCIoError) res = compress_block(blk, g_compress_level);
     cc_arena_free(&blk->arena);
     
     typedef struct { CompressedResult* __result; } __result_t;
@@ -116,7 +117,7 @@ void* compress_task_wrapper(void* arg) {
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
-    (void)level;
+    g_compress_level = level;
     
     CCFile in_file;
     if (cc_file_open(&in_file, in_path, "rb") != 0) {

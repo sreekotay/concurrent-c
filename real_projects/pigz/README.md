@@ -158,19 +158,23 @@ Both versions support similar options:
 ### Prerequisites
 - GCC with pthread support
 - zlib development headers (`zlib.h`)
+- zopfli development headers (`zopfli.h`) for the full `pigz_cc` port
 - CC compiler (`ccc`) for pigz_cc
 
 ### macOS
 ```bash
-brew install zlib
+brew install zlib zopfli
 make
 ```
 
 ### Linux
 ```bash
-sudo apt-get install zlib1g-dev
+sudo apt-get install zlib1g-dev zopfli libzopfli-dev
 make
 ```
+
+If zopfli is installed outside the default compiler search paths, pass
+`ZOPFLI_CFLAGS` and `ZOPFLI_LDFLAGS` to `make`.
 
 ## License
 

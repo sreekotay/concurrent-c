@@ -1,10 +1,20 @@
 /*
- * Channel policy regression (not wired into redis_idiomatic today): a full
- * per-client reply queue must not block the shared owner if the server uses
- * try_send + close-on-EAGAIN.  Slow client fills a cap-2 reply channel without
- * recv; fast client's request is still answered before the overflow closes the
- * slow side.  redis_idiomatic uses blocking send on the reply channel for
- * throughput; revisit non-blocking handoff with profiling before changing prod.
+ * Redis-style head-of-line (HOL) model test (no TCP, no redis_idiomatic binary).
+ *
+ * Topology: N:1 request channel into a single owner; per-client bounded reply
+ * channels.  Two policies:
+ *
+ * 1) blocking_send: owner uses blocking cc_channel_send on the reply channel.
+ *    Slow client fills its reply channel, then submits another request; the
+ *    owner blocks on that reply send.  A fast client's request is queued behind
+ *    the blocked owner and cannot complete until the slow side drains a slot.
+ *
+ * 2) try_send: owner uses cc_channel_try_send + close-on-full (EAGAIN).
+ *    After the slow channel is full, overflow does not park the owner; the fast
+ *    client's request is still answered before the slow overflow is attempted.
+ *
+ * redis_idiomatic uses blocking reply send for throughput; this test documents
+ * the HOL failure mode and validates the non-blocking alternative in isolation.
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_channel.cch>
@@ -15,7 +25,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* try_send case: need cap>=2 so two replies fill the channel before overflow. */
 #define SLOW_REPLY_CAP 2
+/* blocking HOL case: cap 1 so the second reply send blocks with one undrained reply. */
+#define BLOCK_SLOW_REPLY_CAP 1
 #define FAST_REPLY_CAP 8
 #define REQUEST_CHAN_CAP 16
 
@@ -29,9 +42,213 @@ typedef QueueReq*[~REQUEST_CHAN_CAP N:1 >] HolReqTx;
 typedef QueueReq*[~REQUEST_CHAN_CAP N:1 <] HolReqRx;
 
 static cc_atomic_int g_errors = 0;
+
+/* --- blocking HOL scenario --- */
+static cc_atomic_int g_slow_gate_for_fast = 0;
+static cc_atomic_int g_fast_submitted = 0;
+static cc_atomic_int g_fast_got_reply = 0;
+
+static void hol_owner_blocking_policy(HolReqRx req_rx) {
+    QueueReq* req = NULL;
+    while (cc_io_avail(cc_channel_recv(req_rx, &req))) {
+        if (!req) continue;
+        int v = req->reply_value;
+        CCChanTx tx = req->reply_tx;
+        (void)req->reply_ch;
+        free(req);
+        if (!cc_io_avail(cc_channel_send(tx, v))) {
+            /* peer closed */
+        }
+    }
+}
+
+static void slow_client_blocking(HolReqTx req_tx_raw) {
+    @defer cc_channel_close(req_tx_raw);
+    int[~BLOCK_SLOW_REPLY_CAP 1:1 >] slow_reply_tx;
+    int[~BLOCK_SLOW_REPLY_CAP 1:1 <] slow_reply_rx;
+    CCChan* slow_ch = cc_channel_pair(&slow_reply_tx, &slow_reply_rx);
+    if (!slow_ch) {
+        cc_atomic_fetch_add(&g_errors, 1);
+        cc_atomic_store(&g_slow_gate_for_fast, 1);
+        return;
+    }
+
+    /* Request 1: owner sends reply 1 into cap-1 channel (full, not drained). */
+    {
+        QueueReq* q = malloc(sizeof(*q));
+        if (!q) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            cc_atomic_store(&g_slow_gate_for_fast, 1);
+            cc_channel_close(slow_reply_tx);
+            return;
+        }
+        q->reply_tx = slow_reply_tx;
+        q->reply_ch = slow_ch;
+        q->reply_value = 1;
+        if (!cc_io_avail(cc_channel_send(req_tx_raw, q))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            free(q);
+            cc_atomic_store(&g_slow_gate_for_fast, 1);
+            cc_channel_close(slow_reply_tx);
+            return;
+        }
+    }
+    cc_yield();
+
+    /* Request 2: owner blocks on second blocking send into full slow channel. */
+    {
+        QueueReq* q = malloc(sizeof(*q));
+        if (!q) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            cc_atomic_store(&g_slow_gate_for_fast, 1);
+            cc_channel_close(slow_reply_tx);
+            return;
+        }
+        q->reply_tx = slow_reply_tx;
+        q->reply_ch = slow_ch;
+        q->reply_value = 2;
+        if (!cc_io_avail(cc_channel_send(req_tx_raw, q))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            free(q);
+            cc_atomic_store(&g_slow_gate_for_fast, 1);
+            cc_channel_close(slow_reply_tx);
+            return;
+        }
+    }
+    cc_yield();
+    /* Let owner run: recv r2 and park on send(2). */
+    cc_atomic_store(&g_slow_gate_for_fast, 1);
+
+    while (!cc_atomic_load(&g_fast_submitted)) {
+        cc_yield();
+    }
+    /* Fast is blocked in recv; reply must not have arrived while owner is stuck. */
+    if (cc_atomic_load(&g_fast_got_reply) != 0) {
+        fprintf(stderr,
+                "redis_owner_reply_try_send_hol_smoke: blocking HOL expected "
+                "fast blocked before slow drain, got g_fast_got_reply=%d\n",
+                (int)cc_atomic_load(&g_fast_got_reply));
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+
+    /* Drain one slot so owner can complete send(2) and then service fast's request. */
+    {
+        int got = -1;
+        if (!cc_io_avail(cc_channel_recv(slow_reply_rx, &got))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+        } else if (got != 1) {
+            fprintf(stderr,
+                    "redis_owner_reply_try_send_hol_smoke: blocking slow drain "
+                    "expected first reply 1 got=%d\n",
+                    got);
+            cc_atomic_fetch_add(&g_errors, 1);
+        }
+    }
+
+    while (!cc_atomic_load(&g_fast_got_reply)) {
+        cc_yield();
+    }
+
+    {
+        int got2 = -1;
+        if (cc_io_avail(cc_channel_recv(slow_reply_rx, &got2))) {
+            if (got2 != 2) {
+                fprintf(stderr,
+                        "redis_owner_reply_try_send_hol_smoke: blocking expected "
+                        "second reply 2 got=%d\n",
+                        got2);
+                cc_atomic_fetch_add(&g_errors, 1);
+            }
+        }
+    }
+    cc_channel_close(slow_reply_tx);
+}
+
+static void fast_client_blocking(HolReqTx req_tx_raw) {
+    while (!cc_atomic_load(&g_slow_gate_for_fast)) {
+        cc_yield();
+    }
+
+    int[~FAST_REPLY_CAP 1:1 >] fast_reply_tx;
+    int[~FAST_REPLY_CAP 1:1 <] fast_reply_rx;
+    CCChan* fast_ch = cc_channel_pair(&fast_reply_tx, &fast_reply_rx);
+    if (!fast_ch) {
+        cc_atomic_fetch_add(&g_errors, 1);
+        cc_atomic_store(&g_fast_submitted, 1);
+        return;
+    }
+
+    {
+        QueueReq* q = malloc(sizeof(*q));
+        if (!q) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            cc_atomic_store(&g_fast_submitted, 1);
+            cc_channel_close(fast_reply_tx);
+            return;
+        }
+        q->reply_tx = fast_reply_tx;
+        q->reply_ch = fast_ch;
+        q->reply_value = 4242;
+        if (!cc_io_avail(cc_channel_send(req_tx_raw, q))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            free(q);
+            cc_atomic_store(&g_fast_submitted, 1);
+            cc_channel_close(fast_reply_tx);
+            return;
+        }
+    }
+    cc_atomic_store(&g_fast_submitted, 1);
+
+    int got = -1;
+    if (!cc_io_avail(cc_channel_recv(fast_reply_rx, &got))) {
+        cc_atomic_fetch_add(&g_errors, 1);
+        cc_channel_close(fast_reply_tx);
+        return;
+    }
+    if (got != 4242) {
+        fprintf(stderr,
+                "redis_owner_reply_try_send_hol_smoke: blocking fast expected 4242 got=%d\n",
+                got);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+    cc_atomic_store(&g_fast_got_reply, 1);
+    cc_channel_close(fast_reply_tx);
+}
+
+static int run_blocking_hol_demo(void) {
+    cc_atomic_store(&g_errors, 0);
+    cc_atomic_store(&g_slow_gate_for_fast, 0);
+    cc_atomic_store(&g_fast_submitted, 0);
+    cc_atomic_store(&g_fast_got_reply, 0);
+
+    HolReqTx req_tx;
+    HolReqRx req_rx;
+    CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx);
+    if (!req_ch) return 10;
+    @defer req_ch.free();
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 11;
+        HolReqRx req_rx_raw = req_rx;
+        HolReqTx req_tx_raw = req_tx;
+        n->spawn(() => [req_rx_raw] { hol_owner_blocking_policy(req_rx_raw); });
+        n->spawn(() => [req_tx_raw] { slow_client_blocking(req_tx_raw); });
+        n->spawn(() => [req_tx_raw] { fast_client_blocking(req_tx_raw); });
+    }
+
+    if (cc_atomic_load(&g_errors) != 0) {
+        fprintf(stderr,
+                "redis_owner_reply_try_send_hol_smoke: blocking case FAIL errors=%d\n",
+                (int)cc_atomic_load(&g_errors));
+        return 20;
+    }
+    printf("redis_owner_reply_try_send_hol_smoke: blocking HOL case PASS\n");
+    return 0;
+}
+
+/* --- try_send non-HOL scenario (original shape) --- */
 static cc_atomic_int g_slow_prefill_sent = 0;
-/* Set after fast's reply is received so the owner has finished r1,r2,f1
- * before the slow overflow request (avoids r3 vs f1 racing on the req channel). */
 static cc_atomic_int g_fast_reply_received = 0;
 
 static void hol_owner_try_send_policy(HolReqRx req_rx) {
@@ -60,7 +277,7 @@ static void hol_owner_try_send_policy(HolReqRx req_rx) {
     }
 }
 
-static void slow_client(HolReqTx req_tx_raw) {
+static void slow_client_try_send(HolReqTx req_tx_raw) {
     @defer cc_channel_close(req_tx_raw);
     int[~SLOW_REPLY_CAP 1:1 >] slow_reply_tx;
     int[~SLOW_REPLY_CAP 1:1 <] slow_reply_rx;
@@ -113,14 +330,11 @@ static void slow_client(HolReqTx req_tx_raw) {
         if (!cc_io_avail(cc_channel_send(req_tx_raw, q))) {
             cc_atomic_fetch_add(&g_errors, 1);
             free(q);
-            cc_atomic_store(&g_fast_reply_received, 1);
             cc_channel_close(slow_reply_tx);
             return;
         }
     }
 
-    /* Drain the two replies that landed before overflow closed the channel.
-     * req_tx_raw is closed by @defer when this fiber returns (unblocks owner). */
     for (int k = 0; k < SLOW_REPLY_CAP; ++k) {
         int got = -1;
         if (!cc_io_avail(cc_channel_recv(slow_reply_rx, &got))) {
@@ -128,7 +342,8 @@ static void slow_client(HolReqTx req_tx_raw) {
         }
         if (got != k + 1) {
             fprintf(stderr,
-                    "redis_owner_reply_try_send_hol_smoke: slow recv mismatch got=%d expected=%d\n",
+                    "redis_owner_reply_try_send_hol_smoke: try_send slow recv "
+                    "mismatch got=%d expected=%d\n",
                     got,
                     k + 1);
             cc_atomic_fetch_add(&g_errors, 1);
@@ -138,7 +353,7 @@ static void slow_client(HolReqTx req_tx_raw) {
     cc_channel_close(slow_reply_tx);
 }
 
-static void fast_client(HolReqTx req_tx_raw) {
+static void fast_client_try_send(HolReqTx req_tx_raw) {
     while (!cc_atomic_load(&g_slow_prefill_sent)) {
         cc_yield();
     }
@@ -181,7 +396,7 @@ static void fast_client(HolReqTx req_tx_raw) {
     }
     if (got != 4242) {
         fprintf(stderr,
-                "redis_owner_reply_try_send_hol_smoke: fast expected 4242 got=%d\n",
+                "redis_owner_reply_try_send_hol_smoke: try_send fast expected 4242 got=%d\n",
                 got);
         cc_atomic_fetch_add(&g_errors, 1);
     }
@@ -189,8 +404,7 @@ static void fast_client(HolReqTx req_tx_raw) {
     cc_channel_close(fast_reply_tx);
 }
 
-int main(void) {
-    cc_sched_set_num_workers(8);
+static int run_try_send_non_hol_demo(void) {
     cc_atomic_store(&g_errors, 0);
     cc_atomic_store(&g_slow_prefill_sent, 0);
     cc_atomic_store(&g_fast_reply_received, 0);
@@ -198,28 +412,37 @@ int main(void) {
     HolReqTx req_tx;
     HolReqRx req_rx;
     CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx);
-    if (!req_ch) return 10;
+    if (!req_ch) return 30;
     @defer req_ch.free();
 
     {
         CCNursery* n = @create(NULL) @destroy;
-        if (!n) return 11;
-
+        if (!n) return 31;
         HolReqRx req_rx_raw = req_rx;
         HolReqTx req_tx_raw = req_tx;
-
         n->spawn(() => [req_rx_raw] { hol_owner_try_send_policy(req_rx_raw); });
-        n->spawn(() => [req_tx_raw] { slow_client(req_tx_raw); });
-        n->spawn(() => [req_tx_raw] { fast_client(req_tx_raw); });
+        n->spawn(() => [req_tx_raw] { slow_client_try_send(req_tx_raw); });
+        n->spawn(() => [req_tx_raw] { fast_client_try_send(req_tx_raw); });
     }
 
     if (cc_atomic_load(&g_errors) != 0) {
         fprintf(stderr,
-                "redis_owner_reply_try_send_hol_smoke: FAIL errors=%d\n",
-                cc_atomic_load(&g_errors));
-        return 20;
+                "redis_owner_reply_try_send_hol_smoke: try_send case FAIL errors=%d\n",
+                (int)cc_atomic_load(&g_errors));
+        return 40;
     }
+    printf("redis_owner_reply_try_send_hol_smoke: try_send non-HOL case PASS\n");
+    return 0;
+}
 
-    printf("redis_owner_reply_try_send_hol_smoke: PASS\n");
+int main(void) {
+    cc_sched_set_num_workers(8);
+
+    int rc = run_blocking_hol_demo();
+    if (rc != 0) return rc;
+    rc = run_try_send_non_hol_demo();
+    if (rc != 0) return rc;
+
+    printf("redis_owner_reply_try_send_hol_smoke: ALL PASS\n");
     return 0;
 }

@@ -7418,8 +7418,11 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         {
             size_t use_len = strlen(use);
             size_t insert_pos = 0;
-            size_t delayed_insert_pos = use_len;
             unsigned char delayed_result_specs[512] = {0};
+            size_t delayed_result_pos[512];
+            for (size_t i = 0; i < sizeof(delayed_result_pos) / sizeof(delayed_result_pos[0]); i++) {
+                delayed_result_pos[i] = use_len + 1;
+            }
             while (insert_pos < use_len) {
                 size_t line_start = insert_pos;
                 size_t line_end = line_start;
@@ -7508,10 +7511,9 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 size_t first_use = cc__find_ident_top_level_pp(use, decl_end, use_len, concrete);
                 delayed_result_specs[i] = 1;
                 if (first_use < use_len) {
-                    size_t pos = cc__line_start_before_pp(use, first_use);
-                    if (pos < delayed_insert_pos) delayed_insert_pos = pos;
-                } else if (decl_end < delayed_insert_pos) {
-                    delayed_insert_pos = decl_end;
+                    delayed_result_pos[i] = cc__line_start_before_pp(use, first_use);
+                } else {
+                    delayed_result_pos[i] = decl_end;
                 }
             }
             fwrite(use, 1, insert_pos, out);
@@ -7803,61 +7805,72 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
                 }
             }
-            if (delayed_insert_pos < use_len && delayed_insert_pos > insert_pos) {
-                fwrite(use + insert_pos, 1, delayed_insert_pos - insert_pos, out);
-                fprintf(out, "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
-                for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
-                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (!delayed_result_specs[i] || !spec) continue;
-                    if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
-                    int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
-                    fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
-                    fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
-                    if (ok_is_void) {
-                        fprintf(out,
-                            "typedef struct CCResult_%s_%s {\n"
-                            "    bool ok;\n"
-                            "    union { char _dummy; %s error; } u;\n"
-                            "} CCResult_%s_%s;\n",
-                            spec->mangled_ok, spec->mangled_err, spec->err_type,
-                            spec->mangled_ok, spec->mangled_err);
-                    } else {
-                        fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
-                                spec->mangled_ok, spec->mangled_err,
-                                spec->ok_type, spec->err_type);
+            {
+                size_t delayed_cursor = insert_pos;
+                for (;;) {
+                    size_t next_pos = use_len + 1;
+                    for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
+                        if (!delayed_result_specs[i]) continue;
+                        if (delayed_result_pos[i] > delayed_cursor && delayed_result_pos[i] < next_pos) {
+                            next_pos = delayed_result_pos[i];
+                        }
                     }
-                    fprintf(out, "#endif\n");
-                    fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            spec->mangled_ok, spec->mangled_err,
-                            spec->mangled_ok, spec->mangled_err);
-                    fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            spec->mangled_ok, spec->mangled_err,
-                            spec->mangled_ok, spec->mangled_err);
-                    if (!ok_is_void) {
-                        fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                    if (next_pos > use_len) break;
+
+                    fwrite(use + delayed_cursor, 1, next_pos - delayed_cursor, out);
+                    fprintf(out, "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
+                    for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
+                        const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                        if (!delayed_result_specs[i] || delayed_result_pos[i] != next_pos || !spec) continue;
+                        if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
+                        int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
+                        fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
+                        fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
+                        if (ok_is_void) {
+                            fprintf(out,
+                                "typedef struct CCResult_%s_%s {\n"
+                                "    bool ok;\n"
+                                "    union { char _dummy; %s error; } u;\n"
+                                "} CCResult_%s_%s;\n",
+                                spec->mangled_ok, spec->mangled_err, spec->err_type,
                                 spec->mangled_ok, spec->mangled_err);
+                        } else {
+                            fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                                    spec->mangled_ok, spec->mangled_err,
+                                    spec->ok_type, spec->err_type);
+                        }
+                        fprintf(out, "#endif\n");
+                        fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->mangled_ok, spec->mangled_err,
+                                spec->mangled_ok, spec->mangled_err);
+                        fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->mangled_ok, spec->mangled_err,
+                                spec->mangled_ok, spec->mangled_err);
+                        if (!ok_is_void) {
+                            fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                    spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                    spec->mangled_ok, spec->mangled_err);
+                        }
+                        fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->err_type, spec->mangled_ok, spec->mangled_err,
+                                spec->mangled_ok, spec->mangled_err);
+                        if (!ok_is_void) {
+                            fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
+                                    spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                    spec->mangled_ok, spec->mangled_err, spec->ok_type);
+                        }
                     }
-                    fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            spec->err_type, spec->mangled_ok, spec->mangled_err,
-                            spec->mangled_ok, spec->mangled_err);
-                    if (!ok_is_void) {
-                        fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
-                                spec->ok_type, spec->mangled_ok, spec->mangled_err,
-                                spec->mangled_ok, spec->mangled_err, spec->ok_type);
+                    fprintf(out, "/* --- end delayed result type declarations --- */\n");
+                    {
+                        int resume_line = 1;
+                        for (size_t i = 0; i < next_pos; i++) {
+                            if (use[i] == '\n') resume_line++;
+                        }
+                        fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
                     }
+                    delayed_cursor = next_pos;
                 }
-                fprintf(out, "/* --- end delayed result type declarations --- */\n");
-                {
-                    int resume_line = 1;
-                    for (size_t i = 0; i < delayed_insert_pos; i++) {
-                        if (use[i] == '\n') resume_line++;
-                    }
-                    fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
-                }
-                fputs(use + delayed_insert_pos, out);
-            } else {
-                fputs(use + insert_pos, out);
+                fputs(use + delayed_cursor, out);
             }
         }
         free(lowered_system_use);

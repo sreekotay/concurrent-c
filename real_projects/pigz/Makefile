@@ -1,8 +1,22 @@
 # Makefile for pigz - builds both original (pthread) and CC versions
 
-CC = gcc
-CFLAGS = -O3 -Wall -Wextra -pthread -Ipigz_c -I/opt/homebrew/include
-LDFLAGS = -lz -lpthread -lzopfli -L/opt/homebrew/lib
+CC ?= gcc
+CFLAGS ?= -O3 -Wall -Wextra -pthread
+PIGZ_CFLAGS ?= -Ipigz_c
+PIGZ_LDFLAGS ?= -lz -lpthread
+ifneq ($(wildcard /opt/homebrew/include/zopfli.h),)
+ZOPFLI_CFLAGS ?= -I/opt/homebrew/include
+ZOPFLI_LDFLAGS ?= -lzopfli -L/opt/homebrew/lib
+else
+ZOPFLI_CFLAGS ?=
+ZOPFLI_LDFLAGS ?= -lzopfli
+endif
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+SECTION_LDFLAGS ?= -Wl,-dead_strip
+else
+SECTION_LDFLAGS ?= -Wl,--gc-sections
+endif
 
 # Output directory for binaries
 OUT_DIR = out
@@ -20,11 +34,11 @@ $(OUT_DIR):
 
 # Original pigz (pthread-based)
 $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_DIR)
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,-dead_strip -o $@ $(PIGZ_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(PIGZ_CFLAGS) -ffunction-sections -fdata-sections $(SECTION_LDFLAGS) -o $@ $(PIGZ_SRCS) $(PIGZ_LDFLAGS)
 
 # CC version
 $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz -lzopfli -L/opt/homebrew/lib" --cc-flags "-I/opt/homebrew/include" --release
+	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz $(ZOPFLI_LDFLAGS)" --cc-flags "$(ZOPFLI_CFLAGS)" --release
 
 # Idiomatic CC version (with T!E result types)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
@@ -67,7 +81,7 @@ setup:
 	./setup.sh
 
 # Test both versions produce identical output
-test: pigz pigz_cc
+test: pigz pigz_cc pigz_idiomatic pigz_hybrid
 	@echo "=== Generating test data ==="
 	dd if=/dev/urandom of=test_input.bin bs=1M count=10 2>/dev/null
 	@echo ""
@@ -79,12 +93,22 @@ test: pigz pigz_cc
 	$(OUT_DIR)/pigz_cc -k -c test_input.bin > test_cc.gz
 	@echo "CC compressed size: $$(wc -c < test_cc.gz) bytes"
 	@echo ""
+	@echo "=== Testing idiomatic pigz demos ==="
+	$(OUT_DIR)/pigz_idiomatic test_input.bin
+	mv test_input.bin.gz test_idiomatic.gz
+	$(OUT_DIR)/pigz_hybrid test_input.bin
+	mv test_input.bin.gz test_hybrid.gz
+	@echo ""
 	@echo "=== Verifying decompression ==="
 	gunzip -c test_orig.gz > test_orig_decomp.bin
 	gunzip -c test_cc.gz > test_cc_decomp.bin
+	gunzip -c test_idiomatic.gz > test_idiomatic_decomp.bin
+	gunzip -c test_hybrid.gz > test_hybrid_decomp.bin
 	cmp test_input.bin test_orig_decomp.bin && echo "Original: OK"
 	cmp test_input.bin test_cc_decomp.bin && echo "CC: OK"
-	@rm -f test_input.bin test_orig.gz test_cc.gz test_orig_decomp.bin test_cc_decomp.bin
+	cmp test_input.bin test_idiomatic_decomp.bin && echo "Idiomatic: OK"
+	cmp test_input.bin test_hybrid_decomp.bin && echo "Hybrid: OK"
+	@rm -f test_input.bin test_orig.gz test_cc.gz test_idiomatic.gz test_hybrid.gz test_orig_decomp.bin test_cc_decomp.bin test_idiomatic_decomp.bin test_hybrid_decomp.bin
 
 clean:
 	rm -rf $(OUT_DIR) *.o *.gz *.bin
@@ -92,4 +116,4 @@ clean:
 smoke: pigz_cc
 	@./smoke.sh
 
-.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic smoke
+.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_hybrid smoke

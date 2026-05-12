@@ -335,6 +335,14 @@ void cc_listener_close(CCListener* ln) {
  * ============================================================================ */
 
 size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err) {
+    return cc_socket_read_into_deadline(sock, buf, max_bytes, out_err, NULL);
+}
+
+size_t cc_socket_read_into_deadline(CCSocket* sock,
+                                    char* buf,
+                                    size_t max_bytes,
+                                    CCNetError* out_err,
+                                    const CCDeadline* deadline) {
     *out_err = CC_NET_OK;
     if (!buf && max_bytes > 0) {
         *out_err = CC_NET_OTHER;
@@ -346,6 +354,8 @@ size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetErr
         *out_err = errno_to_net_error(prep_err);
         return 0;
     }
+    struct timespec ts;
+    const struct timespec* abs_deadline = cc_deadline_as_timespec(deadline, &ts);
 
     while (1) {
         ssize_t n = read(sock->fd, buf, max_bytes);
@@ -361,8 +371,8 @@ size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetErr
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__net_trace_read("wait_begin", sock->fd, n, errno);
             cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
-            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLIN)
-                                   : cc__io_wait_fd(sock->fd, POLLIN);
+            int wait_err = watcher ? cc__io_watcher_wait_deadline(watcher, POLLIN, abs_deadline)
+                                   : cc__io_wait_fd_deadline(sock->fd, POLLIN, abs_deadline);
             cc__net_trace_read("wait_end", sock->fd, n, wait_err);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
@@ -433,12 +443,22 @@ CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetEr
 }
 
 size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err) {
+    return cc_socket_write_deadline(sock, data, len, out_err, NULL);
+}
+
+size_t cc_socket_write_deadline(CCSocket* sock,
+                                const char* data,
+                                size_t len,
+                                CCNetError* out_err,
+                                const CCDeadline* deadline) {
     *out_err = CC_NET_OK;
     int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
         *out_err = errno_to_net_error(prep_err);
         return 0;
     }
+    struct timespec ts;
+    const struct timespec* abs_deadline = cc_deadline_as_timespec(deadline, &ts);
 
     while (1) {
         ssize_t n = write(sock->fd, data, len);
@@ -447,8 +467,8 @@ size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError*
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
-            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLOUT)
-                                   : cc__io_wait_fd(sock->fd, POLLOUT);
+            int wait_err = watcher ? cc__io_watcher_wait_deadline(watcher, POLLOUT, abs_deadline)
+                                   : cc__io_wait_fd_deadline(sock->fd, POLLOUT, abs_deadline);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
                 return 0;
