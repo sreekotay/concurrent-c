@@ -3,10 +3,11 @@
  *
  * This version aims for feature parity with Mark Adler's original pigz,
  * while demonstrating idiomatic Concurrent-C patterns:
- * - Result types (T!>(E)) for error propagation
  * - CCFile UFCS with Result-based I/O
  * - Explicit nursery handles for staged pipelines
  * - Arena-backed ownership transfer with @create/@destroy and detach()
+ * - Ordered compression results as plain CompressedResult* on the wire (NULL
+ *   task result on failure); internal compress_block still uses T!>(CCIoError).
  */
 
 #include "pigz_cc.cch"
@@ -110,7 +111,7 @@ static inline void destroy_input_arena(CCArena* arena) {
 
 /*
  * Compress a single block using a provided z_stream.
- * Returns a CompressedResult*!>(CCIoError) to demonstrate idiomatic error propagation.
+ * Returns CompressedResultPtr !>(CCIoError) (internal worker API).
  * (matches pigz.c:2310-2350)
  * 
  * Uses owned arena scope with arena.detach() for clean ownership transfer:
@@ -400,10 +401,13 @@ CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
     return result;
 }
 
-CompressedResultPtr !>(CCIoError) compress_owned_block(Block* blk) {
+CompressedResult* compress_owned_block(Block* blk) {
     CompressedResultPtr !>(CCIoError) result = do_compress_work(blk);
     return_input_arena(blk->arena, blk->pool);
-    return result;
+    if (cc_is_err(result)) {
+        return NULL;
+    }
+    return cc_value(result);
 }
 
 /* ============================================================================
@@ -762,8 +766,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         if (chan_cap > 1024) chan_cap = 1024;
     }
 
-    CompressedResultPtr !>(CCIoError)[~chan_cap >] results_tx;
-    CompressedResultPtr !>(CCIoError)[~chan_cap ordered <] results_rx;
+    CompressedResult*[~chan_cap >] results_tx;
+    CompressedResult*[~chan_cap ordered <] results_rx;
     CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
     @defer results_ch.free();
 
@@ -903,8 +907,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         }
         
         while (!write_failed) {
-            CompressedResultPtr !>(CCIoError) task_result;
-            bool !>(CCIoError) recv_res = cc_channel_recv(results_rx, &task_result);
+            CompressedResult* r = NULL;
+            bool !>(CCIoError) recv_res = cc_channel_recv(results_rx, &r);
             if (cc_is_err(recv_res)) {
                 report_io_error("failed to receive compression result", cc_unwrap_err_as(recv_res, CCIoError));
                 mark_pipeline_error();
@@ -919,13 +923,13 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 break;
             }
 
-            if (cc_is_err(task_result)) {
-                report_io_error("compression task failed", cc_unwrap_err_as(task_result, CCIoError));
+            if (!r) {
+                fprintf(stderr, "Error: compression task failed (OOM or zlib)\n");
                 mark_pipeline_error();
                 write_failed = true;
+                cc_channel_rx_close_err(results_ch, EIO);
                 break;
             }
-            CompressedResult* r = cc_value(task_result);
             
             // Accumulate global checksum and total length
             if (first_block) {
@@ -1131,8 +1135,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 if (prev_blk) {
                     prev_blk->is_last = true;
                     cc_channel_send_task(results_tx, () => [prev_blk] {
-                        CompressedResultPtr !>(CCIoError) res = compress_owned_block(prev_blk);
-                        res;
+                        return compress_owned_block(prev_blk);
                     });
                     prev_blk = NULL;
                 }
@@ -1209,8 +1212,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             // If we already have a pending block, spawn task
             if (prev_blk) {
                 cc_channel_send_task(results_tx, () => [prev_blk] {
-                    CompressedResultPtr !>(CCIoError) res = compress_owned_block(prev_blk);
-                    res;
+                    return compress_owned_block(prev_blk);
                 });
             }
 
@@ -1218,8 +1220,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             if (data.len < block_size) {
                 blk->is_last = true;
                 cc_channel_send_task(results_tx, () => [blk] {
-                    CompressedResultPtr !>(CCIoError) res = compress_owned_block(blk);
-                    res;
+                    return compress_owned_block(blk);
                 });
                 prev_blk = NULL;
                 hit_eof = true;

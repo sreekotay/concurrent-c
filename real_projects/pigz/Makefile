@@ -1,16 +1,39 @@
 # Makefile for pigz - builds both original (pthread) and CC versions
+#
+# Zopfli (level 11 in upstream pigz.c and pigz_cc): discovery is automatic unless
+# you set both ZOPFLI_CFLAGS and ZOPFLI_LDFLAGS (non-empty). Order: pkg-config
+# libzopfli, pkg-config zopfli, Homebrew paths, /usr/local, system /usr/include.
 
 CC ?= gcc
 CFLAGS ?= -O3 -Wall -Wextra -pthread
 PIGZ_CFLAGS ?= -Ipigz_c
 PIGZ_LDFLAGS ?= -lz -lpthread
-ifneq ($(wildcard /opt/homebrew/include/zopfli.h),)
-ZOPFLI_CFLAGS ?= -I/opt/homebrew/include
-ZOPFLI_LDFLAGS ?= -lzopfli -L/opt/homebrew/lib
-else
+
+# User/environment may preset both; otherwise we fill them in below.
 ZOPFLI_CFLAGS ?=
-ZOPFLI_LDFLAGS ?= -lzopfli
+ZOPFLI_LDFLAGS ?=
+
+ifeq ($(and $(strip $(ZOPFLI_CFLAGS)),$(strip $(ZOPFLI_LDFLAGS))),)
+  ifeq ($(shell pkg-config libzopfli --exists 2>/dev/null && echo 1),1)
+    override ZOPFLI_CFLAGS := $(shell pkg-config --cflags libzopfli)
+    override ZOPFLI_LDFLAGS := $(shell pkg-config --libs libzopfli)
+  else ifeq ($(shell pkg-config zopfli --exists 2>/dev/null && echo 1),1)
+    override ZOPFLI_CFLAGS := $(shell pkg-config --cflags zopfli)
+    override ZOPFLI_LDFLAGS := $(shell pkg-config --libs zopfli)
+  else ifneq ($(wildcard /opt/homebrew/include/zopfli.h),)
+    override ZOPFLI_CFLAGS := -I/opt/homebrew/include
+    override ZOPFLI_LDFLAGS := -L/opt/homebrew/lib -lzopfli
+  else ifneq ($(wildcard /usr/local/include/zopfli.h),)
+    override ZOPFLI_CFLAGS := -I/usr/local/include
+    override ZOPFLI_LDFLAGS := -L/usr/local/lib -lzopfli
+  else ifneq ($(wildcard /usr/include/zopfli.h),)
+    override ZOPFLI_CFLAGS :=
+    override ZOPFLI_LDFLAGS := -lzopfli
+  else
+    $(error Zopfli not found (need zopfli.h + libzopfli). Install: brew install zopfli (macOS), apt install libzopfli-dev (Debian/Ubuntu), or set both ZOPFLI_CFLAGS and ZOPFLI_LDFLAGS for your prefix.)
+  endif
 endif
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 SECTION_LDFLAGS ?= -Wl,-dead_strip
@@ -32,9 +55,9 @@ CCC = ../../out/cc/bin/ccc
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-# Original pigz (pthread-based)
+# Original pigz (pthread-based; Zopfli for -11 per upstream pigz.c)
 $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_DIR)
-	$(CC) $(CFLAGS) $(PIGZ_CFLAGS) -ffunction-sections -fdata-sections $(SECTION_LDFLAGS) -o $@ $(PIGZ_SRCS) $(PIGZ_LDFLAGS)
+	$(CC) $(CFLAGS) $(PIGZ_CFLAGS) $(ZOPFLI_CFLAGS) -ffunction-sections -fdata-sections $(SECTION_LDFLAGS) -o $@ $(PIGZ_SRCS) $(PIGZ_LDFLAGS) $(ZOPFLI_LDFLAGS)
 
 # CC version
 $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)

@@ -41,24 +41,30 @@ if [ "$MEM_LIMIT_MB" -gt 0 ]; then
 fi
 echo ""
 
-# Check binaries exist
-if [ ! -f "$OUT_DIR/pigz" ]; then
-    echo "Error: $OUT_DIR/pigz not found. Run 'make pigz' first."
-    exit 1
-fi
+# Ensure benchmark binaries (always under this script's out/, not cwd).
+ensure_pigz_bins() {
+    if [ ! -x "$OUT_DIR/pigz" ] || [ ! -x "$OUT_DIR/pigz_cc" ]; then
+        echo "Building $OUT_DIR/pigz and pigz_cc ..."
+        make -C "$SCRIPT_DIR" pigz pigz_cc
+    fi
+    if [ ! -x "$OUT_DIR/pigz" ]; then
+        echo "Error: $OUT_DIR/pigz is missing or not executable after make."
+        exit 1
+    fi
+    if [ ! -x "$OUT_DIR/pigz_cc" ]; then
+        echo "Error: $OUT_DIR/pigz_cc is missing or not executable after make."
+        exit 1
+    fi
+}
 
-if [ ! -f "$OUT_DIR/pigz_cc" ]; then
-    echo "Error: $OUT_DIR/pigz_cc not found. Run 'make pigz_cc' first."
-    exit 1
-fi
+ensure_pigz_bins
+
+PIGZ_ORIG="$OUT_DIR/pigz"
+PIGZ_CC="$OUT_DIR/pigz_cc"
 
 # Create data directory
 mkdir -p "$DATA_DIR"
 cd "$DATA_DIR"
-
-# Store absolute paths
-PIGZ_ORIG="$OUT_DIR/pigz"
-PIGZ_CC="$OUT_DIR/pigz_cc"
 
 download_silesia() {
     # We keep the extracted corpus under testdata/silesia/ to avoid cluttering testdata/.
@@ -147,7 +153,7 @@ generate_text_data() {
 run_compress() {
     local key=$1
     local name=$2
-    local cmd=$3
+    local binary=$3
     local input=$4
     local total_time=0
     local total_out=0
@@ -157,6 +163,10 @@ run_compress() {
     echo "Input: $(du -h $input | cut -f1) ($input_size bytes)"
     
     for run in $(seq 1 $RUNS); do
+        if [ ! -x "$binary" ]; then
+            echo "Error: benchmark binary missing mid-run: $binary"
+            exit 1
+        fi
         # Ensure fresh input
         cp "$input" bench_test.bin
         
@@ -169,9 +179,9 @@ run_compress() {
         if [ "$MEM_LIMIT_MB" -gt 0 ]; then
             # Use ulimit to restrict virtual memory (approximate memory limit)
             # 1024 * MEM_LIMIT_MB
-            (ulimit -v $((MEM_LIMIT_MB * 1024)); $cmd bench_test.bin)
+            (ulimit -v $((MEM_LIMIT_MB * 1024)); "$binary" -k -p "$WORKERS" bench_test.bin)
         else
-            $cmd bench_test.bin
+            "$binary" -k -p "$WORKERS" bench_test.bin
         fi
         
         end=$(python3 -c 'import time; print(time.time())')
@@ -205,7 +215,7 @@ run_compress() {
 run_decompress() {
     local key=$1
     local name=$2
-    local cmd=$3
+    local binary=$3
     local compressed=$4
     local total_time=0
     local total_out=0
@@ -213,6 +223,10 @@ run_decompress() {
     echo "=== $name (Decompression) ==="
     
     for run in $(seq 1 $RUNS); do
+        if [ ! -x "$binary" ]; then
+            echo "Error: benchmark binary missing mid-run: $binary"
+            exit 1
+        fi
         # Ensure fresh compressed input
         cp "$compressed" bench_test.gz
         
@@ -223,9 +237,9 @@ run_decompress() {
         start=$(python3 -c 'import time; print(time.time())')
         
         if [ "$MEM_LIMIT_MB" -gt 0 ]; then
-            (ulimit -v $((MEM_LIMIT_MB * 1024)) 2>/dev/null || true; $cmd bench_test.gz)
+            (ulimit -v $((MEM_LIMIT_MB * 1024)) 2>/dev/null || true; "$binary" -d -k -p "$WORKERS" bench_test.gz)
         else
-            $cmd bench_test.gz
+            "$binary" -d -k -p "$WORKERS" bench_test.gz
         fi
         
         end=$(python3 -c 'import time; print(time.time())')
@@ -264,8 +278,8 @@ echo "COMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_compress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -k -p $WORKERS" "$INPUT_FILE"
-run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG -k -p $WORKERS" "$INPUT_FILE"
+run_compress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC" "$INPUT_FILE"
+run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG" "$INPUT_FILE"
 
 # Create compressed files for decompression benchmarks
 echo "=== Preparing Compressed Files ==="
@@ -286,8 +300,8 @@ echo "DECOMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_decompress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -d -k -p $WORKERS" "bench_cc.gz"
-run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG -d -k -p $WORKERS" "bench_orig.gz"
+run_decompress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC" "bench_cc.gz"
+run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG" "bench_orig.gz"
 
 # Verify correctness
 echo "=== Correctness Check ==="
