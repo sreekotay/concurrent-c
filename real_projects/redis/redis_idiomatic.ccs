@@ -6,7 +6,7 @@
  * matching replies on a per-connection 1:1 reply channel.  Serialization
  * is by channel topology, not worker pinning, so the scheduler is free
  * to use any number of OS threads.  Pipeline depth is bounded by
- * PIPELINE_LIMIT.
+ * `k_pipeline_reply_cap` (see enum near the reply channel typedef).
  *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
  * Memory: CC_REDIS_MEM_REPORT=1 logs Mach footprint, logical_db_live vs
@@ -39,12 +39,6 @@
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_type.cch>
 
-#define DEFAULT_PORT 6380
-#define READ_CHUNK 4096
-#ifndef READ_BUF_CAP
-#define READ_BUF_CAP (64 * 1024)
-#endif
-#define WRITE_BUF_CAP (1 * 1024)
 /* DB arena layout:
  *   - Three arenas: map (RedisDbMap blob + handle), key (cloned key bytes),
  *     value (CCString backing for DB values).  Mem report prints
@@ -53,39 +47,6 @@
  *   - Map/value arenas use small fixed roots + heap overflow.
  *   - Key arena remains growable because key bytes are many small persistent
  *     allocations, which fit the slab model better than per-key malloc. */
-
-#ifndef REDIS_DB_OVERFLOW_ARENA_ROOT
-#define REDIS_DB_OVERFLOW_ARENA_ROOT 1024
-#endif
-#ifndef REDIS_DB_KEY_ARENA_ROOT
-#define REDIS_DB_KEY_ARENA_ROOT 4096
-#endif
-/* Hash table bucket count at DB startup (Jackson map).  Small values
- * lower idle RSS; a keyspace much larger than this triggers growth
- * (rehash) and peak RSS under load can exceed a single large upfront
- * table.  Override: -DREDIS_DB_INITIAL_BUCKETS=<N>. */
-#ifndef REDIS_DB_INITIAL_BUCKETS
-#define REDIS_DB_INITIAL_BUCKETS 1024
-#endif
-/* Max requests packed into one submit/drain/flush cycle. */
-#ifndef PIPELINE_LIMIT
-#define PIPELINE_LIMIT 16
-#endif
-/* Shared request channel capacity.  Sized well above PIPELINE_LIMIT so
- * bursts from many connections don't serialise senders; once full,
- * backpressure propagates naturally. */
-#define REQUEST_CHAN_CAP 256
-/* Per-conn reply channel capacity.  Matching PIPELINE_LIMIT lets the
- * owner publish a whole batch without blocking. */
-#define REPLY_CHAN_CAP PIPELINE_LIMIT
-/* Slow-client egress policy: reply handoff is normal channel backpressure;
- * actual slow-consumer detection happens at socket egress via write deadlines. */
-#ifndef REDIS_SOCKET_WRITE_TIMEOUT_MS
-#define REDIS_SOCKET_WRITE_TIMEOUT_MS 1000
-#endif
-#ifndef REDIS_SOCKET_READ_TIMEOUT_MS
-#define REDIS_SOCKET_READ_TIMEOUT_MS 60000
-#endif
 
 static inline CCSliceHdr db_key_hdr_view(char[:] key) {
     CCSliceHdr h = {0};
@@ -137,6 +98,14 @@ typedef struct RedisDbMemStats {
 
 static RedisDbMemStats g_db_mem_stats = {0};
 
+/* Compile-time channel geometry: embedded in CC endpoint types and must match
+ * handle_client's per-round submit cap (same value as reply channel depth). */
+enum {
+    k_request_chan_cap = 256,
+    k_pipeline_reply_cap = 16,
+    redis_conn_out_buf_bytes = 1024,
+};
+
 typedef enum ReplyProvenance {
     REPLY_PROVENANCE_STATIC = 0,
     REPLY_PROVENANCE_REQUEST_BORROWED,
@@ -148,8 +117,8 @@ typedef struct ReplySlot {
     void* payload;
 } ReplySlot;
 
-typedef ReplySlot*[~REPLY_CHAN_CAP 1:1 >] ReplyTx;
-typedef ReplySlot*[~REPLY_CHAN_CAP 1:1 <] ReplyRx;
+typedef ReplySlot*[~k_pipeline_reply_cap 1:1 >] ReplyTx;
+typedef ReplySlot*[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
 typedef struct RedisConn {
     _Atomic size_t refs;
@@ -166,20 +135,19 @@ typedef struct RedisConn {
      * are copied here before crossing that boundary. Reset once per drained
      * batch. */
     CCArena reply_arena;
-    /* Owner → client reply stream (1:1, cap PIPELINE_LIMIT so the
-     * owner never blocks publishing a full batch). */
+    /* Owner → client reply stream (1:1, depth k_pipeline_reply_cap). */
     ReplyTx reply_tx;
     ReplyRx reply_rx;
     size_t out_len;
-    char out_buf[WRITE_BUF_CAP];
+    char out_buf[redis_conn_out_buf_bytes];
 } RedisConn;
 
 /* The shared request channel's two endpoints, named so function
  * signatures don't have to spell out the channel type.  Clients hand a
  * RedisRequest* across ReqTx; the owner drains from ReqRx and replies
  * on the request's originating conn->reply_rx. */
-typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 >] ReqTx;
-typedef RedisRequest*[~REQUEST_CHAN_CAP N:1 <] ReqRx;
+typedef RedisRequest*[~k_request_chan_cap N:1 >] ReqTx;
+typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static RedisConn* redis_conn_addref(RedisConn* conn);
@@ -721,12 +689,13 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             map_live,
             key_live + value_live + map_live);
     if (db) {
+        /* Arena roots (B): must match db_init() map/value heap root and key root. */
         fprintf(stderr,
                 "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(growable) value=%u(heap_overflow)\n",
                 tag ? tag : "db",
-                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT,
-                (unsigned)REDIS_DB_KEY_ARENA_ROOT,
-                (unsigned)REDIS_DB_OVERFLOW_ARENA_ROOT);
+                1024u,
+                4096u,
+                1024u);
         redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
         redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);
         redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
@@ -781,8 +750,8 @@ static CCString !>(CCError) db_clone_value_into_arena(CCArena* arena,
     return cc_ok(cloned);
 }
 
-static bool db_init_overflow_arena(CCArena* a) {
-    *a = cc_arena_heap(REDIS_DB_OVERFLOW_ARENA_ROOT);
+static bool db_init_overflow_arena(CCArena* a, size_t root_bytes) {
+    *a = cc_arena_heap(root_bytes);
     if (!a->valid()) return false;
     a->block_max = 1;
     if (!cc_arena_set_heap_overflow(a, true)) {
@@ -801,13 +770,15 @@ static void db_free_arenas_only(RedisDb* db) {
 
 static bool db_init(RedisDb* db, size_t bucket_count) {
     if (!db || bucket_count == 0) return false;
-    if (!db_init_overflow_arena(&db->map_arena)) return false;
-    db->key_arena = cc_arena_heap(REDIS_DB_KEY_ARENA_ROOT);
+    const size_t map_value_heap_root = 1024;
+    const size_t key_arena_root = 4096;
+    if (!db_init_overflow_arena(&db->map_arena, map_value_heap_root)) return false;
+    db->key_arena = cc_arena_heap(key_arena_root);
     if (!db->key_arena.valid()) {
         db_free_arenas_only(db);
         return false;
     }
-    if (!db_init_overflow_arena(&db->value_arena)) {
+    if (!db_init_overflow_arena(&db->value_arena, map_value_heap_root)) {
         db_free_arenas_only(db);
         return false;
     }
@@ -1011,7 +982,8 @@ static void db_free_all(RedisDb* db) {
 static bool write_all(CCSocket* sock, CCSlice data) {
     CCNetError err = CC_NET_OK;
     size_t off = 0;
-    CCDeadline deadline = cc_deadline_after_ms(REDIS_SOCKET_WRITE_TIMEOUT_MS);
+    const int write_deadline_ms = 1000;
+    CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
     while (off < data.len) {
         size_t n = cc_socket_write_deadline(sock,
                                             (const char*)data.ptr + off,
@@ -1036,10 +1008,10 @@ static bool flush_output_buffer(CCSocket* sock, RedisConn* conn) {
 
 static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     if (!conn || data.len == 0) return true;
-    if (data.len > WRITE_BUF_CAP) {
+    if (data.len > redis_conn_out_buf_bytes) {
         return flush_output_buffer(sock, conn) && write_all(sock, data);
     }
-    if (conn->out_len + data.len > WRITE_BUF_CAP) {
+    if (conn->out_len + data.len > redis_conn_out_buf_bytes) {
         if (!flush_output_buffer(sock, conn)) return false;
     }
     memcpy(conn->out_buf + conn->out_len, data.ptr, data.len);
@@ -1048,8 +1020,8 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
 }
 
 static char* reserve_output_bytes(CCSocket* sock, RedisConn* conn, size_t n) {
-    if (!conn || n == 0 || n > WRITE_BUF_CAP) return NULL;
-    if (conn->out_len + n > WRITE_BUF_CAP) {
+    if (!conn || n == 0 || n > redis_conn_out_buf_bytes) return NULL;
+    if (conn->out_len + n > redis_conn_out_buf_bytes) {
         if (!flush_output_buffer(sock, conn)) return NULL;
     }
     char* dst = conn->out_buf + conn->out_len;
@@ -1206,10 +1178,8 @@ static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply
     return cc_ok(true);
 }
 
-/* Sized to hold ~PIPELINE_LIMIT replies without growth; oversized
- * replies overflow to heap blocks automatically. */
-#define REPLY_ARENA_INITIAL (16 * 1024)
-
+/* First reply_arena slab: enough for ~k_pipeline_reply_cap hot replies; larger
+ * payloads spill to heap blocks. */
 static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisConn* conn = calloc(1, sizeof(*conn));
     if (!conn) return NULL;
@@ -1219,7 +1189,8 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
     CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
     if (!reply_ch) { free(conn); return NULL; }
 
-    conn->reply_arena = cc_arena_heap(REPLY_ARENA_INITIAL);
+    const size_t reply_arena_initial = 16 * 1024;
+    conn->reply_arena = cc_arena_heap(reply_arena_initial);
     if (!conn->reply_arena.base) {
         cc_channel_free(reply_tx);
         free(conn);
@@ -1390,7 +1361,7 @@ static inline bool reply_send(Reply* rep) {
  * it can't outlive the owner and nobody else can take its address. */
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
-    if (!db_init(&db, REDIS_DB_INITIAL_BUCKETS)) {
+    if (!db_init(&db, 1024)) {
         fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
         return 1;
     }
@@ -1444,11 +1415,12 @@ static inline bool reply_send(Reply* rep) {
     /* Teardown: cancel reply_rx first (unblocks any owner-side send
      * stuck on a full reply channel), then drop the ref.  Encoded via
      * the @destroy body plus the registered redis_conn_release. */
-    RedisConn* conn = redis_conn_create(conn_id) !> { return 1; } @destroy {
+    RedisConn* conn = redis_conn_create(conn_id) !> { return 1; }     @destroy {
         cc_channel_cancel(conn->reply_rx);
     };
 
-    char read_buf[READ_BUF_CAP];
+    /* Large enough for pipelined redis-benchmark without constant compact moves. */
+    char read_buf[64 * 1024];
     RespReader reader = rr_init_nb(read_buf, sizeof(read_buf));
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
@@ -1460,9 +1432,9 @@ static inline bool reply_send(Reply* rep) {
             return 0;
         }
 
-        /* Submit: up to PIPELINE_LIMIT parsed requests to the owner.  Every
+        /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
          * accepted request owes exactly one ReplySlot back on reply_rx. */
-        size_t batch_cap = PIPELINE_LIMIT;
+        size_t batch_cap = (size_t)k_pipeline_reply_cap;
         size_t reply_slots_pending = 0;
         size_t submitted = 0;
         for (size_t s = 0; s < batch_cap; s++) {
@@ -1495,7 +1467,7 @@ static inline bool reply_send(Reply* rep) {
         if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
 
         /* If the socket read already buffered more complete/partial commands
-         * and this batch stopped only because of PIPELINE_LIMIT, keep parsing
+         * and this batch stopped only because of k_pipeline_reply_cap, keep parsing
          * before parking on another read.  Otherwise -P larger than the server
          * batch cap can leave commands stranded in read_buf while the fiber
          * waits for new socket readiness that may never arrive. */
@@ -1510,7 +1482,7 @@ static inline bool reply_send(Reply* rep) {
 int main(int argc, char** argv) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
 
-    int port = DEFAULT_PORT;
+    int port = 6380;
     if (argc > 1) {
         char* end = NULL;
         long parsed = strtol(argv[1], &end, 10);
@@ -1534,8 +1506,8 @@ int main(int argc, char** argv) {
     /* cc_channel_pair's syntax pass matches the raw endpoint types
      * structurally (it doesn't resolve typedefs), so declare in raw
      * form here and rely on the ReqTx/ReqRx aliases everywhere else. */
-    RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;
-    RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx;
+    RedisRequest*[~k_request_chan_cap N:1 >] req_tx;
+    RedisRequest*[~k_request_chan_cap N:1 <] req_rx;
     CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
 
     CCListener* ln_ptr = &ln;
