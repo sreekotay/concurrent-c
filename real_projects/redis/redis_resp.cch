@@ -42,7 +42,9 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     }
 
-    size_t max_bytes = READ_CHUNK;
+    /* One syscall's worth; capped by space left in the reader buffer. */
+    const size_t max_read_chunk = 4096;
+    size_t max_bytes = max_read_chunk;
     if (max_bytes > avail) max_bytes = avail;
 
     size_t n = 0;
@@ -54,7 +56,8 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
         if (net_err != CC_NET_OK) return cc_err(net_to_io_error(net_err));
     } else {
         CCNetError err = CC_NET_OK;
-        CCDeadline deadline = cc_deadline_after_ms(REDIS_SOCKET_READ_TIMEOUT_MS);
+        const int read_deadline_ms = 60000;
+        CCDeadline deadline = cc_deadline_after_ms(read_deadline_ms);
         n = cc_socket_read_into_deadline(sock, r->data + r->end, max_bytes, &err, &deadline);
         if (err != CC_NET_OK) return cc_err(net_to_io_error(err));
     }
