@@ -78,9 +78,8 @@
 /* Per-conn reply channel capacity.  Matching PIPELINE_LIMIT lets the
  * owner publish a whole batch without blocking. */
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
-/* Slow-client egress policy: the owner uses try_send and closes an overfull
- * reply channel instead of parking behind one connection.  Socket writes are
- * still deadline-bounded so a client fiber cannot wait forever while flushing. */
+/* Slow-client egress policy: reply handoff is normal channel backpressure;
+ * actual slow-consumer detection happens at socket egress via write deadlines. */
 #ifndef REDIS_SOCKET_WRITE_TIMEOUT_MS
 #define REDIS_SOCKET_WRITE_TIMEOUT_MS 1000
 #endif
@@ -1377,15 +1376,10 @@ static inline bool reply_send(Reply* reply);
 static inline bool reply_send(Reply* rep) {
     if (!rep || !rep->slot) return false;
     @errhandler(CCError e) { cc_channel_close(rep->tx, cc_io_error(e)); return false; }
-    bool ok = cc_channel_try_send(rep->tx, rep->slot) !>(e) {
+    return rep->tx.send(rep->slot) !>(e) {
         cc_channel_close(rep->tx, e);
         return false;
     };
-    if (!ok) {
-        cc_channel_close(rep->tx, cc_io_error_os(CC_IO_BUSY, EAGAIN));
-        return false;
-    }
-    return true;
 }
 
 @noblock static inline void reply_release_batch(RedisConn* conn) {
