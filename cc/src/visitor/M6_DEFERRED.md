@@ -1,6 +1,11 @@
 # M6 — Type-syntax AST tolerance (deferred)
 
-**Status:** Not started. See [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
+**Status:** Superseded by **M7**. M7.A landed (opt-in pre-expand, zero
+regressions on 429/429 smoke + parity with baseline on examples/stress).
+M7.B (text-pass `#define`-awareness) is the remaining piece needed for
+the macro CC-syntax case. See
+[COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md) for
+the current M7 plan.
 
 ## 2026-05-26 update — pre-expand spike supersedes M5.5/M6 for macros
 
@@ -31,32 +36,37 @@ replaced by:
 - a single `cc_cpp_expand()` call early in `cc_build_parse_input`
 - removing the redundant text passes for forms now handled by CPP
 
-**Why not flipped on by default yet:**
+**What landed in M7.A:**
 
-1. Reparses (`cc__reparse_source_to_ast`) operate on edited buffers
-   built from the original source; they need either (a) pre-expand
-   applied once and propagated through edits, or (b) restructure of
-   `src_ufcs` plumbing in `visit_codegen.c` (~lines 3540-3700).
-2. Many visitor passes carry "original-source-span" assumptions; after
-   pre-expand all spans must round-trip through `CCSourceMap`. M0.5
-   landed the map; passes need to be wired to consult it.
-3. TCC's `# N "file" flags` GCC-style line markers in the expanded
-   output trip TCC's own parser when re-fed (see "incompatible
-   redefinition of `__mbstate_t`" on Apple SDK headers): pre-expand
-   inlines system headers and the second-pass TCC re-encounters
-   builtin-style decls.
+- `cc_cpp_expand()` runs TCC's CPP **after** `cc_preprocess_for_initial_parse`,
+  so the prepended container/result-type `#include` lines resolve before
+  TCC's second-pass parser sees them.
+- GCC-style `# N "file" flags` line markers are normalized to bare C99
+  `#line` form to prevent TCC from re-triggering system-header include
+  logic (which was the `__mbstate_t` redefinition seen in the spike).
+- Opt-in via `CC_PRE_EXPAND=1`. 429/429 smoke pass; examples/stress
+  baseline unchanged (same 2 pre-existing closure-capture failures).
 
-**Suggested follow-up (M7):** plan a pre-expand integration milestone
-that replaces M5.5/M6:
+**Why CHAN-macro tests still don't compile under `CC_PRE_EXPAND=1`:**
 
-- Filter or rewrite `# N "..." flags` lines to bare `#line` before
-  the second-pass parse (or use `-fno-canonical-prefixes`-style flag
-  on TCC's CPP).
-- Skip the `_cch → _h` include rewrites when pre-expand is enabled
-  (CPP resolves them itself).
-- Run pre-expand once; reparses use the same expanded buffer.
-- Then retire `pass_channel_syntax` text scan and other forms that
-  pre-expand made the parser able to handle.
+Phase-1 text passes (esp. P4 `cc__rewrite_chan_handle_types`) scan
+text token-by-token without skipping `#define` bodies. For
+`#define CHAN(T) T[~4 >]`, P4 matches `T[~4 >]` **inside** the macro
+body and rewrites it to `CCChanTx`, leaving a dangling `CCChanTx`
+identifier that breaks the parse before CPP ever runs. M7.B is the
+follow-up: teach `CCScannerState` to skip strings/comments/`#define`
+bodies; then pre-expand sees an intact `#define` and the rest works.
+
+**M7.C — eventual cleanups (after M7.B):**
+
+- Flip `CC_PRE_EXPAND=1` to default.
+- Retire `pass_channel_syntax` text scan and `cc__rewrite_chan_handle_types`
+  in favor of the lexer-recognized form.
+- Retire the local/system `_cch → _h` include rewrites (CPP handles them).
+- Propagate the expanded buffer through reparses (`cc__reparse_source_to_ast`)
+  instead of re-reading the original source.
+- Wire `CCSourceMap` into visitor passes that carry "original-source-span"
+  assumptions so diagnostics still point to user source after pre-expand.
 
 ## Goal (original, M6)
 

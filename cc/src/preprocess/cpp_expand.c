@@ -32,6 +32,81 @@ static void cc__cpp_err_silent(void* opaque, const char* msg) {
     }
 }
 
+/* Rewrite GCC-style line markers `# N "file" flags...` to bare C99
+ * `#line N "file"` form. When TCC's preprocessor emits the GCC variant,
+ * a subsequent TCC parse re-encounters the marker and treats the trailing
+ * flags (esp. `1` = file-start, `3` = system header) as a re-entry into
+ * that file, which can trigger double-decl errors (e.g. `__mbstate_t`
+ * from Apple SDK headers). The C99 form has no side effects beyond
+ * updating diagnostic location, which is all we want here.
+ *
+ * Returns a freshly-malloc'd buffer (caller frees old `buf`); writes
+ * the new length to `*out_len`. The rewrite cannot grow lines so a
+ * same-size allocation always suffices. Returns NULL on OOM. */
+static char* cc__normalize_line_markers(const char* buf, size_t len, size_t* out_len) {
+    if (!buf) { if (out_len) *out_len = 0; return NULL; }
+    char* dst = (char*)malloc(len + 1);
+    if (!dst) return NULL;
+    char* out = dst;
+    const char* in = buf;
+    const char* end = buf + len;
+    while (in < end) {
+        const char* line_start = in;
+        const char* line_end = (const char*)memchr(in, '\n', (size_t)(end - in));
+        if (!line_end) line_end = end;
+
+        int is_gcc_marker = 0;
+        const char* digit_end = NULL;
+        const char* quote_open = NULL;
+        const char* quote_close = NULL;
+        if (line_end - line_start >= 4 && line_start[0] == '#' && line_start[1] == ' ') {
+            const char* p = line_start + 2;
+            while (p < line_end && (*p >= '0' && *p <= '9')) p++;
+            if (p > line_start + 2 && p < line_end && *p == ' ') {
+                digit_end = p;
+                p++;
+                if (p < line_end && *p == '"') {
+                    quote_open = p;
+                    const char* q = (const char*)memchr(p + 1, '"', (size_t)(line_end - p - 1));
+                    if (q) {
+                        quote_close = q;
+                        const char* after_q = q + 1;
+                        while (after_q < line_end && (*after_q == ' ' || *after_q == '\t')) after_q++;
+                        if (after_q < line_end && *after_q >= '0' && *after_q <= '9') {
+                            is_gcc_marker = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (is_gcc_marker) {
+            const char* digit_start = line_start + 2;
+            while (digit_start < digit_end && *digit_start == ' ') digit_start++;
+            memcpy(out, "#line ", 6); out += 6;
+            size_t dlen = (size_t)(digit_end - digit_start);
+            memcpy(out, digit_start, dlen); out += dlen;
+            *out++ = ' ';
+            size_t qlen = (size_t)(quote_close - quote_open + 1);
+            memcpy(out, quote_open, qlen); out += qlen;
+        } else {
+            size_t n = (size_t)(line_end - line_start);
+            if (n > 0) memcpy(out, line_start, n);
+            out += n;
+        }
+
+        if (line_end < end) {
+            *out++ = '\n';
+            in = line_end + 1;
+        } else {
+            in = line_end;
+        }
+    }
+    *out = '\0';
+    if (out_len) *out_len = (size_t)(out - dst);
+    return dst;
+}
+
 char* cc_cpp_expand(const char* src, size_t src_len,
                     const char* input_path, size_t* out_len) {
     if (out_len) *out_len = 0;
@@ -151,6 +226,19 @@ char* cc_cpp_expand(const char* src, size_t src_len,
         free(buf);
         tcc_delete(s);
         return NULL;
+    }
+
+    /* Normalize GCC-style `# N "..." flags` markers to bare `#line N "..."`
+     * so the second-pass TCC parse doesn't re-trigger system-header
+     * inclusion logic. */
+    {
+        size_t norm_len = 0;
+        char* norm = cc__normalize_line_markers(buf, buf_size, &norm_len);
+        if (norm) {
+            free(buf);
+            buf = norm;
+            buf_size = norm_len;
+        }
     }
 
     if (out_len) *out_len = buf_size;

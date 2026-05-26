@@ -37,26 +37,6 @@ int cc_build_parse_input(const char* file_buf,
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
     }
-
-    /* M5.5/M6 alternative spike: optionally pre-expand the CPP so that
-     * macro-generated CC syntax (e.g. CHAN(T) -> T[~4 >]) is visible to
-     * downstream text passes. Off by default. */
-    if (!for_reparse && getenv("CC_PRE_EXPAND")) {
-        size_t exp_len = 0;
-        char* expanded = cc_cpp_expand(buf, got, input_path, &exp_len);
-        if (expanded) {
-            free(buf);
-            buf = expanded;
-            got = exp_len;
-            if (getenv("CC_DEBUG_PRE_EXPAND")) {
-                fprintf(stderr, "[cc:pre-expand] %s expanded to %zu bytes\n",
-                        input_path ? input_path : "<input>", exp_len);
-            }
-        } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
-            fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",
-                    input_path ? input_path : "<input>");
-        }
-    }
     {
         char* blanked = cc_blank_comptime_blocks_for_prep(buf, got);
         if (blanked) { free(buf); buf = blanked; got = strlen(buf); }
@@ -79,6 +59,39 @@ int cc_build_parse_input(const char* file_buf,
     cc_unwrap_destroy_set_symbols(NULL);
     free(buf);
     if (!pp) goto fail;
+
+    /* M7 spike: opt-in pre-expand via CPP, applied after all CC text
+     * passes have run. Resolves the prepended `#include` directives that
+     * `cc_preprocess_for_initial_parse` adds (containers, result types) so
+     * TCC's second-pass parser sees a fully-expanded translation unit.
+     *
+     * Known limitation: macros whose BODY contains CC syntax (e.g.
+     *   #define CHAN(T) T[~4 >]
+     * ) are mangled by phase-1 text passes (P3/P4) before this point and
+     * cannot be rescued here. Fix requires making text passes #define-aware
+     * (skip strings/comments/macro bodies) — tracked as M7.B. */
+    if (!for_reparse && getenv("CC_PRE_EXPAND")) {
+        size_t pp_len = strlen(pp);
+        size_t exp_len = 0;
+        char* expanded = cc_cpp_expand(pp, pp_len, input_path, &exp_len);
+        if (expanded) {
+            free(pp);
+            pp = expanded;
+            if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                fprintf(stderr, "[cc:pre-expand] %s: %zu -> %zu bytes\n",
+                        input_path ? input_path : "<input>", pp_len, exp_len);
+                const char* dump = getenv("CC_DEBUG_PRE_EXPAND_DUMP");
+                if (dump && dump[0]) {
+                    FILE* df = fopen(dump, "wb");
+                    if (df) { fwrite(pp, 1, exp_len, df); fclose(df); }
+                    fprintf(stderr, "[cc:pre-expand] dumped to %s\n", dump);
+                }
+            }
+        } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
+            fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",
+                    input_path ? input_path : "<input>");
+        }
+    }
 
     out->buffer = pp;
     out->len = strlen(pp);
