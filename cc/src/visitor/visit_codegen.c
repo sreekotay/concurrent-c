@@ -33,6 +33,7 @@
 #include "header/lower_header.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/cpp_expand.h"
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
 #include "util/path.h"
@@ -1329,6 +1330,42 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
             pp_len = strlen(prep);
         }
     }
+    /* M7.C (opt-in): pre-expand the FINAL reparse input (after all
+     * #include-emitting prelude steps: cc_preprocess_for_reparse +
+     * cc__prepend_reparse_prelude + parser-helper rewrites). Pre-expanding
+     * earlier causes subsequent prelude steps to re-include system headers
+     * and trigger double-decl errors (e.g. __mbstate_t from Apple SDK).
+     * After CPP runs, re-lower any CC type syntax that emerged from macro
+     * expansion.
+     *
+     * Gated behind CC_PRE_EXPAND_REPARSE (separate from CC_PRE_EXPAND)
+     * because CPP-expanding the full reparse buffer changes some AST
+     * shapes (e.g. async function bodies emitted by phase-3) in ways
+     * that confuse later AST walkers. Full macro-generated CC-syntax
+     * support requires the visitor refactor (M1) that consumes
+     * cc_build_parse_input's pre-expanded buffer directly; this opt-in
+     * path lets us validate the pipeline end-to-end for the macro cases
+     * in tests/macro/ without disturbing the 429/429 default. */
+    if (prep && getenv("CC_PRE_EXPAND_REPARSE") && input_path) {
+        size_t exp_len = 0;
+        char* expanded = cc_cpp_expand(prep, pp_len, input_path, &exp_len);
+        if (expanded) {
+            if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                fprintf(stderr, "[cc:pre-expand:reparse] stage=%s %zu -> %zu bytes\n",
+                        stage ? stage : "?", pp_len, exp_len);
+            }
+            free(prep);
+            prep = expanded;
+            pp_len = exp_len;
+            char* relowered = cc_relower_cc_type_syntax_preserving_registry(prep, pp_len, input_path);
+            if (relowered) {
+                free(prep);
+                prep = relowered;
+                pp_len = strlen(prep);
+            }
+        }
+    }
+
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
     if (cc_debug_enabled("REPARSE")) {

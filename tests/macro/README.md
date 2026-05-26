@@ -1,10 +1,15 @@
 # Macro-generated CC syntax tests
 
-**Status:** M7.A + M7.B shipped (pre-expand opt-in and `#define`-aware
-phase-1 scanner; 429/429 smoke with zero regressions either way). M7.C
-(post-expand re-lower without clearing the type registry + reparse
-plumbing) is the remaining piece to actually compile the macros in this
-folder end-to-end. See
+**Status:** M7.A + M7.B + M7.C (partial) shipped (pre-expand opt-in,
+`#define`-aware phase-1 scanner, registry-preserving post-pre-expand
+re-lower, and opt-in reparse pre-expand). 429/429 smoke with
+`CC_PRE_EXPAND=1`; the additional `CC_PRE_EXPAND_REPARSE=1` flag
+exercises the reparse-side CPP path but is opt-in because it changes
+AST shapes in 4 unrelated smoke tests. Full macro end-to-end compile
+is blocked on the M1 visitor refactor (visitor consuming
+`cc_build_parse_input`'s buffer instead of re-reading the original
+file) so that span-based passes like the channel-pair scanner see the
+expanded form. See
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 - M5.5 hooks (TCC parse-time recognizer) — stubs only; superseded by M7.
@@ -57,20 +62,40 @@ inside `#define`/`#include`/`#if` bodies. Verified via
 phase-1 verbatim, and CPP correctly expands `CHAN(int)` to `int[~4 >]`
 during pre-expand.
 
-## M7.C (TODO) — what still needs to happen
+## What landed in M7.C (partial)
 
-After CPP expands `CHAN(int)` to `int[~4 >]`, no text pass runs again
-to lower `[~N >]` to `CCChanTx`. The pre-expand spike tried calling
-`cc_rewrite_header_type_syntax_shared` on the post-pre-expand buffer
-but it clears the type registry as a side effect, breaking unrelated
-Result-type lookups in `send_task_hybrid_smoke`. M7.C needs:
+1. `cc_relower_cc_type_syntax_preserving_registry` in
+   `cc/src/preprocess/preprocess.{c,h}` — runs the same four header-safe
+   lowerings as `cc_rewrite_header_type_syntax_shared`
+   (`cc__rewrite_string_templates`, `cc__rewrite_chan_handle_types`,
+   `cc__rewrite_slice_types`, `cc_rewrite_generic_containers`) but
+   deliberately does NOT call `cc_type_registry_clear`, so Result/Vec/Map
+   registrations from the main preprocess survive. Called by
+   `cc_build_parse_input` immediately after `cc_cpp_expand`: macro-
+   generated CC type syntax like `int[~4 >]` (from `#define CHAN(T)
+   T[~4 >]`) is now lowered to `CCChanTx_int` and TCC's initial parse
+   succeeds.
+2. Mirror of (1) inside `cc__reparse_source_to_ast` in
+   `visit_codegen.c`, but gated behind a separate env var
+   (`CC_PRE_EXPAND_REPARSE=1`) because CPP-expanding the full reparse
+   buffer (post-prelude) regresses 4 unrelated smoke tests
+   (`async_chan_await_works_smoke`, `async_channel_typed_lowered_smoke`,
+   `call_site_noblock_smoke`, `ufcs_nested_std_io_smoke`) by changing
+   AST shapes the async-AST and a few UFCS passes depend on. Useful
+   for validating the end-to-end CPP-through-reparse pipeline
+   without disturbing the default.
 
-1. A registry-preserving variant of header-safe re-lowering (or
-   save/restore around the call).
-2. Pre-expand also wired through reparses in `visit_codegen.c` so
-   phase-3 sees the expanded macro too.
-3. Then the macro tests in this folder will compile under
-   `CC_PRE_EXPAND=1`.
+## Why the macro CHAN tests in this folder still fail
+
+Even with both flags on, `cc_channel_pair(&tx, &rx)` errors with
+`could not find declarations for 'tx' and 'rx'`. That pass scans the
+visitor's `src_ufcs` buffer — which is still the raw un-expanded user
+source read from disk in `visit_codegen.c`. The expanded form lives
+only in `cc_build_parse_input`'s output (used for the initial parse)
+and in the reparse path (when `CC_PRE_EXPAND_REPARSE=1`). Threading
+the pre-expanded buffer through the visitor's text-pass pipeline is
+the M1 visitor refactor; tracked under M1 in
+[`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 ## M5.5 (TCC fork) — still relevant if pre-expand turns out to be infeasible
 
@@ -86,5 +111,8 @@ pre-expand:
 ## Related
 
 - `CC_BATCH_PHASE3=1` — experimental Phase 3 batching (off by default)
-- `CC_PRE_EXPAND=1` — experimental TCC-CPP pre-expand (off by default)
+- `CC_PRE_EXPAND=1` — experimental TCC-CPP pre-expand of the initial
+  parse + post-expand re-lower (off by default; 429/429 smoke)
+- `CC_PRE_EXPAND_REPARSE=1` — also pre-expand the reparse buffer
+  (off by default; opt-in, regresses 4 smoke tests today)
 - `CC_DEBUG_PRE_EXPAND=1` — verbose pre-expand diagnostics

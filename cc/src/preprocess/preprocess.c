@@ -8282,6 +8282,31 @@ chain_cleanup:
     return out;
 }
 
+char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
+                                                    size_t input_len,
+                                                    const char* input_path) {
+    CCPassChain chain;
+    char* out = NULL;
+    if (!src || input_len == 0) return NULL;
+
+    /* DELIBERATELY do NOT touch the type registry. Caller has already gone
+     * through phase-1+phase-3 and may have populated registries (Result,
+     * Vec, Map, channel) that downstream passes depend on. We only run the
+     * inner text rewrites to mop up CC syntax produced post-preprocess
+     * (e.g. via cc_cpp_expand of a #define body). */
+    cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+
+    if (chain.src != src) out = strdup(chain.src);
+
+chain_cleanup:
+    cc_pass_chain_free(&chain);
+    return out;
+}
+
 char* cc_preprocess_include_expanded(const char* input_path) {
     char repo_root[1024];
     char cmd[4096];

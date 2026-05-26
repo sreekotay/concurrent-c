@@ -122,6 +122,19 @@ char* cc__rewrite_at_await(const char* src, size_t n);
 // Returns newly allocated string on change, NULL if no rewrite applied.
 char* cc__rewrite_at_call_site_mode(const char* src, size_t n);
 
+// M7.C: re-run header-safe CC type-syntax lowerings (channel handle types,
+// slice types, generic containers, string templates) on a buffer that has
+// already passed through the main preprocess. Unlike
+// `cc_rewrite_header_type_syntax_shared`, this variant does NOT clear or
+// reset the global type registry, so it is safe to call after phase-1+phase-3
+// preprocessing or after `cc_cpp_expand` to mop up CC syntax produced by
+// macro expansion (e.g. `#define CHAN(T) T[~4 >]` invoked as `CHAN(int) tx;`
+// becoming `int[~4 >] tx;` post-CPP). Returns malloc'd string on changes,
+// NULL when no rewrite was needed. Caller must free().
+char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
+                                                    size_t input_len,
+                                                    const char* input_path);
+
 // Rewrite `@async [<attrs>] void <name>(...)` to `@async [<attrs>] CCAsyncVoidRet <name>(...)`.
 // Keeps the function visible to phase-3 reparse as a CCTaskIntptr-returning
 // function (needed so that call-sites like `n->spawn_async(fn(args))` type-check
