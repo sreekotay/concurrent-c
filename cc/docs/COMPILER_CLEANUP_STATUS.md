@@ -35,7 +35,14 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | Milestone | Notes |
 |-----------|--------|
 | **M6** | Pilot stub-AST for `T[~N >]`; retire P4 text pass. See [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md). **Likely superseded by M7 pre-expand.** |
-| **M7 (proposed)** | Replace M5.5+M6 with a pre-expand pass that runs TCC's `-E` once at the input boundary. Spike landed in `cc/src/preprocess/cpp_expand.{c,h}` + `CC_PRE_EXPAND=1` flag; standalone probe at `cc/src/tools/cpp_expand_probe.c` confirms `#define CHAN(T) T[~4 >]` expands cleanly with CC channel tokens preserved. Full pipeline needs reparse plumbing + `# N "file" flags` line-marker handling. See [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md). |
+
+## M7 — Pre-expand integration (in progress)
+
+| Phase | Status | What landed |
+|-------|--------|-------------|
+| **M7.A** (opt-in, no regressions) | **Shipped** | `cc_cpp_expand()` runs TCC's CPP after `cc_preprocess_for_initial_parse` so the prepended container/result-type `#include` lines resolve. GCC-style `# N "file" flags` markers normalized to bare C99 `#line` to prevent TCC's parser from re-triggering system-header inclusion. Opt-in via `CC_PRE_EXPAND=1`. **429/429 smoke pass; examples/stress baselines unchanged (same 2 pre-existing failures: `recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`).** |
+| **M7.B** (macro CC syntax) | Not started | The CHAN-macro case (`#define CHAN(T) T[~4 >]`) requires that phase-1 text passes (esp. P4 `cc__rewrite_chan_handle_types`) skip `#define` bodies, strings, and comments. Today P4 sees the `T[~4 >]` token inside the `#define` body and lowers it to `CCChanTx` before CPP can run. Fix: extend the shared `CCScannerState` to recognize and skip macro definition lines; then `CC_PRE_EXPAND=1` will unlock the macro-CC-syntax case end-to-end. |
+| **M7.C** (default on) | Not started | After M7.B, flip `CC_PRE_EXPAND` default to `1`. Retire P4 (channel-syntax) if pre-expand can also feed the lexer-recognized form via existing TCC CC tokens. Begin retiring redundant `_cch → _h` rewrites (CPP handles them once everything else is on the same path). |
 
 ---
 
@@ -48,19 +55,22 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-Two top recommendations, given the spike result:
+1. **M7.B — #define-aware text passes**: makes pre-expand fully solve the
+   macro CC-syntax case (`#define CHAN(T) T[~4 >]`). Required pieces:
+   (a) extend `CCScannerState` (or per-pass scanners that don't use it) to
+   recognize `#define` directive lines and skip the body until the
+   logical-line end (handle backslash-newline continuations);
+   (b) verify on `tests/macro/macro_chan_minimal_smoke.ccs` and
+   `macro_chan_capacity_macro_smoke.ccs`;
+   (c) once macros work, flip `CC_PRE_EXPAND=1` to default.
 
-1. **M7 (pre-expand integration)** — replaces M5.5 + M6 if it works
-   end-to-end. Pipeline plumbing: skip `.cch → .h` rewrite when on, filter
-   `# N "file" flags` markers, propagate expanded buffer through reparses.
-   Win: zero TCC fork changes; macro-generated CC syntax works for free.
-
-2. **Closure-literal refactor** — re-use existing `cc__collect_closure_edits`
-   path (EditBuffer-based, places protos at `find_protos_insertion_point`)
-   in `visit_codegen.c` instead of the older `cc__rewrite_closure_literals_with_nodes`
-   path. Fixes the two pre-existing capture-variant failures
-   (`examples/recipe_tcp_echo.ccs`, `stress/syscall_kidnap.ccs`) and removes
-   the brittle in-buffer offset walk in `cc__closure_proto_insert_off`.
+2. **Closure-literal refactor**: re-use existing `cc__collect_closure_edits`
+   (EditBuffer-based; places protos at `find_protos_insertion_point`)
+   in `visit_codegen.c` instead of the older
+   `cc__rewrite_closure_literals_with_nodes`. Fixes the two pre-existing
+   capture-variant failures (`recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`)
+   and removes the brittle in-buffer offset walk in
+   `cc__closure_proto_insert_off`.
 
 Then in priority order:
 
@@ -70,7 +80,8 @@ Then in priority order:
 6. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
 7. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
 8. **Runtime R1+** — consume serialized `.ccs.map` from compile
-9. **M5.5 fallback** — only if M7 pre-expand is blocked; otherwise drop
+9. **M7.C** — flip pre-expand default; retire redundant `.cch` rewrites
+10. **M5.5 fallback** — only if M7 turns out to need TCC-side help after all; otherwise drop
 
 ---
 
@@ -85,8 +96,9 @@ Then in priority order:
 | `CC_DEBUG_REPARSE_DUMP_DIR=...` | Write intermediate buffers per reparse |
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
 | `CC_BATCH_PHASE3=1` | Experimental batched Phase 3 collectors |
-| `CC_PRE_EXPAND=1` | Experimental: run TCC `-E` (CPP) before text passes. Spike — initial parse only |
+| `CC_PRE_EXPAND=1` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse. Zero-regression opt-in |
 | `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |
+| `CC_DEBUG_PRE_EXPAND_DUMP=/path` | Dump the post-expand buffer to a file (M7.A debugging) |
 
 Full list: [DEBUG_VARS.md](../src/diag/DEBUG_VARS.md).
 
