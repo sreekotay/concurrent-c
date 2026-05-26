@@ -60,16 +60,18 @@ int cc_build_parse_input(const char* file_buf,
     free(buf);
     if (!pp) goto fail;
 
-    /* M7 spike: opt-in pre-expand via CPP, applied after all CC text
-     * passes have run. Resolves the prepended `#include` directives that
+    /* M7: opt-in pre-expand via CPP, applied after all CC text passes
+     * have run. Resolves the prepended `#include` directives that
      * `cc_preprocess_for_initial_parse` adds (containers, result types) so
      * TCC's second-pass parser sees a fully-expanded translation unit.
      *
-     * Known limitation: macros whose BODY contains CC syntax (e.g.
-     *   #define CHAN(T) T[~4 >]
-     * ) are mangled by phase-1 text passes (P3/P4) before this point and
-     * cannot be rescued here. Fix requires making text passes #define-aware
-     * (skip strings/comments/macro bodies) — tracked as M7.B. */
+     * Combined with the scanner's `in_pp` tracking (which makes phase-1
+     * text passes skip `#define` directive bodies), this lets macro
+     * definitions whose body contains CC syntax (`#define CHAN(T) T[~4 >]`)
+     * survive intact through phase-1; CPP then expands the macro at the
+     * call site. Full end-to-end support for macro-produced CC syntax
+     * still requires post-expand re-lowering (M7.C) which needs the type
+     * registry to survive the second pass — tracked separately. */
     if (!for_reparse && getenv("CC_PRE_EXPAND")) {
         size_t pp_len = strlen(pp);
         size_t exp_len = 0;

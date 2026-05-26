@@ -41,8 +41,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | Phase | Status | What landed |
 |-------|--------|-------------|
 | **M7.A** (opt-in, no regressions) | **Shipped** | `cc_cpp_expand()` runs TCC's CPP after `cc_preprocess_for_initial_parse` so the prepended container/result-type `#include` lines resolve. GCC-style `# N "file" flags` markers normalized to bare C99 `#line` to prevent TCC's parser from re-triggering system-header inclusion. Opt-in via `CC_PRE_EXPAND=1`. **429/429 smoke pass; examples/stress baselines unchanged (same 2 pre-existing failures: `recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`).** |
-| **M7.B** (macro CC syntax) | Not started | The CHAN-macro case (`#define CHAN(T) T[~4 >]`) requires that phase-1 text passes (esp. P4 `cc__rewrite_chan_handle_types`) skip `#define` bodies, strings, and comments. Today P4 sees the `T[~4 >]` token inside the `#define` body and lowers it to `CCChanTx` before CPP can run. Fix: extend the shared `CCScannerState` to recognize and skip macro definition lines; then `CC_PRE_EXPAND=1` will unlock the macro-CC-syntax case end-to-end. |
-| **M7.C** (default on) | Not started | After M7.B, flip `CC_PRE_EXPAND` default to `1`. Retire P4 (channel-syntax) if pre-expand can also feed the lexer-recognized form via existing TCC CC tokens. Begin retiring redundant `_cch → _h` rewrites (CPP handles them once everything else is on the same path). |
+| **M7.B** (`#define`-aware scanner) | **Shipped** | `CCScannerState` now tracks `in_pp` and treats any `#`-led line (with backslash-newline continuations) as non-code, so all 13 phase-1 passes that use `cc_scanner_skip_non_code` (`cc__rewrite_chan_handle_types`, `cc_rewrite_slice_types`, `cc_rewrite_generic_containers`, etc.) no longer rewrite tokens inside `#define`/`#include`/`#if` bodies. **429/429 smoke pass; CC_PRE_EXPAND=1 still parity with baseline.** The CHAN macro definition now survives intact through phase-1 (verified via debug dump); CPP correctly expands `CHAN(int)` to `int[~4 >]`. |
+| **M7.C** (post-expand re-lower + reparse plumbing) | Not started | To actually compile the CHAN macro case end-to-end, two pieces are still needed: (a) re-run `cc__rewrite_chan_handle_types` (and other header-safe lowerings) on the post-pre-expand buffer to convert `int[~4 >]` → `CCChanTx`, while preserving the type registry (a spike clearing the registry via `cc_rewrite_header_type_syntax_shared` broke `send_task_hybrid_smoke`'s Result type lookups); (b) propagate the pre-expanded buffer through reparses in `visit_codegen.c` so phase-3 doesn't re-process the original `CHAN(int)` syntax. Then flip `CC_PRE_EXPAND=1` to default and begin retiring redundant `_cch → _h` rewrites (CPP handles them). |
 
 ---
 
@@ -55,14 +55,20 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-1. **M7.B — #define-aware text passes**: makes pre-expand fully solve the
-   macro CC-syntax case (`#define CHAN(T) T[~4 >]`). Required pieces:
-   (a) extend `CCScannerState` (or per-pass scanners that don't use it) to
-   recognize `#define` directive lines and skip the body until the
-   logical-line end (handle backslash-newline continuations);
-   (b) verify on `tests/macro/macro_chan_minimal_smoke.ccs` and
+1. **M7.C — post-expand re-lower + reparse plumbing**: makes pre-expand
+   fully solve the macro CC-syntax case (`#define CHAN(T) T[~4 >]`).
+   Required pieces:
+   (a) re-run `cc__rewrite_chan_handle_types` (and a few other header-safe
+   lowerings) on the post-pre-expand buffer without clearing the type
+   registry — the spike used `cc_rewrite_header_type_syntax_shared` which
+   `cc_type_registry_clear`s as a side effect and broke downstream Result
+   type lookups, so a registry-preserving variant is needed;
+   (b) propagate the pre-expanded buffer through reparses in
+   `visit_codegen.c` so phase-3 doesn't re-process the original
+   `CHAN(int)` syntax;
+   (c) verify on `tests/macro/macro_chan_minimal_smoke.ccs` and
    `macro_chan_capacity_macro_smoke.ccs`;
-   (c) once macros work, flip `CC_PRE_EXPAND=1` to default.
+   (d) flip `CC_PRE_EXPAND=1` to default.
 
 2. **Closure-literal refactor**: re-use existing `cc__collect_closure_edits`
    (EditBuffer-based; places protos at `find_protos_insertion_point`)

@@ -1,11 +1,15 @@
 # M6 — Type-syntax AST tolerance (deferred)
 
-**Status:** Superseded by **M7**. M7.A landed (opt-in pre-expand, zero
-regressions on 429/429 smoke + parity with baseline on examples/stress).
-M7.B (text-pass `#define`-awareness) is the remaining piece needed for
-the macro CC-syntax case. See
-[COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md) for
-the current M7 plan.
+**Status:** Superseded by **M7**.
+
+- **M7.A** (opt-in pre-expand): shipped. 429/429 smoke, examples/stress
+  baseline unchanged.
+- **M7.B** (text-pass `#define`-awareness): shipped. `CCScannerState`
+  now skips `#define`/`#include`/`#if` bodies; the CHAN-macro
+  definition survives intact through phase-1 text passes and is
+  correctly expanded by CPP.
+- **M7.C** (post-expand re-lower + reparse plumbing): not started.
+  See [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
 
 ## 2026-05-26 update — pre-expand spike supersedes M5.5/M6 for macros
 
@@ -47,15 +51,25 @@ replaced by:
 - Opt-in via `CC_PRE_EXPAND=1`. 429/429 smoke pass; examples/stress
   baseline unchanged (same 2 pre-existing closure-capture failures).
 
-**Why CHAN-macro tests still don't compile under `CC_PRE_EXPAND=1`:**
+**What M7.B added on top of M7.A:**
 
-Phase-1 text passes (esp. P4 `cc__rewrite_chan_handle_types`) scan
-text token-by-token without skipping `#define` bodies. For
-`#define CHAN(T) T[~4 >]`, P4 matches `T[~4 >]` **inside** the macro
-body and rewrites it to `CCChanTx`, leaving a dangling `CCChanTx`
-identifier that breaks the parse before CPP ever runs. M7.B is the
-follow-up: teach `CCScannerState` to skip strings/comments/`#define`
-bodies; then pre-expand sees an intact `#define` and the rest works.
+`CCScannerState` tracks `in_pp` (entered on any `#`-led line, exited on
+non-continued newline, with `\\\n` handled as line-continuation). All
+~13 phase-1 passes that use `cc_scanner_skip_non_code` therefore now
+treat `#define`/`#include`/`#if` bodies as non-code and leave them
+untouched. Validated via debug dump: `#define CHAN(T) T[~4 >]` survives
+phase-1 verbatim and CPP correctly expands `CHAN(int)` to `int[~4 >]`.
+
+**Why the macro tests still fail compilation under `CC_PRE_EXPAND=1`:**
+
+After CPP expands `CHAN(int) tx;` to `int[~4 >] tx;`, no text pass
+runs again to lower it to `CCChanTx`. The spike tried calling
+`cc_rewrite_header_type_syntax_shared` on the post-pre-expand buffer
+to re-run `cc__rewrite_chan_handle_types`, but that helper clears the
+type registry as a side effect, which broke unrelated downstream Result
+type lookups (`send_task_hybrid_smoke`). M7.C is the follow-up:
+introduce a registry-preserving variant of header-safe re-lowering
+plus reparse plumbing.
 
 **M7.C — eventual cleanups (after M7.B):**
 

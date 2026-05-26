@@ -1,8 +1,10 @@
 # Macro-generated CC syntax tests
 
-**Status:** M7.A shipped (pre-expand opt-in, zero regressions, 429/429
-smoke). M7.B (`#define`-aware text passes — required to actually compile
-macros whose body contains CC syntax) not started. See
+**Status:** M7.A + M7.B shipped (pre-expand opt-in and `#define`-aware
+phase-1 scanner; 429/429 smoke with zero regressions either way). M7.C
+(post-expand re-lower without clearing the type registry + reparse
+plumbing) is the remaining piece to actually compile the macros in this
+folder end-to-end. See
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 - M5.5 hooks (TCC parse-time recognizer) — stubs only; superseded by M7.
@@ -45,22 +47,30 @@ CC_PRE_EXPAND=1 cc/bin/ccc <your-file>.ccs
 CC_PRE_EXPAND=1 make smoke   # 429/429 pass
 ```
 
-## M7.B (TODO) — why the macro tests in this folder don't compile yet
+## What landed in M7.B
 
-Phase-1 text passes (esp. P4 `cc__rewrite_chan_handle_types`) scan the
-raw source token-by-token without skipping `#define` directive bodies.
-For `#define CHAN(T) T[~4 >]`, P4 sees the `T[~4 >]` pattern inside the
-`#define` body and lowers it to `CCChanTx` mid-line, leaving a dangling
-identifier that breaks the parse before CPP ever runs.
+`CCScannerState` now tracks `in_pp` and treats any `#`-led line as
+non-code (with backslash-newline continuation handling). The 13 phase-1
+passes that share `cc_scanner_skip_non_code` no longer rewrite tokens
+inside `#define`/`#include`/`#if` bodies. Verified via
+`CC_DEBUG_PRE_EXPAND_DUMP`: the `#define CHAN(T) T[~4 >]` line survives
+phase-1 verbatim, and CPP correctly expands `CHAN(int)` to `int[~4 >]`
+during pre-expand.
 
-Fix path:
+## M7.C (TODO) — what still needs to happen
 
-1. Teach `CCScannerState` (and per-pass scanners that don't use it) to
-   detect `#define <name>(...)` and skip until the logical line end
-   (handle backslash-newline continuations).
-2. Verify on the two tests in this folder.
-3. Then `CC_PRE_EXPAND=1` will actually compile macro-generated CC syntax
-   end-to-end.
+After CPP expands `CHAN(int)` to `int[~4 >]`, no text pass runs again
+to lower `[~N >]` to `CCChanTx`. The pre-expand spike tried calling
+`cc_rewrite_header_type_syntax_shared` on the post-pre-expand buffer
+but it clears the type registry as a side effect, breaking unrelated
+Result-type lookups in `send_task_hybrid_smoke`. M7.C needs:
+
+1. A registry-preserving variant of header-safe re-lowering (or
+   save/restore around the call).
+2. Pre-expand also wired through reparses in `visit_codegen.c` so
+   phase-3 sees the expanded macro too.
+3. Then the macro tests in this folder will compile under
+   `CC_PRE_EXPAND=1`.
 
 ## M5.5 (TCC fork) — still relevant if pre-expand turns out to be infeasible
 
