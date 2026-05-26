@@ -1223,6 +1223,15 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
     size_t i = 0;
     size_t last_emit = 0;
     int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    /* M7.B parity: this visitor-side text pass must also skip #define /
+     * #include / #if bodies so macro definitions whose body looks like CC
+     * channel-handle syntax (e.g. `#define LOOKS_LIKE_CHAN(T) T[~4 >]`)
+     * are not rewritten when the macro is never invoked.  Without this,
+     * the bare line becomes `CCChanTx` and TCC fails the subsequent
+     * reparse with "too many basic types". */
+    int in_pp = 0;          /* inside a preprocessor directive */
+    int pp_continued = 0;   /* previous non-WS char was '\' (line continuation) */
+    int at_line_start = 1;  /* start of logical line for `#` detection */
     int line = 1, col = 1;
 
     while (i < n) {
@@ -1230,10 +1239,37 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
         if (c == '\n') { line++; col = 1; }
 
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_line_comment) { if (c == '\n') { in_line_comment = 0; at_line_start = 1; } i++; col++; continue; }
         if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
         if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
         if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+
+        /* Inside a preprocessor directive: skip until end of logical line
+         * (honoring backslash-newline continuations). */
+        if (in_pp) {
+            if (c == '\n') {
+                if (pp_continued) { pp_continued = 0; }
+                else { in_pp = 0; at_line_start = 1; }
+                i++; continue;
+            }
+            if (c == '\\') {
+                size_t k = i + 1;
+                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                pp_continued = (k < n && src[k] == '\n') ? 1 : 0;
+                i++; col++; continue;
+            }
+            if (c != ' ' && c != '\t') pp_continued = 0;
+            i++; col++; continue;
+        }
+
+        /* Detect start of a preprocessor directive. */
+        if (at_line_start && c == '#') {
+            in_pp = 1; pp_continued = 0; at_line_start = 0;
+            i++; col++; continue;
+        }
+
+        if (c == '\n') at_line_start = 1;
+        else if (c != ' ' && c != '\t') at_line_start = 0;
 
         if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
         if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }

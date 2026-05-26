@@ -1,0 +1,37 @@
+/* M7.A smoke: a representative CC program that exercises the
+ * pre-expand pipeline end-to-end on the initial parse (containers,
+ * channels, closures, result types, UFCS).  With `CC_PRE_EXPAND=1`,
+ * `cc_cpp_expand` runs after `cc_preprocess_for_initial_parse` and
+ * the prepended `#include` lines for `CCResult_int`,
+ * `CCVec_int_init`, etc. must all resolve cleanly in a single CPP
+ * pass.  Any regression where pre-expand re-triggers system-header
+ * inclusion (e.g. `__mbstate_t` double-decl) would surface here too.
+ *
+ * Runs identically under the default pipeline AND under
+ * `CC_PRE_EXPAND=1`; the smoke runner exercises the default,
+ * `CC_PRE_EXPAND=1 make smoke` covers the opt-in path. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int double_it(int x) { return x * 2; }
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    CCVec::[int] nums = cc_vec_new::[int](&arena);
+    nums.push(1);
+    nums.push(2);
+    nums.push(3);
+
+    int sum = 0;
+    int* p0 = nums.get(0);
+    int* p1 = nums.get(1);
+    int* p2 = nums.get(2);
+    if (p0) sum += double_it(*p0);
+    if (p1) sum += double_it(*p1);
+    if (p2) sum += double_it(*p2);
+    cc_arena_free(&arena);
+    printf("sum=%d\n", sum);
+    return sum == 12 ? 0 : 2;
+}

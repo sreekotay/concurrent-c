@@ -1346,7 +1346,8 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
      * cc_build_parse_input's pre-expanded buffer directly; this opt-in
      * path lets us validate the pipeline end-to-end for the macro cases
      * in tests/macro/ without disturbing the 429/429 default. */
-    if (prep && getenv("CC_PRE_EXPAND_REPARSE") && input_path) {
+    const char* _ppe_rp = getenv("CC_PRE_EXPAND_REPARSE");
+    if (prep && _ppe_rp && _ppe_rp[0] && _ppe_rp[0] != '0' && input_path) {
         size_t exp_len = 0;
         char* expanded = cc_cpp_expand(prep, pp_len, input_path, &exp_len);
         if (expanded) {

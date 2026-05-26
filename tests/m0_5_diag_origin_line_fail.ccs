@@ -1,0 +1,19 @@
+/* M0.5 smoke: a compile error in user code should report the
+ * filename and the correct ORIGINAL line number — not a line from
+ * the lowered/preprocessed buffer (which can run into the
+ * thousands).
+ *
+ * The `@arena_init` form is retired and intentionally errors out
+ * during phase-3.  The diagnostic is emitted with the original
+ * (file, line, col) span; the `.compile_err` match string includes
+ * the line number so any regression that drops or rewrites the
+ * span will fail this test. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char buf[128];
+    @arena_init(buf, sizeof(buf)) {
+        (void)arena;
+    }
+    return 0;
+}
