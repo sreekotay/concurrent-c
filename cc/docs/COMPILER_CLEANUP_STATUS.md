@@ -1,7 +1,7 @@
 # Compiler cleanup status (M0–M5.5)
 
 **Last updated:** 2026-05-26  
-**Smoke suite:** 429 tests passing (`make smoke`)
+**Smoke suite:** 436 tests passing (`make smoke`, default + `CC_PRE_EXPAND=1`)
 
 This is the single source of truth for the compiler cleanup workstream (M0–M5.5). See also [PIPELINE.md](../src/visitor/PIPELINE.md), [PASS_INVENTORY.md](../src/visitor/PASS_INVENTORY.md), [DIAG_AUDIT.md](../src/diag/DIAG_AUDIT.md), [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md).
 
@@ -41,7 +41,7 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | Phase | Status | What landed |
 |-------|--------|-------------|
 | **M7.A** (opt-in, no regressions) | **Shipped** | `cc_cpp_expand()` runs TCC's CPP after `cc_preprocess_for_initial_parse` so the prepended container/result-type `#include` lines resolve. GCC-style `# N "file" flags` markers normalized to bare C99 `#line` to prevent TCC's parser from re-triggering system-header inclusion. Opt-in via `CC_PRE_EXPAND=1`. **429/429 smoke pass; examples/stress baselines unchanged (same 2 pre-existing failures: `recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`).** |
-| **M7.B** (`#define`-aware scanner) | **Shipped** | `CCScannerState` now tracks `in_pp` and treats any `#`-led line (with backslash-newline continuations) as non-code, so all 13 phase-1 passes that use `cc_scanner_skip_non_code` (`cc__rewrite_chan_handle_types`, `cc_rewrite_slice_types`, `cc_rewrite_generic_containers`, etc.) no longer rewrite tokens inside `#define`/`#include`/`#if` bodies. **429/429 smoke pass; CC_PRE_EXPAND=1 still parity with baseline.** The CHAN macro definition now survives intact through phase-1 (verified via debug dump); CPP correctly expands `CHAN(int)` to `int[~4 >]`. |
+| **M7.B** (`#define`-aware scanner) | **Shipped** | `CCScannerState` now tracks `in_pp` and treats any `#`-led line (with backslash-newline continuations) as non-code, so all 13 phase-1 passes that use `cc_scanner_skip_non_code` (`cc__rewrite_chan_handle_types`, `cc_rewrite_slice_types`, `cc_rewrite_generic_containers`, etc.) no longer rewrite tokens inside `#define`/`#include`/`#if` bodies. The visitor-side `cc__rewrite_chan_handle_types_text` in `pass_channel_syntax.c` (which has its own ad-hoc scanner) was also taught the same `in_pp`/`pp_continued`/`at_line_start` plumbing — covered by `tests/m7b_define_chan_body_unused_smoke.ccs` which previously failed with "too many basic types" when an unused `#define LOOKS_LIKE_CHAN(T) T[~4 >]` was present. **436/436 smoke pass; CC_PRE_EXPAND=1 still parity with baseline.** The CHAN macro definition now survives intact through phase-1 (verified via debug dump); CPP correctly expands `CHAN(int)` to `int[~4 >]`. |
 | **M7.C** (post-expand re-lower + reparse plumbing) | **Partially shipped** | **(a) Registry-preserving re-lower** (`cc_relower_cc_type_syntax_preserving_registry`) added in `preprocess.{c,h}` — wraps the same four header-safe lowerings as `cc_rewrite_header_type_syntax_shared` but deliberately does NOT call `cc_type_registry_clear`, so it is safe to run after the main preprocess has populated the registry. Wired into `cc_build_parse_input` right after `cc_cpp_expand`: the initial parse now compiles macro-generated CC type syntax (e.g. `int[~4 >]` from `#define CHAN(T) T[~4 >]`) into `CCChanTx_T` without disturbing existing Result/Vec/Map registrations. **(b) Reparse pre-expand** wired into `cc__reparse_source_to_ast` just before `cc_tcc_bridge_parse_string_to_ast`, gated behind a separate `CC_PRE_EXPAND_REPARSE=1` env (see below). 429/429 smoke pass with `CC_PRE_EXPAND=1` (M7.A behavior preserved). Full macro CHAN end-to-end still needs the visitor refactor (consuming `cc_build_parse_input`'s buffer instead of re-reading from disk) so that the channel-pair scanner and other AST/text span passes see the expanded form; tracked under M1 visitor work. |
 | **M7.C2** caveat | Opt-in only | `CC_PRE_EXPAND_REPARSE=1` runs CPP over the FINAL reparse buffer (after `cc_preprocess_for_reparse` + `cc__prepend_reparse_prelude` + parser-helper rewrites — earlier placement causes `__mbstate_t` double-decl). Validated end-to-end pipeline but regresses 4 smoke tests (`async_chan_await_works_smoke`, `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`, `ufcs_nested_std_io_smoke`) because CPP-expanded reparse output changes AST shapes in ways that confuse the async-AST and a few UFCS passes. Kept opt-in so it can be unblocked one pass at a time without disturbing the default. |
 
@@ -56,20 +56,18 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-1. **M7.C — post-expand re-lower + reparse plumbing**: makes pre-expand
-   fully solve the macro CC-syntax case (`#define CHAN(T) T[~4 >]`).
-   Required pieces:
-   (a) re-run `cc__rewrite_chan_handle_types` (and a few other header-safe
-   lowerings) on the post-pre-expand buffer without clearing the type
-   registry — the spike used `cc_rewrite_header_type_syntax_shared` which
-   `cc_type_registry_clear`s as a side effect and broke downstream Result
-   type lookups, so a registry-preserving variant is needed;
-   (b) propagate the pre-expanded buffer through reparses in
-   `visit_codegen.c` so phase-3 doesn't re-process the original
-   `CHAN(int)` syntax;
-   (c) verify on `tests/macro/macro_chan_minimal_smoke.ccs` and
-   `macro_chan_capacity_macro_smoke.ccs`;
-   (d) flip `CC_PRE_EXPAND=1` to default.
+1. **M1 visitor refactor → finish macro CC-syntax**: M7.C parts (a)/(b)
+   landed, but the visitor still re-reads the raw user source for
+   span-based passes (channel-pair scanner, etc.).  Threading
+   `cc_build_parse_input`'s pre-expanded buffer all the way through
+   `visit_codegen.c` is what's needed to make
+   `tests/macro/macro_chan_capacity_macro_smoke.ccs` compile end-to-end
+   under `CC_PRE_EXPAND=1`.  Should also fix the source-map drift
+   surfaced by `tests/m0_5_diag_origin_line_fail.ccs` under
+   `CC_PRE_EXPAND=1` (currently the test is pinned to default via an
+   `.env` sidecar; remove the override once M1 lands).
+   After that, flip `CC_PRE_EXPAND=1` to default and begin retiring
+   redundant `_cch → _h` rewrites (CPP handles them).
 
 2. **Closure-literal refactor**: re-use existing `cc__collect_closure_edits`
    (EditBuffer-based; places protos at `find_protos_insertion_point`)

@@ -1,0 +1,30 @@
+/* M7.B smoke: phase-1 scanner skips `#define` bodies.
+ *
+ * The `LOOKS_LIKE_CHAN` macro body contains CC channel-handle token
+ * sequences (`T[~4 >]` and `T[~4 <]`).  Before M7.B, the phase-1
+ * `cc__rewrite_chan_handle_types` text pass walked through `#define`
+ * bodies and would have rewritten the `T[~4 >]` tokens to
+ * `CCChanTx_T` (or aborted on the unknown identifier), silently
+ * mangling the macro body even when the macro is never invoked.
+ *
+ * The macro is intentionally unused — the test asserts only that
+ * the file compiles AND that real channel-handle declarations
+ * elsewhere in the same TU continue to lower correctly.  Any
+ * regression in the M7.B `CCScannerState.in_pp` plumbing would
+ * either fail to parse the file (typical case) or quietly produce
+ * a broken macro that breaks other consumers later.
+ *
+ * Pre-expand independent: passes under default AND CC_PRE_EXPAND=1. */
+#include <ccc/cc_runtime.cch>
+
+#define LOOKS_LIKE_CHAN(T) T[~4 >] tx; T[~4 <] rx
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    chan_close(tx);
+    cc_chan_free(ch);
+    return 0;
+}

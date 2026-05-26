@@ -1,0 +1,24 @@
+/* M0.5 smoke: a phase-3 visitor diagnostic must still report the
+ * original `.ccs` filename and line number, not a line from the
+ * lowered/preprocessed/prelude-prepended buffer.
+ *
+ * `cc_channel_pair(&tx, &rx)` requires both endpoint decls to be
+ * recognizable to the channel-pair scanner.  Here `rx` is a bare
+ * `int` (no `[~ ... <]` form), so the pass emits its scripted
+ * error.  The `.compile_err` substring includes the line number
+ * (which is the call site) so any regression that drops the
+ * origin span or maps it to the post-preprocess buffer will fail
+ * this test.
+ *
+ * This complements `m0_5_diag_origin_line_fail.ccs` (which exercises
+ * the async-AST diagnostic path) by hitting a different pass that
+ * formats `(file:line:col)` independently. */
+#include <ccc/cc_runtime.cch>
+
+int main(void) {
+    int[~4 >] tx;
+    int rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    return 0;
+}

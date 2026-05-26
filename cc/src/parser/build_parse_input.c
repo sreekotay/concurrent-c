@@ -72,7 +72,11 @@ int cc_build_parse_input(const char* file_buf,
      * call site. Full end-to-end support for macro-produced CC syntax
      * still requires post-expand re-lowering (M7.C) which needs the type
      * registry to survive the second pass — tracked separately. */
-    if (!for_reparse && getenv("CC_PRE_EXPAND")) {
+    /* Accept any non-empty, non-"0" value as "on" so that `CC_PRE_EXPAND=`
+     * (set to empty via the smoke `.env` sidecar) disables pre-expand
+     * cleanly. */
+    const char* _ppe = getenv("CC_PRE_EXPAND");
+    if (!for_reparse && _ppe && _ppe[0] && _ppe[0] != '0') {
         size_t pp_len = strlen(pp);
         size_t exp_len = 0;
         char* expanded = cc_cpp_expand(pp, pp_len, input_path, &exp_len);

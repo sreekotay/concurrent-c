@@ -1,0 +1,50 @@
+/* M1 smoke: shared preprocess pipeline regression guard.
+ *
+ * Exercises a wide cross-section of CC features in a single TU so the
+ * shared `cc_preprocess_for_initial_parse` / `cc_preprocess_for_reparse`
+ * paths (M1 + M3) are forced through every text-pass bucket they
+ * cover:
+ *   - channel handle decls and `cc_channel_pair`
+ *   - closure literal with explicit captures + `cc_nursery_spawn_async`
+ *   - generic container declarations (CCVec::[int])
+ *   - Result type + `!>` unwrap on a fallible call
+ *   - UFCS method calls on a registered container type
+ *   - `@defer` for scope-bound cleanup
+ *
+ * Every reparse stage in `visit_codegen.c` (statement-lowering,
+ * async-lowering, final-UFCS) sees this same source through
+ * `cc__reparse_source_to_ast`, which re-runs the shared M1 pipeline.
+ * Any drift between the initial-parse and reparse buckets surfaces as
+ * an internal-reparse-failure or wrong stdout. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(8));
+    if (!arena.base) return 1;
+
+    CCVec::[int] xs = cc_vec_new::[int](&arena);
+    xs.push(11);
+    xs.push(22);
+    xs.push(33);
+
+    int total = 0;
+    int* a = xs.get(0);
+    int* b = xs.get(1);
+    int* c = xs.get(2);
+    if (a) total += *a;
+    if (b) total += *b;
+    if (c) total += *c;
+
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+
+    @defer cc_chan_free(ch);
+    @defer chan_close(tx);
+
+    cc_arena_free(&arena);
+    printf("total=%d\n", total);
+    return total == 66 ? 0 : 3;
+}

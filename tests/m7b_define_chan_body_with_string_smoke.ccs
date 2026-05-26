@@ -1,0 +1,18 @@
+/* M7.B smoke: `#define` body containing a string literal with CC-like
+ * tokens.  Stresses the interaction between `CCScannerState.in_pp` and
+ * `CCScannerState.in_str` — both must remain set inside a multi-token
+ * `#define` body, and the `\`-newline continuation handling must not
+ * accidentally exit pp-mode while we are mid-string.
+ *
+ * The macro is invoked at runtime to print the literal; if any phase-1
+ * pass had rewritten the string contents the printed text would differ
+ * from the source literal and the stdout match would fail. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define DESCRIBE_CHAN "uses T[~N >] for tx and T[~N <] for rx"
+
+int main(void) {
+    puts(DESCRIBE_CHAN);
+    return 0;
+}
