@@ -34,7 +34,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 | Milestone | Notes |
 |-----------|--------|
-| **M6** | Pilot stub-AST for `T[~N >]`; retire P4 text pass. See [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md). Start after M5.5 macro tests are green. |
+| **M6** | Pilot stub-AST for `T[~N >]`; retire P4 text pass. See [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md). **Likely superseded by M7 pre-expand.** |
+| **M7 (proposed)** | Replace M5.5+M6 with a pre-expand pass that runs TCC's `-E` once at the input boundary. Spike landed in `cc/src/preprocess/cpp_expand.{c,h}` + `CC_PRE_EXPAND=1` flag; standalone probe at `cc/src/tools/cpp_expand_probe.c` confirms `#define CHAN(T) T[~4 >]` expands cleanly with CC channel tokens preserved. Full pipeline needs reparse plumbing + `# N "file" flags` line-marker handling. See [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md). |
 
 ---
 
@@ -47,14 +48,29 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-1. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)
-2. **`tests/diag/` harness** — `EXPECT-DIAG` parsing; 3–5 smoke tests (protects I1–I8)
-3. **M5.5 finish** — TCC fork: push synthesized tokens for channel/result/slice/postfix after CPP
-4. **M1 finish** — `visit_codegen.c` → `cc_build_parse_input`; thread `CCSourceMap` on reparse
-5. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
-6. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
-7. **Runtime R1+** — consume serialized `.ccs.map` from compile
-8. **M6** — after M5.5
+Two top recommendations, given the spike result:
+
+1. **M7 (pre-expand integration)** — replaces M5.5 + M6 if it works
+   end-to-end. Pipeline plumbing: skip `.cch → .h` rewrite when on, filter
+   `# N "file" flags` markers, propagate expanded buffer through reparses.
+   Win: zero TCC fork changes; macro-generated CC syntax works for free.
+
+2. **Closure-literal refactor** — re-use existing `cc__collect_closure_edits`
+   path (EditBuffer-based, places protos at `find_protos_insertion_point`)
+   in `visit_codegen.c` instead of the older `cc__rewrite_closure_literals_with_nodes`
+   path. Fixes the two pre-existing capture-variant failures
+   (`examples/recipe_tcp_echo.ccs`, `stress/syscall_kidnap.ccs`) and removes
+   the brittle in-buffer offset walk in `cc__closure_proto_insert_off`.
+
+Then in priority order:
+
+3. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)
+4. **`tests/diag/` harness** — `EXPECT-DIAG` parsing; 3–5 smoke tests (protects I1–I8)
+5. **M1 finish** — `visit_codegen.c` → `cc_build_parse_input`; thread `CCSourceMap` on reparse
+6. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
+7. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
+8. **Runtime R1+** — consume serialized `.ccs.map` from compile
+9. **M5.5 fallback** — only if M7 pre-expand is blocked; otherwise drop
 
 ---
 
@@ -69,6 +85,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | `CC_DEBUG_REPARSE_DUMP_DIR=...` | Write intermediate buffers per reparse |
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
 | `CC_BATCH_PHASE3=1` | Experimental batched Phase 3 collectors |
+| `CC_PRE_EXPAND=1` | Experimental: run TCC `-E` (CPP) before text passes. Spike — initial parse only |
+| `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |
 
 Full list: [DEBUG_VARS.md](../src/diag/DEBUG_VARS.md).
 

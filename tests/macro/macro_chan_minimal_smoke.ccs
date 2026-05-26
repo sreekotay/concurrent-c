@@ -1,0 +1,12 @@
+/* Minimal pre-expand spike test (CC_PRE_EXPAND=1).
+ * No prelude include; just verify the CHAN(int) macro expands to channel
+ * syntax that the lexer accepts. We never actually exercise channels — we
+ * only need the parse to succeed. */
+
+#define CHAN(T) T[~4 >]
+
+int main(void) {
+    CHAN(int) tx;
+    (void)tx;
+    return 0;
+}
