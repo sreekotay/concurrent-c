@@ -1,9 +1,11 @@
 #include "build_parse_input.h"
 
 #include "../diag/diag.h"
+#include "../preprocess/cpp_expand.h"
 #include "../visitor/pass_create.h"
 #include "../visitor/pass_unwrap_destroy.h"
 #include "preprocess/preprocess.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,6 +36,26 @@ int cc_build_parse_input(const char* file_buf,
     {
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
+    }
+
+    /* M5.5/M6 alternative spike: optionally pre-expand the CPP so that
+     * macro-generated CC syntax (e.g. CHAN(T) -> T[~4 >]) is visible to
+     * downstream text passes. Off by default. */
+    if (!for_reparse && getenv("CC_PRE_EXPAND")) {
+        size_t exp_len = 0;
+        char* expanded = cc_cpp_expand(buf, got, input_path, &exp_len);
+        if (expanded) {
+            free(buf);
+            buf = expanded;
+            got = exp_len;
+            if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                fprintf(stderr, "[cc:pre-expand] %s expanded to %zu bytes\n",
+                        input_path ? input_path : "<input>", exp_len);
+            }
+        } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
+            fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",
+                    input_path ? input_path : "<input>");
+        }
     }
     {
         char* blanked = cc_blank_comptime_blocks_for_prep(buf, got);

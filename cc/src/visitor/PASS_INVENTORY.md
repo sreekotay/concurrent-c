@@ -192,6 +192,31 @@ Reducing to 4 reparses requires making `pass_closure_literal_ast.c` use fine-gra
 to batch with Phase 6 (spawn/nursery/arena). Effort: ~2-3 days. Not blocked technically,
 only by refactoring risk.
 
+## Known issues (closure literals in deeply-rewritten call sites)
+
+Two pre-existing failures share a root cause in `pass_closure_literal_ast.c`:
+
+- `examples/recipe_tcp_echo.ccs` — `n->spawn(() => [sock] { handle_client(sock); })`
+  inside `if (test_mode) { ... }` inside a nursery `{ ... } @destroy` block.
+  The local forward-decl emitted by `cc__closure_proto_insert_off` lands
+  inside `main`'s body (not at file scope), so `static` storage class
+  on the bridge decl is illegal in block scope. Even after dropping
+  `static`, the captured `sock` is not unpacked from `__env` — the
+  closure body sees an undefined `sock`.
+- `stress/syscall_kidnap.ccs` — `nursery->spawnhybrid(() => [id] { ... })`
+  inside a `for` loop. The capture-variant closure literal is **not
+  detected at all** (no descriptor produced); the raw `() => [id] { ... }`
+  text leaks to the host C compiler.
+
+Both reproduce on the main branch before M0–M5.5 (verified via `git stash`
++ rebuild). Common factor: capture-variant closures (`() => [x] { ... }`)
+where the enclosing rewritten context confuses either the AST collector
+or the file-scope-position finder. **Fix path:** route closure-literal
+emission through the EditBuffer infrastructure (`cc__collect_closure_edits`
+in the same file, currently unused by `visit_codegen.c`), which places
+protos at `find_protos_insertion_point` (top-of-file) and removes the
+brittle in-buffer offset walk. Tracked separately.
+
 ## Next Steps
 
 1. **Reparse reduction (5→4)**: Make closure_literals use CCEditBuffer (fine-grained edits)

@@ -1,0 +1,21 @@
+/* Pre-expand spike test: requires CC_PRE_EXPAND=1.
+ * Verifies #define-generated CC channel syntax compiles when CPP runs first.
+ *
+ * Without pre-expand, CHAN(int) is opaque to text passes; with pre-expand,
+ * the macro expands to `int [~ 4 >]` before any rewriter sees it. */
+
+#include <ccc/std/prelude.cch>
+
+#define CHAN(T) T[~4 >]
+
+int main(void) {
+    CHAN(int) tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    (void)chan_send(tx, 42);
+    chan_close(tx);
+    int v;
+    while (cc_chan_recv(rx.raw, &v, sizeof(v)) == 0) {}
+    cc_chan_free(ch);
+    return 0;
+}
