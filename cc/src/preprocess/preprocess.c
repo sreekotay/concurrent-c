@@ -54,6 +54,9 @@ typedef struct {
     int in_block_comment;
     int in_str;
     int in_chr;
+    int in_pp;          /* Inside a preprocessor directive (#define / #include / etc.) */
+    int pp_continued;   /* Previous non-WS char on the current pp line was '\\' */
+    int at_line_start;  /* Last non-whitespace was a newline (or BOF) */
     int line;  /* Current line (1-based), updated if track_pos is true */
     int col;   /* Current column (1-based), updated if track_pos is true */
 } CCScannerState;
@@ -64,6 +67,9 @@ static void cc_scanner_init(CCScannerState* s) {
     s->in_block_comment = 0;
     s->in_str = 0;
     s->in_chr = 0;
+    s->in_pp = 0;
+    s->pp_continued = 0;
+    s->at_line_start = 1;
     s->line = 1;
     s->col = 1;
 }
@@ -86,7 +92,10 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     
     /* Inside line comment */
     if (s->in_line_comment) {
-        if (c == '\n') s->in_line_comment = 0;
+        if (c == '\n') {
+            s->in_line_comment = 0;
+            s->at_line_start = 1;
+        }
         (*pos)++;
         return 1;
     }
@@ -126,7 +135,51 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
         }
         return 1;
     }
-    
+
+    /* Inside a preprocessor directive (#define, #include, #if, ...).
+     * Skip until the end of the logical line (handles backslash-newline
+     * continuations). Body bytes are reported as "non-code" so text
+     * passes never rewrite them. */
+    if (s->in_pp) {
+        if (c == '\n') {
+            if (s->pp_continued) {
+                /* Continuation: stay in pp mode for the next line. */
+                s->pp_continued = 0;
+            } else {
+                s->in_pp = 0;
+                s->at_line_start = 1;
+            }
+            (*pos)++;
+            return 1;
+        }
+        if (c == '\\') {
+            /* Look ahead past optional spaces/tabs to see if next char is
+             * '\n'; if so, this is a line-continuation. */
+            size_t k = i + 1;
+            while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+            s->pp_continued = (k < n && src[k] == '\n') ? 1 : 0;
+            (*pos)++;
+            return 1;
+        }
+        if (c != ' ' && c != '\t') s->pp_continued = 0;
+        (*pos)++;
+        return 1;
+    }
+
+    /* Detect start of a preprocessor directive: `#` as first non-WS on a line.
+     * Once detected, enter in_pp and let the next iteration skip the body. */
+    if (s->at_line_start && c == '#') {
+        s->in_pp = 1;
+        s->pp_continued = 0;
+        s->at_line_start = 0;
+        (*pos)++;
+        return 1;
+    }
+
+    /* Update at_line_start tracking for non-pp code. */
+    if (c == '\n') s->at_line_start = 1;
+    else if (c != ' ' && c != '\t') s->at_line_start = 0;
+
     /* Check for start of comment/string */
     if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; s->col++; return 1; }
