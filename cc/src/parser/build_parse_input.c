@@ -89,6 +89,19 @@ int cc_build_parse_input(const char* file_buf,
                     fprintf(stderr, "[cc:pre-expand] dumped to %s\n", dump);
                 }
             }
+            /* M7.C: post-expand re-lower of CC type syntax that may have
+             * appeared via macro expansion (e.g. `int[~4 >]` from
+             * `#define CHAN(T) T[~4 >]` invoked as `CHAN(int)`). Uses a
+             * registry-preserving variant so existing Result/Vec/Map type
+             * registrations from cc_preprocess_for_initial_parse survive. */
+            char* relowered = cc_relower_cc_type_syntax_preserving_registry(pp, strlen(pp), input_path);
+            if (relowered) {
+                free(pp);
+                pp = relowered;
+                if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                    fprintf(stderr, "[cc:pre-expand] re-lowered post-expand CC type syntax\n");
+                }
+            }
         } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
             fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",
                     input_path ? input_path : "<input>");
