@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <ctype.h>
 
+#include "build_parse_input.h"
 #include "tcc_bridge.h"
 #include "comptime/hook_compile.h"
 #include "comptime/symbols.h"
@@ -56,7 +57,7 @@ static int cc__find_matching_brace_parse(const char* src, size_t len, size_t lbr
     return 0;
 }
 
-static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, size_t n) {
+char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
     char* out;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     if (!src) return NULL;
@@ -382,75 +383,21 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     }
     free(reg_src);
 
-    {
-        char* lowered_includes = cc_rewrite_local_cch_includes_to_lowered_headers(file_buf, got, input_path);
-        if (lowered_includes) {
-            free(file_buf);
-            file_buf = lowered_includes;
-            got = strlen(file_buf);
-        }
-    }
-
-    {
-        char* lowered_system_includes = cc_rewrite_system_cch_includes_to_lowered_headers(file_buf, got);
-        if (lowered_system_includes) {
-            free(file_buf);
-            file_buf = lowered_system_includes;
-            got = strlen(file_buf);
-        }
-    }
-
-    char* parse_buf = cc__blank_comptime_blocks_preserve_layout_parse(file_buf, got);
-    if (parse_buf) {
-        free(file_buf);
-        file_buf = parse_buf;
-    }
-
-    char* nursery_proto = cc_rewrite_nursery_create_destroy_proto(file_buf, got, input_path);
-    if (nursery_proto == (char*)-1) {
+    CCBuildParseInput prep = {0};
+    if (cc_build_parse_input(file_buf, got, input_path, symbols, 0, &prep) != 0) {
         free(file_buf);
         return -1;
     }
-    if (nursery_proto) {
-        free(file_buf);
-        file_buf = nursery_proto;
-        got = strlen(file_buf);
-    }
-
-    if (symbols) {
-        char* registered_create = cc_rewrite_registered_type_create_destroy(file_buf, got, input_path, symbols);
-        if (registered_create == (char*)-1) {
-            free(file_buf);
-            return -1;
-        }
-        if (registered_create) {
-            free(file_buf);
-            file_buf = registered_create;
-            got = strlen(file_buf);
-        }
-    }
-
-    /* Preprocess to string (no temp file).  Install the symbol table on
-     * the unwrap-destroy pass's ambient slot so bodyless `!> @destroy;`
-     * on user types registered via `@comptime cc_type_register(...)`
-     * resolves to the registered destroy callee (the preprocess chain
-     * doesn't carry a CCSymbolTable parameter today; see
-     * cc/src/visitor/pass_unwrap_destroy.h). */
-    cc_unwrap_destroy_set_symbols(symbols);
-    char* pp_buf = cc_preprocess_to_string(file_buf, got, input_path);
-    cc_unwrap_destroy_set_symbols(NULL);
     free(file_buf);
-    if (!pp_buf) {
-        return -1;
-    }
-
+    char* pp_buf = prep.buffer;
     {
         size_t st_len = 0;
-        char* st = cc__rewrite_chan_send_task_text(NULL, pp_buf, strlen(pp_buf), &st_len);
+        char* st = cc__rewrite_chan_send_task_text(NULL, pp_buf, prep.len, &st_len);
         if (st) {
             free(pp_buf);
             pp_buf = st;
-            (void)st_len;
+            prep.buffer = st;
+            prep.len = st_len;
         }
     }
     {
@@ -458,8 +405,11 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         if (parser_helpers) {
             free(pp_buf);
             pp_buf = parser_helpers;
+            prep.buffer = parser_helpers;
+            prep.len = strlen(parser_helpers);
         }
     }
+    (void)prep.source_map; /* threaded through codegen in later milestones */
 
     /* Debug: dump preprocessed output if requested */
     if (getenv("CC_DUMP_LOWERED")) {
@@ -479,7 +429,7 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     char* parse_input = cc__neutralize_comments_preserve_layout_parse(pp_buf, strlen(pp_buf));
     CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(parse_input ? parse_input : pp_buf, rel_path, input_path, symbols);
     free(parse_input);
-    free(pp_buf);
+    cc_build_parse_input_free(&prep);
     if (root) {
         root->original_path = input_path;
         root->lowered_is_temp = 0;

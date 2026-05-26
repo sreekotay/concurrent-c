@@ -1,117 +1,58 @@
-# CC Visitor Pipeline
+# Concurrent-C Codegen Pipeline (authoritative)
 
-This document describes the lowering passes in `visit_codegen.c`.
+**Last updated:** 2026-05-26 (post M0–M5.5 ship)
 
-## Pass Ordering
+Authoritative call-site map for `visit_codegen.c` and `parse.c`. Status summary: [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
 
-Passes are organized into phases. Within each phase, passes may be batched
-(sharing an EditBuffer) or run sequentially.
+## Reparse count (per translation unit)
 
-### Phase 1: Text Preprocessing (before TCC parse)
+| Stage | Function | Notes |
+|-------|----------|-------|
+| Initial | `cc_tcc_bridge_parse_string_to_ast` | `parse.c` / codegen entry; full preprocess |
+| Phase3 pre-UFCS | `cc__reparse_source_to_ast` | When `src_ufcs != src_all` after phase-2 |
+| Phase3 post-UFCS | `cc__reparse_source_to_ast` | After UFCS apply (sequential path) |
+| Phase3 post-closure-calls | `cc__reparse_source_to_ast` | After closure-call rewrite |
+| Phase3 post-call-site-mode | `cc__reparse_source_to_ast` | `@blocking` / `@noblock` markers |
+| Phase3 post-autoblock | `cc__reparse_source_to_ast` | After autoblock |
+| Phase3 batched | `cc__reparse_source_to_ast` | **Only if `CC_BATCH_PHASE3=1`** — single reparse after batched apply |
+| Channel/type text | buffer + parse | Channel pair + type syntax |
+| Closure literal | `cc__reparse_source_to_ast` | Whole-file closure lift |
+| Async SM | `cc__reparse_source_to_ast` | State machine |
 
-These passes handle syntax that TCC cannot parse directly.
+**Current total:** ~9 `cc__reparse_source_to_ast` call sites (sequential default) + 1 initial parse.
 
-| # | Pass | Input | Output | Notes |
-|---|------|-------|--------|-------|
-| 1 | generic_containers | `Vec<T>` | `Vec_T` | Monomorphization syntax |
-| 2 | ufcs_containers | `v.push(x)` | `Vec_T_push(&v, x)` | Container method calls |
-| 3 | std_io_ufcs | `std_out.write()` | `cc_std_out_write()` | I/O helpers |
+**Target:** 3–4 (initial + post-Phase-3 + post-closure + post-async) after M2 default batch + M4 fine-grained edits.
 
-### Phase 2: Text Passes (batched)
+## Phase 3 status
 
-| # | Pass | Input | Output | Notes |
-|---|------|-------|--------|-------|
-| 4 | with_deadline | `with_deadline(ms) {...}` | CCDeadline scope + `@defer` | **Produces @defer for pass 16** |
-| 5 | @match | `@match { case ch.recv(): }` | `switch` + `cc_chan_match_select` | Channel select syntax |
+- **Default:** UFCS → reparse → closure_calls → reparse → (call-site mode) → autoblock → reparse → await_normalize (sequential). Uses `cc__apply_coarse_codegen_pass` per collector.
+- **Experimental:** `CC_BATCH_PHASE3=1` runs `cc__apply_batched_phase3_passes()` (all four collectors, one apply, one reparse). Not default — caused test regressions when enabled without further AST merge work.
 
-*These two passes share an EditBuffer because they operate on non-overlapping syntax.*
+## Preprocess entry points (M3)
 
-### Phase 3: Initial AST Passes (sequential)
+| API | Use |
+|-----|-----|
+| `cc_preprocess_for_initial_parse` | First parse of a TU |
+| `cc_preprocess_for_reparse` | Reparse; skips validation checks (legacy `skip_checks=1`) |
+| `cc_preprocess_for_light_reparse` | Reparse when phase-1 type-syntax bucket already applied |
 
-After Phase 2, source is parsed with TCC to get stub-AST.
+`cc__reparse_source_to_ast` uses `cc_preprocess_for_reparse` (not light) unless stage is explicitly batched.
 
-| # | Pass | Transform | Notes |
-|---|------|-----------|-------|
-| 6 | UFCS | `x.method(y)` → `method(&x, y)` | General UFCS |
-| 7 | closure_calls | `c(x)` → `c.fn(c.env, x)` | Closure invocation |
-| 8 | autoblock | Wrap blocking calls | Insert cc_block() wrappers |
-| 9 | await_normalize | `await expr` → temp binding | Prepare for async lowering |
+## Canonical prep (M1)
 
-*These use whole-file replacement - cannot batch yet.*
+- **`cc_build_parse_input()`** — shared prep in `cc/src/parser/build_parse_input.c`
+- **Wired in:** `parse.c`
+- **Not yet wired in:** `visit_codegen.c` (still duplicates include/comptime/nursery/preprocess steps)
 
-### Phase 4: Channel Syntax (text)
+## Orphan / unwired components
 
-| # | Pass | Transform |
-|---|------|-----------|
-| 10 | channel_pair | `channel_pair(&tx, &rx)` lowering |
-| 11 | channel_types | `int[~4 >]` → `CCChanTx` |
+| Component | Status |
+|-----------|--------|
+| `pass_nursery_spawn_ast.c` | Compiled; `cc__collect_nursery_edits` unwired — nursery in `preprocess.c` + `pass_closure_literal_ast.c` |
+| `cc_preprocess_simple()` | Declared; never invoked — experimental AST path only |
 
-### Phase 5: Closure Literals (reparse required)
+## Diagnostics (M0.5)
 
-| # | Pass | Transform |
-|---|------|-----------|
-| 12 | closure_literals | `\|x\| {...}` → `__cc_closure_make_N(...)` |
-
-*Generates additional prototypes and definitions.*
-
-### Phase 6: Structured Concurrency (reparse required)
-
-| # | Pass | Transform |
-|---|------|-----------|
-| 13 | spawn/nursery AST lowering | `spawn(...)` / `@create(...)/wait/free` helpers → runtime calls |
-
-*Retired block forms such as `spawn(...)`, `@nursery { ... }`, and `@arena { ... }` now fail in the parser before this phase runs.*
-
-### Phase 7: Defer (text)
-
-| # | Pass | Transform | Notes |
-|---|------|-----------|-------|
-| 16 | defer | `@defer stmt;` → inject before `}` and `return` | **Consumes @defer from pass 4** |
-
-### Phase 8: Async State Machine (reparse required)
-
-| # | Pass | Transform |
-|---|------|-----------|
-| 17 | async | `@async fn()` → state machine |
-
-*Final lowering pass. Transforms async functions into resumable state machines.*
-
-## Dependencies
-
-```
-with_deadline (4) ──produces @defer──▶ defer (16)
-```
-
-## Future Improvements
-
-1. **Refactor whole-file passes to fine-grained edits** - Would enable batching phases 3 and 4.
-   Passes that currently use whole-file replacement:
-   - `pass_ufcs.c` - UFCS AST pass
-   - `pass_closure_calls.c` - closure invocation
-   - `pass_autoblock.c` - blocking call wrappers
-   - `pass_await_normalize.c` - await temp binding
-   
-2. **Merge related passes** - UFCS passes (1-3, 6), channel passes (10-11)
-   - These share common logic but have ordering dependencies
-   
-3. **Reduce reparses** - Currently several TCC parses; could potentially reduce further
-   - Requires careful dependency analysis between phases
-
-4. **Extract channel code** - ✓ DONE
-   - `pass_channel_syntax.h/.c` contains channel syntax functions
-   - ~606 lines extracted from `visit_codegen.c`
-
-5. **Extract type syntax code** - ✓ DONE
-   - `pass_type_syntax.h/.c` contains slice/optional/result type syntax
-   - ~815 lines extracted from `visit_codegen.c`
-   - `visit_codegen.c` reduced from 2254 to 830 lines (63% reduction)
-
-## Adding a New Pass
-
-1. Create `pass_newfeature.c` and `pass_newfeature.h`
-2. Use `#include "visitor/pass_common.h"` for shared infrastructure
-3. Implement either:
-   - `cc__collect_newfeature_edits(root, ctx, eb)` for fine-grained (preferred)
-   - `cc__rewrite_newfeature_syntax(...)` for whole-file
-4. Add to `visit_codegen.c` at the appropriate phase
-5. Update this document
+- Module: `cc/src/diag/`
+- Driver: `cc_diag_init` / `cc_diag_print_all` on compile failure
+- See [DEBUG_VARS.md](../diag/DEBUG_VARS.md)

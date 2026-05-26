@@ -2,12 +2,12 @@
 
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
-**Last updated**: 2026-02-01
+**Last updated**: 2026-05-26 (post M0–M5.5 — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
 
 ## Current Stats
 
 - **Total lines**: ~21k across pass files
-- **TCC reparses**: 4 (spawn+nursery+arena batched)
+- **TCC reparses**: ~9 call sites in `visit_codegen.c` + 1 initial parse (not 4)
 - **Text-based passes in preprocess.c**: 19 functions
 - **AST-based passes**: 8
 
@@ -57,7 +57,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | 3 | pass_with_deadline_syntax.c | 430 | `with_deadline(ms)` → CCDeadline + @defer |
 | 4 | pass_match_syntax.c | 600 | `@match` → switch + cc_chan_match_select |
 
-### Phase 3: Initial AST Passes (UNIFIED via EditBuffer, REPARSE #1)
+### Phase 3: Initial AST Passes (EditBuffer; sequential reparse by default)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
@@ -66,8 +66,9 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | 7 | pass_autoblock.c | 1,260 | Insert cc_block() wrappers |
 | 8 | pass_await_normalize.c | 529 | `await expr` → temp binding |
 
-**Note**: These 4 passes now use unified CCEditBuffer collection - edits are
-collected from all passes, then applied once (instead of 4 sequential rewrites).
+**M2 status (2026-05-26):**
+- **Default:** sequential `cc__apply_coarse_codegen_pass` + reparse between collectors (429 smoke tests).
+- **Experimental:** `CC_BATCH_PHASE3=1` → `cc__apply_batched_phase3_passes()` (one apply, one reparse). Not default until AST merge ordering is fixed.
 
 ### Phase 4: Channel Syntax (text, REPARSE #2)
 
@@ -86,7 +87,7 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 12 | pass_nursery_spawn_ast.c | 1,071 | spawn/nursery lowering |
+| 12 | pass_nursery_spawn_ast.c | 1,071 | spawn/nursery lowering (**ORPHAN**: `cc__collect_nursery_edits` unwired; nursery in preprocess + closure_literal) |
 
 ### Phase 7: Defer (text)
 
@@ -111,10 +112,10 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 
 ### High Value (reduces reparses)
 
-1. ✅ **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
-   - All are AST-based, now use unified CCEditBuffer
-   - Edits collected once, applied once (vs 4 sequential rewrites)
-   - Done: 2026-02-01
+1. **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
+   - **Partial (2026-05-26):** `cc__apply_batched_phase3_passes()` behind `CC_BATCH_PHASE3=1`
+   - **Default path:** still sequential reparses (see PIPELINE.md)
+   - **Next:** make batching safe by default (fix AST/type state between collectors)
 
 2. **Merge closure_literals + spawn/nursery** — share one reparse
    - BLOCKED: closure_literals uses coarse-grained whole-file edit
@@ -142,18 +143,19 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 
 ## Completed Improvements
 
-1. ✅ Update this inventory to match reality (2026-02-01)
-2. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
-3. ✅ Phase 3 passes unified via CCEditBuffer (2026-02-01)
-4. ✅ Dynamic type registries - `cc__cg_result_types` and `cc__cg_optional_types` are
+1. ✅ Compiler cleanup M0–M5.5 infrastructure (2026-05-26) — diag core, `cc_build_parse_input`, preprocess reparse APIs, `tcc_ext_api`, macro recognizer hooks; see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md)
+2. ✅ Update this inventory to match reality (2026-02-01)
+3. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
+4. ✅ Phase 3 EditBuffer infrastructure (2026-02-01); batched apply optional via `CC_BATCH_PHASE3` (2026-05-26)
+5. ✅ Dynamic type registries - `cc__cg_result_types` and `cc__cg_optional_types` are
    now heap-allocated dynamic arrays (previously fixed [64]). No limit on Result/Optional
    type count per compilation unit. (2026-03-09)
-5. ✅ Explicit registry reset - `cc__cg_reset_type_registries()` called once per
+6. ✅ Explicit registry reset - `cc__cg_reset_type_registries()` called once per
    compilation unit in visit_codegen.c. Scan functions now ACCUMULATE rather than
    implicitly resetting on each call. Previously the second call to any scan function
    within one compilation unit (e.g. from pass_closure_literal_ast.c) would silently
    discard types collected by the first call. (2026-03-09)
-6. ✅ `spawn into` correctness - fixed `__spawn_into_thunk` to detect when the called
+7. ✅ `spawn into` correctness - fixed `__spawn_into_thunk` to detect when the called
    function stores its result directly via cc_task_result_ptr (evidenced by returning
    the same buffer pointer). The thunk no longer overwrites the caller's structured
    result. The `spawn into(ch)?` form now uses discard-on-backpressure semantics

@@ -1,6 +1,7 @@
 /* edit_buffer.c - Edit collection and application for source-to-source transforms. */
 
 #include "edit_buffer.h"
+#include "../diag/source_map.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,13 +24,14 @@ void cc_edit_buffer_free(CCEditBuffer* eb) {
     memset(eb, 0, sizeof(*eb));
 }
 
-int cc_edit_buffer_add(CCEditBuffer* eb, size_t start_off, size_t end_off,
-                       const char* replacement, int priority, const char* pass_name) {
+int cc_edit_buffer_add_ex(CCEditBuffer* eb, size_t start_off, size_t end_off,
+                          const char* replacement, int priority, const char* pass_name,
+                          CCSourceSpan origin_span, const char* phase,
+                          CCConstructKind construct_kind) {
     if (!eb) return -1;
     if (start_off > end_off) return -1;
     if (end_off > eb->src_len) return -1;
-    
-    /* Grow array if needed */
+
     if (eb->count >= eb->capacity) {
         int new_cap = eb->capacity ? eb->capacity * 2 : 64;
         CCEdit* new_edits = realloc(eb->edits, new_cap * sizeof(CCEdit));
@@ -37,17 +39,44 @@ int cc_edit_buffer_add(CCEditBuffer* eb, size_t start_off, size_t end_off,
         eb->edits = new_edits;
         eb->capacity = new_cap;
     }
-    
+
     CCEdit* e = &eb->edits[eb->count];
     e->start_off = start_off;
     e->end_off = end_off;
     e->replacement = replacement ? strdup(replacement) : strdup("");
     e->priority = priority;
     e->pass_name = pass_name;
-    
+    e->origin_span = origin_span;
+    e->phase = phase ? phase : pass_name;
+    e->construct_kind = construct_kind;
+
     if (!e->replacement) return -1;
     eb->count++;
     return 0;
+}
+
+int cc_edit_buffer_add(CCEditBuffer* eb, size_t start_off, size_t end_off,
+                       const char* replacement, int priority, const char* pass_name) {
+    return cc_edit_buffer_add_ex(eb, start_off, end_off, replacement, priority, pass_name,
+                                 CC_SPAN_NONE, pass_name, CC_CONSTRUCT_NONE);
+}
+
+void cc_edit_buffer_register_spans(CCEditBuffer* eb, CCSourceMap* map,
+                                   const char* default_phase) {
+    if (!eb || !map) return;
+    for (int i = 0; i < eb->count; i++) {
+        const CCEdit* e = &eb->edits[i];
+        if (cc_span_is_none(e->origin_span)) continue;
+        CCSourceSpan gen;
+        gen.start.byte_off = e->start_off;
+        gen.end.byte_off = e->end_off;
+        gen.start.line = gen.end.line = 0;
+        const char* ph = e->phase ? e->phase : default_phase;
+        cc_source_map_add(map, gen, e->origin_span, ph, e->construct_kind, NULL);
+        if (cc_debug_enabled("SPANS")) {
+            cc_debug_log(ph ? ph : "edit", "registered span off %zu..%zu", e->start_off, e->end_off);
+        }
+    }
 }
 
 int cc_edit_buffer_add_protos(CCEditBuffer* eb, const char* protos, size_t len) {

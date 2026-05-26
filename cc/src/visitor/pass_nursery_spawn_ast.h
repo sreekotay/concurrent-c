@@ -29,6 +29,8 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
 
 /* NEW: Collect nursery edits into EditBuffer without applying.
    Returns number of edits added (>= 0), or -1 on error. */
+/* ORPHAN (M0): no callers in visit_codegen; nursery lowering is in preprocess.c
+ * and pass_closure_literal_ast.c. Retained for future EditBuffer migration. */
 int cc__collect_nursery_edits(const CCASTRoot* root,
                               const CCVisitorCtx* ctx,
                               CCEditBuffer* eb);

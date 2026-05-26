@@ -1,5 +1,8 @@
 #include "tcc_bridge.h"
 
+#include "cc_macro_recognizer.h"
+#include "../../../third_party/tcc-patches/tcc_ext_api.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -67,6 +70,7 @@ CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char*
     if (tcc_set_ext_parser) {
         tcc_set_ext_parser(&cc_ext_parser);
     }
+    cc_macro_recognizer_register(NULL);
     int _saved_fd = -1; char _tmppath[256];
     cc__tcc_stderr_capture_start(&_saved_fd, _tmppath, sizeof(_tmppath));
     struct CCASTStubRoot* r = cc_tcc_parse_to_ast(preprocessed_path, original_path, symbols);
@@ -120,6 +124,7 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
     if (tcc_set_ext_parser) {
         tcc_set_ext_parser(&cc_ext_parser);
     }
+    cc_macro_recognizer_register(NULL);
     int _saved_fd2 = -1; char _tmppath2[256];
     cc__tcc_stderr_capture_start(&_saved_fd2, _tmppath2, sizeof(_tmppath2));
     struct CCASTStubRoot* r = cc_tcc_parse_string_to_ast(source_code, virtual_filename, original_path, symbols);
