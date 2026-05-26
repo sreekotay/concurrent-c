@@ -7243,6 +7243,8 @@ static size_t cc__type_decl_end_top_level_pp(const char* src, size_t len, const 
     return 0;
 }
 
+static int g_cc_preprocess_reparse_skip_phase1 = 0;
+
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks) {
     if (!input || input_len == 0) return NULL;
 
@@ -7284,8 +7286,11 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     CCPassChain chain;
     cc_pass_chain_init(&chain, buf, got);
     
-    /* Shared phase-1 canonical CC normalization bucket. */
-    if (cc__apply_phase1_canonical_passes(&chain, input_path) != 0) goto chain_cleanup;
+    /* Shared phase-1 canonical CC normalization bucket (skipped on reparse). */
+    if (!g_cc_preprocess_reparse_skip_phase1 &&
+        cc__apply_phase1_canonical_passes(&chain, input_path) != 0) {
+        goto chain_cleanup;
+    }
     /* Shared phase-3 bucket: parser/host-C survival and lowering. */
     if (cc__apply_phase3_host_lowering_passes(&chain, input_path) != 0) goto chain_cleanup;
     const char* use = chain.src;
@@ -7891,6 +7896,21 @@ chain_cleanup:
 // Wrapper that runs all checks (default behavior for initial parse).
 char* cc_preprocess_to_string(const char* input, size_t input_len, const char* input_path) {
     return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
+}
+
+char* cc_preprocess_for_initial_parse(const char* input, size_t input_len, const char* input_path) {
+    return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
+}
+
+char* cc_preprocess_for_reparse(const char* input, size_t input_len, const char* input_path) {
+    return cc_preprocess_to_string_ex(input, input_len, input_path, 1);
+}
+
+char* cc_preprocess_for_light_reparse(const char* input, size_t input_len, const char* input_path) {
+    g_cc_preprocess_reparse_skip_phase1 = 1;
+    char* r = cc_preprocess_to_string_ex(input, input_len, input_path, 1);
+    g_cc_preprocess_reparse_skip_phase1 = 0;
+    return r;
 }
 
 typedef struct {

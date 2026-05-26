@@ -9,5 +9,8 @@
 int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** out_root);
 void cc_free_ast(CCASTRoot* root);
 
+/* Shared prep helper (M1) */
+char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n);
+
 #endif // CC_PARSER_PARSE_H
 

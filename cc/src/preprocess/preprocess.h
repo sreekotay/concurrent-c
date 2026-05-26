@@ -19,6 +19,13 @@ char* cc_preprocess_to_string(const char* input, size_t input_len, const char* i
 // Use skip_checks=1 for reparse passes where checks already ran on original source.
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks);
 
+/* M3: explicit initial vs reparse entry points */
+char* cc_preprocess_for_initial_parse(const char* input, size_t input_len, const char* input_path);
+/* Reparse with checks skipped (same as legacy cc_preprocess_to_string_ex(..., 1)). */
+char* cc_preprocess_for_reparse(const char* input, size_t input_len, const char* input_path);
+/* Reparse after phase-1 already applied: skip checks and phase-1 type-syntax bucket. */
+char* cc_preprocess_for_light_reparse(const char* input, size_t input_len, const char* input_path);
+
 // Expand a source file through the host C preprocessor so local and stdlib
 // headers appear in one include-expanded stream with line markers preserved.
 // Returns malloc'd string on success, NULL on error. Caller must free().
@@ -57,6 +64,7 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 
 // Simple preprocessing for the experimental AST/codegen path: only adds #line directive, no CC syntax rewrites.
 // All CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
+// UNWIRED (M0): no production callers; reserved for tests / minimal-parse experiments.
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path);
 

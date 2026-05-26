@@ -72,6 +72,16 @@ See the [stdlib spec](spec/concurrent-c-stdlib-spec.md) for full API documentati
 
 ---
 
+### Compiler debugging & cleanup status
+
+The compiler pipeline was refactored in 2026 (M0–M5.5): diagnostics core, shared prep API, preprocess reparse modes, TCC ext API boundary, and experimental macro-syntax hooks.
+
+- **Status (what shipped / what's next):** [cc/docs/COMPILER_CLEANUP_STATUS.md](cc/docs/COMPILER_CLEANUP_STATUS.md)
+- **Debug flags:** `CC_DEBUG_REPARSE`, `CC_DEBUG_DIAG`, `CC_DEBUG_LOWER`, `CC_DEBUG_SPANS`; CLI `--show-lowered=<phase>`
+- **Details:** [cc/src/diag/DEBUG_VARS.md](cc/src/diag/DEBUG_VARS.md)
+
+---
+
 ### Build
 
 #### Build the compiler

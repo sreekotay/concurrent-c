@@ -1,4 +1,5 @@
 #include "pass_closure_literal_ast.h"
+#include "../diag/mangle.h"
 
 #include <ctype.h>
 #include <stdarg.h>

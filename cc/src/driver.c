@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "comptime/symbols.h"
+#include "diag/diag.h"
 #include "visitor/pass.h"
 
 // Stub pipeline: const pass then main pass (currently copies input->output).
@@ -13,6 +14,9 @@ int cc_compile_with_config(const char *input_path, const char *output_path, cons
     if (!input_path || !output_path) {
         return -1;
     }
+
+    cc_diag_init();
+    cc_diag_register_file(input_path);
 
     CCSymbolTable* symbols = cc_symbols_new();
     if (!symbols) {
@@ -46,7 +50,11 @@ int cc_compile_with_config(const char *input_path, const char *output_path, cons
         }
     }
 
+    if (err != 0 && cc_diag_error_count() > 0) {
+        cc_diag_print_all(stderr);
+    }
     cc_symbols_free(symbols);
+    cc_diag_shutdown();
     return err;
 }
 

@@ -37,6 +37,8 @@
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "../diag/diag.h"
+#include "../diag/source_map.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
@@ -65,6 +67,13 @@ static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
                                          const char* base_src,
                                          CCCodegenEditCollectorFn collect,
                                          int* out_changed);
+
+static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
+                                           const CCVisitorCtx* ctx,
+                                           char** src_io,
+                                           size_t* len_io,
+                                           const char* base_src,
+                                           int* out_changed);
 
 static size_t cc__cg_line_start_before(const char* src, size_t pos) {
     if (!src) return 0;
@@ -783,6 +792,41 @@ static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
     return 0;
 }
 
+/* M2: collect UFCS + closure_calls + autoblock + await_normalize in one apply. */
+static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
+                                           const CCVisitorCtx* ctx,
+                                           char** src_io,
+                                           size_t* len_io,
+                                           const char* base_src,
+                                           int* out_changed) {
+    CCEditBuffer eb;
+    if (out_changed) *out_changed = 0;
+    if (!root || !ctx || !src_io || !*src_io || !len_io) return 0;
+
+    cc_edit_buffer_init(&eb, *src_io, *len_io);
+    if (cc__collect_ufcs_edits(root, ctx, &eb) < 0 ||
+        cc__collect_closure_calls_edits(root, ctx, &eb) < 0 ||
+        cc__collect_autoblocking_edits(root, ctx, &eb) < 0 ||
+        cc__collect_await_normalize_edits(root, ctx, &eb) < 0) {
+        cc_edit_buffer_free(&eb);
+        return -1;
+    }
+    if (eb.count > 0) {
+        size_t new_len = 0;
+        char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
+        if (rewritten) {
+            if (*src_io != base_src) free(*src_io);
+            *src_io = rewritten;
+            *len_io = new_len;
+            if (out_changed) *out_changed = 1;
+            cc_debug_log("lower", "phase3 batched apply: %d edits", eb.count);
+            cc_diag_maybe_dump_lowered("phase3", rewritten, new_len);
+        }
+    }
+    cc_edit_buffer_free(&eb);
+    return 0;
+}
+
 static const char* cc__canonicalize_placeholder_family_type_codegen(const char* type_name,
                                                                     char* scratch,
                                                                     size_t scratch_cap) {
@@ -1228,7 +1272,7 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
     int strict_had_env = strict_env != NULL;
     char* strict_saved = strict_env ? strdup(strict_env) : NULL;
     unsetenv("CC_STRICT_RESULT_UNWRAP");
-    char* pp_buf = cc_preprocess_to_string_ex(pp_in, pp_in_len, input_path, 1);
+    char* pp_buf = cc_preprocess_for_reparse(pp_in, pp_in_len, input_path);
     if (strict_had_env) {
         setenv("CC_STRICT_RESULT_UNWRAP", strict_saved ? strict_saved : "", 1);
     } else {
@@ -1287,6 +1331,9 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
     }
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
+    if (cc_debug_enabled("REPARSE")) {
+        cc_debug_log("reparse", "stage=%s path=%s", stage ? stage : "?", input_path ? input_path : "?");
+    }
     root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
     if (!root) {
         cc__report_reparse_failure(stage, input_path, src, src_len, prep, pp_len);
@@ -3760,6 +3807,46 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             phase3_root = phase3_owned_root;
         }
         cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
+        if (getenv("CC_BATCH_PHASE3")) {
+            if (src_ufcs &&
+                (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
+                 cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
+                char* cs = cc__rewrite_at_call_site_mode(src_ufcs, src_ufcs_len);
+                if (cs) {
+                    if (src_ufcs != src_all) free(src_ufcs);
+                    src_ufcs = cs;
+                    src_ufcs_len = strlen(cs);
+                }
+            }
+            phase3_changed = 0;
+            if (cc__apply_batched_phase3_passes(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                                src_all, &phase3_changed) < 0) {
+                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (phase3_changed) {
+                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+                phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                              "phase3 after batched rewrite");
+                if (!phase3_owned_root) {
+                    fclose(out);
+                    if (src_ufcs != src_all) free(src_ufcs);
+                    free(src_all);
+                    free(closure_protos);
+                    free(closure_defs);
+                    return EINVAL;
+                }
+                phase3_root = phase3_owned_root;
+            } else if (phase3_owned_root) {
+                cc_tcc_bridge_free_ast(phase3_owned_root);
+                phase3_owned_root = NULL;
+            }
+        } else {
         if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
                                           src_all, cc__collect_ufcs_edits, &phase3_changed) < 0) {
             fclose(out);
@@ -3793,14 +3880,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (phase3_changed) {
-            if (getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP") && src_ufcs) {
-                const char* dump_path = getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP");
-                FILE* df = dump_path ? fopen(dump_path, "w") : NULL;
-                if (df) {
-                    fwrite(src_ufcs, 1, src_ufcs_len, df);
-                    fclose(df);
-                }
-            }
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
                                                           "phase3 after closure-call rewrite");
@@ -3814,11 +3893,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             phase3_root = phase3_owned_root;
         }
-        /* Phase 3 call-site mode rewrite: convert `@blocking f(...)` /
-         * `@noblock f(...)` call-site annotations into surviving block-
-         * comment markers (`/​*@CC_SITE=blocking*​/ f(...)`) so pass_autoblock
-         * can observe them while scanning src_ufcs.  Reparse afterwards so
-         * AST offsets reflect the shifted callee positions. */
         if (src_ufcs &&
             (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
              cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
@@ -3852,14 +3926,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (phase3_changed) {
-            if (getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP") && src_ufcs) {
-                const char* dump_path = getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP");
-                FILE* df = dump_path ? fopen(dump_path, "w") : NULL;
-                if (df) {
-                    fwrite(src_ufcs, 1, src_ufcs_len, df);
-                    fclose(df);
-                }
-            }
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
                                                           "phase3 after autoblock rewrite");
@@ -3884,6 +3950,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+        } /* !CC_BATCH_PHASE3 */
 
         /* Debug output for await rewrite */
         if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {

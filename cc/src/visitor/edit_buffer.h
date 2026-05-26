@@ -12,6 +12,8 @@
 
 #include <stddef.h>
 
+#include "../diag/diag.h"
+
 /* A single source edit: replace [start_off, end_off) with replacement text. */
 typedef struct CCEdit {
     size_t start_off;           /* Start offset in source (inclusive) */
@@ -19,6 +21,9 @@ typedef struct CCEdit {
     char* replacement;          /* Replacement text (owned, freed on cleanup) */
     int priority;               /* For ordering edits at same position (higher = apply first) */
     const char* pass_name;      /* For debugging: which pass created this edit */
+    CCSourceSpan origin_span;   /* User .ccs location (I5); CC_SPAN_NONE if unknown */
+    const char* phase;          /* Pipeline phase for diagnostics (I2) */
+    CCConstructKind construct_kind;
 } CCEdit;
 
 /* Collection of edits to apply to a source buffer. */
@@ -47,6 +52,16 @@ void cc_edit_buffer_free(CCEditBuffer* eb);
 /* Add an edit to the buffer. Replacement is copied, caller still owns original. */
 int cc_edit_buffer_add(CCEditBuffer* eb, size_t start_off, size_t end_off,
                        const char* replacement, int priority, const char* pass_name);
+
+/* Same with origin span / phase / construct (I5). */
+int cc_edit_buffer_add_ex(CCEditBuffer* eb, size_t start_off, size_t end_off,
+                          const char* replacement, int priority, const char* pass_name,
+                          CCSourceSpan origin_span, const char* phase,
+                          CCConstructKind construct_kind);
+
+/* After apply: register generated→origin mappings in source map. */
+void cc_edit_buffer_register_spans(CCEditBuffer* eb, CCSourceMap* map,
+                                   const char* default_phase);
 
 /* Add generated code to be inserted after includes. */
 int cc_edit_buffer_add_protos(CCEditBuffer* eb, const char* protos, size_t len);

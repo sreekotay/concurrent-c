@@ -14,6 +14,7 @@
 #include "build/build.h"
 #include <ccc/cc_build_helpers.cch>
 #include "driver.h"
+#include "diag/diag.h"
 #include "preprocess/preprocess.h"
 
 // Forward decls for helpers used by multiple modes.
@@ -3785,6 +3786,13 @@ parse_fail:
 
 int main(int argc, char **argv) {
     cc_init_paths(argv[0]);
+    cc_diag_init();
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (strncmp(arg, "--show-lowered=", 15) == 0) {
+            cc_diag_set_show_lowered_phase(arg + 15);
+        }
+    }
     if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
         usage(argv[0]);
         return 0;
