@@ -73,19 +73,44 @@ typedef struct cc_type_info {
     void (*drop_fn)(void* p);                     /* NULL → no-op */
 } cc_type_info;
 
-/* `type_of(T)` — preprocessor macro that resolves to the address
- * of the type-info symbol for T.  T must be a single token that
- * has a registered `__cc_ti_T` symbol (link error otherwise — a
- * deliberate "you forgot to register" signal).  For unregistered
- * user types, see `cc_type_register(...)` below.
+/* `cc_type_of(mangled)` — runtime lookup of a `cc_type_info*` by
+ * mangled-name string.  Returns NULL if the type hasn't been
+ * registered in the current binary.  This is the public API; the
+ * `type_of(T)` macro below is sugar over it.
  *
- * Phase 3 (separate commit) will teach the compiler to recognize
- * `type_of(T)` as a parser-level builtin so it can give a better
- * error than the linker's "undefined symbol __cc_ti_T". */
-#define type_of(T) (&__cc_ti_##T)
+ * Lookup is currently O(n) (small global array, populated by
+ * static constructors at startup).  Both primitives (always
+ * registered) and per-TU container instantiations (registered by
+ * codegen-emitted constructors — see milestone #4a in
+ * `cc/docs/COMPILER_CLEANUP_STATUS.md`) flow through the same
+ * registry, which gives stable pointer-identity across all callers
+ * within a single binary.
+ *
+ * `cc_type_info_register` is the registration entry-point —
+ * primitives and codegen-emitted constructors call it.  User code
+ * MAY call it directly to teach the registry about a hand-rolled
+ * `cc_type_info`.  (The name is deliberately distinct from the
+ * legacy `cc_type_register(name, hooks)` comptime API below; the
+ * two will be unified in a later milestone.) */
+const cc_type_info* cc_type_of(const char* mangled);
+void cc_type_info_register(const cc_type_info* ti);
+
+/* `type_of(T)` — sugar: `cc_type_of(#T)`.  Why a function call
+ * rather than `(&__cc_ti_##T)`?  Because T is often a typedef that
+ * the parser pass hasn't yet emitted a forward-declaration for, and
+ * a function call with a string literal trivially parses where
+ * `&undeclared_symbol` does not.  The registry lookup is cheap and
+ * happens once per call-site at runtime; comptime
+ * (`@comptime { type_of(T).fields ... }`) will get a real
+ * parser-level builtin in a separate commit. */
+#define type_of(T) cc_type_of(#T)
 
 /* Primitive type-info symbols — defined in cc/runtime/cc_type_info.c
- * and always linked into the runtime. */
+ * and always linked into the runtime.  Kept exposed so callers that
+ * really want compile-time-constant pointers (e.g. static
+ * initializers) can still take their address directly.  Most code
+ * should prefer `type_of(int)`, which is just `cc_type_of("int")`
+ * and goes through the registry. */
 extern const cc_type_info __cc_ti_int;
 extern const cc_type_info __cc_ti_char;
 extern const cc_type_info __cc_ti_short;

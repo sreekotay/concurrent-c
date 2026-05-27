@@ -198,7 +198,7 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    already-lowered text, etc. Audit and remove.
 
 **4a. `cc_type_info` runtime type system + erased containers.**
-*Status: in progress (Commits 1 & 2 of 3 landed 2026-05-27).*
+*Status: in progress (Commits 1, 2, 3a, 3b landed 2026-05-27).*
 
 This is the strategic foundation under "generics with selectable
 link-time footprint" and "performant + fully complete comptime."
@@ -208,11 +208,10 @@ link-time footprint" and "performant + fully complete comptime."
     (name, mangled, id, size, align, kind, nfields, flags,
     fields[], copy_fn, drop_fn).  Primitive symbols
     (`__cc_ti_int`, `__cc_ti_char`, …) emitted from
-    `cc/runtime/cc_type_info.c` and always linked.  `type_of(T)`
-    macro resolves to `(&__cc_ti_T)`.  Layout-locking smoke:
-    `tests/cc_type_info_primitives_smoke.ccs`.
-  - Commit 2 (this): `cc_dyn_vec` type-erased dynamic array in
-    `cc/include/ccc/cc_dyn_vec.cch` + `cc/runtime/cc_dyn_vec.c`.
+    `cc/runtime/cc_type_info.c` and always linked.  Layout-locking
+    smoke: `tests/cc_type_info_primitives_smoke.ccs`.
+  - Commit 2 (`b2357ec`): `cc_dyn_vec` type-erased dynamic array
+    in `cc/include/ccc/cc_dyn_vec.cch` + `cc/runtime/cc_dyn_vec.c`.
     SINGLE implementation (`cc_dyn_vec_push`, `_pop`, `_at`,
     `_clear`, `_free`, `_init`, `_reserve`) handles any element
     type via `ti->size`/`ti->align`/`ti->copy_fn`/`ti->drop_fn`.
@@ -221,16 +220,55 @@ link-time footprint" and "performant + fully complete comptime."
     proving the dispatch contract end-to-end.  Symbol audit on
     the test object confirms 7 undefined refs total — one per
     op, regardless of element type.
-  - Commit 3 (separate session): teach the compiler that
+  - Commit 3a (this): per-T `cc_type_info` emission for codegen-
+    generated `CC_VEC_DECL_ARENA(T)` / `CC_MAP_DECL_ARENA(K,V)`
+    instantiations + the registry that makes `type_of(T)` work
+    by name.  Three pieces:
+      1. `visit_codegen.c` now emits a `static const cc_type_info
+         __cc_ti_<mangled>` next to every generic container
+         instantiation, plus a `__attribute__((constructor(102)))`
+         that calls `cc_type_info_register(&__cc_ti_<mangled>)`
+         at startup.
+      2. `cc_type_info.c` ships a small global registry
+         (`cc_type_info_register` / `cc_type_of`) and a
+         `constructor(101)` that pre-registers all primitives.
+      3. `cc_type.cch`: `type_of(T)` is now sugar for
+         `cc_type_of(#T)`.  Why: TCC's initial parse rejected
+         `&__cc_ti_<undeclared>` even when the symbol existed in
+         the lowered output (codegen hadn't emitted it yet).  A
+         function call with a string literal parses cleanly and
+         doesn't depend on the symbol being declared at parse
+         time.  Lookup is O(n) on a small array — measurable but
+         negligible until type counts are in the thousands.
+    Smoke: `tests/cc_type_info_generic_emit_smoke.ccs` covers
+    primitives + custom-struct Vec + Map, identity stability
+    across repeated lookups, distinctness across mangled names,
+    and the NULL-for-unknown contract.
+  - Commit 3b (this): registry entries for stdlib-pre-baked Vec
+    typedefs (`CCVec_int`, `CCVec_char`, `CCVec_size_t`,
+    `CCVec_float`, `CCVec_double`, `CCVec_voidptr`,
+    `CCVec_charptr`, `CCVec_intptr` — typedef'd directly in
+    `vec.cch` as `typedef __CCVecGeneric CCVec_X;` and therefore
+    bypassed by the codegen emission path 3a hooked into).
+    `cc_type_info.c` now ships a `static const cc_type_info`
+    plus a `constructor(102)` registration for each.  Layout is
+    mirrored as a private `cc__prebaked_vec_layout` (size/align
+    matched to `__CCVecGeneric`); the smoke pins all pre-baked
+    sizes equal to detect drift.  `type_of(CCVec_int)` now works
+    out-of-the-box for unmodified user code that picks up the
+    pre-baked typedef.
+  - Commit 3c (deferred — highest risk): teach the compiler that
     `type_of(T)` is a parser-level builtin (so unregistered T
-    gives a sane diagnostic instead of a linker error), and
+    gives a sane diagnostic instead of NULL at runtime), and
     extend `@comptime` so `type_of(T).fields` walks struct
     layouts.  This unlocks the "performant + fully complete"
     half of the strategic goal.
 
-The legacy `cc_type_register(T, hooks)` API is untouched;
-unification (registering also emits a per-T `cc_type_info`) is
-part of Commit 3 work.
+The legacy `cc_type_register(name, hooks)` comptime API is
+untouched; the new entry-point is deliberately named
+`cc_type_info_register(const cc_type_info*)` to avoid the name
+collision.  Unification will happen in a later milestone once
+3c's parser builtin lands.
 
 **4b. Stable closure-IDs + delete `pass_closure_literal_ast.c`'s
 recovery path.**  Today closure literals are matched between passes

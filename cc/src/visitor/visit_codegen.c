@@ -4367,6 +4367,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
                 fprintf(out, "#include <ccc/cc_channel.h>\n");
+                /* Pulled in so the per-T `cc_type_info` symbol emissions
+                 * below (the "container type info" block) compile.  See
+                 * COMPILER_CLEANUP_STATUS.md milestone #4a / Commit 3a. */
+                fprintf(out, "#include <ccc/cc_type.cch>\n");
                 fprintf(out, "/* --- end container declarations (macros inserted after typedefs) --- */\n\n");
 
                 cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
@@ -4390,6 +4394,47 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                         char line[512];
                         snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                         cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
+                        /* Commit 3a: per-T `cc_type_info` emission for the
+                         * Vec instantiation, registered with the global
+                         * type registry at startup so
+                         * `type_of(CCVec_int)` / `cc_type_of("CCVec_int")`
+                         * resolve to a real `cc_type_info*`.  This is the
+                         * bridge that lets the type-erased `cc_dyn_vec`
+                         * (Commit 2) carry container elements.
+                         *
+                         * `static const` keeps the symbol per-TU (no
+                         * link-time collisions when multiple TUs use the
+                         * same Vec<T>); the registry takes care of giving
+                         * back a stable pointer for a given mangled name. */
+                        char ti_line[2048];
+                        snprintf(ti_line, sizeof(ti_line),
+                            "static const cc_type_info __cc_ti_%s = {\n"
+                            "    .name      = \"%s\",\n"
+                            "    .mangled   = \"%s\",\n"
+                            "    .id        = 0,\n"
+                            "    .size      = (uint32_t)sizeof(%s),\n"
+                            "    .align     = (uint32_t)_Alignof(%s),\n"
+                            "    .kind      = (uint16_t)CC_TK_GENERIC_INST,\n"
+                            "    .nfields   = 0,\n"
+                            /* Vec headers carry an owning data pointer
+                             * managed by the arena.  Conservative flags
+                             * (no POD/trivial-copy/trivial-drop) until a
+                             * future commit defines container copy/drop
+                             * semantics. */
+                            "    .flags     = 0,\n"
+                            "    ._reserved = 0,\n"
+                            "    .fields    = NULL,\n"
+                            "    .copy_fn   = NULL,\n"
+                            "    .drop_fn   = NULL,\n"
+                            "};\n"
+                            "__attribute__((constructor(102)))\n"
+                            "static void __cc_ti_reg_%s(void) {\n"
+                            "    cc_type_info_register(&__cc_ti_%s);\n"
+                            "}\n",
+                            inst->mangled_name, inst->mangled_name, inst->mangled_name,
+                            inst->mangled_name, inst->mangled_name,
+                            inst->mangled_name, inst->mangled_name);
+                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, ti_line);
                     }
                 }
                 
@@ -4412,6 +4457,33 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                         snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
                                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
                         cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
+                        /* Commit 3a: per-(K,V) `cc_type_info` for the
+                         * Map instantiation.  Same shape and rationale
+                         * as Vec above. */
+                        char ti_line[2048];
+                        snprintf(ti_line, sizeof(ti_line),
+                            "static const cc_type_info __cc_ti_%s = {\n"
+                            "    .name      = \"%s\",\n"
+                            "    .mangled   = \"%s\",\n"
+                            "    .id        = 0,\n"
+                            "    .size      = (uint32_t)sizeof(%s),\n"
+                            "    .align     = (uint32_t)_Alignof(%s),\n"
+                            "    .kind      = (uint16_t)CC_TK_GENERIC_INST,\n"
+                            "    .nfields   = 0,\n"
+                            "    .flags     = 0,\n"
+                            "    ._reserved = 0,\n"
+                            "    .fields    = NULL,\n"
+                            "    .copy_fn   = NULL,\n"
+                            "    .drop_fn   = NULL,\n"
+                            "};\n"
+                            "__attribute__((constructor(102)))\n"
+                            "static void __cc_ti_reg_%s(void) {\n"
+                            "    cc_type_info_register(&__cc_ti_%s);\n"
+                            "}\n",
+                            inst->mangled_name, inst->mangled_name, inst->mangled_name,
+                            inst->mangled_name, inst->mangled_name,
+                            inst->mangled_name, inst->mangled_name);
+                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, ti_line);
                     }
                 }
 
