@@ -1,0 +1,65 @@
+/* Regression guard for the lost-wakeup race in cc_nursery_wait's
+ * worker-frees barrier (cc/runtime/nursery.c).  Before the
+ * `atomic_thread_fence(memory_order_seq_cst)` was added to both
+ * sides of the alive_count / alive_waiter Dekker pair, the
+ * waiter's `store_release(alive_waiter)` and `load_acquire(alive_count)`
+ * could be observed out-of-order by the notifier on ARM64, the
+ * notifier read `alive_waiter == NULL`, no signal was emitted,
+ * and the waiter parked forever.  See the matching comments in
+ * `cc_nursery_notify_child_done` and `cc_nursery_wait`.
+ *
+ * Why this test is hostile to the bug:
+ *
+ *   - DEPTH=2 (not deep nesting) — keeps the per-iteration cost
+ *     low so we can do many iterations.
+ *   - ITERATIONS=4000 — empirically gave deadlock-within-seconds
+ *     on the pre-fix binary in the diagnostic agent's reproducer
+ *     (`stress/nested_nursery_deep.ccs` needed 30*200=6000
+ *     barrier traversals; this test does ~8000 in flat form).
+ *   - No printf in the hot loop — printf hides timing windows
+ *     because `write(2)` itself drives scheduler activity.
+ *   - We sum a counter through cc_atomic so a missed wake also
+ *     shows up as a wrong final count, not just a hang.
+ *
+ * If this test ever hangs or returns the wrong count, the
+ * primary suspect is the same Dekker pair drifting out of sync
+ * (a future refactor dropping the fence, or a NEW nursery
+ * completion path landing without the fence pattern).  The fix
+ * is to mirror the comment + fence from `sched_v2.c`'s
+ * `sched_v2_join` Dekker pair to whatever new site appeared.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 4000
+
+cc_atomic_int g_count = 0;
+
+int main(void) {
+    for (int i = 0; i < ITERATIONS; i++) {
+        {
+            CCNursery* outer = @create(NULL) @destroy;
+            if (!outer) { printf("FAIL: outer create\n"); return 1; }
+
+            outer->spawn (() => [] {
+                {
+                    CCNursery* inner = @create(NULL) @destroy;
+                    if (!inner) { abort(); }
+
+                    inner->spawn (() => [] {
+                        cc_atomic_fetch_add(&g_count, 1);
+                    });
+                }
+            });
+        }
+    }
+
+    int got = cc_atomic_load(&g_count);
+    if (got != ITERATIONS) {
+        printf("FAIL: g_count=%d expected=%d\n", got, ITERATIONS);
+        return 1;
+    }
+    printf("nursery worker-frees race stress: OK (%d iterations)\n", got);
+    return 0;
+}

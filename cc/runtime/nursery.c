@@ -532,6 +532,20 @@ void cc_nursery_notify_child_done(CCNursery* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
     if (prev == 1) {
+        /* Dekker pair with cc_nursery_wait waiter: notifier stores
+         * alive_count then loads alive_waiter; waiter stores
+         * alive_waiter then loads alive_count.  A release/acq_rel RMW
+         * on the two different objects is insufficient on ARM64 — the
+         * store buffer can hide our alive_count=0 from the waiter's
+         * load while also hiding the waiter's publish from our
+         * exchange, yielding a lost wake (one parked fiber per
+         * nesting level, which is exactly what
+         * `stress/nested_nursery_deep.ccs` was hitting).  Full fence
+         * on both sides forces at least one side to observe the
+         * other.  Mirrors the same fix in `sched_v2.c` for the
+         * `sched_v2_join` Dekker pair (search "Dekker pair with
+         * sched_v2_join"). */
+        atomic_thread_fence(memory_order_seq_cst);
         fiber_v2* waiter = atomic_exchange_explicit(&n->alive_waiter, NULL, memory_order_acq_rel);
         if (waiter) sched_v2_signal(waiter);
         wake_primitive_wake_all(&n->alive_wake);
@@ -557,6 +571,13 @@ int cc_nursery_wait(CCNursery* n) {
         fiber_v2* self = sched_v2_current_fiber();
         if (self) {
             atomic_store_explicit(&n->alive_waiter, self, memory_order_release);
+            /* Dekker pair with cc_nursery_notify_child_done: see the
+             * companion comment there for the full story.  Without
+             * this fence on ARM64, the store_release above and the
+             * load_acquire below can be observed out-of-order by the
+             * notifier, leaving us parked with no signal coming.
+             * Stress: `tests/stress/nursery_worker_frees_race_stress_smoke.ccs`. */
+            atomic_thread_fence(memory_order_seq_cst);
             while (atomic_load_explicit(&n->alive_count, memory_order_acquire) != 0) {
                 sched_v2_set_park_reason("nursery_wait");
                 sched_v2_park();
