@@ -78,8 +78,46 @@ const CCTypeInstantiation* cc_type_registry_get_map(CCTypeRegistry* reg, size_t 
 size_t cc_type_registry_channel_count(CCTypeRegistry* reg);
 const CCTypeInstantiation* cc_type_registry_get_channel(CCTypeRegistry* reg, size_t idx);
 
-/* Thread-local global registry for use during preprocessing */
+/* Thread-local global registry for use during preprocessing.
+ *
+ * DEPRECATED for NEW code (2026-05-26): do not add new
+ * `cc_type_registry_get_global()` callers.  Thread an explicit
+ * `CCTypeRegistry*` parameter through the caller's plumbing
+ * instead.  See the "type-registry ratchet" rule in
+ * `cc/src/visitor/PASS_INVENTORY.md`.  These functions stay
+ * because ~50 existing call sites depend on them; the goal is to
+ * ratchet that number down, not let it grow.
+ *
+ * The implicit stack semantics: `cc_type_registry_set_global`
+ * REPLACES the current registry; callers wanting nested scoping
+ * must save+restore the prior pointer themselves OR use the
+ * `cc_type_registry_scope_push/pop` helpers below. */
 CCTypeRegistry* cc_type_registry_get_global(void);
 void cc_type_registry_set_global(CCTypeRegistry* reg);
+
+/* Scoped helpers for the global registry.
+ *
+ * Consolidates the save / new / set / restore / free dance that
+ * was open-coded in ~9 call sites.  `_push` allocates a fresh
+ * registry, saves the prior global into `scope`, and installs the
+ * new one.  `_pop` restores the prior and frees the temp.  Both
+ * are safe to call when allocation fails (push returns 0, pop is
+ * a no-op).
+ *
+ * Typical use:
+ *
+ *     CCTypeRegistryScope scope;
+ *     if (cc_type_registry_scope_push(&scope)) {
+ *         // ... call code that uses the (now temp) global ...
+ *         cc_type_registry_scope_pop(&scope);
+ *     }
+ */
+typedef struct {
+    CCTypeRegistry* saved;
+    CCTypeRegistry* temp;
+} CCTypeRegistryScope;
+
+int  cc_type_registry_scope_push(CCTypeRegistryScope* scope);
+void cc_type_registry_scope_pop(CCTypeRegistryScope* scope);
 
 #endif /* CC_TYPE_REGISTRY_H */

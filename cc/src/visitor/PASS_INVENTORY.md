@@ -62,9 +62,23 @@ these rules.
    PR that adds a reparse call site must update that count and
    justify the addition.
 
+6. **Type-registry ratchet.**  Do NOT add new
+   `cc_type_registry_get_global()` / `cc_type_registry_set_global()`
+   callers.  The global registry is a thread-local ambient
+   context with ~50 existing callers — the goal is to ratchet
+   that count DOWN, not let it grow.  New code paths should
+   accept an explicit `CCTypeRegistry*` parameter.  When you
+   genuinely need to scope a *temporary* registry around a call
+   (e.g. comptime preprocess isolation), use the
+   `cc_type_registry_scope_push/pop` helpers from
+   `cc/src/preprocess/type_registry.h` instead of the open-coded
+   save / new / set / restore / free dance — it's wrong on at
+   least three of the ~9 existing sites in subtle leak-on-error
+   ways.
+
 If your change can't follow these rules, the right move is to
-update the helpers (`text_scan.h`, `text.h`) so it CAN, not to
-work around them in a single pass.
+update the helpers (`text_scan.h`, `text.h`, `type_registry.h`)
+so it CAN, not to work around them in a single pass.
 
 ----
 

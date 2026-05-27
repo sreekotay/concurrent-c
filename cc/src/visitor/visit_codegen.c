@@ -1233,15 +1233,15 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                                                const char* input_path, CCSymbolTable* symbols,
                                                const char* stage,
                                                const CCReparseFlags* flags) {
-    CCTypeRegistry* saved_reg = cc_type_registry_get_global();
-    CCTypeRegistry* temp_reg = cc_type_registry_new();
+    CCTypeRegistryScope reg_scope;
+    int reg_pushed = cc_type_registry_scope_push(&reg_scope);
     char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
     char* registered_create = NULL;
     char* family_rewritten = NULL;
     char* reparse_clean = NULL;
     char* reparse_surface_sanitized = NULL;
     CCASTRoot* root = NULL;
-    if (temp_reg) cc_type_registry_set_global(temp_reg);
+    (void)reg_pushed;
     const char* pp_in = nursery_rewritten ? nursery_rewritten : src;
     size_t pp_in_len = nursery_rewritten ? strlen(nursery_rewritten) : src_len;
     if (symbols) {
@@ -1403,10 +1403,7 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     }
     free(prep);
 done:
-    if (temp_reg) {
-        cc_type_registry_set_global(saved_reg);
-        cc_type_registry_free(temp_reg);
-    }
+    cc_type_registry_scope_pop(&reg_scope);
     return root;
 }
 
@@ -4656,19 +4653,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             {
                 char* rewritten = NULL;
-                CCTypeRegistry* saved_reg = cc_type_registry_get_global();
-                CCTypeRegistry* temp_reg = cc_type_registry_new();
-                if (temp_reg) {
-                    cc_type_registry_set_global(temp_reg);
-                    if (ctx && ctx->symbols) {
-                        cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
-                    }
+                CCTypeRegistryScope reg_scope;
+                int reg_pushed = cc_type_registry_scope_push(&reg_scope);
+                if (reg_pushed && ctx && ctx->symbols) {
+                    cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
                 }
                 rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(closure_defs, closure_defs_len);
-                if (temp_reg) {
-                    cc_type_registry_set_global(saved_reg);
-                    cc_type_registry_free(temp_reg);
-                }
+                if (reg_pushed) cc_type_registry_scope_pop(&reg_scope);
                 if (rewritten) {
                     free(closure_defs);
                     closure_defs = rewritten;
@@ -5247,19 +5238,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         {
             char* rewritten = NULL;
-            CCTypeRegistry* saved_reg = cc_type_registry_get_global();
-            CCTypeRegistry* temp_reg = cc_type_registry_new();
-            if (temp_reg) {
-                cc_type_registry_set_global(temp_reg);
-                if (ctx && ctx->symbols) {
-                    cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
-                }
+            CCTypeRegistryScope reg_scope;
+            int reg_pushed = cc_type_registry_scope_push(&reg_scope);
+            if (reg_pushed && ctx && ctx->symbols) {
+                cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
             }
             rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(src_ufcs, src_ufcs_len);
-            if (temp_reg) {
-                cc_type_registry_set_global(saved_reg);
-                cc_type_registry_free(temp_reg);
-            }
+            if (reg_pushed) cc_type_registry_scope_pop(&reg_scope);
             if (rewritten) {
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rewritten;
@@ -5455,19 +5440,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             {
                 char* rewritten = NULL;
-                CCTypeRegistry* saved_reg = cc_type_registry_get_global();
-                CCTypeRegistry* temp_reg = cc_type_registry_new();
-                if (temp_reg) {
-                    cc_type_registry_set_global(temp_reg);
-                    if (ctx && ctx->symbols) {
-                        cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
-                    }
+                CCTypeRegistryScope reg_scope;
+                int reg_pushed = cc_type_registry_scope_push(&reg_scope);
+                if (reg_pushed && ctx && ctx->symbols) {
+                    cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
                 }
                 rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(closure_defs, closure_defs_len);
-                if (temp_reg) {
-                    cc_type_registry_set_global(saved_reg);
-                    cc_type_registry_free(temp_reg);
-                }
+                if (reg_pushed) cc_type_registry_scope_pop(&reg_scope);
                 if (rewritten) {
                     free(closure_defs);
                     closure_defs = rewritten;
