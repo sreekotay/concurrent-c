@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (14 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3; async_ast.c complete).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (15 / 17 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1).  Remaining: K2, K3, L, M.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 86 sites migrated, 16 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 91 sites migrated, 11 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,16 +63,16 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch J3).
+Updated 2026-05-27 (post Batch K1).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **86** (+1 from Batch J3) |
-| Remaining to migrate | **16** |
-| — trivial | 10 |
+| Already on `CCInertScan` | **91** (+5 from Batch K1, plus 1 retired helper) |
+| Remaining to migrate | **11** |
+| — trivial | 6 |
 | — medium | 2 |
-| — complex | 4 (or 6 counting full-file rewrites) |
+| — complex | 3 (or 5 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -555,8 +555,20 @@ J3 (complex, separate commit) — **LANDED 2026-05-27**:
 
 ### Batch K — closure literal pass (11 sites + helper, 2–3 commits)
 
-K1 — precursor helper + auto-collapse:
-- [ ] `cc__scan_skip_string_comment` helper migration; verify `cc__find_*_arrow_skipping_inert`, `cc__amp_is_const_param_read`, `cc__find_mutation_in_body`, recovery scan all collapse / simplify automatically.
+K1 — precursor helper + auto-collapse — **LANDED 2026-05-27**:
+- [x] **Deleted `cc__scan_skip_string_comment` helper** (~35 LOC) plus both forward decls.  Was a stateless poor-man's CCInertScan that only handled strings/chars/comments (no `#line`, no pp directives, no stateful multi-line tracking).
+- [x] `cc__find_next_arrow_skipping_inert` — drop-in replacement; the defensive `if (i == before) i++;` guard no longer needed (CCInertScan always advances)
+- [x] `cc__find_prev_arrow_skipping_inert` — drop-in replacement; same defensive guard removed
+- [x] `cc__addr_of_is_readonly_call` arg-index inner loop — `for` → `while` with `lim = min(amp_off, n)` upfront
+- [x] `cc__find_mutation_in_body` — `for` → `while` with body-`continue;` audit: 6 early-skip continues each got `{ i++; continue; }`; final `i = j - 1;` (relied on for's `++i`) → `i = j;`
+- [x] Recovery scan in main file (~2880) — drop-in replacement; defensive guard removed
+
+**Actual diff**: +55 / −91 (net **−36 LOC**).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **Defensive `if (i == before) i++;` guards become dead code**.  Old `cc__scan_skip_string_comment` could theoretically return 1 without advancing in pathological cases (e.g. lone `'` at EOF — actually it does advance, but the guards were preemptively defensive).  CCInertScan's contract guarantees `*pos` strictly advances when it returns 1.  Pattern: **migrating away from old per-pass scan helpers lets us drop defensive infinite-loop guards.**
+- **Body-`continue;` audit was the hard part of K1**: `cc__find_mutation_in_body` had 6 early-skip continues (`!is_ident_start`, `is_ident_char`, bounds, `strncmp`, post-ident-char, struct field access).  Each needs `{ i++; continue; }`.  Skipped the body-continue trap (Batch F1) with no test failures because the pre-migration audit caught all 6.
+- **K1 cost ≈ 5 sites of effort, K2+K3 cost not yet reduced** — the "auto-collapse" framing in the audit was optimistic.  None of the K2/K3 sites used `cc__scan_skip_string_comment`; they have their own inline state machines that still need migrating.  Net effect of K1: −36 LOC and one shared helper retired, but K2/K3 work is unchanged.
 
 K2 — trivial bulk (7 sites):
 - [ ] 4× anon in `cc__maybe_record_decl_stmt`
