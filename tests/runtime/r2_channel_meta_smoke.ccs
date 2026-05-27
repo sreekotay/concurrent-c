@@ -1,0 +1,98 @@
+// Smoke: R2 — channel deadlock diagnostic metadata.
+//
+// What it exercises
+// -----------------
+// The channel-pair lowering in `pass_channel_syntax.c` rewrites
+// `cc_channel_pair(&tx, &rx);` to a do/while block that:
+//   1. calls `cc_channel_pair_create(...)`, then
+//   2. stamps `cc_chan_set_diag_meta(__cc_ch, "tx,rx", __FILE__, __LINE__)`
+//      on the returned channel.
+// The expression-form lowering does the same via a statement expression.
+//
+// `cc_rt_diag_channel_meta(ch, &name, &file, &line)` then returns the
+// stamped values; this is also what `sched_v2_check_deadlock` uses to
+// surface the user-facing channel name in its dump banner.
+//
+// What we verify (without actually deadlocking)
+// ---------------------------------------------
+//   - Each channel pair carries the literal "tx,rx" (or the handle
+//     names the user actually declared).
+//   - The file substring matches this test file.
+//   - The line is > 0 (the creation-site line; not pinned to an exact
+//     number so the test stays formatting-tolerant).
+//   - A channel created via the raw C API (`cc_chan_create`) reports
+//     "no meta" — the API truthfully says it doesn't know.
+//
+// Why not trigger a real deadlock?
+// --------------------------------
+// `sched_v2_check_deadlock` fires on a sysmon tick (~1s persist) and
+// _exits process 124 unless `CC_DEADLOCK_ABORT=0`.  Both behaviors are
+// awkward in a stdout smoke; the metadata is the user-visible payload
+// and verifying it round-trips is enough.  Manual verification of the
+// deadlock banner is covered by running existing deadlock smokes with
+// channels created via the lowered path.
+
+#include <stdio.h>
+#include <string.h>
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+int main(void) {
+    int pass = 1;
+
+    {
+        /* Lowered path: pass_channel_syntax stamps "tx,rx" + this file. */
+        int[~4 >] tx;
+        int[~4 <] rx;
+        cc_channel_pair(&tx, &rx);
+
+        const char* name = NULL;
+        const char* file = NULL;
+        int line = 0;
+        int ok = cc_rt_diag_channel_meta(tx.raw, &name, &file, &line);
+
+        int name_ok = (ok && name && strcmp(name, "tx,rx") == 0) ? 1 : 0;
+        int file_ok = (ok && file && strstr(file, "r2_channel_meta_smoke") != NULL) ? 1 : 0;
+        int line_ok = (ok && line > 0) ? 1 : 0;
+        printf("pair ok=%d name_match=%d file_match=%d line_gt0=%d\n",
+               ok, name_ok, file_ok, line_ok);
+        if (!name_ok || !file_ok || !line_ok) pass = 0;
+
+        /* tx and rx share the same CCChan*; reading via rx must yield
+         * the same metadata (the stamp is on the channel, not the
+         * handle).  This guards against future divergence if anyone
+         * adds per-handle metadata layers. */
+        const char* rname = NULL;
+        const char* rfile = NULL;
+        int rline = 0;
+        int rok = cc_rt_diag_channel_meta(rx.raw, &rname, &rfile, &rline);
+        int rx_match = (rok && rname && strcmp(rname, "tx,rx") == 0 && rfile == file && rline == line) ? 1 : 0;
+        printf("pair rx_view_matches=%d\n", rx_match);
+        if (!rx_match) pass = 0;
+
+        cc_chan_free(tx.raw);
+    }
+
+    {
+        /* Raw C-API channel: no lowering path runs, so no meta should
+         * be stamped.  The API must report "no info" truthfully (not a
+         * stale value from the previous channel above). */
+        CCChan* raw = cc_chan_create(4);
+        const char* name = NULL;
+        const char* file = NULL;
+        int line = 0;
+        int ok = cc_rt_diag_channel_meta(raw, &name, &file, &line);
+        printf("raw_ok=%d name=%s\n", ok, name ? name : "(null)");
+        if (ok != 0) pass = 0;
+        cc_chan_free(raw);
+    }
+
+    {
+        /* NULL channel: API must not crash and must return 0. */
+        int ok = cc_rt_diag_channel_meta(NULL, NULL, NULL, NULL);
+        printf("null_ok=%d\n", ok);
+        if (ok != 0) pass = 0;
+    }
+
+    return pass ? 0 : 1;
+}

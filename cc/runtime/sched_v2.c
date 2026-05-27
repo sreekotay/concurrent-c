@@ -2374,6 +2374,11 @@ void sched_v2_debug_dump_state(const char* prefix) {
 
 int cc__chan_debug_is_open(void* ch_obj);
 void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
+/* R2 — forward decl for the channel diag-meta reader (defined in
+ * `channel.c` where the `CCChan` layout is visible). */
+struct CCChan;
+int cc_chan_get_diag_meta(const struct CCChan* ch, const char** out_name,
+                          const char** out_file, int* out_line);
 
 static _Atomic uint64_t g_v2_deadlock_first_seen = 0;
 static _Atomic int g_v2_deadlock_reported = 0;
@@ -2469,6 +2474,40 @@ static void sched_v2_dump_parked_fibers_for_verdict(void) {
             if (is_parked && !skipped && f->park_obj && f->park_reason &&
                 strncmp(f->park_reason, "chan_", 5) == 0) {
                 cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
+                /* R2 — when the park is on a channel, surface its
+                 * user-facing name + creation-site source location so
+                 * the deadlock dump points back at the user's `tx,rx`
+                 * (or owned single-handle) declaration instead of just
+                 * a raw `CCChan*`.  Channels created outside the
+                 * lowered path (e.g. direct `cc_chan_create` from C
+                 * tests) have no meta — silently skipped. */
+                const char* chan_name = NULL;
+                const char* chan_file = NULL;
+                int chan_line = 0;
+                if (cc_chan_get_diag_meta((const struct CCChan*)f->park_obj,
+                                          &chan_name, &chan_file, &chan_line)) {
+                    fprintf(stderr,
+                            "    chan user: name=%s site=%s:%d\n",
+                            chan_name ? chan_name : "?",
+                            chan_file ? chan_file : "?",
+                            chan_line);
+                }
+            }
+            if (is_parked && !skipped) {
+                /* R1 — surface the per-fiber async backtrace name in the
+                 * deadlock dump too, so the reader sees both endpoints:
+                 * "this task (`add_value` at file:line) is parked on
+                 * channel `tx,rx` (created at file:line)". */
+                const char* async_name = NULL;
+                const char* async_file = NULL;
+                int async_line = 0;
+                if (sched_v2_fiber_get_diag_name(f, &async_name, &async_file, &async_line)) {
+                    fprintf(stderr,
+                            "    task user: name=%s site=%s:%d\n",
+                            async_name ? async_name : "?",
+                            async_file ? async_file : "?",
+                            async_line);
+                }
             }
             shown++;
         }

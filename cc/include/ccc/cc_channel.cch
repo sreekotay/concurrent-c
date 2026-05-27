@@ -280,6 +280,26 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);
 void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig);
 
+/* R2 — record/read channel diagnostic metadata.  The setter is called
+ * once by the spawn-site lowering (`pass_channel_syntax.c`) right after
+ * the channel is created; both the deadlock detector and
+ * `cc_rt_diag_channel_meta` read it later.  `name` is typically the
+ * `"tx,rx"` handle pair or the single-handle name; `file`/`line` are
+ * the creation-site source location.  All strings are caller-owned and
+ * must outlive the channel (C string literals in lowered output
+ * trivially satisfy that). */
+void cc_chan_set_diag_meta(CCChan* ch, const char* name,
+                           const char* file, int line);
+int  cc_chan_get_diag_meta(const CCChan* ch, const char** out_name,
+                           const char** out_file, int* out_line);
+/* R2 — user-facing channel meta query.  Same semantics as
+ * `cc_chan_get_diag_meta`; exposed via `cc_rt_diag_*` so user code can
+ * follow a consistent diagnostic API surface.  Returns 1 if any field
+ * was populated, 0 for NULL ch or for channels created outside the
+ * lowered path (raw `cc_chan_create`).  Any out_* pointer may be NULL. */
+int cc_rt_diag_channel_meta(const CCChan* ch, const char** out_name,
+                             const char** out_file, int* out_line);
+
 // Timed send/recv honoring an absolute deadline.
 int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const struct timespec* abs_deadline);
 int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const struct timespec* abs_deadline);
@@ -372,6 +392,34 @@ static inline CCChan* cc_channel_pair_create_returning(size_t capacity,
                                                        CCChanRx* out_rx) {
     return cc_channel_pair_create(capacity, mode, allow_send_take, elem_size,
                                   is_sync, topology, is_ordered, out_tx, out_rx);
+}
+/* R2 — single-call create + diag-meta stamp.
+ *
+ * The spawn-site lowering in `pass_channel_syntax.c` emits this helper
+ * (instead of a statement-expression wrapping `cc_channel_pair_create`
+ * + `cc_chan_set_diag_meta`) for two reasons:
+ *   1. Inside `@async` bodies, the state-machine frame promotion
+ *      mangles locals declared inside `({ ... })` (e.g. `CCChan* __cc_ch`
+ *      gets rewritten to `CCChan* __f->__cc_ch`, which is invalid C).
+ *   2. A single inline function generates the same code paths as before
+ *      while keeping the lowering's emit small and the lowered C
+ *      hand-crafted-looking (one call, no `do { ... } while(0)` block). */
+static inline CCChan* cc_channel_pair_create_named(size_t capacity,
+                                                    CCChanMode mode,
+                                                    bool allow_send_take,
+                                                    size_t elem_size,
+                                                    bool is_sync,
+                                                    int topology,
+                                                    bool is_ordered,
+                                                    CCChanTx* out_tx,
+                                                    CCChanRx* out_rx,
+                                                    const char* diag_name,
+                                                    const char* diag_file,
+                                                    int diag_line) {
+    CCChan* ch = cc_channel_pair_create(capacity, mode, allow_send_take, elem_size,
+                                        is_sync, topology, is_ordered, out_tx, out_rx);
+    cc_chan_set_diag_meta(ch, diag_name, diag_file, diag_line);
+    return ch;
 }
 static inline int cc_channel_is_ordered(CCChan* ch) { return cc_chan_is_ordered(ch); }
 static inline void cc_channel_raw_close(CCChan* ch) { cc_chan_close(ch); }
