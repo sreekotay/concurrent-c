@@ -1,8 +1,17 @@
 # Compiler cleanup status (M0–M5.5)
 
 **Last updated:** 2026-05-27  
-**Smoke suite:** 455 tests passing under the new default (pre-expand on)
+**Smoke suite:** 458 tests passing under the new default (pre-expand on)
 AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
+
+### Recent (this session — 2026-05-27)
+
+- `9d37916` **nursery: fix lost-wakeup race in worker-frees alive_count barrier.** Added `atomic_thread_fence(memory_order_seq_cst)` on both sides of the Dekker pair in `cc_nursery_wait` and `cc_nursery_notify_child_done`; was hanging `stress/nested_nursery_deep.ccs` on ARM64. New regression smoke: `tests/nursery_worker_frees_race_stress_smoke.ccs` (4000-iteration shallow nursery hammer).
+- `8c80304` **nursery: document why notify_child_done's wake is prev==1-conditional.** Considered moving `wake_primitive_wake_all` out of the `if (prev == 1)` block as "belt-and-suspenders" but on inspection it adds N futex syscalls per N-child nursery for zero correctness benefit (the gen-counter handles intermediate decrements correctly). Doc-only commit so the next reader doesn't propose the same change.
+- `df28528` **codegen: hand-crafted-C polish for defer expansion + closure decls.** `cc__normalize_defer_stmt` wraps multi-stmt defer bodies as `{ ... }` with breathing space; brace-exit defer-flush snapshots and restores the trailing-`}` indent so the user's brace lands at its original column. Closure-decl groups in `pass_closure_literal_ast.c` get a blank line between adjacent closures' proto blocks.
+- `7b9723b` **preprocess: L2 prelude rewriter — convert standard-C idioms TCC rejects.** New `cc/src/preprocess/cc_l2_rewriter.{h,c}` rewrites `offsetof(T,F)` → `__builtin_offsetof(T,F)` and `__attribute__((constructor(N)))` → `__attribute__((constructor))` (priority preserved through to host-compiler emit). Wired into both initial-parse and reparse paths. Two new smokes; adding a new idiom is a single function.
+- `75a773a` **preprocess: closure-ID markers — foundation pass.** New `cc/src/preprocess/cc_closure_markers.{h,c}` injects `/*CC_CLO:N*/` comments before every closure literal in source order. Markers ride along in `root->parse_buffer` as inert comments. **Consumer migration (d.2) is documented but not yet implemented** — the obvious dual-injection-into-src_ufcs approach broke 8 unrelated smokes due to byte-position-sensitive text passes; see the header for the three viable plumbing options.
+- `10db87e` **codegen: hand-crafted-C polish for return-path + function-cleanup epilogue.** Plain-`return X;` defer flush now detects mid-line vs multi-line context and emits accordingly (inline-spaced on one line, or indent-aligned across multiple lines). Function-cleanup epilogue (`__cc_cleanup_N:` label path) keeps the label at col 0 but indents the defer body + trailing `return`s to the function-body indent.
 
 This is the single source of truth for the compiler cleanup workstream (M0–M5.5). See also [PIPELINE.md](../src/visitor/PIPELINE.md), [PASS_INVENTORY.md](../src/visitor/PASS_INVENTORY.md), [DIAG_AUDIT.md](../src/diag/DIAG_AUDIT.md), [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md).
 
