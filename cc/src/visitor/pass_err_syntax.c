@@ -893,6 +893,14 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
     char qch = 0;
     int in_line_comment = 0;
     int in_block_comment = 0;
+    /* `in_pp` covers preprocessor-directive bodies that the visitor's
+     * preprocess chain leaves verbatim in the working buffer.  Without
+     * it, a benign `#define UNUSED_ERR_TARGET(lhs, e) lhs =<! e @err`
+     * would have its `@err` keyword scanned as if it were real source
+     * code and report "expected ';' after @err" on the #define line.
+     * Regression guard: `tests/inert_pp_directive_tokens_smoke.ccs`. */
+    int in_pp = 0;
+    int at_line_start = 1;
 
     char* out = NULL;
     size_t ol = 0, oc = 0;
@@ -906,9 +914,22 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
         char ch = in_src[i];
         if (ch == '\n') line_no++;
 
+        if (in_pp) {
+            cc__append_n(&out, &ol, &oc, &ch, 1);
+            if (ch == '\n') {
+                size_t k = i;
+                while (k > 0 && (in_src[k - 1] == ' ' || in_src[k - 1] == '\t' || in_src[k - 1] == '\r')) k--;
+                if (k == 0 || in_src[k - 1] != '\\') {
+                    in_pp = 0;
+                    at_line_start = 1;
+                }
+            }
+            continue;
+        }
+
         if (in_line_comment) {
             cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\n') in_line_comment = 0;
+            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
             continue;
         }
         if (in_block_comment) {
@@ -930,6 +951,14 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             if (ch == qch) in_str = 0;
             continue;
         }
+        if (at_line_start && ch == '#') {
+            cc__append_n(&out, &ol, &oc, &ch, 1);
+            in_pp = 1;
+            at_line_start = 0;
+            continue;
+        }
+        if (ch == '\n') { at_line_start = 1; }
+        else if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
         if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '/') {
             cc__append_n(&out, &ol, &oc, &in_src[i], 2);
             i++;

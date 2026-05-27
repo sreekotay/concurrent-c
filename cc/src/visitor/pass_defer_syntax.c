@@ -739,6 +739,17 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
     char qch = 0;
     int in_line_comment = 0;
     int in_block_comment = 0;
+    /* `in_pp` covers preprocessor-directive bodies that the visitor's
+     * preprocess chain leaves verbatim in the working buffer.  Without
+     * it, a benign `#define UNUSED_DEFER(stmt) @defer stmt` would be
+     * mis-scanned, the `@defer` keyword inside the macro body would be
+     * treated as a real statement, and the user would see a confusing
+     * "malformed @defer statement" error on the #define line.  See
+     * `tests/inert_pp_directive_tokens_smoke.ccs` for the regression
+     * guard.  This mirrors the `in_pp` handling in
+     * `pass_channel_syntax.c` (M7.B reference implementation). */
+    int in_pp = 0;
+    int at_line_start = 1;
 
     int changed = 0;
     CCDeferFunctionScope fn_scope;
@@ -749,9 +760,22 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
 
         if (ch == '\n') line_no++;
 
+        if (in_pp) {
+            cc__append_n(&out, &outl, &outc, &ch, 1);
+            if (ch == '\n') {
+                size_t k = i;
+                while (k > 0 && (in_src[k - 1] == ' ' || in_src[k - 1] == '\t' || in_src[k - 1] == '\r')) k--;
+                if (k == 0 || in_src[k - 1] != '\\') {
+                    in_pp = 0;
+                    at_line_start = 1;
+                }
+            }
+            continue;
+        }
+
         if (in_line_comment) {
             cc__append_n(&out, &outl, &outc, &ch, 1);
-            if (ch == '\n') in_line_comment = 0;
+            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
             continue;
         }
         if (in_block_comment) {
@@ -773,6 +797,15 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             if (ch == qch) in_str = 0;
             continue;
         }
+
+        if (at_line_start && ch == '#') {
+            cc__append_n(&out, &outl, &outc, &ch, 1);
+            in_pp = 1;
+            at_line_start = 0;
+            continue;
+        }
+        if (ch == '\n') { at_line_start = 1; }
+        else if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
 
         if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '/') {
             cc__append_n(&out, &outl, &outc, &in_src[i], 2);

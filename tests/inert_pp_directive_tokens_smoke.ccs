@@ -1,0 +1,70 @@
+/* inert_pp_directive_tokens_smoke.ccs - regression guard for the
+ * pre-expand / `CCScannerState` `in_pp` handling.  CC text passes must
+ * skip ALL preprocessor-directive lines (so `#define` bodies,
+ * `#if 0` blocks, and `#line` markers don't get scanned as if they
+ * were normal code containing CC tokens).
+ *
+ * This is the M7.B regression guard.  Before M7.B, `#define CHAN(T)
+ * T[~4 >]` would have its body rewritten by the chan-bracket scanner
+ * mid-define, breaking macro CHAN usage.  Now `CCScannerState` tracks
+ * `in_pp` and the 13 phase-1 passes that share `cc_scanner_skip_non_code`
+ * leave preprocessor directive bodies alone.
+ *
+ * The complementary `inert_*_tokens_smoke.ccs` files cover comments and
+ * string literals; this one covers preprocessor directives. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+
+static void plain(void) {}
+
+/* CC tokens inside `#define` bodies.  These macros are never invoked
+ * — they're here purely so the lexical patterns sit in the source
+ * file and visit scanners must NOT rewrite them. */
+#define UNUSED_CLOSURE_NOCAP        () => { plain(); }
+#define UNUSED_CLOSURE_CAP(x)       () => [x] { plain(); }
+#define UNUSED_CHAN_TX_BRACKETS     [~4 >]
+#define UNUSED_CHAN_RX_BRACKETS     [~4 <]
+#define UNUSED_NURSERY_INIT         @create(NULL) @destroy
+#define UNUSED_DEFER(stmt)          @defer stmt
+#define UNUSED_UNWRAP(expr)         expr !>
+#define UNUSED_ERR_TARGET(lhs, e)   lhs =<! e @err
+#define UNUSED_ERR_HANDLER          @errhandler(CCError e) { (void)e; }
+#define UNUSED_ASYNC_FN             @async int f(void) { return 0; }
+#define UNUSED_AWAIT_CALL(e)        @await e
+#define UNUSED_UFCS_CALL(o, m, a)   o->m(a)
+#define UNUSED_GENERIC_DECL         CCVec::[int]
+#define UNUSED_GENERIC_NEW          cc_vec_new::[int]
+
+/* CC tokens inside `#if 0` block.  CPP must drop the whole block
+ * before any text pass sees it. */
+#if 0
+int main_disabled(void) {
+    CCNursery* n = @create(NULL) @destroy;
+    n->spawnhybrid(() => { plain(); });
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    (void)ch;
+    return 0;
+}
+#endif
+
+/* CC tokens straddled across line continuations: a `#define` whose
+ * body uses `\` to extend onto the next line still has its full body
+ * treated as inert by the scanner. */
+#define MULTI_LINE_CLOSURE() \
+    () => { \
+        plain(); \
+    }
+
+int main(void) {
+    /* Real code path — these MUST be rewritten despite the same syntax
+     * appearing in #define bodies above. */
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 1;
+        n->spawnhybrid(() => { plain(); });
+    }
+    return 0;
+}

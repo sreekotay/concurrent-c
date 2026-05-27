@@ -82,9 +82,11 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    typedefs).  Fixes the block-scope `static` failure in
    `examples/recipe_tcp_echo.ccs`.  Smoke clean in both modes.
    **Remaining layers** (separate bugs, NOT addressed by this refactor):
-   - `recipe_tcp_echo.ccs` layer 2: captured `sock` is not unpacked from
-     `__env` — lives in capture-emission code in
-     `pass_closure_literal_ast.c`.
+   - ~~`recipe_tcp_echo.ccs` layer 2: captured `sock` is not unpacked from
+     `__env`~~ **FIXED (May 2026)** — was downstream fallout of layer 1
+     plus the `=>`-in-comment scanner trap, not an actual capture-
+     emission bug.  Verified end-to-end: `recipe_tcp_echo --test`
+     completes the client/server round-trip cleanly.
    - ~~`syscall_kidnap.ccs`: capture-variant closure inside a `for` loop
      is not detected at all~~ **FIXED (May 2026)** — root cause was a
      class of bug: byte-level `=>` scanning loops in the closure
