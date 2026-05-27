@@ -104,6 +104,11 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
             continue;
         }
         char c = src[i];
+        /* Code-path newline: `cc_inert_scan_step` returns 0 for `\n`
+         * outside any inert region and leaves `i` pointing AT the newline,
+         * so line/col tracking has to happen here too — otherwise error
+         * messages report a wildly wrong line on multi-line input. */
+        if (c == '\n') { line++; col = 1; i++; continue; }
 
         if (c == '[') {
             size_t j = i + 1;
