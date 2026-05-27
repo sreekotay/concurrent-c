@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (2 / 13 batches landed).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (3 / 13 batches landed).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -45,23 +45,31 @@ The mechanical migration:
 1. `#include "util/text_scan.h"` (or `#include "../util/text_scan.h"` depending on path).
 2. Replace inline state vars (`in_lc`/`in_bc`/`in_str`/`qch`/`in_pp`/...) with one `CCInertScan scan; cc_inert_scan_init(&scan, ctx->input_path);`.
 3. At loop top: `if (cc_inert_scan_step(&scan, src, n, &i)) { /* rewrite: copy verbatim; find-only: continue */; continue; }`.
-4. Optional: `if (!scan.in_user_file) { /* skip CC-token match */; i++; continue; }` — a no-op today (always 1) until Phase 4 flips.
+4. Convert `for (i=...; i<n; i++)` → `while (i < n)` with explicit `i++`s where the original implicitly advanced.  `cc_inert_scan_step` advances `i` by 1 or 2+ bytes; a `for`-loop's post-increment would double-advance.
+5. Optional: `if (!scan.in_user_file) { /* skip CC-token match */; i++; continue; }` — a no-op today (always 1) until Phase 4 flips.
 
-Today: zero behavior change.  After Phase 4: scanners ignore inert content AND header-origin tokens.
+**Watch-outs:**
+
+- **`at_line_start = 0` after init** when the input is a mid-buffer slice rather than a full file (Batch A surprise — `cc__line_has_await_keyword` quirk).  A leading `#` in a slice is code, not a pp directive.
+- **Newline tracking in inert regions** — for rewrites that maintain `last_line_off`, `line`, or `col`, sweep the consumed `[before, i)` range after each `cc_inert_scan_step` that returned 1 (`for (size_t k = before; k < i; k++) if (src[k] == '\n') ...`).
+- **Code-path newline** — `cc_inert_scan_step` returns 0 for `\n` outside any inert region and leaves `i` pointing AT the newline.  Any rewrite that tracks `line` or `col` must also handle `if (c == '\n') { line++; col = 1; i++; continue; }` on the code-byte path (Batch C surprise — `m0_5_diag_channel_pair_origin_fail` regression).
+- **Inner sub-scanners** in bounded regions (paren groups, expression tails) — usually str/chr-only "no comments" scanners.  Batch B left these inline deliberately; reasonable default.  Migrate if a regression surfaces.
+
+Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ignore inert content AND header-origin tokens.  One incidental fix landed already: error-message column off-by-one in `cc__rewrite_channel_pair_calls_text` (test expectations updated in the same commit).
 
 ---
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch B).
+Updated 2026-05-27 (post Batch C).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **18** (+7 from Batch B) |
-| Remaining to migrate | **84** |
-| — trivial | 50 |
-| — medium | 29 |
+| Already on `CCInertScan` | **25** (+7 from Batch C) |
+| Remaining to migrate | **77** |
+| — trivial | 45 |
+| — medium | 27 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -72,17 +80,17 @@ Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_
 
 State-var codes: `lc` = in_line_comment, `bc` = in_block_comment, `str` = in_str, `chr` = in_chr, `qch` = quote char, `pp` = in_pp, `ppc` = pp_continued, `als` = at_line_start.
 
-### `pass_channel_syntax.c` (2215 LOC, 7 sites, no `text_scan.h`)
+### `pass_channel_syntax.c` (2215 LOC, 7 sites, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__record_chan_handle_alias_decls` (~152) | find-only | {lc,bc,str,chr} | ~16 | trivial | Collect over full TU |
-| `cc__scan_matching_brace` (~401) | find-only | {lc,bc,str,chr} | ~24 | trivial | Also `brace_depth` |
-| `cc__rewrite_channel_pair_calls_text` (~944) | rewrite | {lc,bc,str,chr} | ~20 | trivial | Tracks line/col |
-| `cc__rewrite_chan_handle_types_text` (~1295) | rewrite | {lc,bc,str,chr,pp,ppc,als} | ~55 | medium | Full pp-trio; M7.B reference for defer/err |
-| `cc__find_matching_delim` (~1715) | find-only | {lc,bc,str,chr} | ~18 | trivial | Also `depth` |
-| `cc__find_arrow` (~1737) | find-only | {lc,bc,str,chr} | ~16 | trivial | Duplicate of closure arrow-finder |
-| `cc__extract_block_tail_expr` (~1787) | find-only | {lc,bc,str,chr} | ~25 | medium | Interleaved with par/sq/br |
+| `cc__record_chan_handle_alias_decls` (~152) | find-only | {lc,bc,str,chr} | ~16 | trivial | **✓ Migrated (Batch C)** |
+| `cc__scan_matching_brace` (~401) | find-only | {lc,bc,str,chr} | ~24 | trivial | **✓ Migrated (Batch C)** — `depth` stays alongside |
+| `cc__rewrite_channel_pair_calls_text` (~944) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch C)** — `line`/`col` preserved (inert sweep + code-path `\n` handler); incidentally fixes a +1 column off-by-one (anchored test `m0_5_diag_channel_pair_origin_fail.compile_err` updated 21:19 → 21:18) |
+| `cc__rewrite_chan_handle_types_text` (~1295) | rewrite | {lc,bc,str,chr,pp,ppc,als} | ~55 | medium | **✓ Migrated (Batch C)** — `CCInertScan` does the full pp trio natively, so this collapses to the same simple shape as the other rewrites |
+| `cc__find_matching_delim` (~1715) | find-only | {lc,bc,str,chr} | ~18 | trivial | **✓ Migrated (Batch C)** — `depth` stays alongside |
+| `cc__find_arrow` (~1737) | find-only | {lc,bc,str,chr} | ~16 | trivial | **✓ Migrated (Batch C)** |
+| `cc__extract_block_tail_expr` (~1787) | find-only | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch C)** — `par`/`sq`/`br` stay alongside; for-loop replaced with `while` to accommodate step's variable advance |
 
 ### `pass_closure_literal_ast.c` (3875 LOC, 12 sites, no `text_scan.h`)
 
@@ -323,17 +331,26 @@ Ordering principle: **easy wins first to build muscle memory, then per-area swee
 
 **Pattern emerging**: most "rewrite" sites have an **outer** scanner (now migrated) plus one or two **inner** scanners that walk a bounded region (a paren group, an expression-tail) using str/chr only.  We're deliberately leaving the inner scanners inline this batch because (a) they're correct enough for their bounded scope and (b) migrating them is a deeper change that adds little until Phase 4.  Recorded for future batches: if a regression ever surfaces in `!>(...)` with a comment inside, this is where to look.
 
-### Batch C — channel-syntax sweep (7 sites, 1 commit — possibly 2 if `_chan_handle_types_text` is hairy)
+### Batch C — channel-syntax sweep (7 sites, 1 commit) — **LANDED 2026-05-27**
 
 > Goal: file we just edited for R2 — context is fresh.
 
-- [ ] `pass_channel_syntax.c::cc__record_chan_handle_alias_decls`
-- [ ] `pass_channel_syntax.c::cc__scan_matching_brace` (`brace_depth` stays alongside)
-- [ ] `pass_channel_syntax.c::cc__rewrite_channel_pair_calls_text`
-- [ ] `pass_channel_syntax.c::cc__find_matching_delim` (`depth` stays alongside)
-- [ ] `pass_channel_syntax.c::cc__find_arrow`
-- [ ] `pass_channel_syntax.c::cc__extract_block_tail_expr` (medium — par/sq/br stay alongside)
-- [ ] `pass_channel_syntax.c::cc__rewrite_chan_handle_types_text` (medium — already has full pp trio, so adopting `CCInertScan` should be a drop-in win)
+- [x] `pass_channel_syntax.c::cc__record_chan_handle_alias_decls`
+- [x] `pass_channel_syntax.c::cc__scan_matching_brace`
+- [x] `pass_channel_syntax.c::cc__rewrite_channel_pair_calls_text`
+- [x] `pass_channel_syntax.c::cc__find_matching_delim`
+- [x] `pass_channel_syntax.c::cc__find_arrow`
+- [x] `pass_channel_syntax.c::cc__extract_block_tail_expr`
+- [x] `pass_channel_syntax.c::cc__rewrite_chan_handle_types_text` (drop-in win — `CCInertScan`'s native pp trio replaces the hand-rolled one, the comment about M7.B parity now says "see `text_scan.h`")
+
+**Actual diff**: 67 / −124 (net **−57 LOC**).  Smoke 461/461 both modes.  Channel lowering inspected on `r2_channel_meta_smoke.ccs` — still produces clean `cc_channel_pair_create_named(...)` with `"tx,rx"`/`__FILE__`/`__LINE__` metadata.
+
+**Surprises:**
+- **Code-path `\n` bug**: latent in Batch B too.  `cc_inert_scan_step` returns 0 for `\n` outside any inert region and leaves `i` pointing AT the newline.  My initial Batch C migration of `cc__rewrite_channel_pair_calls_text` lost line tracking for code-line newlines and reported the `m0_5_diag_channel_pair_origin_fail.ccs` error at line 16 (prelude) instead of line 21 (user source).  Fix: add `if (c == '\n') { line++; col = 1; i++; continue; }` after the inert-step block.  Retroactively applied to `cc__rewrite_slice_types_text` (Batch B); no test there ever triggered the error path so it had been latent.
+- **Off-by-one column** in original pre-migration code: pre-state `if (c == '\n') { line++; col = 1; }` followed by `i++; col++` overshot by 1 (reported the column of the byte AFTER the token, not the token itself).  My migration reports the correct column.  Test `m0_5_diag_channel_pair_origin_fail.compile_err` was anchored on the buggy 21:19 — updated to the now-correct 21:18 in the same commit.
+- **`for` → `while`** loop conversion for two find-only sites (`cc__find_matching_delim`, `cc__extract_block_tail_expr`).  `cc_inert_scan_step` advances `i` by 1 or 2 bytes per call, which a `for (i=...; i<end; i++)` would double-advance.  Mechanical change but worth noting for batch authors who reach for `for` first.
+
+**Pattern that should now go into the migration template**: any rewrite that tracks `line`/`col` needs BOTH the inert-region sweep AND a code-path `\n` handler.  This is recurring — at least 3 sites so far (`cc__rewrite_slice_types_text`, `cc__rewrite_channel_pair_calls_text`, `cc__rewrite_chan_handle_types_text`) and probably more in batches H/I/J.
 
 ### Batch D — create + nursery + match (13 sites, 2 commits)
 
