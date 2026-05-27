@@ -1218,19 +1218,36 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 char rx_arg[256];
                 snprintf(rx_arg, sizeof(rx_arg), "&%s", rx_name);
 
-                char repl[1024];
+                /* R2 — the "tx,rx" handle-pair string is the user-facing
+                 * channel name we want surfaced in deadlock dumps and via
+                 * `cc_rt_diag_channel_meta`.  Truncation guard keeps the
+                 * literal below 96 chars even for very long handle names. */
+                char diag_name[96];
+                {
+                    int dn = snprintf(diag_name, sizeof(diag_name), "%s,%s", tx_name, rx_name);
+                    if (dn < 0 || (size_t)dn >= sizeof(diag_name)) {
+                        snprintf(diag_name, sizeof(diag_name), "<chan>");
+                    }
+                }
+
+                char repl[1280];
                 size_t consumed;
                 if (is_expression) {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
-                    /* Expression form: emit the call as a pure expression (no
-                     * trailing `;`) and consume only through the closing `)`
-                     * of cc_channel_pair(...).  Whatever follows (`;`, `!>`,
-                     * `?>`, `.method(...)`, etc.) stays untouched. */
+                    /* Expression form: emit a single call to the inline
+                     * helper `cc_channel_pair_create_named` (defined in
+                     * `cc_channel.cch`) which does both the create and
+                     * the diag-meta stamp.  Using a statement expression
+                     * here would collide with the `@async` state-machine
+                     * frame promotion (locals inside `({ ... })` get
+                     * rewritten to `__f->`-prefixed field accesses, which
+                     * is invalid C for declarations). */
                     snprintf(repl, sizeof(repl),
-                             "/* cc_channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s)",
+                             "/* cc_channel_pair */ cc_channel_pair_create_named(%s, %s, %d, %s, %d, %s, %d, &%s, %s, \"%s\", __FILE__, __LINE__)",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg,
+                             diag_name);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                     /* `p` points one past the closing `)`. */
                     consumed = (size_t)(p - (src + i));
@@ -1239,11 +1256,19 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     col += (int)consumed;
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
+                    /* Statement form keeps the existing do/while shape
+                     * (so the NULL-on-OOM `abort()` stays adjacent to
+                     * the create call) but uses the `_named` helper so
+                     * the diag-meta stamp is folded into the create —
+                     * one call instead of two for cleaner lowered C. */
                     snprintf(repl, sizeof(repl),
-                             "/* cc_channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
-                             "if (!__cc_ch) { fprintf(stderr, \"CC: cc_channel_pair failed\\n\"); abort(); } } while(0);",
+                             "/* cc_channel_pair */ do { "
+                             "CCChan* __cc_ch = cc_channel_pair_create_named(%s, %s, %d, %s, %d, %s, %d, &%s, %s, \"%s\", __FILE__, __LINE__); "
+                             "if (!__cc_ch) { fprintf(stderr, \"CC: cc_channel_pair failed\\n\"); abort(); } "
+                             "} while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg,
+                             diag_name);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                     /* Statement form: consume through the trailing `;` (at
                      * `after`) to swallow it, since the replacement already
@@ -1548,12 +1573,17 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                         cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
                     }
                     
-                    /* Emit channel creation */
+                    /* Emit channel creation followed by R2 diag-meta stamp.
+                     * The trailing `;` from the user's source closes the
+                     * stamp call (we leave `last_emit = semi` so it gets
+                     * re-emitted verbatim). */
                     snprintf(buf, sizeof(buf),
                              "CCChan* %s = cc_chan_create_owned(%s, sizeof(%s), "
-                             "__cc_owned_%d_create, __cc_owned_%d_destroy, __cc_owned_%d_reset)",
+                             "__cc_owned_%d_create, __cc_owned_%d_destroy, __cc_owned_%d_reset); "
+                             "cc_chan_set_diag_meta(%s, \"%s\", __FILE__, __LINE__)",
                              var_name, cap_expr, elem_ty,
-                             owned_id, owned_id, owned_id);
+                             owned_id, owned_id, owned_id,
+                             var_name, var_name);
                     cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
                     
                     last_emit = semi;  /* Leave the ; to be emitted */

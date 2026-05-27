@@ -108,3 +108,36 @@ that fiber can answer "what async task am I?" via
   bodies. A future iteration could move the decoration into the prelude
   declaration once the `.cch` → `.h` lowering preserves CC sigils for
   pass_autoblock to consume.
+
+---
+
+## Runtime R2 — channel deadlock diagnostic text (landed 2026-05-27)
+
+Every channel created via the lowered `cc_channel_pair(&tx, &rx)` path
+carries the user-facing handle-pair name (`"tx,rx"`) + creation-site
+`(file, line)` on the `CCChan` struct.  The deadlock detector quotes
+the metadata in its dump banner, and the same data is exposed to user
+code via `cc_rt_diag_channel_meta`.
+
+| Layer | Mechanism |
+|-------|-----------|
+| Per-channel storage | `CCChan` gains `diag_user_name`, `diag_file`, `diag_line`.  Zero-initialized by the channel-create memset.  Setter `cc_chan_set_diag_meta` is a single write — no lock; written exactly once on creation before any sender/receiver can see the channel.  Getter `cc_chan_get_diag_meta` is in `channel.c` where the layout is visible. |
+| Create-site lowering | `pass_channel_syntax.c::cc__rewrite_channel_pair_calls_text` now emits the inline helper `cc_channel_pair_create_named(..., "tx,rx", __FILE__, __LINE__)` (defined in `cc_channel.cch`) instead of bare `cc_channel_pair_create(...)`.  The helper folds the create + diag-meta stamp into a single call — keeps the lowered C hand-crafted-looking and sidesteps the `@async`-frame-promotion collision that a statement-expression wrapper would trigger (locals declared inside `({ ... })` inside an `@async` body get rewritten to `__f->`-prefixed field accesses, which is invalid C for declarations). |
+| Owned channel | `T[~N >] var @owned(...)` lowering also emits `cc_chan_set_diag_meta(var, "var", __FILE__, __LINE__)` right after `cc_chan_create_owned`, so single-handle owned channels are named too. |
+| Deadlock dump | `sched_v2_dump_parked_fibers_for_verdict` (called from `sched_v2_check_deadlock`) now prints two extra lines per channel-parked fiber: `chan user: name=… site=…:…` (the R2 channel meta) and `task user: name=… site=…:…` (the R1 fiber name).  Channels created via the raw `cc_chan_create` API are silently skipped — the API truthfully says "no meta". |
+| User API | `cc_rt_diag_channel_meta(ch, &name, &file, &line)` — forward-declared in `cc_channel.cch`.  Returns 1 if any field was populated, 0 otherwise; safe to pass NULL `ch`. |
+| Smoke | `tests/runtime/r2_channel_meta_smoke.ccs` — verifies the meta round-trips through both `tx.raw` and `rx.raw` views; verifies raw `cc_chan_create` and NULL inputs both report "no info" truthfully.  Manual verification of the deadlock banner: build any program with an `@async` recv on an empty channel and run with `CC_DEADLOCK_ABORT=0` — the dump shows both `chan user:` and `task user:` lines. |
+
+**Known limitations**:
+
+- Strings are caller-owned C literals (lifetime = program), same model as R1.
+- Channels created via the raw `cc_chan_create*` runtime API (no
+  lowered path) report "no meta".  The CC ecosystem prefers the
+  `T[~N >]` syntax; C-style direct creation is a deliberate
+  back-compat surface.
+- R2 reports the creation site, not the send/recv site that's stuck.
+  Pairing the channel meta with the per-fiber R1 task name (both now
+  in the deadlock dump) gives the reader both endpoints: "task `X`
+  spawned at A:B is parked on channel `Y` created at C:D".  Surfacing
+  the exact `cc_chan_send`/`cc_chan_recv` source location is R4/R5
+  follow-up work.

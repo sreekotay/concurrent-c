@@ -1,0 +1,4 @@
+pair ok=1 name_match=1 file_match=1 line_gt0=1
+pair rx_view_matches=1
+raw_ok=0 name=(null)
+null_ok=0

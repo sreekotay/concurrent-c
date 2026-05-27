@@ -66,6 +66,21 @@ int cc_rt_diag_current_async_info(const char** out_name,
     return 0;
 }
 
+/* R2 — channel diag-meta passthrough.  `cc_chan_get_diag_meta` is
+ * defined in `cc/runtime/channel.c` (where the `CCChan` layout is
+ * visible).  Forward-declared here so this TU stays a leaf. */
+extern int cc_chan_get_diag_meta(const struct CCChan* ch,
+                                  const char** out_name,
+                                  const char** out_file,
+                                  int* out_line);
+
+int cc_rt_diag_channel_meta(const struct CCChan* ch,
+                            const char** out_name,
+                            const char** out_file,
+                            int* out_line) {
+    return cc_chan_get_diag_meta(ch, out_name, out_file, out_line);
+}
+
 /* ----------------------------------------------------------------------
  * R3 — `!>` source-location propagation chain.
  *

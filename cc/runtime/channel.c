@@ -626,6 +626,20 @@ struct CCChan {
     /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
     CCNursery* autoclose_owner;
     int warned_autoclose_block;
+    /* R2 — user-facing channel diagnostic metadata.
+     *
+     * Set by `cc_chan_set_diag_meta` (invoked by the spawn-site lowering
+     * in pass_channel_syntax.c right after `cc_channel_pair_create` /
+     * `cc_chan_create_owned` returns the channel).  Lets the deadlock
+     * detector and `cc_rt_diag_channel_meta` quote the channel by the
+     * user's declared name + spawn-site `(file, line)` instead of just
+     * a raw `CCChan*`.
+     *
+     * Strings are caller-owned C string literals (emitted by the
+     * compiler), so no copy and no allocation on the create path. */
+    const char* diag_user_name;
+    const char* diag_file;
+    int         diag_line;
     pthread_mutex_t mu;
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
@@ -1823,6 +1837,34 @@ void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig) {
     cc_chan_lock(ch);
     ch->recv_signal = sig;
     pthread_mutex_unlock(&ch->mu);
+}
+
+/* R2 — channel diagnostic metadata.
+ *
+ * Setter is invoked once per channel by the spawn-site lowering
+ * (`pass_channel_syntax.c` after `cc_channel_pair_create` /
+ * `cc_chan_create_owned`).  No lock: written exactly once on creation
+ * before any sender/receiver can touch the channel, and only read by
+ * diagnostics (the deadlock detector and `cc_rt_diag_channel_meta`).
+ * `name` is a caller-owned C string literal of the form `"tx,rx"`
+ * (handle pair) or `"name"` (owned single-handle); `file` is the
+ * spawn-site `__FILE__`; both live for the program's duration. */
+void cc_chan_set_diag_meta(CCChan* ch, const char* name,
+                           const char* file, int line) {
+    if (!ch) return;
+    ch->diag_user_name = name;
+    ch->diag_file = file;
+    ch->diag_line = line;
+}
+
+int cc_chan_get_diag_meta(const CCChan* ch, const char** out_name,
+                          const char** out_file, int* out_line) {
+    if (!ch) return 0;
+    if (!ch->diag_user_name && !ch->diag_file) return 0;
+    if (out_name) *out_name = ch->diag_user_name;
+    if (out_file) *out_file = ch->diag_file;
+    if (out_line) *out_line = ch->diag_line;
+    return 1;
 }
 
 CCResult_CCChanWaitOrSocketKind_CCIoError cc_chan_wait_recv_or_socket(CCChan* ch,

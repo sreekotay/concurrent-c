@@ -35,6 +35,23 @@ int cc_rt_diag_current_async_info(const char** out_name,
                                   const char** out_file,
                                   int* out_line);
 
+/* R2 — query the creation-site diagnostic metadata recorded on a
+ * channel.  The setter `cc_chan_set_diag_meta` is invoked once per
+ * channel by the spawn-site lowering (`pass_channel_syntax.c`); the
+ * deadlock detector (`sched_v2_check_deadlock`) prints the meta when
+ * a parked fiber's `park_reason` starts with `chan_`.  This function
+ * exposes the same data to user code (e.g. a custom diagnostic print)
+ * without needing to include the runtime's private channel header.
+ *
+ * Returns 1 if any field was populated, 0 if the channel was created
+ * outside the lowered path (e.g. via `cc_chan_create` directly from
+ * C code) or `ch` is NULL.  Any out_* pointer may be NULL. */
+struct CCChan;
+int cc_rt_diag_channel_meta(const struct CCChan* ch,
+                            const char** out_name,
+                            const char** out_file,
+                            int* out_line);
+
 /* ----------------------------------------------------------------------
  * R3 — `!>` source-location propagation chain.
  *
