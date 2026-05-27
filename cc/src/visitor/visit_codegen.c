@@ -3620,25 +3620,51 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        succeed. Note: text-based rewrites like `if @try` run on original source
        early in this function. */
     /* Read original source once; later passes still rewrite against original spans. */
-    /* M1 spike (deferred): swapping `src_all` to `root->parse_buffer` here
-     * makes the visitor's working buffer agree with the AST's coordinate
-     * space, which is necessary for macro CC syntax to work end-to-end.
-     * However, it also exposes the visitor's text scanners to the inlined
-     * CC runtime headers (`<ccc/cc_channel.cch>`, `<ccc/std/vec.cch>`,
-     * etc.) — every text pass that scans `src_all` for patterns like
-     * `cc_channel_pair(`, `[~ ... >]`, `@async`, UFCS calls, etc. then
-     * finds matches inside those runtime headers and emits spurious
-     * diagnostics or rewrites.  Fixing that requires each text scanner
-     * to become `#line`-aware so it skips tokens whose origin file is
-     * not the user TU.  That is the actual M1 lift — a per-pass
-     * iterative change, not a single buffer swap.
+    /* M1 Phase 4 step (c) — DEFERRED (2026-05-27).
      *
-     * Reparse plumbing for this is already in place (see
-     * `CCReparseFlags.src_is_pre_expanded` below + the
-     * `cc__reparse_source_to_ast_ctx` wrapper); when the swap lands,
-     * reparses will short-circuit `cc_preprocess_for_reparse` and
-     * `cc__prepend_reparse_prelude` to avoid double-decl on inlined
-     * system headers. */
+     * The plan was to swap src_all here from `cc__read_entire_file(input_path)`
+     * to a duplicate of `ctx->pre_expanded_buf` when pre-expand is on.  The
+     * plumbing for the swap is all in place (ctx->pre_expanded_buf is
+     * populated by walk.c from root->parse_buffer_pre_relower; the
+     * ctx->src_is_pre_expanded reparse-skip flag exists in CCVisitorCtx;
+     * Phase 4 step (b) added in_user_file guards to 7 outer rewrite
+     * scanners) — but a smoke run of the swap surfaced ~30+ test
+     * regressions across channel/spawn/result/closure suites.
+     *
+     * Root cause (from spawn_into_smoke.ccs investigation):
+     *   `pre_expanded_buf` is NOT just-pre-expanded user source.  It has
+     *   already been through CPP expansion AND multiple early-pipeline
+     *   text rewrites (CC type re-lower, chan_send → cc_chan_result_with,
+     *   etc.).  E.g. user's `CCTask[~4 >] tx;` lands in pre_expanded_buf
+     *   as `CCChanTx tx;`, and `chan_send(tx, x)` lands as
+     *   `cc_chan_result_with(...)`.
+     *
+     *   The visitor passes here expect UN-rewritten user-facing CC syntax
+     *   so they can match patterns like `T[~N >]`, `cc_channel_pair`, etc.
+     *   Feeding them the already-rewritten buffer means matches that
+     *   previously fired on user source now fire (or fail to fire) on the
+     *   wrong-shape text, producing diagnostics that point at the
+     *   pre-expand buffer's coordinates instead of the user file.
+     *
+     * Right fix for a future commit (NOT this one):
+     *   Either (a) capture a SEPARATE pre-rewrite snapshot in the AST root
+     *   (e.g. `parse_buffer_post_cpp_pre_any_rewrite`) and have walk.c
+     *   expose it through a new ctx field, OR (b) reorder the pipeline so
+     *   the text rewrites that produce `cc_chan_result_with` etc. run as
+     *   part of the visitor chain (consuming src_all) instead of inline
+     *   in build_parse_input.c before the buffer is exposed.  Option (b)
+     *   is the architecturally cleaner one but a bigger lift.
+     *
+     * Phase 4 step (b) guards stay in tree as harmless no-ops (raw user
+     * source has no `#line` directives → in_user_file stays 1 → guards
+     * never fire) and become load-bearing once the right buffer reaches
+     * src_all.
+     *
+     * The m0_5_diag_origin_line_fail bug ALSO turned out to have a
+     * preprocessor-side root cause (synthetic CCResult_* typedefs are
+     * injected INTO the `#line N "user.ccs"` region without a fresh
+     * `#line` reset, so TCC's line counter overshoots).  That bug needs
+     * a fix in the preprocessor/result-spec path, NOT here. */
     char* src_all = NULL;
     char* src_regs = NULL;
     size_t src_len = 0;
