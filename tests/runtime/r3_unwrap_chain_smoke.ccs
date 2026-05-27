@@ -1,0 +1,60 @@
+// Smoke: R3 — `!>` source-location propagation chain.
+//
+// Wires through:
+//   1. `__cc_uw_err_at` (cc_result.cch) — baseline / raw-pointer arm
+//      records each call via `cc_rt_diag_record_unwrap_site`.
+//   2. Per-TU enumerated `_Generic` arms (visit_codegen.c) — same record
+//      side-effect on the Result-struct path so typed `T!>(E)` returns
+//      also push their `(file, line)` onto the chain.
+//
+// Test shape: a 2-deep `!>` propagation (`leaf` -> `middle` -> `outer`)
+// originates an error in `leaf`, propagates through `middle`'s `!>` and
+// `outer`'s `!>`, then `main` catches the final error and walks the
+// chain via the public API.
+//
+// What we verify:
+//   - `chain_len == 2` (one entry per `!>` site, in chronological push order).
+//   - Each entry's file string matches this test file (we use a substring
+//     match on the basename so the path stays robust across builds).
+//   - Each entry's line string matches the `!>` site exactly.
+//   - After `clear`, the chain is empty.
+
+#include <stdio.h>
+#include <string.h>
+
+int !>(CCError) leaf(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "thing not found");
+}
+
+int !>(CCError) middle(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int v = leaf()!>;       // chain push #1 — `!>` is on this line (31)
+    return cc_ok(v);
+}
+
+int !>(CCError) outer(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int v = middle()!>;     // chain push #2 — `!>` is on this line (37)
+    return cc_ok(v);
+}
+
+int main(void) {
+    int !>(CCError) r = outer();
+    if (!cc_is_err(r)) {
+        printf("UNEXPECTED ok\n");
+        return 1;
+    }
+    CCError e = cc_unwrap_err(r);
+    printf("error: %s\n", e.message);
+    printf("chain_len=%d\n", cc_rt_diag_unwrap_chain_len());
+    for (int i = 0; i < cc_rt_diag_unwrap_chain_len(); i++) {
+        const char* f = NULL;
+        const char* l = NULL;
+        cc_rt_diag_unwrap_site(i, &f, &l);
+        int file_match = (f && strstr(f, "r3_unwrap_chain_smoke") != NULL) ? 1 : 0;
+        printf("  [%d] file_match=%d line=%s\n", i, file_match, l ? l : "?");
+    }
+    cc_rt_diag_clear_unwrap_chain();
+    printf("after_clear_len=%d\n", cc_rt_diag_unwrap_chain_len());
+    return 0;
+}

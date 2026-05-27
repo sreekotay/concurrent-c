@@ -1,11 +1,12 @@
 # Compiler cleanup status (M0–M5.5)
 
 **Last updated:** 2026-05-27  
-**Smoke suite:** 458 tests passing under the new default (pre-expand on)
+**Smoke suite:** 459 tests passing under the new default (pre-expand on)
 AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
 
 ### Recent (this session — 2026-05-27)
 
+- **R3** **runtime: `!>` source-location propagation chain.** New `cc_rt_diag_record_unwrap_site` + query/print API in `cc/runtime/cc_rt_diag.{h,c}` (ring-buffered, no per-propagation allocation). Wired into both `__cc_uw_err_at` _Generic arms (baseline + per-TU enumerated in `visit_codegen.c`) AND the typed-callee fast path in `pass_result_unwrap.c`'s `cc__ru_emit_uw_err_binder`, so every `!>` propagation pushes its `(file, line)` regardless of which lowering arm fires. Forward-declarations live in `cc_result.cch` so user code picks them up via the prelude. New smoke: `tests/runtime/r3_unwrap_chain_smoke.ccs` — 2-deep `!>` propagation, verifies chain length, file substring, line numbers, and clear() reset. Audit entry added to `cc/src/diag/DIAG_AUDIT.md`.
 - `9d37916` **nursery: fix lost-wakeup race in worker-frees alive_count barrier.** Added `atomic_thread_fence(memory_order_seq_cst)` on both sides of the Dekker pair in `cc_nursery_wait` and `cc_nursery_notify_child_done`; was hanging `stress/nested_nursery_deep.ccs` on ARM64. New regression smoke: `tests/nursery_worker_frees_race_stress_smoke.ccs` (4000-iteration shallow nursery hammer).
 - `8c80304` **nursery: document why notify_child_done's wake is prev==1-conditional.** Considered moving `wake_primitive_wake_all` out of the `if (prev == 1)` block as "belt-and-suspenders" but on inspection it adds N futex syscalls per N-child nursery for zero correctness benefit (the gen-counter handles intermediate decrements correctly). Doc-only commit so the next reader doesn't propose the same change.
 - `df28528` **codegen: hand-crafted-C polish for defer expansion + closure decls.** `cc__normalize_defer_stmt` wraps multi-stmt defer bodies as `{ ... }` with breathing space; brace-exit defer-flush snapshots and restores the trailing-`}` indent so the user's brace lands at its original column. Closure-decl groups in `pass_closure_literal_ast.c` get a blank line between adjacent closures' proto blocks.
@@ -36,7 +37,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | **M2** | `cc__apply_batched_phase3_passes()` | **Default is sequential** (429 tests). Opt-in: `CC_BATCH_PHASE3=1` (experimental; had regressions when default-on) |
 | **M4** | `mangle.h` included in closure pass | Whole-file closure lift unchanged; `cc_diag_mangle_symbol` not used for emitted names |
 | **M5.5** | `cc_macro_recognizer.c` hooks registered at parse | **Token synthesis into TCC lexer not implemented** — `#define CHAN(T) T[~4 >]` still fails; see [tests/macro/README.md](../../tests/macro/README.md) |
-| **Runtime R0** | `cc/runtime/cc_rt_diag.c` stubs in runtime | R1–R5 (async backtrace naming, channel deadlock text, `!>` source location, etc.) not implemented |
+| **Runtime R0** | `cc/runtime/cc_rt_diag.c` stubs in runtime | R1, R2, R4, R5 (async backtrace naming, channel deadlock text, etc.) not implemented |
+| **Runtime R3** | `cc_rt_diag_*_unwrap_*` API + macro/codegen wiring | `!>` propagation chain landed; see `cc/src/diag/DIAG_AUDIT.md` |
 
 ---
 

@@ -1,0 +1,5 @@
+error: thing not found
+chain_len=2
+  [0] file_match=1 line=31
+  [1] file_match=1 line=37
+after_clear_len=0
