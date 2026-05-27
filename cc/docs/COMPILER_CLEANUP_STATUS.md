@@ -1,7 +1,7 @@
 # Compiler cleanup status (M0–M5.5)
 
-**Last updated:** 2026-05-26  
-**Smoke suite:** 447 tests passing under the new default (pre-expand on)
+**Last updated:** 2026-05-27  
+**Smoke suite:** 453 tests passing under the new default (pre-expand on)
 AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
 
 This is the single source of truth for the compiler cleanup workstream (M0–M5.5). See also [PIPELINE.md](../src/visitor/PIPELINE.md), [PASS_INVENTORY.md](../src/visitor/PASS_INVENTORY.md), [DIAG_AUDIT.md](../src/diag/DIAG_AUDIT.md), [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md).
@@ -198,7 +198,7 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    already-lowered text, etc. Audit and remove.
 
 **4a. `cc_type_info` runtime type system + erased containers.**
-*Status: in progress (Commits 1, 2, 3a, 3b, 3c.2-lite landed 2026-05-27).*
+*Status: in progress (Commits 1, 2, 3a, 3b, 3c.2-lite, smell-sweep landed 2026-05-27).*
 
 This is the strategic foundation under "generics with selectable
 link-time footprint" and "performant + fully complete comptime."
@@ -274,6 +274,28 @@ link-time footprint" and "performant + fully complete comptime."
     `cc_ti_flags`, `cc_ti_size`, `cc_ti_align`, `cc_ti_nfields`)
     so user code reads the storage-narrowed fields back as
     their semantic types without casting.
+  - Smell sweep (`d57c1af`, this): post-landing audit.  Fixed
+    `CC_TF_ERASABLE` inconsistency (now set on every container
+    emission path); standardized on `cc__ti_reg_*` prefix for
+    auto-registrar functions (was split with `__cc_ti_reg_*` in
+    codegen); refactored the duplicated Vec/Map `cc_type_info`
+    sprintf in `visit_codegen.c` into one helper with snprintf
+    truncation guard; added a real OOM diagnostic to
+    `cc_type_info_register` (was silently dropping); fixed seven
+    spots of doc drift (milestone refs, stale macro forms,
+    removed-priority comments, accessor usage in examples).
+    Added two contract smokes:
+      - `cc_type_info_contracts_smoke`: pins de-dup-by-name
+        (first-registration wins; shadow registrations rejected),
+        accessor↔storage round-trip
+        (`(uint16_t)cc_ti_kind(ti) == ti->kind`, etc.), and
+        `CC_TF_ERASABLE` on all container paths.
+      - `cc_type_info_nested_container_smoke`: pins
+        `Vec<Vec<int>>` codegen emission for both layers,
+        mangled name `CCVec_CCVec_int`, both layers kind
+        `GENERIC_INST` + `CC_TF_ERASABLE`, outer size equals
+        `sizeof(Vec<int>)`.
+    Smoke: 453/453.
   - Commit 3c.1 / 3c.3 (deferred — highest risk): teach the
     compiler that `type_of(T)` is a parser-level builtin (so
     unregistered T gives a sane diagnostic instead of NULL at
