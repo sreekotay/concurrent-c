@@ -194,28 +194,39 @@ only by refactoring risk.
 
 ## Known issues (closure literals in deeply-rewritten call sites)
 
-Two pre-existing failures share a root cause in `pass_closure_literal_ast.c`:
+Two pre-existing failures share a root cause area in `pass_closure_literal_ast.c`:
 
 - `examples/recipe_tcp_echo.ccs` — `n->spawn(() => [sock] { handle_client(sock); })`
   inside `if (test_mode) { ... }` inside a nursery `{ ... } @destroy` block.
-  The local forward-decl emitted by `cc__closure_proto_insert_off` lands
-  inside `main`'s body (not at file scope), so `static` storage class
-  on the bridge decl is illegal in block scope. Even after dropping
-  `static`, the captured `sock` is not unpacked from `__env` — the
-  closure body sees an undefined `sock`.
+  **Layer 1 fixed (May 2026):** the block-scope `static __cc_closure_make_N(void);`
+  decl that triggered `function without file scope cannot be static` was
+  caused by `cc__closure_proto_insert_off` landing the legacy in-source
+  forward decl inside the enclosing `if` block.  We now pass
+  `skip_inline_protos=1` to `cc__rewrite_closure_literals_with_nodes_ex`
+  from `visit_codegen.c` and place file-scope forward decls via the new
+  `cc_find_first_func_def_offset` helper (just before the first
+  top-level function definition, so user typedefs that appear between
+  `#include`s and the first function — e.g. `HolReqTx` in
+  `tests/redis_owner_reply_try_send_hol_smoke.ccs` — are still in scope).
+  **Layer 2 still open:** the captured `sock` is not unpacked from
+  `__env`; the closure body sees an undefined `sock` and TCC reports
+  `cannot convert 'int' to 'struct CCSocket'` at the lifted body.
+  Likely lives in the capture-emission code in `pass_closure_literal_ast.c`
+  itself.
 - `stress/syscall_kidnap.ccs` — `nursery->spawnhybrid(() => [id] { ... })`
   inside a `for` loop. The capture-variant closure literal is **not
   detected at all** (no descriptor produced); the raw `() => [id] { ... }`
-  text leaks to the host C compiler.
+  text leaks to the host C compiler.  Distinct bug from the
+  proto-placement issue above.
 
 Both reproduce on the main branch before M0–M5.5 (verified via `git stash`
-+ rebuild). Common factor: capture-variant closures (`() => [x] { ... }`)
-where the enclosing rewritten context confuses either the AST collector
-or the file-scope-position finder. **Fix path:** route closure-literal
-emission through the EditBuffer infrastructure (`cc__collect_closure_edits`
-in the same file, currently unused by `visit_codegen.c`), which places
-protos at `find_protos_insertion_point` (top-of-file) and removes the
-brittle in-buffer offset walk. Tracked separately.
++ rebuild). The proto-placement layer is now fixed; the capture-emission
+and detection layers remain.
+
+The legacy `cc__closure_proto_insert_off` walker is still present in
+`pass_closure_literal_ast.c` for backward compat with the default
+(`skip_inline_protos=0`) path, but no in-tree caller exercises it.  It
+can be deleted once we're sure no out-of-tree consumer depends on it.
 
 ## Next Steps
 

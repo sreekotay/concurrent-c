@@ -1218,12 +1218,6 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                                                const char* stage,
                                                const CCReparseFlags* flags);
 
-static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
-                                            const char* input_path, CCSymbolTable* symbols,
-                                            const char* stage) {
-    return cc__reparse_source_to_ast_ex(src, src_len, input_path, symbols, stage, NULL);
-}
-
 static CCASTRoot* cc__reparse_source_to_ast_ctx(const CCVisitorCtx* ctx,
                                                 const char* src, size_t src_len,
                                                 const char* stage) {
@@ -4231,7 +4225,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
 
-        /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
+        /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs.
+         *
+         * Pass `skip_inline_protos=1` so the closure pass does NOT splice a
+         * forward decl into the enclosing function body — we place the
+         * file-scope protos at top-of-file ourselves below (see the
+         * `closure_protos` merge that uses cc__find_protos_insertion_point).
+         * The legacy in-source path is brittle: when the closure is nested
+         * inside an `if`/`for` block, the walker lands the decl inside that
+         * block, where `static T fn();` is a C constraint violation. */
         {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
@@ -4239,10 +4241,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             size_t protos_len = 0;
             char* defs = NULL;
             size_t defs_len = 0;
-            int r = cc__rewrite_closure_literals_with_nodes(root3, ctx, src_ufcs, src_ufcs_len,
-                                                           &rewritten, &rewritten_len,
-                                                           &protos, &protos_len,
-                                                           &defs, &defs_len);
+            int r = cc__rewrite_closure_literals_with_nodes_ex(root3, ctx, src_ufcs, src_ufcs_len,
+                                                               &rewritten, &rewritten_len,
+                                                               &protos, &protos_len,
+                                                               &defs, &defs_len,
+                                                               /*skip_inline_protos=*/1);
             if (r < 0) {
                 cc_tcc_bridge_free_ast(root3);
                 fclose(out);
@@ -4753,18 +4756,60 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             int has_protos = (closure_protos && closure_protos_len > 0);
             const char* defs_buf = closure_defs_stripped ? closure_defs_stripped : closure_defs;
             size_t defs_buf_len  = closure_defs_stripped ? closure_defs_stripped_len : closure_defs_len;
+            /* M-closure refactor: place file-scope forward decls
+             * (`closure_protos`) BEFORE the first function definition,
+             * not at the very end.  When the closure pass is invoked with
+             * `skip_inline_protos=1`, there is no longer an in-source
+             * forward decl spliced into the enclosing function; the only
+             * declaration the call site sees comes from this block.  If we
+             * leave it appended at end (after `main()`), the call site
+             * inside `main()` has no visible declaration of
+             * `__cc_closure_make_N` and TCC fails to parse.
+             *
+             * Critically, "before first function definition" — not "after
+             * last #include" — is the correct insertion point: closure
+             * capture types may be user `typedef`s declared between the
+             * last `#include` and the first function (see
+             * tests/redis_owner_reply_try_send_hol_smoke.ccs which
+             * declares `HolReqTx` / `HolReqRx` after #includes but before
+             * `static void hol_owner_blocking_policy(HolReqRx ...)`).
+             * Inserting after `#include`s would put protos that reference
+             * `HolReqRx` before its typedef.
+             *
+             * Definitions (`closure_defs`) continue to be appended at the
+             * end of the buffer: they reference user types via `__typeof__`
+             * that are only available in the user code's scope, and the
+             * #line directive below keeps user-line diagnostics anchored
+             * for code inside lifted closure bodies. */
+            size_t protos_insert_off = has_protos
+                ? cc_find_first_func_def_offset(src_ufcs, src_ufcs_len)
+                : 0;
+            if (has_protos && protos_insert_off >= src_ufcs_len) {
+                /* No top-level function definition (header-only-style TU).
+                 * Fall back to after-#includes; correct for files with no
+                 * user typedefs between includes and the closure call site. */
+                protos_insert_off = cc_find_protos_insertion_point(src_ufcs, src_ufcs_len);
+            }
             size_t add = strlen(hdr_defs_open) + defs_buf_len + 64 + 1;
             if (has_protos) add += strlen(hdr_protos_open) + closure_protos_len + strlen(hdr_protos_close);
             char* merged = (char*)malloc(src_ufcs_len + add + 1);
             if (merged) {
                 size_t pos = 0;
-                memcpy(merged + pos, src_ufcs, src_ufcs_len); pos += src_ufcs_len;
+                /* [src_ufcs[0..insert_off)] */
                 if (has_protos) {
+                    memcpy(merged + pos, src_ufcs, protos_insert_off);
+                    pos += protos_insert_off;
                     size_t l = strlen(hdr_protos_open);
                     memcpy(merged + pos, hdr_protos_open, l); pos += l;
                     memcpy(merged + pos, closure_protos, closure_protos_len); pos += closure_protos_len;
                     l = strlen(hdr_protos_close);
                     memcpy(merged + pos, hdr_protos_close, l); pos += l;
+                    /* [src_ufcs[insert_off..end)] */
+                    memcpy(merged + pos, src_ufcs + protos_insert_off,
+                           src_ufcs_len - protos_insert_off);
+                    pos += src_ufcs_len - protos_insert_off;
+                } else {
+                    memcpy(merged + pos, src_ufcs, src_ufcs_len); pos += src_ufcs_len;
                 }
                 {
                     size_t l = strlen(hdr_defs_open);

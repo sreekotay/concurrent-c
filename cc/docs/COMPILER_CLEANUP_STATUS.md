@@ -73,13 +73,21 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 > incrementally is safe (the M7.C3 plumbing is already in place to
 > support it), but it is bigger than one commit.
 
-1. **Closure-literal refactor**: re-use existing
-   `cc__collect_closure_edits` (EditBuffer-based; places protos at
-   `find_protos_insertion_point`) in `visit_codegen.c` instead of the
-   older `cc__rewrite_closure_literals_with_nodes`. Fixes the two
-   pre-existing capture-variant failures (`recipe_tcp_echo.ccs`,
-   `syscall_kidnap.ccs`) and removes the brittle in-buffer offset walk
-   in `cc__closure_proto_insert_off`. Independent of M1; quick win.
+1. **Closure-literal refactor — DONE (proto-placement layer).**
+   `visit_codegen.c` now calls `cc__rewrite_closure_literals_with_nodes_ex`
+   with `skip_inline_protos=1`, bypassing the brittle in-source walker
+   (`cc__closure_proto_insert_off`).  File-scope forward decls are placed
+   via the new `cc_find_first_func_def_offset` helper (just before the
+   first top-level function definition — past `#include`s AND user
+   typedefs).  Fixes the block-scope `static` failure in
+   `examples/recipe_tcp_echo.ccs`.  Smoke clean in both modes.
+   **Remaining layers** (separate bugs, NOT addressed by this refactor):
+   - `recipe_tcp_echo.ccs` layer 2: captured `sock` is not unpacked from
+     `__env` — lives in capture-emission code in
+     `pass_closure_literal_ast.c`.
+   - `syscall_kidnap.ccs`: capture-variant closure inside a `for` loop
+     is not detected at all — lives in capture-variant detection code in
+     the same file.
 
 2. **M1 visitor refactor** — bigger than originally framed.
    A spike (May 2026) attempted the naive form — swap
