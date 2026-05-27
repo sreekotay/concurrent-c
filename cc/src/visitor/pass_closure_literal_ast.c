@@ -3439,6 +3439,10 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
                 cc__append_closure_make_proto(&protos, &protos_len, &protos_cap, cty_p, d->id, 1, d);
             }
         }
+        /* Blank line between adjacent closure proto groups so the
+         * lowered C reads as paired (DECL + make-helper(s)) blocks
+         * rather than a wall of consecutive declarations. */
+        cc__append_str(&protos, &protos_len, &protos_cap, "\n");
 
         /* defs: env+drop+make */
         const char* cty = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
