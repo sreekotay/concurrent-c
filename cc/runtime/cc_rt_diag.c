@@ -34,6 +34,38 @@ void cc_rt_diag_set_channel_meta(const char* name, const char* topology,
     (void)line;
 }
 
+/* R1 — current-fiber async info.
+ *
+ * Forward-declared here (rather than via a header that pulls sched_v2's
+ * internals into the prelude) so `cc_rt_diag.c` stays a leaf module in
+ * the runtime TU graph.  Both symbols are defined in `sched_v2.c`. */
+struct fiber_v2;
+extern struct fiber_v2* sched_v2_current_fiber(void);
+extern int sched_v2_fiber_get_diag_name(struct fiber_v2* f,
+                                         const char** out_name,
+                                         const char** out_file,
+                                         int* out_line);
+
+int cc_rt_diag_current_async_info(const char** out_name,
+                                  const char** out_file,
+                                  int* out_line) {
+    struct fiber_v2* f = sched_v2_current_fiber();
+    if (f && sched_v2_fiber_get_diag_name(f, out_name, out_file, out_line)) {
+        return 1;
+    }
+    /* No per-fiber name (either we're not on a fiber, or the fiber was
+     * spawned via the anonymous `cc_nursery_spawn_async` API).  Fall back
+     * to the process-global last-async slot, which `cc_rt_diag_set_async_name`
+     * keeps current for the most-recent named spawn. */
+    if (g_last_async.user_name || g_last_async.file) {
+        if (out_name) *out_name = g_last_async.user_name;
+        if (out_file) *out_file = g_last_async.file;
+        if (out_line) *out_line = g_last_async.line;
+        return 1;
+    }
+    return 0;
+}
+
 /* ----------------------------------------------------------------------
  * R3 — `!>` source-location propagation chain.
  *

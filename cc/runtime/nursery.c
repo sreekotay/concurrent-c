@@ -401,6 +401,13 @@ static int cc_nursery_append_child(CCNursery* n, cc_nursery_child child) {
 
 typedef struct {
     CCTask task;
+    /* R1 — user-facing task naming (NULL when the public
+     * `cc_nursery_spawn_async` API is used directly).  Strings are
+     * caller-owned C string literals (emitted by the spawn-site lowering
+     * in preprocess.c → `cc_nursery_spawn_async_named`), so no copy. */
+    const char* diag_user_name;
+    const char* diag_file;
+    int         diag_line;
 } cc_nursery_async_spawn;
 
 /* Driver fiber for a `spawn_async`-ed @async task.
@@ -419,12 +426,31 @@ typedef struct {
  * stops being true (e.g. a new lowering shape that returns PENDING for
  * bookkeeping), both the compiler emit and this loop need to change
  * together. */
+/* Forward decls from sched_v2.c for the R1 fiber-stamp call below. */
+struct fiber_v2;
+extern struct fiber_v2* sched_v2_current_fiber(void);
+extern void sched_v2_fiber_set_diag_name(struct fiber_v2* f,
+                                          const char* name,
+                                          const char* file, int line);
+
 static void* cc__nursery_async_runner(void* arg) {
     cc_nursery_async_spawn* a = (cc_nursery_async_spawn*)arg;
     intptr_t result = 0;
     int err = 0;
     int cancel_sent = 0;
     if (!a) return NULL;
+
+    /* R1: stamp the running fiber with the user-facing async name on
+     * first entry, so `cc_rt_diag_current_async_info` answers "what task
+     * am I?" for any code running inside this fiber.  Stamped here (not
+     * in the spawn caller) because the runner is the first code that
+     * executes on the new fiber's own context — `sched_v2_current_fiber`
+     * returns this fiber rather than the parent. */
+    if (a->diag_user_name || a->diag_file) {
+        sched_v2_fiber_set_diag_name(sched_v2_current_fiber(),
+                                     a->diag_user_name, a->diag_file,
+                                     a->diag_line);
+    }
 
     for (;;) {
         if (!cancel_sent && cc_cancelled()) {
@@ -499,7 +525,10 @@ int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
     return cc_nursery_spawn(n, fn, arg);
 }
 
-int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
+int cc_nursery_spawn_async_named(CCNursery* n, CCTask task,
+                                  const char* diag_user_name,
+                                  const char* diag_file,
+                                  int diag_line) {
     cc_nursery_async_spawn* a;
     int err;
     if (!n || task.kind == CC_TASK_KIND_INVALID) {
@@ -512,12 +541,22 @@ int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
         return ENOMEM;
     }
     a->task = task;
+    a->diag_user_name = diag_user_name;
+    a->diag_file = diag_file;
+    a->diag_line = diag_line;
     err = cc_nursery_spawn(n, cc__nursery_async_runner, a);
     if (err != 0) {
         cc_task_free(&a->task);
         free(a);
     }
     return err;
+}
+
+int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
+    /* Anonymous-spawn entry point: kept for callers (and tests) that
+     * predate the spawn-site lowering's switch to the `_named` variant.
+     * The runner sees NULL metadata and skips the fiber-name stamp. */
+    return cc_nursery_spawn_async_named(n, task, NULL, NULL, 0);
 }
 
 int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {

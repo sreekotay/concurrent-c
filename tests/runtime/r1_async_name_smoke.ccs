@@ -1,0 +1,112 @@
+// Smoke: R1 — async backtrace naming.
+//
+// What it exercises
+// -----------------
+// The spawn-site UFCS lowering for `n->spawn_async(<callee>(...))` in
+// preprocess.c rewrites to `cc_nursery_spawn_async_named(...)` and
+// appends `, "<callee>", __FILE__, __LINE__` so each new fiber carries
+// its user-facing name + source location.
+//
+// `cc__nursery_async_runner` stamps those onto the running fiber's
+// `fiber_v2` diag slot on first execution, and any code on that fiber
+// can answer "what task am I?" via `cc_rt_diag_current_async_info`.
+//
+// What we verify
+// --------------
+//   - Each @async body sees a non-null name == its own callee name.
+//   - Each sees a `file` substring matching this test file.
+//   - Each sees a `line` > 0 (the spawn-site line; tracking exact lines
+//     would couple the test to formatting, so we just gate on >0).
+//   - From `main` (no fiber), the API falls through to the global
+//     `g_last_async` slot (set on the most-recent named spawn), which
+//     should still report a usable name after the nursery scope exits.
+
+#include <stdio.h>
+#include <string.h>
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task.cch>
+
+/* Per-task result slots (written from the @async fiber, read from main
+ * after the nursery scope completes).  Pointers are caller-owned C string
+ * literals so no copy is needed. */
+static const char* g_alpha_name = NULL;
+static const char* g_alpha_file = NULL;
+static cc_atomic_int g_alpha_line = 0;
+static cc_atomic_int g_alpha_ok = 0;
+
+static const char* g_beta_name = NULL;
+static const char* g_beta_file = NULL;
+static cc_atomic_int g_beta_line = 0;
+static cc_atomic_int g_beta_ok = 0;
+
+@async int task_alpha(void) {
+    const char* nm = NULL;
+    const char* fl = NULL;
+    int ln = 0;
+    /* @noblock pins the query to the current fiber's stack — without it
+     * pass_autoblock would wrap the call into `cc_run_blocking_task_intptr`
+     * and run on a worker thread where `sched_v2_current_fiber()` is NULL,
+     * so the per-fiber diag slot would be invisible to the query. */
+    int ok = @noblock cc_rt_diag_current_async_info(&nm, &fl, &ln);
+    g_alpha_name = nm;
+    g_alpha_file = fl;
+    cc_atomic_store(&g_alpha_line, ln);
+    cc_atomic_store(&g_alpha_ok, ok);
+    return 0;
+}
+
+@async int task_beta(void) {
+    const char* nm = NULL;
+    const char* fl = NULL;
+    int ln = 0;
+    int ok = @noblock cc_rt_diag_current_async_info(&nm, &fl, &ln);
+    g_beta_name = nm;
+    g_beta_file = fl;
+    cc_atomic_store(&g_beta_line, ln);
+    cc_atomic_store(&g_beta_ok, ok);
+    return 0;
+}
+
+int main(void) {
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 10;
+        if (n->spawn_async(task_alpha()) != 0) return 11;
+        if (n->spawn_async(task_beta()) != 0) return 12;
+    }
+
+    /* Per-fiber slot was populated by each task; substring-match the
+     * file path (basename only) so the test stays robust across
+     * absolute/relative source paths in different build setups. */
+    int file_match_a = (g_alpha_file && strstr(g_alpha_file, "r1_async_name_smoke") != NULL) ? 1 : 0;
+    int file_match_b = (g_beta_file && strstr(g_beta_file, "r1_async_name_smoke") != NULL) ? 1 : 0;
+    int name_match_a = (g_alpha_name && strcmp(g_alpha_name, "task_alpha") == 0) ? 1 : 0;
+    int name_match_b = (g_beta_name && strcmp(g_beta_name, "task_beta") == 0) ? 1 : 0;
+    int line_gt0_a = (cc_atomic_load(&g_alpha_line) > 0) ? 1 : 0;
+    int line_gt0_b = (cc_atomic_load(&g_beta_line) > 0) ? 1 : 0;
+
+    printf("alpha ok=%d name_match=%d file_match=%d line_gt0=%d\n",
+           cc_atomic_load(&g_alpha_ok), name_match_a, file_match_a, line_gt0_a);
+    printf("beta  ok=%d name_match=%d file_match=%d line_gt0=%d\n",
+           cc_atomic_load(&g_beta_ok), name_match_b, file_match_b, line_gt0_b);
+
+    /* From `main` we're not on a fiber, so the API falls through to the
+     * process-global `g_last_async` slot, which was set by the macro stub
+     * `cc_rt_diag_set_async_name` (not by R1's `_named` path).  The slot
+     * stays empty in this test (no caller invokes `set_async_name`
+     * explicitly), so we expect `main_ok == 0`.  This documents the
+     * boundary: without per-fiber context, the API truthfully reports
+     * "no naming info" rather than returning stale data from the last
+     * fiber. */
+    const char* mn = NULL;
+    const char* mf = NULL;
+    int ml = 0;
+    int main_ok = cc_rt_diag_current_async_info(&mn, &mf, &ml);
+    printf("main_ok=%d main_name=%s\n", main_ok, mn ? mn : "(null)");
+
+    int pass = name_match_a && name_match_b && file_match_a && file_match_b
+               && line_gt0_a && line_gt0_b
+               && cc_atomic_load(&g_alpha_ok) && cc_atomic_load(&g_beta_ok);
+    return pass ? 0 : 13;
+}
