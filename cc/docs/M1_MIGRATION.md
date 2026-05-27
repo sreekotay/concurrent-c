@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (8 / 13 batches landed — A, B, C, D1, D2, E, F1, F2).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (9 / 13 batches landed — A, B, C, D1, D2, E, F1, F2, G).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 51 sites migrated, 51 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 59 sites migrated, 43 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -55,6 +55,7 @@ The mechanical migration:
 - **Code-path newline** — `cc_inert_scan_step` returns 0 for `\n` outside any inert region and leaves `i` pointing AT the newline.  Any rewrite that tracks `line` or `col` must also handle `if (c == '\n') { line++; col = 1; i++; continue; }` on the code-byte path (Batch C surprise — `m0_5_diag_channel_pair_origin_fail` regression).
 - **Inner sub-scanners** in bounded regions (paren groups, expression tails) — usually str/chr-only "no comments" scanners.  Batch B left these inline deliberately; reasonable default.  Migrate if a regression surfaces.
 - **Body-`continue;` infinite-loop trap** (Batch F1 — caught by smoke).  Per-keyword loops where the original used `for (i=0; i<n; ++i)` and the body had an `if (...) continue;` (e.g. "skip if this looks like a function call, not a decl") — in the original, `continue` triggered the for's `++i`.  After migrating to `while (i < n)` with a tail `i += type_len ;` advance, the `continue;` skips that advance and re-tests the same position forever.  Fix: invert the condition into an `if (!(...)) { ... rest of body ... }` guard so the tail advance always runs.  Audit the body BEFORE migrating any per-keyword loop.
+- **Stale scanner state after big jumps** (Batch G — `cc__pu_find_outer_errhandler` post-match `i = rbrace + 1;`).  When the migrated loop jumps `i` past a body that the scanner never saw (e.g. `i = rbrace + 1` skips a whole `@errhandler { ... }` body), the scanner's `in_block_comment` / `in_pp` / `in_user_file` flags reflect state at the PRE-jump position.  If the body contained an unterminated comment (impossible by definition, since `cc_find_matching_brace` is comment-aware) or a `#line` directive (possible!), the scanner state is stale.  Safe today because no Batch-G site reads `scan.in_user_file` after a jump.  Watch-out for future passes: if a post-jump code path reads any `scan.*` flag, `cc_inert_scan_init(&scan, ...)` to reset before continuing.
 
 Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ignore inert content AND header-origin tokens.  One incidental fix landed already: error-message column off-by-one in `cc__rewrite_channel_pair_calls_text` (test expectations updated in the same commit).
 
@@ -62,15 +63,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch F2).
+Updated 2026-05-27 (post Batch G).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **51** (+4 from Batch F2) |
-| Remaining to migrate | **51** |
-| — trivial | 34 |
-| — medium | 12 |
+| Already on `CCInertScan` | **59** (+8 from Batch G) |
+| Remaining to migrate | **43** |
+| — trivial | 30 |
+| — medium | 8 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -222,21 +223,21 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 | ~~`cc__lookup_enclosing_param_type_codegen` (~2499)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — clean drop-in |
 | ~~`cc__collect_ufcs_field_and_var_types` (~3250)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — body `continue;` at ~3450 was safe (inner `while ... i++;` advanced before continue) |
 
-### `pass_result_unwrap.c` (2964 LOC, 9 inline + 4 migrated, has `text_scan.h`)
+### `pass_result_unwrap.c` (2964 LOC, 1 inline + 12 migrated, has `text_scan.h`)
 
-**Migrated:** `cc__find_unwrap_token` (~299), `cc__find_rhs_end_forward` (~476), `cc__find_semi_forward` (~613), `cc__find_bang_token_from` (~932).
+**Migrated:** `cc__find_unwrap_token` (~299), `cc__find_rhs_end_forward` (~476), `cc__find_semi_forward` (~613), `cc__find_bang_token_from` (~932), plus Batch G: `cc__pos_in_line_comment` (~385), `cc__bang_lhs_looks_like_decl` (~974), `cc__pu_find_outer_errhandler` (~1153), `cc__pu_next_stmt` (~1298), `cc__pu_find_enclosing_brace_close` (~1393), `cc__pu_find_next_stmt_byte` (~1430), `cc__pu_process_bang_body` (~1474), `cc__strict_unhandled_scan` (~2529).
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__pos_in_line_comment` (~385) | find-only | {str,qch} | ~16 | trivial | Shared by backward LHS |
+| ~~`cc__pos_in_line_comment` (~385)~~ | ~~find-only~~ | ~~{str,qch}~~ | ~~~16~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — new "post-step state probe" pattern: drive `cc_inert_scan_step` to consume bytes and check `scan.in_line_comment` after each step.  Returns 1 the instant the scanner crosses into line-comment mode.  Strict superset of original behavior (also detects `/* ... */ //` on same line, which the original missed since it didn't track block comments). |
 | `cc__find_lhs_start_backward_raw` (~405) | find-only | hybrid backward | ~45 | **complex** | **Backward** — see cross-cutting risk #1 |
-| `cc__bang_lhs_looks_like_decl` (~974) | find-only | {str,qch,lc,bc} | ~22 | trivial | |
-| `cc__pu_find_outer_errhandler` (~1153) | find-only | {str,qch,lc,bc} | ~25 | medium | `@errhandler` match + body jump |
-| `cc__pu_next_stmt` (~1298) | find-only | ad-hoc prefix + {str,qch,lc,bc} | ~35 | medium | Two-phase |
-| `cc__pu_find_enclosing_brace_close` (~1393) | find-only | {str,qch,lc,bc} | ~22 | trivial | |
-| `cc__pu_find_next_stmt_byte` (~1430) | find-only | ad-hoc | ~25 | trivial | One-shot |
-| `cc__pu_process_bang_body` (~1474) | rewrite | {str,qch,lc,bc} | ~55 | medium | Rewrite + verbatim copy |
-| `cc__strict_unhandled_scan` (~2529) | find-only | {str,qch,lc,bc} | ~25 | trivial | |
+| ~~`cc__bang_lhs_looks_like_decl` (~974)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~22~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — clean drop-in; `for` → `while` with tail `i++` |
+| ~~`cc__pu_find_outer_errhandler` (~1153)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch G)** — body-`continue;` audit: 7 early-skip continues each got `{ i++; continue; }`; post-match jump `i = rbrace;` (relied on for `++i`) → `i = rbrace + 1;`.  CCInertScan state inside body is stale after jump but `in_user_file` isn't checked so safe |
+| ~~`cc__pu_next_stmt` (~1298)~~ | ~~find-only~~ | ~~ad-hoc prefix + {str,qch,lc,bc}~~ | ~~~35~~ | ~~medium~~ | **✓ Migrated (Batch G)** — two-phase: Phase 1 (leading ws/comments skip) uses a separate scoped `CCInertScan skip;` since the original didn't track strings; Phase 2 (stmt body walk) uses a fresh `CCInertScan scan;`.  Brace/paren/bracket arms each got `i++; continue;` |
+| ~~`cc__pu_find_enclosing_brace_close` (~1393)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~22~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — `for` → `while`; brace/paren/bracket arms each got `i++; continue;` (body-`continue;` audit) |
+| ~~`cc__pu_find_next_stmt_byte` (~1430)~~ | ~~find-only~~ | ~~ad-hoc~~ | ~~~25~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — comments-only ad-hoc skip replaced by `CCInertScan`; whitespace and label-skip logic preserved alongside; label-skip's `i = m + 1; continue;` already pre-advances so doesn't need `i++` |
+| ~~`cc__pu_process_bang_body` (~1474)~~ | ~~rewrite~~ | ~~{str,qch,lc,bc}~~ | ~~~55~~ | ~~medium~~ | **✓ Migrated (Batch G)** — canonical rewrite template: snapshot `before = i;` before each `cc_inert_scan_step`, `cc__append_n(out, body + before, i - before)` after step returns 1.  Replaces ~50 LOC of interleaved `in_lc`/`in_bc`/`in_str` + `cc__append_n` boilerplate with the 5-line snapshot pattern |
+| ~~`cc__strict_unhandled_scan` (~2529)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~25~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — already a `while` loop; cleanest of the eight: just replace the inert-handler prefix with `cc_inert_scan_step` |
 
 ### `pass_defer_syntax.c` (1453 LOC, 7 inline + 1 migrated, has `text_scan.h`)
 
@@ -448,18 +449,27 @@ Commit F2 (4 medium sites) — **LANDED 2026-05-27**:
   - `cc__emit_closure_field_call`: pointer-walk had to become indexed.  No semantic change.
 - **Pointer-walk conversion pattern**: when a scanner uses `for (const char* p = src; *p; p++)`, `CCInertScan` (which takes `(buf, len, &i)`) forces a switch to indexed walk.  Pattern: compute `size_t n = strlen(src);` once before the loop, replace `*p` with `src[i]`, replace `p[1]` with `src[i+1]` (with bounds check), replace `comma = p;` with `comma = src + i;` (or just save the index).
 
-### Batch G — pass_result_unwrap forward sites (8 sites, 1–2 commits)
+### Batch G — pass_result_unwrap forward sites (8 sites, 1 commit) — **LANDED 2026-05-27**
 
 > Backward scanner `cc__find_lhs_start_backward_raw` deferred to Batch L.
 
-- [ ] `cc__pos_in_line_comment` (helper)
-- [ ] `cc__bang_lhs_looks_like_decl`
-- [ ] `cc__pu_find_outer_errhandler` (medium)
-- [ ] `cc__pu_next_stmt` (medium — two-phase)
-- [ ] `cc__pu_find_enclosing_brace_close`
-- [ ] `cc__pu_find_next_stmt_byte`
-- [ ] `cc__pu_process_bang_body` (medium — rewrite)
-- [ ] `cc__strict_unhandled_scan`
+- [x] `cc__pos_in_line_comment` — new pattern: post-step `scan.in_line_comment` probe
+- [x] `cc__bang_lhs_looks_like_decl` — clean drop-in
+- [x] `cc__pu_find_outer_errhandler` — 7 early-skip continues `{ i++; continue; }`'d; post-match jump `i = rbrace + 1;`
+- [x] `cc__pu_next_stmt` — two scoped `CCInertScan` instances (one per phase)
+- [x] `cc__pu_find_enclosing_brace_close` — body-`continue;` audit on brace counters
+- [x] `cc__pu_find_next_stmt_byte` — comment-only scan replaced; label-skip preserved
+- [x] `cc__pu_process_bang_body` — canonical rewrite template (snapshot before, append after)
+- [x] `cc__strict_unhandled_scan` — already a while; trivial replacement
+
+**Actual diff**: +69 / −189 (net **−120 LOC**, the biggest batch reduction yet).  Smoke 461/461 both modes.  No new warnings (pre-existing 3rd-party noise unchanged).
+
+**Surprises:**
+- **No bugs, no smoke regressions** — the body-`continue;` trap pattern was a known watch-out from Batch F1, so every early-skip continue got audited before the StrReplace ran.  This is what muscle memory looks like.
+- **New pattern — "post-step state probe"**: `cc__pos_in_line_comment` doesn't try to MATCH a CC token; it just wants to know if position X sits inside a line comment.  Migration: drive `cc_inert_scan_step` over the line and check `scan.in_line_comment` after each step.  Returns 1 the moment the scanner crosses into line-comment mode.  Note this is strictly more correct than the original — the original only checked for `//` ignoring block comments, so `/* foo */ //` on the same line would still return 1 (correctly) by accident.  CCInertScan handles this for free.
+- **`cc__pu_process_bang_body` is the canonical rewrite template now**: the snapshot-before/append-after pattern replaces ~50 LOC of interleaved `in_lc`/`in_bc`/`in_str` state + `cc__append_n` calls with 5 lines.  Pointing future rewrite-pass migrations here.
+- **Two-phase functions like `cc__pu_next_stmt`**: easiest pattern is two scoped `CCInertScan` instances (one per phase), each freshly initialized.  Cheaper than trying to preserve state across the phase boundary and clearer for the reader.
+- **Stale scanner state after big jumps** (in `cc__pu_find_outer_errhandler` post-match `i = rbrace + 1;`): scanner doesn't process the skipped bytes, so its `in_block_comment` / `in_pp` flags could be wrong if the body contained those.  Safe for this function (it doesn't check `in_user_file` or any other state-derived flag, just looks for `@errhandler` tokens at code position).  Note this as a Watch-out for future jumps: if a post-match jump is followed by code that reads `scan.in_user_file`, re-init the scanner.
 
 ### Batch H — pass_defer_syntax (6 forward sites, 1 commit; complex main loop separate)
 
