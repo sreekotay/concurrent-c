@@ -672,15 +672,144 @@ If Batch K3 proves expensive, pivot to **4b** (stable closure-IDs) first — see
 
 ---
 
-## Phase 4 — the flip
+## Phase 3 — pre-flight findings (2026-05-27, post Batch M)
 
-After all batches green:
+Conducted before the Phase 4 flip.  Results summary:
 
-- [ ] Add `tests/m1_basename_collision_smoke.ccs` — user TU named `cc_channel.ccs` to verify `CCInertScan.in_user_file` doesn't false-match a header with the same basename.  (Optional: extend `cc__inert_scan_path_is_user_tu` to compare a path component or two beyond basename.)
-- [ ] In `visit_codegen.c`, swap the `src_all = cc__read_entire_file(ctx->input_path)` source to `src_all = strdup(root->parse_buffer)` (or equivalent) when `CC_PRE_EXPAND` is on.
-- [ ] Run full smoke both modes.  Expect regressions — debug each by either (i) auditing the offending pass's `in_user_file` filter usage or (ii) extending `CCInertScan` if a real corner case shows up.
-- [ ] Remove the `.env` pin on `tests/m0_5_diag_origin_line_fail.ccs` once green.
+### (1) Bug repro
+
+Confirmed on `main` (post Batch M):
+
+```
+$ CC_PRE_EXPAND=1 ccc build tests/m0_5_diag_origin_line_fail.ccs
+…/m0_5_diag_origin_line_fail.ccs:56: error: async: `@arena_init(...) { ... }` is retired; …
+
+$ CC_PRE_EXPAND=0 ccc build tests/m0_5_diag_origin_line_fail.ccs
+…/m0_5_diag_origin_line_fail.ccs:15: error: async: `@arena_init(...) { ... }` is retired; …
+```
+
+Expected (per `.compile_err`): line **15**.  Bug only manifests with `CC_PRE_EXPAND=1`.
+
+### (2) Acceptance criterion
+
+`tests/m0_5_diag_origin_line_fail.env` pins `CC_PRE_EXPAND=` (empty) for this test so it passes today by avoiding the bug.  Comment in that file:
+
+> Pin this test to the default pipeline; once the M1 visitor refactor lands and source maps survive pre-expand, drop this override.
+
+**Phase 4 success criterion**: delete the `CC_PRE_EXPAND=` line from `m0_5_diag_origin_line_fail.env`, full suite still green.
+
+### (3) `cc_inert_scan_init` audit
+
+89 total call sites across 22 files.
+
+- **8 already pass `input_path`** (born-CCInertScan native, or Phase 2 outer scanners that already needed it for `current_file`):
+  - `pass_check_type_of.c:190,285`
+  - `pass_channel_syntax.c:942,1300`
+  - `pass_err_syntax.c:629`
+  - `pass_match_syntax.c:121,422`
+  - `pass_result_unwrap.c:1449,2447`
+  - `pass_type_syntax.c:94`
+  - `visit_codegen.c:1995` (Batch M)
+  - `checker.c:920`
+
+- **81 currently pass `NULL`**.  Triage needed for Phase 4 step (a):
+  - **Outer pass-level rewrite scanners** → plumb `ctx->input_path`; will need `in_user_file` filtering in Phase 4 step (b).
+  - **Inner bounded sub-scanners** (arg-list, expression-tail, brace-body sweeps) → keep `NULL`.  These operate on substrings already extracted by the outer pass, so file-origin was settled upstream.  No `#line` directives appear in those substrings; threading `input_path` would be pure ceremony.
+  - **Probe scanners** (e.g. `cc__*_pos_in_line_comment`, the Batch L parity helpers) → keep `NULL`.  They scan ≤1 line and never see a `#line` directive boundary.
+
+Per-pass triage is part of Phase 4 step (a), done file-by-file alongside the guard insertion.
+
+### (4) Buffer swap point
+
+`visit_codegen.c:3642-3646`:
+
+```c
+char* src_all = NULL;
+char* src_regs = NULL;
+size_t src_len = 0;
+if (ctx->input_path) {
+    cc__read_entire_file(ctx->input_path, &src_all, &src_len);
+}
+```
+
+Currently re-reads the raw `.ccs` file from disk.  Phase 4 step (c) replaces this with:
+
+```c
+if (ctx->pre_expanded_buf && ctx->pre_expanded_len) {
+    /* M1 Phase 4: use the post-pre-expand buffer; #line directives map
+     * every byte back to its origin file.  Outer rewrite scanners filter
+     * by scan.in_user_file to skip inlined header content. */
+    src_all = (char*)malloc(ctx->pre_expanded_len + 1);
+    if (!src_all) return ENOMEM;
+    memcpy(src_all, ctx->pre_expanded_buf, ctx->pre_expanded_len);
+    src_all[ctx->pre_expanded_len] = '\0';
+    src_len = ctx->pre_expanded_len;
+    ctx->src_is_pre_expanded = 1;  /* reparse fast-path */
+} else if (ctx->input_path) {
+    cc__read_entire_file(ctx->input_path, &src_all, &src_len);
+}
+```
+
+### (5) Pre-expanded buffer plumbing
+
+`ctx->pre_expanded_buf` is already populated in `walk.c:14-21` from `root->parse_buffer_pre_relower` (preferred — still has unlowered CC syntax) or `root->parse_buffer` (fallback).  `pass_channel_syntax.c:1039` proves the plumbing works: it consults `pre_expanded_buf` today as a SECONDARY fallback for macro-generated chan handle decls.
+
+### (6) `src_is_pre_expanded` reparse plumbing
+
+`CCVisitorCtx.src_is_pre_expanded` (`visitor.h:24`) exists and is consumed in `visit_codegen.c:1258,1336,1394`.  When set, reparses skip `cc__prepend_reparse_prelude` and `cc_preprocess_for_reparse`'s `.cch → .h` rewrite to avoid double-decl on already-inlined system headers.  Plumbing is in place; Phase 4 step (c) just needs to SET the flag when the swap happens.
+
+---
+
+## Phase 4 — the flip (staged)
+
+After all batches green AND pre-flight findings recorded (above), proceed in three commits.
+
+### Step (a+b) — plumb `input_path` + add `in_user_file` guards (per-pass commits)
+
+For each pass file with outer rewrite-shape scanners:
+
+1. Identify the outer pass-level scanner(s) — typically the top-level `cc__rewrite_*_text` or equivalent entry function.
+2. Change `cc_inert_scan_init(&scan, NULL)` → `cc_inert_scan_init(&scan, ctx ? ctx->input_path : NULL)` at those sites.
+3. Add `if (!scan.in_user_file) { /* skip CC-token match path */; i++; continue; }` to the per-byte rewrite loop, AFTER `cc_inert_scan_step` and BEFORE the CC-token match attempts.
+4. Leave inner bounded sub-scanners and probe helpers as `cc_inert_scan_init(&scan, NULL)` — they don't see `#line` directives.
+5. Verify full suite 461/461 in both modes.  Because no `#line` directives appear in the CURRENT inputs (`src_all` is still the raw `.ccs`), `in_user_file` stays 1 throughout and the guards are no-ops — both modes must remain green.
+
+Order suggestion (lowest-risk first, by pass complexity):
+- [ ] `pass_strip_markers.c` (1 outer site, trivial rewrite)
+- [ ] `pass_create.c` (4 sites, simple)
+- [ ] `pass_defer_syntax.c` (6 sites)
+- [ ] `pass_with_deadline_syntax.c` (2 sites)
+- [ ] `pass_nursery_spawn_ast.c` (3 sites)
+- [ ] `pass_channel_syntax.c` (remaining 5 NULL sites; 2 already on input_path)
+- [ ] `pass_unwrap_destroy.c` (2 sites, post-Batch L)
+- [ ] `pass_type_syntax.c` (remaining 6 NULL sites; 1 already on input_path)
+- [ ] `pass_match_syntax.c` (remaining 7 NULL sites; 2 already on input_path)
+- [ ] `pass_err_syntax.c` (remaining 4 NULL sites; 1 already on input_path)
+- [ ] `pass_result_unwrap.c` (remaining 11 NULL sites; 2 already on input_path)
+- [ ] `pass_closure_literal_ast.c` (15 NULL sites — largest)
+- [ ] `pass_ufcs.c` + `ufcs.c` (1 + 4 sites)
+- [ ] `pass_strip_markers.c` (1 site)
+- [ ] `async_ast.c` (12 sites)
+- [ ] `visit_codegen.c` (remaining 11 NULL sites; 1 already on input_path)
+- [ ] `pass_closure_markers.c` + `cc_l2_rewriter.c` (preprocess-side, deliberately stay NULL — they run on raw text BEFORE pre-expand)
+- [ ] `edit_buffer.c` (1 site, probably stays NULL — utility, not pass)
+
+### Step (c) — the buffer swap (one commit, the value-delivery moment)
+
+- [ ] Add `tests/m1_basename_collision_smoke.ccs` — user TU named e.g. `cc_channel.ccs` to verify `CCInertScan.in_user_file` doesn't false-match a header with the same basename.  Either confirm the assumption holds (because users don't name TUs `cc_channel.ccs` in practice) OR extend `cc__inert_scan_path_is_user_tu` to compare a path component or two beyond basename.
+- [ ] In `visit_codegen.c:3642`, apply the buffer-swap diff above.
+- [ ] Set `ctx->src_is_pre_expanded = 1` in the swap branch.
+- [ ] Run full smoke both modes.  Expect regressions — for each, root-cause by:
+  1. Identify which pass's CC-token match fired in header territory.
+  2. Verify that pass's outer scanner has the step (b) guard.
+  3. If yes, check whether the input/output buffers got mismatched offsets (a `#line`-only-virtual line increment shouldn't affect byte offsets — the `#line` directive is real bytes in the buffer).
+  4. If a real corner case, extend `CCInertScan` (e.g. path-component-compare instead of basename-only).
+- [ ] Delete the `CC_PRE_EXPAND=` line from `tests/m0_5_diag_origin_line_fail.env`; verify the test still passes (the acceptance criterion).
 - [ ] Update `COMPILER_CLEANUP_STATUS.md` "Recommended next work" item 2 (M1 visitor refactor): mark (a)/(b)/(c) all DONE; promote to "Shipped (complete)".
+
+### Phase 4 surprises landing zone
+
+(Empty until step (c) runs.)
 
 ---
 
