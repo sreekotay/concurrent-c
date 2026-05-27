@@ -1,0 +1,32 @@
+/* Trigger test for the compile-time `type_of(T)` diagnostic
+ * (`cc/src/visitor/pass_check_type_of.c`).
+ *
+ * In default mode the pass emits a warning to stderr that does
+ * not fail the build.  The `.env` sidecar here sets
+ * `CC_TYPE_OF_STRICT=1` to upgrade the warning to an error,
+ * which propagates through `cc_build_parse_input` and aborts
+ * the compile — exactly the path a CI configuration would want.
+ *
+ * The `.compile_err` sidecar asserts the diagnostic text shape:
+ * file, line, column, level, and the actionable hint pointing
+ * the user at the two registration options.
+ *
+ * Positive cases (type_of with a known type) are covered
+ * implicitly by every other type_info smoke that passes today;
+ * if any false positive ever fires under default mode it will
+ * appear as a stray "warning: type_of" line in the build log.
+ */
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+int main(void) {
+    /* Line 25 below should be the source of the diagnostic.
+     * `DefinitelyNotARegisteredType` is not a primitive, not a
+     * pre-baked Vec, not in this TU's CCTypeRegistry, and not
+     * declared via CC_TYPE_INFO_BEGIN/END.  The compile MUST
+     * fail under CC_TYPE_OF_STRICT=1. */
+    const cc_type_info* ti = type_of(DefinitelyNotARegisteredType);
+    (void)ti;
+    printf("unreachable\n");
+    return 0;
+}

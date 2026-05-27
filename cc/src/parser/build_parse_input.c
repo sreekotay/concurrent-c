@@ -2,6 +2,8 @@
 
 #include "../diag/diag.h"
 #include "../preprocess/cpp_expand.h"
+#include "../preprocess/type_registry.h"
+#include "../visitor/pass_check_type_of.h"
 #include "../visitor/pass_create.h"
 #include "../visitor/pass_unwrap_destroy.h"
 #include "preprocess/preprocess.h"
@@ -57,8 +59,43 @@ int cc_build_parse_input(const char* file_buf,
         ? cc_preprocess_for_reparse(buf, got, input_path)
         : cc_preprocess_for_initial_parse(buf, got, input_path);
     cc_unwrap_destroy_set_symbols(NULL);
+    if (!pp) { free(buf); goto fail; }
+
+    /* Compile-time check: every `type_of(T)` / `cc_type_of("T")` call
+     * in this TU should reference a type whose `cc_type_info` will be
+     * registered in this binary.  The check runs ONLY on the initial
+     * parse (reparses re-traverse the same source; one diag per real
+     * site is enough), and reads from the RAW user `buf` — not the
+     * preprocessed `pp` — because `type_of(T)` is a user-facing macro
+     * that hasn't been CPP-expanded yet, so we still see the literal
+     * `T` token the user wrote.
+     *
+     * On the type-registry ratchet rule (PASS_INVENTORY rule #6):
+     * this call is a single inspect-only read at the natural seam
+     * where the preprocess pass above just finished populating the
+     * global registry.  We are not extending the registry's
+     * lifecycle or installing a new owner — just observing the
+     * Vec/Map instantiations collected during generic-container
+     * lowering so we can validate `type_of(CCVec_T)` references
+     * against them.  Threading an explicit `CCTypeRegistry*` here
+     * would require widening every preprocess return type up to
+     * `cc_build_parse_input`; that is a worthwhile follow-up but
+     * out of scope for this commit. */
+    if (!for_reparse) {
+        size_t before = (size_t)cc_diag_error_count();
+        cc__check_type_of_calls(buf, got, input_path,
+                                cc_type_registry_get_global());
+        /* Strict mode emits diagnostics as `CC_DIAG_ERROR`, which
+         * bumps the global error count.  Fail the build immediately
+         * if that happened — the buffered diags are already on the
+         * driver's path to `cc_diag_print_all`. */
+        if ((size_t)cc_diag_error_count() > before) {
+            free(buf);
+            free(pp);
+            goto fail;
+        }
+    }
     free(buf);
-    if (!pp) goto fail;
 
     /* M7: opt-in pre-expand via CPP, applied after all CC text passes
      * have run. Resolves the prepended `#include` directives that
