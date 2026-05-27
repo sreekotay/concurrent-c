@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (12 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (13 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 74 sites migrated, 28 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 85 sites migrated, 17 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,18 +63,18 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch I).
+Updated 2026-05-27 (post Batch J).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **74** (+9 from Batch I) |
-| Remaining to migrate | **28** |
-| — trivial | 21 |
+| Already on `CCInertScan` | **85** (+11 from Batch J) |
+| Remaining to migrate | **17** |
+| — trivial | 10 |
 | — medium | 2 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
-Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
+Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
 ---
 
@@ -516,22 +516,32 @@ I2 — err forward sites (4 sites):
 I3 — err complex full-pass rewrite (separate commit):
 - [ ] `cc__rewrite_err_core` main loop (complex — `ito[]` offset map)
 
-### Batch J — async_ast forward sites (11 sites, 2 commits; complex separate)
+### Batch J — async_ast forward sites (11 sites, 1 combined commit; complex separate) — **LANDED 2026-05-27**
 
-J1 (8 sites, mostly trivial-medium):
-- [ ] `cc__find_matching_paren`
-- [ ] `cc__find_matching_brace`
-- [ ] `cc__rewrite_idents` (medium — "no comments" flag)
-- [ ] `cc__rewrite_typed_chan_await_expr` (medium — "no comments" flag)
-- [ ] `cc__scan_simple_stmt_end`
-- [ ] `cc__truncate_at_first_semicolon0`
-- [ ] `cc__split_top_level_semis` (medium)
-- [ ] `cc__rhs_has_top_level_comma`
+J1+J2 combined into a single commit (file didn't yet have `text_scan.h`, so all 11 forward sites were migrated at once for net diff clarity):
 
-J2 (3 sites, mixed):
-- [ ] `cc__parse_loop_from_text` anon (medium)
-- [ ] `cc__normalize_result_generic_bool_calls` (medium — "no comments" flag)
-- [ ] `cc_async_rewrite_state_machine_ast` anon (medium)
+- [x] `cc__find_matching_paren` — **deleted local copy**, `#define`'d to `cc_find_matching_paren` from `util/text.h` (identical implementation; "Keep local implementations" comment removed)
+- [x] `cc__find_matching_brace` — same as above
+- [x] `cc__rewrite_idents` (rewrite, "no comments" → now comment-aware) — canonical rewrite template with the existing realloc/cap pattern preserved; fixed a latent realloc-leak (original returned NULL without freeing old `out` on realloc failure)
+- [x] `cc__rewrite_typed_chan_await_expr` (find-only with depth + "no comments" → now comment-aware) — inner comma scanner only; outer find-`(` already uses `cc_find_char_top_level`
+- [x] `cc__scan_simple_stmt_end` — clean drop-in
+- [x] `cc__truncate_at_first_semicolon0` — clean drop-in (NULL-terminates in place)
+- [x] `cc__split_top_level_semis` — collect-shape; `@errhandler` body-close split logic preserved
+- [x] `cc__rhs_has_top_level_comma` — clean drop-in
+- [x] `cc__parse_loop_from_text` anon (for-header `;` splitter on `header` slice)
+- [x] `cc__normalize_result_generic_bool_calls` — rewrite with `last_emit` jumps; inner depth-scanner replaced with `cc__find_matching_paren`; outer adds CCInertScan (pattern matches are now skipped inside comments/strings)
+- [x] `cc_async_rewrite_state_machine_ast` anon — per-line ident finder; `break` on `//` converges to `continue` on inert step (single-line slice, so behavior is equivalent)
+
+**Actual diff**: +83 / −189 (net **−106 LOC**).  Full suite 461/461 (default mode); 382/382 smoke-filtered (both modes).
+
+> **Watch-out (process)**: a transient `[FAIL] ... build failed` storm during one full-suite run turned out to be a parallelism flake (`--jobs 4` under system load — re-run was clean).  When investigating a wide failure pattern, always rerun once before bisecting.
+
+**Surprises:**
+- **Two identical local helpers shadowed `util/text.h`** with a `/* Keep local implementations ... to avoid subtle behavioral changes */` comment.  Byte-for-byte diff confirmed they were identical to the shared versions.  Replaced with `#define cc__find_matching_paren cc_find_matching_paren` (and twin for brace) — preserves all call sites with zero churn, gains the shared-helper status, and lets future Batch M migrate them in one place.  **Watch-out: any "Keep local — avoid behavioral changes" comment older than ~2 weeks is suspect; diff-confirm before trusting it.**
+- **Existing helper reuse, second sighting**: `cc__normalize_result_generic_bool_calls`'s inner paren-depth scanner was a hand-rolled `int depth = 1, in_str = 0, in_chr = 0; for (; arg_end < n; arg_end++) {...}` walker — exactly `cc_find_matching_paren`'s contract.  Replaced 20 LOC with one call.  Combined with Batch I's `cc_find_matching_paren/brace` reuse for the `with_deadline` scanners, this is now an established pattern: **whenever you see a `depth=1; for (...){...}` walking forward from after a `(`, check for `cc_find_matching_paren` first.**
+- **Per-line scanner with `break` on inert**: the anon at ~3170 had `if (in_lc) break;` instead of `continue;` — the slice was a single source line so `\n`-terminated comments effectively halted the search.  Migrated form uses `continue;` (the natural CCInertScan rewrite); because the slice still has no `\n`, the scanner stays in `in_line_comment` for the rest of the iterations, so `memcmp` never runs while inert.  Behaviorally equivalent on single-line slices, more correct on multi-line ones (which this caller doesn't pass).
+- **Realloc-leak fix in `cc__rewrite_idents`**: the original `out = realloc(out, cap); if (!out) return NULL;` leaks the previous `out` if realloc fails.  My migration only changed one of the three realloc sites (the new inert-bulk-copy one); the other two still have the original pattern.  Recorded as a future cleanup item: "audit rewrite passes for realloc-leak-on-failure pattern".
+- **No new patterns** otherwise — every site followed an already-documented template.
 
 J3 (complex, separate commit):
 - [ ] `cc__emit_awaits_in_expr` (complex — nested rewrite + operand scanner)
