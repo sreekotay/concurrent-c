@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (1 / 13 batches landed).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (2 / 13 batches landed).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -53,15 +53,15 @@ Today: zero behavior change.  After Phase 4: scanners ignore inert content AND h
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch A).
+Updated 2026-05-27 (post Batch B).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **11** (+3 from Batch A) |
-| Remaining to migrate | **91** |
-| — trivial | 56 |
-| — medium | 30 |
+| Already on `CCInertScan` | **18** (+7 from Batch B) |
+| Remaining to migrate | **84** |
+| — trivial | 50 |
+| — medium | 29 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -100,17 +100,17 @@ State-var codes: `lc` = in_line_comment, `bc` = in_block_comment, `str` = in_str
 
 Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`, `cc__amp_is_const_param_read`, `cc__find_mutation_in_body`, recovery forward scan ~2888 all DELEGATE to `cc__scan_skip_string_comment` — migrating the helper migrates them all.
 
-### `pass_type_syntax.c` (1152 LOC, 7 sites, no `text_scan.h`)
+### `pass_type_syntax.c` (1152 LOC, 7 sites, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__rewrite_slice_types_text` (~84) | rewrite | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__scan_for_existing_result_types` (~244) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__rewrite_result_types_text` (~445) | rewrite | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__rewrite_result_field_sugar_text` pass 1 (~584) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__rewrite_result_field_sugar_text` pass 2 (~665) | rewrite | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__rewrite_inferred_result_constructors` (~782) | rewrite | {lc,bc,str,chr} | ~25 | medium | Also brace_depth, fn_brace_depth, current_result_type[256] |
-| `cc__rewrite_try_exprs_text` (~1062) | rewrite | {lc,bc,str,chr} | ~20 | trivial | |
+| `cc__rewrite_slice_types_text` (~84) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** — `line`/`col` preserved via post-step sweep; original had a small off-by-one on the column of the first char after a newline, migration incidentally fixes it |
+| `cc__scan_for_existing_result_types` (~244) | find-only | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** |
+| `cc__rewrite_result_types_text` (~445) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** outer scanner; inner str/chr-only paren-balanced scanner for error-type extraction left alone (bounded, no comments expected inside `!>(...)`) |
+| `cc__rewrite_result_field_sugar_text` pass 1 (~584) | find-only | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** |
+| `cc__rewrite_result_field_sugar_text` pass 2 (~665) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** |
+| `cc__rewrite_inferred_result_constructors` (~782) | rewrite | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch B)** outer scanner; `brace_depth`/`fn_brace_depth`/`current_result_type[256]` stayed alongside; inner str/chr-only `cc_ok(...)`/`cc_err(...)` arg-split scanner left alone (bounded paren scan, "no comments" pre-existing) |
+| `cc__rewrite_try_exprs_text` (~1062) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** outer scanner; inner str/chr-only expression-end scanner left alone (similar bounded "no comments" pattern) |
 
 ### `pass_create.c` (534 LOC, 3 sites, no `text_scan.h`)
 
@@ -308,16 +308,20 @@ Ordering principle: **easy wins first to build muscle memory, then per-area swee
 - For `cc_find_first_func_def_offset`, newlines inside inert regions still need to advance `last_line_off`.  Solved by sweeping the consumed `[before, i)` range after each `cc_inert_scan_step` returns 1.  Pattern is reusable for any "find-only with line tracking" site (e.g. `cc__cg_type_decl_end_top_level` in F2).
 - The ad-hoc `#`-directive skip in `cc_find_first_func_def_offset` was replaced by `CCInertScan`'s built-in `in_pp` handling, which is strictly more correct (handles line continuations + the at-line-start guard properly).
 
-### Batch B — type-syntax sweep (7 sites, 1 commit)
+### Batch B — type-syntax sweep (7 sites, 1 commit) — **LANDED 2026-05-27**
 
 > Goal: single-pass sweep of the most uniformly-trivial file in the audit.
 
-- [ ] `pass_type_syntax.c::cc__rewrite_slice_types_text`
-- [ ] `pass_type_syntax.c::cc__scan_for_existing_result_types`
-- [ ] `pass_type_syntax.c::cc__rewrite_result_types_text`
-- [ ] `pass_type_syntax.c::cc__rewrite_result_field_sugar_text` (pass 1 & 2)
-- [ ] `pass_type_syntax.c::cc__rewrite_inferred_result_constructors` (medium — `brace_depth`/`fn_brace_depth`/`current_result_type` stay alongside)
-- [ ] `pass_type_syntax.c::cc__rewrite_try_exprs_text`
+- [x] `pass_type_syntax.c::cc__rewrite_slice_types_text` (post-step sweep for line/col)
+- [x] `pass_type_syntax.c::cc__scan_for_existing_result_types`
+- [x] `pass_type_syntax.c::cc__rewrite_result_types_text` (inner `!>(...)` paren scan kept inline)
+- [x] `pass_type_syntax.c::cc__rewrite_result_field_sugar_text` (pass 1 & 2)
+- [x] `pass_type_syntax.c::cc__rewrite_inferred_result_constructors` (`brace_depth`/`fn_brace_depth`/`current_result_type` stay alongside; inner `cc_ok(...)` paren scan kept inline)
+- [x] `pass_type_syntax.c::cc__rewrite_try_exprs_text` (inner expression-end paren scan kept inline)
+
+**Actual diff**: 42 / −97 (net **−55 LOC**).  Smoke 461/461 both modes.  Lowered C inspected on `result_custom_types_smoke.ccs`: all rewrites (`CCRes(T,E) → CCResult_T_E`, `cc_ok(v) → cc_ok_CCResult_..._...(v)`, `cc_err(...)`, `CCSlice[T]`, `cc_try(...)`) emit byte-for-byte identical output.
+
+**Pattern emerging**: most "rewrite" sites have an **outer** scanner (now migrated) plus one or two **inner** scanners that walk a bounded region (a paren group, an expression-tail) using str/chr only.  We're deliberately leaving the inner scanners inline this batch because (a) they're correct enough for their bounded scope and (b) migrating them is a deeper change that adds little until Phase 4.  Recorded for future batches: if a regression ever surfaces in `!>(...)` with a comment inside, this is where to look.
 
 ### Batch C — channel-syntax sweep (7 sites, 1 commit — possibly 2 if `_chan_handle_types_text` is hairy)
 
