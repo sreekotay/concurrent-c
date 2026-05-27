@@ -10,6 +10,7 @@
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 #include "visitor/visitor.h"
 
@@ -963,71 +964,29 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
  * and comments.  Mirrors cc__find_unwrap_token but for the `!>` token. */
 static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
                                      size_t* out_pos) {
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    /* `in_pp` covers preprocessor-directive bodies (`#define ...`,
-     * `#include ...`, etc.) that the visitor's preprocess chain
-     * leaves verbatim in the working buffer.  Without this, a benign
-     * `#define UNUSED_UNWRAP(expr) expr !>` would be mis-rewritten
-     * as if `expr !>` were real source-position code, and the user
-     * would see a confusing `expected ';' terminating '!>' body`
-     * error on the #define line. */
-    int in_pp = 0;
-    int at_line_start = 1; /* track whether `#` introduces a directive */
-    for (size_t i = start; i < n; i++) {
-        char ch = s[i];
-        if (in_pp) {
-            if (ch == '\n') {
-                /* Line continuation: trailing `\` (optionally followed
-                 * by whitespace) extends the directive body. */
-                size_t k = i;
-                while (k > 0 && (s[k - 1] == ' ' || s[k - 1] == '\t' || s[k - 1] == '\r')) k--;
-                if (k == 0 || s[k - 1] != '\\') {
-                    in_pp = 0;
-                    at_line_start = 1;
-                }
-            }
-            continue;
-        }
-        if (in_line_comment) {
-            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < n && s[i + 1] == '/') {
-                in_block_comment = 0;
-                i++;
-            } else if (ch == '\n') {
-                /* preserve at_line_start = 0; block comments don't
-                 * introduce a fresh logical line for `#` detection. */
-            }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (at_line_start && ch == '#') { in_pp = 1; continue; }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '/') {
-            in_line_comment = 1; i++; continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '*') {
-            in_block_comment = 1; i++; continue;
-        }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; at_line_start = 0; continue; }
-        if (ch == '\n') { at_line_start = 1; continue; }
-        if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
-        if (ch == '!' && i + 1 < n && s[i + 1] == '>') {
-            /* Disambiguate against `!=`: `!=` has `=` after `!`, so the
-             * `s[i+1] == '>'` check already excludes it.  Any leading
-             * punctuation is fine — `!>` is a two-char operator at word
-             * boundary regardless of what precedes it. */
+    /* Find the next `!>` token at top level (skipping comments,
+     * string literals, char literals, and preprocessor-directive
+     * bodies).  Without this, a benign `#define UNUSED_UNWRAP(expr)
+     * expr !>` would be mis-rewritten as if `expr !>` were real
+     * source-position code; without the comment/string handling, a
+     * `// expr !>` line comment or `"... !>"` string would similarly
+     * trip the scanner.  Routed through the shared `CCInertScan`
+     * helper so the same state machine governs all visitor passes
+     * (see `cc/src/util/text_scan.h`). */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = start;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+        /* Disambiguate against `!=`: `!=` has `=` after `!`, so the
+         * `s[i+1] == '>'` check already excludes it.  Any leading
+         * punctuation is fine — `!>` is a two-char operator at word
+         * boundary regardless of what precedes it. */
+        if (s[i] == '!' && i + 1 < n && s[i + 1] == '>') {
             if (out_pos) *out_pos = i;
             return 1;
         }
+        i++;
     }
     return 0;
 }

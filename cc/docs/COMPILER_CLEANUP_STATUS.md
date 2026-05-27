@@ -124,7 +124,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    rewrites.
    The real M1 lift is therefore three pieces:
    - **(a) Source-buffer unification.** One-line swap of `src_all`
-     to `root->parse_buffer` when pre-expand is on.
+     to `root->parse_buffer` when pre-expand is on.  **TODO** —
+     blocked on (c) below.
    - **(b) Reparse prelude awareness.**  `cc__reparse_source_to_ast`
      skips `cc_preprocess_for_reparse` + `cc__prepend_reparse_prelude`
      when its input is pre-expanded (system headers + container
@@ -134,16 +135,44 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
      `cc__reparse_source_to_ast_ctx` wrapper.  Confirmed end-to-end
      in the spike: with the swap on and the flag set, reparse made
      it past the `__mbstate_t` wall before hitting the next class
-     of failures.
+     of failures.  **DONE (plumbing).**
    - **(c) `#line`-aware text scanners.**  Each visitor pass that
      scans `src_all` for syntactic patterns needs to filter by
      origin file (the file the nearest preceding `#line N "..."`
      points to) so it only acts on tokens that originated in the
-     user TU.  Likely shape: centralize this in `CCScannerState`
-     (already exists; tracks comments/strings/preprocessor) by
-     adding an `in_user_file` flag updated on every `#line`
-     directive.  Then migrate passes one at a time, with smoke
-     gating each step.  Probably 5–10 commits.
+     user TU.  **PARTIAL.**  Foundation landed (May 2026):
+       - `cc/src/util/text_scan.h` exposes `CCInertScan` — the
+         visitor-side shared scanner state.  It tracks comments,
+         string/char literals, preprocessor-directive bodies
+         (with `\`-line-continuation handling), and parses `#line`
+         directives to maintain an `in_user_file` flag (by
+         basename match against `ctx->input_path`).
+       - `pass_result_unwrap.c::cc__find_bang_token_from` migrated
+         to use `CCInertScan` (replaces ~50 lines of inline state
+         machine with 10 lines of helper calls).  Proves the
+         migration pattern for find-only scanners.
+       - `tests/line_directive_origin_filter_smoke.ccs` validates
+         that `#line` directives don't break compilation today (the
+         test will be extended to also include CC tokens in
+         non-user-TU regions once per-pass migrations land).
+     **TODO (per-pass migration).** Roughly 10–15 visitor passes
+     still inline their own comment/string/pp state machines.  Each
+     should follow the `cc__find_bang_token_from` template:
+       1. Add `#include "util/text_scan.h"`.
+       2. Replace the inline state vars (`in_str`/`qch`/`in_lc`/
+          `in_bc`/`in_pp`/etc.) with a `CCInertScan` initialized
+          from `ctx->input_path`.
+       3. At the top of each loop iteration, call
+          `cc_inert_scan_step(&scan, src, n, &i)` and `continue`
+          if it returns 1 (with output passes also appending the
+          consumed range to their output buffer).
+       4. After the step, optionally check `scan.in_user_file` to
+          skip rewriting tokens that came from inlined headers.
+     Until (a) lands, the `in_user_file` flag is always 1 (because
+     `src_all` is still the raw user file with no `#line`
+     directives), so today the migration is mechanical and risk-
+     free — purely deduplicates the state machines.  When (a)
+     flips on, the `in_user_file` filter kicks in automatically.
    - The M7.C3 plumbing (`CCASTRoot.parse_buffer*`,
      `CCVisitorCtx.pre_expanded_buf`,
      `cc__find_chan_decl_before` alt_buf pattern) is already there
