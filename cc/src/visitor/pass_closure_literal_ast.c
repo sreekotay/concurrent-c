@@ -226,81 +226,57 @@ static int cc__closure_start_off_best_effort(const char* src, size_t len,
    We scan from `start_off` until we can match `=>` and then find the end of the body. */
 static size_t cc__infer_closure_end_off(const char* src, size_t len, size_t start_off) {
     if (!src || start_off >= len) return len;
-    size_t i = start_off;
-    /* find '=>' */
-    while (i + 1 < len) {
-        if (src[i] == '=' && src[i + 1] == '>') { i += 2; break; }
-        i++;
-    }
+    /* Phase 1: find the closure's `=>` using the shared comment-safe
+     * helper.  Original phase-1 walked raw bytes; a `// ... => ...`
+     * line comment between start_off and the real `=>` could latch
+     * onto the comment's arrow (the syscall_kidnap.ccs reproducer
+     * documented at `cc__find_next_arrow_skipping_inert`). */
+    size_t arrow = cc__find_next_arrow_skipping_inert(src, len, start_off);
+    if (arrow == (size_t)-1) return len;
+    size_t i = arrow + 2;  /* past `=>` */
     if (i >= len) return len;
-    /* Scan body: if we see a '{' at top level, treat it as a block body and match braces.
-       Otherwise treat as expression body and stop at a delimiter at top level. */
+
+    /* Phase 2: scan body.  If we see a `{` at top level, treat it as a
+     * block body and match braces (delegating to `cc_find_matching_brace`).
+     * Otherwise treat as expression body and stop at a delimiter at top
+     * level.  Behavior change: original tracked strings only (no chars,
+     * no comments); CCInertScan makes both branches comment- and
+     * char-literal-aware. */
     int par = 0, brk = 0;
-    int in_str = 0;
-    char qch = 0;
-    for (; i < len; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, src, len, &i)) continue;
         char ch = src[i];
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '(') { par++; continue; }
+        if (ch == '(') { par++; i++; continue; }
         if (ch == ')') {
             if (par == 0 && brk == 0) break;
             if (par) par--;
+            i++;
             continue;
         }
-        if (ch == '[') { brk++; continue; }
+        if (ch == '[') { brk++; i++; continue; }
         if (ch == ']') {
             if (brk == 0 && par == 0) break;
             if (brk) brk--;
+            i++;
             continue;
         }
         if (ch == '{' && par == 0 && brk == 0) {
-            /* Block body: match braces starting here. */
-            int br2 = 0;
-            int in2 = 0;  /* in string */
-            char q2 = 0;
-            int in_lc = 0; /* in line comment */
-            int in_bc = 0; /* in block comment */
-            for (; i < len; i++) {
-                char c2 = src[i];
-                /* Handle line comment */
-                if (in_lc) {
-                    if (c2 == '\n') in_lc = 0;
-                    continue;
-                }
-                /* Handle block comment */
-                if (in_bc) {
-                    if (c2 == '*' && i + 1 < len && src[i + 1] == '/') { in_bc = 0; i++; }
-                    continue;
-                }
-                /* Handle string */
-                if (in2) {
-                    if (c2 == '\\' && i + 1 < len) { i++; continue; }
-                    if (c2 == q2) in2 = 0;
-                    continue;
-                }
-                /* Start of line comment */
-                if (c2 == '/' && i + 1 < len && src[i + 1] == '/') { in_lc = 1; i++; continue; }
-                /* Start of block comment */
-                if (c2 == '/' && i + 1 < len && src[i + 1] == '*') { in_bc = 1; i++; continue; }
-                /* Start of string */
-                if (c2 == '"' || c2 == '\'') { in2 = 1; q2 = c2; continue; }
-                if (c2 == '{') br2++;
-                else if (c2 == '}') {
-                    br2--;
-                    if (br2 == 0) { i++; break; }
-                }
+            /* Phase 3: block body — delegate to the shared brace
+             * matcher (handles strings/chars/comments correctly). */
+            size_t rbrace = 0;
+            if (cc_find_matching_brace(src, len, i, &rbrace)) {
+                return rbrace + 1;
             }
-            return (i <= len) ? i : len;
+            return len;
         }
         /* Expression body: stop at delimiter at top level. */
         if (par == 0 && brk == 0) {
             if (ch == ',' || ch == ';' || ch == '\n') break;
         }
+        i++;
     }
     return i;
 }
