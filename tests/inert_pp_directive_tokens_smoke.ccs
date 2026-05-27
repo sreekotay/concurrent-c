@@ -28,6 +28,7 @@ static void plain(void) {}
 #define UNUSED_NURSERY_INIT         @create(NULL) @destroy
 #define UNUSED_DEFER(stmt)          @defer stmt
 #define UNUSED_UNWRAP(expr)         expr !>
+#define UNUSED_RESULT_UNWRAP(expr)  expr ?>
 #define UNUSED_ERR_TARGET(lhs, e)   lhs =<! e @err
 #define UNUSED_ERR_HANDLER          @errhandler(CCError e) { (void)e; }
 #define UNUSED_ASYNC_FN             @async int f(void) { return 0; }

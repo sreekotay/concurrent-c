@@ -273,39 +273,16 @@ static int cc__pu_mangle_binder_in_body(const char* src, size_t n,
 static int cc__pu_body_diverges(const char* body, size_t blen);
 
 /* Scan forward to find the byte index of the first `?>` that is not inside
- * a comment or string literal.  Returns 1 and writes *out_pos on success,
- * 0 if no such occurrence exists. */
+ * a comment, string literal, or preprocessor directive body.  Returns 1
+ * and writes *out_pos on success, 0 if no such occurrence exists.
+ * Routed through `CCInertScan` for shared state-machine logic. */
 static int cc__find_unwrap_token(const char* s, size_t n, size_t* out_pos) {
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (size_t i = 0; i < n; i++) {
-        char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < n && s[i + 1] == '/') {
-                in_block_comment = 0;
-                i++;
-            }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '/') {
-            in_line_comment = 1; i++; continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '*') {
-            in_block_comment = 1; i++; continue;
-        }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '?' && i + 1 < n && s[i + 1] == '>') {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+        if (s[i] == '?' && i + 1 < n && s[i + 1] == '>') {
             /* Reject if the preceding non-ws char suggests we misparsed a
              * different operator (e.g. '??>' trigraph / digraph lookalikes).
              * In practice the CC source does not emit those so a literal
@@ -313,6 +290,7 @@ static int cc__find_unwrap_token(const char* s, size_t n, size_t* out_pos) {
             if (out_pos) *out_pos = i;
             return 1;
         }
+        i++;
     }
     return 0;
 }
@@ -473,52 +451,34 @@ static size_t cc__find_lhs_start_backward(const char* s, size_t from) {
 
 /* Find the end (exclusive) of the RHS expression by scanning forward from
  * `from`. Returns the position of the first byte that is NOT part of the
- * RHS (i.e. the terminator). */
+ * RHS (i.e. the terminator).  Routed through `CCInertScan` so the same
+ * state machine governs all visitor passes. */
 static int cc__find_rhs_end_forward(const char* s, size_t n, size_t from, size_t* out_end) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (size_t i = from; i < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = from;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
         char ch2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && ch2 == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
 
-        if (ch == '(') { par++; continue; }
-        if (ch == '[') { brk++; continue; }
-        if (ch == '{') { br++; continue; }
+        if (ch == '(') { par++; i++; continue; }
+        if (ch == '[') { brk++; i++; continue; }
+        if (ch == '{') { br++;  i++; continue; }
         if (ch == ')') {
             if (par == 0) { *out_end = i; return 1; }
-            par--;
-            continue;
+            par--; i++; continue;
         }
         if (ch == ']') {
             if (brk == 0) { *out_end = i; return 1; }
-            brk--;
-            continue;
+            brk--; i++; continue;
         }
         if (ch == '}') {
             if (br == 0) { *out_end = i; return 1; }
-            br--;
-            continue;
+            br--; i++; continue;
         }
-        if (par > 0 || brk > 0 || br > 0) continue;
+        if (par > 0 || brk > 0 || br > 0) { i++; continue; }
 
         if (ch == ';' || ch == ',') { *out_end = i; return 1; }
         if (ch == '?') {
@@ -529,6 +489,7 @@ static int cc__find_rhs_end_forward(const char* s, size_t n, size_t from, size_t
         if (ch == ':') { *out_end = i; return 1; }
         if (ch == '&' && ch2 == '&') { *out_end = i; return 1; }
         if (ch == '|' && ch2 == '|') { *out_end = i; return 1; }
+        i++;
     }
     *out_end = n;
     return 1;
@@ -630,42 +591,28 @@ static int cc__range_is_ident(const char* s, size_t a, size_t b) {
  * considered failure.  Returns 1 on success with *out_semi set, 0 otherwise.
  */
 static int cc__find_semi_forward(const char* s, size_t n, size_t from, size_t* out_semi) {
+    /* Find the next top-level `;` after `from`, skipping comments,
+     * string/char literals, preprocessor-directive bodies, and
+     * nested `()`/`[]`/`{}` groups.  Routed through `CCInertScan`
+     * so the same state machine governs all visitor passes. */
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (size_t i = from; i < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = from;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && ch2 == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-
-        if (ch == '(') { par++; continue; }
-        if (ch == '[') { brk++; continue; }
-        if (ch == '{') { br++; continue; }
-        if (ch == ')') { if (par == 0) return 0; par--; continue; }
-        if (ch == ']') { if (brk == 0) return 0; brk--; continue; }
-        if (ch == '}') { if (br == 0) return 0; br--; continue; }
-
+        if (ch == '(') { par++; i++; continue; }
+        if (ch == '[') { brk++; i++; continue; }
+        if (ch == '{') { br++;  i++; continue; }
+        if (ch == ')') { if (par == 0) return 0; par--; i++; continue; }
+        if (ch == ']') { if (brk == 0) return 0; brk--; i++; continue; }
+        if (ch == '}') { if (br  == 0) return 0; br--;  i++; continue; }
         if (par == 0 && brk == 0 && br == 0 && ch == ';') {
             if (out_semi) *out_semi = i;
             return 1;
         }
+        i++;
     }
     return 0;
 }
