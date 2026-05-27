@@ -9,6 +9,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "preprocess/preprocess.h"
 #include "visitor/pass_common.h"
 #include "visitor/pass_defer_syntax.h"
@@ -76,12 +77,6 @@ static int cc__looks_like_macro_constant(const char* s, size_t n) {
     return has_alpha;
 }
 
-/* Forward decl: defined further down (line ~1635), declared here so the
- * `=>`-scanning helpers below can route through it.  Skips one C
- * comment, string literal, or char literal at `*io`; returns 1 and
- * advances `*io` past it, or 0 if no skip was needed. */
-static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io);
-
 /* Walk forward from `from` looking for the next `=>` token at the top
  * level of the buffer, skipping over C comments, string literals, and
  * character literals.  Returns the offset of the `=` byte, or `(size_t)-1`
@@ -100,13 +95,12 @@ static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io);
  * (e.g. for closures inside macro arglists) also stay comment-safe. */
 static size_t cc__find_next_arrow_skipping_inert(const char* src, size_t lim, size_t from) {
     if (!src) return (size_t)-1;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
     size_t i = from;
     while (i + 1 < lim) {
-        size_t before = i;
-        if (cc__scan_skip_string_comment(src, lim, &i)) {
-            if (i == before) i++; /* defensive: avoid infinite loop */
-            continue;
-        }
+        if (cc_inert_scan_step(&scan, src, lim, &i)) continue;
         if (src[i] == '=' && src[i + 1] == '>') return i;
         i++;
     }
@@ -127,14 +121,13 @@ static size_t cc__find_next_arrow_skipping_inert(const char* src, size_t lim, si
  * arglists, so the cost is amortised away. */
 static size_t cc__find_prev_arrow_skipping_inert(const char* src, size_t lo, size_t from) {
     if (!src || from <= lo) return (size_t)-1;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
     size_t last_arrow = (size_t)-1;
     size_t i = lo;
     while (i + 1 < from) {
-        size_t before = i;
-        if (cc__scan_skip_string_comment(src, from, &i)) {
-            if (i == before) i++;
-            continue;
-        }
+        if (cc_inert_scan_step(&scan, src, from, &i)) continue;
         if (src[i] == '=' && src[i + 1] == '>') {
             last_arrow = i;
             i += 2;
@@ -1693,43 +1686,6 @@ typedef enum {
     CC_MUT_ADDR_OF_NONCONST_CALL = 3,
 } CCMutationKind;
 
-static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io) {
-    size_t i = *io;
-    if (i >= n) return 0;
-    if (s[i] == '"') {
-        i++;
-        while (i < n) {
-            if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
-            if (s[i] == '"') { i++; break; }
-            i++;
-        }
-        *io = i;
-        return 1;
-    }
-    if (s[i] == '\'' && i + 1 < n) {
-        i++;
-        if (i < n && s[i] == '\\' && i + 1 < n) i += 2;
-        else i++;
-        if (i < n && s[i] == '\'') i++;
-        *io = i;
-        return 1;
-    }
-    if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
-        i += 2;
-        while (i < n && s[i] != '\n') i++;
-        *io = i;
-        return 1;
-    }
-    if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
-        i += 2;
-        while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-        if (i + 1 < n) i += 2;
-        *io = i;
-        return 1;
-    }
-    return 0;
-}
-
 /* Best-effort classification for `&var` usage:
    - If inside a call arglist for a known function and the corresponding param is `const T*`, treat as read-only (OK).
    - If inside a call arglist but param is `T*` (or unknown), treat as potential write.
@@ -1779,17 +1735,24 @@ static int cc__addr_of_is_readonly_call(const char* body,
     /* Determine arg index by scanning from lp+1 to amp_off counting top-level commas. */
     int argi = 0;
     int p = 0, b = 0, sq = 0;
-    for (size_t i = lp + 1; i < amp_off && i < n; i++) {
-        size_t ii = i;
-        if (cc__scan_skip_string_comment(body, n, &ii)) { i = ii ? (ii - 1) : i; continue; }
-        char c = body[i];
-        if (c == '(') p++;
-        else if (c == ')' && p > 0) p--;
-        else if (c == '{') b++;
-        else if (c == '}' && b > 0) b--;
-        else if (c == '[') sq++;
-        else if (c == ']' && sq > 0) sq--;
-        else if (c == ',' && p == 0 && b == 0 && sq == 0) argi++;
+    {
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;  /* mid-body slice */
+        size_t lim = (amp_off < n) ? amp_off : n;
+        size_t i = lp + 1;
+        while (i < lim) {
+            if (cc_inert_scan_step(&scan, body, n, &i)) continue;
+            char c = body[i];
+            if (c == '(') p++;
+            else if (c == ')' && p > 0) p--;
+            else if (c == '{') b++;
+            else if (c == '}' && b > 0) b--;
+            else if (c == '[') sq++;
+            else if (c == ']' && sq > 0) sq--;
+            else if (c == ',' && p == 0 && b == 0 && sq == 0) argi++;
+            i++;
+        }
     }
 
     if (argi < 0 || argi >= sig->param_count) {
@@ -1817,12 +1780,13 @@ static int cc__find_mutation_in_body(const char* body,
     if (out_kind) *out_kind = CC_MUT_NONE;
     if (out_callee) *out_callee = NULL;
     if (out_param_ty) *out_param_ty = NULL;
-    
-    for (size_t i = 0; i < body_len; i++) {
-        /* Skip strings/comments. */
-        size_t ii = i;
-        if (cc__scan_skip_string_comment(body, body_len, &ii)) { i = ii ? (ii - 1) : i; continue; }
-        
+
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < body_len) {
+        if (cc_inert_scan_step(&scan, body, body_len, &i)) continue;
+
         /* Check for ++var or --var */
         if (i + 1 + var_len < body_len) {
             if ((body[i] == '+' && body[i+1] == '+') || (body[i] == '-' && body[i+1] == '-')) {
@@ -1838,32 +1802,32 @@ static int cc__find_mutation_in_body(const char* body,
                 }
             }
         }
-        
+
         /* Check for identifier at position i */
-        if (!cc__is_ident_start_char(body[i])) continue;
-        if (i > 0 && cc__is_ident_char2(body[i-1])) continue;
-        if (i + var_len > body_len) continue;
-        if (strncmp(body + i, var_name, var_len) != 0) continue;
+        if (!cc__is_ident_start_char(body[i])) { i++; continue; }
+        if (i > 0 && cc__is_ident_char2(body[i-1])) { i++; continue; }
+        if (i + var_len > body_len) { i++; continue; }
+        if (strncmp(body + i, var_name, var_len) != 0) { i++; continue; }
         char after = (i + var_len < body_len) ? body[i + var_len] : 0;
-        if (cc__is_ident_char2(after)) continue;
+        if (cc__is_ident_char2(after)) { i++; continue; }
         /* Skip struct field accesses: ptr->field or obj.field */
         if (i >= 2) {
             size_t k = i - 1;
             while (k > 0 && (body[k] == ' ' || body[k] == '\t')) k--;
-            if (body[k] == '.' || (body[k] == '>' && k > 0 && body[k-1] == '-')) continue;
+            if (body[k] == '.' || (body[k] == '>' && k > 0 && body[k-1] == '-')) { i++; continue; }
         }
-        
+
         /* Found var_name at position i. Check for mutation. */
         size_t j = i + var_len;
         while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
-        
+
         /* var++ or var-- */
         if (j + 1 < body_len && ((body[j] == '+' && body[j+1] == '+') || (body[j] == '-' && body[j+1] == '-'))) {
             if (out_offset) *out_offset = i;
             if (out_kind) *out_kind = CC_MUT_WRITE;
             return 1;
         }
-        
+
         /* var = ..., var += ..., var -= ..., etc. */
         if (j < body_len && body[j] == '=') {
             if (j + 1 >= body_len || body[j+1] != '=') { /* not == */
@@ -1872,7 +1836,7 @@ static int cc__find_mutation_in_body(const char* body,
                 return 1;
             }
         }
-        if (j + 1 < body_len && body[j+1] == '=' && 
+        if (j + 1 < body_len && body[j+1] == '=' &&
             (body[j] == '+' || body[j] == '-' || body[j] == '*' || body[j] == '/' ||
              body[j] == '%' || body[j] == '&' || body[j] == '|' || body[j] == '^' ||
              body[j] == '<' || body[j] == '>')) {
@@ -1886,7 +1850,7 @@ static int cc__find_mutation_in_body(const char* body,
             if (out_kind) *out_kind = CC_MUT_WRITE;
             return 1;
         }
-        
+
         /* Check for &var (address-of) */
         if (i > 0) {
             size_t k = i - 1;
@@ -1908,8 +1872,11 @@ static int cc__find_mutation_in_body(const char* body,
                 }
             }
         }
-        
-        i = j - 1; /* continue scanning after this identifier */
+
+        /* Advance past the matched identifier; original used `i = j - 1`
+         * relying on for's `++i` to land at `j`.  In the while form,
+         * just set `i = j` directly. */
+        i = j;
     }
     return 0;
 }
@@ -1939,8 +1906,6 @@ typedef struct {
     int cap_count;
     char* body_text; /* original body (includes braces for block bodies) */
 } CCClosureDesc;
-
-static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io);
 
 /* Rewrite calls to captured closure variables within a closure body.
    E.g., if 'inc' is captured as CCClosure1, rewrite `inc(x)` to `cc_closure1_call(inc, (intptr_t)(x))`. */
@@ -2877,18 +2842,17 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             if (scan_lim > in_len) scan_lim = in_len;
             int has_arrow = 0;
             int saw_stmt_boundary = 0;
+            CCInertScan rscan;
+            cc_inert_scan_init(&rscan, NULL);
+            rscan.at_line_start = 0;  /* mid-buffer slice */
             size_t q = start_off;
             while (q + 1 < scan_lim) {
-                size_t before = q;
                 /* Comment- and string-safe: a `// ... => ...` line comment
                  * between start_off and the closure's real `=>` would
                  * otherwise be matched as a stmt boundary (no chars
                  * trigger it, but the loop would then walk past the real
                  * arrow into the comment text). */
-                if (cc__scan_skip_string_comment(in_src, scan_lim, &q)) {
-                    if (q == before) q++;
-                    continue;
-                }
+                if (cc_inert_scan_step(&rscan, in_src, scan_lim, &q)) continue;
                 if (in_src[q] == ';' || in_src[q] == '{' || in_src[q] == '}') {
                     saw_stmt_boundary = 1;
                     break;
