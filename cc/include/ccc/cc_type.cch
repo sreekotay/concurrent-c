@@ -2,9 +2,109 @@
 #define CC_TYPE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_arena.cch>
+
+/* ============================================================
+ * Runtime type information (cc_type_info)
+ *
+ * This is the first piece of CC's real type system.  Every CC
+ * type (primitive, struct, generic instantiation, closure) gets
+ * one `cc_type_info` symbol describing its size, alignment,
+ * layout, and lifecycle hooks.  Two consumers share the same
+ * data:
+ *   - Generic containers can dispatch on it to provide a
+ *     type-erased footprint (`cc_dyn_vec`, etc.) instead of
+ *     monomorphizing per-T.
+ *   - Comptime code can introspect it via `type_of(T)` to drive
+ *     codegen, serialization, schema emission, etc.
+ *
+ * Primitive `cc_type_info` symbols (`__cc_ti_int`, etc.) live in
+ * `cc/runtime/cc_type_info.c` and are always linked in.  User
+ * types and container instantiations emit their own per-TU
+ * `cc_type_info` symbols (added incrementally; see milestone
+ * #4b in `cc/docs/COMPILER_CLEANUP_STATUS.md`).
+ *
+ * Access pattern:
+ *     const cc_type_info* ti = type_of(int);
+ *     printf("%s size=%u align=%u\n", ti->name, ti->size, ti->align);
+ * ============================================================ */
+
+typedef enum cc_type_kind {
+    CC_TK_UNKNOWN       = 0,
+    CC_TK_PRIMITIVE     = 1,
+    CC_TK_POINTER       = 2,
+    CC_TK_STRUCT        = 3,
+    CC_TK_GENERIC_INST  = 4,    /* Vec<T>, Map<K,V>, Chan<T> */
+    CC_TK_CLOSURE       = 5,
+    CC_TK_FUNCTION      = 6,
+    CC_TK_ARRAY         = 7,
+} cc_type_kind;
+
+typedef enum cc_type_flag {
+    CC_TF_NONE          = 0,
+    CC_TF_POD           = 1u << 0,  /* plain old data — bitwise copy is safe */
+    CC_TF_TRIVIAL_COPY  = 1u << 1,  /* copy_fn is NULL — caller uses memcpy(dst, src, size) */
+    CC_TF_TRIVIAL_DROP  = 1u << 2,  /* drop_fn is NULL — caller does nothing */
+    CC_TF_ERASABLE      = 1u << 3,  /* safe to put through a type-erased container */
+} cc_type_flag;
+
+typedef struct cc_type_field {
+    const char*                  name;
+    const struct cc_type_info*   type;
+    uint32_t                     offset;     /* bytes from struct start */
+    uint32_t                     reserved;   /* future: nelems for array fields, bit width for bitfields */
+} cc_type_field;
+
+typedef struct cc_type_info {
+    const char*           name;        /* display name: "int", "Point", "Vec<int>" */
+    const char*           mangled;     /* symbol-safe: "int", "Point", "CCVec_int" */
+    uint32_t              id;          /* per-binary stable ID; 0 = not yet assigned */
+    uint32_t              size;        /* sizeof(T) */
+    uint32_t              align;       /* alignof(T) */
+    uint16_t              kind;        /* cc_type_kind, stored as uint16_t */
+    uint16_t              nfields;
+    uint16_t              flags;       /* cc_type_flag bitset */
+    uint16_t              _reserved;
+    const cc_type_field*  fields;      /* may be NULL when nfields == 0 */
+    void (*copy_fn)(void* dst, const void* src);  /* NULL → bitwise copy */
+    void (*drop_fn)(void* p);                     /* NULL → no-op */
+} cc_type_info;
+
+/* `type_of(T)` — preprocessor macro that resolves to the address
+ * of the type-info symbol for T.  T must be a single token that
+ * has a registered `__cc_ti_T` symbol (link error otherwise — a
+ * deliberate "you forgot to register" signal).  For unregistered
+ * user types, see `cc_type_register(...)` below.
+ *
+ * Phase 3 (separate commit) will teach the compiler to recognize
+ * `type_of(T)` as a parser-level builtin so it can give a better
+ * error than the linker's "undefined symbol __cc_ti_T". */
+#define type_of(T) (&__cc_ti_##T)
+
+/* Primitive type-info symbols — defined in cc/runtime/cc_type_info.c
+ * and always linked into the runtime. */
+extern const cc_type_info __cc_ti_int;
+extern const cc_type_info __cc_ti_char;
+extern const cc_type_info __cc_ti_short;
+extern const cc_type_info __cc_ti_long;
+extern const cc_type_info __cc_ti_float;
+extern const cc_type_info __cc_ti_double;
+extern const cc_type_info __cc_ti_size_t;
+extern const cc_type_info __cc_ti_intptr_t;
+extern const cc_type_info __cc_ti_bool;
+
+/* ============================================================
+ * Legacy comptime type-registration API.
+ *
+ * Pre-dates `cc_type_info`.  Today this is the only way to wire
+ * up create/destroy/UFCS hooks for user types via comptime.
+ * The two APIs will be unified in milestone #4b (see status doc):
+ * `cc_type_register(T, hooks)` will additionally emit the
+ * per-T `cc_type_info` symbol so `type_of(T)` works seamlessly.
+ * ============================================================ */
 
 typedef struct {
     const char* callee1;

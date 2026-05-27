@@ -1,0 +1,97 @@
+/* Commit 1 smoke: the primitive cc_type_info symbols exist, are
+ * linkable, and report plausible size/align/name/kind.
+ *
+ * This is the first vertical slice of the strategic type-system
+ * direction laid out in `cc/docs/COMPILER_CLEANUP_STATUS.md`
+ * milestone #4b.  Subsequent commits build:
+ *   - Commit 2: per-T `cc_type_info` emission for user structs +
+ *     `cc_dyn_vec` type-erased container that consumes it
+ *   - Commit 3: `type_of(T)` recognized as a compiler builtin so
+ *     comptime introspection (`@comptime { type_of(T).fields ... }`)
+ *     works
+ *
+ * The point of THIS test is to lock down the on-disk shape of
+ * `cc_type_info` (field order, sizes, flag bits) before anyone
+ * starts emitting per-T variants — once container code references
+ * specific field offsets it's much harder to evolve. */
+
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int check(const char* label, const cc_type_info* ti,
+                 const char* want_name, unsigned want_size,
+                 cc_type_kind want_kind) {
+    if (!ti) {
+        printf("FAIL %s: null cc_type_info\n", label);
+        return 1;
+    }
+    if (strcmp(ti->name, want_name) != 0) {
+        printf("FAIL %s: name=\"%s\" want=\"%s\"\n", label, ti->name, want_name);
+        return 1;
+    }
+    if (ti->size != want_size) {
+        printf("FAIL %s: size=%u want=%u\n", label, ti->size, want_size);
+        return 1;
+    }
+    if ((cc_type_kind)ti->kind != want_kind) {
+        printf("FAIL %s: kind=%u want=%u\n", label, (unsigned)ti->kind, (unsigned)want_kind);
+        return 1;
+    }
+    /* Primitives must report POD + trivial-copy + trivial-drop + erasable.
+     * Containers will rely on these bits to bypass copy_fn/drop_fn dispatch. */
+    unsigned want_flags = (unsigned)(CC_TF_POD | CC_TF_TRIVIAL_COPY |
+                                     CC_TF_TRIVIAL_DROP | CC_TF_ERASABLE);
+    if ((ti->flags & want_flags) != want_flags) {
+        printf("FAIL %s: flags=0x%x missing required primitive bits 0x%x\n",
+               label, (unsigned)ti->flags, want_flags);
+        return 1;
+    }
+    if (ti->copy_fn != NULL || ti->drop_fn != NULL) {
+        printf("FAIL %s: primitives must have NULL copy/drop fns\n", label);
+        return 1;
+    }
+    if (ti->nfields != 0 || ti->fields != NULL) {
+        printf("FAIL %s: primitives must have no fields\n", label);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    int fails = 0;
+
+    fails += check("int",      type_of(int),      "int",      sizeof(int),      CC_TK_PRIMITIVE);
+    fails += check("char",     type_of(char),     "char",     sizeof(char),     CC_TK_PRIMITIVE);
+    fails += check("short",    type_of(short),    "short",    sizeof(short),    CC_TK_PRIMITIVE);
+    fails += check("long",     type_of(long),     "long",     sizeof(long),     CC_TK_PRIMITIVE);
+    fails += check("float",    type_of(float),    "float",    sizeof(float),    CC_TK_PRIMITIVE);
+    fails += check("double",   type_of(double),   "double",   sizeof(double),   CC_TK_PRIMITIVE);
+    fails += check("size_t",   type_of(size_t),   "size_t",   sizeof(size_t),   CC_TK_PRIMITIVE);
+    fails += check("intptr_t", type_of(intptr_t), "intptr_t", sizeof(intptr_t), CC_TK_PRIMITIVE);
+    fails += check("bool",     type_of(bool),     "bool",     sizeof(bool),     CC_TK_PRIMITIVE);
+
+    /* Distinct mangled names are critical: type_of(T) macro-expands
+     * to (&__cc_ti_T), so two primitives that aliased to the same
+     * symbol would silently merge.  Check that the int and long
+     * symbols are actually distinct objects. */
+    if (type_of(int) == type_of(long)) {
+        printf("FAIL distinct: int and long resolve to same cc_type_info\n");
+        fails++;
+    }
+
+    /* The id field is allowed to be 0 (not-yet-assigned) for the
+     * initial commit.  Lock that in so we don't accidentally start
+     * relying on stable IDs before they actually exist. */
+    if (type_of(int)->id != 0) {
+        printf("FAIL id: expected 0 (unassigned) in commit 1, got %u\n",
+               type_of(int)->id);
+        fails++;
+    }
+
+    if (fails == 0) {
+        printf("cc_type_info primitives: 9 OK\n");
+        return 0;
+    }
+    return 1;
+}
