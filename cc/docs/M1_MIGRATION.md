@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (3 / 13 batches landed).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (4 / 13 batches landed — A, B, C, D1).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 8 sites migrated, 94 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 33 sites migrated, 69 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -61,15 +61,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch C).
+Updated 2026-05-27 (post Batch D1).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **25** (+7 from Batch C) |
-| Remaining to migrate | **77** |
-| — trivial | 45 |
-| — medium | 27 |
+| Already on `CCInertScan` | **33** (+8 from Batch D1) |
+| Remaining to migrate | **69** |
+| — trivial | 41 |
+| — medium | 23 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -120,13 +120,13 @@ Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`
 | `cc__rewrite_inferred_result_constructors` (~782) | rewrite | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch B)** outer scanner; `brace_depth`/`fn_brace_depth`/`current_result_type[256]` stayed alongside; inner str/chr-only `cc_ok(...)`/`cc_err(...)` arg-split scanner left alone (bounded paren scan, "no comments" pre-existing) |
 | `cc__rewrite_try_exprs_text` (~1062) | rewrite | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch B)** outer scanner; inner str/chr-only expression-end scanner left alone (similar bounded "no comments" pattern) |
 
-### `pass_create.c` (534 LOC, 3 sites, no `text_scan.h`)
+### `pass_create.c` (534 LOC, 3 sites, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__create_find_top_level_comma` (~47) | find-only | {lc,bc,str,chr} | ~25 | trivial | Also par/brk/br |
-| `cc__create_build_arg_slices` (~93) | find-only | {str,chr} | ~40 | medium | **Two passes**, no comment skip |
-| `cc__create_seed_registered_var_types` (~179) | find-only | {lc,bc,str,chr} | ~20 | trivial | Per-type outer × full-buffer inner |
+| `cc__create_find_top_level_comma` (~47) | find-only | {lc,bc,str,chr} | ~25 | trivial | **✓ Migrated (Batch D1)** — `par`/`brk`/`br` stay alongside; `for` → `while` |
+| `cc__create_build_arg_slices` (~93) | find-only | {str,chr} | ~40 | medium | **✓ Migrated (Batch D1)** — **behavior change**: now comment-aware (was deliberately not).  Synthetic trailing-`,` trick (loop `i <= n` with `(i < n) ? c : ','`) replaced with explicit post-loop trailing-arg emit so `cc_inert_scan_step`'s `[0,n)` contract is honored.  `at_line_start = 0` for mid-buffer slice |
+| `cc__create_seed_registered_var_types` (~179) | find-only | {lc,bc,str,chr} | ~20 | trivial | **✓ Migrated (Batch D1)** — `CCInertScan` re-init INSIDE per-type outer loop; loop-tail increment changed from `i += type_len - 1` (relying on `++i` from `for`) to `i += type_len` (explicit) |
 
 ### `async_ast.c` (3652 LOC, 12 sites, no `text_scan.h`)
 
@@ -151,17 +151,19 @@ Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`
 |------|-------|-------|-----|------------|-------|
 | `cc__line_has_await_keyword` (~106) | find-only | {str,qch} + in_blk_cmt | ~28 | trivial | **✓ Migrated (Batch A)** |
 
-### `pass_match_syntax.c` (712 LOC, 7 sites, no `text_scan.h`)
+### `pass_match_syntax.c` (712 LOC, 7+ sites, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__parse_match_call_args` (~35) | find-only | {str,qch} + par/brk/brc | ~15 | medium | No comment skip |
-| `cc__rewrite_match_syntax` main loop (~95) | rewrite | {lc,bc,str,chr} | ~25 | medium | Contains 2 nested inline scanners |
-| anon loop in `cc__rewrite_match_syntax` (~147) | find-only | {str,qch,lc,bc} | ~15 | trivial | `with_deadline(...)` arg paren |
-| anon loop in `cc__rewrite_match_syntax` (~195) | find-only | {str,qch} | ~10 | trivial | `@match` body `{`; no comments |
-| `cc__collect_match_edits` main loop (~415) | collect | {lc,bc,str,chr} | ~25 | medium | Mirror of rewrite path |
-| anon loop in `cc__collect_match_edits` (~460) | find-only | {str,qch,lc,bc} | ~15 | trivial | Duplicate of ~147 |
-| anon loop in `cc__collect_match_edits` (~507) | find-only | {str,qch} | ~10 | trivial | Duplicate of ~195 |
+| `cc__parse_lowered_match_call` inner (~65) | find-only | {str,qch} + par/brk/brc | ~15 | medium | **✓ Migrated (Batch D1)** — **behavior change**: now comment-aware (was deliberately not).  Inner paren-scan inside hdr slice; `at_line_start = 0` |
+| `cc__rewrite_match_syntax` main loop (~95) | rewrite | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch D1)** — `line`/`col` preserved (inert sweep + code-path `\n` handler).  Re-counted: 4+ nested inner scanners (not 2 as audit said); migrated 3 of them, left the bounded "no comments" single-stmt `;` scanner inline (see Batch D1 below) |
+| anon loop in `cc__rewrite_match_syntax` (~147) — body-brace matcher | find-only | {str,qch,lc,bc} | ~15 | trivial | **✓ Migrated (Batch D1)** — `br` stays alongside; `for` → `while` |
+| anon loop in `cc__rewrite_match_syntax` (~195) — case header `:` scanner | find-only | {str,qch,lc,bc} | ~22 | trivial | **✓ Migrated (Batch D1)** — `par`/`brk2`/`br2` stay alongside; hand-rolled `//`/`/*` inner skip replaced by `CCInertScan` |
+| anon loop in `cc__rewrite_match_syntax` (~223) — case body brace matcher | find-only | {str,qch,lc,bc} | ~12 | trivial | **✓ Migrated (Batch D1)** — `brr` stays alongside |
+| anon loop in `cc__rewrite_match_syntax` (~238) — case body single-stmt `;` scanner | find-only | {str,chr} | ~12 | trivial | **Deferred** — bounded paren scan, no comments expected; mirrors Batch B's "inner scanner" decision |
+| `cc__collect_match_edits` main loop (~415) | collect | {lc,bc,str,chr} | ~25 | medium | Mirror of rewrite path (Batch D2) |
+| anon loop in `cc__collect_match_edits` (~460) | find-only | {str,qch,lc,bc} | ~15 | trivial | Duplicate of ~147 (Batch D2) |
+| anon loop in `cc__collect_match_edits` (~507) | find-only | {str,qch} | ~10 | trivial | Duplicate of ~195 (Batch D2) |
 
 ### `pass_unwrap_destroy.c` (735 LOC, 2 sites, no `text_scan.h`)
 
@@ -354,13 +356,29 @@ Ordering principle: **easy wins first to build muscle memory, then per-area swee
 
 ### Batch D — create + nursery + match (13 sites, 2 commits)
 
-Commit D1 (8 sites):
-- [ ] `pass_create.c` (3 sites — `cc__create_build_arg_slices` is "no comments" — flag in commit msg)
-- [ ] `pass_match_syntax.c` outer + 4 nested (~5 sites)
+Commit D1 (8 sites) — **LANDED 2026-05-27**:
+- [x] `pass_create.c::cc__create_find_top_level_comma`
+- [x] `pass_create.c::cc__create_build_arg_slices` — **behavior change**: now comment-aware (was deliberately not); synthetic trailing-`,` trick replaced by explicit post-loop emit
+- [x] `pass_create.c::cc__create_seed_registered_var_types` — per-type re-init; loop-tail increment adjusted
+- [x] `pass_match_syntax.c::cc__parse_lowered_match_call` inner (~65) — **behavior change**: now comment-aware
+- [x] `pass_match_syntax.c::cc__rewrite_match_syntax` main loop (~95) — `line`/`col` preserved via post-step sweep + code-path `\n` handler
+- [x] `pass_match_syntax.c::cc__rewrite_match_syntax` nested ~147 (body-brace matcher)
+- [x] `pass_match_syntax.c::cc__rewrite_match_syntax` nested ~195 (case header `:` scanner)
+- [x] `pass_match_syntax.c::cc__rewrite_match_syntax` nested ~223 (case body brace matcher)
+- [ ] **Deferred**: `pass_match_syntax.c::cc__rewrite_match_syntax` nested ~238 (case body single-stmt `;` scanner — bounded, no comments).  Mirrors Batch B's inner-scanner decision.
+
+**Actual diff**: 102 / −146 (net **−44 LOC**).  Smoke 461/461 both modes.  Lowered C inspected on `match_case_header_comment_bait_smoke.ccs`: still emits the expected `do { /* @match */ size_t __cc_match_idx_1 = ...; CCChanMatchCase __cc_match_cases_1[1]; ... cc_chan_match_select(...) ... switch (__cc_match_idx_1) { ... } } while(0);`.
+
+**Surprises:**
+- **Audit miscount in `pass_match_syntax.c`**: audit said "2 nested inline scanners" inside `cc__rewrite_match_syntax`; real count is 4 (body-brace ~147, case header ~195, case-body brace ~223, case-body single-stmt ~238).  Migrated 3, left the no-comments single-stmt scanner inline.  D2 will also touch the collect path's mirrored set.
+- **Two "no comments" behavior changes** (`cc__create_build_arg_slices`, `cc__parse_lowered_match_call` inner).  Smoke green in both modes; effect is correct in practice (no real CC source embeds `/* */` inside `cc_type_create(int, "...")` arg-list strings or inside `<chan>.recv(/*...*/&x)` headers — and the latter the rewrite path catches *before* this inner scanner runs, via `cc_find_substr_top_level`).
+- **Synthetic trailing-char trick** in `cc__create_build_arg_slices` had to go: the original looped `for (i=0; i <= n; ++i)` with `c = (i < n) ? args_src[i] : ','` to flush the last segment.  `cc_inert_scan_step` requires `*pos < n`, so the trick must be replaced with explicit post-loop trailing-arg emit.  Pattern to remember for any future "synthetic sentinel" loop.
+- **Per-type scanner re-init** in `cc__create_seed_registered_var_types`: the outer loop iterates types and the inner scanner walks the full source per type.  `CCInertScan` state must reset per outer iteration (init inside the outer loop body).
+- **Loop-tail increment** in `cc__create_seed_registered_var_types`: original `i += type_len - 1` relied on `for`'s `++i` to give total advance of `type_len`; new while-loop changes to `i += type_len`.
 
 Commit D2 (5 sites):
 - [ ] `pass_nursery_spawn_ast.c` (3 sites — orphan pass, but migrate for consistency; "no comments" flag for two)
-- [ ] `pass_match_syntax.c` `cc__collect_match_edits` outer + 2 nested
+- [ ] `pass_match_syntax.c::cc__collect_match_edits` outer + 2 nested (mirrors of ~147 and ~195; same migration shape as D1)
 
 ### Batch E — ufcs duplicate consolidation (2 sites in different files, 1 commit)
 

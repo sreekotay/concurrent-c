@@ -10,6 +10,7 @@
 
 #include "preprocess/type_registry.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 
@@ -46,18 +47,12 @@ static int cc__create_match_kw(const char* src, size_t n, size_t pos, const char
 
 static int cc__create_find_top_level_comma(const char* src, size_t start, size_t end, size_t* out_pos) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = start; i < end; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = start;
+    while (i < end) {
+        if (cc_inert_scan_step(&scan, src, end, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < end) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
         if (c == '(') par++;
         else if (c == ')') { if (par) par--; }
         else if (c == '[') brk++;
@@ -68,6 +63,7 @@ static int cc__create_find_top_level_comma(const char* src, size_t start, size_t
             if (out_pos) *out_pos = i;
             return 1;
         }
+        i++;
     }
     return 0;
 }
@@ -94,57 +90,78 @@ static CCSliceArray cc__create_build_arg_slices(CCArena* arena, const char* args
     CCSliceArray argv = {0};
     size_t count = 0, start = 0, n = 0, index = 0;
     int depth_paren = 0, depth_brack = 0, depth_brace = 0;
-    int in_str = 0, in_chr = 0;
     CCSlice* items = NULL;
+    CCInertScan scan;
     if (!arena || !args_src || !args_src[0]) return argv;
     n = strlen(args_src);
-    for (size_t i = 0; i <= n; ++i) {
-        char c = (i < n) ? args_src[i] : ',';
-        char c2 = (i + 1 < n) ? args_src[i + 1] : 0;
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') { depth_paren++; continue; }
-        if (c == ')') { if (depth_paren > 0) depth_paren--; continue; }
-        if (c == '[') { depth_brack++; continue; }
-        if (c == ']') { if (depth_brack > 0) depth_brack--; continue; }
-        if (c == '{') { depth_brace++; continue; }
-        if (c == '}') { if (depth_brace > 0) depth_brace--; continue; }
-        if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
-            size_t s = start, e = i;
-            while (s < e && isspace((unsigned char)args_src[s])) s++;
-            while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
-            if (e > s) count++;
-            start = i + 1;
+    /* Two-pass arg splitter (count then fill).  Migrated to CCInertScan;
+     * the original used a synthetic trailing `,` (via `i <= n` and
+     * `(i < n) ? args_src[i] : ','`) to flush the final segment.  We
+     * replace that trick with an explicit post-loop trailing emit so
+     * cc_inert_scan_step's [0, n) contract is honored. */
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* args_src is a mid-buffer slice */
+    {
+        size_t i = 0;
+        while (i < n) {
+            if (cc_inert_scan_step(&scan, args_src, n, &i)) continue;
+            char c = args_src[i];
+            if (c == '(') { depth_paren++; i++; continue; }
+            if (c == ')') { if (depth_paren > 0) depth_paren--; i++; continue; }
+            if (c == '[') { depth_brack++; i++; continue; }
+            if (c == ']') { if (depth_brack > 0) depth_brack--; i++; continue; }
+            if (c == '{') { depth_brace++; i++; continue; }
+            if (c == '}') { if (depth_brace > 0) depth_brace--; i++; continue; }
+            if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+                size_t s = start, e = i;
+                while (s < e && isspace((unsigned char)args_src[s])) s++;
+                while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
+                if (e > s) count++;
+                start = i + 1;
+            }
+            i++;
         }
+    }
+    /* Trailing arg (was the synthetic ',' at i==n). */
+    {
+        size_t s = start, e = n;
+        while (s < e && isspace((unsigned char)args_src[s])) s++;
+        while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
+        if (e > s) count++;
     }
     if (count == 0) return argv;
     items = (CCSlice*)cc_arena_alloc(arena, count * sizeof(CCSlice), _Alignof(CCSlice));
     if (!items) return argv;
     start = 0;
     depth_paren = depth_brack = depth_brace = 0;
-    in_str = in_chr = 0;
-    for (size_t i = 0; i <= n; ++i) {
-        char c = (i < n) ? args_src[i] : ',';
-        char c2 = (i + 1 < n) ? args_src[i + 1] : 0;
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') { depth_paren++; continue; }
-        if (c == ')') { if (depth_paren > 0) depth_paren--; continue; }
-        if (c == '[') { depth_brack++; continue; }
-        if (c == ']') { if (depth_brack > 0) depth_brack--; continue; }
-        if (c == '{') { depth_brace++; continue; }
-        if (c == '}') { if (depth_brace > 0) depth_brace--; continue; }
-        if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
-            size_t s = start, e = i;
-            while (s < e && isspace((unsigned char)args_src[s])) s++;
-            while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
-            if (e > s) items[index++] = cc_slice_from_buffer((void*)(args_src + s), e - s);
-            start = i + 1;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    {
+        size_t i = 0;
+        while (i < n) {
+            if (cc_inert_scan_step(&scan, args_src, n, &i)) continue;
+            char c = args_src[i];
+            if (c == '(') { depth_paren++; i++; continue; }
+            if (c == ')') { if (depth_paren > 0) depth_paren--; i++; continue; }
+            if (c == '[') { depth_brack++; i++; continue; }
+            if (c == ']') { if (depth_brack > 0) depth_brack--; i++; continue; }
+            if (c == '{') { depth_brace++; i++; continue; }
+            if (c == '}') { if (depth_brace > 0) depth_brace--; i++; continue; }
+            if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+                size_t s = start, e = i;
+                while (s < e && isspace((unsigned char)args_src[s])) s++;
+                while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
+                if (e > s) items[index++] = cc_slice_from_buffer((void*)(args_src + s), e - s);
+                start = i + 1;
+            }
+            i++;
         }
+    }
+    {
+        size_t s = start, e = n;
+        while (s < e && isspace((unsigned char)args_src[s])) s++;
+        while (e > s && isspace((unsigned char)args_src[e - 1])) e--;
+        if (e > s) items[index++] = cc_slice_from_buffer((void*)(args_src + s), e - s);
     }
     argv.items = items;
     argv.len = index;
@@ -183,7 +200,7 @@ static int cc__create_seed_registered_var_types(CCSymbolTable* symbols, const ch
         const char* type_name = cc_symbols_type_name(symbols, ti);
         const void* create_fn = NULL;
         size_t type_len = type_name ? strlen(type_name) : 0;
-        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+        CCInertScan scan;
         if (!type_name || !type_len || strchr(type_name, '*')) continue;
         if (cc_symbols_lookup_type_create_callable(symbols, type_name, &create_fn) != 0 && create_fn == NULL) {
             const char* create_callee = NULL;
@@ -192,18 +209,10 @@ static int cc__create_seed_registered_var_types(CCSymbolTable* symbols, const ch
                 continue;
             }
         }
-        for (size_t i = 0; i < n; ++i) {
-            char c = src[i];
-            char c2 = (i + 1 < n) ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-            if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-            if (c == '"') { in_str = 1; continue; }
-            if (c == '\'') { in_chr = 1; continue; }
-            if (!cc__create_match_kw(src, n, i, type_name)) continue;
+        cc_inert_scan_init(&scan, NULL);
+        for (size_t i = 0; i < n; ) {
+            if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+            if (!cc__create_match_kw(src, n, i, type_name)) { i++; continue; }
             {
                 size_t p = cc_skip_ws_and_comments(src, n, i + type_len);
                 while (p < n && src[p] == '*') p++;
@@ -222,7 +231,7 @@ static int cc__create_seed_registered_var_types(CCSymbolTable* symbols, const ch
                     if (v < n && src[v] != '(') cc_type_registry_add_var(reg, var_name, type_name);
                 }
             }
-            i += type_len ? (type_len - 1) : 0;
+            i += type_len ? type_len : 1;
         }
     }
     return 0;
