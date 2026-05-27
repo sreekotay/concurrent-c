@@ -110,6 +110,11 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
          * messages report a wildly wrong line on multi-line input. */
         if (c == '\n') { line++; col = 1; i++; continue; }
 
+        /* M1 Phase 4 step (b): filter header-origin tokens.  No-op today;
+         * activates after the buffer swap.  Block-copy pattern (last_emit
+         * unchanged) preserves the byte automatically. */
+        if (!scan.in_user_file) { i++; col++; continue; }
+
         if (c == '[') {
             size_t j = i + 1;
             size_t colon = (size_t)-1;

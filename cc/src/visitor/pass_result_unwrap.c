@@ -2448,6 +2448,14 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
     size_t i = 0;
     while (i < n) {
         if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+
+        /* M1 Phase 4 step (b): filter header-origin tokens.  No-op today
+         * (find-only scanner; raw .ccs has no `#line` directives so
+         * in_user_file is always 1).  Activates after the buffer swap and
+         * prevents `any_err` from being raised on result-fn calls that
+         * live entirely inside inlined CC runtime headers. */
+        if (!scan.in_user_file) { i++; continue; }
+
         char c = s[i];
 
         /* Look for identifier starts. */
