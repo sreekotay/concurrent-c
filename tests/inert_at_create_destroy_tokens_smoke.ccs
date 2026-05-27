@@ -1,0 +1,30 @@
+/* inert_at_create_destroy_tokens_smoke.ccs - regression guard for the
+ * `@create` / `@destroy` text pass.  `cc/src/visitor/pass_create.c`
+ * scans the source for `@create` byte-by-byte (audit flagged this as
+ * HIGH risk, same bug class as the closure `=>`-in-comment trap).
+ * `@create`/`@destroy` inside comments and strings must NOT trigger
+ * rewriting. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+
+/* @-keyword tokens inside a block comment:
+ *   CCNursery* n = @create(NULL) @destroy;
+ *   CCSomething* x = @create(args) @destroy; */
+
+// @-keyword tokens inside line comments:
+// CCNursery* n = @create(NULL) @destroy;
+// also @create on its own and @destroy on its own
+
+const char* k_at_doc_create  = "@create";
+const char* k_at_doc_destroy = "@destroy";
+const char* k_at_doc_decl    = "CCNursery* n = @create(NULL) @destroy;";
+
+int main(void) {
+    if (!k_at_doc_create || !k_at_doc_destroy || !k_at_doc_decl) return 1;
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+    }
+    return 0;
+}

@@ -1,0 +1,40 @@
+/* inert_generic_tokens_smoke.ccs - regression guard for the generic
+ * `::[T]` type-instantiation scanner.  CCVec::[int], CCMap::[K,V] etc.
+ * must NOT be rewritten when they appear inside comments or strings. */
+
+#include <ccc/std/prelude.cch>
+
+/* Generic tokens inside a block comment:
+ *   CCVec::[int] xs = cc_vec_new::[int](&arena);
+ *   xs.push(1); */
+
+// Generic tokens inside line comments:
+// CCVec::[int] xs = cc_vec_new::[int](&arena);
+// CCMap::[int,int] m;
+
+const char* k_generic_vec = "CCVec::[int] xs;";
+const char* k_generic_map = "CCMap::[int,int] m;";
+const char* k_generic_new = "cc_vec_new::[int](&arena);";
+
+int main(void) {
+    if (!k_generic_vec || !k_generic_map || !k_generic_new) return 1;
+
+    CCArena arena = cc_arena_heap(kilobytes(1));
+    if (!arena.base) return 2;
+
+    CCVec::[int] xs = cc_vec_new::[int](&arena);
+    xs.push(11);
+    xs.push(22);
+    xs.push(33);
+
+    int total = 0;
+    int* a = xs.get(0);
+    int* b = xs.get(1);
+    int* c = xs.get(2);
+    if (a) total += *a;
+    if (b) total += *b;
+    if (c) total += *c;
+
+    cc_arena_free(&arena);
+    return (total == 66) ? 0 : 3;
+}

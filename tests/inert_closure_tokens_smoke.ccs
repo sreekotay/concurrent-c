@@ -1,0 +1,76 @@
+/* inert_closure_tokens_smoke.ccs - regression guard for the bug class
+ *   "CC text scanner latches onto a token that lives inside a C comment
+ *    or string literal rather than the real source code."
+ *
+ * Specifically guards the closure-literal scanner.  The trigger pattern
+ * is `() => { ... }` (no-capture) and `() => [x] { ... }` (capture).
+ * The recovery / validation loops used to walk the buffer byte-by-byte
+ * looking for `=>` without skipping inert regions.  A comment like
+ *   // pattern: (a && b) => exit
+ * between two real closures would latch the recovery scanner onto the
+ * comment's `=>`, claim a fake descriptor pointing into the comment
+ * text, and leave the real downstream closure call unrewritten.
+ *
+ * Origin: stress/syscall_kidnap.ccs broke this way for months.
+ *
+ * Test strategy: put the closure tokens inside both block comments,
+ * line comments, AND string literals, then exercise REAL closures
+ * before and after them.  If any scanner misfires, either compile
+ * will fail (raw CC syntax leaks to the host C compiler) or the
+ * program will exit non-zero. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdatomic.h>
+
+atomic_int g_count = 0;
+
+/* Closure tokens inside a block comment:
+ *   spawn(() => { foo(); });
+ *   spawn(() => [id] { bar(id); });
+ *   spawn(@unsafe () => { sys(); }); */
+
+// Closure tokens inside line comments:
+//   spawn(() => { foo(); });
+//   spawn(() => [id] { bar(id); });
+//   pattern: (a && b) => exit   <-- the literal syscall_kidnap trigger
+
+/* String literals carrying the same closure syntax: these are real
+ * `const char*` storage; the bytes live in .rodata and the closure
+ * scanner must NOT mistake them for source closures. */
+const char* k_doc_nocap   = "() => { foo(); }";
+const char* k_doc_cap     = "() => [id] { bar(id); }";
+const char* k_doc_unsafe  = "@unsafe () => { sys(); }";
+const char* k_doc_trigger = "// pattern: (a && b) => exit";
+
+static void noop(int id) { (void)id; atomic_fetch_add(&g_count, 1); }
+static void plain(void)  { atomic_fetch_add(&g_count, 1); }
+
+int main(void) {
+    if (!k_doc_nocap || !k_doc_cap || !k_doc_unsafe || !k_doc_trigger) {
+        return 1;
+    }
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+
+        /* Real no-capture closure BEFORE the comment-with-=>.  Pre-fix
+         * this one was the silent victim (UFCS rewrite ran, closure
+         * rewrite did not, host C compiler choked). */
+        n->spawnhybrid(() => { plain(); });
+
+        /* Line comment with a => that previously fooled the scanner. */
+        // pattern: (cancelled && no_work) => exit
+
+        /* Real capture-variant closure AFTER the trap-comment, inside
+         * a for-loop body (the original syscall_kidnap form). */
+        for (int i = 0; i < 3; i++) {
+            int id = i;
+            n->spawnhybrid(() => [id] { noop(id); });
+        }
+    }
+
+    /* All 4 closures (1 no-cap + 3 capture) must have run. */
+    return (atomic_load(&g_count) == 4) ? 0 : 3;
+}

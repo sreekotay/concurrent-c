@@ -85,9 +85,25 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    - `recipe_tcp_echo.ccs` layer 2: captured `sock` is not unpacked from
      `__env` — lives in capture-emission code in
      `pass_closure_literal_ast.c`.
-   - `syscall_kidnap.ccs`: capture-variant closure inside a `for` loop
-     is not detected at all — lives in capture-variant detection code in
-     the same file.
+   - ~~`syscall_kidnap.ccs`: capture-variant closure inside a `for` loop
+     is not detected at all~~ **FIXED (May 2026)** — root cause was a
+     class of bug: byte-level `=>` scanning loops in the closure
+     descriptor recovery path did not skip C comments or string
+     literals.  A `// Pattern: (a && b) => exit` comment between two
+     real closures latched the recovery scanner onto the comment's
+     `=>`, claimed a fake descriptor pointing into the comment, and
+     starved the real heartbeat closure of its descriptor.  Fix:
+     introduce `cc__find_next_arrow_skipping_inert` /
+     `cc__find_prev_arrow_skipping_inert` (routing through the
+     existing `cc__scan_skip_string_comment` machinery) and use them
+     in all four `=>` scan sites in `pass_closure_literal_ast.c`
+     (best-effort forward/backward, post-best-effort validation, and
+     the descriptor-recovery scan).  Regression guards live in
+     `tests/inert_*_tokens_smoke.ccs` (one file per CC scanner
+     family — closure, channel, UFCS, `@create`/`@destroy`,
+     `@async`/`@await`/`@defer`, Result-unwrap, generics) so any
+     future text-scanner that forgets to skip inert regions will
+     fail one of these tests.
 
 2. **M1 visitor refactor** — bigger than originally framed.
    A spike (May 2026) attempted the naive form — swap

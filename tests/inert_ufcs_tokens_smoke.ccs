@@ -1,0 +1,37 @@
+/* inert_ufcs_tokens_smoke.ccs - regression guard for the UFCS scanner.
+ * UFCS lowers `obj->method(args)` into `cc_method_X(obj, args)` for
+ * registered container/handle types.  The AST-driven primary path is
+ * comment-safe, but the text-fallback path historically walked raw
+ * source looking for `->` separators.  `->` is also valid C struct
+ * pointer access, so the scanner must reject `->` inside comments and
+ * string literals or it could mis-rewrite plain C code that happens
+ * to be quoted in an adjacent string. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+
+static void plain(void) {}
+
+/* UFCS-looking tokens inside a block comment:
+ *   nursery->spawnhybrid(fn);
+ *   nursery->cancel();
+ *   nursery->wait(); */
+
+// UFCS-looking tokens inside line comments:
+// nursery->spawnhybrid(fn);
+// nursery->cancel();
+
+const char* k_ufcs_doc_spawn  = "nursery->spawnhybrid(fn);";
+const char* k_ufcs_doc_cancel = "nursery->cancel();";
+const char* k_ufcs_doc_wait   = "nursery->wait();";
+
+int main(void) {
+    if (!k_ufcs_doc_spawn || !k_ufcs_doc_cancel || !k_ufcs_doc_wait) return 1;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+        n->spawnhybrid(() => { plain(); });
+    }
+    return 0;
+}
