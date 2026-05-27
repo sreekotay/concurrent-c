@@ -144,29 +144,12 @@ static void cc__append_missing_indent_to(char** out, size_t* out_len, size_t* ou
 static int cc__count_top_level_semicolons(const char* s, size_t n) {
     int count = 0;
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-
-    for (size_t i = 0; i < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < n && s[i + 1] == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')' && par > 0) par--;
         else if (ch == '[') brk++;
@@ -174,6 +157,7 @@ static int cc__count_top_level_semicolons(const char* s, size_t n) {
         else if (ch == '{') br++;
         else if (ch == '}' && br > 0) br--;
         else if (ch == ';' && par == 0 && brk == 0 && br == 0) count++;
+        i++;
     }
     return count;
 }
@@ -259,20 +243,15 @@ static int cc__is_storage_keyword_range(const char* s, size_t n) {
  * into the function prologue.  Scan is O(end) per call. */
 static size_t cc__last_stmt_terminator_before(const char* s, size_t end) {
     size_t last = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!s || end == 0) return 0;
-    for (size_t i = 0; i < end; ++i) {
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < end) {
+        if (cc_inert_scan_step(&scan, s, end, &i)) continue;
         char c = s[i];
-        char c2 = (i + 1 < end) ? s[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
         if (c == ';' || c == '{' || c == '}') last = i + 1;
+        i++;
     }
     return last;
 }
@@ -378,36 +357,21 @@ static int cc__scan_function_top_level_defer_info(const char* s, size_t len, siz
                                                   int* out_has_defer, int* out_has_conditional) {
     size_t close_i = 0;
     int rel_depth = 1;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
+    CCInertScan scan;
 
     if (out_has_defer) *out_has_defer = 0;
     if (out_has_conditional) *out_has_conditional = 0;
     if (!s || open_i >= len || s[open_i] != '{') return 0;
     if (!cc__find_matching_brace_text(s, len, open_i, &close_i)) return 0;
 
-    for (size_t i = open_i + 1; i < close_i; i++) {
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice (inside function body) */
+    size_t i = open_i + 1;
+    while (i < close_i) {
+        if (cc_inert_scan_step(&scan, s, close_i, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < len && s[i + 1] == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '{') { rel_depth++; continue; }
-        if (ch == '}') { rel_depth--; continue; }
+        if (ch == '{') { rel_depth++; i++; continue; }
+        if (ch == '}') { rel_depth--; i++; continue; }
         if (rel_depth == 1 && cc__token_is(s, len, i, "@defer")) {
             size_t j = i + 6;
             if (out_has_defer) *out_has_defer = 1;
@@ -416,6 +380,7 @@ static int cc__scan_function_top_level_defer_info(const char* s, size_t len, siz
                 if (out_has_conditional) *out_has_conditional = 1;
             }
         }
+        i++;
     }
     return 1;
 }
@@ -482,16 +447,40 @@ static int cc__extract_function_return_type(const char* s, size_t len, size_t br
     return 1;
 }
 
+/* Walk forward from `open_paren + 1` to find the matching `)`, treating
+ * comments/strings/chars as inert.  Returns 1 with `*out_close` set to
+ * the position of the matching `)`; 0 on unbalanced or trailing junk
+ * (any non-whitespace byte after the matching `)`). */
+static int cc__match_ctor_close_paren(const char* expr, size_t end,
+                                      size_t open_paren, size_t* out_close) {
+    int par = 1;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-expression slice */
+    size_t close_paren = open_paren + 1;
+    while (close_paren < end) {
+        if (cc_inert_scan_step(&scan, expr, end, &close_paren)) continue;
+        char ch = expr[close_paren];
+        if (ch == '(') par++;
+        else if (ch == ')') {
+            par--;
+            if (par == 0) break;
+        }
+        close_paren++;
+    }
+    if (close_paren >= end || par != 0) return 0;
+    for (size_t i = close_paren + 1; i < end; i++) {
+        if (!isspace((unsigned char)expr[i])) return 0;
+    }
+    *out_close = close_paren;
+    return 1;
+}
+
 static int cc__match_result_ctor_prefix_arg(const char* expr, size_t expr_len, const char* prefix,
                                             size_t* out_arg_start, size_t* out_arg_end) {
     size_t start = 0, end = expr_len, name_end;
     size_t open_paren, close_paren;
     size_t prefix_len;
-    int par = 1;
-    int in_str = 0;
-    int in_chr = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
 
     if (!expr || !prefix) return 0;
     prefix_len = strlen(prefix);
@@ -508,47 +497,7 @@ static int cc__match_result_ctor_prefix_arg(const char* expr, size_t expr_len, c
     while (open_paren < end && isspace((unsigned char)expr[open_paren])) open_paren++;
     if (open_paren >= end || expr[open_paren] != '(') return 0;
 
-    close_paren = open_paren + 1;
-    while (close_paren < end) {
-        char ch = expr[close_paren];
-        char ch2 = (close_paren + 1 < end) ? expr[close_paren + 1] : 0;
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            close_paren++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && ch2 == '/') { in_block_comment = 0; close_paren += 2; continue; }
-            close_paren++;
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && close_paren + 1 < end) { close_paren += 2; continue; }
-            if (ch == '"') in_str = 0;
-            close_paren++;
-            continue;
-        }
-        if (in_chr) {
-            if (ch == '\\' && close_paren + 1 < end) { close_paren += 2; continue; }
-            if (ch == '\'') in_chr = 0;
-            close_paren++;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_line_comment = 1; close_paren += 2; continue; }
-        if (ch == '/' && ch2 == '*') { in_block_comment = 1; close_paren += 2; continue; }
-        if (ch == '"') { in_str = 1; close_paren++; continue; }
-        if (ch == '\'') { in_chr = 1; close_paren++; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') {
-            par--;
-            if (par == 0) break;
-        }
-        close_paren++;
-    }
-    if (close_paren >= end || par != 0) return 0;
-    for (size_t i = close_paren + 1; i < end; i++) {
-        if (!isspace((unsigned char)expr[i])) return 0;
-    }
+    if (!cc__match_ctor_close_paren(expr, end, open_paren, &close_paren)) return 0;
     if (out_arg_start) *out_arg_start = open_paren + 1;
     if (out_arg_end) *out_arg_end = close_paren;
     return 1;
@@ -558,11 +507,6 @@ static int cc__match_result_ctor_name_arg(const char* expr, size_t expr_len, con
                                           size_t* out_arg_start, size_t* out_arg_end) {
     size_t start = 0, end = expr_len, name_len;
     size_t open_paren, close_paren;
-    int par = 1;
-    int in_str = 0;
-    int in_chr = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
 
     if (!expr || !name) return 0;
     name_len = strlen(name);
@@ -576,47 +520,7 @@ static int cc__match_result_ctor_name_arg(const char* expr, size_t expr_len, con
     while (open_paren < end && isspace((unsigned char)expr[open_paren])) open_paren++;
     if (open_paren >= end || expr[open_paren] != '(') return 0;
 
-    close_paren = open_paren + 1;
-    while (close_paren < end) {
-        char ch = expr[close_paren];
-        char ch2 = (close_paren + 1 < end) ? expr[close_paren + 1] : 0;
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            close_paren++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && ch2 == '/') { in_block_comment = 0; close_paren += 2; continue; }
-            close_paren++;
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && close_paren + 1 < end) { close_paren += 2; continue; }
-            if (ch == '"') in_str = 0;
-            close_paren++;
-            continue;
-        }
-        if (in_chr) {
-            if (ch == '\\' && close_paren + 1 < end) { close_paren += 2; continue; }
-            if (ch == '\'') in_chr = 0;
-            close_paren++;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_line_comment = 1; close_paren += 2; continue; }
-        if (ch == '/' && ch2 == '*') { in_block_comment = 1; close_paren += 2; continue; }
-        if (ch == '"') { in_str = 1; close_paren++; continue; }
-        if (ch == '\'') { in_chr = 1; close_paren++; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') {
-            par--;
-            if (par == 0) break;
-        }
-        close_paren++;
-    }
-    if (close_paren >= end || par != 0) return 0;
-    for (size_t i = close_paren + 1; i < end; i++) {
-        if (!isspace((unsigned char)expr[i])) return 0;
-    }
+    if (!cc__match_ctor_close_paren(expr, end, open_paren, &close_paren)) return 0;
     if (out_arg_start) *out_arg_start = open_paren + 1;
     if (out_arg_end) *out_arg_end = close_paren;
     return 1;
@@ -664,29 +568,12 @@ static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) 
 
 static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size_t* out_end_off) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (; i < len; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer probe */
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < len && s[i + 1] == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -697,6 +584,7 @@ static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size
             if (out_end_off) *out_end_off = i + 1;
             return 1;
         }
+        i++;
     }
     return 0;
 }
