@@ -14,6 +14,7 @@
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 
 // Thread-local context: set to 1 when rewriting UFCS inside `await`.
 // Channel ops should emit task-returning variants when set.
@@ -285,12 +286,12 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     int paren_depth = 0, bracket_depth = 0;
     size_t stmt_start = 0;
     size_t i = 0;
     const char* name = recv_expr;
     char root[128];
+    CCInertScan scan;
     if (!src || !recv_expr || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
     name = skip_ws(name);
@@ -302,17 +303,11 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
     if (strlen(name) >= sizeof(root)) return NULL;
     strcpy(root, name);
     scope_stack[0] = 0;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* src is a mid-buffer slice */
     while (i < limit) {
+        if (cc_inert_scan_step(&scan, src, limit, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '(') { paren_depth++; i++; continue; }
         if (c == ')') { if (paren_depth > 0) paren_depth--; i++; continue; }
         if (c == '[') { bracket_depth++; i++; continue; }
