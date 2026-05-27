@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (13 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (14 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3; async_ast.c complete).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 85 sites migrated, 17 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 86 sites migrated, 16 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,16 +63,16 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch J).
+Updated 2026-05-27 (post Batch J3).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **85** (+11 from Batch J) |
-| Remaining to migrate | **17** |
+| Already on `CCInertScan` | **86** (+1 from Batch J3) |
+| Remaining to migrate | **16** |
 | — trivial | 10 |
 | — medium | 2 |
-| — complex | 5 (or 7 counting full-file rewrites) |
+| — complex | 4 (or 6 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -543,8 +543,15 @@ J1+J2 combined into a single commit (file didn't yet have `text_scan.h`, so all 
 - **Realloc-leak fix in `cc__rewrite_idents`**: the original `out = realloc(out, cap); if (!out) return NULL;` leaks the previous `out` if realloc fails.  My migration only changed one of the three realloc sites (the new inert-bulk-copy one); the other two still have the original pattern.  Recorded as a future cleanup item: "audit rewrite passes for realloc-leak-on-failure pattern".
 - **No new patterns** otherwise — every site followed an already-documented template.
 
-J3 (complex, separate commit):
-- [ ] `cc__emit_awaits_in_expr` (complex — nested rewrite + operand scanner)
+J3 (complex, separate commit) — **LANDED 2026-05-27**:
+- [x] `cc__emit_awaits_in_expr` — canonical rewrite template (outer) + indexed-walk operand scanner (inner); outer scanner re-initialized after operand-skip to clear stale `in_*` state (the inner pscan tracked the operand's inert spans, but outer scan never saw them)
+
+**Actual diff**: +35 / −24 (net **+11 LOC** — the operand scanner's `if/break` split for unbalanced delims slightly out-grew the original inline state machine).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **Stale-outer-state pattern applied for the first time** (the watch-out from Batch G).  After the outer loop jumps `i = expr_e;` past the operand, the inner pscan saw all the operand's inert content, but the outer scan didn't — so its `in_block_comment` / `in_pp` flags could mismatch reality.  Fix: `cc_inert_scan_init(&scan, NULL); scan.at_line_start = 0;` right before `continue;`.  Cheap and unambiguous.  Pattern: **when an outer scanner jumps past a region another scanner walked, re-init the outer.**
+- **Operand-scanner unbalanced-delim split**: the original collapsed `']'`/`'}'` unbalanced-terminator and depth-decrement into a single conditional (`else if (c == ']') { if (pbrk) pbrk--; }` then later `if (c == ']') break;` at depth-0).  Migrated into explicit per-character if/break/continue arms for clarity.  Same semantics, slightly more LOC.
+- **Latent realloc-leak fixed** in the rewrite path: outer `realloc(out, out_cap); if (!out) return NULL;` leaks the old pointer; replaced with `tmp = realloc(...); if (!tmp) { free(out); return NULL; } out = tmp;`.  Same pattern as the J1 `cc__rewrite_idents` fix.
 
 ### Batch K — closure literal pass (11 sites + helper, 2–3 commits)
 
