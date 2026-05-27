@@ -1,0 +1,128 @@
+/* Pins the three lower-level contracts the type-info system
+ * relies on but the other smokes don't explicitly check:
+ *
+ *   1. Registry de-dup is by mangled name AND preserves first-
+ *      registration identity.  Re-registering the same
+ *      `cc_type_info*` is a no-op; registering a DIFFERENT
+ *      `cc_type_info*` with the same mangled name is also a
+ *      no-op (the first wins).  `cc_type_of(name)` continues to
+ *      return the original pointer.
+ *
+ *   2. The typed accessors (`cc_ti_kind` / `cc_ti_flags` /
+ *      `cc_ti_size` / `cc_ti_align` / `cc_ti_nfields`) are
+ *      pure storage reinterpretations — `(uint16_t)cc_ti_kind(ti)`
+ *      must equal `ti->kind`, etc.  Locks the storage contract so
+ *      a future widening / packing change has to update both
+ *      sides at once.
+ *
+ *   3. Containers — both the codegen-emitted path and the runtime
+ *      pre-baked Vec set — carry `CC_TF_ERASABLE`.  The flag is
+ *      currently a hint (cc_dyn_vec doesn't enforce it), but
+ *      generic library code is allowed to depend on it, so we
+ *      pin the bit on registration.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct {
+    int x;
+    int y;
+} Point2;
+
+static int fails = 0;
+
+static void pin(int cond, const char* msg) {
+    if (!cond) {
+        printf("FAIL: %s\n", msg);
+        fails++;
+    }
+}
+
+int main(void) {
+    /* Force the codegen pass to emit CCVec_Point2 by actually
+     * using Vec<Point2> here.  The generic_emit smoke covers
+     * the codegen-emission path itself; what we lock down below
+     * are the registry/accessor/flag contracts. */
+    CCArena arena = cc_arena_heap(kilobytes(8));
+    if (!arena.base) { printf("FAIL arena\n"); return 1; }
+    Vec<Point2> v = vec_new<Point2>(&arena);
+    Point2 p = { 11, 22 };
+    v.push(p);
+
+    /* --- (1) de-dup / identity ------------------------------- */
+
+    const cc_type_info* int_ti  = type_of(int);
+    pin(int_ti != NULL, "type_of(int) is non-NULL");
+
+    /* Same pointer back from successive calls. */
+    pin(type_of(int) == int_ti,
+        "type_of(int) returns stable pointer across calls");
+
+    /* Re-register the exact same pointer: no-op. */
+    cc_type_info_register(int_ti);
+    pin(type_of(int) == int_ti,
+        "re-registering same pointer preserves identity");
+
+    /* Register a DIFFERENT cc_type_info with the same mangled name:
+     * also a no-op (first-registration wins by name). */
+    cc_type_info shadow = {0};
+    shadow.name      = "int (shadow)";
+    shadow.mangled   = "int";
+    shadow.size      = 999;
+    shadow.align     = 1;
+    shadow.kind      = (uint16_t)CC_TK_PRIMITIVE;
+    cc_type_info_register(&shadow);
+    pin(type_of(int) == int_ti,
+        "registering shadow under same mangled name is rejected");
+    pin(cc_ti_size(type_of(int)) == sizeof(int),
+        "shadow did not overwrite size");
+
+    /* --- (2) accessor / storage consistency ------------------- */
+
+    const cc_type_info* vec_ti = type_of(CCVec_Point2);
+    pin(vec_ti != NULL,
+        "codegen-emitted CCVec_Point2 is registered");
+    if (vec_ti) {
+        pin((uint16_t)cc_ti_kind(vec_ti) == vec_ti->kind,
+            "cc_ti_kind round-trips through storage");
+        pin((uint16_t)cc_ti_flags(vec_ti) == vec_ti->flags,
+            "cc_ti_flags round-trips through storage");
+        pin(cc_ti_size(vec_ti) == (size_t)vec_ti->size,
+            "cc_ti_size widens uint32_t -> size_t cleanly");
+        pin(cc_ti_align(vec_ti) == (size_t)vec_ti->align,
+            "cc_ti_align widens uint32_t -> size_t cleanly");
+        pin(cc_ti_nfields(vec_ti) == (size_t)vec_ti->nfields,
+            "cc_ti_nfields widens uint16_t -> size_t cleanly");
+    }
+
+    /* --- (3) CC_TF_ERASABLE on containers --------------------- */
+
+    if (vec_ti) {
+        pin((cc_ti_flags(vec_ti) & CC_TF_ERASABLE) != 0,
+            "codegen-emitted container carries CC_TF_ERASABLE");
+        pin(cc_ti_kind(vec_ti) == CC_TK_GENERIC_INST,
+            "codegen-emitted container kind is GENERIC_INST");
+    }
+
+    /* Pre-baked stdlib Vec — registered by the runtime constructor
+     * in cc_type_info.c.  Same erasable contract. */
+    const cc_type_info* vint_ti = type_of(CCVec_int);
+    pin(vint_ti != NULL, "pre-baked CCVec_int is registered");
+    if (vint_ti) {
+        pin((cc_ti_flags(vint_ti) & CC_TF_ERASABLE) != 0,
+            "pre-baked CCVec_int carries CC_TF_ERASABLE");
+    }
+
+    /* And primitives — already had the flag before this commit. */
+    pin((cc_ti_flags(int_ti) & CC_TF_ERASABLE) != 0,
+        "primitive int carries CC_TF_ERASABLE");
+
+    if (fails == 0) {
+        printf("cc_type_info contracts: OK\n");
+        return 0;
+    }
+    printf("cc_type_info contracts: %d FAIL\n", fails);
+    return 1;
+}

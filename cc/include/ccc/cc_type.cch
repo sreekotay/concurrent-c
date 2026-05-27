@@ -24,12 +24,16 @@
  * Primitive `cc_type_info` symbols (`__cc_ti_int`, etc.) live in
  * `cc/runtime/cc_type_info.c` and are always linked in.  User
  * types and container instantiations emit their own per-TU
- * `cc_type_info` symbols (added incrementally; see milestone
- * #4b in `cc/docs/COMPILER_CLEANUP_STATUS.md`).
+ * `cc_type_info` symbols — generic containers (Vec/Map) via
+ * codegen, user structs via the `CC_TYPE_INFO_BEGIN/FIELD/END`
+ * macros below.  See milestone #4a in
+ * `cc/docs/COMPILER_CLEANUP_STATUS.md` for the design.
  *
- * Access pattern:
+ * Access pattern (prefer the typed accessors over raw fields —
+ * `kind`/`flags`/`nfields` are stored as `uint16_t` for compactness):
  *     const cc_type_info* ti = type_of(int);
- *     printf("%s size=%u align=%u\n", ti->name, ti->size, ti->align);
+ *     printf("%s size=%zu align=%zu\n",
+ *            ti->name, cc_ti_size(ti), cc_ti_align(ti));
  * ============================================================ */
 
 typedef enum cc_type_kind {
@@ -48,7 +52,14 @@ typedef enum cc_type_flag {
     CC_TF_POD           = 1u << 0,  /* plain old data — bitwise copy is safe */
     CC_TF_TRIVIAL_COPY  = 1u << 1,  /* copy_fn is NULL — caller uses memcpy(dst, src, size) */
     CC_TF_TRIVIAL_DROP  = 1u << 2,  /* drop_fn is NULL — caller does nothing */
-    CC_TF_ERASABLE      = 1u << 3,  /* safe to put through a type-erased container */
+    /* CC_TF_ERASABLE: a *hint* that the type is safe through a
+     * type-erased container.  Set by primitives and by codegen-
+     * emitted / pre-baked container instantiations.  Today no
+     * runtime path enforces it — `cc_dyn_vec` will accept any
+     * `cc_type_info` regardless.  Treat it as advisory: code
+     * generating generic dispatch tables can refuse types that
+     * don't have it set; everything else can ignore it. */
+    CC_TF_ERASABLE      = 1u << 3,
 } cc_type_flag;
 
 typedef struct cc_type_field {
@@ -61,13 +72,18 @@ typedef struct cc_type_field {
 typedef struct cc_type_info {
     const char*           name;        /* display name: "int", "Point", "Vec<int>" */
     const char*           mangled;     /* symbol-safe: "int", "Point", "CCVec_int" */
-    uint32_t              id;          /* per-binary stable ID; 0 = not yet assigned */
+    /* `id`: reserved slot for a per-binary stable type ID.
+     * Currently always 0; populated by a future commit once we
+     * have a use case (cross-process serialization, debugger
+     * dumps).  Smokes pin it to 0 so we don't accidentally start
+     * relying on it before it exists. */
+    uint32_t              id;
     uint32_t              size;        /* sizeof(T) */
     uint32_t              align;       /* alignof(T) */
-    uint16_t              kind;        /* cc_type_kind, stored as uint16_t */
-    uint16_t              nfields;
-    uint16_t              flags;       /* cc_type_flag bitset */
-    uint16_t              _reserved;
+    uint16_t              kind;        /* cc_type_kind, narrowed to uint16_t — use cc_ti_kind() to read */
+    uint16_t              nfields;     /* use cc_ti_nfields() to read */
+    uint16_t              flags;       /* cc_type_flag bitset — use cc_ti_flags() to read */
+    uint16_t              _reserved;   /* padding; keeps the struct 16-byte aligned */
     const cc_type_field*  fields;      /* may be NULL when nfields == 0 */
     void (*copy_fn)(void* dst, const void* src);  /* NULL → bitwise copy */
     void (*drop_fn)(void* p);                     /* NULL → no-op */
@@ -109,30 +125,31 @@ static inline size_t cc_ti_nfields(const cc_type_info* ti) {
  * `type_of(T)` macro below is sugar over it.
  *
  * Lookup is currently O(n) (small global array, populated by
- * static constructors at startup).  Both primitives (always
- * registered) and per-TU container instantiations (registered by
- * codegen-emitted constructors — see milestone #4a in
- * `cc/docs/COMPILER_CLEANUP_STATUS.md`) flow through the same
- * registry, which gives stable pointer-identity across all callers
+ * static constructors at startup).  Primitives, per-TU container
+ * instantiations (codegen-emitted), and user struct registrations
+ * (`CC_TYPE_INFO_BEGIN/FIELD/END` below) all flow through the same
+ * registry — giving stable pointer-identity across all callers
  * within a single binary.
  *
- * `cc_type_info_register` is the registration entry-point —
- * primitives and codegen-emitted constructors call it.  User code
- * MAY call it directly to teach the registry about a hand-rolled
- * `cc_type_info`.  (The name is deliberately distinct from the
- * legacy `cc_type_register(name, hooks)` comptime API below; the
- * two will be unified in a later milestone.) */
+ * `cc_type_info_register` is the registration entry-point.
+ * Primitives and codegen-emitted constructors call it for you.
+ * User code MAY call it directly to teach the registry about a
+ * hand-rolled `cc_type_info`.  (The name is deliberately distinct
+ * from the legacy `cc_type_register(name, hooks)` comptime API
+ * below; unifying the two is deferred to milestone #4a's later
+ * commits — see COMPILER_CLEANUP_STATUS.md.) */
 const cc_type_info* cc_type_of(const char* mangled);
 void cc_type_info_register(const cc_type_info* ti);
 
 /* `type_of(T)` — sugar: `cc_type_of(#T)`.  Why a function call
- * rather than `(&__cc_ti_##T)`?  Because T is often a typedef that
- * the parser pass hasn't yet emitted a forward-declaration for, and
- * a function call with a string literal trivially parses where
- * `&undeclared_symbol` does not.  The registry lookup is cheap and
- * happens once per call-site at runtime; comptime
+ * rather than `(&__cc_ti_##T)`?  Because T is often a typedef
+ * (e.g. `CCVec_int`) whose `__cc_ti_T` symbol is emitted by a
+ * later codegen pass, and a function call with a string literal
+ * trivially parses where `&undeclared_symbol` does not.  The
+ * registry lookup is cheap (linear scan of a small table) and
+ * happens once per call-site at runtime.  Comptime
  * (`@comptime { type_of(T).fields ... }`) will get a real
- * parser-level builtin in a separate commit. */
+ * parser-level builtin in a separate commit (3c.3). */
 #define type_of(T) cc_type_of(#T)
 
 /* Primitive type-info symbols — defined in cc/runtime/cc_type_info.c
