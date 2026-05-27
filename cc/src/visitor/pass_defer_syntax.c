@@ -7,6 +7,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/edit_buffer.h"
 #include "visitor/pass_common.h"
 
@@ -345,39 +346,28 @@ static int cc__decl_has_async_attr(const char* s, size_t pos, size_t end) {
 }
 
 static int cc__find_matching_brace_text(const char* s, size_t len, size_t open_i, size_t* out_close_i) {
-    int depth = 1;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-
+    /* Find the `}` that matches the `{` at `open_i`, skipping
+     * inert content (comments, strings, char literals, pp
+     * directives) via the shared `CCInertScan` helper. */
     if (!s || open_i >= len || s[open_i] != '{') return 0;
-    for (size_t i = open_i + 1; i < len; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    int depth = 1;
+    size_t i = open_i + 1;
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < len && s[i + 1] == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '{') depth++;
-        else if (ch == '}') {
+        if (ch == '{') { depth++; i++; continue; }
+        if (ch == '}') {
             depth--;
             if (depth == 0) {
                 if (out_close_i) *out_close_i = i;
                 return 1;
             }
+            i++;
+            continue;
         }
+        i++;
     }
     return 0;
 }
