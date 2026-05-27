@@ -1,0 +1,133 @@
+/* Commit 3c.2-lite smoke: user struct registration via the
+ * `CC_TYPE_INFO_BEGIN / FIELD / END` helper macros.
+ *
+ * What this pins down (the runtime half of comptime
+ * introspection — see milestone #4a in
+ * `cc/docs/COMPILER_CLEANUP_STATUS.md`):
+ *
+ *   - A `typedef struct {...}` with hand-rolled
+ *     `CC_TYPE_INFO_*` block ends up in the global registry,
+ *     reachable via `type_of(MyStruct)`.
+ *   - `kind == CC_TK_STRUCT`, `size == sizeof(MyStruct)`,
+ *     `align == _Alignof(MyStruct)`, and `nfields` matches the
+ *     declared field count.
+ *   - Each `cc_type_field`'s `.name` is the spelled identifier,
+ *     `.offset` matches `offsetof(MyStruct, fname)`, and
+ *     `.type` points at the SAME `cc_type_info` that
+ *     `type_of(FieldType)` returns (registry-stable identity
+ *     across primitive lookups AND struct lookups).
+ *   - A struct that references ANOTHER registered struct as a
+ *     field type composes correctly — i.e. the type graph
+ *     traverses across struct boundaries (the canonical
+ *     comptime use case: walk a payload's layout to drive
+ *     serialization / schema emission).
+ *
+ * What this does NOT pin down (deferred to later commits):
+ *   - Pointer-typed fields (need a separate macro form +
+ *     `CC_TF_POINTER` flag).
+ *   - Auto-registration from `typedef struct` without the
+ *     user writing the macro block (requires AST integration).
+ *   - Parser-level `type_of` builtin (Commit 3c.1 / 3c.3).
+ */
+
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int   a;
+    float b;
+} Pair;
+
+CC_TYPE_INFO_BEGIN(Pair)
+    CC_TYPE_INFO_FIELD(Pair, a, int)
+    CC_TYPE_INFO_FIELD(Pair, b, float)
+CC_TYPE_INFO_END(Pair, "Pair")
+
+/* Composed type: a field of type `Pair` — verifies the type graph
+ * traverses across struct boundaries via the registry. */
+typedef struct {
+    double x;
+    Pair   inner;
+} WithPair;
+
+CC_TYPE_INFO_BEGIN(WithPair)
+    CC_TYPE_INFO_FIELD(WithPair, x,     double)
+    CC_TYPE_INFO_FIELD(WithPair, inner, Pair)
+CC_TYPE_INFO_END(WithPair, "WithPair")
+
+int main(void) {
+    /* Pair — flat struct with two primitive fields. */
+    const cc_type_info* tp = type_of(Pair);
+    if (!tp) { printf("FAIL: type_of(Pair) NULL — registration didn't run\n"); return 1; }
+    if (cc_ti_kind(tp) != CC_TK_STRUCT) {
+        printf("FAIL: Pair kind=%d want STRUCT\n", (int)cc_ti_kind(tp)); return 2;
+    }
+    if (cc_ti_size(tp) != sizeof(Pair)) {
+        printf("FAIL: Pair size=%zu want %zu\n", cc_ti_size(tp), sizeof(Pair)); return 3;
+    }
+    if (cc_ti_align(tp) != _Alignof(Pair)) {
+        printf("FAIL: Pair align=%zu want %zu\n", cc_ti_align(tp), (size_t)_Alignof(Pair)); return 4;
+    }
+    if (cc_ti_nfields(tp) != 2) {
+        printf("FAIL: Pair nfields=%zu want 2\n", cc_ti_nfields(tp)); return 5;
+    }
+    if (!tp->fields) { printf("FAIL: Pair fields NULL\n"); return 6; }
+
+    if (strcmp(tp->fields[0].name, "a") != 0) {
+        printf("FAIL: Pair fields[0].name='%s'\n", tp->fields[0].name); return 7;
+    }
+    if (tp->fields[0].offset != __builtin_offsetof(Pair, a)) {
+        printf("FAIL: Pair fields[0].offset=%u\n", tp->fields[0].offset);
+        return 8;
+    }
+    if (tp->fields[0].type != type_of(int)) {
+        printf("FAIL: Pair fields[0].type != type_of(int)\n"); return 9;
+    }
+
+    if (strcmp(tp->fields[1].name, "b") != 0) {
+        printf("FAIL: Pair fields[1].name='%s'\n", tp->fields[1].name); return 10;
+    }
+    if (tp->fields[1].offset != __builtin_offsetof(Pair, b)) {
+        printf("FAIL: Pair fields[1].offset\n"); return 11;
+    }
+    if (tp->fields[1].type != type_of(float)) {
+        printf("FAIL: Pair fields[1].type != type_of(float)\n"); return 12;
+    }
+
+    /* WithPair — composes a primitive field AND a struct-typed
+     * field.  The struct-typed field's .type must equal the
+     * SAME pointer the registry returns for type_of(Pair). */
+    const cc_type_info* twp = type_of(WithPair);
+    if (!twp) { printf("FAIL: type_of(WithPair) NULL\n"); return 13; }
+    if (cc_ti_nfields(twp) != 2) {
+        printf("FAIL: WithPair nfields=%zu want 2\n", cc_ti_nfields(twp)); return 14;
+    }
+    if (twp->fields[1].type != tp) {
+        printf("FAIL: WithPair.inner.type != type_of(Pair) — type graph broken\n");
+        return 15;
+    }
+    if (twp->fields[0].offset != __builtin_offsetof(WithPair, x)) {
+        printf("FAIL: WithPair.x offset\n"); return 16;
+    }
+    if (twp->fields[1].offset != __builtin_offsetof(WithPair, inner)) {
+        printf("FAIL: WithPair.inner offset\n"); return 17;
+    }
+
+    /* Generic "walk all fields of a registered struct" — the
+     * canonical use case (e.g. for a serializer). */
+    size_t total_field_bytes = 0;
+    for (size_t i = 0; i < cc_ti_nfields(twp); i++) {
+        total_field_bytes += cc_ti_size(twp->fields[i].type);
+    }
+    /* This holds only because both fields are POD with no padding
+     * between them on common ABIs.  We don't assert equality with
+     * sizeof(WithPair) — that would fail under struct padding —
+     * but we DO assert the walk visited real type info. */
+    if (total_field_bytes == 0) {
+        printf("FAIL: field walk produced 0 bytes\n"); return 18;
+    }
+
+    printf("cc_type_info struct introspect: OK\n");
+    return 0;
+}

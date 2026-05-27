@@ -4427,7 +4427,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             "    .copy_fn   = NULL,\n"
                             "    .drop_fn   = NULL,\n"
                             "};\n"
-                            "__attribute__((constructor(102)))\n"
+                            "__attribute__((constructor))\n"
                             "static void __cc_ti_reg_%s(void) {\n"
                             "    cc_type_info_register(&__cc_ti_%s);\n"
                             "}\n",
@@ -4476,7 +4476,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             "    .copy_fn   = NULL,\n"
                             "    .drop_fn   = NULL,\n"
                             "};\n"
-                            "__attribute__((constructor(102)))\n"
+                            "__attribute__((constructor))\n"
                             "static void __cc_ti_reg_%s(void) {\n"
                             "    cc_type_info_register(&__cc_ti_%s);\n"
                             "}\n",

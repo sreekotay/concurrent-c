@@ -536,6 +536,21 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
     return cc_slice_from_buffer(buf, total);
 }
 
+/* ------------------------------------------------------------
+ * Size-helper sugar.
+ *
+ * Lives next to the arena constructor — every call site that
+ * allocates an arena reads better with `kilobytes(8)` than
+ * `8 * 1024`, and it's silly to require a `prelude.cch` include
+ * just for this.  Smoke tests that include only `cc_arena.cch`
+ * (e.g. `tests/cc_dyn_vec_basic_smoke.ccs`) get the helpers
+ * automatically.
+ * ------------------------------------------------------------ */
+
+static inline size_t kilobytes(size_t n) { return n * 1024; }
+static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
+static inline size_t gigabytes(size_t n) { return n * 1024 * 1024 * 1024; }
+
 // Allocate a growable arena with heap-backed storage of given initial size.
 // block_max = 0 means unbounded growth (the default for heap-created arenas).
 static inline CCArena cc_arena_heap(size_t bytes) {

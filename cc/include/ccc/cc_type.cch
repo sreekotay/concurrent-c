@@ -73,6 +73,36 @@ typedef struct cc_type_info {
     void (*drop_fn)(void* p);                     /* NULL → no-op */
 } cc_type_info;
 
+/* Typed accessors — read storage-narrowed fields back as their
+ * semantic types so user code doesn't have to cast at every
+ * comparison.  Storage stays packed (uint16_t kind/flags/nfields,
+ * uint32_t size/align — keeps the struct compact for the many
+ * thousands of cc_type_info symbols a large program will carry);
+ * accessors give callers the wide type they actually want.
+ *
+ *   if (cc_ti_kind(ti) == CC_TK_STRUCT) { ... }    // no cast
+ *   if (cc_ti_flags(ti) & CC_TF_POD)    { ... }    // no cast
+ *   printf("size=%zu\n", cc_ti_size(ti));          // %zu just works
+ *
+ * Prefer these over direct field access in new code; the raw
+ * struct fields stay public for serialization / debug-printer
+ * use cases that need the on-wire shape. */
+static inline cc_type_kind cc_ti_kind(const cc_type_info* ti) {
+    return (cc_type_kind)ti->kind;
+}
+static inline cc_type_flag cc_ti_flags(const cc_type_info* ti) {
+    return (cc_type_flag)ti->flags;
+}
+static inline size_t cc_ti_size(const cc_type_info* ti) {
+    return (size_t)ti->size;
+}
+static inline size_t cc_ti_align(const cc_type_info* ti) {
+    return (size_t)ti->align;
+}
+static inline size_t cc_ti_nfields(const cc_type_info* ti) {
+    return (size_t)ti->nfields;
+}
+
 /* `cc_type_of(mangled)` — runtime lookup of a `cc_type_info*` by
  * mangled-name string.  Returns NULL if the type hasn't been
  * registered in the current binary.  This is the public API; the
@@ -120,6 +150,88 @@ extern const cc_type_info __cc_ti_double;
 extern const cc_type_info __cc_ti_size_t;
 extern const cc_type_info __cc_ti_intptr_t;
 extern const cc_type_info __cc_ti_bool;
+
+/* `offsetof` lives in stddef.h, which `cc_type.cch` includes at
+ * the top.  We rely on it inside CC_TYPE_INFO_FIELD below. */
+
+/* ============================================================
+ * User struct registration helpers (Commit 3c.2-lite)
+ *
+ * Goal: let user code register a plain `typedef struct {...}` so
+ * that `type_of(MyStruct).fields[i].{name,type,offset}` walks the
+ * declared layout at runtime.  This is the runtime half of
+ * comptime introspection — once the parser-level builtin (3c.3)
+ * lands, comptime code calls into the same `cc_type_info` we
+ * emit here, so there is only one source of truth per type.
+ *
+ * Usage:
+ *
+ *     typedef struct {
+ *         int   a;
+ *         float b;
+ *     } Point;
+ *
+ *     CC_TYPE_INFO_BEGIN(Point)
+ *         CC_TYPE_INFO_FIELD(Point, a, int)
+ *         CC_TYPE_INFO_FIELD(Point, b, float)
+ *     CC_TYPE_INFO_END(Point, "Point")
+ *
+ * Constraints / footguns:
+ *   - The third arg to CC_TYPE_INFO_FIELD is the *mangled* type
+ *     name of the field (e.g. `int`, `float`, `CCVec_int`,
+ *     `MyStruct`).  The macro expands to `&__cc_ti_<mangled>`,
+ *     which must be a declared symbol at expansion site —
+ *     primitives are pre-declared in cc_type.cch above; user
+ *     structs declared with these macros work because the
+ *     `static const cc_type_info __cc_ti_<T>` IS the declaration.
+ *     Pointer fields aren't supported by this minimal form yet
+ *     (would need a `CC_TF_POINTER` flag plus a separate macro);
+ *     use the long form by hand if you need them.
+ *   - Field order in the macro block MUST match struct
+ *     declaration order; `offsetof()` enforces correct offsets
+ *     but does not guard against missing or reordered fields.
+ *   - Each TU that registers a type T gets its own static
+ *     `__cc_ti_T` — the runtime registry de-dupes by mangled
+ *     name (first-registration wins), giving stable pointer
+ *     identity across all callers.
+ * ============================================================ */
+
+#define CC_TYPE_INFO_BEGIN(T)                                                \
+    static const cc_type_field cc__ti_fields_##T[] = {
+
+/* Use `__builtin_offsetof` instead of the stddef.h `offsetof`:
+ * the latter expands on some libc implementations to
+ * `((size_t)&(((T*)0)->F))`, which trips CC's stub-AST parser
+ * (the "&-of-NULL-deref" idiom is not in the subset the parser
+ * accepts).  `__builtin_offsetof` is a single token both TCC
+ * and the host C compiler recognize directly. */
+#define CC_TYPE_INFO_FIELD(T, FNAME, FTYPE_MANGLED)                          \
+        { .name     = #FNAME,                                                \
+          .type     = &__cc_ti_##FTYPE_MANGLED,                              \
+          .offset   = (uint32_t)__builtin_offsetof(T, FNAME),                \
+          .reserved = 0 },
+
+#define CC_TYPE_INFO_END(T, DISPLAY)                                         \
+    };                                                                       \
+    static const cc_type_info __cc_ti_##T = {                                \
+        .name      = DISPLAY,                                                \
+        .mangled   = #T,                                                     \
+        .id        = 0,                                                      \
+        .size      = (uint32_t)sizeof(T),                                    \
+        .align     = (uint32_t)_Alignof(T),                                  \
+        .kind      = (uint16_t)CC_TK_STRUCT,                                 \
+        .nfields   = (uint16_t)(sizeof(cc__ti_fields_##T)                    \
+                                / sizeof(cc_type_field)),                    \
+        .flags     = 0,                                                      \
+        ._reserved = 0,                                                      \
+        .fields    = cc__ti_fields_##T,                                      \
+        .copy_fn   = NULL,                                                   \
+        .drop_fn   = NULL,                                                   \
+    };                                                                       \
+    __attribute__((constructor))                                             \
+    static void cc__ti_reg_##T(void) {                                       \
+        cc_type_info_register(&__cc_ti_##T);                                 \
+    }
 
 /* ============================================================
  * Legacy comptime type-registration API.
