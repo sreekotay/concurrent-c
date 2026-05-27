@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (9 / 13 batches landed — A, B, C, D1, D2, E, F1, F2, G).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (10 / 14 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 59 sites migrated, 43 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 65 sites migrated, 37 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,15 +63,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch G).
+Updated 2026-05-27 (post Batch H1).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **59** (+8 from Batch G) |
-| Remaining to migrate | **43** |
-| — trivial | 30 |
-| — medium | 8 |
+| Already on `CCInertScan` | **65** (+6 from Batch H1) |
+| Remaining to migrate | **37** |
+| — trivial | 28 |
+| — medium | 4 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -239,19 +239,19 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 | ~~`cc__pu_process_bang_body` (~1474)~~ | ~~rewrite~~ | ~~{str,qch,lc,bc}~~ | ~~~55~~ | ~~medium~~ | **✓ Migrated (Batch G)** — canonical rewrite template: snapshot `before = i;` before each `cc_inert_scan_step`, `cc__append_n(out, body + before, i - before)` after step returns 1.  Replaces ~50 LOC of interleaved `in_lc`/`in_bc`/`in_str` + `cc__append_n` boilerplate with the 5-line snapshot pattern |
 | ~~`cc__strict_unhandled_scan` (~2529)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~25~~ | ~~trivial~~ | **✓ Migrated (Batch G)** — already a `while` loop; cleanest of the eight: just replace the inert-handler prefix with `cc_inert_scan_step` |
 
-### `pass_defer_syntax.c` (1453 LOC, 7 inline + 1 migrated, has `text_scan.h`)
+### `pass_defer_syntax.c` (1453 LOC, 1 inline + 7 migrated, has `text_scan.h`)
 
-**Migrated:** `cc__find_matching_brace_text` (~350).
+**Migrated:** `cc__find_matching_brace_text` (~350), plus Batch H1: `cc__count_top_level_semicolons` (~144), `cc__last_stmt_terminator_before` (~260), `cc__scan_function_top_level_defer_info` (~377), `cc__match_result_ctor_prefix_arg` (~485), `cc__match_result_ctor_name_arg` (~557), `cc__scan_stmt_end_semicolon` (~665).
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__count_top_level_semicolons` (~144) | find-only | {str,qch,lc,bc} | ~35 | trivial | |
-| `cc__last_stmt_terminator_before` (~260) | find-only | {lc,bc,str,chr} | ~18 | trivial | |
-| `cc__scan_function_top_level_defer_info` (~377) | find-only | {str,qch,lc,bc} | ~25 | medium | Also rel_depth |
-| `cc__match_result_ctor_prefix_arg` (~485) | find-only | {str,chr,lc,bc} | ~35 | medium | |
-| `cc__match_result_ctor_name_arg` (~557) | find-only | {str,chr,lc,bc} | ~35 | medium | Same as above |
-| `cc__scan_stmt_end_semicolon` (~665) | find-only | {str,qch,lc,bc} | ~35 | trivial | |
-| `cc__rewrite_defer_syntax` main loop (~704) | rewrite | {str,qch,lc,bc,pp,als} | ~90 | **complex** | Full defer-stack pass with pp tracking |
+| ~~`cc__count_top_level_semicolons` (~144)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~35~~ | ~~trivial~~ | **✓ Migrated (Batch H1)** — `if/else if` counter chain naturally falls through to tail `i++` — no body-`continue;` audit needed |
+| ~~`cc__last_stmt_terminator_before` (~260)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~18~~ | ~~trivial~~ | **✓ Migrated (Batch H1)** — cleanest of the six, naked body with no counters or continues |
+| ~~`cc__scan_function_top_level_defer_info` (~377)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch H1)** — `rel_depth` stays alongside; `{`/`}` arms get `i++; continue;`; CCInertScan called with bound `close_i` (not `len`) since loop terminates at the matching brace |
+| ~~`cc__match_result_ctor_prefix_arg` (~485)~~ | ~~find-only~~ | ~~{str,chr,lc,bc}~~ | ~~~35~~ | ~~medium~~ | **✓ Migrated (Batch H1)** — **near-duplicate consolidation**: both ~485 and ~557 had identical paren-balance inert-scan blocks; factored into shared helper `cc__match_ctor_close_paren` (~25 LOC).  Net −60 LOC across the pair |
+| ~~`cc__match_result_ctor_name_arg` (~557)~~ | ~~find-only~~ | ~~{str,chr,lc,bc}~~ | ~~~35~~ | ~~medium~~ | **✓ Migrated (Batch H1)** — calls `cc__match_ctor_close_paren` |
+| ~~`cc__scan_stmt_end_semicolon` (~665)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~35~~ | ~~trivial~~ | **✓ Migrated (Batch H1)** — duplicate of pass_err_syntax's twin; identical migration shape |
+| `cc__rewrite_defer_syntax` main loop (~704) | rewrite | {str,qch,lc,bc,pp,als} | ~90 | **complex** | Full defer-stack pass with pp tracking (Batch H2) |
 
 ### `pass_with_deadline_syntax.c` (412 LOC, 5 inline + 1 migrated outer, has `text_scan.h`)
 
@@ -471,15 +471,22 @@ Commit F2 (4 medium sites) — **LANDED 2026-05-27**:
 - **Two-phase functions like `cc__pu_next_stmt`**: easiest pattern is two scoped `CCInertScan` instances (one per phase), each freshly initialized.  Cheaper than trying to preserve state across the phase boundary and clearer for the reader.
 - **Stale scanner state after big jumps** (in `cc__pu_find_outer_errhandler` post-match `i = rbrace + 1;`): scanner doesn't process the skipped bytes, so its `in_block_comment` / `in_pp` flags could be wrong if the body contained those.  Safe for this function (it doesn't check `in_user_file` or any other state-derived flag, just looks for `@errhandler` tokens at code position).  Note this as a Watch-out for future jumps: if a post-match jump is followed by code that reads `scan.in_user_file`, re-init the scanner.
 
-### Batch H — pass_defer_syntax (6 forward sites, 1 commit; complex main loop separate)
+### Batch H — pass_defer_syntax (6 forward sites + 1 complex, 2 commits)
 
-H1 (6 trivial/medium):
-- [ ] `cc__count_top_level_semicolons`
-- [ ] `cc__last_stmt_terminator_before`
-- [ ] `cc__scan_function_top_level_defer_info` (medium)
-- [ ] `cc__match_result_ctor_prefix_arg` (medium)
-- [ ] `cc__match_result_ctor_name_arg` (medium)
-- [ ] `cc__scan_stmt_end_semicolon`
+H1 (6 trivial/medium) — **LANDED 2026-05-27**:
+- [x] `cc__count_top_level_semicolons` — `if/else if` chain naturally falls through to tail `i++`
+- [x] `cc__last_stmt_terminator_before` — cleanest drop-in
+- [x] `cc__scan_function_top_level_defer_info` — `rel_depth` stays; `{`/`}` arms `i++; continue;`
+- [x] `cc__match_result_ctor_prefix_arg` — consolidated with name_arg below
+- [x] `cc__match_result_ctor_name_arg` — extracted `cc__match_ctor_close_paren` helper, net −60 LOC across the pair
+- [x] `cc__scan_stmt_end_semicolon` — duplicate of pass_err_syntax's twin
+
+**Actual diff**: +49 / −187 (net **−138 LOC**, new biggest batch reduction — beats Batch G by 18).  Smoke 461/461 both modes.
+
+**Surprises:**
+- **Near-duplicate consolidation worked this time** (unlike Batch E).  `cc__match_result_ctor_prefix_arg` and `cc__match_result_ctor_name_arg` had IDENTICAL paren-balance inert-scan blocks — the only difference was the prefix/name token-matching logic ABOVE the inert scan.  Extracted just the inert-scan-and-balanced-paren walk into a shared helper `cc__match_ctor_close_paren` (~25 LOC).  Replaces ~70 LOC of duplicated body in each function with a single call.  Generally useful pattern: **when two callers diverge only in the pre-scan setup but share an identical inert-scanner body, factor the inert-scanner body out.**
+- **Why this is different from Batch E's "don't consolidate" decision**: in Batch E, the two functions diverged in FOUR places (input parsing + 3 different helper calls inside the body).  Here, the divergence is only in the leading prefix/name check.  The post-extraction call sites are 3 lines (`if (!cc__match_ctor_close_paren(...)) return 0;`).  Easy enough.
+- **Counter `if/else if` chains don't need body-`continue;` audit** — sites 1 and 6 use `if (ch == '(') par++; else if (ch == ')') par--;` chains that naturally fall through to the loop tail.  No `continue;` in any arm means tail `i++` always runs.  Cheaper migration than sites with explicit `if (ch == '{') { rel_depth++; continue; }` (which need the `{ i++; continue; }` audit).
 
 H2 (complex full-pass rewrite, separate commit):
 - [ ] `cc__rewrite_defer_syntax` main loop (complex)
