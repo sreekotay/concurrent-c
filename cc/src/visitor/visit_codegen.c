@@ -182,20 +182,14 @@ static size_t cc__cg_type_decl_end_top_level(const char* src, size_t len, const 
         }
         size_t q = s;
         int brace_depth = 0;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        for (; q < len; q++) {
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;  /* mid-buffer slice */
+        while (q < len) {
+            if (cc_inert_scan_step(&scan, src, len, &q)) continue;
             char c = src[q];
-            char c2 = (q + 1 < len) ? src[q + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; q++; } continue; }
-            if (in_str) { if (c == '\\' && c2) { q++; continue; } if (c == '"') in_str = 0; continue; }
-            if (in_chr) { if (c == '\\' && c2) { q++; continue; } if (c == '\'') in_chr = 0; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; q++; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; q++; continue; }
-            if (c == '"') { in_str = 1; continue; }
-            if (c == '\'') { in_chr = 1; continue; }
-            if (c == '{') { brace_depth++; continue; }
-            if (c == '}') { if (brace_depth > 0) brace_depth--; continue; }
+            if (c == '{') { brace_depth++; q++; continue; }
+            if (c == '}') { if (brace_depth > 0) brace_depth--; q++; continue; }
             if (c == ';' && brace_depth == 0) {
                 size_t end = q + 1;
                 int declares_type = 0;
@@ -225,6 +219,7 @@ static size_t cc__cg_type_decl_end_top_level(const char* src, size_t len, const 
                 p = (end < len && src[end] == '\n') ? end + 1 : end;
                 break;
             }
+            q++;
         }
         if (q >= len) return 0;
     }
@@ -572,24 +567,19 @@ static int cc__cg_consume_postfix_cc_suffix_chain(const char* src, size_t n,
 static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t n) {
     char* out = NULL;
     int changed = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src || n == 0) return NULL;
-    for (size_t i = 0; i + 1 < n; i++) {
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i + 1 < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = src[i + 1];
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (!(c == '!' && c2 == '>')) continue;
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (!(c == '!' && c2 == '>')) { i++; continue; }
 
         size_t suffix_end = 0;
         int has_lifetime = 0;
-        if (!cc__cg_consume_postfix_cc_suffix_chain(src, n, i, &suffix_end, &has_lifetime)) continue;
+        if (!cc__cg_consume_postfix_cc_suffix_chain(src, n, i, &suffix_end, &has_lifetime)) { i++; continue; }
 
         size_t stmt_a = i;
         while (stmt_a > 0 && src[stmt_a - 1] != ';' && src[stmt_a - 1] != '{' &&
@@ -628,7 +618,7 @@ static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t 
         }
         if (has_assign && !has_lifetime && !is_return_stmt) {
             if (!looks_like_decl_init) {
-                if (suffix_end > 0) i = suffix_end - 1;
+                i = (suffix_end > 0) ? suffix_end : i + 1;
                 continue;
             }
         }
@@ -670,7 +660,7 @@ static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t 
             out[i] = ';';
         }
         changed = 1;
-        if (suffix_end > 0) i = suffix_end - 1;
+        i = (suffix_end > 0) ? suffix_end : i + 1;
     }
     if (!changed) {
         free(out);

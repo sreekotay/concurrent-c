@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (7 / 13 batches landed — A, B, C, D1, D2, E, F1).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (8 / 13 batches landed — A, B, C, D1, D2, E, F1, F2).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 47 sites migrated, 55 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 51 sites migrated, 51 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -62,15 +62,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch F1).
+Updated 2026-05-27 (post Batch F2).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **47** (+6 from Batch F1) |
-| Remaining to migrate | **55** |
+| Already on `CCInertScan` | **51** (+4 from Batch F2) |
+| Remaining to migrate | **51** |
 | — trivial | 34 |
-| — medium | 16 |
+| — medium | 12 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -189,9 +189,9 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__ufcs_lookup_scoped_local_var_type` (~273) | find-only | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch E)** — scope-stack/decl-count algorithm preserved (paren_depth/bracket_depth/scope_stack/scope_depth/decl_count all stay alongside).  Still a near-copy of `cc__lookup_scoped_local_var_type_codegen` — see Batch E notes for the deferred dedup |
-| `cc__build_ufcs_arg_slices` (~702) | find-only | {str,chr} | ~40 | medium | Two-pass comma split; no comments (Batch F2) |
-| anon loop in `cc__emit_closure_field_call` (~1511) | find-only | {str,qch} | ~18 | trivial | (Batch F2) |
+| ~~`cc__ufcs_lookup_scoped_local_var_type` (~273)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch E)** — scope-stack/decl-count algorithm preserved (paren_depth/bracket_depth/scope_stack/scope_depth/decl_count all stay alongside).  Still a near-copy of `cc__lookup_scoped_local_var_type_codegen` — see Batch E notes for the deferred dedup |
+| ~~`cc__build_ufcs_arg_slices` (~702)~~ | ~~find-only~~ | ~~{str,chr}~~ | ~~~40~~ | ~~medium~~ | **✓ Migrated (Batch F2)** — **behavior change**: now comment-aware (was deliberately not).  Synthetic trailing-`,` trick (loop `i <= n` with `(i < n) ? c : ','`) replaced with explicit post-loop trailing-arg emit (same pattern as Batch D1's `cc__create_build_arg_slices`).  `at_line_start = 0` for mid-expression slice |
+| ~~anon loop in `cc__emit_closure_field_call` (~1511)~~ | ~~find-only~~ | ~~{str,qch}~~ | ~~~18~~ | ~~trivial~~ | **✓ Migrated (Batch F2)** — **behavior change**: now comment-aware.  Pointer-walk converted to indexed walk via `strlen(args)` since `CCInertScan` requires `(buf, len, &i)` |
 
 ### `checker.c` (1314 LOC, 1 site, now uses `text_scan.h`)
 
@@ -205,15 +205,15 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 |------|-------|-------|-----|------------|-------|
 | `cc_find_first_func_def_offset` (~174) | find-only | {lc,bc,str,chr} | ~45 | medium | **✓ Migrated (Batch A)** — `brace_depth` / `last_line_off` stayed alongside; ad-hoc `#`-skip replaced by `CCInertScan` in_pp; inert newlines tracked via post-step sweep |
 
-### `visit_codegen.c` (5598 LOC, 3 inline + 9 migrated, has `text_scan.h`)
+### `visit_codegen.c` (5598 LOC, 1 inline + 11 migrated, has `text_scan.h`)
 
-**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642), `cc__lookup_scoped_local_var_type_codegen` (~2408 — Batch E), plus Batch F1: `cc__neutralize_comments_for_reparse` (~420), `cc__rewrite_parser_placeholder_ufcs_lowers` (~968), `cc__blank_comptime_blocks_preserve_layout` (~2127), `cc__register_ufcs_declared_vars_for_type` (~2162), `cc__lookup_enclosing_param_type_codegen` (~2499), `cc__collect_ufcs_field_and_var_types` (~3250).
+**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642), `cc__lookup_scoped_local_var_type_codegen` (~2408 — Batch E), plus Batch F1: `cc__neutralize_comments_for_reparse` (~420), `cc__rewrite_parser_placeholder_ufcs_lowers` (~968), `cc__blank_comptime_blocks_preserve_layout` (~2127), `cc__register_ufcs_declared_vars_for_type` (~2162), `cc__lookup_enclosing_param_type_codegen` (~2499), `cc__collect_ufcs_field_and_var_types` (~3250), plus Batch F2: `cc__cg_type_decl_end_top_level` (~185), `cc__sanitize_statement_unwraps_for_reparse` (~586).
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| anon loop in `cc__cg_type_decl_end_top_level` (~185) | find-only | {lc,bc,str,chr} | ~20 | medium | Also brace_depth (Batch F2) |
+| ~~anon loop in `cc__cg_type_decl_end_top_level` (~185)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~medium~~ | **✓ Migrated (Batch F2)** — `brace_depth` stays alongside; `for` → `while` with explicit `q++` tail.  `c == '{'`/`c == '}'` arms use `q++; continue;` (body-`continue;` trap variant for brace counters) |
 | ~~`cc__neutralize_comments_for_reparse` (~420)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~50~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — new "inert-kind discrimination" pattern: snapshot `scan.in_line_comment`/`scan.in_block_comment` BEFORE step, check AFTER; blank consumed range only if EITHER flag was set in the OR.  Strings/chars/pp left verbatim |
-| `cc__sanitize_statement_unwraps_for_reparse` (~586) | find-only | {lc,bc,str,chr} | ~20 | medium | Backward stmt walk after match (Batch F2) |
+| ~~`cc__sanitize_statement_unwraps_for_reparse` (~586)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~medium~~ | **✓ Migrated (Batch F2)** — `for` → `while`; mid-body `continue;` (early-skip patterns) converted to `{ i++; continue; }`; trailing `i = suffix_end - 1;` (relied on for's `++i`) merged with tail advance via `i = (suffix_end > 0) ? suffix_end : i + 1;` ternary |
 | ~~`cc__rewrite_parser_placeholder_ufcs_lowers` (~968)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — clean drop-in; removed now-unused `c` local |
 | `cc__collect_legacy_ufcs_registrations` (~2014) | find-only | {lc,bc,str,chr} + line_start | ~35 | **complex** | Custom `#line` parse — partial overlap with `CCInertScan`.  Consolidate carefully (Batch M) |
 | ~~`cc__blank_comptime_blocks_preserve_layout` (~2127)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~30~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — `i = body_r;` becomes `i = body_r + 1;` (was relying on for's `++i`) |
@@ -432,11 +432,21 @@ Commit F1 (6 trivial in visit_codegen.c) — **LANDED 2026-05-27**:
 - **`cc__rewrite_parser_placeholder_ufcs_lowers`** had an unused `char c = src[i];` after the migration removed all `c`-references.  Just dropped it.
 - **`cc__blank_comptime_blocks_preserve_layout`** had `i = body_r;` relying on the for-loop's `++i` to make total advance `body_r + 1`.  Changed to explicit `i = body_r + 1;`.
 
-Commit F2 (4 sites):
-- [ ] `visit_codegen.c::cc__cg_type_decl_end_top_level` anon (medium — `brace_depth`)
-- [ ] `visit_codegen.c::cc__sanitize_statement_unwraps_for_reparse` (medium — backward stmt walk separate)
-- [ ] `ufcs.c::cc__build_ufcs_arg_slices` (medium — "no comments" flag)
-- [ ] `ufcs.c::cc__emit_closure_field_call` anon
+Commit F2 (4 medium sites) — **LANDED 2026-05-27**:
+- [x] `visit_codegen.c::cc__cg_type_decl_end_top_level` anon — `brace_depth` stays alongside; `q++; continue;` on `{`/`}` arms, tail `q++` for fall-through
+- [x] `visit_codegen.c::cc__sanitize_statement_unwraps_for_reparse` — body-`continue;` early-skip pattern: each `continue;` audited and converted to `{ i++; continue; }`; trailing `i = suffix_end - 1;` (relied on for's `++i`) folded into `i = (suffix_end > 0) ? suffix_end : i + 1;` ternary
+- [x] `ufcs.c::cc__build_ufcs_arg_slices` — two-pass split, synthetic trailing-`,` → explicit post-loop trailing-arg emit (twin of Batch D1 `cc__create_build_arg_slices`)
+- [x] `ufcs.c::cc__emit_closure_field_call` anon — pointer-walk (`for (const char* p = args; *p; p++)`) converted to indexed walk via `strlen(args)` since `CCInertScan` requires `(buf, len, &i)`
+
+**Actual diff**: +60 / −98 (net **−38 LOC**).  Smoke 461/461 both modes.  No new pre-existing warnings cleared (the 2 unrelated unused-static helpers in `ufcs.c` remain).
+
+**Surprises:**
+- **No new patterns** — F2 was the cleanest batch yet.  Every site was a textbook application of an already-documented Watch-out:
+  - `cc__cg_type_decl_end_top_level`: standard `for`→`while` with explicit tail `q++` plus `q++; continue;` on the brace-counter arms.
+  - `cc__sanitize_statement_unwraps_for_reparse`: body-`continue;` audit before migration successfully spotted 3 early-skip continues (lines `!(c == '!' && c2 == '>')`, suffix-chain bail, decl-init bail).  Each got `i++` before the continue — no smoke regression.
+  - `cc__build_ufcs_arg_slices`: identical to its `pass_create.c` twin; synthetic trailing-`,` trick has now appeared 3 times, so the "explicit post-loop emit" rewrite is muscle memory.
+  - `cc__emit_closure_field_call`: pointer-walk had to become indexed.  No semantic change.
+- **Pointer-walk conversion pattern**: when a scanner uses `for (const char* p = src; *p; p++)`, `CCInertScan` (which takes `(buf, len, &i)`) forces a switch to indexed walk.  Pattern: compute `size_t n = strlen(src);` once before the loop, replace `*p` with `src[i]`, replace `p[1]` with `src[i+1]` (with bounds check), replace `comma = p;` with `comma = src + i;` (or just save the index).
 
 ### Batch G — pass_result_unwrap forward sites (8 sites, 1–2 commits)
 
