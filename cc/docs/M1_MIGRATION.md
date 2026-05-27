@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (19 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L).  **All 102 forward-scan sites migrated; backward-scan decision recorded.**  Remaining: M (1 special).
+**Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  **All 102 forward-scan sites migrated; backward-scan decision recorded; special case folded in.**  Ready for Phase 3 (pre-flight) → Phase 4 (buffer swap + `in_user_file` activation).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -58,6 +58,7 @@ The mechanical migration:
 - **Stale scanner state after big jumps** (Batch G — `cc__pu_find_outer_errhandler` post-match `i = rbrace + 1;`).  When the migrated loop jumps `i` past a body that the scanner never saw (e.g. `i = rbrace + 1` skips a whole `@errhandler { ... }` body), the scanner's `in_block_comment` / `in_pp` / `in_user_file` flags reflect state at the PRE-jump position.  If the body contained an unterminated comment (impossible by definition, since `cc_find_matching_brace` is comment-aware) or a `#line` directive (possible!), the scanner state is stale.  Safe today because no Batch-G site reads `scan.in_user_file` after a jump.  Watch-out for future passes: if a post-jump code path reads any `scan.*` flag, `cc_inert_scan_init(&scan, ...)` to reset before continuing.
 - **Backward scanners and `CCInertScan`** (Batch L decision).  `CCInertScan` walks forward only.  When a backward scanner CALLS a forward-walking companion (e.g. `cc__*_pos_in_line_comment` walks from line start to find `//`), that companion CAN use `CCInertScan` — migrate it to match the G/I2 twin pattern.  When the OUTER loop walks backward, it stays inline.  Do NOT build a speculative `CCInertScanBackward`: the backward loops are short, correct, and have heterogeneous boundary conditions (paren/brace depth + stmt-continuation lookahead + return-keyword stripping) that don't compose into a shared abstraction.  Confirmed in Batch L after auditing all three backward sites.
 - **`scan.in_line_comment` flip-detection** (Batch L sub-pattern).  When walking forward to find the OPENER of an inert region (e.g. "where does `//` start on this line?"): stash `was_lc = scan.in_line_comment` BEFORE `cc_inert_scan_step`; if `!was_lc && scan.in_line_comment` AFTER the step, the step just consumed `//` and the saved `before` is the opener position.  Distinct from the G-style "scan the whole line and re-check" pattern — this stops at the opener instead of running to EOL.
+- **`in_user_file` is the wrong primitive for file-PATH binning** (Batch M).  `scan.in_user_file` is a BASENAME match — designed to answer "is this token from the user TU or from a system header?" for Phase 4's `in_user_file` filter.  When the question is instead "did this `@comptime` block originate in file A or file B inside the user's project?", basename collisions (e.g. two files both named `lib.ccs`) would give a wrong answer.  Use `scan.current_file` (the raw filename from the most-recent `#line`) and do a full-path `strcmp` against the relevant anchor (`ctx->input_path`).  `cc__collect_legacy_ufcs_registrations` is the canonical example: it reads `scan.current_file` but deliberately does NOT consult `scan.in_user_file`.
 
 Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ignore inert content AND header-origin tokens.  One incidental fix landed already: error-message column off-by-one in `cc__rewrite_channel_pair_calls_text` (test expectations updated in the same commit).
 
@@ -65,7 +66,7 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch L — **forward done, backward decided**).
+Updated 2026-05-27 (post Batch M — **Phase 2 complete**).
 
 | Metric | Count |
 |--------|-------|
@@ -73,10 +74,11 @@ Updated 2026-05-27 (post Batch L — **forward done, backward decided**).
 | Already on `CCInertScan` | **102** — **DONE** |
 | Remaining (forward) | **0** |
 | Backward-scan sites | **3** — companions migrated to parity (Batch L); backward loops stay (decision recorded) |
+| Special cases (`#line`-aware inline scanners) | **1** — Batch M migrated `cc__collect_legacy_ufcs_registrations` |
 
 Outside the 102-site forward-scan count:
 - Batch **L**: ✓ **DONE** — companion `cc__ud_pos_in_line_comment` migrated for G/I2 parity; sub-walk inside `cc__ud_stmt_start_backward` migrated; backward loops left intact; no `CCInertScanBackward` abstraction built.
-- Batch **M**: 1 special case (`cc__collect_legacy_ufcs_registrations` — verify `#line`-tracking equivalence)
+- Batch **M**: ✓ **DONE** — `cc__collect_legacy_ufcs_registrations` migrated to CCInertScan; legacy `logical_file` buffer + inline `#line` parser deleted (CCInertScan's `current_file` is a strict superset); behavioural-equivalence confirmed (full-path compare preserved; basename `in_user_file` deliberately not used).
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -645,9 +647,22 @@ The migrations that DID happen:
 - **`scan.in_line_comment` flip-detection** is a new sub-pattern: stash `was_lc = scan.in_line_comment` BEFORE `cc_inert_scan_step`; if AFTER the step `!was_lc && scan.in_line_comment`, the step just consumed `//` and `before` is the `/` position.  Useful for "find the opener of an inert region as I walk into it" — distinct from G's "find the opener by scanning the full line" pattern.  Worth promoting if a third site needs it.
 - **No `CCInertScanBackward`**: the pre-flight assumption ("backward scanners are similar enough to warrant a shared abstraction") didn't hold up under examination.  The backward loops are short (40-90 LOC), correct, and have heterogeneous boundary conditions (paren/brace depth tracking, stmt-continuation lookahead in `cc__ud_*`, return-keyword stripping in `cc__find_lhs_*`).  Sharing them would require either parameterizing the boundary logic (complex) or duplicating the scanner once per pass (no savings).  **Confirmed: ship without it.**
 
-### Batch M — special cases (1–2 commits)
+### Batch M — special cases — **LANDED 2026-05-27**
 
-- [ ] `visit_codegen.c::cc__collect_legacy_ufcs_registrations` — verify behavioral equivalence with `CCInertScan`'s `#line` tracking; consolidate or keep separate
+- [x] `visit_codegen.c::cc__collect_legacy_ufcs_registrations` — migrated to `CCInertScan`; behavioural equivalence verified.
+
+**Migration:**
+
+The legacy scanner hand-rolled an inline `# N "file"` parser plus the full inert-region state machine.  CCInertScan's `current_file` field captures the exact data the legacy `logical_file` buffer held — and supports both the bare-`#` (cpp's emission) and the `#line` keyword form (the legacy code only recognised the first).
+
+Replaced ~45 LOC of inline state with ~10 LOC of CCInertScan calls.  The only non-mechanical decision: **keep the full-path bucket comparison**, not the basename match.  The legacy code used `strcmp(logical_file, input_path)` to bin registrations by FULL path; CCInertScan's `in_user_file` flag is a BASENAME match (right for Phase 4's header-filter use case, wrong for binning).  So the migration reads `scan.current_file` (the raw filename from the `#line`) but does its own `strcmp` against `input_path`.  This is documented inline as a deliberate choice.
+
+**Actual diff**: +24 / −41 in `visit_codegen.c` (−17 LOC code).  Full suite: 461/461 default mode; 461/461 `CC_PRE_EXPAND=0`.  All 58 UFCS-related tests green.
+
+**Surprises:**
+- **Strict-superset parse**: CCInertScan accepts `# N "file"` (cpp-emitted, no `line` keyword) AND `#line N "file"` (compiler-emitted, explicit keyword).  The legacy parser only accepted the former.  This is a silent capability gain — any `.ccs` file using `#line` keyword form in `@comptime` blocks now binds bucket paths correctly where the legacy code would silently fall back to `input_path`.  No test covers this today (no such input exists in the corpus), but the behaviour is strictly better.
+- **`in_user_file` is the wrong primitive for binning** (recorded as a watch-out).  It's a basename match designed for "is this token from the user TU or a header?"  When the question is "did this `@comptime` block originate in file A or file B from the user's project tree?", you need a full-path compare against `current_file`, not `in_user_file`.  Future passes that bin by source file should follow this pattern.
+- **Body-jump scanner-state audit**: documented inline at the `i = body_r + 1;` jump that all six relevant `scan.*` flags are stable across the jump (because `cc__find_matching_brace_codegen` is comment/string-aware AND user `@comptime` bodies never contain `#line` directives).  Decided NOT to re-init — re-init would lose any pre-body `current_file` context, which the legacy code preserved.
 
 ---
 
