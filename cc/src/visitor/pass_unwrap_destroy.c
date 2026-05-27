@@ -7,6 +7,7 @@
 
 #include "comptime/symbols.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 
 #define cc__append_n   cc_sb_append
@@ -58,24 +59,22 @@ static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {
 
 /* Return 1 if position `pos` in `s` lies inside a `//` line comment on
  * the same line.  Used by the backward scanner to skip over commented
- * characters without mistaking them for statement terminators. */
+ * characters without mistaking them for statement terminators.
+ *
+ * Twin of `cc__pos_in_line_comment` (pass_result_unwrap, Batch G) and
+ * `cc__err_pos_in_line_comment` (pass_err_syntax, Batch I2).  All three
+ * use the "post-step state probe" pattern: drive CCInertScan over the
+ * line and check `scan.in_line_comment` after each step. */
 static int cc__ud_pos_in_line_comment(const char* s, size_t pos) {
     size_t line_start = pos;
     while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    size_t j = line_start;
-    int in_str = 0;
-    char qch = 0;
-    while (j < pos) {
-        char c = s[j];
-        if (in_str) {
-            if (c == '\\' && j + 1 < pos) { j += 2; continue; }
-            if (c == qch) in_str = 0;
-            j++;
-            continue;
-        }
-        if (c == '"' || c == '\'') { in_str = 1; qch = c; j++; continue; }
-        if (c == '/' && j + 1 < pos && s[j + 1] == '/') return 1;
-        j++;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
+    size_t k = line_start;
+    while (k < pos) {
+        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
+        if (scan.in_line_comment) return 1;
     }
     return 0;
 }
@@ -173,23 +172,22 @@ static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos
         /* Skip line comment: if `k` is inside a `//...` on this line,
          * rewind `i` to the position of the `//` so we still process any
          * code tokens (e.g. a `{` or `}`) that appear before the comment
-         * on the same line. */
+         * on the same line.  Forward-walk uses CCInertScan to honour
+         * strings/char literals while locating the `//` opener. */
         if (c != '\n' && cc__ud_pos_in_line_comment(s, k)) {
             size_t line_start = k;
             while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+            CCInertScan scan;
+            cc_inert_scan_init(&scan, NULL);
+            scan.at_line_start = 1;
             size_t slash = line_start;
-            int in_str = 0; char qch = 0;
             while (slash < k) {
-                char ch = s[slash];
-                if (in_str) {
-                    if (ch == '\\' && slash + 1 < k) { slash += 2; continue; }
-                    if (ch == qch) in_str = 0;
-                    slash++;
-                    continue;
-                }
-                if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; slash++; continue; }
-                if (ch == '/' && slash + 1 < k && s[slash + 1] == '/') break;
-                slash++;
+                size_t before = slash;
+                int was_lc = scan.in_line_comment;
+                if (!cc_inert_scan_step(&scan, s, k, &slash)) slash++;
+                /* The step that transitioned us INTO a line comment
+                 * consumed the `//`; its start sits at `before`. */
+                if (!was_lc && scan.in_line_comment) { slash = before; break; }
             }
             i = slash;
             continue;
