@@ -218,12 +218,21 @@ static char* cc__normalize_defer_stmt(char* stmt) {
         return normalized;
     }
 
-    normalized = (char*)malloc((inner_end - inner_start) + 3);
+    /* Wrap multi-stmt body as `{ ... }` with breathing space — the
+     * normalized form is what gets injected verbatim at every
+     * function exit / block-exit point, so spacing here propagates
+     * directly into the lowered C the user reads.  Pre-2026-05-27
+     * this packed it as `{...}` and a 2-stmt defer rendered as the
+     * notoriously cramped `{cc_nursery_wait(x); cc_nursery_free(x);}`. */
+    size_t body_len = inner_end - inner_start;
+    normalized = (char*)malloc(body_len + 5);
     if (!normalized) return stmt;
     normalized[0] = '{';
-    memcpy(normalized + 1, stmt + inner_start, inner_end - inner_start);
-    normalized[1 + (inner_end - inner_start)] = '}';
-    normalized[2 + (inner_end - inner_start)] = 0;
+    normalized[1] = ' ';
+    memcpy(normalized + 2, stmt + inner_start, body_len);
+    normalized[2 + body_len] = ' ';
+    normalized[3 + body_len] = '}';
+    normalized[4 + body_len] = 0;
     free(stmt);
     return normalized;
 }
@@ -1220,14 +1229,64 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 fn_scope.active = 0;
             } else if (defer_counts[d] > 0) {
                 if (!return_just_emitted[d]) {
+                    /* Preserve the trailing-`}` indent across the
+                     * defer injection.  At this point `out` looks
+                     * like `...prev_stmt;\n        ` and we are
+                     * about to inject defer bodies + the `}` byte.
+                     * If we just emit defer bodies + newline and
+                     * then the `}`, the user's `}` lands at column
+                     * 0 because we already consumed its leading
+                     * whitespace by emitting it bytewise via the
+                     * main loop.
+                     *
+                     * Fix: snapshot the current-line whitespace
+                     * tail, pop it off `out`, emit defer bodies on
+                     * fresh lines with the proper indent, then
+                     * re-emit the snapshotted whitespace so the
+                     * `}` lands at its original indent.  When the
+                     * current line tail is NOT all whitespace
+                     * (e.g. `} else {` on one line, no leading
+                     * indent on the `}`), there's nothing to
+                     * preserve and we fall through to the simple
+                     * inline path.
+                     *
+                     * Net effect on lowered C: defer bodies are
+                     * indented at the enclosing-block statement
+                     * level, and the user's `}` keeps its original
+                     * indent.  See pre-fix bug: cramped
+                     * `{wait; free;}\n}` against column 0; post-fix
+                     * reads as if hand-written. */
+                    char ind_buf[64];
+                    size_t ind_len = 0;
+                    {
+                        size_t k = outl;
+                        while (k > 0 && out[k - 1] != '\n') k--;
+                        size_t tail_start = k;
+                        size_t tail_len = outl - tail_start;
+                        int all_ws = 1;
+                        for (size_t q = 0; q < tail_len; q++) {
+                            char tc = out[tail_start + q];
+                            if (tc != ' ' && tc != '\t') { all_ws = 0; break; }
+                        }
+                        if (all_ws && tail_len > 0 && tail_len < sizeof(ind_buf)) {
+                            memcpy(ind_buf, out + tail_start, tail_len);
+                            ind_len = tail_len;
+                            outl = tail_start;
+                        }
+                    }
+                    size_t indent = cc__suggest_statement_indent(out, outl);
                     for (int k = defer_counts[d] - 1; k >= 0; k--) {
                         if (defers[d][k].cond == DEFER_ALWAYS) {
+                            cc__append_missing_indent_to(&out, &outl, &outc, indent);
                             cc__append_str(&out, &outl, &outc, defers[d][k].stmt);
                             if (defers[d][k].stmt[0] != 0) {
                                 size_t sl = strlen(defers[d][k].stmt);
                                 if (sl == 0 || defers[d][k].stmt[sl - 1] != '\n') cc__append_str(&out, &outl, &outc, "\n");
                             }
                         }
+                    }
+                    if (ind_len > 0) {
+                        cc__append_n(&out, &outl, &outc, ind_buf, ind_len);
                     }
                 }
                 for (int k = defer_counts[d] - 1; k >= 0; k--) {
