@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (16 / 17 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2).  Remaining: K3, L, M.
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (17 / 18 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a).  Remaining: K3b, L, M.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 98 sites migrated, 4 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 101 sites migrated, 1 remaining (K3b: `cc__infer_closure_end_off`) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,15 +63,16 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch K2).
+Updated 2026-05-27 (post Batch K3a).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **98** (+7 from Batch K2) |
-| Remaining to migrate | **4** |
-| — medium | 1 (K3: `cc__has_top_level_brace`) |
-| — complex | 3 (K3: `cc__closure_proto_insert_off`, `cc__parse_closure_from_src`, `cc__infer_closure_end_off` — all in pass_closure_literal_ast.c; plus L = backward scanners, M = special) |
+| Already on `CCInertScan` | **101** (+3 from Batch K3a) |
+| Remaining to migrate | **1** |
+| — complex | 1 (K3b: `cc__infer_closure_end_off`) |
+
+Plus 3 backward scanners (Batch L) and 1 special case (Batch M) outside the 102-site forward-scan count.
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -582,13 +583,21 @@ K2 — trivial bulk (7 sites) — **LANDED 2026-05-27**:
 - **`cc__src_strip_comments_and_strings` behavior change for pp directives**: original didn't track `#line`/`#define`/etc. as inert, so a `#` byte leaked through as code; downstream decl scanners relied on the `if (*p == '#' || *p == '\0') return;` guard.  Migrated version blanks pp-directive bodies (CCInertScan's `in_pp` is on by default).  The guard is now mostly defensive — but a `#` at the START of a pp directive (the `#` byte itself) DOES get blanked.  This is a strict improvement: stripped decl scanners no longer encounter raw `#`s.
 - **Delimiter-preservation works cleanly with snapshot pre/post**: `c == '"' && pre_str != post_str` catches BOTH the opening `"` (pre=0, post=1) and closing `"` (pre=1, post=0).  Same for `'` and `in_chr`.  Pattern: **when an inert-kind rewrite needs to preserve specific entry/exit bytes, snapshot pre-step flags and use XOR-like comparison.**
 
-K3 — medium + complex (4 sites):
-- [ ] `cc__has_top_level_brace` (medium — "no comments" deliberate?  audit first)
-- [ ] `cc__closure_proto_insert_off` (medium — backward-ish)
-- [ ] `cc__parse_closure_from_src` body-brace scan
+K3a — medium (3 sites) — **LANDED 2026-05-27**:
+- [x] `cc__has_top_level_brace` — straight migration; callers pass comment-stripped text so behavior is unchanged in practice (now defensively comment-aware for free)
+- [x] `cc__parse_closure_from_src` body-brace scan — replaced 22 LOC inline state machine with single `cc_find_matching_brace(s, n, body_start, &rbrace)` call.  3rd application of the "use util/text.h's matching helpers" pattern.
+- [x] `cc__closure_proto_insert_off` — preserves `last_line_off` line tracking via the Batch C pattern (post-step `[before, i)` newline sweep).  Code-path `\n` handler still explicit at the top of the code-byte branch.
+
+**Actual diff**: +37 / −114 (net **−77 LOC**).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **`cc_find_matching_brace` 3rd sighting**: after Batches I and J each used it for nested scanners, K3a's `cc__parse_closure_from_src` body-brace site collapsed the same way.  This shared helper has now killed ~80 LOC of duplicated brace-balance inline state machines across 3 files.  **Standing recommendation: any inline `int br = 0; for (...) { if (ch == '{') br++; ... }` is a candidate.**
+- **`last_line_off` tracking in `cc__closure_proto_insert_off`** worked cleanly with Batch C's post-step sweep — no surprises.  The function's `best_func_off = last_line_off;` assignment runs on the code-byte branch (after `{` is detected at depth 0), so the line tracking only needs to be CURRENT, not retroactively-perfect for inert bytes.
+
+K3b — complex (1 site, deferred to next commit):
 - [ ] `cc__infer_closure_end_off` (complex — dual nested, real bug history)
 
-> Optional: **interleave with 4b (stable closure-IDs)** here.  If `cc__infer_closure_end_off` migration proves painful, 4b deletes 150+ LOC of the same surface — could be cheaper to do 4b first.  Decision point at K3.
+> **Pivot decision point**: the artifact suggested optionally interleaving with **4b (stable closure-IDs)** before K3b, since 4b deletes ~150 LOC of the same surface (the heuristic `=>` recovery path that `cc__infer_closure_end_off` services).  Recommendation: **do K3b first** anyway — it's bounded enough (1 function, ~80 LOC) and finishes M1 Phase 2.  4b can then proceed independently with one less stale scanner to worry about.
 
 ### Batch L — backward scanners (3 sites, 1 commit; possibly + helper)
 

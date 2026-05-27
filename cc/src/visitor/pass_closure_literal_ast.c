@@ -793,33 +793,25 @@ static size_t cc__last_top_level_semi_offset(const char* line) {
 }
 
 static int cc__has_top_level_brace(const char* line) {
-    const char* cur = line;
-    int paren_depth = 0, bracket_depth = 0;
-    int in_str = 0, in_chr = 0;
     if (!line) return 0;
-    while (*cur) {
-        char c = *cur;
-        char c2 = cur[1];
-        if (in_str) {
-            if (c == '\\' && c2) { cur += 2; continue; }
-            if (c == '"') in_str = 0;
-            cur++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && c2) { cur += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            cur++;
-            continue;
-        }
-        if (c == '"') { in_str = 1; cur++; continue; }
-        if (c == '\'') { in_chr = 1; cur++; continue; }
-        if (c == '(') { paren_depth++; cur++; continue; }
-        if (c == ')') { if (paren_depth > 0) paren_depth--; cur++; continue; }
-        if (c == '[') { bracket_depth++; cur++; continue; }
-        if (c == ']') { if (bracket_depth > 0) bracket_depth--; cur++; continue; }
-        if ((c == '{' || c == '}') && paren_depth == 0 && bracket_depth == 0) return 1;
-        cur++;
+    size_t n = strlen(line);
+    int paren_depth = 0, bracket_depth = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    /* Note: callers pass comment-stripped text (built from
+     * `cc__src_strip_comments_and_strings`), so original's lack of
+     * comment tracking was harmless.  Migrated form adds comment
+     * awareness for free — defensive against any future caller. */
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, line, n, &i)) continue;
+        char c = line[i];
+        if (c == '(') paren_depth++;
+        else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+        else if (c == '[') bracket_depth++;
+        else if (c == ']') { if (bracket_depth > 0) bracket_depth--; }
+        else if ((c == '{' || c == '}') && paren_depth == 0 && bracket_depth == 0) return 1;
+        i++;
     }
     return 0;
 }
@@ -2086,44 +2078,25 @@ static size_t cc__closure_proto_insert_off(const CCFuncSig* sigs,
     size_t last_line_off = 0;
     size_t best_func_off = (size_t)-1;
     int brace_depth = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     (void)sigs;
     (void)sig_n;
     if (!d || !src) return 0;
     limit = d->start_off;
     if (limit > len) limit = len;
+    cc_inert_scan_init(&scan, NULL);
     while (i < limit) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, src, limit, &i)) {
+            /* Sweep consumed inert range for newlines (Batch C pattern):
+             * `last_line_off` must keep tracking line starts across
+             * inert content (comment bodies / string bodies / pp lines). */
+            for (size_t k = before; k < i; k++) {
+                if (src[k] == '\n') last_line_off = k + 1;
+            }
+            continue;
+        }
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
-        if (in_lc) {
-            if (c == '\n') { in_lc = 0; last_line_off = i + 1; }
-            i++;
-            continue;
-        }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; }
-            if (c == '\n') last_line_off = i + 1;
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < limit) { i += 2; continue; }
-            if (c == '"') in_str = 0;
-            if (c == '\n') last_line_off = i + 1;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < limit) { i += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            if (c == '\n') last_line_off = i + 1;
-            i++;
-            continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '\n') {
             last_line_off = i + 1;
             i++;
@@ -2163,13 +2136,9 @@ static size_t cc__closure_proto_insert_off(const CCFuncSig* sigs,
                 }
             }
             brace_depth++;
-            i++;
-            continue;
         }
-        if (c == '}') {
+        else if (c == '}') {
             if (brace_depth > 0) brace_depth--;
-            i++;
-            continue;
         }
         i++;
     }
@@ -2469,39 +2438,12 @@ static int cc__parse_closure_from_src(const char* src,
     size_t body_start = b0;
     size_t body_end = n;
     if (s[body_start] == '{') {
-        /* Find matching '}' within literal span, skipping strings and comments. */
-        int br = 0;
-        int in_str = 0;
-        char qch = 0;
-        int in_lc = 0; /* line comment */
-        int in_bc = 0; /* block comment */
-        size_t i = body_start;
-        for (; i < n; i++) {
-            char ch = s[i];
-            if (in_lc) {
-                if (ch == '\n') in_lc = 0;
-                continue;
-            }
-            if (in_bc) {
-                if (ch == '*' && i + 1 < n && s[i + 1] == '/') { in_bc = 0; i++; }
-                continue;
-            }
-            if (in_str) {
-                if (ch == '\\' && i + 1 < n) { i++; continue; }
-                if (ch == qch) in_str = 0;
-                continue;
-            }
-            if (ch == '/' && i + 1 < n && s[i + 1] == '/') { in_lc = 1; i++; continue; }
-            if (ch == '/' && i + 1 < n && s[i + 1] == '*') { in_bc = 1; i++; continue; }
-            if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-            if (ch == '{') br++;
-            else if (ch == '}') {
-                br--;
-                if (br == 0) { i++; break; }
-            }
-        }
-        if (br != 0) return 0;
-        body_end = i;
+        /* Find matching '}' within literal span using the shared helper
+         * (`util/text.h::cc_find_matching_brace`); it already skips
+         * strings, char literals, and comments correctly. */
+        size_t rbrace = 0;
+        if (!cc_find_matching_brace(s, n, body_start, &rbrace)) return 0;
+        body_end = rbrace + 1;
     } else {
         /* Expression body: end at end_off (AST already bounded). */
         body_end = n;
