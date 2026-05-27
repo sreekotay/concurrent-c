@@ -197,6 +197,42 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    parts of phase-1 chan_handle/slice/Generic lowering that re-run on
    already-lowered text, etc. Audit and remove.
 
+**4b. Stable closure-IDs + delete `pass_closure_literal_ast.c`'s
+recovery path.**  Today closure literals are matched between passes
+by `(file, line_start, line_end, col_start)`.  That breaks whenever
+a reparse pulls in a header whose `#line` directives drift the
+TCC line counter relative to the working source buffer.  When it
+breaks, `cc__closure_start_off_best_effort` falls back to a
+forward `=>` scan ("the recovery path") which is fragile (it has
+been the root cause of multiple inert-region bugs this session —
+e.g. the `syscall_kidnap.ccs` regression) and *cannot* tell apart
+genuine closures from arrow patterns in commented-out code.
+
+The right shape is to give each closure literal a stable identity
+at construction time:
+
+  - Add a new pre-AST text pass `cc__inject_closure_ids` that
+    walks the buffer once with `CCInertScan`, finds each `=>`,
+    derives the closure's `(` start, and inserts a unique marker
+    immediately before it (e.g. `/*CC_CLO:42*/`).  Markers are
+    monotonic per-TU and survive every downstream rewrite (they
+    live inside a C comment).
+  - Teach `pass_closure_literal_ast.c` to look up closures by
+    marker ID rather than by `(line_start, line_end, col_start)`.
+    Each `CCClosureDesc` carries the same ID; pass-to-pass
+    identity is now exact, not heuristic.
+  - Delete `cc__closure_start_off_best_effort`'s arrow-scan
+    fallbacks and the entire "recovery" branch in
+    `cc__resolve_closure_descriptors_into`.
+
+Cost: one new ~300-LOC text pass, ~150 LOC deleted from
+`pass_closure_literal_ast.c`, a smoke test that puts comments
+with `=>` between real closures (already partly covered by
+`tests/inert_closure_tokens_smoke.ccs`).  Risk: medium — every
+downstream pass that scans for closures has to switch to the
+marker.  Scope to a single PR with a kill-switch env var until
+447/447 holds for ≥3 stress runs.
+
 Then in priority order (independent of M1):
 
 5. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)

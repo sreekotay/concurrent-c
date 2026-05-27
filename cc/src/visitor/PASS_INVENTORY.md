@@ -76,6 +76,20 @@ these rules.
    least three of the ~9 existing sites in subtle leak-on-error
    ways.
 
+7. **Closure-identity ratchet.**  Do NOT add new callers of
+   `cc__closure_start_off_best_effort` or the descriptor
+   "recovery" branch in `pass_closure_literal_ast.c`.  Both are
+   heuristic fallbacks for a deeper problem: closures are
+   matched between passes by `(line_start, line_end, col_start)`,
+   which drifts whenever a reparse pulls in a header with
+   `#line` directives.  The right fix is stable closure-IDs
+   injected as `/*CC_CLO:N*/` markers before TCC parses — see
+   the "Stable closure-IDs" milestone (#4b) in
+   `COMPILER_CLEANUP_STATUS.md`.  Until that ships, new closure-
+   walking code should compare full `(file, line, col, end)`
+   tuples (never a single coord) and bail loudly on ambiguous
+   matches rather than picking the "best" one.
+
 If your change can't follow these rules, the right move is to
 update the helpers (`text_scan.h`, `text.h`, `type_registry.h`)
 so it CAN, not to work around them in a single pass.
