@@ -4,6 +4,70 @@ This document maps all compilation passes and preprocessing transforms, with con
 
 **Last updated**: 2026-05-26 (post M0–M5.5 — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
 
+## Invariants for new text scanners (MUST follow)
+
+These are *non-negotiable* for any new text-rewriting pass added to
+`cc/src/visitor/pass_*.c`, `cc/src/preprocess/preprocess.c`, or
+anywhere else that walks the source buffer looking for CC syntax
+patterns.  Every single inert-region bug we've hit (commits `43e0ebc`,
+`842dd8c`, `23ea0a5`, `22f2896`, `2aa5ad3`) is a violation of one of
+these rules.
+
+1. **No inline state machines.**  Do NOT declare local
+   `int in_str` / `char qch` / `int in_line_comment` /
+   `int in_block_comment` / `int in_pp` / `int at_line_start`
+   variables in a new scanner.  Use `CCInertScan` from
+   `cc/src/util/text_scan.h` instead.  It is the visitor-side
+   shared scanner state — comment / string / char-literal /
+   preprocessor-directive body / `#line` directive tracking, all
+   in one place.
+   Migration template: see `pass_result_unwrap.c::cc__find_bang_token_from`
+   (commit `23ea0a5`) and the brace/paren finders in
+   `visit_codegen.c` (commit `2aa5ad3`).
+
+2. **No reinventing skip helpers.**  `cc/src/util/text.h` already
+   exposes comment-aware substring / identifier / matching-bracket
+   finders (`cc_find_substr_top_level`, `cc_find_ident_top_level`,
+   `cc_find_matching_paren`, `cc_find_matching_brace`,
+   `cc_find_matching_bracket`, `cc_rfind_char_top_level`,
+   `cc_contains_token_top_level`).  Use them.  When extending them,
+   add the new behavior to `text.h` so every caller benefits at
+   once.  Do not copy-paste a parallel implementation into a pass.
+
+3. **Every CC syntax token family MUST have an inert-region smoke
+   test.**  When you add a new CC syntax pattern (a new `@keyword`,
+   a new operator, a new bracket form), add a
+   `tests/inert_<family>_tokens_smoke.ccs` that puts the new
+   token inside a block comment, a line comment, a string literal,
+   a char literal, AND a `#define` body alongside real working
+   code.  The existing `tests/inert_*_tokens_smoke.ccs` files are
+   the templates.  Without this, the next refactor of your scanner
+   will silently regress in one of these contexts.
+
+4. **`#line` directives are first-class.**  Any scanner that
+   operates on the post-preprocess buffer (most visitor passes do)
+   must respect `CCInertScan.in_user_file` before acting on a
+   token.  In the M1 final form this filters out matches that came
+   from inlined CC runtime headers (`<ccc/cc_channel.cch>`,
+   `<ccc/std/vec.cch>`, etc.).  Today the flag is always 1 because
+   `src_all` is still the raw user file, but writing pass code
+   that *ignores* the flag now creates a latent bug that bites the
+   moment the M1 swap lands.
+
+5. **Reparses are expensive — fewer is better.**  Before adding
+   another `cc__reparse_source_to_ast_ctx` call site, ask whether
+   the same effect can be achieved via `CCEditBuffer` (in-place
+   edits) or by extending an existing reparse to do more work.
+   Today's count is documented under "Current Stats" below; any
+   PR that adds a reparse call site must update that count and
+   justify the addition.
+
+If your change can't follow these rules, the right move is to
+update the helpers (`text_scan.h`, `text.h`) so it CAN, not to
+work around them in a single pass.
+
+----
+
 ## Current Stats
 
 - **Total lines**: ~21k across pass files
