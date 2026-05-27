@@ -527,7 +527,30 @@ int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {
 /* Worker-frees mode: v2 worker calls this on MCO_DEAD for every
  * nursery-owned fiber (the fiber itself was already pushed back onto
  * g_v2.free_list by the worker).  Tick the barrier; on the last
- * outstanding child, wake cc_nursery_wait. */
+ * outstanding child, wake cc_nursery_wait.
+ *
+ * Why the wake is `prev == 1`-conditional (do NOT move it outside):
+ *
+ *   - The fiber waiter is parked exactly once via sched_v2_signal,
+ *     which is also gated on the final decrement.  Extra signals
+ *     would just be no-ops for an already-running fiber but cost
+ *     a v2 scheduler hot-path push every time.
+ *   - The non-fiber thread waiter (the `else` branch of
+ *     `cc_nursery_wait`) loops on `wake_primitive_wait(gen)` and
+ *     only breaks when `alive_count == 0`.  It doesn't care about
+ *     intermediate decrements — so an intermediate `wake_all`
+ *     would wake the thread, force it to re-check, find
+ *     `alive_count > 0`, and re-sleep.  Each `wake_primitive_wake_all`
+ *     is a futex/ulock syscall regardless of waiter count, and the
+ *     extra round trips would turn an O(1) wait into O(N).
+ *   - The Dekker pair below (fence + xchg(alive_waiter)) is the
+ *     only ARM64-sensitive piece; once that's correct, the
+ *     single wake at the boundary is exactly what's needed.
+ *
+ *   Concretely: moving `wake_primitive_wake_all` out of the
+ *   `if (prev == 1)` block would cost ~6000 extra syscalls per
+ *   run of `stress/nested_nursery_deep.ccs` with zero correctness
+ *   gain.  Don't. */
 void cc_nursery_notify_child_done(CCNursery* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
