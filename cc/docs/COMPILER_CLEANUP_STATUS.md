@@ -1,7 +1,7 @@
 # Compiler cleanup status (M0–M5.5)
 
 **Last updated:** 2026-05-27  
-**Smoke suite:** 453 tests passing under the new default (pre-expand on)
+**Smoke suite:** 455 tests passing under the new default (pre-expand on)
 AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
 
 This is the single source of truth for the compiler cleanup workstream (M0–M5.5). See also [PIPELINE.md](../src/visitor/PIPELINE.md), [PASS_INVENTORY.md](../src/visitor/PASS_INVENTORY.md), [DIAG_AUDIT.md](../src/diag/DIAG_AUDIT.md), [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md).
@@ -296,12 +296,34 @@ link-time footprint" and "performant + fully complete comptime."
         `GENERIC_INST` + `CC_TF_ERASABLE`, outer size equals
         `sizeof(Vec<int>)`.
     Smoke: 453/453.
-  - Commit 3c.1 / 3c.3 (deferred — highest risk): teach the
-    compiler that `type_of(T)` is a parser-level builtin (so
-    unregistered T gives a sane diagnostic instead of NULL at
-    runtime), and extend `@comptime` so `type_of(T).fields`
-    walks struct layouts at compile time.  This unlocks the
-    "performant + fully complete" half of the strategic goal.
+  - Commit 3c.1-lite (`<this commit>`): compile-time diagnostic
+    for unregistered `type_of(T)` / `cc_type_of("T")` calls.
+    New pass `cc/src/visitor/pass_check_type_of.c` runs after
+    preprocess in `cc_build_parse_input`.  It walks the RAW user
+    buffer (still pre-CPP, so `type_of(T)` and macro-style
+    `CC_TYPE_INFO_BEGIN(X)` are visible) with `CCInertScan`,
+    builds a "known names" set from (i) the 9 hardcoded
+    primitives, (ii) the 8 hardcoded pre-baked Vec typedefs,
+    (iii) every Vec/Map instantiation in this TU's
+    `CCTypeRegistry`, (iv) every `CC_TYPE_INFO_BEGIN(X)` in the
+    source, then flags every `type_of(X)` / `cc_type_of("X")`
+    call whose `X` is none of those.  Warnings print inline at
+    emit time (`cc_diag_print_all` only flushes on build
+    failure, which a warning shouldn't cause).  Errors flow
+    through the buffered path.  Tunable via two env vars:
+    `CC_TYPE_OF_CHECK=0` disables; `CC_TYPE_OF_STRICT=1`
+    upgrades warnings to errors and fails the build (CI use).
+    Smoke: `tests/check_type_of_unregistered_fail.ccs` +
+    `.env` (`CC_TYPE_OF_STRICT=1`) + `.compile_err` pins the
+    diagnostic text, file/line/col, and that the strict-mode
+    build fails.  All 454 existing smokes still pass with zero
+    spurious warnings (verified by `grep -c "warning: type_of"`
+    on the full build log under both default and `CC_PRE_EXPAND=0`).
+    Total: 455/455.
+  - Commit 3c.3 (deferred — highest risk): extend `@comptime`
+    so `type_of(T).fields` walks struct layouts at compile time.
+    This unlocks the "performant + fully complete" half of the
+    strategic goal.
 
 The legacy `cc_type_register(name, hooks)` comptime API is
 untouched; the new entry-point is deliberately named
