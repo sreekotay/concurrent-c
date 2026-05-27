@@ -72,18 +72,19 @@ int main(void) {
     fails += check("intptr_t", type_of(intptr_t), "intptr_t", sizeof(intptr_t), CC_TK_PRIMITIVE);
     fails += check("bool",     type_of(bool),     "bool",     sizeof(bool),     CC_TK_PRIMITIVE);
 
-    /* Distinct mangled names are critical: type_of(T) macro-expands
-     * to (&__cc_ti_T), so two primitives that aliased to the same
-     * symbol would silently merge.  Check that the int and long
-     * symbols are actually distinct objects. */
+    /* Distinct mangled names are critical: type_of(T) expands to
+     * `cc_type_of(#T)` which does a registry lookup by string —
+     * if two primitives accidentally registered under the same
+     * mangled name they'd silently alias.  Check that the int
+     * and long entries are actually distinct objects. */
     if (type_of(int) == type_of(long)) {
         printf("FAIL distinct: int and long resolve to same cc_type_info\n");
         fails++;
     }
 
-    /* The id field is allowed to be 0 (not-yet-assigned) for the
-     * initial commit.  Lock that in so we don't accidentally start
-     * relying on stable IDs before they actually exist. */
+    /* The id field is intentionally unassigned (always 0) until a
+     * future commit gives it real meaning.  Lock the contract so
+     * downstream code can't quietly start relying on it. */
     if (type_of(int)->id != 0) {
         printf("FAIL id: expected 0 (unassigned) in commit 1, got %u\n",
                type_of(int)->id);

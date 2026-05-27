@@ -1,20 +1,26 @@
 /*
- * Primitive `cc_type_info` symbols.
+ * Primitive `cc_type_info` symbols + global type-info registry.
  *
  * Every primitive type that user code can pass to `type_of(T)` has
- * one externally-visible `cc_type_info` here.  The set is small and
- * fixed — adding a new primitive means adding three lines in two
- * places (this file + the matching `extern` in cc_type.cch).
+ * one externally-visible `cc_type_info` here.  Adding a new
+ * primitive is THREE places: the `CC_TI_PRIM(...)` call in this
+ * file, the matching `extern const cc_type_info __cc_ti_X;` in
+ * `cc_type.cch`, and the `cc_type_info_register(&__cc_ti_X)` line
+ * in `cc__ti_register_primitives` below.
  *
  * For user-defined structs and generic instantiations, per-T
- * `cc_type_info` emission is done at codegen time (see milestone
- * #4b in cc/docs/COMPILER_CLEANUP_STATUS.md).  This file ships the
- * always-available primitives so the API has something to bite on
- * from day one.
+ * `cc_type_info` emission happens either at codegen time
+ * (`visit_codegen.c::cc__emit_container_cc_type_info`, for
+ * `Vec<T>`/`Map<K,V>`) or via the `CC_TYPE_INFO_BEGIN/FIELD/END`
+ * macros in `cc_type.cch` (for user structs).  See milestone #4a
+ * in `cc/docs/COMPILER_CLEANUP_STATUS.md` for the design.  This
+ * file ships the always-available primitives plus the registry
+ * machinery they (and everyone else) plug into.
  */
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
@@ -88,9 +94,13 @@ static size_t                cc__ti_registry_cap = 0;
 
 void cc_type_info_register(const cc_type_info* ti) {
     if (!ti || !ti->mangled) return;
-    /* De-dup: same mangled name should map to a single entry.
-     * First-registration wins, which gives primitives priority
-     * over user re-registrations of the same name. */
+    /* De-dup: same mangled name maps to a single entry; whoever
+     * registers first keeps the slot.  Constructor order across
+     * TUs is unspecified, so callers MUST treat the resulting
+     * pointer as "whatever was registered first under this
+     * mangled name" — not assume primitives win or any other
+     * ordering.  Pointer identity is still stable per name
+     * for the lifetime of the process. */
     for (size_t i = 0; i < cc__ti_registry_n; i++) {
         const cc_type_info* cur = cc__ti_registry[i];
         if (cur == ti) return;
@@ -100,7 +110,16 @@ void cc_type_info_register(const cc_type_info* ti) {
         size_t new_cap = cc__ti_registry_cap == 0 ? CC__TI_REG_INITIAL_CAP : cc__ti_registry_cap * 2;
         const cc_type_info** grown = (const cc_type_info**)realloc(
             cc__ti_registry, new_cap * sizeof(*grown));
-        if (!grown) return; /* registration silently dropped on OOM */
+        if (!grown) {
+            /* Diagnose rather than fail silently — type-system
+             * coherence depends on every registration landing. */
+            fprintf(stderr,
+                "cc_type_info_register: OOM growing registry "
+                "(cap=%zu, dropping '%s'); type_of(\"%s\") will "
+                "return NULL\n",
+                cc__ti_registry_cap, ti->mangled, ti->mangled);
+            return;
+        }
         cc__ti_registry     = grown;
         cc__ti_registry_cap = new_cap;
     }
@@ -141,22 +160,21 @@ static void cc__ti_register_primitives(void) {
 }
 
 /* ------------------------------------------------------------
- * Commit 3b: cc_type_info for stdlib pre-baked vec instantiations.
+ * cc_type_info for stdlib pre-baked vec instantiations.
  *
  * `cc/include/ccc/std/vec.cch` defines a fixed set of "pre-baked"
  * Vec<T> typedefs (CCVec_int, CCVec_char, CCVec_size_t, …) that
  * all alias `__CCVecGeneric`.  Those typedefs bypass the codegen
- * emission path in `visit_codegen.c` (which Commit 3a hooked
- * into), so without explicit registration here, `type_of(CCVec_int)`
- * would return NULL.  Below we emit one `cc_type_info` per pre-
- * baked name and register the lot at constructor priority 102 —
- * after primitives but at the same tier as codegen-emitted user
- * containers.
+ * emission path in `visit_codegen.c::cc__emit_container_cc_type_info`,
+ * so without explicit registration here, `type_of(CCVec_int)`
+ * would return NULL.  We emit one `cc_type_info` per pre-baked
+ * name and register the lot in a single constructor.
  *
- * Note: every pre-baked vec shares the SAME C layout
+ * Every pre-baked vec shares the SAME C layout
  * (`__CCVecGeneric`), so size/align are identical.  The mangled
- * name is what disambiguates them in the registry; downstream
- * code that introspects the element type belongs in 3c.
+ * name is what disambiguates them in the registry; the element
+ * type isn't reachable from these records yet — see milestone
+ * #4a's deferred 3c work in COMPILER_CLEANUP_STATUS.md.
  * ------------------------------------------------------------ */
 
 /* `__CCVecGeneric` lives in `std/vec.cch`.  We can't easily
@@ -170,6 +188,11 @@ typedef struct {
     size_t len;
 } cc__prebaked_vec_layout;
 
+/* Containers are erasable (a `Vec<T>` header is safely carried
+ * through a `cc_dyn_vec` slot), but NOT POD / trivial-copy /
+ * trivial-drop — bitwise-copying a vec header aliases the
+ * arena-owned data pointer.  Flag set accordingly: erasable
+ * hint, no trivial bits. */
 #define CC_TI_PREBAKED_VEC(SYMNAME, DISPLAY)                              \
     static const cc_type_info __cc_ti_##SYMNAME = {                       \
         .name      = DISPLAY,                                             \
@@ -179,7 +202,7 @@ typedef struct {
         .align     = (uint32_t)_Alignof(cc__prebaked_vec_layout),         \
         .kind      = (uint16_t)CC_TK_GENERIC_INST,                        \
         .nfields   = 0,                                                   \
-        .flags     = 0,  /* owning container — conservative flags */      \
+        .flags     = (uint16_t)CC_TF_ERASABLE,                            \
         ._reserved = 0,                                                   \
         .fields    = NULL,                                                \
         .copy_fn   = NULL,                                                \
