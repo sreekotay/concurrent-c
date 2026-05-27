@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (5 / 13 batches landed — A, B, C, D1, D2).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (6 / 13 batches landed — A, B, C, D1, D2, E).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 39 sites migrated, 63 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 41 sites migrated, 61 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -61,15 +61,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch D2).
+Updated 2026-05-27 (post Batch E).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **39** (+6 from Batch D2) |
-| Remaining to migrate | **63** |
+| Already on `CCInertScan` | **41** (+2 from Batch E) |
+| Remaining to migrate | **61** |
 | — trivial | 38 |
-| — medium | 20 |
+| — medium | 18 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -184,13 +184,13 @@ Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`
 
 Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for consistency so the file-wide `CCInertScan` story is uniform when the orphan is wired up or deleted.
 
-### `ufcs.c` (2252 LOC, 3 sites, no `text_scan.h`)
+### `ufcs.c` (2252 LOC, 3 sites, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__ufcs_lookup_scoped_local_var_type` (~273) | find-only | {lc,bc,str,chr} | ~25 | medium | **Near-copy** of visit_codegen ~2408; batch together |
-| `cc__build_ufcs_arg_slices` (~702) | find-only | {str,chr} | ~40 | medium | Two-pass comma split; no comments |
-| anon loop in `cc__emit_closure_field_call` (~1511) | find-only | {str,qch} | ~18 | trivial | |
+| `cc__ufcs_lookup_scoped_local_var_type` (~273) | find-only | {lc,bc,str,chr} | ~25 | medium | **✓ Migrated (Batch E)** — scope-stack/decl-count algorithm preserved (paren_depth/bracket_depth/scope_stack/scope_depth/decl_count all stay alongside).  Still a near-copy of `cc__lookup_scoped_local_var_type_codegen` — see Batch E notes for the deferred dedup |
+| `cc__build_ufcs_arg_slices` (~702) | find-only | {str,chr} | ~40 | medium | Two-pass comma split; no comments (Batch F2) |
+| anon loop in `cc__emit_closure_field_call` (~1511) | find-only | {str,qch} | ~18 | trivial | (Batch F2) |
 
 ### `checker.c` (1314 LOC, 1 site, now uses `text_scan.h`)
 
@@ -204,9 +204,9 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 |------|-------|-------|-----|------------|-------|
 | `cc_find_first_func_def_offset` (~174) | find-only | {lc,bc,str,chr} | ~45 | medium | **✓ Migrated (Batch A)** — `brace_depth` / `last_line_off` stayed alongside; ad-hoc `#`-skip replaced by `CCInertScan` in_pp; inert newlines tracked via post-step sweep |
 
-### `visit_codegen.c` (5598 LOC, 10 inline + 2 migrated, has `text_scan.h`)
+### `visit_codegen.c` (5598 LOC, 9 inline + 3 migrated, has `text_scan.h`)
 
-**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642).
+**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642), `cc__lookup_scoped_local_var_type_codegen` (~2408 — Batch E).
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
@@ -217,7 +217,7 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 | `cc__collect_legacy_ufcs_registrations` (~2014) | find-only | {lc,bc,str,chr} + line_start | ~35 | **complex** | Custom `#line` parse — partial overlap with `CCInertScan`.  Consolidate carefully |
 | `cc__blank_comptime_blocks_preserve_layout` (~2127) | rewrite | {lc,bc,str,chr} | ~30 | trivial | |
 | `cc__register_ufcs_declared_vars_for_type` (~2162) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__lookup_scoped_local_var_type_codegen` (~2408) | find-only | {lc,bc,str,chr} | ~25 | medium | **Near-copy** of ufcs.c ~273; batch together |
+| ~~`cc__lookup_scoped_local_var_type_codegen` (~2408)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch E)** — moved to "Migrated" list above |
 | `cc__lookup_enclosing_param_type_codegen` (~2499) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
 | `cc__collect_ufcs_field_and_var_types` (~3250) | find-only | {lc,bc,str,chr} | ~20 | trivial | Marked dead-code in banner but scanner present |
 
@@ -392,12 +392,26 @@ Commit D2 (6 sites) — **LANDED 2026-05-27**:
 
 **Surprises:** None — D2 was a near-mechanical mirror of D1's pass_match_syntax work, and pass_nursery_spawn_ast's three sites all followed the standard "find-only with depth counters" pattern from Batch C.  The two "no comments" behavior changes in pass_nursery_spawn_ast are theoretical only since the file is orphaned today; even so, smoke would have caught any real regression because the helpers are still link-reachable.
 
-### Batch E — ufcs duplicate consolidation (2 sites in different files, 1 commit)
+### Batch E — ufcs duplicate consolidation (2 sites in different files, 1 commit) — **LANDED 2026-05-27**
 
 > Goal: kill the near-copy.  Either migrate both to `CCInertScan` AND introduce a shared scoped-local-var helper, OR just migrate each independently.  Decide at commit time based on how messy the consolidation looks.
 
-- [ ] `ufcs.c::cc__ufcs_lookup_scoped_local_var_type`
-- [ ] `visit_codegen.c::cc__lookup_scoped_local_var_type_codegen`
+- [x] `ufcs.c::cc__ufcs_lookup_scoped_local_var_type` — migrated independently
+- [x] `visit_codegen.c::cc__lookup_scoped_local_var_type_codegen` — migrated independently
+
+**Decision (commit-time)**: migrated each independently rather than consolidating.  The two functions share an identical scope-stack + decl-count body, but differ in **four** non-trivial places:
+  1. Input parsing (`recv_expr` skip-`&`/whitespace/identifier-extract vs raw `var_name`).
+  2. Helper-fn names called inside the body: parse-decl fallback (×2), normalize-decl-type (×2), canonicalize-type-alias (×2) — all per-file static.
+  3. Non-decl-stmt check: hand-rolled list vs `cc_is_non_decl_stmt_type` helper.
+  4. Post-loop fallback: NULL vs `cc__lookup_enclosing_param_type_codegen(...)`.
+
+Consolidating would require a function-pointer dispatch table or harmonizing those four divergences first — net churn larger than the M1 scope.  Recorded as a **future cleanup item**: "deduplicate scoped-local-var-type lookup" — owner: anyone touching either file next.
+
+**Actual diff**: +14 / −36 (net **−22 LOC**).  Smoke 461/461 both modes.  Spot-check on `ufcs_chained_methods_smoke.ccs` confirms receiver-type lookup still produces correct chained-method dispatch.
+
+**Surprises:**
+- **Incidental warning fix**: removing the unused `in_lc`/`in_bc`/`in_str`/`in_chr` locals dropped one of the build's 3 pre-existing `-Wunused-*` warnings to 2.  The remaining 2 (`cc__is_channel_tx_recv_type`, `cc__is_channel_rx_recv_type`) are unrelated dead static helpers — separate cleanup.
+- **The audit's "batch together" suggestion was right but for the wrong reason.**  Yes, both files need the same migration; no, that doesn't mean they should be consolidated yet.  Migration-with-future-dedup-flag is the right tradeoff at this scale.
 
 ### Batch F — ufcs + visit_codegen trivial bulk (10 sites, 2 commits)
 

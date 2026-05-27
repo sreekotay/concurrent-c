@@ -2420,24 +2420,18 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     int paren_depth = 0, bracket_depth = 0;
     size_t stmt_start = 0;
     size_t i = 0;
+    CCInertScan scan;
     if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
     scope_stack[0] = 0;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* src is a mid-buffer slice */
     while (i < limit) {
+        if (cc_inert_scan_step(&scan, src, limit, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '(') { paren_depth++; i++; continue; }
         if (c == ')') { if (paren_depth > 0) paren_depth--; i++; continue; }
         if (c == '[') { bracket_depth++; i++; continue; }
