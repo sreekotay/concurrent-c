@@ -32,6 +32,7 @@
 #include "comptime/hook_compile.h"
 #include "header/lower_header.h"
 #include "parser/tcc_bridge.h"
+#include "preprocess/cc_l2_rewriter.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/type_registry.h"
@@ -1456,6 +1457,22 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * needs the full M1 swap (visitor consumes the pre-expand buffer
      * end-to-end) — see PASS_INVENTORY.md and COMPILER_CLEANUP_STATUS.md.
      * Until then, reparses use the unexpanded prelude+sanitize chain. */
+
+    /* L2 prelude rewriter: same standard-C-to-TCC-friendly token
+     * rewrites applied in the initial parse path
+     * (`cc_build_parse_input`) must also run here, because the
+     * reparse pipeline is a parallel route to the same TCC parser
+     * — any idiom TCC rejects on the initial parse will reject
+     * here too.  Runs just before `cc_tcc_bridge_parse_string_to_ast`. */
+    {
+        size_t l2_len = 0;
+        char* l2 = cc_l2_rewrite_all(prep, pp_len, &l2_len);
+        if (l2) {
+            free(prep);
+            prep = l2;
+            pp_len = l2_len;
+        }
+    }
 
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));

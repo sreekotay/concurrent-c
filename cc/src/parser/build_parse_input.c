@@ -1,6 +1,7 @@
 #include "build_parse_input.h"
 
 #include "../diag/diag.h"
+#include "../preprocess/cc_l2_rewriter.h"
 #include "../preprocess/cpp_expand.h"
 #include "../preprocess/type_registry.h"
 #include "../visitor/pass_check_type_of.h"
@@ -171,6 +172,28 @@ int cc_build_parse_input(const char* file_buf,
         } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
             fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",
                     input_path ? input_path : "<input>");
+        }
+    }
+
+    /* L2 prelude rewriter (2026-05-27): convert a small set of
+     * *standard C* idioms that TCC's stub-AST parser rejects into
+     * TCC-acceptable equivalents.  Runs LAST in the pipeline so
+     * it sees the same buffer the parser will see, including any
+     * macro-expanded text produced by the M7 CPP-expand step
+     * above.  See cc/src/preprocess/cc_l2_rewriter.h for the
+     * current idiom list and the "user-facing surface ratchet"
+     * rationale (PASS_INVENTORY rule #7). */
+    {
+        size_t pp_len = strlen(pp);
+        size_t l2_len = 0;
+        char* l2 = cc_l2_rewrite_all(pp, pp_len, &l2_len);
+        if (l2) {
+            free(pp);
+            pp = l2;
+            if (getenv("CC_DEBUG_L2_REWRITE")) {
+                fprintf(stderr, "[cc:l2-rewrite] %s: %zu -> %zu bytes\n",
+                        input_path ? input_path : "<input>", pp_len, l2_len);
+            }
         }
     }
 
