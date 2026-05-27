@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (6 / 13 batches landed — A, B, C, D1, D2, E).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (7 / 13 batches landed — A, B, C, D1, D2, E, F1).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 41 sites migrated, 61 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 47 sites migrated, 55 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -54,6 +54,7 @@ The mechanical migration:
 - **Newline tracking in inert regions** — for rewrites that maintain `last_line_off`, `line`, or `col`, sweep the consumed `[before, i)` range after each `cc_inert_scan_step` that returned 1 (`for (size_t k = before; k < i; k++) if (src[k] == '\n') ...`).
 - **Code-path newline** — `cc_inert_scan_step` returns 0 for `\n` outside any inert region and leaves `i` pointing AT the newline.  Any rewrite that tracks `line` or `col` must also handle `if (c == '\n') { line++; col = 1; i++; continue; }` on the code-byte path (Batch C surprise — `m0_5_diag_channel_pair_origin_fail` regression).
 - **Inner sub-scanners** in bounded regions (paren groups, expression tails) — usually str/chr-only "no comments" scanners.  Batch B left these inline deliberately; reasonable default.  Migrate if a regression surfaces.
+- **Body-`continue;` infinite-loop trap** (Batch F1 — caught by smoke).  Per-keyword loops where the original used `for (i=0; i<n; ++i)` and the body had an `if (...) continue;` (e.g. "skip if this looks like a function call, not a decl") — in the original, `continue` triggered the for's `++i`.  After migrating to `while (i < n)` with a tail `i += type_len ;` advance, the `continue;` skips that advance and re-tests the same position forever.  Fix: invert the condition into an `if (!(...)) { ... rest of body ... }` guard so the tail advance always runs.  Audit the body BEFORE migrating any per-keyword loop.
 
 Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ignore inert content AND header-origin tokens.  One incidental fix landed already: error-message column off-by-one in `cc__rewrite_channel_pair_calls_text` (test expectations updated in the same commit).
 
@@ -61,15 +62,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch E).
+Updated 2026-05-27 (post Batch F1).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **41** (+2 from Batch E) |
-| Remaining to migrate | **61** |
-| — trivial | 38 |
-| — medium | 18 |
+| Already on `CCInertScan` | **47** (+6 from Batch F1) |
+| Remaining to migrate | **55** |
+| — trivial | 34 |
+| — medium | 16 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -204,22 +205,22 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 |------|-------|-------|-----|------------|-------|
 | `cc_find_first_func_def_offset` (~174) | find-only | {lc,bc,str,chr} | ~45 | medium | **✓ Migrated (Batch A)** — `brace_depth` / `last_line_off` stayed alongside; ad-hoc `#`-skip replaced by `CCInertScan` in_pp; inert newlines tracked via post-step sweep |
 
-### `visit_codegen.c` (5598 LOC, 9 inline + 3 migrated, has `text_scan.h`)
+### `visit_codegen.c` (5598 LOC, 3 inline + 9 migrated, has `text_scan.h`)
 
-**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642), `cc__lookup_scoped_local_var_type_codegen` (~2408 — Batch E).
+**Migrated:** `cc__find_matching_paren_codegen` (~1619), `cc__find_matching_brace_codegen` (~1642), `cc__lookup_scoped_local_var_type_codegen` (~2408 — Batch E), plus Batch F1: `cc__neutralize_comments_for_reparse` (~420), `cc__rewrite_parser_placeholder_ufcs_lowers` (~968), `cc__blank_comptime_blocks_preserve_layout` (~2127), `cc__register_ufcs_declared_vars_for_type` (~2162), `cc__lookup_enclosing_param_type_codegen` (~2499), `cc__collect_ufcs_field_and_var_types` (~3250).
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| anon loop in `cc__cg_type_decl_end_top_level` (~185) | find-only | {lc,bc,str,chr} | ~20 | medium | Also brace_depth |
-| `cc__neutralize_comments_for_reparse` (~420) | rewrite | {lc,bc,str,chr} | ~50 | trivial | Same as `cc__src_strip_comments_and_strings` |
-| `cc__sanitize_statement_unwraps_for_reparse` (~586) | find-only | {lc,bc,str,chr} | ~20 | medium | Backward stmt walk after match |
-| `cc__rewrite_parser_placeholder_ufcs_lowers` (~968) | rewrite | {lc,bc,str,chr} | ~25 | trivial | |
-| `cc__collect_legacy_ufcs_registrations` (~2014) | find-only | {lc,bc,str,chr} + line_start | ~35 | **complex** | Custom `#line` parse — partial overlap with `CCInertScan`.  Consolidate carefully |
-| `cc__blank_comptime_blocks_preserve_layout` (~2127) | rewrite | {lc,bc,str,chr} | ~30 | trivial | |
-| `cc__register_ufcs_declared_vars_for_type` (~2162) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
-| ~~`cc__lookup_scoped_local_var_type_codegen` (~2408)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch E)** — moved to "Migrated" list above |
-| `cc__lookup_enclosing_param_type_codegen` (~2499) | find-only | {lc,bc,str,chr} | ~20 | trivial | |
-| `cc__collect_ufcs_field_and_var_types` (~3250) | find-only | {lc,bc,str,chr} | ~20 | trivial | Marked dead-code in banner but scanner present |
+| anon loop in `cc__cg_type_decl_end_top_level` (~185) | find-only | {lc,bc,str,chr} | ~20 | medium | Also brace_depth (Batch F2) |
+| ~~`cc__neutralize_comments_for_reparse` (~420)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~50~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — new "inert-kind discrimination" pattern: snapshot `scan.in_line_comment`/`scan.in_block_comment` BEFORE step, check AFTER; blank consumed range only if EITHER flag was set in the OR.  Strings/chars/pp left verbatim |
+| `cc__sanitize_statement_unwraps_for_reparse` (~586) | find-only | {lc,bc,str,chr} | ~20 | medium | Backward stmt walk after match (Batch F2) |
+| ~~`cc__rewrite_parser_placeholder_ufcs_lowers` (~968)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — clean drop-in; removed now-unused `c` local |
+| `cc__collect_legacy_ufcs_registrations` (~2014) | find-only | {lc,bc,str,chr} + line_start | ~35 | **complex** | Custom `#line` parse — partial overlap with `CCInertScan`.  Consolidate carefully (Batch M) |
+| ~~`cc__blank_comptime_blocks_preserve_layout` (~2127)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~30~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — `i = body_r;` becomes `i = body_r + 1;` (was relying on for's `++i`) |
+| ~~`cc__register_ufcs_declared_vars_for_type` (~2162)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — body-`continue;` trap fix: inverted `if (...) continue;` to `if (!(...)) { ... }` guard so tail `i += type_len` always runs.  See Watch-outs |
+| ~~`cc__lookup_scoped_local_var_type_codegen` (~2408)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~25~~ | ~~medium~~ | **✓ Migrated (Batch E)** |
+| ~~`cc__lookup_enclosing_param_type_codegen` (~2499)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — clean drop-in |
+| ~~`cc__collect_ufcs_field_and_var_types` (~3250)~~ | ~~find-only~~ | ~~{lc,bc,str,chr}~~ | ~~~20~~ | ~~trivial~~ | **✓ Migrated (Batch F1)** — body `continue;` at ~3450 was safe (inner `while ... i++;` advanced before continue) |
 
 ### `pass_result_unwrap.c` (2964 LOC, 9 inline + 4 migrated, has `text_scan.h`)
 
@@ -415,13 +416,21 @@ Consolidating would require a function-pointer dispatch table or harmonizing tho
 
 ### Batch F — ufcs + visit_codegen trivial bulk (10 sites, 2 commits)
 
-Commit F1 (5 trivial in visit_codegen.c):
-- [ ] `cc__neutralize_comments_for_reparse`
-- [ ] `cc__rewrite_parser_placeholder_ufcs_lowers`
-- [ ] `cc__blank_comptime_blocks_preserve_layout`
-- [ ] `cc__register_ufcs_declared_vars_for_type`
-- [ ] `cc__lookup_enclosing_param_type_codegen`
-- [ ] `cc__collect_ufcs_field_and_var_types`
+Commit F1 (6 trivial in visit_codegen.c) — **LANDED 2026-05-27**:
+- [x] `cc__neutralize_comments_for_reparse` — new pattern: inert-kind discrimination via prev/post `scan.in_*` snapshots
+- [x] `cc__rewrite_parser_placeholder_ufcs_lowers`
+- [x] `cc__blank_comptime_blocks_preserve_layout`
+- [x] `cc__register_ufcs_declared_vars_for_type` — body-`continue;` infinite-loop bug caught by smoke + fixed
+- [x] `cc__lookup_enclosing_param_type_codegen`
+- [x] `cc__collect_ufcs_field_and_var_types`
+
+**Actual diff**: +44 / −108 (net **−64 LOC**).  Smoke 461/461 both modes.  Incidentally cleared 2 of 3 pre-existing `-Wunused-*` warnings (1 from F1, 1 from E).
+
+**Surprises:**
+- **New pattern — "inert-kind discrimination"**: `cc__neutralize_comments_for_reparse` actively *uses* the inert state to decide what to rewrite (blank comments, leave strings).  Migrated by snapshotting `scan.in_line_comment`/`scan.in_block_comment` BEFORE the step, then OR-ing with the same flags AFTER; if EITHER side is true, the step consumed comment bytes and we blank them.  Strings/chars/pp are left verbatim.  Generally useful pattern for any "rewrite by inert-region kind" pass.
+- **Body-`continue;` infinite-loop bug** (caught by smoke!): `cc__register_ufcs_declared_vars_for_type` had `if (v < n && src[v] == '(') continue;` mid-body — the original for-loop's `continue` triggered `++i`; my while-loop's `continue` skipped the tail `i += type_len` advance and re-tested the same position forever.  4 tests hung at 300s build timeout (`unwrap_destroy_registered_type_smoke`, `arena_detach_destroy_return_smoke`, `nursery_create_detach_proto_smoke`, `comptime_type_create_arg_types_smoke`).  Fix: invert the condition to `if (!(...)) { ... rest of body ... }` so the tail advance always runs.  Added to Watch-outs as a pre-migration audit checklist item.
+- **`cc__rewrite_parser_placeholder_ufcs_lowers`** had an unused `char c = src[i];` after the migration removed all `c`-references.  Just dropped it.
+- **`cc__blank_comptime_blocks_preserve_layout`** had `i = body_r;` relying on the for-loop's `++i` to make total advance `body_r + 1`.  Changed to explicit `i = body_r + 1;`.
 
 Commit F2 (4 sites):
 - [ ] `visit_codegen.c::cc__cg_type_decl_end_top_level` anon (medium — `brace_depth`)
