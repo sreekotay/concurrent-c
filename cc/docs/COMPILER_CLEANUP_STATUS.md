@@ -57,49 +57,94 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-1. **Unblock `CC_PRE_EXPAND_REPARSE` → finish macro CC-syntax**:
-   M7.C3 wired the pre-expand text from `cc_build_parse_input` all the
-   way to the visitor (via `CCASTRoot.parse_buffer*` →
-   `CCVisitorCtx.pre_expanded_buf`) and taught the channel-pair scanner
-   to fall back to it for macro-generated chan handle decls.  The
-   remaining blocker for `tests/macro/macro_chan_capacity_macro_smoke.ccs`
-   is the reparse path: `cc__reparse_source_to_ast` re-runs phase-1+
-   phase-3 over the raw user source, so macros like `CHAN(int) tx;` are
-   still opaque to chan-handle lowering, and `cc__rewrite_chan_handle_types`
-   never sees the `[~4 >]` form on the reparse side. The fix is to flip
-   `CC_PRE_EXPAND_REPARSE=1` to default after addressing the four
-   regressions called out in the M7.C2 caveat (`async_chan_await_works_smoke`,
-   `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`,
-   `ufcs_nested_std_io_smoke`) — they fail because the CPP-expanded
-   reparse output changes AST shapes that the async-AST and UFCS passes
-   walk by node-index. Likely fix: teach those passes to consult the
-   same `pre_expanded_buf` plumbing M7.C3 added, or fall back to
-   the AST root's `parse_buffer` for span lookups.
-   Should also fix the source-map drift surfaced by
-   `tests/m0_5_diag_origin_line_fail.ccs` under `CC_PRE_EXPAND=1`
-   (currently the test is pinned to default via an `.env` sidecar;
-   remove the override once the reparse path is consistent).
-   After that, flip `CC_PRE_EXPAND=1` to default and begin retiring
-   redundant `_cch → _h` rewrites (CPP handles them).
+> **Central blocker risk callout:** M1 (the visitor refactor) is the
+> load-bearing piece for four otherwise-stalled items: macro CC-syntax
+> end-to-end, flipping `CC_PRE_EXPAND=1` to default, retiring redundant
+> `_cch → _h` rewrites, and fixing the `m0_5_diag_origin_line_fail`
+> source-map drift.  The earlier framing — "just unblock the four
+> `CC_PRE_EXPAND_REPARSE` regressions and flip the flag" —
+> understated the problem: those four passes fail because
+> `visit_codegen.c` reads `src_all` from disk (small, user-source-
+> shaped buffer) while the pre-expand reparse's AST stores
+> `fn->lbrace/rbrace` as offsets into a much larger inlined-headers
+> buffer.  No per-pass plumbing fixes that coordinate mismatch; we
+> have to make the visitor's working buffer agree with the AST's
+> parse buffer.  This is the actual M1 refactor.  Doing it
+> incrementally is safe (the M7.C3 plumbing is already in place to
+> support it), but it is bigger than one commit.
 
-2. **Closure-literal refactor**: re-use existing `cc__collect_closure_edits`
-   (EditBuffer-based; places protos at `find_protos_insertion_point`)
-   in `visit_codegen.c` instead of the older
-   `cc__rewrite_closure_literals_with_nodes`. Fixes the two pre-existing
-   capture-variant failures (`recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`)
-   and removes the brittle in-buffer offset walk in
-   `cc__closure_proto_insert_off`.
+1. **Closure-literal refactor**: re-use existing
+   `cc__collect_closure_edits` (EditBuffer-based; places protos at
+   `find_protos_insertion_point`) in `visit_codegen.c` instead of the
+   older `cc__rewrite_closure_literals_with_nodes`. Fixes the two
+   pre-existing capture-variant failures (`recipe_tcp_echo.ccs`,
+   `syscall_kidnap.ccs`) and removes the brittle in-buffer offset walk
+   in `cc__closure_proto_insert_off`. Independent of M1; quick win.
 
-Then in priority order:
+2. **M1 visitor refactor** — bigger than originally framed.
+   A spike (May 2026) attempted the naive form — swap
+   `src_all = cc__read_entire_file(ctx->input_path)` →
+   `src_all = strdup(root->parse_buffer)` when `CC_PRE_EXPAND=1` —
+   to align the visitor's working buffer with the AST's coordinate
+   space.  Smoke went from 436/436 to ~62/436 under
+   `CC_PRE_EXPAND=1`.  The dominant failure mode is **not** the
+   reparse prelude (that part is solvable; see below) but that
+   visitor text scanners then see the inlined CC runtime headers
+   (`<ccc/cc_channel.cch>`, `<ccc/std/vec.cch>`, `<ccc/cc_result.cch>`,
+   etc.) as part of `src_all`.  Patterns those scanners look for —
+   `cc_channel_pair(`, `[~ ... >]`, UFCS calls, `@async`, `!>`, etc.
+   — are present in the runtime headers themselves, so scanners
+   match against header content and emit spurious diagnostics or
+   rewrites.
+   The real M1 lift is therefore three pieces:
+   - **(a) Source-buffer unification.** One-line swap of `src_all`
+     to `root->parse_buffer` when pre-expand is on.
+   - **(b) Reparse prelude awareness.**  `cc__reparse_source_to_ast`
+     skips `cc_preprocess_for_reparse` + `cc__prepend_reparse_prelude`
+     when its input is pre-expanded (system headers + container
+     `.cch` files already inlined → re-prepending double-decls
+     `__mbstate_t` etc.).  Plumbing for this is already in place:
+     `CCReparseFlags.src_is_pre_expanded` + the
+     `cc__reparse_source_to_ast_ctx` wrapper.  Confirmed end-to-end
+     in the spike: with the swap on and the flag set, reparse made
+     it past the `__mbstate_t` wall before hitting the next class
+     of failures.
+   - **(c) `#line`-aware text scanners.**  Each visitor pass that
+     scans `src_all` for syntactic patterns needs to filter by
+     origin file (the file the nearest preceding `#line N "..."`
+     points to) so it only acts on tokens that originated in the
+     user TU.  Likely shape: centralize this in `CCScannerState`
+     (already exists; tracks comments/strings/preprocessor) by
+     adding an `in_user_file` flag updated on every `#line`
+     directive.  Then migrate passes one at a time, with smoke
+     gating each step.  Probably 5–10 commits.
+   - The M7.C3 plumbing (`CCASTRoot.parse_buffer*`,
+     `CCVisitorCtx.pre_expanded_buf`,
+     `cc__find_chan_decl_before` alt_buf pattern) is already there
+     to support this work and remains useful as a fallback for
+     scanners that aren't yet `#line`-aware.
 
-3. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)
-4. **`tests/diag/` harness** — `EXPECT-DIAG` parsing; 3–5 smoke tests (protects I1–I8)
-5. **M1 finish** — `visit_codegen.c` → `cc_build_parse_input`; thread `CCSourceMap` on reparse
-6. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
-7. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
-8. **Runtime R1+** — consume serialized `.ccs.map` from compile
-9. **M7.C** — flip pre-expand default; retire redundant `.cch` rewrites
-10. **M5.5 fallback** — only if M7 turns out to need TCC-side help after all; otherwise drop
+3. **Flip `CC_PRE_EXPAND=1` to default** (post-M1). Once item #2 is
+   green and the macro CHAN tests in `tests/macro/` compile end-to-end,
+   make pre-expand the default. Remove the `.env` sidecar pinning
+   `tests/m0_5_diag_origin_line_fail.ccs` to non-pre-expand mode (the
+   source-map drift goes away when the visitor and AST agree on
+   coordinates).
+
+4. **Retire redundant text passes** (post-flip). With CPP handling
+   `#include` resolution unconditionally, several legacy passes become
+   no-ops or near-no-ops: the local/system `_cch → _h` rewriters,
+   parts of phase-1 chan_handle/slice/Generic lowering that re-run on
+   already-lowered text, etc. Audit and remove.
+
+Then in priority order (independent of M1):
+
+5. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)
+6. **`tests/diag/` harness** — `EXPECT-DIAG` parsing; 3–5 smoke tests (protects I1–I8)
+7. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
+8. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
+9. **Runtime R1+** — consume serialized `.ccs.map` from compile
+10. **M5.5 fallback** — only if M7/M1 turns out to need TCC-side help after all; otherwise drop. Current evidence says drop.
 
 ---
 

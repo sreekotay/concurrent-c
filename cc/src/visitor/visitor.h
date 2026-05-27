@@ -14,6 +14,14 @@ typedef struct CCVisitorCtx {
      * is off.  Borrowed; owned by the AST root. */
     const char* pre_expanded_buf;
     size_t      pre_expanded_len;
+    /* M1: when nonzero, the visitor's working `src_all` is itself the
+     * pre-expanded buffer (i.e. M1.1's src-buffer unification is active).
+     * Reparses use this to skip steps that re-prepend or re-process
+     * system-header content that's already inlined in the buffer
+     * (`cc__prepend_reparse_prelude`, .cch → .h rewriting, container
+     * include prepends).  When zero, reparses behave exactly as they
+     * did pre-M1 (full prelude + preprocess chain). */
+    int         src_is_pre_expanded;
     // TODO: add type tables, provenance tracking, arena/async context, codegen state.
 } CCVisitorCtx;
 
