@@ -632,6 +632,13 @@ static int cc__rewrite_colon_defaults(const CCVisitorCtx* ctx, const char* s, si
     while (i < n) {
         if (cc_inert_scan_step(&scan, s, n, &i)) continue;
 
+        /* M1 Phase 4 step (b): filter header-origin tokens.  No-op today
+         * (raw .ccs has no `#line` directives so in_user_file is always 1);
+         * activates when Phase 4 step (c) swaps src_all to the pre-expanded
+         * buffer.  copy_from is unchanged, so the byte is preserved by the
+         * next block-copy (and the final post-loop copy). */
+        if (!scan.in_user_file) { i++; continue; }
+
         size_t op_at = 0;
         size_t op_len = 0;
         if (i + 3 <= n && s[i] == '=' && s[i + 1] == '<' && s[i + 2] == '!' && (i == 0 || s[i - 1] != '<')) {

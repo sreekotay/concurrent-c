@@ -957,6 +957,13 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
          * lines long, see m0_5_diag_channel_pair_origin_fail). */
         if (c == '\n') { line++; col = 1; i++; continue; }
 
+        /* M1 Phase 4 step (b): filter header-origin tokens.  No-op today
+         * (raw .ccs has no `#line` directives so in_user_file is always 1);
+         * activates when Phase 4 step (c) swaps src_all to the pre-expanded
+         * buffer.  Block-copy pattern (last_emit unchanged) preserves the
+         * byte in the output via the subsequent verbatim copy. */
+        if (!scan.in_user_file) { i++; col++; continue; }
+
         /* Look for canonical channel-pair constructor token. */
         if (c == 'c' && i + 15 < len && memcmp(src + i, "cc_channel_pair", 15) == 0) {
             const size_t pair_name_len = 15;
@@ -1309,6 +1316,9 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
         }
         char c = src[i];
         if (c == '\n') { line++; col = 1; i++; continue; }
+
+        /* M1 Phase 4 step (b): see twin at ~line 942 for rationale. */
+        if (!scan.in_user_file) { i++; col++; continue; }
 
         if (c == '[') {
             size_t j = i + 1;
