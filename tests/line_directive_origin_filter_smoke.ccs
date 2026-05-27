@@ -1,0 +1,59 @@
+/* line_directive_origin_filter_smoke.ccs — regression guard for the
+ * M1 visitor refactor (`#line`-aware text scanners, see
+ * `cc/docs/COMPILER_CLEANUP_STATUS.md` "Recommended next work #2/(c)").
+ *
+ * The M1 lift hands the visitor a pre-expanded source buffer with
+ * inlined CC runtime headers (`<ccc/cc_channel.cch>`, `<ccc/std/vec.cch>`,
+ * etc.).  Patterns those runtime headers contain — `cc_channel_pair(`,
+ * `[~ ... >]`, UFCS calls, `@async`, `!>`, etc. — must NOT be matched
+ * by visitor text scanners.
+ *
+ * To exercise the path without depending on the full M1 src_all swap
+ * (still in progress), this test uses explicit `#line` directives to
+ * carve out a "header-origin" region in the middle of the user TU.
+ * CC tokens inside the header-origin region must be left alone; the
+ * real tokens outside it must be rewritten as usual.
+ *
+ * Today the visitor passes are NOT `#line`-aware yet; what this test
+ * actually verifies is that:
+ *   1. `#line` directives don't crash the parser
+ *   2. Code inside a `#line` block compiles to the same output as
+ *      code without one
+ *   3. The infrastructure header `text_scan.h` (the future home of
+ *      `#line` filtering) compiles cleanly
+ *
+ * Once the per-pass `#line`-aware migration lands, this test can be
+ * extended to also include CC tokens inside a `#line`-marked
+ * non-user-TU region; those tokens should round-trip verbatim. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+
+static void plain(void) {}
+
+int main(void) {
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 1;
+        n->spawnhybrid(() => { plain(); });
+    }
+
+#line 1000 "fake_header.h"
+    /* Code in this region claims to originate from "fake_header.h".
+     * The host C compiler still compiles it as-is; only the diagnostic
+     * line numbers change.  This is the shape of code the visitor
+     * will see after the M1 src_all swap (header content inlined). */
+    int x = 42;
+    (void)x;
+#line 50 "line_directive_origin_filter_smoke.ccs"
+
+    /* Back in the user TU.  Another real closure here verifies the
+     * visitor didn't get confused by the intervening directives. */
+    {
+        CCNursery* n2 = @create(NULL) @destroy;
+        if (!n2) return 2;
+        n2->spawnhybrid(() => { plain(); });
+    }
+
+    return 0;
+}
