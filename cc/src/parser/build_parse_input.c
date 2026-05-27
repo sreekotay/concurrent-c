@@ -1,6 +1,7 @@
 #include "build_parse_input.h"
 
 #include "../diag/diag.h"
+#include "../preprocess/cc_closure_markers.h"
 #include "../preprocess/cc_l2_rewriter.h"
 #include "../preprocess/cpp_expand.h"
 #include "../preprocess/type_registry.h"
@@ -193,6 +194,34 @@ int cc_build_parse_input(const char* file_buf,
             if (getenv("CC_DEBUG_L2_REWRITE")) {
                 fprintf(stderr, "[cc:l2-rewrite] %s: %zu -> %zu bytes\n",
                         input_path ? input_path : "<input>", pp_len, l2_len);
+            }
+        }
+    }
+
+    /* Closure-ID marker injection (2026-05-27, foundation pass):
+     * insert /\*CC_CLO:N*\/ block comments immediately before
+     * every closure literal in source order.  Markers are
+     * inert (block comments stripped by TCC), but provide a
+     * stable in-text anchor that downstream closure-walking
+     * code can use to recover from AST `(line, col)` drift
+     * across pipeline stages without resorting to the brittle
+     * "find next `=>` skipping inert regions" heuristic.  See
+     * cc/src/preprocess/cc_closure_markers.h for the design
+     * and the planned consumer migration.  This commit only
+     * injects; consumers (pass_closure_literal_ast.c) still
+     * use the heuristic stack — the markers ride along as
+     * harmless comments until a follow-up commit switches the
+     * recovery path. */
+    {
+        size_t pp_len = strlen(pp);
+        size_t cm_len = 0;
+        char* cm = cc_inject_closure_markers(pp, pp_len, &cm_len);
+        if (cm) {
+            free(pp);
+            pp = cm;
+            if (getenv("CC_DEBUG_CLOSURE_MARKERS")) {
+                fprintf(stderr, "[cc:clo-markers] %s: %zu -> %zu bytes\n",
+                        input_path ? input_path : "<input>", pp_len, cm_len);
             }
         }
     }
