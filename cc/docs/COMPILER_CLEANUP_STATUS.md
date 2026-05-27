@@ -42,8 +42,9 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 |-------|--------|-------------|
 | **M7.A** (opt-in, no regressions) | **Shipped** | `cc_cpp_expand()` runs TCC's CPP after `cc_preprocess_for_initial_parse` so the prepended container/result-type `#include` lines resolve. GCC-style `# N "file" flags` markers normalized to bare C99 `#line` to prevent TCC's parser from re-triggering system-header inclusion. Opt-in via `CC_PRE_EXPAND=1`. **429/429 smoke pass; examples/stress baselines unchanged (same 2 pre-existing failures: `recipe_tcp_echo.ccs`, `syscall_kidnap.ccs`).** |
 | **M7.B** (`#define`-aware scanner) | **Shipped** | `CCScannerState` now tracks `in_pp` and treats any `#`-led line (with backslash-newline continuations) as non-code, so all 13 phase-1 passes that use `cc_scanner_skip_non_code` (`cc__rewrite_chan_handle_types`, `cc_rewrite_slice_types`, `cc_rewrite_generic_containers`, etc.) no longer rewrite tokens inside `#define`/`#include`/`#if` bodies. The visitor-side `cc__rewrite_chan_handle_types_text` in `pass_channel_syntax.c` (which has its own ad-hoc scanner) was also taught the same `in_pp`/`pp_continued`/`at_line_start` plumbing — covered by `tests/m7b_define_chan_body_unused_smoke.ccs` which previously failed with "too many basic types" when an unused `#define LOOKS_LIKE_CHAN(T) T[~4 >]` was present. **436/436 smoke pass; CC_PRE_EXPAND=1 still parity with baseline.** The CHAN macro definition now survives intact through phase-1 (verified via debug dump); CPP correctly expands `CHAN(int)` to `int[~4 >]`. |
-| **M7.C** (post-expand re-lower + reparse plumbing) | **Partially shipped** | **(a) Registry-preserving re-lower** (`cc_relower_cc_type_syntax_preserving_registry`) added in `preprocess.{c,h}` — wraps the same four header-safe lowerings as `cc_rewrite_header_type_syntax_shared` but deliberately does NOT call `cc_type_registry_clear`, so it is safe to run after the main preprocess has populated the registry. Wired into `cc_build_parse_input` right after `cc_cpp_expand`: the initial parse now compiles macro-generated CC type syntax (e.g. `int[~4 >]` from `#define CHAN(T) T[~4 >]`) into `CCChanTx_T` without disturbing existing Result/Vec/Map registrations. **(b) Reparse pre-expand** wired into `cc__reparse_source_to_ast` just before `cc_tcc_bridge_parse_string_to_ast`, gated behind a separate `CC_PRE_EXPAND_REPARSE=1` env (see below). 429/429 smoke pass with `CC_PRE_EXPAND=1` (M7.A behavior preserved). Full macro CHAN end-to-end still needs the visitor refactor (consuming `cc_build_parse_input`'s buffer instead of re-reading from disk) so that the channel-pair scanner and other AST/text span passes see the expanded form; tracked under M1 visitor work. |
+| **M7.C** (post-expand re-lower + reparse plumbing) | **Partially shipped** | **(a) Registry-preserving re-lower** (`cc_relower_cc_type_syntax_preserving_registry`) added in `preprocess.{c,h}` — wraps the same four header-safe lowerings as `cc_rewrite_header_type_syntax_shared` but deliberately does NOT call `cc_type_registry_clear`, so it is safe to run after the main preprocess has populated the registry. Wired into `cc_build_parse_input` right after `cc_cpp_expand`: the initial parse now compiles macro-generated CC type syntax (e.g. `int[~4 >]` from `#define CHAN(T) T[~4 >]`) into `CCChanTx_T` without disturbing existing Result/Vec/Map registrations. **(b) Reparse pre-expand** wired into `cc__reparse_source_to_ast` just before `cc_tcc_bridge_parse_string_to_ast`, gated behind a separate `CC_PRE_EXPAND_REPARSE=1` env (see below). 429/429 smoke pass with `CC_PRE_EXPAND=1` (M7.A behavior preserved). Full macro CHAN end-to-end still needs the reparse path to also run pre-expand without regressions; tracked under M7.C2 caveat below. |
 | **M7.C2** caveat | Opt-in only | `CC_PRE_EXPAND_REPARSE=1` runs CPP over the FINAL reparse buffer (after `cc_preprocess_for_reparse` + `cc__prepend_reparse_prelude` + parser-helper rewrites — earlier placement causes `__mbstate_t` double-decl). Validated end-to-end pipeline but regresses 4 smoke tests (`async_chan_await_works_smoke`, `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`, `ufcs_nested_std_io_smoke`) because CPP-expanded reparse output changes AST shapes in ways that confuse the async-AST and a few UFCS passes. Kept opt-in so it can be unblocked one pass at a time without disturbing the default. |
+| **M7.C3** (M1-lite visitor plumbing + heap bug fix) | **Shipped** | **(a) AST root carries the pre-expand text.** `CCASTRoot` gained two owned fields: `parse_buffer` (post-CPP-expand + post-relower, the exact text TCC parsed) and `parse_buffer_pre_relower` (post-CPP but still with `[~ ... >]` chan brackets intact). `cc_build_parse_input` now copies the pre-relower buffer before running the in-place re-lower; `parse.c` transfers ownership of both to the AST root, and `cc_tcc_bridge_free_ast` frees them. **(b) Visitor ctx exposes the buffer.** `CCVisitorCtx` gained `pre_expanded_buf`/`pre_expanded_len` (NULL when pre-expand off). `walk.c` populates them from the root, preferring the pre-relower copy so bracket-based scanners get a view that still has `[~ ... >]` even when the AST sees `CCChanTx_int`. **(c) Channel-pair scanner fallback.** `cc__find_chan_decl_before` is now parameterized by an `alt_buf`/`alt_len` fallback. When the raw user source doesn't contain a `[~ ... >] name;` decl (e.g. the user wrote `CHAN(int) tx;`), the scanner searches the pre-expand buffer too; on hit, the caller uses the matching buffer for `cc__parse_chan_bracket_spec`. **(d) `cc_cpp_expand` heap-safety fix.** On macOS, `open_memstream(3)` returns a buffer whose reserved capacity extends past its logical end — a later `malloc()` can land inside that capacity and silently scribble over the trailing NUL when the caller writes its new allocation. `cc__rewrite_chan_handle_types` then scanned past the original end into the caller's chunk and produced a buffer ~2× the expected size. `cc_cpp_expand` now re-packs its output into a fresh tight allocation before returning, which permanently retires that footgun for all callers. **436/436 smoke pass, both default and `CC_PRE_EXPAND=1`.** Full end-to-end macro CHAN compile still blocked on `CC_PRE_EXPAND_REPARSE` regressions (M7.C2). |
 
 ---
 
@@ -56,16 +57,28 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Recommended next work
 
-1. **M1 visitor refactor → finish macro CC-syntax**: M7.C parts (a)/(b)
-   landed, but the visitor still re-reads the raw user source for
-   span-based passes (channel-pair scanner, etc.).  Threading
-   `cc_build_parse_input`'s pre-expanded buffer all the way through
-   `visit_codegen.c` is what's needed to make
-   `tests/macro/macro_chan_capacity_macro_smoke.ccs` compile end-to-end
-   under `CC_PRE_EXPAND=1`.  Should also fix the source-map drift
-   surfaced by `tests/m0_5_diag_origin_line_fail.ccs` under
-   `CC_PRE_EXPAND=1` (currently the test is pinned to default via an
-   `.env` sidecar; remove the override once M1 lands).
+1. **Unblock `CC_PRE_EXPAND_REPARSE` → finish macro CC-syntax**:
+   M7.C3 wired the pre-expand text from `cc_build_parse_input` all the
+   way to the visitor (via `CCASTRoot.parse_buffer*` →
+   `CCVisitorCtx.pre_expanded_buf`) and taught the channel-pair scanner
+   to fall back to it for macro-generated chan handle decls.  The
+   remaining blocker for `tests/macro/macro_chan_capacity_macro_smoke.ccs`
+   is the reparse path: `cc__reparse_source_to_ast` re-runs phase-1+
+   phase-3 over the raw user source, so macros like `CHAN(int) tx;` are
+   still opaque to chan-handle lowering, and `cc__rewrite_chan_handle_types`
+   never sees the `[~4 >]` form on the reparse side. The fix is to flip
+   `CC_PRE_EXPAND_REPARSE=1` to default after addressing the four
+   regressions called out in the M7.C2 caveat (`async_chan_await_works_smoke`,
+   `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`,
+   `ufcs_nested_std_io_smoke`) — they fail because the CPP-expanded
+   reparse output changes AST shapes that the async-AST and UFCS passes
+   walk by node-index. Likely fix: teach those passes to consult the
+   same `pre_expanded_buf` plumbing M7.C3 added, or fall back to
+   the AST root's `parse_buffer` for span lookups.
+   Should also fix the source-map drift surfaced by
+   `tests/m0_5_diag_origin_line_fail.ccs` under `CC_PRE_EXPAND=1`
+   (currently the test is pinned to default via an `.env` sidecar;
+   remove the override once the reparse path is consistent).
    After that, flip `CC_PRE_EXPAND=1` to default and begin retiring
    redundant `_cch → _h` rewrites (CPP handles them).
 
@@ -102,6 +115,7 @@ Then in priority order:
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
 | `CC_BATCH_PHASE3=1` | Experimental batched Phase 3 collectors |
 | `CC_PRE_EXPAND=1` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse. Zero-regression opt-in |
+| `CC_PRE_EXPAND_REPARSE=1` | M7.C2: run CPP over the FINAL reparse buffer (after `cc_preprocess_for_reparse` + reparse prelude + parser-helper rewrites). Opt-in; see M7.C2 caveat above for the four regressing smoke tests |
 | `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |
 | `CC_DEBUG_PRE_EXPAND_DUMP=/path` | Dump the post-expand buffer to a file (M7.A debugging) |
 

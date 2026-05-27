@@ -169,6 +169,16 @@ void cc_tcc_bridge_free_ast(CCASTRoot* root) {
     if (root->tcc_root) {
         cc_tcc_free_ast((struct CCASTStubRoot*)root->tcc_root);
     }
+    if (root->parse_buffer) {
+        free(root->parse_buffer);
+        root->parse_buffer = NULL;
+        root->parse_buffer_len = 0;
+    }
+    if (root->parse_buffer_pre_relower) {
+        free(root->parse_buffer_pre_relower);
+        root->parse_buffer_pre_relower = NULL;
+        root->parse_buffer_pre_relower_len = 0;
+    }
     free(root);
 }
 #else

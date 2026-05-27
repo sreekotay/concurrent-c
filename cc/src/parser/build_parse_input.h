@@ -10,6 +10,12 @@ typedef struct CCBuildParseInput {
     size_t len;
     CCSourceMap* source_map;
     int primary_file_id;
+    /* M7.C3: post-CPP-expand but PRE-relower buffer (still has
+     * `int[~4 >]` etc.).  Used by the channel-pair scanner to find
+     * macro-generated chan handle decls. Owned; NULL when pre-expand
+     * is off. */
+    char* buffer_pre_relower;
+    size_t buffer_pre_relower_len;
 } CCBuildParseInput;
 
 /* Canonical prep shared by parse.c and visit_codegen.c (M1). Caller frees via

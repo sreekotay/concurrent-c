@@ -429,6 +429,29 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     char* parse_input = cc__neutralize_comments_preserve_layout_parse(pp_buf, strlen(pp_buf));
     CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(parse_input ? parse_input : pp_buf, rel_path, input_path, symbols);
     free(parse_input);
+    /* M7.C3 / M1-lite: when pre-expand is on, hand the post-pre-expand
+     * buffer (with macros resolved and CC type syntax re-lowered) to the
+     * visitor via root->parse_buffer.  Visitor span passes that scan the
+     * raw user source can fall back to this buffer when their pattern
+     * doesn't match in src_all (e.g. `cc__find_chan_decl_before` for
+     * macro-generated chan handles). The buffer ownership is transferred
+     * to root; `cc_tcc_bridge_free_ast` frees it. */
+    {
+        const char* _ppe = getenv("CC_PRE_EXPAND");
+        int _ppe_on = (_ppe && _ppe[0] && _ppe[0] != '0');
+        if (root && _ppe_on && pp_buf) {
+            root->parse_buffer = pp_buf;       /* take ownership */
+            root->parse_buffer_len = prep.len;
+            prep.buffer = NULL;                /* don't double-free */
+            prep.len = 0;
+            if (prep.buffer_pre_relower) {
+                root->parse_buffer_pre_relower = prep.buffer_pre_relower;
+                root->parse_buffer_pre_relower_len = prep.buffer_pre_relower_len;
+                prep.buffer_pre_relower = NULL;
+                prep.buffer_pre_relower_len = 0;
+            }
+        }
+    }
     cc_build_parse_input_free(&prep);
     if (root) {
         root->original_path = input_path;

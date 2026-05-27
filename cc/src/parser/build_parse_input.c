@@ -97,8 +97,27 @@ int cc_build_parse_input(const char* file_buf,
              * appeared via macro expansion (e.g. `int[~4 >]` from
              * `#define CHAN(T) T[~4 >]` invoked as `CHAN(int)`). Uses a
              * registry-preserving variant so existing Result/Vec/Map type
-             * registrations from cc_preprocess_for_initial_parse survive. */
-            char* relowered = cc_relower_cc_type_syntax_preserving_registry(pp, strlen(pp), input_path);
+             * registrations from cc_preprocess_for_initial_parse survive.
+             *
+             * Stash the pre-relower buffer (still has `[~ ... >]` brackets)
+             * for downstream visitor passes that need to introspect chan
+             * handle bracket specs of macro-generated decls (M7.C3). */
+            /* Stash a copy of the post-CPP-expand buffer BEFORE the relower
+             * step so the visitor's channel-pair scanner can fall back to a
+             * view that still has `[~ ... >]` chan brackets for macro-
+             * generated decls (M7.C3). `cc_cpp_expand` now tightly re-packs
+             * its output, so this malloc is guaranteed not to overlap
+             * pp's allocation. */
+            {
+                char* pre_relower_copy = (char*)malloc(exp_len + 1);
+                if (pre_relower_copy) {
+                    memcpy(pre_relower_copy, pp, exp_len);
+                    pre_relower_copy[exp_len] = '\0';
+                    out->buffer_pre_relower = pre_relower_copy;
+                    out->buffer_pre_relower_len = exp_len;
+                }
+            }
+            char* relowered = cc_relower_cc_type_syntax_preserving_registry(pp, exp_len, input_path);
             if (relowered) {
                 free(pp);
                 pp = relowered;
@@ -128,6 +147,9 @@ void cc_build_parse_input_free(CCBuildParseInput* in) {
     free(in->buffer);
     in->buffer = NULL;
     in->len = 0;
+    free(in->buffer_pre_relower);
+    in->buffer_pre_relower = NULL;
+    in->buffer_pre_relower_len = 0;
     cc_source_map_free(in->source_map);
     in->source_map = NULL;
 }

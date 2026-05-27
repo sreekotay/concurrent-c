@@ -658,16 +658,17 @@ static int cc__resolve_chan_typedef_brackets(const char* src,
     return 0;
 }
 
-/* Find channel declaration before a given offset.
- * Searches backwards for `name` with a preceding `[~ ... ]` bracket
- * spec, either inline at the decl or via a typedef alias. */
-static int cc__find_chan_decl_before(const char* src,
-                                     size_t len,
-                                     size_t search_before_off,
-                                     const char* name,
-                                     size_t* out_lbrack,
-                                     size_t* out_rbrack,
-                                     size_t* out_ty_start) {
+/* Inner search: same as cc__find_chan_decl_before but parameterized over
+ * the buffer to search.  Separated so we can run it against `src` first
+ * and then against the post-pre-expand fallback buffer for macro-
+ * generated chan handle decls (M7.C3). */
+static int cc__find_chan_decl_before_in_buf(const char* src,
+                                            size_t len,
+                                            size_t search_before_off,
+                                            const char* name,
+                                            size_t* out_lbrack,
+                                            size_t* out_rbrack,
+                                            size_t* out_ty_start) {
     if (!src || !name || !*name || !out_lbrack || !out_rbrack || !out_ty_start) return 0;
     size_t nm_len = strlen(name);
     if (search_before_off > len) search_before_off = len;
@@ -728,6 +729,44 @@ static int cc__find_chan_decl_before(const char* src,
         *out_rbrack = td_rbr;
         *out_ty_start = td_ts;
         return 1;
+    }
+    return 0;
+}
+
+/* Find channel declaration before a given offset, falling back to the
+ * post-pre-expand buffer (M7.C3) when the raw user source doesn't
+ * contain the pattern.  The fallback covers macro-generated chan handle
+ * decls where the user wrote `CHAN(int) tx;` but the parser-visible
+ * (post-CPP, post-relower) form is `int[~4 >] tx;`.
+ *
+ * On success, `*out_in_alt` is set to 1 when the brackets live in
+ * `alt_buf` rather than `src`; the caller must use the matching buffer
+ * when parsing the bracket spec.  When `alt_buf` is NULL (pre-expand
+ * off), behaves exactly like the inner search on `src`. */
+static int cc__find_chan_decl_before(const char* src,
+                                     size_t len,
+                                     const char* alt_buf,
+                                     size_t alt_len,
+                                     size_t search_before_off,
+                                     const char* name,
+                                     size_t* out_lbrack,
+                                     size_t* out_rbrack,
+                                     size_t* out_ty_start,
+                                     int* out_in_alt) {
+    if (out_in_alt) *out_in_alt = 0;
+    if (cc__find_chan_decl_before_in_buf(src, len, search_before_off, name,
+                                         out_lbrack, out_rbrack, out_ty_start)) {
+        return 1;
+    }
+    if (alt_buf && alt_len > 0) {
+        /* The post-pre-expand buffer has different offsets than `src`,
+         * so search the whole buffer (search_before_off is meaningful
+         * only for the original-source offset space). */
+        if (cc__find_chan_decl_before_in_buf(alt_buf, alt_len, alt_len, name,
+                                             out_lbrack, out_rbrack, out_ty_start)) {
+            if (out_in_alt) *out_in_alt = 1;
+            return 1;
+        }
     }
     return 0;
 }
@@ -1009,8 +1048,15 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
 
                 size_t tx_lbr=0, tx_rbr=0, tx_ts=0;
                 size_t rx_lbr=0, rx_rbr=0, rx_ts=0;
-                if (!cc__find_chan_decl_before(src, len, call_start, tx_name, &tx_lbr, &tx_rbr, &tx_ts) ||
-                    !cc__find_chan_decl_before(src, len, call_start, rx_name, &rx_lbr, &rx_rbr, &rx_ts)) {
+                int tx_in_alt = 0, rx_in_alt = 0;
+                const char* alt_buf = (ctx && ctx->pre_expanded_buf) ? ctx->pre_expanded_buf : NULL;
+                size_t alt_len      = (ctx && ctx->pre_expanded_buf) ? ctx->pre_expanded_len : 0;
+                if (!cc__find_chan_decl_before(src, len, alt_buf, alt_len,
+                                               call_start, tx_name,
+                                               &tx_lbr, &tx_rbr, &tx_ts, &tx_in_alt) ||
+                    !cc__find_chan_decl_before(src, len, alt_buf, alt_len,
+                                               call_start, rx_name,
+                                               &rx_lbr, &rx_rbr, &rx_ts, &rx_in_alt)) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col, CC_ERR_CHANNEL, "cc_channel_pair could not find declarations for '%s' and '%s'", tx_name, rx_name);
@@ -1031,14 +1077,22 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 int dummy_allow=0;
                 const char* dummy_sz="0";
                 int tx_ordered=0, rx_ordered=0;
-                
-                cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr,
+
+                /* Use the buffer the brackets actually live in: src for the
+                 * common case, the pre-expand fallback when the decl came
+                 * from a macro expansion (M7.C3). */
+                const char* tx_buf = tx_in_alt ? alt_buf : src;
+                size_t      tx_buf_len = tx_in_alt ? alt_len : len;
+                const char* rx_buf = rx_in_alt ? alt_buf : src;
+                size_t      rx_buf_len = rx_in_alt ? alt_len : len;
+
+                cc__parse_chan_bracket_spec(ctx, tx_buf, tx_buf_len, tx_lbr, tx_rbr,
                                             &tx_is_tx, &tx_is_rx, &tx_cap,
                                             tx_cap_expr, sizeof(tx_cap_expr),
                                             &tx_bp, &tx_mode, tx_topo, sizeof(tx_topo),
                                             &tx_has_topo, &tx_unknown, &dummy_allow, &dummy_sz,
                                             &tx_ordered);
-                cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr,
+                cc__parse_chan_bracket_spec(ctx, rx_buf, rx_buf_len, rx_lbr, rx_rbr,
                                             &rx_is_tx, &rx_is_rx, &rx_cap,
                                             rx_cap_expr, sizeof(rx_cap_expr),
                                             &rx_bp, &rx_mode, rx_topo, sizeof(rx_topo),
