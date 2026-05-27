@@ -61,6 +61,13 @@
  * The shape is identical for both, so this helper exists to
  * keep the two call sites in sync.
  *
+ * Output layout is deliberately spacious — the goal is for the
+ * lowered C to read like something a human wrote: a blank line
+ * separates the struct from its registrar, and another blank
+ * line above the whole block separates it from the preceding
+ * `CC_VEC_DECL_ARENA` / `CC_MAP_DECL_ARENA` line.  A leading
+ * source-attribution comment names the originating CC syntax.
+ *
  * Returns 0 on success, -1 on snprintf truncation (which means
  * the mangled name is implausibly long — log it loudly so the
  * caller can investigate; the emission is silently dropped). */
@@ -73,6 +80,8 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
      * fires in practice, switch to a malloc'd buffer here.   */
     char line[4096];
     int written = snprintf(line, sizeof(line),
+        "\n"
+        "/* cc_type_info for %s (emitted by visit_codegen) */\n"
         "static const cc_type_info __cc_ti_%s = {\n"
         "    .name      = \"%s\",\n"
         "    .mangled   = \"%s\",\n"
@@ -90,10 +99,13 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
         "    .copy_fn   = NULL,\n"
         "    .drop_fn   = NULL,\n"
         "};\n"
+        "\n"
         "__attribute__((constructor))\n"
         "static void cc__ti_reg_%s(void) {\n"
         "    cc_type_info_register(&__cc_ti_%s);\n"
-        "}\n",
+        "}\n"
+        "\n",
+        mangled,
         mangled, mangled, mangled,
         mangled, mangled,
         mangled, mangled);
