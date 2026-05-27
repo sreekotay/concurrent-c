@@ -967,16 +967,41 @@ static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
     char qch = 0;
     int in_line_comment = 0;
     int in_block_comment = 0;
+    /* `in_pp` covers preprocessor-directive bodies (`#define ...`,
+     * `#include ...`, etc.) that the visitor's preprocess chain
+     * leaves verbatim in the working buffer.  Without this, a benign
+     * `#define UNUSED_UNWRAP(expr) expr !>` would be mis-rewritten
+     * as if `expr !>` were real source-position code, and the user
+     * would see a confusing `expected ';' terminating '!>' body`
+     * error on the #define line. */
+    int in_pp = 0;
+    int at_line_start = 1; /* track whether `#` introduces a directive */
     for (size_t i = start; i < n; i++) {
         char ch = s[i];
+        if (in_pp) {
+            if (ch == '\n') {
+                /* Line continuation: trailing `\` (optionally followed
+                 * by whitespace) extends the directive body. */
+                size_t k = i;
+                while (k > 0 && (s[k - 1] == ' ' || s[k - 1] == '\t' || s[k - 1] == '\r')) k--;
+                if (k == 0 || s[k - 1] != '\\') {
+                    in_pp = 0;
+                    at_line_start = 1;
+                }
+            }
+            continue;
+        }
         if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
+            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
             continue;
         }
         if (in_block_comment) {
             if (ch == '*' && i + 1 < n && s[i + 1] == '/') {
                 in_block_comment = 0;
                 i++;
+            } else if (ch == '\n') {
+                /* preserve at_line_start = 0; block comments don't
+                 * introduce a fresh logical line for `#` detection. */
             }
             continue;
         }
@@ -985,13 +1010,16 @@ static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
             if (ch == qch) in_str = 0;
             continue;
         }
+        if (at_line_start && ch == '#') { in_pp = 1; continue; }
         if (ch == '/' && i + 1 < n && s[i + 1] == '/') {
             in_line_comment = 1; i++; continue;
         }
         if (ch == '/' && i + 1 < n && s[i + 1] == '*') {
             in_block_comment = 1; i++; continue;
         }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
+        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; at_line_start = 0; continue; }
+        if (ch == '\n') { at_line_start = 1; continue; }
+        if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
         if (ch == '!' && i + 1 < n && s[i + 1] == '>') {
             /* Disambiguate against `!=`: `!=` has `=` after `!`, so the
              * `s[i+1] == '>'` check already excludes it.  Any leading

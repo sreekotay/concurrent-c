@@ -313,9 +313,27 @@ static int expect_contains_lines(const char* stream_name,
     return 0;
 }
 
-static int test_requires_async(const char* stem) {
+/* Compute the directory portion of a path like "tests/macro/foo.ccs" →
+ * "tests/macro".  Falls back to "tests" if there is no slash.  Output
+ * fits in `out` (size `cap`); always NUL-terminated. */
+static void test_dir_from_path(const char* path, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!path) return;
+    const char* last = strrchr(path, '/');
+    if (!last) {
+        snprintf(out, cap, "tests");
+        return;
+    }
+    size_t n = (size_t)(last - path);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, path, n);
+    out[n] = '\0';
+}
+
+static int test_requires_async(const char* test_dir, const char* stem) {
     char p[512];
-    snprintf(p, sizeof(p), "tests/%s.requires_async", stem);
+    snprintf(p, sizeof(p), "%s/%s.requires_async", test_dir, stem);
     return file_exists(p);
 }
 
@@ -350,12 +368,12 @@ static void env_sidecar_clear(EnvSidecar* e) {
     e->count = 0;
 }
 
-static void env_sidecar_apply(const char* stem, EnvSidecar* e) {
+static void env_sidecar_apply(const char* test_dir, const char* stem, EnvSidecar* e) {
     if (!e) return;
     e->count = 0;
     if (!stem || !stem[0]) return;
     char path[512];
-    snprintf(path, sizeof(path), "tests/%s.env", stem);
+    snprintf(path, sizeof(path), "%s/%s.env", test_dir, stem);
     unsigned char* buf = NULL;
     size_t len = 0;
     if (read_entire_file_alloc(path, &buf, &len) != 0 || !buf) {
@@ -437,12 +455,15 @@ static int run_one_test(const char* stem,
     snprintf(out_txt, sizeof(out_txt), "%s/%s.stdout", (out_dir && out_dir[0]) ? out_dir : "out", stem);
     snprintf(err_txt, sizeof(err_txt), "%s/%s.stderr", (out_dir && out_dir[0]) ? out_dir : "out", stem);
 
-    /* Sidecars */
+    /* Sidecars live alongside the test file (e.g. `tests/macro/foo.env`
+     * for `tests/macro/foo.ccs`).  Derived from input_path. */
+    char test_dir[512];
+    test_dir_from_path(input_path, test_dir, sizeof(test_dir));
     char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512];
-    snprintf(exp_stdout_path, sizeof(exp_stdout_path), "tests/%s.stdout", stem);
-    snprintf(exp_stderr_path, sizeof(exp_stderr_path), "tests/%s.stderr", stem);
-    snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "tests/%s.compile_err", stem);
-    snprintf(ldflags_path, sizeof(ldflags_path), "tests/%s.ldflags", stem);
+    snprintf(exp_stdout_path, sizeof(exp_stdout_path), "%s/%s.stdout", test_dir, stem);
+    snprintf(exp_stderr_path, sizeof(exp_stderr_path), "%s/%s.stderr", test_dir, stem);
+    snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "%s/%s.compile_err", test_dir, stem);
+    snprintf(ldflags_path, sizeof(ldflags_path), "%s/%s.ldflags", test_dir, stem);
 
     unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
     size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, ldflags_len = 0;
@@ -481,7 +502,7 @@ static int run_one_test(const char* stem,
     }
 
     EnvSidecar envsc = {0};
-    env_sidecar_apply(stem, &envsc);
+    env_sidecar_apply(test_dir, stem, &envsc);
 
     int build_rc = run_cmd_redirect_timeout(build_cmd, NULL, build_err_txt, verbose, build_timeout_sec);
 
@@ -631,10 +652,61 @@ int main(int argc, char** argv) {
         (void)run_cmd_redirect_timeout("./cc/bin/ccc clean", NULL, NULL, verbose, 0);
     }
 
-    DIR* d = opendir("tests");
-    if (!d) {
-        fprintf(stderr, "cc_test: failed to open tests/\n");
-        return 2;
+    /* Collect all .c / .ccs files under tests/ recursively.  Sibling
+     * config files (`tests/<stem>.env`, `.stdout`, `.compile_err`, etc.)
+     * are still keyed by bare stem in the top-level tests/ dir for
+     * back-compat; subdir tests must therefore have stems unique
+     * across the whole tree. */
+    char** all_paths = NULL;
+    int    all_n = 0;
+    int    all_cap = 0;
+    {
+        /* Iterative DFS using an explicit stack of directory paths.
+         * Keeps memory bounded and avoids C-stack growth.  Skips dirs
+         * starting with '.' (e.g. `.cc_test/`). */
+        char** dstack = NULL;
+        int    dstack_n = 0;
+        int    dstack_cap = 0;
+        #define PUSH_DIR(p) do { \
+            if (dstack_n == dstack_cap) { \
+                int nc = dstack_cap ? dstack_cap * 2 : 16; \
+                char** nd = (char**)realloc(dstack, (size_t)nc * sizeof(char*)); \
+                if (!nd) { fprintf(stderr, "cc_test: OOM\n"); return 2; } \
+                dstack = nd; dstack_cap = nc; \
+            } \
+            dstack[dstack_n++] = strdup((p)); \
+        } while (0)
+        PUSH_DIR("tests");
+        while (dstack_n > 0) {
+            char* dir = dstack[--dstack_n];
+            DIR* d = opendir(dir);
+            if (!d) { free(dir); continue; }
+            struct dirent* ent;
+            while ((ent = readdir(d)) != NULL) {
+                const char* nm = ent->d_name;
+                if (!nm || nm[0] == '.') continue;
+                char p[768];
+                snprintf(p, sizeof(p), "%s/%s", dir, nm);
+                struct stat st;
+                if (stat(p, &st) != 0) continue;
+                if (S_ISDIR(st.st_mode)) {
+                    PUSH_DIR(p);
+                    continue;
+                }
+                if (!(ends_with(nm, ".c") || ends_with(nm, ".ccs"))) continue;
+                if (all_n == all_cap) {
+                    int nc = all_cap ? all_cap * 2 : 64;
+                    char** np = (char**)realloc(all_paths, (size_t)nc * sizeof(char*));
+                    if (!np) { fprintf(stderr, "cc_test: OOM\n"); return 2; }
+                    all_paths = np; all_cap = nc;
+                }
+                all_paths[all_n++] = strdup(p);
+            }
+            closedir(d);
+            free(dir);
+        }
+        #undef PUSH_DIR
+        free(dstack);
     }
 
     int ran = 0;
@@ -644,16 +716,19 @@ int main(int argc, char** argv) {
     char** pid_names = NULL;
     int pid_cap = 0;
 
-    struct dirent* ent;
-    while ((ent = readdir(d)) != NULL) {
-        const char* name = ent->d_name;
-        if (!name || name[0] == '.') continue;
-        if (!(ends_with(name, ".c") || ends_with(name, ".ccs"))) continue;
+    for (int ai = 0; ai < all_n; ai++) {
+        const char* path = all_paths[ai];
+        /* basename for stem extraction */
+        const char* name = strrchr(path, '/');
+        name = name ? name + 1 : path;
         char stem[256];
         basename_no_ext(name, stem, sizeof(stem));
         if (!stem[0]) continue;
 
-        if (test_requires_async(stem)) {
+        char tdir[512];
+        test_dir_from_path(path, tdir, sizeof(tdir));
+
+        if (test_requires_async(tdir, stem)) {
             const char* env = getenv("CC_ENABLE_ASYNC");
             if (!(env && strcmp(env, "1") == 0)) {
                 if (verbose) fprintf(stderr, "[SKIP] %s (set CC_ENABLE_ASYNC=1)\n", stem);
@@ -661,8 +736,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        char path[512];
-        snprintf(path, sizeof(path), "tests/%s", name);
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
 
         if (list_only) {
@@ -672,7 +745,7 @@ int main(int argc, char** argv) {
 
         int compile_fail = 0;
         char ce[512];
-        snprintf(ce, sizeof(ce), "tests/%s.compile_err", stem);
+        snprintf(ce, sizeof(ce), "%s/%s.compile_err", tdir, stem);
         if (file_exists(ce)) compile_fail = 1;
         else if (ends_with(name, "_fail.ccs")) compile_fail = 1;
 
@@ -717,7 +790,8 @@ int main(int argc, char** argv) {
         pid_names[running] = strdup(stem);
         running++;
     }
-    closedir(d);
+    for (int i = 0; i < all_n; i++) free(all_paths[i]);
+    free(all_paths);
 
     while (running > 0) {
         pid_pop(pids, pid_names, &running, &failed);

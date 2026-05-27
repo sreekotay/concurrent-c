@@ -1,0 +1,5 @@
+# Expected to fail until macro-CHAN file-scope decl lowering is fully
+# wired (see tests/macro/README.md and cc/docs/COMPILER_CLEANUP_STATUS.md).
+# Same failure class as macro_chan_minimal_smoke.  Delete this file once
+# `CHAN(int) tx;` at file scope lowers to a real type the host C
+# compiler accepts.

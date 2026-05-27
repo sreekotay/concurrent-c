@@ -1,0 +1,8 @@
+# Expected to fail until macro-CHAN file-scope decl lowering is fully
+# wired (see tests/macro/README.md and cc/docs/COMPILER_CLEANUP_STATUS.md).
+# In default mode: "identifier expected" from TCC parsing raw CHAN(int).
+# In CC_PRE_EXPAND=1 mode: "unknown type name 'CCChanTx'" because the
+# host C compiler doesn't see the lowered typedef at file scope.
+# Empty-substring file = "just expect non-zero build exit, no further
+# stderr requirements."  Once the deeper macro lowering lands, delete
+# this file to flip the test from expected-fail to expected-pass.

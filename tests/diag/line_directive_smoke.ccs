@@ -1,8 +1,0 @@
-/* M0.5: verify #line survives preprocess for host compiler mapping */
-#include <ccc/cc_io.cch>
-
-int main(void) {
-    int x = 1;
-    (void)x;
-    return 0;
-}

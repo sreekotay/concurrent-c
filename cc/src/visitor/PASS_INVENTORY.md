@@ -208,11 +208,17 @@ Two pre-existing failures share a root cause area in `pass_closure_literal_ast.c
   top-level function definition, so user typedefs that appear between
   `#include`s and the first function — e.g. `HolReqTx` in
   `tests/redis_owner_reply_try_send_hol_smoke.ccs` — are still in scope).
-  **Layer 2 still open:** the captured `sock` is not unpacked from
-  `__env`; the closure body sees an undefined `sock` and TCC reports
-  `cannot convert 'int' to 'struct CCSocket'` at the lifted body.
-  Likely lives in the capture-emission code in `pass_closure_literal_ast.c`
-  itself.
+  **Layer 2 fixed (May 2026 — verified after closure scanner fix):**
+  the captured `sock` was previously reported as not unpacked from
+  `__env`.  After the closure proto-placement refactor (Layer 1) plus
+  the `=>`-scanner comment-skipping fix, `recipe_tcp_echo.ccs --test`
+  builds AND runs end-to-end: the test client connects, sends
+  `"hello from test"`, the server echoes 16 bytes back, both sides
+  close cleanly, exit 0.  The underlying capture-emission code was
+  always correct; what looked like a layer-2 bug was actually
+  downstream fallout from layer-1's malformed forward decls and from
+  the `=>`-in-comment scanner trap leaving the closure descriptor
+  inconsistent.
 - ~~`stress/syscall_kidnap.ccs` — `nursery->spawnhybrid(() => [id] { ... })`
   inside a `for` loop. The capture-variant closure literal is **not
   detected at all** (no descriptor produced); the raw `() => [id] { ... }`
