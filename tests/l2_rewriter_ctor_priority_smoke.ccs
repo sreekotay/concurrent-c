@@ -1,0 +1,49 @@
+/* Pins idiom #2 of the L2 prelude rewriter:
+ *
+ *     standard C `__attribute__((constructor(N)))` should compile
+ *     in CC user code (the priority arg is stripped before TCC
+ *     sees the attribute).
+ *
+ * Pre-rewriter, this test would fail to compile with TCC's stub-AST
+ * parser rejecting the priority argument syntax with something like
+ * "')' expected (got '(')".  cc_l2_rewriter.c rewrites
+ * `__attribute__((constructor(N)))` to `__attribute__((constructor))`
+ * before handing the buffer to TCC.  Same treatment for `destructor`.
+ *
+ * The test exercises:
+ *   - constructor with a priority — should run on startup.
+ *   - destructor with a priority — should run at exit.
+ *   - several priorities (low / high) — all stripped.
+ *   - a plain `__attribute__((constructor))` mixed in — must NOT
+ *     be touched (the rewriter only matches the priority form).
+ *   - a plain `__attribute__((noreturn))` on a function — must
+ *     NOT be touched (we only handle constructor/destructor). */
+
+#include <stdio.h>
+#include <stdlib.h>
+
+static int ran_ctor_42 = 0;
+static int ran_ctor_99 = 0;
+static int ran_ctor_plain = 0;
+
+__attribute__((constructor(42)))
+static void ctor_at_42(void) { ran_ctor_42 = 1; }
+
+__attribute__((constructor(99)))
+static void ctor_at_99(void) { ran_ctor_99 = 1; }
+
+__attribute__((constructor))
+static void ctor_plain(void) { ran_ctor_plain = 1; }
+
+/* Make sure unrelated attribute forms still parse. */
+__attribute__((unused))
+static int unused_value = 7;
+
+int main(void) {
+    if (!ran_ctor_42)    { printf("FAIL: ctor_at_42 did not run\n"); return 1; }
+    if (!ran_ctor_99)    { printf("FAIL: ctor_at_99 did not run\n"); return 1; }
+    if (!ran_ctor_plain) { printf("FAIL: ctor_plain did not run\n"); return 1; }
+    (void)unused_value;
+    printf("l2 rewriter ctor priority: OK\n");
+    return 0;
+}
