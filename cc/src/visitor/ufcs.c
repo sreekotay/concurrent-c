@@ -700,38 +700,39 @@ static CCSliceArray cc__build_ufcs_arg_slices(CCArena* arena, const char* args_s
     size_t start = 0;
     size_t n = 0;
     int depth_paren = 0, depth_brack = 0, depth_brace = 0;
-    int in_str = 0, in_chr = 0;
+    CCInertScan scan;
     CCSlice* items = NULL;
     size_t index = 0;
     if (!arena || !args_src || !args_src[0]) return argv;
     n = strlen(args_src);
-    for (size_t i = 0; i <= n; ++i) {
-        char c = (i < n) ? args_src[i] : ',';
-        char c2 = (i + 1 < n) ? args_src[i + 1] : 0;
-        if (in_str) {
-            if (c == '\\' && c2) { i++; continue; }
-            if (c == '"') in_str = 0;
-            continue;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* args_src is a mid-expression slice */
+    {
+        size_t i = 0;
+        while (i < n) {
+            if (cc_inert_scan_step(&scan, args_src, n, &i)) continue;
+            char c = args_src[i];
+            if (c == '(') { depth_paren++; i++; continue; }
+            if (c == ')') { if (depth_paren > 0) depth_paren--; i++; continue; }
+            if (c == '[') { depth_brack++; i++; continue; }
+            if (c == ']') { if (depth_brack > 0) depth_brack--; i++; continue; }
+            if (c == '{') { depth_brace++; i++; continue; }
+            if (c == '}') { if (depth_brace > 0) depth_brace--; i++; continue; }
+            if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+                size_t item_s = start;
+                size_t item_e = i;
+                cc__trim_slice_bounds(args_src, &item_s, &item_e);
+                if (item_e > item_s) count++;
+                start = i + 1;
+            }
+            i++;
         }
-        if (in_chr) {
-            if (c == '\\' && c2) { i++; continue; }
-            if (c == '\'') in_chr = 0;
-            continue;
-        }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') { depth_paren++; continue; }
-        if (c == ')') { if (depth_paren > 0) depth_paren--; continue; }
-        if (c == '[') { depth_brack++; continue; }
-        if (c == ']') { if (depth_brack > 0) depth_brack--; continue; }
-        if (c == '{') { depth_brace++; continue; }
-        if (c == '}') { if (depth_brace > 0) depth_brace--; continue; }
-        if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+        /* Synthetic trailing comma — flush the last segment. */
+        {
             size_t item_s = start;
-            size_t item_e = i;
+            size_t item_e = n;
             cc__trim_slice_bounds(args_src, &item_s, &item_e);
             if (item_e > item_s) count++;
-            start = i + 1;
         }
     }
     if (count == 0) return argv;
@@ -739,36 +740,38 @@ static CCSliceArray cc__build_ufcs_arg_slices(CCArena* arena, const char* args_s
     if (!items) return argv;
     start = 0;
     depth_paren = depth_brack = depth_brace = 0;
-    in_str = in_chr = 0;
-    for (size_t i = 0; i <= n; ++i) {
-        char c = (i < n) ? args_src[i] : ',';
-        char c2 = (i + 1 < n) ? args_src[i + 1] : 0;
-        if (in_str) {
-            if (c == '\\' && c2) { i++; continue; }
-            if (c == '"') in_str = 0;
-            continue;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    {
+        size_t i = 0;
+        while (i < n) {
+            if (cc_inert_scan_step(&scan, args_src, n, &i)) continue;
+            char c = args_src[i];
+            if (c == '(') { depth_paren++; i++; continue; }
+            if (c == ')') { if (depth_paren > 0) depth_paren--; i++; continue; }
+            if (c == '[') { depth_brack++; i++; continue; }
+            if (c == ']') { if (depth_brack > 0) depth_brack--; i++; continue; }
+            if (c == '{') { depth_brace++; i++; continue; }
+            if (c == '}') { if (depth_brace > 0) depth_brace--; i++; continue; }
+            if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+                size_t item_s = start;
+                size_t item_e = i;
+                cc__trim_slice_bounds(args_src, &item_s, &item_e);
+                if (item_e > item_s) {
+                    items[index++] = cc_slice_from_buffer((void*)(args_src + item_s), item_e - item_s);
+                }
+                start = i + 1;
+            }
+            i++;
         }
-        if (in_chr) {
-            if (c == '\\' && c2) { i++; continue; }
-            if (c == '\'') in_chr = 0;
-            continue;
-        }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') { depth_paren++; continue; }
-        if (c == ')') { if (depth_paren > 0) depth_paren--; continue; }
-        if (c == '[') { depth_brack++; continue; }
-        if (c == ']') { if (depth_brack > 0) depth_brack--; continue; }
-        if (c == '{') { depth_brace++; continue; }
-        if (c == '}') { if (depth_brace > 0) depth_brace--; continue; }
-        if (c == ',' && depth_paren == 0 && depth_brack == 0 && depth_brace == 0) {
+        /* Synthetic trailing comma — flush the last segment. */
+        {
             size_t item_s = start;
-            size_t item_e = i;
+            size_t item_e = n;
             cc__trim_slice_bounds(args_src, &item_s, &item_e);
             if (item_e > item_s) {
                 items[index++] = cc_slice_from_buffer((void*)(args_src + item_s), item_e - item_s);
             }
-            start = i + 1;
         }
     }
     argv.items = items;
@@ -1505,22 +1508,22 @@ static int cc__emit_closure_field_call(char* out,
     const char* comma = NULL;
     {
         int par = 0, brk = 0, brc = 0;
-        int in_str = 0; char q = 0;
-        for (const char* p = args; *p; p++) {
-            char ch = *p;
-            if (in_str) {
-                if (ch == '\\' && p[1]) { p++; continue; }
-                if (ch == q) in_str = 0;
-                continue;
-            }
-            if (ch == '"' || ch == '\'') { in_str = 1; q = ch; continue; }
+        size_t alen = strlen(args);
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;  /* mid-expression slice */
+        size_t i = 0;
+        while (i < alen) {
+            if (cc_inert_scan_step(&scan, args, alen, &i)) continue;
+            char ch = args[i];
             if (ch == '(') par++;
             else if (ch == ')') { if (par) par--; }
             else if (ch == '[') brk++;
             else if (ch == ']') { if (brk) brk--; }
             else if (ch == '{') brc++;
             else if (ch == '}') { if (brc) brc--; }
-            else if (ch == ',' && par == 0 && brk == 0 && brc == 0) { comma = p; break; }
+            else if (ch == ',' && par == 0 && brk == 0 && brc == 0) { comma = args + i; break; }
+            i++;
         }
     }
     if (!comma) return CC_UFCS_EMIT_UNRESOLVED;
