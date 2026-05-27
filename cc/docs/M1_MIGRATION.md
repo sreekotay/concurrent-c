@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (15 / 17 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1).  Remaining: K2, K3, L, M.
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (16 / 17 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2).  Remaining: K3, L, M.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 91 sites migrated, 11 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 98 sites migrated, 4 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,16 +63,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch K1).
+Updated 2026-05-27 (post Batch K2).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **91** (+5 from Batch K1, plus 1 retired helper) |
-| Remaining to migrate | **11** |
-| — trivial | 6 |
-| — medium | 2 |
-| — complex | 3 (or 5 counting full-file rewrites) |
+| Already on `CCInertScan` | **98** (+7 from Batch K2) |
+| Remaining to migrate | **4** |
+| — medium | 1 (K3: `cc__has_top_level_brace`) |
+| — complex | 3 (K3: `cc__closure_proto_insert_off`, `cc__parse_closure_from_src`, `cc__infer_closure_end_off` — all in pass_closure_literal_ast.c; plus L = backward scanners, M = special) |
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -570,11 +569,18 @@ K1 — precursor helper + auto-collapse — **LANDED 2026-05-27**:
 - **Body-`continue;` audit was the hard part of K1**: `cc__find_mutation_in_body` had 6 early-skip continues (`!is_ident_start`, `is_ident_char`, bounds, `strncmp`, post-ident-char, struct field access).  Each needs `{ i++; continue; }`.  Skipped the body-continue trap (Batch F1) with no test failures because the pre-migration audit caught all 6.
 - **K1 cost ≈ 5 sites of effort, K2+K3 cost not yet reduced** — the "auto-collapse" framing in the audit was optimistic.  None of the K2/K3 sites used `cc__scan_skip_string_comment`; they have their own inline state machines that still need migrating.  Net effect of K1: −36 LOC and one shared helper retired, but K2/K3 work is unchanged.
 
-K2 — trivial bulk (7 sites):
-- [ ] 4× anon in `cc__maybe_record_decl_stmt`
-- [ ] `cc__maybe_record_decl`
-- [ ] `cc__last_top_level_semi_offset`
-- [ ] `cc__src_strip_comments_and_strings` (rewrite template)
+K2 — trivial bulk (7 sites) — **LANDED 2026-05-27**:
+- [x] 4× anon in `cc__maybe_record_decl_stmt` — pointer-walks (`const char* cur_scan` over `[p, semi)`) converted to indexed walks using `stmt` as base; pointer outputs (`name_s`, `comma_pos[]`, `eq`) preserved via `stmt + i` at scan exit
+- [x] `cc__maybe_record_decl` — outer pointer-walk on `line` converted to indexed; calls `cc__maybe_record_decl_stmt` with `line + stmt_off` / `line + semi_off` (the recorder's pointer interface unchanged)
+- [x] `cc__last_top_level_semi_offset` — returns offset directly (was returning `(size_t)(last - line)` pointer subtraction)
+- [x] `cc__src_strip_comments_and_strings` — **inert-kind discrimination** pattern (Batch F1 twin): snapshot pre-step `scan.in_str`/`scan.in_chr`, blank consumed `[before, i)` bytes EXCEPT (i) newlines (preserve line numbers) and (ii) string/char delimiters on entry/exit transitions
+
+**Actual diff**: +128 / −208 (net **−80 LOC**).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **Pointer-walk → indexed walk pattern, 2nd application** (after Batch F2's `cc__emit_closure_field_call`).  When the function's outputs are pointers but the inert scan is interior, convert offset ↔ pointer at the scan boundaries: `size_t p_off = p - base;` going in, `name_s = base + s_off;` coming out.  Keeps the function's public interface stable while the inner loop is properly indexed.
+- **`cc__src_strip_comments_and_strings` behavior change for pp directives**: original didn't track `#line`/`#define`/etc. as inert, so a `#` byte leaked through as code; downstream decl scanners relied on the `if (*p == '#' || *p == '\0') return;` guard.  Migrated version blanks pp-directive bodies (CCInertScan's `in_pp` is on by default).  The guard is now mostly defensive — but a `#` at the START of a pp directive (the `#` byte itself) DOES get blanked.  This is a strict improvement: stripped decl scanners no longer encounter raw `#`s.
+- **Delimiter-preservation works cleanly with snapshot pre/post**: `c == '"' && pre_str != post_str` catches BOTH the opening `"` (pre=0, post=1) and closing `"` (pre=1, post=0).  Same for `'` and `in_chr`.  Pattern: **when an inert-kind rewrite needs to preserve specific entry/exit bytes, snapshot pre-step flags and use XOR-like comparison.**
 
 K3 — medium + complex (4 sites):
 - [ ] `cc__has_top_level_brace` (medium — "no comments" deliberate?  audit first)
