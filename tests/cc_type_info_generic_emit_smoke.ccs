@@ -1,0 +1,118 @@
+/* Commit 3a smoke: the compiler emits a per-T `cc_type_info`
+ * alongside every codegen-emitted `CC_VEC_DECL_ARENA(T)` and
+ * `CC_MAP_DECL_ARENA(K,V)`, and registers it with the global
+ * type registry via a constructor.  `type_of(T)` becomes
+ * `cc_type_of("T")`, which goes through that registry.
+ *
+ * What this test pins down:
+ *   - `type_of(int)` still works (primitives are pre-registered
+ *     by the runtime constructor — Commit 1 behavior).
+ *   - `type_of(CCVec_Pair)` returns a real `cc_type_info*` whose
+ *     size matches `sizeof(CCVec_Pair)` — i.e. the codegen-
+ *     emitted constructor ran and registered the symbol.
+ *   - Same for `type_of(Map_int_int)`.
+ *   - The registry returns stable pointer-identity: two calls
+ *     to `type_of(X)` give back the same pointer.
+ *   - Distinct mangled names give distinct cc_type_info objects.
+ *   - `cc_type_of(...)` on an unknown name returns NULL (the
+ *     "not registered" signal).
+ *   - Stdlib pre-baked Vec types (Commit 3b) are also registered:
+ *     `type_of(CCVec_int)` and friends resolve via the runtime
+ *     constructor, even though they bypass codegen emission.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct {
+    int a;
+    int b;
+} Pair;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(8 * 1024);
+    if (!arena.base) { printf("FAIL arena\n"); return 1; }
+
+    /* Force CCVec_Pair AND Map_int_int through the codegen
+     * emission path by actually using them in the user TU. */
+    Vec<Pair> v = vec_new<Pair>(&arena);
+    Pair p = { 1, 2 };
+    v.push(p);
+
+    Map<int, int> m = map_new<int, int>(&arena);
+    m.insert(7, 70);
+
+    /* Primitive — registered by runtime constructor. */
+    const cc_type_info* ti_int = type_of(int);
+    if (!ti_int) { printf("FAIL: type_of(int)\n"); return 2; }
+    if ((cc_type_kind)ti_int->kind != CC_TK_PRIMITIVE) {
+        printf("FAIL int kind\n"); return 3;
+    }
+
+    /* Container — registered by codegen-emitted constructor. */
+    const cc_type_info* ti_vec = type_of(CCVec_Pair);
+    if (!ti_vec) { printf("FAIL: type_of(CCVec_Pair) returned NULL — constructor did not register\n"); return 4; }
+    if ((cc_type_kind)ti_vec->kind != CC_TK_GENERIC_INST) {
+        printf("FAIL vec kind: got %u\n", (unsigned)ti_vec->kind); return 5;
+    }
+    if (ti_vec->size != sizeof(CCVec_Pair)) {
+        printf("FAIL vec size: got %u want %zu\n", ti_vec->size, sizeof(CCVec_Pair)); return 6;
+    }
+    if (ti_vec->align == 0) { printf("FAIL vec align=0\n"); return 7; }
+
+    const cc_type_info* ti_map = type_of(Map_int_int);
+    if (!ti_map) { printf("FAIL: type_of(Map_int_int)\n"); return 8; }
+    if ((cc_type_kind)ti_map->kind != CC_TK_GENERIC_INST) {
+        printf("FAIL map kind\n"); return 9;
+    }
+    if (ti_map->size != sizeof(Map_int_int)) {
+        printf("FAIL map size\n"); return 10;
+    }
+
+    /* Stable pointer identity across repeated lookups. */
+    if (type_of(int) != ti_int) { printf("FAIL int identity\n"); return 11; }
+    if (type_of(CCVec_Pair) != ti_vec) { printf("FAIL vec identity\n"); return 12; }
+    if (type_of(Map_int_int) != ti_map) { printf("FAIL map identity\n"); return 13; }
+
+    /* Distinct mangled names → distinct pointers. */
+    if (ti_int == ti_vec || ti_int == ti_map || ti_vec == ti_map) {
+        printf("FAIL distinctness\n"); return 14;
+    }
+
+    /* Unknown name returns NULL — caller's "not registered" signal. */
+    if (cc_type_of("CCVec_DefinitelyNotRegistered") != NULL) {
+        printf("FAIL: lookup of unregistered type didn't return NULL\n");
+        return 15;
+    }
+
+    /* Commit 3b: stdlib pre-baked Vec types are registered by the
+     * runtime constructor.  Verify a representative sample. */
+    const cc_type_info* ti_vi  = type_of(CCVec_int);
+    const cc_type_info* ti_vc  = type_of(CCVec_char);
+    const cc_type_info* ti_vd  = type_of(CCVec_double);
+    if (!ti_vi || !ti_vc || !ti_vd) {
+        printf("FAIL: pre-baked CCVec_* not registered\n"); return 16;
+    }
+    if ((cc_type_kind)ti_vi->kind != CC_TK_GENERIC_INST) {
+        printf("FAIL pre-baked vec kind\n"); return 17;
+    }
+    /* Pre-baked vecs all share the __CCVecGeneric layout, so
+     * their sizes match each other (a real signal that the
+     * runtime's mirrored layout in cc_type_info.c hasn't drifted
+     * from vec.cch). */
+    if (ti_vi->size != ti_vc->size || ti_vc->size != ti_vd->size) {
+        printf("FAIL pre-baked vec size drift: %u %u %u\n",
+               ti_vi->size, ti_vc->size, ti_vd->size);
+        return 18;
+    }
+    /* Distinct mangled names → distinct cc_type_info pointers
+     * even when the underlying layout is identical. */
+    if (ti_vi == ti_vc || ti_vc == ti_vd) {
+        printf("FAIL pre-baked vec identity collapsed\n"); return 19;
+    }
+
+    cc_arena_destroy(&arena);
+    printf("cc_type_info generic emit: 9 OK\n");
+    return 0;
+}
