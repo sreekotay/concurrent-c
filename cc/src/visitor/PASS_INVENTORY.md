@@ -76,7 +76,31 @@ these rules.
    least three of the ~9 existing sites in subtle leak-on-error
    ways.
 
-7. **Closure-identity ratchet.**  Do NOT add new callers of
+7. **User-facing surface ratchet.**  A CC pipeline papercut
+   (TCC stub-AST rejects standard C, parse-time vs codegen-time
+   phase ordering, packed storage on public structs) MUST land
+   INSIDE the compiler/runtime, NOT leak into user source or
+   smoke tests.  Adding things like `(uint32_t)` casts,
+   `__builtin_X` substitutions, magic-literal workarounds for a
+   missing helper, or `#ifdef CC_PARSER_MODE` branches to
+   user-facing headers is a code smell — the *user* should write
+   idiomatic C with CC extensions; constraints that force
+   unidiomatic spellings belong on our side of the line.
+   When you bump into one of these, the options are (in order of
+   preference): (a) hide it inside a macro/header/runtime helper
+   so user code stays clean (see `kilobytes` in `cc_arena.cch`,
+   the typed accessors `cc_ti_kind`/`cc_ti_size`/... in
+   `cc_type.cch`); (b) add an entry to milestone "L2 — pre-parse
+   rewrite pass for standard C idioms" in
+   `COMPILER_CLEANUP_STATUS.md`; (c) escalate to the TCC stub-AST
+   audit (milestone L3).  Adding the workaround to a test file
+   without one of (a–c) requires explicit justification in the
+   commit message.
+   Concrete pattern: `__attribute__((constructor(N)))` with a
+   priority argument trips TCC's stub-AST — drop the priority
+   and rely on the registry being insertion-order-agnostic.
+
+8. **Closure-identity ratchet.**  Do NOT add new callers of
    `cc__closure_start_off_best_effort` or the descriptor
    "recovery" branch in `pass_closure_literal_ast.c`.  Both are
    heuristic fallbacks for a deeper problem: closures are

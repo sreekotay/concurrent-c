@@ -31,7 +31,7 @@ typedef struct {
 } Pair;
 
 int main(void) {
-    CCArena arena = cc_arena_heap(8 * 1024);
+    CCArena arena = cc_arena_heap(kilobytes(8));
     if (!arena.base) { printf("FAIL arena\n"); return 1; }
 
     /* Force CCVec_Pair AND Map_int_int through the codegen
@@ -46,27 +46,27 @@ int main(void) {
     /* Primitive — registered by runtime constructor. */
     const cc_type_info* ti_int = type_of(int);
     if (!ti_int) { printf("FAIL: type_of(int)\n"); return 2; }
-    if ((cc_type_kind)ti_int->kind != CC_TK_PRIMITIVE) {
+    if (cc_ti_kind(ti_int) != CC_TK_PRIMITIVE) {
         printf("FAIL int kind\n"); return 3;
     }
 
     /* Container — registered by codegen-emitted constructor. */
     const cc_type_info* ti_vec = type_of(CCVec_Pair);
     if (!ti_vec) { printf("FAIL: type_of(CCVec_Pair) returned NULL — constructor did not register\n"); return 4; }
-    if ((cc_type_kind)ti_vec->kind != CC_TK_GENERIC_INST) {
-        printf("FAIL vec kind: got %u\n", (unsigned)ti_vec->kind); return 5;
+    if (cc_ti_kind(ti_vec) != CC_TK_GENERIC_INST) {
+        printf("FAIL vec kind\n"); return 5;
     }
-    if (ti_vec->size != sizeof(CCVec_Pair)) {
-        printf("FAIL vec size: got %u want %zu\n", ti_vec->size, sizeof(CCVec_Pair)); return 6;
+    if (cc_ti_size(ti_vec) != sizeof(CCVec_Pair)) {
+        printf("FAIL vec size: got %zu want %zu\n", cc_ti_size(ti_vec), sizeof(CCVec_Pair)); return 6;
     }
-    if (ti_vec->align == 0) { printf("FAIL vec align=0\n"); return 7; }
+    if (cc_ti_align(ti_vec) == 0) { printf("FAIL vec align=0\n"); return 7; }
 
     const cc_type_info* ti_map = type_of(Map_int_int);
     if (!ti_map) { printf("FAIL: type_of(Map_int_int)\n"); return 8; }
-    if ((cc_type_kind)ti_map->kind != CC_TK_GENERIC_INST) {
+    if (cc_ti_kind(ti_map) != CC_TK_GENERIC_INST) {
         printf("FAIL map kind\n"); return 9;
     }
-    if (ti_map->size != sizeof(Map_int_int)) {
+    if (cc_ti_size(ti_map) != sizeof(Map_int_int)) {
         printf("FAIL map size\n"); return 10;
     }
 
@@ -94,16 +94,16 @@ int main(void) {
     if (!ti_vi || !ti_vc || !ti_vd) {
         printf("FAIL: pre-baked CCVec_* not registered\n"); return 16;
     }
-    if ((cc_type_kind)ti_vi->kind != CC_TK_GENERIC_INST) {
+    if (cc_ti_kind(ti_vi) != CC_TK_GENERIC_INST) {
         printf("FAIL pre-baked vec kind\n"); return 17;
     }
     /* Pre-baked vecs all share the __CCVecGeneric layout, so
      * their sizes match each other (a real signal that the
      * runtime's mirrored layout in cc_type_info.c hasn't drifted
      * from vec.cch). */
-    if (ti_vi->size != ti_vc->size || ti_vc->size != ti_vd->size) {
-        printf("FAIL pre-baked vec size drift: %u %u %u\n",
-               ti_vi->size, ti_vc->size, ti_vd->size);
+    if (cc_ti_size(ti_vi) != cc_ti_size(ti_vc) || cc_ti_size(ti_vc) != cc_ti_size(ti_vd)) {
+        printf("FAIL pre-baked vec size drift: %zu %zu %zu\n",
+               cc_ti_size(ti_vi), cc_ti_size(ti_vc), cc_ti_size(ti_vd));
         return 18;
     }
     /* Distinct mangled names → distinct cc_type_info pointers

@@ -118,13 +118,16 @@ const cc_type_info* cc_type_of(const char* mangled) {
     return NULL;
 }
 
-/* Register the fixed-set primitives at startup.  Constructor
- * priority isn't strictly required (all primitives are leaf
- * types, no inter-init dependencies), but using `(101)` puts us
- * ahead of typical user constructors so `type_of(int)` already
- * resolves inside any user-registered constructor that may run
- * later. */
-__attribute__((constructor(101)))
+/* Register the fixed-set primitives at startup.
+ *
+ * No constructor priority: TCC's stub-AST parser rejects the
+ * `__attribute__((constructor(N)))` form, and the registry
+ * doesn't actually need ordering — lookups are by mangled
+ * name, so it's safe for user-type constructors to run before
+ * primitive ones (a `type_of(int)` call inside such a
+ * constructor would return NULL, but none of CC's registration
+ * constructors call `type_of` at init time, only at use time). */
+__attribute__((constructor))
 static void cc__ti_register_primitives(void) {
     cc_type_info_register(&__cc_ti_int);
     cc_type_info_register(&__cc_ti_char);
@@ -194,7 +197,7 @@ CC_TI_PREBAKED_VEC(CCVec_intptr,   "Vec<int*>");
 
 #undef CC_TI_PREBAKED_VEC
 
-__attribute__((constructor(102)))
+__attribute__((constructor))
 static void cc__ti_register_prebaked_vecs(void) {
     cc_type_info_register(&__cc_ti_CCVec_int);
     cc_type_info_register(&__cc_ti_CCVec_char);

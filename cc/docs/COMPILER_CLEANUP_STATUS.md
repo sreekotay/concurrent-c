@@ -198,7 +198,7 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    already-lowered text, etc. Audit and remove.
 
 **4a. `cc_type_info` runtime type system + erased containers.**
-*Status: in progress (Commits 1, 2, 3a, 3b landed 2026-05-27).*
+*Status: in progress (Commits 1, 2, 3a, 3b, 3c.2-lite landed 2026-05-27).*
 
 This is the strategic foundation under "generics with selectable
 link-time footprint" and "performant + fully complete comptime."
@@ -257,12 +257,29 @@ link-time footprint" and "performant + fully complete comptime."
     sizes equal to detect drift.  `type_of(CCVec_int)` now works
     out-of-the-box for unmodified user code that picks up the
     pre-baked typedef.
-  - Commit 3c (deferred — highest risk): teach the compiler that
-    `type_of(T)` is a parser-level builtin (so unregistered T
-    gives a sane diagnostic instead of NULL at runtime), and
-    extend `@comptime` so `type_of(T).fields` walks struct
-    layouts.  This unlocks the "performant + fully complete"
-    half of the strategic goal.
+  - Commit 3c.2-lite (this): user struct registration via
+    hand-rolled `CC_TYPE_INFO_BEGIN/FIELD/END` macros in
+    `cc_type.cch`.  Each registered struct lands in the runtime
+    registry with `kind=CC_TK_STRUCT`, full field metadata
+    (name, type-pointer-to-another-cc_type_info, byte offset),
+    and a `constructor` that auto-registers at startup.  Field
+    types compose: a `WithPair { Pair inner; }` struct's
+    `inner` field correctly resolves to the SAME
+    `cc_type_info*` `type_of(Pair)` returns — the type graph
+    traverses across struct boundaries via the registry.
+    Smoke: `tests/cc_type_info_struct_introspect_smoke.ccs`
+    pins kind/size/align/nfields, per-field name/type/offset
+    correctness, and the cross-struct type-graph property.
+    Same commit also added typed accessors (`cc_ti_kind`,
+    `cc_ti_flags`, `cc_ti_size`, `cc_ti_align`, `cc_ti_nfields`)
+    so user code reads the storage-narrowed fields back as
+    their semantic types without casting.
+  - Commit 3c.1 / 3c.3 (deferred — highest risk): teach the
+    compiler that `type_of(T)` is a parser-level builtin (so
+    unregistered T gives a sane diagnostic instead of NULL at
+    runtime), and extend `@comptime` so `type_of(T).fields`
+    walks struct layouts at compile time.  This unlocks the
+    "performant + fully complete" half of the strategic goal.
 
 The legacy `cc_type_register(name, hooks)` comptime API is
 untouched; the new entry-point is deliberately named
@@ -305,6 +322,45 @@ with `=>` between real closures (already partly covered by
 downstream pass that scans for closures has to switch to the
 marker.  Scope to a single PR with a kill-switch env var until
 447/447 holds for ≥3 stress runs.
+
+**4c. L2 — Pre-parse rewrite for standard C idioms TCC rejects.**
+*Status: deferred (no concrete trigger yet, but accumulating).*
+
+Catalog of host-C constructs that TCC's stub-AST currently
+rejects, forcing user code to write the non-standard spelling:
+
+  - `__attribute__((constructor(N)))` — priority arg rejected.
+    Workaround in place: drop the priority; registry doesn't
+    need ordering.  Cost of restoring priorities later: zero
+    (just re-add the arg, since the underlying mechanism still
+    works on the host C compiler).
+  - `offsetof(T, F)` from `<stddef.h>` — glibc/musl/Apple SDK
+    expand to `((size_t)&(((T*)0)->F))` which trips stub-AST.
+    Workaround in place: `__builtin_offsetof(T, F)`, hidden
+    inside the `CC_TYPE_INFO_FIELD` macro.  If a future user-
+    facing macro needs `offsetof`, prefer hiding it the same way.
+  - `&undeclared_symbol` — rejected with "lvalue expected" even
+    when the symbol is defined later in the lowered output.
+    Workaround in place: `type_of(T)` does a registry lookup by
+    name instead of `(&__cc_ti_##T)`.
+
+Shape of the eventual fix: a single text pass run on the
+pre-expand buffer (before TCC sees it) that rewrites these
+constructs to forms stub-AST accepts.  Cost: ~200 LOC of pass +
+table-driven rewrites + smoke per rewrite rule.  Trigger: when
+the catalog hits ~6 entries OR when one of them starts costing
+real user-code ergonomics (e.g. someone wants to write
+`offsetof` in their own code, not just inside our macros).
+
+**4d. L3 — TCC stub-AST C-dialect audit.**
+*Status: deferred (depends on 4c's catalog being well-populated).*
+
+The right long-term fix for the items above is to widen
+stub-AST's accepted C dialect to match GCC/clang's behavior on
+common idioms.  This is genuine TCC parser work — touching the
+attribute parser, the unary-operator parser, etc.  Don't start
+this until 4c's catalog gives a prioritized list; otherwise
+risk doing the work in the wrong order.
 
 Then in priority order (independent of M1):
 

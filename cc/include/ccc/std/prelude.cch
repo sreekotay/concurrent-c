@@ -29,8 +29,11 @@
 #include "async_io.cch"
 #include "future.cch"
 
-static inline size_t kilobytes(size_t n) { return n * 1024; }
-static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
+/* `kilobytes`/`megabytes` moved into `ccc/cc_arena.cch` so any
+ * code that allocates an arena gets them without pulling in the
+ * full std prelude.  Re-included here transitively via the
+ * arena import above, so existing `#include
+ * <ccc/std/prelude.cch>` users see no change. */
 
 #endif // CC_STD_PRELUDE_H
 

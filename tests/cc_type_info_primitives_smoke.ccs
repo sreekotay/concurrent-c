@@ -30,28 +30,29 @@ static int check(const char* label, const cc_type_info* ti,
         printf("FAIL %s: name=\"%s\" want=\"%s\"\n", label, ti->name, want_name);
         return 1;
     }
-    if (ti->size != want_size) {
-        printf("FAIL %s: size=%u want=%u\n", label, ti->size, want_size);
+    if (cc_ti_size(ti) != want_size) {
+        printf("FAIL %s: size=%zu want=%u\n", label, cc_ti_size(ti), want_size);
         return 1;
     }
-    if ((cc_type_kind)ti->kind != want_kind) {
-        printf("FAIL %s: kind=%u want=%u\n", label, (unsigned)ti->kind, (unsigned)want_kind);
+    if (cc_ti_kind(ti) != want_kind) {
+        printf("FAIL %s: kind=%d want=%d\n",
+               label, (int)cc_ti_kind(ti), (int)want_kind);
         return 1;
     }
     /* Primitives must report POD + trivial-copy + trivial-drop + erasable.
      * Containers will rely on these bits to bypass copy_fn/drop_fn dispatch. */
-    unsigned want_flags = (unsigned)(CC_TF_POD | CC_TF_TRIVIAL_COPY |
-                                     CC_TF_TRIVIAL_DROP | CC_TF_ERASABLE);
-    if ((ti->flags & want_flags) != want_flags) {
+    cc_type_flag want_flags = (cc_type_flag)(CC_TF_POD | CC_TF_TRIVIAL_COPY |
+                                             CC_TF_TRIVIAL_DROP | CC_TF_ERASABLE);
+    if ((cc_ti_flags(ti) & want_flags) != want_flags) {
         printf("FAIL %s: flags=0x%x missing required primitive bits 0x%x\n",
-               label, (unsigned)ti->flags, want_flags);
+               label, (unsigned)cc_ti_flags(ti), (unsigned)want_flags);
         return 1;
     }
     if (ti->copy_fn != NULL || ti->drop_fn != NULL) {
         printf("FAIL %s: primitives must have NULL copy/drop fns\n", label);
         return 1;
     }
-    if (ti->nfields != 0 || ti->fields != NULL) {
+    if (cc_ti_nfields(ti) != 0 || ti->fields != NULL) {
         printf("FAIL %s: primitives must have no fields\n", label);
         return 1;
     }
