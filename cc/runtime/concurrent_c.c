@@ -24,6 +24,7 @@
 #include "exec.c"
 #include "arena_state.c"
 #include "cc_rt_diag.c"
+#include "cc_type_info.c"
 #include "io_wait.c"
 #include "net.c"
 #include "socket.c"
