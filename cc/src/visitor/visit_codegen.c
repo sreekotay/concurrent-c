@@ -38,6 +38,7 @@
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "../diag/diag.h"
 #include "../diag/source_map.h"
 
@@ -1564,18 +1565,15 @@ static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t 
 }
 
 static int cc__find_matching_paren_codegen(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lpar; i < len; ++i) {
+    /* Find the `)` that matches the `(` at `lpar`, skipping inert
+     * content via the shared `CCInertScan` helper. */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    int depth = 0;
+    size_t i = lpar;
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, src, len, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
         if (c == '(') depth++;
         else if (c == ')') {
             depth--;
@@ -1584,23 +1582,21 @@ static int cc__find_matching_paren_codegen(const char* src, size_t len, size_t l
                 return 1;
             }
         }
+        i++;
     }
     return 0;
 }
 
 static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t lbrace, size_t* out_rbrace) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lbrace; i < len; ++i) {
+    /* Find the `}` that matches the `{` at `lbrace`, skipping inert
+     * content via the shared `CCInertScan` helper. */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    int depth = 0;
+    size_t i = lbrace;
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, src, len, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
         if (c == '{') depth++;
         else if (c == '}') {
             depth--;
@@ -1609,6 +1605,7 @@ static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t l
                 return 1;
             }
         }
+        i++;
     }
     return 0;
 }
