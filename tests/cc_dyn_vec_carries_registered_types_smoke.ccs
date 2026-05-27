@@ -1,0 +1,194 @@
+/* Pins the headline milestone-4a integration story end-to-end:
+ *
+ *   `cc_dyn_vec` carries any `cc_type_info`-described element,
+ *   including the two paths that didn't exist when the basic
+ *   `cc_dyn_vec` smoke was written:
+ *
+ *     (1) Codegen-emitted container records — Vec<Point2> headers
+ *         stuffed into a type-erased outer container.  Exercises
+ *         the `visit_codegen.c::cc__emit_container_cc_type_info`
+ *         path: the inner Vec<Point2> usage causes the compiler
+ *         to emit a `CCVec_Point2` `cc_type_info`, which the
+ *         outer `cc_dyn_vec` looks up by name via `type_of(CCVec_Point2)`.
+ *
+ *     (2) User CC_TYPE_INFO_BEGIN/FIELD/END-registered struct —
+ *         a plain `RegPair` declared in this TU and registered
+ *         via the macro family, then carried through `cc_dyn_vec`
+ *         using `type_of(RegPair)`.  Exercises the user-facing
+ *         macro path that landed in 3c.2-lite.
+ *
+ * Both paths share the same registry; the test is a single TU so
+ * pointer-identity also pins (lookup returns the same `cc_type_info*`
+ * a hand-rolled `&__cc_ti_X` would yield).
+ *
+ * NOTE on (1) — the contained Vec<Point2> is "moved by header":
+ * its (data*, len) pair is bitwise-copied into the cc_dyn_vec slot.
+ * The original `inner` still names the same underlying buffer (the
+ * container header is documented as erasable but NOT trivial-copy
+ * — see `cc_type.cch::cc_type_flag`).  After the push, we treat
+ * the slot-side copy as the live view and don't touch `inner`
+ * again; that matches the documented contract and avoids any
+ * arena-double-free pretense.
+ */
+
+#include <ccc/cc_dyn_vec.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Point2 {
+    int x;
+    int y;
+} Point2;
+
+typedef struct RegPair {
+    int  a;
+    long b;
+} RegPair;
+
+/* Register `RegPair` with the runtime type registry — this is
+ * the user-facing 3c.2-lite path under test in case (2). */
+CC_TYPE_INFO_BEGIN(RegPair)
+    CC_TYPE_INFO_FIELD(RegPair, a, int)
+    CC_TYPE_INFO_FIELD(RegPair, b, long)
+CC_TYPE_INFO_END(RegPair, "RegPair")
+
+static int fails = 0;
+
+static void pin(int cond, const char* msg) {
+    if (!cond) {
+        printf("FAIL: %s\n", msg);
+        fails++;
+    }
+}
+
+/* ---------- Case (1): cc_dyn_vec carrying codegen-emitted Vec<Point2> ---------- */
+
+static void test_codegen_emitted_container_element(CCArena* arena) {
+    /* Use Vec<Point2> first so the codegen pass emits cc_type_info
+     * for `CCVec_Point2` (otherwise `type_of(CCVec_Point2)` would
+     * return NULL — that's a different failure mode, covered by
+     * the generic_emit smoke). */
+    Vec<Point2> inner = vec_new<Point2>(arena);
+    Point2 a = { 11, 22 };
+    Point2 b = { 33, 44 };
+    inner.push(a);
+    inner.push(b);
+
+    const cc_type_info* ti = type_of(CCVec_Point2);
+    pin(ti != NULL, "type_of(CCVec_Point2) resolved");
+    if (!ti) return;
+    pin(cc_ti_size(ti) == sizeof(Vec<Point2>),
+        "ti size matches sizeof(Vec<Point2>)");
+
+    cc_dyn_vec outer;
+    pin(cc_dyn_vec_init(&outer, arena, ti, 2) == 0,
+        "cc_dyn_vec_init with codegen-emitted container ti");
+
+    pin(cc_dyn_vec_push(&outer, &inner) == 0,
+        "push Vec<Point2> header into cc_dyn_vec");
+    pin(cc_dyn_vec_len(&outer) == 1,
+        "cc_dyn_vec len after one push == 1");
+
+    /* Read back via at() and verify it's bit-identical to what
+     * we pushed (memcpy contract — copy_fn is NULL on the
+     * codegen-emitted ti). */
+    Vec<Point2>* slot = (Vec<Point2>*)cc_dyn_vec_at(&outer, 0);
+    pin(slot != NULL, "cc_dyn_vec_at(0) returned non-NULL");
+    if (slot) {
+        /* The container view in the slot must see the same two
+         * elements `inner` had — the data pointer was shared. */
+        pin(slot->len == 2, "slot->len == 2 (shared backing)");
+        Point2* sp0 = (Point2*)slot->data;
+        if (sp0) {
+            pin(sp0[0].x == 11 && sp0[0].y == 22,
+                "slot data[0] is {11,22}");
+            pin(sp0[1].x == 33 && sp0[1].y == 44,
+                "slot data[1] is {33,44}");
+        }
+    }
+
+    cc_dyn_vec_free(&outer);
+}
+
+/* ---------- Case (2): cc_dyn_vec carrying user-registered struct ---------- */
+
+static void test_user_registered_struct_element(CCArena* arena) {
+    const cc_type_info* ti = type_of(RegPair);
+    pin(ti != NULL, "type_of(RegPair) resolved");
+    if (!ti) return;
+    pin(cc_ti_kind(ti) == CC_TK_STRUCT,
+        "RegPair ti kind == STRUCT");
+    pin(cc_ti_size(ti) == sizeof(RegPair),
+        "RegPair ti size matches sizeof(RegPair)");
+    pin(cc_ti_nfields(ti) == 2,
+        "RegPair ti has 2 registered fields");
+
+    cc_dyn_vec v;
+    pin(cc_dyn_vec_init(&v, arena, ti, 4) == 0,
+        "cc_dyn_vec_init with user-registered struct ti");
+
+    for (int i = 0; i < 4; i++) {
+        RegPair p = { .a = i, .b = (long)(i * 1000L) };
+        pin(cc_dyn_vec_push(&v, &p) == 0, "push RegPair");
+    }
+    pin(cc_dyn_vec_len(&v) == 4, "cc_dyn_vec len == 4");
+
+    for (int i = 0; i < 4; i++) {
+        RegPair* p = (RegPair*)cc_dyn_vec_at(&v, (size_t)i);
+        pin(p != NULL, "cc_dyn_vec_at returned non-NULL");
+        if (p) {
+            pin(p->a == i && p->b == (long)(i * 1000L),
+                "RegPair fields round-trip through cc_dyn_vec");
+        }
+    }
+
+    /* Move-out semantics: caller takes ownership, no drop_fn. */
+    RegPair taken = { 0 };
+    pin(cc_dyn_vec_pop(&v, &taken) == 0, "cc_dyn_vec_pop with out");
+    pin(taken.a == 3 && taken.b == 3000L,
+        "popped RegPair matches last push");
+    pin(cc_dyn_vec_len(&v) == 3, "len decremented after pop");
+
+    cc_dyn_vec_free(&v);
+}
+
+/* ---------- Pointer-identity across paths ---------- */
+
+static void test_pointer_identity(void) {
+    /* Same mangled name, multiple type_of() calls — same pointer.
+     * Locks the registry de-dup contract for the both-paths case. */
+    const cc_type_info* a = type_of(RegPair);
+    const cc_type_info* b = type_of(RegPair);
+    pin(a == b, "type_of(RegPair) is identity-stable");
+
+    const cc_type_info* va = type_of(CCVec_Point2);
+    const cc_type_info* vb = type_of(CCVec_Point2);
+    pin(va == vb, "type_of(CCVec_Point2) is identity-stable");
+
+    /* Distinct names give distinct entries (no accidental aliasing). */
+    pin((const void*)a != (const void*)va,
+        "RegPair ti and CCVec_Point2 ti are distinct");
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(8));
+    if (!arena.base) {
+        printf("FAIL arena\n");
+        return 1;
+    }
+
+    test_codegen_emitted_container_element(&arena);
+    test_user_registered_struct_element(&arena);
+    test_pointer_identity();
+
+    cc_arena_destroy(&arena);
+
+    if (fails == 0) {
+        printf("cc_dyn_vec carries registered types: OK\n");
+        return 0;
+    }
+    printf("cc_dyn_vec carries registered types: %d FAIL\n", fails);
+    return 1;
+}
