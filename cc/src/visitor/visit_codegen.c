@@ -419,57 +419,43 @@ static void cc__report_reparse_failure(const char* stage,
 
 static char* cc__neutralize_comments_for_reparse(const char* src, size_t n) {
     char* out = NULL;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
-    for (size_t i = 0; i < n; i++) {
-        char c = out[i];
-        char c2 = (i + 1 < n) ? out[i + 1] : 0;
-        if (in_lc) {
-            if (c == '\n') in_lc = 0;
-            else out[i] = ' ';
-            continue;
-        }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') {
-                out[i] = ' ';
-                out[i + 1] = ' ';
-                in_bc = 0;
-                i++;
-                continue;
+    cc_inert_scan_init(&scan, NULL);
+    /* Migrated to CCInertScan.  Trick: to decide whether a consumed
+     * inert run was a comment (blank it) vs string/char/pp (leave it
+     * verbatim), we snapshot `in_line_comment`/`in_block_comment`
+     * BEFORE the step and check them AFTER.  A single step touches
+     * at most one inert-region kind (e.g. `* /` closing a block
+     * comment, then `"` opening a string, requires two separate
+     * steps), so the prev||curr disjunction is unambiguous.
+     *
+     * Behavior tweak: pp directives (`#define`/`#line`/etc.) are now
+     * skipped as inert instead of being treated as code.  Since the
+     * fall-through behavior on code bytes here is "do nothing",
+     * leaving pp bytes verbatim is the same outcome — no semantic
+     * change. */
+    for (size_t i = 0; i < n; ) {
+        size_t before = i;
+        int prev_lc = scan.in_line_comment;
+        int prev_bc = scan.in_block_comment;
+        if (cc_inert_scan_step(&scan, src, n, &i)) {
+            int touched_comment = prev_lc || prev_bc ||
+                                  scan.in_line_comment || scan.in_block_comment;
+            if (touched_comment) {
+                for (size_t k = before; k < i; k++) {
+                    char ch = src[k];
+                    if (ch != '\n' && ch != '\r' && ch != '\t') out[k] = ' ';
+                }
             }
-            if (c != '\n' && c != '\r' && c != '\t') out[i] = ' ';
+            /* String/char/pp regions stay verbatim (already memcpy'd). */
             continue;
         }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) { i++; continue; }
-            if (c == '"') in_str = 0;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) { i++; continue; }
-            if (c == '\'') in_chr = 0;
-            continue;
-        }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '/' && c2 == '/') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
-            in_lc = 1;
-            i++;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
-            in_bc = 1;
-            i++;
-            continue;
-        }
+        i++;
     }
     return out;
 }
@@ -969,22 +955,13 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
     CCTypeRegistry* reg = cc_type_registry_get_global();
     char* out = NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     int changed = 0;
+    CCInertScan scan;
     if (!src || n == 0) return NULL;
+    cc_inert_scan_init(&scan, NULL);
 
     for (size_t i = 0; i < n; ) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
 
         if ((i == 0 || !cc_is_ident_char(src[i - 1])) &&
             i + 10 < n && memcmp(src + i, "cc_string_", 10) == 0) {
@@ -2126,34 +2103,27 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
     char* out = NULL;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
-    for (size_t i = 0; i < n; ++i) {
+    cc_inert_scan_init(&scan, NULL);
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
+        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) { i++; continue; }
         {
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
             size_t body_r;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
+            if (body_l >= n || src[body_l] != '{') { i++; continue; }
+            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
             for (size_t k = i; k <= body_r; ++k) {
                 if (out[k] != '\n') out[k] = ' ';
             }
-            i = body_r;
+            i = body_r + 1;
         }
     }
     return out;
@@ -2163,21 +2133,13 @@ static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                                                      const char* type_name,
                                                      const char* src,
                                                      size_t n) {
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     size_t type_len = type_name ? strlen(type_name) : 0;
+    CCInertScan scan;
     if (!reg || !type_name || !type_len || !src) return;
-    for (size_t i = 0; i < n; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (!cc__match_keyword_codegen(src, n, i, type_name)) continue;
+    cc_inert_scan_init(&scan, NULL);
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+        if (!cc__match_keyword_codegen(src, n, i, type_name)) { i++; continue; }
         {
             size_t p = cc__skip_ws_codegen(src, n, i + type_len);
             while (p < n && src[p] == '*') p++;
@@ -2194,34 +2156,40 @@ static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                 }
                 var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
                 v = cc__skip_ws_codegen(src, n, v);
-                if (v < n && src[v] == '(') continue;
-                if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
-                    v < n && src[v] == '=') {
-                    size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
-                    if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
-                        char rhs_name[128];
-                        size_t rn = 0;
-                        size_t r = rhs;
-                        while (r < n && (isalnum((unsigned char)src[r]) || src[r] == '_')) {
-                            if (rn + 1 < sizeof(rhs_name)) rhs_name[rn] = src[r];
-                            rn++;
-                            r++;
-                        }
-                        rhs_name[rn < sizeof(rhs_name) ? rn : sizeof(rhs_name) - 1] = '\0';
-                        if (rhs_name[0]) {
-                            const char* rhs_type_name = cc_type_registry_lookup_var(reg, rhs_name);
-                            if (rhs_type_name &&
-                                ((strcmp(type_name, "CCChanTx") == 0 && strncmp(rhs_type_name, "CCChanTx_", 9) == 0) ||
-                                 (strcmp(type_name, "CCChanRx") == 0 && strncmp(rhs_type_name, "CCChanRx_", 9) == 0))) {
-                                final_type_name = rhs_type_name;
+                /* Original used `continue;` here when `src[v] == '('`
+                 * (function-call shape, not a decl).  In the new while
+                 * loop, `continue` would skip the `i += type_len`
+                 * advance and re-test the same byte forever.  Invert to
+                 * a guard so we still fall through to the advance. */
+                if (!(v < n && src[v] == '(')) {
+                    if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
+                        v < n && src[v] == '=') {
+                        size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
+                        if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
+                            char rhs_name[128];
+                            size_t rn = 0;
+                            size_t r = rhs;
+                            while (r < n && (isalnum((unsigned char)src[r]) || src[r] == '_')) {
+                                if (rn + 1 < sizeof(rhs_name)) rhs_name[rn] = src[r];
+                                rn++;
+                                r++;
+                            }
+                            rhs_name[rn < sizeof(rhs_name) ? rn : sizeof(rhs_name) - 1] = '\0';
+                            if (rhs_name[0]) {
+                                const char* rhs_type_name = cc_type_registry_lookup_var(reg, rhs_name);
+                                if (rhs_type_name &&
+                                    ((strcmp(type_name, "CCChanTx") == 0 && strncmp(rhs_type_name, "CCChanTx_", 9) == 0) ||
+                                     (strcmp(type_name, "CCChanRx") == 0 && strncmp(rhs_type_name, "CCChanRx_", 9) == 0))) {
+                                    final_type_name = rhs_type_name;
+                                }
                             }
                         }
                     }
+                    cc_type_registry_add_var(reg, var_name, final_type_name);
                 }
-                cc_type_registry_add_var(reg, var_name, final_type_name);
             }
         }
-        i += type_len ? (type_len - 1) : 0;
+        i += type_len ? type_len : 1;
     }
 }
 
@@ -2496,20 +2464,14 @@ static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
                                                            char* out_type,
                                                            size_t out_type_sz) {
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* src is a mid-buffer slice */
     while (i < limit) {
+        if (cc_inert_scan_step(&scan, src, limit, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '{') {
             size_t rpar = i;
             size_t lpar;
@@ -3244,19 +3206,12 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!reg || !src) return;
+    cc_inert_scan_init(&scan, NULL);
     while (i < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '{') {
             cc__record_function_params_before_brace_codegen(reg, src, i);
         }
