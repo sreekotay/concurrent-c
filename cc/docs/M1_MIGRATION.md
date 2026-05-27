@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (17 / 18 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a).  Remaining: K3b, L, M.
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (18 / 19 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b).  **All 102 forward-scan sites migrated.**  Remaining: L (backward scanners), M (special).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 101 sites migrated, 1 remaining (K3b: `cc__infer_closure_end_off`) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 102 / 102 forward sites complete; 3 backward sites (Batch L) + 1 special (Batch M) remain |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,16 +63,17 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch K3a).
+Updated 2026-05-27 (post Batch K3b — **all forward sites complete**).
 
 | Metric | Count |
 |--------|-------|
-| Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **101** (+3 from Batch K3a) |
-| Remaining to migrate | **1** |
-| — complex | 1 (K3b: `cc__infer_closure_end_off`) |
+| Total forward-scan sites (inline + migrated) | **102** |
+| Already on `CCInertScan` | **102** (+1 from Batch K3b) — **DONE** |
+| Remaining (forward) | **0** |
 
-Plus 3 backward scanners (Batch L) and 1 special case (Batch M) outside the 102-site forward-scan count.
+Outside the 102-site forward-scan count:
+- Batch **L**: 3 backward scanners (decision pending: extend `text_scan.h` with `CCInertScanBackward` vs migrate independently)
+- Batch **M**: 1 special case (`cc__collect_legacy_ufcs_registrations` — verify `#line`-tracking equivalence)
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
 
@@ -594,10 +595,18 @@ K3a — medium (3 sites) — **LANDED 2026-05-27**:
 - **`cc_find_matching_brace` 3rd sighting**: after Batches I and J each used it for nested scanners, K3a's `cc__parse_closure_from_src` body-brace site collapsed the same way.  This shared helper has now killed ~80 LOC of duplicated brace-balance inline state machines across 3 files.  **Standing recommendation: any inline `int br = 0; for (...) { if (ch == '{') br++; ... }` is a candidate.**
 - **`last_line_off` tracking in `cc__closure_proto_insert_off`** worked cleanly with Batch C's post-step sweep — no surprises.  The function's `best_func_off = last_line_off;` assignment runs on the code-byte branch (after `{` is detected at depth 0), so the line tracking only needs to be CURRENT, not retroactively-perfect for inert bytes.
 
-K3b — complex (1 site, deferred to next commit):
-- [ ] `cc__infer_closure_end_off` (complex — dual nested, real bug history)
+K3b — complex (1 site) — **LANDED 2026-05-27**:
+- [x] `cc__infer_closure_end_off` — all 3 phases migrated:
+  - **Phase 1 (`=>` find)** delegated to `cc__find_next_arrow_skipping_inert` (the comment-safe helper from K1).  Original walked raw bytes and could latch onto a `// ... => ...` comment between start_off and the real `=>` (the syscall_kidnap.ccs reproducer documented at the helper).
+  - **Phase 2 (outer body scan)** uses CCInertScan; original tracked strings only (no chars, no comments).  Now comment- and char-literal-aware in BOTH the block-body-detect and expression-body-end branches.
+  - **Phase 3 (block-body brace match)** delegated to `cc_find_matching_brace`.  Replaces 33 LOC of nested inline state machine with one call.  4th application of the shared-helper pattern in this file.
 
-> **Pivot decision point**: the artifact suggested optionally interleaving with **4b (stable closure-IDs)** before K3b, since 4b deletes ~150 LOC of the same surface (the heuristic `=>` recovery path that `cc__infer_closure_end_off` services).  Recommendation: **do K3b first** anyway — it's bounded enough (1 function, ~80 LOC) and finishes M1 Phase 2.  4b can then proceed independently with one less stale scanner to worry about.
+**Actual diff**: +21 / −64 (net **−43 LOC**).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **All three CCInertScan-equivalent helpers (`cc_find_matching_paren`, `cc_find_matching_brace`, `cc__find_next_arrow_skipping_inert`) used in ONE function** — Phase 1 grabs the arrow finder, Phase 3 grabs the brace matcher, Phase 2 uses CCInertScan directly.  The original 80-LOC function shrunk to 37 LOC.  This is the **maximum-leverage application** of the migration template: when a complex multi-phase function happens to align with multiple shared helpers, the LOC reduction compounds.
+- **No new patterns** — every phase used an already-documented template.  This is the cleanest possible "complex migration" outcome.
+- **Real bug history vindicated**: the phase-1 fix (using comment-safe arrow find) is a strict correctness improvement on top of the M1 refactor goal.  The original was vulnerable to the same `// =>` latching bug as the K1 sites; now it isn't.
 
 ### Batch L — backward scanners (3 sites, 1 commit; possibly + helper)
 
