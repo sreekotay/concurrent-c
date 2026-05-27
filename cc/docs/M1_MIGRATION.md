@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (18 / 19 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b).  **All 102 forward-scan sites migrated.**  Remaining: L (backward scanners), M (special).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (19 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L).  **All 102 forward-scan sites migrated; backward-scan decision recorded.**  Remaining: M (1 special).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -56,6 +56,8 @@ The mechanical migration:
 - **Inner sub-scanners** in bounded regions (paren groups, expression tails) — usually str/chr-only "no comments" scanners.  Batch B left these inline deliberately; reasonable default.  Migrate if a regression surfaces.
 - **Body-`continue;` infinite-loop trap** (Batch F1 — caught by smoke).  Per-keyword loops where the original used `for (i=0; i<n; ++i)` and the body had an `if (...) continue;` (e.g. "skip if this looks like a function call, not a decl") — in the original, `continue` triggered the for's `++i`.  After migrating to `while (i < n)` with a tail `i += type_len ;` advance, the `continue;` skips that advance and re-tests the same position forever.  Fix: invert the condition into an `if (!(...)) { ... rest of body ... }` guard so the tail advance always runs.  Audit the body BEFORE migrating any per-keyword loop.
 - **Stale scanner state after big jumps** (Batch G — `cc__pu_find_outer_errhandler` post-match `i = rbrace + 1;`).  When the migrated loop jumps `i` past a body that the scanner never saw (e.g. `i = rbrace + 1` skips a whole `@errhandler { ... }` body), the scanner's `in_block_comment` / `in_pp` / `in_user_file` flags reflect state at the PRE-jump position.  If the body contained an unterminated comment (impossible by definition, since `cc_find_matching_brace` is comment-aware) or a `#line` directive (possible!), the scanner state is stale.  Safe today because no Batch-G site reads `scan.in_user_file` after a jump.  Watch-out for future passes: if a post-jump code path reads any `scan.*` flag, `cc_inert_scan_init(&scan, ...)` to reset before continuing.
+- **Backward scanners and `CCInertScan`** (Batch L decision).  `CCInertScan` walks forward only.  When a backward scanner CALLS a forward-walking companion (e.g. `cc__*_pos_in_line_comment` walks from line start to find `//`), that companion CAN use `CCInertScan` — migrate it to match the G/I2 twin pattern.  When the OUTER loop walks backward, it stays inline.  Do NOT build a speculative `CCInertScanBackward`: the backward loops are short, correct, and have heterogeneous boundary conditions (paren/brace depth + stmt-continuation lookahead + return-keyword stripping) that don't compose into a shared abstraction.  Confirmed in Batch L after auditing all three backward sites.
+- **`scan.in_line_comment` flip-detection** (Batch L sub-pattern).  When walking forward to find the OPENER of an inert region (e.g. "where does `//` start on this line?"): stash `was_lc = scan.in_line_comment` BEFORE `cc_inert_scan_step`; if `!was_lc && scan.in_line_comment` AFTER the step, the step just consumed `//` and the saved `before` is the opener position.  Distinct from the G-style "scan the whole line and re-check" pattern — this stops at the opener instead of running to EOL.
 
 Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ignore inert content AND header-origin tokens.  One incidental fix landed already: error-message column off-by-one in `cc__rewrite_channel_pair_calls_text` (test expectations updated in the same commit).
 
@@ -63,16 +65,17 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch K3b — **all forward sites complete**).
+Updated 2026-05-27 (post Batch L — **forward done, backward decided**).
 
 | Metric | Count |
 |--------|-------|
 | Total forward-scan sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **102** (+1 from Batch K3b) — **DONE** |
+| Already on `CCInertScan` | **102** — **DONE** |
 | Remaining (forward) | **0** |
+| Backward-scan sites | **3** — companions migrated to parity (Batch L); backward loops stay (decision recorded) |
 
 Outside the 102-site forward-scan count:
-- Batch **L**: 3 backward scanners (decision pending: extend `text_scan.h` with `CCInertScanBackward` vs migrate independently)
+- Batch **L**: ✓ **DONE** — companion `cc__ud_pos_in_line_comment` migrated for G/I2 parity; sub-walk inside `cc__ud_stmt_start_backward` migrated; backward loops left intact; no `CCInertScanBackward` abstraction built.
 - Batch **M**: 1 special case (`cc__collect_legacy_ufcs_registrations` — verify `#line`-tracking equivalence)
 
 Smoke at last batch close: **461/461** full suite (default mode); 382/382 when filtered to `_smoke` subset (both modes).
@@ -608,15 +611,39 @@ K3b — complex (1 site) — **LANDED 2026-05-27**:
 - **No new patterns** — every phase used an already-documented template.  This is the cleanest possible "complex migration" outcome.
 - **Real bug history vindicated**: the phase-1 fix (using comment-safe arrow find) is a strict correctness improvement on top of the M1 refactor goal.  The original was vulnerable to the same `// =>` latching bug as the K1 sites; now it isn't.
 
-### Batch L — backward scanners (3 sites, 1 commit; possibly + helper)
+### Batch L — backward scanners (3 sites) — **LANDED 2026-05-27**
 
-> Goal: decide on the backward-scan helper investment, then sweep all three.
+> Outcome: decision made AGAINST a speculative `CCInertScanBackward` abstraction; companion helpers brought to parity with G/I twins where the loop walks forward through an inert region.
 
-Sub-decision (commit-time): extend `text_scan.h` with `CCInertScanBackward` (similar API but walks backward), OR migrate each backward site independently using existing per-pass companions.
+**Decision rationale** (recorded for posterity):
 
-- [ ] `pass_result_unwrap.c::cc__find_lhs_start_backward_raw`
-- [ ] `pass_err_syntax.c::cc__err_stmt_start_backward`
-- [ ] `pass_unwrap_destroy.c::cc__ud_stmt_start_backward`
+The three audit "sites" are not uniform — they walk backward looking for statement boundaries, but the helpers they CALL are mixed forward/backward:
+
+| Companion helper | Direction | Status |
+|---|---|---|
+| `cc__pos_in_line_comment` (result_unwrap) | forward (from line start) | already on CCInertScan (Batch G) |
+| `cc__err_pos_in_line_comment` (err_syntax) | forward | already on CCInertScan (Batch I2) |
+| `cc__ud_pos_in_line_comment` (unwrap_destroy) | forward | **migrated in L (parity)** |
+| Inline `find //` forward-walk in `cc__ud_stmt_start_backward` | forward | **migrated in L** |
+| `cc__skip_block_comment_backward` × 2 (result_unwrap + err) | backward | unchanged — no CCInertScan equivalent |
+| `cc__skip_str_backward` (result_unwrap) | backward | unchanged — no CCInertScan equivalent |
+| Outer stmt-boundary scanner loops (all 3) | backward | unchanged — CCInertScan is forward-only |
+
+A `CCInertScanBackward` abstraction would be ~80 LOC of duplicated state-machine logic in `text_scan.h`, used by 3 call sites, none of which need `in_user_file` (Phase 4's purpose) because they operate on already-extracted per-statement spans — the file-origin question is settled upstream.  **Not building it.**
+
+The migrations that DID happen:
+
+- [x] `pass_unwrap_destroy.c::cc__ud_pos_in_line_comment` — replaced inline forward state-machine with CCInertScan post-step probe, matching G's and I2's twins.  ~20 LOC → ~10 LOC.
+- [x] `pass_unwrap_destroy.c::cc__ud_stmt_start_backward` — the inner "find `//` on this line" forward-walk (~20 LOC of `in_str`/`qch` tracking) replaced with CCInertScan stepping until `scan.in_line_comment` flips from 0 → 1.  The OUTER backward loop is unchanged.
+- [x] `pass_result_unwrap.c::cc__find_lhs_start_backward_raw` — **no change warranted**.  All forward-walking companions already on CCInertScan; backward loop stays.
+- [x] `pass_err_syntax.c::cc__err_stmt_start_backward` — **no change warranted**.  Same reason.
+
+**Actual diff**: +9 / −22 (net **−13 LOC**).  Full suite 461/461 both modes.
+
+**Surprises:**
+- **The "site count" was misleading**: the audit counted 3 backward scanners but the real migration units were the forward-walking helpers they invoke.  Two of three helpers were already migrated (G + I2); only one was lagging.  Lesson: when counting "sites remaining" by outer-function arity, double-check whether the COMPANIONS are already migrated — the function may already be 90% on CCInertScan.
+- **`scan.in_line_comment` flip-detection** is a new sub-pattern: stash `was_lc = scan.in_line_comment` BEFORE `cc_inert_scan_step`; if AFTER the step `!was_lc && scan.in_line_comment`, the step just consumed `//` and `before` is the `/` position.  Useful for "find the opener of an inert region as I walk into it" — distinct from G's "find the opener by scanning the full line" pattern.  Worth promoting if a third site needs it.
+- **No `CCInertScanBackward`**: the pre-flight assumption ("backward scanners are similar enough to warrant a shared abstraction") didn't hold up under examination.  The backward loops are short (40-90 LOC), correct, and have heterogeneous boundary conditions (paren/brace depth tracking, stmt-continuation lookahead in `cc__ud_*`, return-keyword stripping in `cc__find_lhs_*`).  Sharing them would require either parameterizing the boundary logic (complex) or duplicating the scanner once per pass (no savings).  **Confirmed: ship without it.**
 
 ### Batch M — special cases (1–2 commits)
 
