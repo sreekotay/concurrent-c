@@ -1982,45 +1982,27 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
                                                  const char* input_path,
                                                  const char* src,
                                                  size_t n) {
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
-    char logical_file[1024] = {0};
+    /* CCInertScan replaces inline in_lc/in_bc/in_str/in_chr/line_start
+     * tracking AND the inline `# N "file"` parser.  `scan.current_file`
+     * holds the most-recent `#line` filename — the exact data the legacy
+     * `logical_file` buffer captured, plus support for the `#line N "..."`
+     * keyword form.  Full-path compare against `input_path` (below)
+     * preserves the legacy bucket-path semantics; we deliberately do NOT
+     * use `scan.in_user_file` here because that is a basename match and
+     * the legacy code distinguished by full path. */
+    CCInertScan scan;
     if (!pending || !src) return 0;
-    for (size_t i = 0; i < n; ++i) {
+    cc_inert_scan_init(&scan, input_path);
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (line_start && c == '#') {
-            size_t p = i + 1;
-            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
-            while (p < n && isdigit((unsigned char)src[p])) p++;
-            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
-            if (p < n && src[p] == '"') {
-                size_t q = p + 1;
-                size_t out = 0;
-                while (q < n && src[q] && src[q] != '"' && out + 1 < sizeof(logical_file)) {
-                    logical_file[out++] = src[q++];
-                }
-                logical_file[out] = '\0';
-            }
-            while (i < n && src[i] != '\n') i++;
-            line_start = 1;
-            continue;
-        }
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        line_start = (c == '\n');
-        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
+        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) { i++; continue; }
         {
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
             size_t body_r;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
+            if (body_l >= n || src[body_l] != '{') { i++; continue; }
+            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
             for (size_t j = body_l + 1; j < body_r; ++j) {
                 if (!cc__match_keyword_codegen(src, body_r, j, "cc_ufcs_register")) continue;
                 size_t lpar = cc__skip_ws_codegen(src, body_r, j + strlen("cc_ufcs_register"));
@@ -2060,8 +2042,9 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
                     r.handler_is_ident = 1;
                     r.handler_name = strdup(handler);
                     if (!r.handler_name) { free(r.pattern); return -1; }
-                    if (logical_file[0] && input_path && strcmp(logical_file, input_path) != 0) {
-                        r.bucket_path = strdup(logical_file);
+                    if (scan.current_file[0] && input_path &&
+                        strcmp(scan.current_file, input_path) != 0) {
+                        r.bucket_path = strdup(scan.current_file);
                     } else {
                         r.bucket_path = strdup(input_path ? input_path : "");
                     }
@@ -2083,7 +2066,23 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
                 }
                 j = rpar;
             }
-            i = body_r;
+            /* Jump past the matched `@comptime { ... }` body.
+             *
+             * Stale-scanner-state audit (Batch G watch-out):
+             *   - in_str/in_chr/in_line_comment/in_block_comment: all 0
+             *     pre-body, all 0 post-body — `cc__find_matching_brace_codegen`
+             *     is comment- and string-aware so the body is balanced.
+             *   - in_pp: 0 (we entered the body via `@`, not `#`).
+             *   - current_file / in_user_file: stable.  `#line` directives
+             *     do not appear inside user-written `@comptime` blocks —
+             *     the preprocessor emits them around includes, not inside
+             *     hand-written user braces.  This matches the legacy
+             *     behaviour, which never re-scanned the body for `#line`s
+             *     either.
+             *   - at_line_start: will self-correct on the next step.
+             * No re-init required.
+             */
+            i = body_r + 1;
         }
     }
     return 0;
