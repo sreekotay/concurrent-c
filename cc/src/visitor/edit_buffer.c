@@ -2,6 +2,7 @@
 
 #include "edit_buffer.h"
 #include "../diag/source_map.h"
+#include "../util/text_scan.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -176,48 +177,23 @@ size_t cc_find_first_func_def_offset(const char* src, size_t len) {
     size_t i = 0;
     size_t last_line_off = 0;
     int brace_depth = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    /* Inert-region tracking (comments/strings/chars/pp-directives) is
+     * delegated to `CCInertScan`; `brace_depth` and `last_line_off` stay
+     * here because they're specific to function-def detection.  Newlines
+     * inside inert regions still need to advance `last_line_off`, so the
+     * post-step scan below sweeps consumed bytes for `\n`. */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
     while (i < len) {
-        char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) {
-            if (c == '\n') { in_lc = 0; last_line_off = i + 1; }
-            i++; continue;
-        }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; }
-            if (c == '\n') last_line_off = i + 1;
-            i++; continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < len) { i += 2; continue; }
-            if (c == '"') in_str = 0;
-            if (c == '\n') last_line_off = i + 1;
-            i++; continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < len) { i += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            if (c == '\n') last_line_off = i + 1;
-            i++; continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        if (c == '\n') { last_line_off = i + 1; i++; continue; }
-        /* Treat #-directives as a single skipped line so a `#define foo(x) {}`
-         * line isn't misread as a function definition. */
-        if (c == '#' && (i == last_line_off
-                         || (i > 0 && (src[i - 1] == '\n' || src[i - 1] == ' ' || src[i - 1] == '\t')))) {
-            size_t j = i;
-            while (j < len && src[j] != '\n') {
-                if (src[j] == '\\' && j + 1 < len && src[j + 1] == '\n') { j += 2; continue; }
-                j++;
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, src, len, &i)) {
+            for (size_t k = before; k < i; k++) {
+                if (src[k] == '\n') last_line_off = k + 1;
             }
-            i = j;
             continue;
         }
+        char c = src[i];
+        if (c == '\n') { last_line_off = i + 1; i++; continue; }
         if (c == '{') {
             if (brace_depth == 0) {
                 size_t j = i;

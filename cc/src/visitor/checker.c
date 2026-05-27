@@ -8,6 +8,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
@@ -915,56 +916,27 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                     size_t got = fread(buf, 1, (size_t)n, f);
                     buf[got] = 0;
 
-                    int in_line_comment = 0;
-                    int in_block_comment = 0;
-                    int in_str = 0;
-                    int in_chr = 0;
-
+                    CCInertScan scan;
+                    cc_inert_scan_init(&scan, ctx->input_path);
                     int saw_await = 0;
                     int saw_async = 0;
-                    for (size_t i = 0; i + 5 <= got; i++) {
+                    for (size_t i = 0; i < got; ) {
+                        if (cc_inert_scan_step(&scan, buf, got, &i)) continue;
                         char c = buf[i];
-                        char c2 = (i + 1 < got) ? buf[i + 1] : 0;
-                        if (in_line_comment) {
-                            if (c == '\n') in_line_comment = 0;
-                            continue;
-                        }
-                        if (in_block_comment) {
-                            if (c == '*' && c2 == '/') { in_block_comment = 0; i++; }
-                            continue;
-                        }
-                        if (in_str) {
-                            if (c == '\\' && i + 1 < got) { i++; continue; }
-                            if (c == '"') in_str = 0;
-                            continue;
-                        }
-                        if (in_chr) {
-                            if (c == '\\' && i + 1 < got) { i++; continue; }
-                            if (c == '\'') in_chr = 0;
-                            continue;
-                        }
-
-                        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; continue; }
-                        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; continue; }
-                        if (c == '"') { in_str = 1; continue; }
-                        if (c == '\'') { in_chr = 1; continue; }
-
                         /* Track presence of @async and await (outside comments/strings). */
                         if (c == '@' && i + 6 <= got && memcmp(buf + i + 1, "async", 5) == 0) {
                             char after = (i + 6 < got) ? buf[i + 6] : ' ';
                             if (!(isalnum((unsigned char)after) || after == '_')) saw_async = 1;
                         }
-                        if (buf[i] == 'a' &&
-                            buf[i + 1] == 'w' &&
-                            buf[i + 2] == 'a' &&
-                            buf[i + 3] == 'i' &&
-                            buf[i + 4] == 't') {
+                        if (c == 'a' && i + 5 <= got &&
+                            memcmp(buf + i, "await", 5) == 0) {
                             char before = (i > 0) ? buf[i - 1] : ' ';
                             char after = (i + 5 < got) ? buf[i + 5] : ' ';
                             int before_ok = !(isalnum((unsigned char)before) || before == '_');
                             int after_ok = !(isalnum((unsigned char)after) || after == '_');
                             if (before_ok && after_ok) saw_await = 1;
                         }
+                        i++;
                     }
                     if (saw_await && !saw_async) {
                         StubNodeView sn;

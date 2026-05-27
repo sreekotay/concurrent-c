@@ -10,6 +10,7 @@
 #include "preprocess/preprocess.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
 
@@ -105,29 +106,23 @@ static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t o
  * channel ops lower to the task-returning variants. */
 static int cc__line_has_await_keyword(const char* line) {
     if (!line) return 0;
-    int in_str = 0;
-    char str_q = 0;
-    int in_blk_cmt = 0;
-    for (const char* p = line; *p; p++) {
-        char c = *p;
-        if (in_blk_cmt) {
-            if (c == '*' && p[1] == '/') { in_blk_cmt = 0; p++; }
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && p[1]) { p++; continue; }
-            if (c == str_q) in_str = 0;
-            continue;
-        }
-        if (c == '"' || c == '\'') { in_str = 1; str_q = c; continue; }
-        if (c == '/' && p[1] == '/') return 0;
-        if (c == '/' && p[1] == '*') { in_blk_cmt = 1; p++; continue; }
-        if (c != 'a') continue;
-        if (strncmp(p, "await", 5) != 0) continue;
-        /* Boundary check: word-prefix must not be ident char. */
-        if (p != line && cc__is_ident_char_char(*(p - 1))) continue;
-        char nx = p[5];
-        if (cc__is_ident_char_char(nx)) continue;
+    size_t n = strlen(line);
+    CCInertScan s;
+    cc_inert_scan_init(&s, NULL);
+    /* `line` is a single in-buffer line slice; not the start of a file, so a
+     * leading `#` here would be code (preprocessor directives never reach this
+     * fallback path).  Disable the `#` heuristic to preserve byte-equivalent
+     * behavior with the previous hand-rolled scanner. */
+    s.at_line_start = 0;
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&s, line, n, &i)) continue;
+        if (line[i] != 'a' || i + 5 > n) { i++; continue; }
+        if (memcmp(line + i, "await", 5) != 0) { i++; continue; }
+        /* Word boundary: preceding char (if any) and following char must not
+         * be identifier chars. */
+        if (i > 0 && cc__is_ident_char_char(line[i - 1])) { i++; continue; }
+        char nx = line[i + 5];
+        if (cc__is_ident_char_char(nx)) { i++; continue; }
         return 1;
     }
     return 0;
