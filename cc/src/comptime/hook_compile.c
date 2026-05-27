@@ -649,8 +649,9 @@ static int cc__build_compile_and_load(const char* input_path,
     char cache_dylib_path[1280];
     CCComptimeDlModule* module = NULL;
     CCArgvBuilder argv = {0};
-    CCTypeRegistry* saved_reg = NULL;
-    CCTypeRegistry* temp_reg = NULL;
+    CCTypeRegistryScope reg_scope;
+    reg_scope.saved = NULL;
+    reg_scope.temp  = NULL;
     int rc = -1;
     int source_is_header = 0;
     int needs_cc_preprocess = 0;
@@ -674,9 +675,7 @@ static int cc__build_compile_and_load(const char* input_path,
     /* Isolate type-registry side-effects of the comptime preprocess step so
        they don't leak into the main-pass registry. */
     if (needs_cc_preprocess) {
-        saved_reg = cc_type_registry_get_global();
-        temp_reg = cc_type_registry_new();
-        if (temp_reg) cc_type_registry_set_global(temp_reg);
+        (void)cc_type_registry_scope_push(&reg_scope);
     }
 
     blanked_src = cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
@@ -850,10 +849,7 @@ done:
     free(blanked_src);
     free(pp_src);
     free(tu_src);
-    if (temp_reg) {
-        cc_type_registry_set_global(saved_reg);
-        cc_type_registry_free(temp_reg);
-    }
+    cc_type_registry_scope_pop(&reg_scope);
     return rc;
 }
 

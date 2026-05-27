@@ -84,6 +84,26 @@ void cc_type_registry_set_global(CCTypeRegistry* reg) {
     g_type_registry = reg;
 }
 
+int cc_type_registry_scope_push(CCTypeRegistryScope* scope) {
+    if (!scope) return 0;
+    scope->saved = NULL;
+    scope->temp  = NULL;
+    CCTypeRegistry* temp = cc_type_registry_new();
+    if (!temp) return 0;
+    scope->saved = g_type_registry;
+    scope->temp  = temp;
+    g_type_registry = temp;
+    return 1;
+}
+
+void cc_type_registry_scope_pop(CCTypeRegistryScope* scope) {
+    if (!scope || !scope->temp) return;
+    g_type_registry  = scope->saved;
+    cc_type_registry_free(scope->temp);
+    scope->saved = NULL;
+    scope->temp  = NULL;
+}
+
 CCTypeRegistry* cc_type_registry_new(void) {
     CCTypeRegistry* reg = (CCTypeRegistry*)calloc(1, sizeof(CCTypeRegistry));
     return reg;
