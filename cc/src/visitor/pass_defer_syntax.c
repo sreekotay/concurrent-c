@@ -68,13 +68,6 @@ static int cc__not_member_access_prefix(const char* s, size_t i) {
     return 1;
 }
 
-static void cc__ensure_line_start(char** out, size_t* out_len, size_t* out_cap) {
-    if (!out || !out_len || !out_cap) return;
-    if (*out_len == 0) return;
-    char last = (*out)[*out_len - 1];
-    if (last != '\n') cc__append_n(out, out_len, out_cap, "\n", 1);
-}
-
 static void cc__append_newline_padding(char** out, size_t* out_len, size_t* out_cap,
                                        const char* src, size_t n) {
     if (!out || !out_len || !out_cap || !src) return;
@@ -1060,14 +1053,64 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                     }
                     cc__append_str(&out, &outl, &outc, "return __cc_ret;\n}");
                 } else {
-                    for (int d = depth; d >= 0; d--) {
-                        int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
-                        for (int k = defer_counts[dd] - 1; k >= 0; k--) {
-                            cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
-                            cc__append_n(&out, &outl, &outc, "\n", 1);
+                    /* Hand-crafted-C indent for the plain-return defer
+                     * flush.  Pre-fix, this branch unconditionally
+                     * appended `\n` after each defer body and dropped
+                     * `return X;` at column 0 — readable as a machine
+                     * dump, not as code.
+                     *
+                     * Two cases:
+                     *
+                     *   (a) The user's `return` is on its OWN line
+                     *       (typical block style).  Output's current
+                     *       line is whitespace-only when we arrive
+                     *       here (we already emitted the user's
+                     *       leading indent bytewise).  Emit each
+                     *       defer body on its own line at the
+                     *       source-line indent of `i`, then re-emit
+                     *       the indent before `return X;`.  Result
+                     *       reads like a hand-aligned cleanup block.
+                     *
+                     *   (b) The user's `return` is INLINE with prior
+                     *       statements (`if (...) { ...; return 1; }`
+                     *       on one source line).  Output's current
+                     *       line has non-whitespace content.  Emit
+                     *       defer bodies inline, separated by a
+                     *       single space, no newlines — the
+                     *       following `return X;` then flows on the
+                     *       same line, mirroring the user's compact
+                     *       layout. */
+                    int mid_line = 0;
+                    {
+                        size_t k = outl;
+                        while (k > 0 && out[k - 1] != '\n') k--;
+                        for (size_t q = k; q < outl; q++) {
+                            if (out[q] != ' ' && out[q] != '\t' && out[q] != '\r') {
+                                mid_line = 1;
+                                break;
+                            }
                         }
                     }
-                    cc__ensure_line_start(&out, &outl, &outc);
+                    if (mid_line) {
+                        for (int d = depth; d >= 0; d--) {
+                            int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                            for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                                cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                                cc__append_str(&out, &outl, &outc, " ");
+                            }
+                        }
+                    } else {
+                        size_t indent = cc__source_line_indent_len(in_src, i);
+                        for (int d = depth; d >= 0; d--) {
+                            int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                            for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                                cc__append_missing_indent_to(&out, &outl, &outc, indent);
+                                cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                                cc__append_n(&out, &outl, &outc, "\n", 1);
+                            }
+                        }
+                        cc__append_missing_indent_to(&out, &outl, &outc, indent);
+                    }
                     cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
                 }
             }
@@ -1205,9 +1248,23 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             if (d < 0) d = 0;
             if (d >= 256) d = 255;
             if (fn_scope.active && d == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
+                /* Hand-crafted-C indent for the function-cleanup
+                 * epilogue.  Pre-fix, the `__cc_cleanup_N:` label,
+                 * each defer body, and the trailing `return`
+                 * statements all landed at column 0 — readable as
+                 * a goto-spaghetti dump rather than the structured
+                 * cleanup the user wrote.  We preserve the source's
+                 * function-body indent (typically 4 spaces) for the
+                 * defer bodies and trailing returns; the label
+                 * intentionally stays at column 0 (idiomatic for C
+                 * labels — `__cc_cleanup_N:` at column 0 is what a
+                 * human would write). */
+                size_t fn_body_indent = cc__source_line_indent_len(in_src, i);
+                if (fn_body_indent == 0) fn_body_indent = 4; /* belt + suspenders for funcs at col 0 */
                 cc_sb_append_fmt(&out, &outl, &outc, "__cc_cleanup_%d:\n", fn_scope.cleanup_label_id);
                 for (int k = defer_counts[1] - 1; k >= 0; k--) {
                     if (defers[1][k].cond == DEFER_ALWAYS) {
+                        cc__append_missing_indent_to(&out, &outl, &outc, fn_body_indent);
                         cc__append_str(&out, &outl, &outc, defers[1][k].stmt);
                         if (defers[1][k].stmt[0] != 0) {
                             size_t sl = strlen(defers[1][k].stmt);
@@ -1219,9 +1276,11 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 }
                 defer_counts[1] = 0;
                 if (!fn_scope.is_void) {
+                    cc__append_missing_indent_to(&out, &outl, &outc, fn_body_indent);
                     cc_sb_append_fmt(&out, &outl, &outc,
                                    "if (__cc_ret_set_%d) return __cc_retval_%d;\n",
                                    fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
+                    cc__append_missing_indent_to(&out, &outl, &outc, fn_body_indent);
                     cc_sb_append_fmt(&out, &outl, &outc,
                                    "return (__typeof__(__cc_retval_%d)){0};\n",
                                    fn_scope.cleanup_label_id);
