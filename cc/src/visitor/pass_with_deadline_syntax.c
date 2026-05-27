@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/edit_buffer.h"
 
 int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, size_t* out_len) {
@@ -265,69 +266,17 @@ int cc__collect_with_deadline_edits(CCEditBuffer* eb) {
 
     int edits_added = 0;
     size_t i = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
     unsigned long counter = 0;
 
+    /* Shared inert-region scanner (comments/strings/char-literals/
+     * preprocessor directives) — see PASS_INVENTORY.md invariants
+     * and `cc/src/util/text_scan.h`. */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+
     while (i < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && c2 == '/') {
-                i += 2;
-                in_block_comment = 0;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-
-        if (c == '/' && c2 == '/') {
-            i += 2;
-            in_line_comment = 1;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            i += 2;
-            in_block_comment = 1;
-            continue;
-        }
-        if (c == '"') {
-            i++;
-            in_str = 1;
-            continue;
-        }
-        if (c == '\'') {
-            i++;
-            in_chr = 1;
-            continue;
-        }
 
         /* Handle @with_deadline(ms) as alias for with_deadline(ms) */
         size_t start_off = i;

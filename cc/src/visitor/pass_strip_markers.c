@@ -1,4 +1,5 @@
 #include "pass_strip_markers.h"
+#include "util/text_scan.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -12,73 +13,29 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
     /* Remove only these markers: @async, @noblock, @blocking, @latency_sensitive.
        This is a conservative text pass so the generated C compiles; real semantics
        will be implemented by async lowering later.
-       
-       IMPORTANT: Skip markers inside strings, char literals, and comments to avoid
-       corrupting string contents like "@async is cool". */
+
+       Skip markers inside strings, char literals, comments AND preprocessor-
+       directive bodies (so `#define M @async ...` macro definitions don't
+       have their `@async` swallowed before any expansion site is seen).
+       Routed through `CCInertScan` for shared state-machine logic — see
+       `cc/src/util/text_scan.h` and the invariant in PASS_INVENTORY.md. */
     char* buf = (char*)malloc(in_len + 1);
     if (!buf) return 0;
     size_t w = 0;
-    int in_string = 0;
-    int in_char = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    
-    for (size_t i = 0; i < in_len; ) {
+
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < in_len) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, in, in_len, &i)) {
+            /* Inert region: copy through verbatim. */
+            size_t take = i - before;
+            memcpy(buf + w, in + before, take);
+            w += take;
+            continue;
+        }
         char c = in[i];
-        char c2 = (i + 1 < in_len) ? in[i + 1] : 0;
-        
-        /* Handle comment/string state transitions */
-        if (in_line_comment) {
-            buf[w++] = in[i++];
-            if (c == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            buf[w++] = in[i++];
-            if (c == '*' && c2 == '/') {
-                buf[w++] = in[i++];
-                in_block_comment = 0;
-            }
-            continue;
-        }
-        if (in_string) {
-            buf[w++] = in[i++];
-            if (c == '\\' && i < in_len) { buf[w++] = in[i++]; continue; }
-            if (c == '"') in_string = 0;
-            continue;
-        }
-        if (in_char) {
-            buf[w++] = in[i++];
-            if (c == '\\' && i < in_len) { buf[w++] = in[i++]; continue; }
-            if (c == '\'') in_char = 0;
-            continue;
-        }
-        
-        /* Enter comment/string states */
-        if (c == '/' && c2 == '/') {
-            buf[w++] = in[i++];
-            buf[w++] = in[i++];
-            in_line_comment = 1;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            buf[w++] = in[i++];
-            buf[w++] = in[i++];
-            in_block_comment = 1;
-            continue;
-        }
-        if (c == '"') {
-            buf[w++] = in[i++];
-            in_string = 1;
-            continue;
-        }
-        if (c == '\'') {
-            buf[w++] = in[i++];
-            in_char = 1;
-            continue;
-        }
-        
-        /* Now safe to check for @ markers (we're not in string/comment) */
         if (c == '@') {
             const char* kw = NULL;
             size_t kw_len = 0;
