@@ -124,6 +124,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
      fail one of these tests.
 
 2. **M1 visitor refactor** — bigger than originally framed.
+   See [M1_MIGRATION.md](./M1_MIGRATION.md) for the per-site audit,
+   per-batch plan, and running progress (updated per commit).
    A spike (May 2026) attempted the naive form — swap
    `src_all = cc__read_entire_file(ctx->input_path)` →
    `src_all = strdup(root->parse_buffer)` when `CC_PRE_EXPAND=1` —
