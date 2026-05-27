@@ -1,0 +1,36 @@
+/* inert_at_async_await_defer_tokens_smoke.ccs - regression guard for
+ * the `@async`, `@await`, `@defer` and `@unsafe` text passes.  These
+ * markers must NOT be rewritten when they live inside comments or
+ * string literals. */
+
+#include <ccc/std/prelude.cch>
+
+/* @-keyword tokens inside a block comment:
+ *   @async int f(void) { return 1; }
+ *   int v = @await f();
+ *   @defer cleanup();
+ *   @unsafe foo(); */
+
+// @-keyword tokens inside line comments:
+// @async int f(void) { return 1; }
+// int v = @await f();
+// @defer cleanup();
+
+const char* k_at_async  = "@async int f(void) { ... }";
+const char* k_at_await  = "int v = @await f();";
+const char* k_at_defer  = "@defer cleanup();";
+const char* k_at_unsafe = "@unsafe foo();";
+
+@async int compute(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    if (!k_at_async || !k_at_await || !k_at_defer || !k_at_unsafe) return 1;
+
+    int x = 0;
+    @defer x = 1;
+    int v = @await compute(41);
+    (void)x;
+    return (v == 42) ? 0 : 2;
+}

@@ -1,0 +1,33 @@
+/* inert_channel_tokens_smoke.ccs - regression guard for channel-syntax
+ * scanners.  CC's channel handle types use `T[~N >]` (tx FIFO) and
+ * `T[~N <]` (rx FIFO).  The text pass that lowers `T[~N ...]` to
+ * `CCChanTx`/`CCChanRx` walks the buffer looking for `[~` brackets;
+ * the typedef-resolution / handle-pair lookup helpers also walk
+ * backward through source.  All of those must skip C comments and
+ * string literals so the patterns below do NOT confuse them. */
+
+#include <ccc/cc_runtime.cch>
+
+/* Channel tokens inside a block comment:
+ *   int[~4 >] tx;
+ *   int[~4 <] rx;
+ *   cc_channel_pair(&tx, &rx); */
+
+// Channel tokens inside line comments:
+// int[~8 >] tx2;
+// int[~8 <] rx2;
+
+const char* k_chan_doc_tx = "int[~4 >] tx;";
+const char* k_chan_doc_rx = "int[~4 <] rx;";
+const char* k_chan_pair   = "cc_channel_pair(&tx, &rx);";
+
+int main(void) {
+    if (!k_chan_doc_tx || !k_chan_doc_rx || !k_chan_pair) return 1;
+
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    cc_chan_free(ch);
+    return 0;
+}

@@ -1,0 +1,38 @@
+/* inert_result_unwrap_tokens_smoke.ccs - regression guard for the
+ * Result-type / `!>` / `=<!` / `@err` / `@errhandler` scanners.  These
+ * tokens must NOT be rewritten when they appear inside comments or
+ * string literals. */
+
+#include <stdio.h>
+
+/* Result/err tokens inside a block comment:
+ *   int !> (CCError) f(void);
+ *   int v =<! f() @err;
+ *   @errhandler(CCError e) { ... } */
+
+// Result/err tokens inside line comments:
+// int !> (CCError) f(void);
+// int v =<! f() @err;
+// @errhandler(CCError e) { ... }
+
+const char* k_err_sig    = "int !> (CCError) f(void);";
+const char* k_err_assign = "int v =<! f() @err;";
+const char* k_err_handler = "@errhandler(CCError e) { handle(e); }";
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(42);
+}
+
+int main(void) {
+    if (!k_err_sig || !k_err_assign || !k_err_handler) return 1;
+
+    int handler_fired = 0;
+    @errhandler(CCError e) {
+        (void)e;
+        handler_fired = 999;
+    }
+
+    int v =<! always_ok() @err;
+    (void)handler_fired;
+    return (v == 42) ? 0 : 2;
+}

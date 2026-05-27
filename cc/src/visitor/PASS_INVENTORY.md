@@ -213,15 +213,25 @@ Two pre-existing failures share a root cause area in `pass_closure_literal_ast.c
   `cannot convert 'int' to 'struct CCSocket'` at the lifted body.
   Likely lives in the capture-emission code in `pass_closure_literal_ast.c`
   itself.
-- `stress/syscall_kidnap.ccs` — `nursery->spawnhybrid(() => [id] { ... })`
+- ~~`stress/syscall_kidnap.ccs` — `nursery->spawnhybrid(() => [id] { ... })`
   inside a `for` loop. The capture-variant closure literal is **not
   detected at all** (no descriptor produced); the raw `() => [id] { ... }`
-  text leaks to the host C compiler.  Distinct bug from the
-  proto-placement issue above.
+  text leaks to the host C compiler.~~  **FIXED (May 2026).**  Root cause
+  was not the capture variant itself but the closure scanner's
+  *recovery / validation* path: a `// Pattern: (cancelled && no_work) => exit`
+  line comment in `kidnapper_fiber` was being walked by the byte-level
+  `=>` scanner without comment/string skipping, latching a fake closure
+  descriptor onto the comment's `=>` and starving the real heartbeat
+  closure of its descriptor.  Fix in `pass_closure_literal_ast.c`:
+  added `cc__find_next_arrow_skipping_inert` / `_prev_` helpers that
+  route through the existing `cc__scan_skip_string_comment` machinery,
+  and rewired the four raw `=>` scan loops (best-effort start/end,
+  validation, recovery) to use them.  Regression guards live in
+  `tests/inert_*_tokens_smoke.ccs` (one per CC scanner family).
 
-Both reproduce on the main branch before M0–M5.5 (verified via `git stash`
-+ rebuild). The proto-placement layer is now fixed; the capture-emission
-and detection layers remain.
+The proto-placement layer (Layer 1) is fixed; the syscall_kidnap
+detection layer is fixed; the `recipe_tcp_echo.ccs` capture-emission
+layer (Layer 2 above) remains open.
 
 The legacy `cc__closure_proto_insert_off` walker is still present in
 `pass_closure_literal_ast.c` for backward compat with the default

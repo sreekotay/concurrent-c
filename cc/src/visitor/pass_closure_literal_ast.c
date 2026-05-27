@@ -76,6 +76,75 @@ static int cc__looks_like_macro_constant(const char* s, size_t n) {
     return has_alpha;
 }
 
+/* Forward decl: defined further down (line ~1635), declared here so the
+ * `=>`-scanning helpers below can route through it.  Skips one C
+ * comment, string literal, or char literal at `*io`; returns 1 and
+ * advances `*io` past it, or 0 if no skip was needed. */
+static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io);
+
+/* Walk forward from `from` looking for the next `=>` token at the top
+ * level of the buffer, skipping over C comments, string literals, and
+ * character literals.  Returns the offset of the `=` byte, or `(size_t)-1`
+ * if none is found before `lim` (or end-of-buffer).
+ *
+ * This is the comment-safe replacement for the bare loop
+ *   `for (i = from; i + 1 < lim; i++) if (src[i]=='=' && src[i+1]=='>') ...`
+ * which has caused real bugs: a `// ... => exit` comment between two
+ * real closures latched the recovery scanner onto the comment's `=>`,
+ * producing a fake closure descriptor at the comment's text — and the
+ * real closure's call site then went unrewritten because its descriptor
+ * was misresolved (syscall_kidnap.ccs reproducer).
+ *
+ * Callers that need to walk backwards from a point have a paired helper
+ * (`cc__find_prev_arrow_skipping_inert`) so backward arrow searches
+ * (e.g. for closures inside macro arglists) also stay comment-safe. */
+static size_t cc__find_next_arrow_skipping_inert(const char* src, size_t lim, size_t from) {
+    if (!src) return (size_t)-1;
+    size_t i = from;
+    while (i + 1 < lim) {
+        size_t before = i;
+        if (cc__scan_skip_string_comment(src, lim, &i)) {
+            if (i == before) i++; /* defensive: avoid infinite loop */
+            continue;
+        }
+        if (src[i] == '=' && src[i + 1] == '>') return i;
+        i++;
+    }
+    return (size_t)-1;
+}
+
+/* Walk backwards from `from-1` looking for the nearest preceding `=>`
+ * at the top level of `src[lo..from)`, skipping over C comments and
+ * string/char literals.  Returns the offset of the `=` byte, or
+ * `(size_t)-1` if none is found.
+ *
+ * Backward scanning past arbitrary text without first knowing where
+ * comments and strings begin is hard: a stray block-comment closer
+ * might actually live inside a string literal, etc.  We cheat by
+ * walking forward from `lo` once (using the comment-safe helper) and
+ * recording every `=>` we see, then return the last one before `from`.  This is O(N) in the search range but only invoked
+ * in the rare backward-arrow fallback path for closures inside macro
+ * arglists, so the cost is amortised away. */
+static size_t cc__find_prev_arrow_skipping_inert(const char* src, size_t lo, size_t from) {
+    if (!src || from <= lo) return (size_t)-1;
+    size_t last_arrow = (size_t)-1;
+    size_t i = lo;
+    while (i + 1 < from) {
+        size_t before = i;
+        if (cc__scan_skip_string_comment(src, from, &i)) {
+            if (i == before) i++;
+            continue;
+        }
+        if (src[i] == '=' && src[i + 1] == '>') {
+            last_arrow = i;
+            i += 2;
+            continue;
+        }
+        i++;
+    }
+    return last_arrow;
+}
+
 static size_t cc__find_closure_start_from_arrow(const char* src, size_t span_start, size_t arrow_off) {
     if (!src) return span_start;
     if (arrow_off <= span_start) return span_start;
@@ -132,24 +201,16 @@ static int cc__closure_start_off_best_effort(const char* src, size_t len,
     size_t hi = cc__offset_of_line_1based(src, len, le + 1);
     if (hi > len) hi = len;
     if (lo >= hi) return 0;
-    /* Find first '=>' within the span and derive closure start from it. */
-    size_t arrow = (size_t)-1;
-    for (size_t i = lo; i + 1 < hi; i++) {
-        if (src[i] == '=' && src[i + 1] == '>') { arrow = i; break; }
-    }
+    /* Find first '=>' within the span and derive closure start from it.
+     * Comment/string-safe to avoid latching onto `// ... => ...` comments. */
+    size_t arrow = cc__find_next_arrow_skipping_inert(src, hi, lo);
     if (arrow == (size_t)-1) {
         /* Fallback: closures inside macro arguments get assigned the line of
          * the macro call's closing ')' (not where `=>` actually appears in
          * source). Scan backward from `lo` for the nearest '=>' and derive
          * the closure start from it. Bounded to avoid crossing statements. */
         size_t scan_limit = (lo > 4096) ? (lo - 4096) : 0;
-        size_t back_arrow = (size_t)-1;
-        for (size_t i = lo; i-- > scan_limit; ) {
-            if (i + 1 < len && src[i] == '=' && src[i + 1] == '>') {
-                back_arrow = i;
-                break;
-            }
-        }
+        size_t back_arrow = cc__find_prev_arrow_skipping_inert(src, scan_limit, lo);
         if (back_arrow == (size_t)-1) return 0;
         size_t st = cc__find_closure_start_from_arrow(src, scan_limit, back_arrow);
         *out_off = st;
@@ -2816,12 +2877,24 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             if (scan_lim > in_len) scan_lim = in_len;
             int has_arrow = 0;
             int saw_stmt_boundary = 0;
-            for (size_t q = start_off; q + 1 < scan_lim; q++) {
+            size_t q = start_off;
+            while (q + 1 < scan_lim) {
+                size_t before = q;
+                /* Comment- and string-safe: a `// ... => ...` line comment
+                 * between start_off and the closure's real `=>` would
+                 * otherwise be matched as a stmt boundary (no chars
+                 * trigger it, but the loop would then walk past the real
+                 * arrow into the comment text). */
+                if (cc__scan_skip_string_comment(in_src, scan_lim, &q)) {
+                    if (q == before) q++;
+                    continue;
+                }
                 if (in_src[q] == ';' || in_src[q] == '{' || in_src[q] == '}') {
                     saw_stmt_boundary = 1;
                     break;
                 }
                 if (in_src[q] == '=' && in_src[q + 1] == '>') { has_arrow = 1; break; }
+                q++;
             }
             if (!has_arrow || saw_stmt_boundary) be_ok = 0;
         }
@@ -2846,31 +2919,35 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
              * offsets is small; a linear scan over descs[0..k-1] is fine. */
             int found = 0;
             size_t scan = 0;
+            /* Comment/string-safe forward scan.  Without this, a comment
+             * like `// Pattern: (a && b) => exit` between two real
+             * closures would be matched here, the recovery code would
+             * claim a fake closure descriptor pointing into the comment
+             * text, and the REAL closure's call site would be left
+             * unrewritten (syscall_kidnap.ccs repro). */
             while (scan + 1 < in_len) {
-                if (in_src[scan] == '=' && in_src[scan + 1] == '>') {
-                    size_t st_guess = cc__find_closure_start_from_arrow(in_src, 0, scan);
-                    if (st_guess < in_len && st_guess + 1 < in_len) {
-                        int claimed = 0;
-                        for (int kk = 0; kk < k; kk++) {
-                            if (descs[kk].start_off == st_guess ||
-                                (descs[kk].start_off <= st_guess && st_guess < descs[kk].end_off)) {
-                                claimed = 1;
-                                break;
-                            }
-                        }
-                        if (!claimed) {
-                            start_off = st_guess;
-                            size_t ln_lo = st_guess;
-                            while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
-                            start_col1 = 1 + (int)(st_guess - ln_lo);
-                            found = 1;
+                size_t arrow = cc__find_next_arrow_skipping_inert(in_src, in_len, scan);
+                if (arrow == (size_t)-1) break;
+                size_t st_guess = cc__find_closure_start_from_arrow(in_src, 0, arrow);
+                if (st_guess < in_len && st_guess + 1 < in_len) {
+                    int claimed = 0;
+                    for (int kk = 0; kk < k; kk++) {
+                        if (descs[kk].start_off == st_guess ||
+                            (descs[kk].start_off <= st_guess && st_guess < descs[kk].end_off)) {
+                            claimed = 1;
                             break;
                         }
                     }
-                    scan = scan + 2;
-                    continue;
+                    if (!claimed) {
+                        start_off = st_guess;
+                        size_t ln_lo = st_guess;
+                        while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
+                        start_col1 = 1 + (int)(st_guess - ln_lo);
+                        found = 1;
+                        break;
+                    }
                 }
-                scan++;
+                scan = arrow + 2;
             }
             if (!found) {
                 if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
