@@ -241,6 +241,24 @@ char* cc_cpp_expand(const char* src, size_t src_len,
         }
     }
 
+    /* Re-pack `buf` into a fresh malloc allocation.  open_memstream(3) on
+     * macOS hands back a buffer whose reserved capacity extends past the
+     * logical end, and a subsequent malloc() can land inside that
+     * capacity.  When the caller later writes its own malloc'd buffer,
+     * it silently scribbles over `buf`'s trailing NUL, which then makes
+     * `strlen(buf)` walk into adjacent memory and downstream text
+     * passes consume a corrupted, much larger buffer.  Copying into a
+     * properly-sized allocation prevents the overlap. */
+    {
+        char* tight = (char*)malloc(buf_size + 1);
+        if (tight) {
+            memcpy(tight, buf, buf_size);
+            tight[buf_size] = '\0';
+            free(buf);
+            buf = tight;
+        }
+    }
+
     if (out_len) *out_len = buf_size;
     tcc_delete(s);
     return buf;

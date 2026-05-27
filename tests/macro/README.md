@@ -1,15 +1,16 @@
 # Macro-generated CC syntax tests
 
-**Status:** M7.A + M7.B + M7.C (partial) shipped (pre-expand opt-in,
-`#define`-aware phase-1 scanner, registry-preserving post-pre-expand
-re-lower, and opt-in reparse pre-expand). 429/429 smoke with
-`CC_PRE_EXPAND=1`; the additional `CC_PRE_EXPAND_REPARSE=1` flag
-exercises the reparse-side CPP path but is opt-in because it changes
-AST shapes in 4 unrelated smoke tests. Full macro end-to-end compile
-is blocked on the M1 visitor refactor (visitor consuming
-`cc_build_parse_input`'s buffer instead of re-reading the original
-file) so that span-based passes like the channel-pair scanner see the
-expanded form. See
+**Status:** M7.A + M7.B + M7.C (partial) + M7.C3 (M1-lite plumbing)
+shipped. 436/436 smoke pass in both default and `CC_PRE_EXPAND=1`
+modes; the additional `CC_PRE_EXPAND_REPARSE=1` flag exercises the
+reparse-side CPP path but is opt-in because it changes AST shapes in
+4 unrelated smoke tests. The M7.C3 plumbing means the channel-pair
+scanner CAN now resolve macro-generated chan handle decls (e.g.
+`CHAN(int) tx;` → `int[~4 >] tx;`) by falling back to
+`CCASTRoot.parse_buffer_pre_relower`; the remaining blocker for end-
+to-end macro CHAN compile is the reparse path itself, which still
+re-runs phase-1+phase-3 on the raw user source and trips on
+unexpanded macros. See
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 - M5.5 hooks (TCC parse-time recognizer) — stubs only; superseded by M7.
@@ -85,16 +86,47 @@ during pre-expand.
    for validating the end-to-end CPP-through-reparse pipeline
    without disturbing the default.
 
+## What landed in M7.C3 (M1-lite visitor plumbing + heap-safety fix)
+
+1. `CCASTRoot` gained two owned text-buffer fields:
+   - `parse_buffer` — exactly what TCC parsed (post-CPP-expand +
+     post-relower).
+   - `parse_buffer_pre_relower` — post-CPP but still has `[~ ... >]`
+     chan brackets intact (useful for scanners that need bracket
+     specs from macro-generated decls).
+   Both are populated by `cc_build_parse_input` when
+   `CC_PRE_EXPAND=1`, transferred to the root in `parse.c`, and freed
+   by `cc_tcc_bridge_free_ast`.
+2. `CCVisitorCtx` gained `pre_expanded_buf`/`pre_expanded_len`,
+   populated from the root in `walk.c` (prefers `parse_buffer_pre_relower`
+   so visitor span scanners get a view that still has chan brackets).
+3. The channel-pair scanner's `cc__find_chan_decl_before` is now
+   parameterized by `alt_buf`/`alt_len`. When the raw user source
+   doesn't contain a `[~ ... >] name;` decl (e.g. the user wrote
+   `CHAN(int) tx;`), the scanner falls back to the pre-expand buffer
+   and the caller uses the matching buffer for
+   `cc__parse_chan_bracket_spec`. This makes macro-generated chan
+   handle decls resolvable end-to-end on the visitor side.
+4. **Heap-safety fix in `cc_cpp_expand`.** On macOS, `open_memstream(3)`
+   returns a buffer whose reserved capacity extends past its logical
+   end. A subsequent `malloc()` can land inside that capacity, and
+   when the caller writes to its own malloc'd chunk, it silently
+   scribbles over `pp`'s trailing NUL. `cc__rewrite_chan_handle_types`
+   then walks past `pp`'s logical end into the caller's chunk and
+   doubles the buffer. `cc_cpp_expand` now re-packs its output into a
+   fresh tight allocation before returning, retiring that footgun for
+   all callers (was triggered by the M7.C3 pre-relower copy).
+
 ## Why the macro CHAN tests in this folder still fail
 
-Even with both flags on, `cc_channel_pair(&tx, &rx)` errors with
-`could not find declarations for 'tx' and 'rx'`. That pass scans the
-visitor's `src_ufcs` buffer — which is still the raw un-expanded user
-source read from disk in `visit_codegen.c`. The expanded form lives
-only in `cc_build_parse_input`'s output (used for the initial parse)
-and in the reparse path (when `CC_PRE_EXPAND_REPARSE=1`). Threading
-the pre-expanded buffer through the visitor's text-pass pipeline is
-the M1 visitor refactor; tracked under M1 in
+The M7.C3 plumbing fixes the visitor side (channel-pair scanner can
+now resolve macro-generated `tx`/`rx`). The remaining blocker is the
+reparse path: `cc__reparse_source_to_ast` re-runs phase-1+phase-3 on
+the raw user source, so macros like `CHAN(int) tx;` are still opaque
+to chan-handle lowering on the reparse side and TCC chokes on the
+literal `CHAN(int)`. The fix is to enable `CC_PRE_EXPAND_REPARSE=1`
+by default after addressing the four regressions called out in the
+M7.C2 caveat. Tracked under "Recommended next work #1" in
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 ## M5.5 (TCC fork) — still relevant if pre-expand turns out to be infeasible

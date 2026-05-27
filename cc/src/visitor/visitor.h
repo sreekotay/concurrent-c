@@ -8,6 +8,12 @@
 typedef struct CCVisitorCtx {
     CCSymbolTable* symbols;
     const char* input_path; // used for #line source mapping
+    /* M7.C3 / M1-lite: post-pre-expand text buffer (from the AST root) that
+     * span-based scanners can consult as a fallback when the raw user source
+     * doesn't contain the pattern they're looking for. NULL when pre-expand
+     * is off.  Borrowed; owned by the AST root. */
+    const char* pre_expanded_buf;
+    size_t      pre_expanded_len;
     // TODO: add type tables, provenance tracking, arena/async context, codegen state.
 } CCVisitorCtx;
 

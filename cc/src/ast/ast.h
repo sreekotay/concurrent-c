@@ -1,6 +1,8 @@
 #ifndef CC_AST_AST_H
 #define CC_AST_AST_H
 
+#include <stddef.h>
+
 // Minimal CC AST shim. As parser hooks land, populate these nodes instead of the TCC stub.
 //
 // Transitional note:
@@ -68,6 +70,26 @@ typedef struct CCASTRoot {
     // Stub-node side table (transitional; used by current visitor lowering).
     const struct CCASTStubNode* nodes;
     int node_count;
+    /* M7.C3 / M1-lite: text buffers produced by `cc_build_parse_input`
+     * for the initial parse, owned by the root and freed in
+     * `cc_tcc_bridge_free_ast`. Both NULL when pre-expand is off.
+     *
+     * `parse_buffer` is the final post-pre-expand + post-relower text
+     * (CC type syntax lowered to `CCChanTx_T` / `CCSlice_T` / etc.) that
+     * TCC actually parsed — useful when a span pass wants the same view
+     * the AST has.
+     *
+     * `parse_buffer_pre_relower` is the post-CPP-expand but
+     * PRE-relower text (still contains `int[~4 >] tx;`).  The
+     * channel-pair scanner falls back to this buffer when the raw user
+     * source doesn't contain the chan handle decl pattern (macro-
+     * generated chan handles, e.g. `#define CHAN(T) T[~4 >]` invoked
+     * as `CHAN(int) tx;`).  #line directives preserve original-file
+     * (line, col) info in both. */
+    char*  parse_buffer;
+    size_t parse_buffer_len;
+    char*  parse_buffer_pre_relower;
+    size_t parse_buffer_pre_relower_len;
 } CCASTRoot;
 
 #endif // CC_AST_AST_H
