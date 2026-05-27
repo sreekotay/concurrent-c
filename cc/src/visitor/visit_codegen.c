@@ -1204,9 +1204,40 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
 }
 
 /* Helper: reparse source string to AST (in-memory). */
+/* Per-reparse flags forwarded from the caller (visitor ctx).  Kept as a
+ * separate small struct so we don't have to plumb the full CCVisitorCtx
+ * through every reparse callsite. */
+typedef struct {
+    int src_is_pre_expanded;  /* M1: pp_in is already a pre-expanded buffer
+                               * (system headers inlined).  Skip the
+                               * reparse prelude prepend + .cch lowering. */
+} CCReparseFlags;
+
+static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
+                                               const char* input_path, CCSymbolTable* symbols,
+                                               const char* stage,
+                                               const CCReparseFlags* flags);
+
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
                                             const char* input_path, CCSymbolTable* symbols,
                                             const char* stage) {
+    return cc__reparse_source_to_ast_ex(src, src_len, input_path, symbols, stage, NULL);
+}
+
+static CCASTRoot* cc__reparse_source_to_ast_ctx(const CCVisitorCtx* ctx,
+                                                const char* src, size_t src_len,
+                                                const char* stage) {
+    CCReparseFlags flags = { .src_is_pre_expanded = (ctx && ctx->src_is_pre_expanded) };
+    return cc__reparse_source_to_ast_ex(src, src_len,
+                                        ctx ? ctx->input_path : NULL,
+                                        ctx ? ctx->symbols : NULL,
+                                        stage, &flags);
+}
+
+static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
+                                               const char* input_path, CCSymbolTable* symbols,
+                                               const char* stage,
+                                               const CCReparseFlags* flags) {
     CCTypeRegistry* saved_reg = cc_type_registry_get_global();
     CCTypeRegistry* temp_reg = cc_type_registry_new();
     char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
@@ -1273,7 +1304,23 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
     int strict_had_env = strict_env != NULL;
     char* strict_saved = strict_env ? strdup(strict_env) : NULL;
     unsetenv("CC_STRICT_RESULT_UNWRAP");
-    char* pp_buf = cc_preprocess_for_reparse(pp_in, pp_in_len, input_path);
+    char* pp_buf = NULL;
+    if (flags && flags->src_is_pre_expanded) {
+        /* M1: when input is already pre-expanded, skip the heavy
+         * `cc_preprocess_for_reparse` chain.  Its outputs — phase-1
+         * lowering (chan handle, slice, generic containers) and the
+         * `#include <ccc/std/vec.cch>` + `cc_result.cch` prelude — would
+         * either re-process already-lowered tokens (no-op at best) or
+         * pull in system headers that are already inlined here
+         * (double-decl).  Just take the input as-is. */
+        pp_buf = (char*)malloc(pp_in_len + 1);
+        if (pp_buf) {
+            memcpy(pp_buf, pp_in, pp_in_len);
+            pp_buf[pp_in_len] = '\0';
+        }
+    } else {
+        pp_buf = cc_preprocess_for_reparse(pp_in, pp_in_len, input_path);
+    }
     if (strict_had_env) {
         setenv("CC_STRICT_RESULT_UNWRAP", strict_saved ? strict_saved : "", 1);
     } else {
@@ -1311,9 +1358,19 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
         }
     }
     size_t pp_len = strlen(pp_buf);
-    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
-    free(pp_buf);
-    if (!prep) goto done;
+    char* prep = NULL;
+    /* M1: when the caller's working buffer is the pre-expanded form,
+     * container type declarations, result types, and system headers
+     * are already inlined.  Re-running `cc__prepend_reparse_prelude`
+     * would double-declare types like `__mbstate_t` from the Apple SDK. */
+    int src_pre_expanded = (flags && flags->src_is_pre_expanded);
+    if (src_pre_expanded) {
+        prep = pp_buf;
+    } else {
+        prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
+        free(pp_buf);
+        if (!prep) goto done;
+    }
     {
         char* parser_helpers = cc__rewrite_result_helper_calls_for_parser(prep, pp_len);
         if (parser_helpers) {
@@ -3582,6 +3639,25 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        succeed. Note: text-based rewrites like `if @try` run on original source
        early in this function. */
     /* Read original source once; later passes still rewrite against original spans. */
+    /* M1 spike (deferred): swapping `src_all` to `root->parse_buffer` here
+     * makes the visitor's working buffer agree with the AST's coordinate
+     * space, which is necessary for macro CC syntax to work end-to-end.
+     * However, it also exposes the visitor's text scanners to the inlined
+     * CC runtime headers (`<ccc/cc_channel.cch>`, `<ccc/std/vec.cch>`,
+     * etc.) — every text pass that scans `src_all` for patterns like
+     * `cc_channel_pair(`, `[~ ... >]`, `@async`, UFCS calls, etc. then
+     * finds matches inside those runtime headers and emits spurious
+     * diagnostics or rewrites.  Fixing that requires each text scanner
+     * to become `#line`-aware so it skips tokens whose origin file is
+     * not the user TU.  That is the actual M1 lift — a per-pass
+     * iterative change, not a single buffer swap.
+     *
+     * Reparse plumbing for this is already in place (see
+     * `CCReparseFlags.src_is_pre_expanded` below + the
+     * `cc__reparse_source_to_ast_ctx` wrapper); when the swap lands,
+     * reparses will short-circuit `cc_preprocess_for_reparse` and
+     * `cc__prepend_reparse_prelude` to avoid double-decl on inlined
+     * system headers. */
     char* src_all = NULL;
     char* src_regs = NULL;
     size_t src_len = 0;
@@ -3831,9 +3907,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          * works off an AST whose offsets and types match the text it is
          * actually editing. */
         if (src_ufcs != src_all) {
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len,
-                                                          ctx->input_path, ctx->symbols,
-                                                          "phase3 after phase-2 rewrites");
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                              "phase3 after phase-2 rewrites");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -3869,8 +3944,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             if (phase3_changed) {
                 if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-                phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                              "phase3 after batched rewrite");
+                phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                                  "phase3 after batched rewrite");
                 if (!phase3_owned_root) {
                     fclose(out);
                     if (src_ufcs != src_all) free(src_ufcs);
@@ -3895,8 +3970,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (phase3_changed) {
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                          "phase3 after coarse UFCS rewrite");
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                              "phase3 after coarse UFCS rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -3919,8 +3994,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         if (phase3_changed) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                          "phase3 after closure-call rewrite");
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                              "phase3 after closure-call rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -3940,8 +4015,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs = cs;
                 src_ufcs_len = strlen(cs);
                 if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-                phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                              "phase3 after call-site mode rewrite");
+                phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                                  "phase3 after call-site mode rewrite");
                 if (!phase3_owned_root) {
                     fclose(out);
                     if (src_ufcs != src_all) free(src_ufcs);
@@ -3965,8 +4040,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         if (phase3_changed) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                          "phase3 after autoblock rewrite");
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                              "phase3 after autoblock rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -4147,8 +4222,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
         cc__debug_dump_reparse_source("stage1_pre_stmt", src_ufcs, src_ufcs_len, ctx->input_path);
-        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                     "statement-lowering input");
+        CCASTRoot* root3 = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                         "statement-lowering input");
         if (!root3) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -4216,8 +4291,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@async") ||
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "await"))) {
         cc__debug_dump_reparse_source("stage2_pre_async", src_ufcs, src_ufcs_len, ctx->input_path);
-        CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                     "async-lowering input");
+        CCASTRoot* root2 = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                         "async-lowering input");
         if (getenv("CC_DEBUG_REPARSE")) {
             fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2 ? root2->node_count : -1);
         }
@@ -4735,8 +4810,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             CCTypeRegistry* saved_reg = cc_type_registry_get_global();
             CCTypeRegistry* temp_reg = cc_type_registry_new();
             cc__debug_dump_reparse_source("stage3_pre_final_ufcs", src_ufcs, src_ufcs_len, ctx->input_path);
-            CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
-                                                                   "final-UFCS input");
+            CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                                       "final-UFCS input");
             if (!final_ufcs_root) {
                 if (temp_reg) cc_type_registry_free(temp_reg);
                 fclose(out);
