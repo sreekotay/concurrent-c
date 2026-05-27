@@ -5277,21 +5277,26 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "    default: (__x__))\n");
-                /* __cc_uw_err_at */
+                /* __cc_uw_err_at — every arm side-effects on R3's unwrap
+                 * chain (comma-operator) before extracting the error.  See
+                 * the baseline macro in cc_result.cch for the rationale; the
+                 * enumerated arms here must use the *same* shape so the
+                 * record() call fires for Result-struct LHSs too, not just
+                 * the raw-pointer default. */
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "#undef __cc_uw_err_at\n#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n");
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
-                    char line[256];
+                    char line[320];
                     snprintf(line, sizeof(line),
-                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
+                        "    %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((%s*)(void*)&(__x__))->u.error), \\\n",
                         spec->concrete_name, spec->concrete_name);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
+                    "    default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))\n");
 
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "/* --- end result type declarations --- */\n\n");

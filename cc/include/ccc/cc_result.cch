@@ -455,6 +455,27 @@ static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
     CC_ERROR(CC_ERR_NULL, \
              "NULL returned from " expr_lit " at " file_lit ":" line_lit)
 
+/* R3 — runtime hook + query API for `!>` source-location propagation chain.
+ *
+ * Forward-declared here (rather than via a separate header include) so
+ * that any TU using `!>` / `?>` / `@err` picks up the declarations via
+ * the prelude without an extra `#include`.  Implementation lives in
+ * `cc/runtime/cc_rt_diag.c`; the runtime object is linked into every
+ * CC binary by the driver, so the symbols always resolve.
+ *
+ * `record` is called via the comma operator inside `__cc_uw_err_at` (and
+ * the per-TU enumerated `_Generic` arms emitted by `visit_codegen.c`) so
+ * each `!>` propagation pushes its source site onto the chain before the
+ * error value is extracted and returned.
+ *
+ * The query/clear/print functions are part of the user-facing API — an
+ * `@errhandler` can walk the chain to render where the error trickled
+ * through, then `clear()` to scope the chain to a single error. */
+void cc_rt_diag_record_unwrap_site(const char* file, const char* line_str);
+void cc_rt_diag_clear_unwrap_chain(void);
+int  cc_rt_diag_unwrap_chain_len(void);
+int  cc_rt_diag_unwrap_site(int i, const char** out_file, const char** out_line_str);
+
 /* ============================================================================
  * Unified unwrap primitives: `__cc_uw_is_err(x)`, `__cc_uw_value(x)`,
  * `__cc_uw_err_at(x, expr, file, line)`.
@@ -484,8 +505,15 @@ static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
     default: (*(void* const*)(void*)&(__x__) == (void*)0))
 #define __cc_uw_value(__x__) _Generic((__x__), \
     default: (__x__))
+/* R3: record the propagation site (comma-operator side effect) before
+ * extracting the error.  The comma expression evaluates to the right
+ * operand, so the _Generic arm's type is unchanged.  When `visit_codegen.c`
+ * `#undef`s + re-emits this macro with enumerated arms per concrete
+ * Result struct, each typed arm is wrapped in the same comma idiom so the
+ * record() call fires regardless of which arm is selected. */
 #define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \
-    default: __cc_err_null_at(__e__, __f__, __l__))
+    default: (cc_rt_diag_record_unwrap_site(__f__, __l__), \
+              __cc_err_null_at(__e__, __f__, __l__)))
 
 /*
  * Result constructors - simplified API.

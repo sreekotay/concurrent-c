@@ -77,12 +77,27 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
      * Since parser-mode Result specs now emit distinct typed structs
      * (see `cc/include/ccc/cc_result.cch` + preprocess.c), `(tmp).u.error`
      * already has the declared error type in both parser mode and the
-     * real compile; no `*(E*)(void*)&` through-pointer dance needed. */
+     * real compile; no `*(E*)(void*)&` through-pointer dance needed.
+     *
+     * R3: even on the optimized direct-field-access path we must still
+     * push the propagation site onto the runtime unwrap chain, so an
+     * `@errhandler` walking the chain sees this `!>` site.  Without
+     * this the typed-callee path would silently bypass `__cc_uw_err_at`
+     * and the chain would only show non-typed propagations — a hole
+     * exactly where most production code lives.  The record() call sits
+     * on the *error* branch only (since the binder declaration only runs
+     * after the `is_err` guard succeeds), so it does not fire on the
+     * fast Ok path. */
     char callee[128];
     char err_type[256];
     if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
         cc_result_fn_registry_get_err_type(callee, strlen(callee),
                                             err_type, sizeof(err_type))) {
+        const char* f = file ? file : "<input>";
+        size_t fl = strlen(f);
+        cc__append_str(out, ol, oc, "cc_rt_diag_record_unwrap_site(");
+        cc_sb_append_c_string_literal(out, ol, oc, f, 0, fl);
+        cc_sb_append_fmt(out, ol, oc, ", \"%d\"); ", line);
         cc_sb_append_fmt(out, ol, oc,
                          "%s %s = (%s).u.error; ",
                          err_type, binder, tmpv);
@@ -92,7 +107,12 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
      * pointer-returning expression with no registry entry).  Use
      * `__typeof__(__cc_uw_err_at(...))` so the binder resolves to:
      *   - the Result struct's declared error field for Result LHS, and
-     *   - `CCError` for raw-pointer LHS (via the default _Generic arm). */
+     *   - `CCError` for raw-pointer LHS (via the default _Generic arm).
+     *
+     * R3 record() fires inside the `__cc_uw_err_at` macro arms (see
+     * cc_result.cch + the per-TU enumerated arms in visit_codegen.c),
+     * so no explicit record() call is needed here — the macro
+     * expansion below already side-effects on each evaluation. */
     cc__append_str(out, ol, oc, "__typeof__(");
     cc_sb_append_uw_err_at(out, ol, oc, tmpv, s, call_a, call_b, file, line);
     cc_sb_append_fmt(out, ol, oc, ") %s = ", binder);
