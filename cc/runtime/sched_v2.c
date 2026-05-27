@@ -208,6 +208,21 @@ struct fiber_v2 {
     CCNursery* saved_nursery;
     CCNursery* admission_nursery;
 
+    /* R1 — user-facing async backtrace metadata.
+     *
+     * Set by `cc_nursery_spawn_async_named` (via the runner stamping its
+     * own fiber on first execution) so any code running on this fiber can
+     * answer "what async task am I?" via `cc_rt_diag_current_async_info`.
+     * Cleared on fiber alloc/recycle so a pooled fiber never inherits the
+     * previous task's name.
+     *
+     * Strings are caller-owned C string literals embedded in the lowered
+     * C output (the spawn-site `__FILE__` and a sanitized callee name) —
+     * no copy, no allocation on the spawn path. */
+    const char* diag_user_name;
+    const char* diag_file;
+    int         diag_line;
+
     /* Intrusive linked list for free list */
     fiber_v2*  next;
     fiber_v2*  all_next;
@@ -841,6 +856,9 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->park_obj = NULL;
             f->deadlock_suppress_depth = 0;
             f->external_wait_depth = 0;
+            f->diag_user_name = NULL;
+            f->diag_file = NULL;
+            f->diag_line = 0;
             atomic_store_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
             atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
             V2_STAT_INC(g_v2_fibers_alive);
@@ -883,6 +901,11 @@ static void fiber_v2_free(fiber_v2* f) {
     f->park_obj = NULL;
     f->deadlock_suppress_depth = 0;
     f->external_wait_depth = 0;
+    /* Same reason: clear R1 async backtrace metadata so a pooled fiber
+     * doesn't surface the previous task's name to `cc_rt_diag_current_async_info`. */
+    f->diag_user_name = NULL;
+    f->diag_file = NULL;
+    f->diag_line = 0;
     atomic_store_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
     /* Pool the coroutine memory (including its stack): mco_uninit just marks
      * the coro DEAD and runs platform teardown (a no-op on ucontext), while
@@ -1504,6 +1527,32 @@ void sched_v2_fiber_inc_external_wait(fiber_v2* f) {
 void sched_v2_fiber_dec_external_wait(fiber_v2* f) {
     if (!f) return;
     if (f->external_wait_depth > 0) f->external_wait_depth--;
+}
+
+/* R1 — record/read user-facing async task naming on a fiber.
+ *
+ * The setter is called once per fiber, by `cc__nursery_async_runner`
+ * right after the runner is entered (so it executes on the new fiber's
+ * own context).  Strings are NOT copied — callers pass C string literals
+ * embedded in the lowered output and live for the program's duration.
+ * The getter is hit by `cc_rt_diag_current_async_info`; it returns 1 if
+ * any field is populated, 0 otherwise. */
+void sched_v2_fiber_set_diag_name(fiber_v2* f, const char* name,
+                                   const char* file, int line) {
+    if (!f) return;
+    f->diag_user_name = name;
+    f->diag_file = file;
+    f->diag_line = line;
+}
+
+int sched_v2_fiber_get_diag_name(fiber_v2* f, const char** out_name,
+                                  const char** out_file, int* out_line) {
+    if (!f) return 0;
+    if (!f->diag_user_name && !f->diag_file) return 0;
+    if (out_name) *out_name = f->diag_user_name;
+    if (out_file) *out_file = f->diag_file;
+    if (out_line) *out_line = f->diag_line;
+    return 1;
 }
 
 int sched_v2_fiber_external_wait_active(fiber_v2* f) {

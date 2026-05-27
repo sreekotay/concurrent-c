@@ -76,3 +76,35 @@ error trickled through — not just the original cc_err message.
 Multi-OS-thread programs will interleave entries. Iterate to TLS once
 we have a real multi-thread regression. Single-thread fiber programs
 (the common case) get the natural chronological chain.
+
+---
+
+## Runtime R1 — async backtrace naming (landed 2026-05-27)
+
+Every fiber spawned via `n->spawn_async(callee(...))` carries the user-
+facing callee name + spawn-site `(file, line)`, so any code running on
+that fiber can answer "what async task am I?" via
+`cc_rt_diag_current_async_info`.
+
+| Layer | Mechanism |
+|-------|-----------|
+| Per-fiber storage | `fiber_v2` gains `diag_user_name`, `diag_file`, `diag_line`. Cleared on alloc/recycle so pooled fibers never inherit the previous task's name. Setter/getter in `sched_v2.c` (`sched_v2_fiber_set_diag_name`, `sched_v2_fiber_get_diag_name`). |
+| Spawn path | `cc_nursery_spawn_async_named(n, task, name, file, line)` populates an extended `cc_nursery_async_spawn` struct; `cc__nursery_async_runner` stamps the fiber on first entry (so `sched_v2_current_fiber()` returns the new fiber). Anonymous `cc_nursery_spawn_async` still works and delegates with NULL/0 metadata. |
+| Spawn-site lowering | UFCS rewrite in `preprocess.c` for `n->spawn_async(callee(...))` emits `cc_nursery_spawn_async_named(n, callee(...), "callee", __FILE__, __LINE__)`. Callee extracted from args via leading-identifier scan; opaque expressions fall back to `"<async>"`. `__FILE__`/`__LINE__` resolve to the user's source location via the `#line` directives CC emits. |
+| User API | `cc_rt_diag_current_async_info(&name, &file, &line)` — forward-declared in `cc_nursery.cch`. Reads the running fiber's slot, falls back to the process-global `g_last_async` when called outside fiber context. Must be invoked as `@noblock cc_rt_diag_current_async_info(...)` inside `@async` bodies to bypass autoblock wrapping (which would route the call through a worker thread where `sched_v2_current_fiber()` is NULL). |
+| Smoke | `tests/runtime/r1_async_name_smoke.ccs` — two named tasks; verifies each fiber sees its own name + file + line, and that `main` (no fiber) gets a truthful "no naming info" response. |
+
+**Known limitations**:
+
+- Names live as long as the underlying C string literals embedded in the
+  lowered output (program lifetime in practice), so no copy / no
+  allocation on the spawn path.
+- Non-`spawn_async` fiber births (closure spawn via `n->spawn(...)`,
+  legacy `cc_nursery_spawn`, the orphan `pass_nursery_spawn_ast.c`) do
+  not yet stamp names — those fibers report `"no info"` to the query.
+  Closures don't have a single user-visible name; threading per-closure
+  source markers is a follow-up.
+- The query requires `@noblock` at the call site inside `@async`
+  bodies. A future iteration could move the decoration into the prelude
+  declaration once the `.cch` → `.h` lowering preserves CC sigils for
+  pass_autoblock to consume.

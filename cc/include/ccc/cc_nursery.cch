@@ -76,6 +76,31 @@ int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
 int cc_nursery_spawn_async(CCNursery* n, CCTask task);
+/* R1 — spawn an async task and stamp its fiber with user-facing naming
+ * (callee name + spawn-site file/line) so any code running inside the
+ * fiber can answer "what task am I?" via `cc_rt_diag_current_async_info`.
+ * The strings must outlive the fiber; the spawn-site lowering in
+ * preprocess.c (UFCS for `n->spawn_async(...)`) supplies C string
+ * literals, which trivially satisfy that. */
+int cc_nursery_spawn_async_named(CCNursery* n, CCTask task,
+                                  const char* diag_user_name,
+                                  const char* diag_file,
+                                  int diag_line);
+/* R1 — answer "what async task am I running inside?" from any code that
+ * runs on a CC scheduler fiber.  Implementation in `cc/runtime/cc_rt_diag.c`.
+ * Returns 1 if any field was populated, 0 if no naming info is associated
+ * with the current fiber (and no process-global fallback is set).  Any
+ * out_* pointer may be NULL.
+ *
+ * Callers inside `@async` bodies should invoke this as
+ * `@noblock cc_rt_diag_current_async_info(...)` so pass_autoblock does
+ * not wrap it into `cc_run_blocking_task_intptr` — that wrap would run
+ * the query on a worker thread where `sched_v2_current_fiber()` returns
+ * NULL, hiding the per-fiber name the spawn path just stamped.  See
+ * `tests/runtime/r1_async_name_smoke.ccs` for the call-site shape. */
+int cc_rt_diag_current_async_info(const char** out_name,
+                                  const char** out_file,
+                                  int* out_line);
 // Lowered helpers for future explicit nursery-handle syntax:
 // create a child nursery, spawn the root closure into it, and return the child handle.
 CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c);

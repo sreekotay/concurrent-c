@@ -4156,6 +4156,13 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawnhybrid_closure0");
                 } else if (strcmp(method_name, "close_on") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_add_closing_tx");
+                } else if (strcmp(method_name, "spawn_async") == 0) {
+                    /* R1: route to the naming variant so the new fiber
+                     * carries the user-facing task name + spawn-site
+                     * source location for `cc_rt_diag_current_async_info`.
+                     * The trailing `, "callee", __FILE__, __LINE__` is
+                     * appended below in the args-emit block. */
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_async_named");
                 } else {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
@@ -4194,6 +4201,30 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             if (args_end > args_start) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            }
+            /* R1: trailing `, "callee", __FILE__, __LINE__` for the
+             * `spawn_async` -> `cc_nursery_spawn_async_named` rewrite.
+             * `__FILE__` and `__LINE__` are resolved by TCC against the
+             * `#line` directives CC emits, so they report the user's
+             * source location, not the generated C path/line. */
+            if (nursery_like && strcmp(method_name, "spawn_async") == 0) {
+                char callee_name[96];
+                size_t ci = args_start;
+                size_t cj = 0;
+                while (ci < args_end && cj + 1 < sizeof(callee_name) &&
+                       (cc_is_ident_char(src[ci]) || src[ci] == ':')) {
+                    callee_name[cj++] = src[ci++];
+                }
+                callee_name[cj] = '\0';
+                if (cj == 0 || ci >= args_end || src[ci] != '(') {
+                    /* Args don't start with a plain `ident(`; fall back to
+                     * the literal "<async>".  Keeps the wiring robust for
+                     * cases like `n->spawn_async(make_task() + foo)`. */
+                    snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
+                }
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", \"");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, callee_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\", __FILE__, __LINE__");
             }
         }
         cc_sb_append_cstr(&out, &out_len, &out_cap, ")");

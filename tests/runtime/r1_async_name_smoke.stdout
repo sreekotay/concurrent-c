@@ -1,0 +1,3 @@
+alpha ok=1 name_match=1 file_match=1 line_gt0=1
+beta  ok=1 name_match=1 file_match=1 line_gt0=1
+main_ok=0 main_name=(null)

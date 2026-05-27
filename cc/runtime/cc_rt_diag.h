@@ -21,6 +21,20 @@ void cc_rt_diag_set_async_name(const char* cc_name, const char* file, int line);
 void cc_rt_diag_set_channel_meta(const char* name, const char* topology,
                                  const char* file, int line);
 
+/* R1 — answer "what async task am I running inside?" from any code that
+ * runs on a CC scheduler fiber.  Reads the per-fiber metadata stamped
+ * by `cc_nursery_spawn_async_named` (via `cc__nursery_async_runner` on
+ * fiber entry).  Falls back to the process-global `g_last_async` slot
+ * (set by `cc_rt_diag_set_async_name`) when called outside fiber
+ * context, so the API still gives useful answers from main/tests.
+ *
+ * Returns 1 if any field was populated, 0 if no name is currently
+ * associated with the caller's fiber and the global slot is empty.
+ * Either out_* pointer may be NULL. */
+int cc_rt_diag_current_async_info(const char** out_name,
+                                  const char** out_file,
+                                  int* out_line);
+
 /* ----------------------------------------------------------------------
  * R3 — `!>` source-location propagation chain.
  *
