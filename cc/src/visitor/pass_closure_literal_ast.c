@@ -563,47 +563,42 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     }
     const char* semi = stmt_end;
     if (!semi || semi <= p) return;
+    /* Base + bounded length for the indexed CCInertScan walks below.
+     * `stmt` is the slice base; valid offsets are [p_off, semi_off). */
+    size_t p_off = (size_t)(p - stmt);
+    size_t semi_off = (size_t)(semi - stmt);
+
     /* Ignore function prototypes (best-effort) */
     {
-        const char* cur_scan = p;
-        const char* lp = NULL;
-        const char* eq = NULL;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        while (cur_scan < semi) {
-            char c = *cur_scan;
-            char c2 = (cur_scan + 1 < semi) ? cur_scan[1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; cur_scan++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur_scan += 2; continue; } cur_scan++; continue; }
-            if (in_str) { if (c == '\\' && c2) { cur_scan += 2; continue; } if (c == '"') in_str = 0; cur_scan++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { cur_scan += 2; continue; } if (c == '\'') in_chr = 0; cur_scan++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; cur_scan += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; cur_scan += 2; continue; }
-            if (c == '"') { in_str = 1; cur_scan++; continue; }
-            if (c == '\'') { in_chr = 1; cur_scan++; continue; }
-            if (c == '(' && !lp) lp = cur_scan;
-            if (c == '=' && !eq) eq = cur_scan;
-            cur_scan++;
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;
+        size_t lp_off = (size_t)-1;
+        size_t eq_off = (size_t)-1;
+        size_t i = p_off;
+        while (i < semi_off) {
+            if (cc_inert_scan_step(&scan, stmt, semi_off, &i)) continue;
+            char c = stmt[i];
+            if (c == '(' && lp_off == (size_t)-1) lp_off = i;
+            if (c == '=' && eq_off == (size_t)-1) eq_off = i;
+            i++;
         }
-        if (lp && (!eq || eq > lp)) return;
+        if (lp_off != (size_t)-1 && (eq_off == (size_t)-1 || eq_off > lp_off)) return;
     }
     /* Ignore member assignments like `g.block = ...` or `p->field = ...`.
        Two-pass: first find `=`, then check for `.`/`->` before it. */
     {
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;
         const char* eq = NULL;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        for (const char* t = p; t < semi; ) {
-            char c = *t;
-            char c2 = (t + 1 < semi) ? t[1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; t++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; t += 2; continue; } t++; continue; }
-            if (in_str) { if (c == '\\' && c2) { t += 2; continue; } if (c == '"') in_str = 0; t++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { t += 2; continue; } if (c == '\'') in_chr = 0; t++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; t += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; t += 2; continue; }
-            if (c == '"') { in_str = 1; t++; continue; }
-            if (c == '\'') { in_chr = 1; t++; continue; }
-            if (c == '=' && c2 != '=') { eq = t; break; }
-            t++;
+        size_t i = p_off;
+        while (i < semi_off) {
+            if (cc_inert_scan_step(&scan, stmt, semi_off, &i)) continue;
+            char c = stmt[i];
+            char c2 = (i + 1 < semi_off) ? stmt[i + 1] : 0;
+            if (c == '=' && c2 != '=') { eq = stmt + i; break; }
+            i++;
         }
         if (eq) {
             for (const char* t = p; t < eq; t++) {
@@ -616,28 +611,22 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     const char* comma_pos[64];
     int comma_n = 0;
     {
-        const char* cur = p;
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;
         int paren = 0, bracket = 0;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        while (cur < semi) {
-            char c = *cur;
-            char c2 = (cur + 1 < semi) ? cur[1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
-            if (in_str) { if (c == '\\' && c2) { cur += 2; continue; } if (c == '"') in_str = 0; cur++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { cur += 2; continue; } if (c == '\'') in_chr = 0; cur++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
-            if (c == '"') { in_str = 1; cur++; continue; }
-            if (c == '\'') { in_chr = 1; cur++; continue; }
+        size_t i = p_off;
+        while (i < semi_off) {
+            if (cc_inert_scan_step(&scan, stmt, semi_off, &i)) continue;
+            char c = stmt[i];
             if (c == '(') paren++;
             else if (c == ')' && paren > 0) paren--;
             else if (c == '[') bracket++;
             else if (c == ']' && bracket > 0) bracket--;
             else if (c == ',' && paren == 0 && bracket == 0 && comma_n < 64) {
-                comma_pos[comma_n++] = cur;
+                comma_pos[comma_n++] = stmt + i;
             }
-            cur++;
+            i++;
         }
     }
 
@@ -647,39 +636,23 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     const char* name_s = NULL;
     size_t name_n = 0;
     {
-        const char* cur = p;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        while (cur < first_seg_end) {
-            char c = *cur;
-            char c2 = (cur + 1 < first_seg_end) ? cur[1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
-            if (in_str) {
-                if (c == '\\' && c2) { cur += 2; continue; }
-                if (c == '"') in_str = 0;
-                cur++;
-                continue;
-            }
-            if (in_chr) {
-                if (c == '\\' && c2) { cur += 2; continue; }
-                if (c == '\'') in_chr = 0;
-                cur++;
-                continue;
-            }
-            if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
-            if (c == '"') { in_str = 1; cur++; continue; }
-            if (c == '\'') { in_chr = 1; cur++; continue; }
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        scan.at_line_start = 0;
+        size_t seg_end_off = (size_t)(first_seg_end - stmt);
+        size_t i = p_off;
+        while (i < seg_end_off) {
+            if (cc_inert_scan_step(&scan, stmt, seg_end_off, &i)) continue;
+            char c = stmt[i];
             if (c == '=' || c == ';') break;
-            if (!cc__is_ident_start_char(c)) { cur++; continue; }
-            {
-                const char* s = cur++;
-                while (cur < first_seg_end && cc__is_ident_char2(*cur)) cur++;
-                size_t n = (size_t)(cur - s);
-                if (n == 0 || cc__is_keyword_tok(s, n)) continue;
-                name_s = s;
-                name_n = n;
-            }
+            if (!cc__is_ident_start_char(c)) { i++; continue; }
+            size_t s_off = i;
+            i++;
+            while (i < seg_end_off && cc__is_ident_char2(stmt[i])) i++;
+            size_t tok_n = i - s_off;
+            if (tok_n == 0 || cc__is_keyword_tok(stmt + s_off, tok_n)) continue;
+            name_s = stmt + s_off;
+            name_n = tok_n;
         }
     }
     if (!name_s || name_n == 0) return;
@@ -764,90 +737,59 @@ static void cc__maybe_record_decl(char*** scope_names,
                                   int depth,
                                   const char* line) {
     if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
-    const char* stmt = line;
-    while (*stmt) {
-        const char* semi = NULL;
-        const char* cur = stmt;
+    size_t n = strlen(line);
+    size_t stmt_off = 0;
+    while (stmt_off < n) {
         int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        while (*cur) {
-            char c = *cur;
-            char c2 = cur[1];
-            if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
-            if (in_str) {
-                if (c == '\\' && c2) { cur += 2; continue; }
-                if (c == '"') in_str = 0;
-                cur++;
-                continue;
-            }
-            if (in_chr) {
-                if (c == '\\' && c2) { cur += 2; continue; }
-                if (c == '\'') in_chr = 0;
-                cur++;
-                continue;
-            }
-            if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
-            if (c == '"') { in_str = 1; cur++; continue; }
-            if (c == '\'') { in_chr = 1; cur++; continue; }
-            if (c == '(') { paren_depth++; cur++; continue; }
-            if (c == ')') { if (paren_depth > 0) paren_depth--; cur++; continue; }
-            if (c == '{') { brace_depth++; cur++; continue; }
-            if (c == '}') { if (brace_depth > 0) brace_depth--; cur++; continue; }
-            if (c == '[') { bracket_depth++; cur++; continue; }
-            if (c == ']') { if (bracket_depth > 0) bracket_depth--; cur++; continue; }
-            if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
-                semi = cur;
+        CCInertScan scan;
+        cc_inert_scan_init(&scan, NULL);
+        size_t i = stmt_off;
+        size_t semi_off = (size_t)-1;
+        while (i < n) {
+            if (cc_inert_scan_step(&scan, line, n, &i)) continue;
+            char c = line[i];
+            if (c == '(') paren_depth++;
+            else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+            else if (c == '{') brace_depth++;
+            else if (c == '}') { if (brace_depth > 0) brace_depth--; }
+            else if (c == '[') bracket_depth++;
+            else if (c == ']') { if (bracket_depth > 0) bracket_depth--; }
+            else if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
+                semi_off = i;
                 break;
             }
-            cur++;
+            i++;
         }
-        if (!semi) break;
-        cc__maybe_record_decl_stmt(scope_names, scope_types, scope_flags, scope_counts, depth, stmt, semi);
-        stmt = semi + 1;
+        if (semi_off == (size_t)-1) break;
+        cc__maybe_record_decl_stmt(scope_names, scope_types, scope_flags, scope_counts,
+                                   depth, line + stmt_off, line + semi_off);
+        stmt_off = semi_off + 1;
     }
 }
 
 static size_t cc__last_top_level_semi_offset(const char* line) {
-    const char* cur = line;
-    const char* last = NULL;
-    int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
     if (!line) return 0;
-    while (*cur) {
-        char c = *cur;
-        char c2 = cur[1];
-        if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
-        if (in_str) {
-            if (c == '\\' && c2) { cur += 2; continue; }
-            if (c == '"') in_str = 0;
-            cur++;
-            continue;
+    size_t n = strlen(line);
+    size_t last = 0;  /* 0 = no semi found */
+    int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, line, n, &i)) continue;
+        char c = line[i];
+        if (c == '(') paren_depth++;
+        else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+        else if (c == '{') brace_depth++;
+        else if (c == '}') { if (brace_depth > 0) brace_depth--; }
+        else if (c == '[') bracket_depth++;
+        else if (c == ']') { if (bracket_depth > 0) bracket_depth--; }
+        else if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
+            last = i + 1;
         }
-        if (in_chr) {
-            if (c == '\\' && c2) { cur += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            cur++;
-            continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
-        if (c == '"') { in_str = 1; cur++; continue; }
-        if (c == '\'') { in_chr = 1; cur++; continue; }
-        if (c == '(') { paren_depth++; cur++; continue; }
-        if (c == ')') { if (paren_depth > 0) paren_depth--; cur++; continue; }
-        if (c == '{') { brace_depth++; cur++; continue; }
-        if (c == '}') { if (brace_depth > 0) brace_depth--; cur++; continue; }
-        if (c == '[') { bracket_depth++; cur++; continue; }
-        if (c == ']') { if (bracket_depth > 0) bracket_depth--; cur++; continue; }
-        if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
-            last = cur + 1;
-        }
-        cur++;
+        i++;
     }
-    return last ? (size_t)(last - line) : 0;
+    return last;
 }
 
 static int cc__has_top_level_brace(const char* line) {
@@ -991,64 +933,42 @@ static char* cc__src_strip_comments_and_strings(const char* src, size_t len) {
     if (!out) return NULL;
     memcpy(out, src, len);
     out[len] = '\0';
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = out[i];
-        char c2 = (i + 1 < len) ? out[i + 1] : 0;
-        if (in_lc) {
-            if (c == '\n') in_lc = 0;
-            else out[i] = ' ';
-            continue;
-        }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') {
-                out[i] = ' ';
-                out[i + 1] = ' ';
-                i++;
-                in_bc = 0;
-                continue;
-            }
-            if (c != '\n') out[i] = ' ';
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && c2 && i + 1 < len) {
-                out[i] = ' ';
-                out[i + 1] = ' ';
-                i++;
-                continue;
-            }
-            if (c == '"') { in_str = 0; continue; }
-            if (c != '\n') out[i] = ' ';
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && c2 && i + 1 < len) {
-                out[i] = ' ';
-                out[i + 1] = ' ';
-                i++;
-                continue;
-            }
-            if (c == '\'') { in_chr = 0; continue; }
-            if (c != '\n') out[i] = ' ';
-            continue;
-        }
-        if (c == '/' && c2 == '/') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
+    /* Inert-kind discrimination (Batch F1 pattern): snapshot pre-step
+     * inert flags so we can blank consumed [before, i) bytes correctly.
+     * Rules:
+     *   - newlines preserved (line numbers stay aligned)
+     *   - string/char delimiters preserved on entry AND exit transitions
+     *     so the surrounding `"`/`'` stay intact
+     *   - everything else inside any inert region (comments / string
+     *     bodies / char bodies / pp directives) → ASCII space
+     *
+     * Note: this is a behavior CHANGE for pp directives — the original
+     * didn't recognise `#line`/`#define`/etc. as inert, so the `#`
+     * leaked through as a code byte (and downstream decl scanners had
+     * the early `if (*p == '#' || *p == '\0') return;` guard to bail).
+     * Migrated version blanks pp-directive bodies; the guard is now
+     * unreachable for those cases (still kept as defense in depth). */
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < len) {
+        int pre_str = scan.in_str;
+        int pre_chr = scan.in_chr;
+        size_t before = i;
+        if (!cc_inert_scan_step(&scan, src, len, &i)) {
             i++;
-            in_lc = 1;
             continue;
         }
-        if (c == '/' && c2 == '*') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
-            i++;
-            in_bc = 1;
-            continue;
+        int post_str = scan.in_str;
+        int post_chr = scan.in_chr;
+        for (size_t k = before; k < i; k++) {
+            char c = src[k];
+            if (c == '\n') continue;
+            /* Preserve string/char delimiters on entry/exit transitions. */
+            if (c == '"' && pre_str != post_str) continue;
+            if (c == '\'' && pre_chr != post_chr) continue;
+            out[k] = ' ';
         }
-        if (c == '"') in_str = 1;
-        else if (c == '\'') in_chr = 1;
     }
     return out;
 }
