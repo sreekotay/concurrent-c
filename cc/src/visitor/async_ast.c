@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -198,55 +199,11 @@ static char* cc__normalize_generic_error_type_text(const char* type_text) {
     return out;
 }
 
-/* Keep local implementations of cc__find_matching_paren/brace to avoid subtle behavioral changes. */
-
-static int cc__find_matching_paren(const char* b, size_t bl, size_t lpar, size_t* out_rpar) {
-    if (!b || lpar >= bl || b[lpar] != '(') return 0;
-    int par = 1, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
-    for (size_t p = lpar + 1; p < bl; p++) {
-        char ch = b[p];
-        char ch2 = (p + 1 < bl) ? b[p + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; p++; } continue; }
-        if (ins) { if (ch == '\\' && p + 1 < bl) { p++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') { par--; if (par == 0) { if (out_rpar) *out_rpar = p; return 1; } }
-        else if (ch == '[') brk++;
-        else if (ch == ']') { if (brk) brk--; }
-        else if (ch == '{') br++;
-        else if (ch == '}') { if (br) br--; }
-    }
-    return 0;
-}
-
-static int cc__find_matching_brace(const char* b, size_t bl, size_t lbrace, size_t* out_rbrace) {
-    if (!b || lbrace >= bl || b[lbrace] != '{') return 0;
-    int br = 1, par = 0, brk = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
-    for (size_t p = lbrace + 1; p < bl; p++) {
-        char ch = b[p];
-        char ch2 = (p + 1 < bl) ? b[p + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; p++; } continue; }
-        if (ins) { if (ch == '\\' && p + 1 < bl) { p++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') { if (par) par--; }
-        else if (ch == '[') brk++;
-        else if (ch == ']') { if (brk) brk--; }
-        else if (ch == '{') br++;
-        else if (ch == '}') { br--; if (br == 0) { if (out_rbrace) *out_rbrace = p; return 1; } }
-    }
-    return 0;
-}
+/* cc_find_matching_paren / cc_find_matching_brace live in util/text.h
+ * (identical implementations).  Wire to those via local-name aliases so
+ * existing call sites keep working without churn. */
+#define cc__find_matching_paren cc_find_matching_paren
+#define cc__find_matching_brace cc_find_matching_brace
 
 static char* cc__rewrite_idents(const char* s, const char* const* names, const char* const* repls, int n) {
     if (!s) return NULL;
@@ -256,41 +213,23 @@ static char* cc__rewrite_idents(const char* s, const char* const* names, const c
     char* out = (char*)malloc(cap);
     if (!out) return NULL;
     size_t ol = 0;
-    int in_str = 0, in_chr = 0;
-    for (size_t i = 0; i < sl; ) {
-        /* Skip string and character literals */
-        if (!in_str && !in_chr && s[i] == '"') {
-            in_str = 1;
-            if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-            out[ol++] = s[i++];
-            continue;
-        }
-        if (!in_str && !in_chr && s[i] == '\'') {
-            in_chr = 1;
-            if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-            out[ol++] = s[i++];
-            continue;
-        }
-        if (in_str) {
-            if (s[i] == '\\' && i + 1 < sl) {
-                if (ol + 3 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-                out[ol++] = s[i++]; out[ol++] = s[i++];
-            } else {
-                if (s[i] == '"') in_str = 0;
-                if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-                out[ol++] = s[i++];
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < sl) {
+        /* Skip strings / chars / comments / #line directives verbatim
+         * — we never rewrite idents inside inert spans. */
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, s, sl, &i)) {
+            size_t k = i - before;
+            if (ol + k + 1 >= cap) {
+                cap = (ol + k) * 2 + 64;
+                char* tmp = (char*)realloc(out, cap);
+                if (!tmp) { free(out); return NULL; }
+                out = tmp;
             }
-            continue;
-        }
-        if (in_chr) {
-            if (s[i] == '\\' && i + 1 < sl) {
-                if (ol + 3 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-                out[ol++] = s[i++]; out[ol++] = s[i++];
-            } else {
-                if (s[i] == '\'') in_chr = 0;
-                if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-                out[ol++] = s[i++];
-            }
+            memcpy(out + ol, s + before, k);
+            ol += k;
             continue;
         }
         if (cc__is_ident_start(s[i])) {
@@ -345,7 +284,7 @@ static char* cc__rewrite_typed_chan_await_expr(const char* expr) {
     const char* args;
     size_t args_len;
     size_t comma = (size_t)-1;
-    int depth = 0, in_str = 0, in_chr = 0;
+    int depth = 0;
     const char* arg0;
     const char* arg1;
     size_t arg0_len, arg1_len;
@@ -372,16 +311,19 @@ static char* cc__rewrite_typed_chan_await_expr(const char* expr) {
     if (!cc__find_matching_paren(s, expr_len, name_len, &rpar)) return strdup(expr);
     args = s + name_len + 1;
     args_len = rpar - (name_len + 1);
-    for (size_t i = 0; i < args_len; i++) {
-        char c = args[i];
-        char c2 = (i + 1 < args_len) ? args[i + 1] : 0;
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(' || c == '[' || c == '{') { depth++; continue; }
-        if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; continue; }
-        if (c == ',' && depth == 0) { comma = i; break; }
+    {
+        CCInertScan ascan;
+        cc_inert_scan_init(&ascan, NULL);
+        ascan.at_line_start = 0;  /* args slice between parens */
+        size_t i = 0;
+        while (i < args_len) {
+            if (cc_inert_scan_step(&ascan, args, args_len, &i)) continue;
+            char c = args[i];
+            if (c == '(' || c == '[' || c == '{') { depth++; i++; continue; }
+            if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; i++; continue; }
+            if (c == ',' && depth == 0) { comma = i; break; }
+            i++;
+        }
     }
     if (comma == (size_t)-1) return strdup(expr);
     arg0 = args;
@@ -717,17 +659,12 @@ static int cc__match_kw_at(const char* s, size_t i, size_t end, const char* kw) 
 
 static size_t cc__scan_simple_stmt_end(const char* src, size_t i, size_t end) {
     int par = 0, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
-    for (; i < end; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer probe */
+    while (i < end) {
+        if (cc_inert_scan_step(&scan, src, end, &i)) continue;
         char ch = src[i];
-        char ch2 = (i + 1 < end) ? src[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (ins) { if (ch == '\\' && i + 1 < end) { i++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -735,6 +672,7 @@ static size_t cc__scan_simple_stmt_end(const char* src, size_t i, size_t end) {
         else if (ch == '{') br++;
         else if (ch == '}') { if (br) br--; }
         if (par == 0 && brk == 0 && br == 0 && ch == ';') return i;
+        i++;
     }
     return end;
 }
@@ -1033,17 +971,12 @@ static void cc__truncate_at_first_semicolon0(char* s) {
     if (!s) return;
     size_t sl = strlen(s);
     int par = 0, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
-    for (size_t i = 0; i < sl; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < sl) {
+        if (cc_inert_scan_step(&scan, s, sl, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < sl) ? s[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (ins) { if (ch == '\\' && i + 1 < sl) { i++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -1051,6 +984,7 @@ static void cc__truncate_at_first_semicolon0(char* s) {
         else if (ch == '{') br++;
         else if (ch == '}') { if (br) br--; }
         if (par == 0 && brk == 0 && br == 0 && ch == ';') { s[i] = 0; return; }
+        i++;
     }
 }
 
@@ -1073,8 +1007,8 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
 
     size_t sl = strlen(s);
     int par = 0, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
     size_t seg_s = 0;
     /* When an `@errhandler` (or similar `@`-prefixed) directive appears
      * at segment start, its `{...}` body is a self-contained statement
@@ -1086,15 +1020,10 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
     char** parts = NULL;
     int pn = 0, pc = 0;
 
-    for (size_t i = 0; i < sl; i++) {
+    size_t i = 0;
+    while (i < sl) {
+        if (cc_inert_scan_step(&scan, s, sl, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < sl) ? s[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (ins) { if (ch == '\\' && i + 1 < sl) { i++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -1135,6 +1064,7 @@ static int cc__split_top_level_semis(const char* s, char*** out_parts, int* out_
             seg_s = (ch == '}') ? i + 1 : i + 1;
             at_errhandler = 0;
         }
+        i++;
     }
     if (seg_s < sl) {
         char* part = cc__dup_slice(s, seg_s, sl);
@@ -1385,19 +1315,15 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
         /* split by two top-level semicolons */
         size_t hl = strlen(header);
         int parx = 0, brkx = 0, brx = 0;
-        int insx = 0; char qx = 0;
-        int in_lc = 0, in_bc = 0;
+        CCInertScan hscan;
+        cc_inert_scan_init(&hscan, NULL);
+        hscan.at_line_start = 0;  /* for-header slice */
         int semi_n = 0;
         size_t semi1 = 0, semi2 = 0;
-        for (size_t k = 0; k < hl; k++) {
+        size_t k = 0;
+        while (k < hl) {
+            if (cc_inert_scan_step(&hscan, header, hl, &k)) continue;
             char ch = header[k];
-            char ch2 = (k + 1 < hl) ? header[k + 1] : 0;
-            if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-            if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k++; } continue; }
-            if (insx) { if (ch == '\\' && k + 1 < hl) { k++; continue; } if (ch == qx) insx = 0; continue; }
-            if (ch == '/' && ch2 == '/') { in_lc = 1; k++; continue; }
-            if (ch == '/' && ch2 == '*') { in_bc = 1; k++; continue; }
-            if (ch == '"' || ch == '\'') { insx = 1; qx = ch; continue; }
             if (ch == '(') parx++;
             else if (ch == ')') { if (parx) parx--; }
             else if (ch == '[') brkx++;
@@ -1409,6 +1335,7 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
                 if (semi_n == 1) semi1 = k;
                 else if (semi_n == 2) semi2 = k;
             }
+            k++;
         }
         if (semi_n == 2) {
             out->for_init = cc__dup_slice(header, 0, semi1);
@@ -1645,17 +1572,14 @@ static int cc__emit_rhs_is_brace_init(const char* rhs) {
 static int cc__rhs_has_top_level_comma(const char* rhs) {
     if (!rhs) return 0;
     int par = 0, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
-    for (size_t i = 0; rhs[i]; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-expression slice */
+    size_t n = strlen(rhs);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, rhs, n, &i)) continue;
         char ch = rhs[i];
-        char ch2 = rhs[i + 1];
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (ins) { if (ch == '\\' && ch2) { i++; continue; } if (ch == q) ins = 0; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -1663,6 +1587,7 @@ static int cc__rhs_has_top_level_comma(const char* rhs) {
         else if (ch == '{') br++;
         else if (ch == '}') { if (br) br--; }
         else if (ch == ',' && par == 0 && brk == 0 && br == 0) return 1;
+        i++;
     }
     return 0;
 }
@@ -1882,9 +1807,13 @@ static char* cc__normalize_result_generic_bool_calls(const char* expr) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     int changed = 0;
+    CCInertScan scan;
     if (!expr) return NULL;
     n = strlen(expr);
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-expression slice */
     while (i < n) {
+        if (cc_inert_scan_step(&scan, expr, n, &i)) continue;
         const char* repl = NULL;
         size_t pat_len = 0;
         if (i + ok_len <= n && memcmp(expr + i, ok_pat, ok_len) == 0) {
@@ -1897,30 +1826,12 @@ static char* cc__normalize_result_generic_bool_calls(const char* expr) {
             i++;
             continue;
         }
+        /* The `(` is the last byte of the matched pattern. */
+        size_t lpar = i + pat_len - 1;
+        size_t rpar = 0;
+        if (!cc__find_matching_paren(expr, n, lpar, &rpar)) { i++; continue; }
         size_t arg_start = i + pat_len;
-        size_t arg_end = arg_start;
-        int depth = 1, in_str = 0, in_chr = 0;
-        for (; arg_end < n; arg_end++) {
-            char ch = expr[arg_end];
-            if (in_str) {
-                if (ch == '\\' && arg_end + 1 < n) { arg_end++; continue; }
-                if (ch == '"') in_str = 0;
-                continue;
-            }
-            if (in_chr) {
-                if (ch == '\\' && arg_end + 1 < n) { arg_end++; continue; }
-                if (ch == '\'') in_chr = 0;
-                continue;
-            }
-            if (ch == '"') { in_str = 1; continue; }
-            if (ch == '\'') { in_chr = 1; continue; }
-            if (ch == '(') depth++;
-            else if (ch == ')') {
-                depth--;
-                if (depth == 0) break;
-            }
-        }
-        if (arg_end >= n || expr[arg_end] != ')') { i++; continue; }
+        size_t arg_end = rpar;
         while (arg_start < arg_end && isspace((unsigned char)expr[arg_start])) arg_start++;
         while (arg_end > arg_start && isspace((unsigned char)expr[arg_end - 1])) arg_end--;
         if (arg_start < arg_end && expr[arg_start] == '&') {
@@ -3167,32 +3078,15 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                         const char* hit = NULL;
                         /* Find the name within the line; don't trust col_start for macro/pinned nodes. */
                         size_t nn = strlen(n[i].aux_s1);
-                        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-                        for (size_t q = 0; q + nn <= ln; q++) {
-                            char ch = ls[q];
-                            char ch2 = (q + 1 < ln) ? ls[q + 1] : 0;
-                            if (in_lc) break;
-                            if (in_bc) {
-                                if (ch == '*' && ch2 == '/') { in_bc = 0; q++; }
-                                continue;
-                            }
-                            if (in_str) {
-                                if (ch == '\\' && q + 1 < ln) { q++; continue; }
-                                if (ch == '"') in_str = 0;
-                                continue;
-                            }
-                            if (in_chr) {
-                                if (ch == '\\' && q + 1 < ln) { q++; continue; }
-                                if (ch == '\'') in_chr = 0;
-                                continue;
-                            }
-                            if (ch == '/' && ch2 == '/') { in_lc = 1; break; }
-                            if (ch == '/' && ch2 == '*') { in_bc = 1; q++; continue; }
-                            if (ch == '"') { in_str = 1; continue; }
-                            if (ch == '\'') { in_chr = 1; continue; }
-                            if (memcmp(ls + q, n[i].aux_s1, nn) != 0) continue;
-                            if (q > 0 && cc__is_ident_char(ls[q - 1])) continue;
-                            if (q + nn < ln && cc__is_ident_char(ls[q + nn])) continue;
+                        CCInertScan scan;
+                        cc_inert_scan_init(&scan, NULL);
+                        scan.at_line_start = 0;  /* mid-buffer one-line slice */
+                        size_t q = 0;
+                        while (q + nn <= ln) {
+                            if (cc_inert_scan_step(&scan, ls, ln, &q)) continue;
+                            if (memcmp(ls + q, n[i].aux_s1, nn) != 0) { q++; continue; }
+                            if (q > 0 && cc__is_ident_char(ls[q - 1])) { q++; continue; }
+                            if (q + nn < ln && cc__is_ident_char(ls[q + nn])) { q++; continue; }
                             hit = ls + q;
                             break;
                         }
