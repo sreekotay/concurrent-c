@@ -412,30 +412,25 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
     int edits_added = 0;
     size_t i = 0;
 
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
     int line = 1;
     int col = 1;
     unsigned long counter = 0;
 
     const char* input_path = (ctx && ctx->input_path) ? ctx->input_path : "<input>";
 
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, input_path);
+
     while (i < n) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, src, n, &i)) {
+            for (size_t k = before; k < i; k++) {
+                if (src[k] == '\n') { line++; col = 1; } else col++;
+            }
+            continue;
+        }
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        if (c == '\n') { line++; col = 1; i++; continue; }
 
         if (c == '@') {
             size_t j = i + 1;
@@ -445,22 +440,19 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                 if (!after || !cc_is_ident_char(after)) {
                     size_t k = j + 5;
                     while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\r' || src[k] == '\n')) k++;
-                    if (k >= n || src[k] != '{') { i++; col++; continue; }                    size_t body_s = k;
+                    if (k >= n || src[k] != '{') { i++; col++; continue; }
+                    size_t body_s = k;
                     int br = 1;
-                    int in_s2 = 0, in_lc2 = 0, in_bc2 = 0;
-                    char q2 = 0;
                     size_t m = body_s + 1;
-                    for (; m < n; m++) {
+                    CCInertScan body_scan;
+                    cc_inert_scan_init(&body_scan, NULL);
+                    body_scan.at_line_start = 0;
+                    while (m < n) {
+                        if (cc_inert_scan_step(&body_scan, src, n, &m)) continue;
                         char ch = src[m];
-                        char ch2 = (m + 1 < n) ? src[m + 1] : 0;
-                        if (in_lc2) { if (ch == '\n') in_lc2 = 0; continue; }
-                        if (in_bc2) { if (ch == '*' && ch2 == '/') { in_bc2 = 0; m++; } continue; }
-                        if (in_s2) { if (ch == '\\' && m + 1 < n) { m++; continue; } if (ch == q2) in_s2 = 0; continue; }
-                        if (ch == '/' && ch2 == '/') { in_lc2 = 1; m++; continue; }
-                        if (ch == '/' && ch2 == '*') { in_bc2 = 1; m++; continue; }
-                        if (ch == '"' || ch == '\'') { in_s2 = 1; q2 = ch; continue; }
                         if (ch == '{') br++;
                         else if (ch == '}') { br--; if (br == 0) break; }
+                        m++;
                     }
                     if (m >= n || br != 0) {
                         char rel[1024];
@@ -494,15 +486,13 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
 
                         size_t hdr_s = p;
                         int par = 0, brk2 = 0, br2 = 0;
-                        int ins = 0; char qq = 0;
                         size_t hdr_e = (size_t)-1;
-                        for (size_t q = p; q < body_e; q++) {
+                        CCInertScan hdr_scan;
+                        cc_inert_scan_init(&hdr_scan, NULL);
+                        hdr_scan.at_line_start = 0;
+                        for (size_t q = p; q < body_e; ) {
+                            if (cc_inert_scan_step(&hdr_scan, src, body_e, &q)) continue;
                             char ch = src[q];
-                            char ch2 = (q + 1 < body_e) ? src[q + 1] : 0;
-                            if (ins) { if (ch == '\\' && q + 1 < body_e) { q++; continue; } if (ch == qq) ins = 0; continue; }
-                            if (ch == '"' || ch == '\'') { ins = 1; qq = ch; continue; }
-                            if (ch == '/' && ch2 == '/') { while (q < body_e && src[q] != '\n') q++; continue; }
-                            if (ch == '/' && ch2 == '*') { q += 2; while (q + 1 < body_e && !(src[q] == '*' && src[q + 1] == '/')) q++; q++; continue; }
                             if (ch == '(') par++;
                             else if (ch == ')') { if (par) par--; }
                             else if (ch == '[') brk2++;
@@ -510,27 +500,25 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             else if (ch == '{') br2++;
                             else if (ch == '}') { if (br2) br2--; }
                             else if (ch == ':' && par == 0 && brk2 == 0 && br2 == 0) { hdr_e = q; break; }
+                            q++;
                         }
-                        if (hdr_e == (size_t)-1) break;                        p = hdr_e + 1;
+                        if (hdr_e == (size_t)-1) break;
+                        p = hdr_e + 1;
                         while (p < body_e && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
                         if (p >= body_e) break;
                         size_t cb_s = p;
                         size_t cb_e = (size_t)-1;
                         if (src[p] == '{') {
                             int brr = 1;
-                            int ins2 = 0; char qq2 = 0;
-                            int lc = 0, bc = 0;
-                            for (size_t q = p + 1; q < body_e; q++) {
+                            CCInertScan cb_scan;
+                            cc_inert_scan_init(&cb_scan, NULL);
+                            cb_scan.at_line_start = 0;
+                            for (size_t q = p + 1; q < body_e; ) {
+                                if (cc_inert_scan_step(&cb_scan, src, body_e, &q)) continue;
                                 char ch = src[q];
-                                char ch2 = (q + 1 < body_e) ? src[q + 1] : 0;
-                                if (lc) { if (ch == '\n') lc = 0; continue; }
-                                if (bc) { if (ch == '*' && ch2 == '/') { bc = 0; q++; } continue; }
-                                if (ins2) { if (ch == '\\' && q + 1 < body_e) { q++; continue; } if (ch == qq2) ins2 = 0; continue; }
-                                if (ch == '/' && ch2 == '/') { lc = 1; q++; continue; }
-                                if (ch == '/' && ch2 == '*') { bc = 1; q++; continue; }
-                                if (ch == '"' || ch == '\'') { ins2 = 1; qq2 = ch; continue; }
                                 if (ch == '{') brr++;
                                 else if (ch == '}') { brr--; if (brr == 0) { cb_e = q + 1; break; } }
+                                q++;
                             }
                         } else {
                             int par3 = 0, brk3 = 0, br3 = 0;

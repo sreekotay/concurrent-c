@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -38,29 +39,12 @@ static int cc__find_substr_in_range(const char* s,
 static int cc__scan_matching_rbrace(const char* s, size_t len, size_t lbrace_off, size_t* out_rbrace_off) {
     if (!s || lbrace_off >= len || s[lbrace_off] != '{') return 0;
     int depth = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (size_t i = lbrace_off; i < len; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* lbrace_off is mid-buffer */
+    for (size_t i = lbrace_off; i < len; ) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < len && s[i + 1] == '/') { in_block_comment = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-
         if (ch == '{') depth++;
         else if (ch == '}') {
             depth--;
@@ -69,6 +53,7 @@ static int cc__scan_matching_rbrace(const char* s, size_t len, size_t lbrace_off
                 return 1;
             }
         }
+        i++;
     }
     return 0;
 }
@@ -433,17 +418,13 @@ static int cc__parse_simple_fn_call(const char* s, size_t n,
 
 static int cc__split_top_level_commas(const char* s, size_t n, int* out_pos, int out_cap) {
     int par = 0, brk = 0, br = 0;
-    int ins = 0;
-    char qch = 0;
     int k = 0;
-    for (size_t i = 0; i < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* s is a mid-buffer slice */
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
-        if (ins) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) ins = 0;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') { ins = 1; qch = ch; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -453,6 +434,7 @@ static int cc__split_top_level_commas(const char* s, size_t n, int* out_pos, int
         else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
             if (k < out_cap) out_pos[k++] = (int)i;
         }
+        i++;
     }
     return k;
 }
@@ -460,26 +442,28 @@ static int cc__split_top_level_commas(const char* s, size_t n, int* out_pos, int
 static size_t cc__infer_spawn_stmt_end_off(const char* s, size_t len, size_t start_off) {
     if (!s || start_off >= len) return 0;
     size_t i = start_off;
-    /* Find first '(' after 'spawn'. */
+    /* Find first '(' after 'spawn'.  The simple linear walk to '(' is OK
+     * here because the caller anchors `start_off` on the identifier after
+     * `spawn` — no comments expected in the gap.  The full inert-aware
+     * scan kicks in once we cross the '('. */
     while (i < len && s[i] != '(') i++;
     if (i >= len || s[i] != '(') return 0;
     int par = 0;
-    int in_str = 0;
-    char qch = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* s is a mid-buffer slice */
     /* Scan to matching ')' for the spawn call. */
-    for (; i < len; i++) {
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
         char ch = s[i];
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') {
+        if (ch == '(') { par++; i++; continue; }
+        if (ch == ')') {
             if (par > 0) par--;
             if (par == 0) { i++; break; }
+            i++;
+            continue;
         }
+        i++;
     }
     if (i > len) i = len;
     /* Consume trailing whitespace and optional ';'. */
