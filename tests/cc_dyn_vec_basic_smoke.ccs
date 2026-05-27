@@ -1,0 +1,169 @@
+/* Commit 2 smoke: cc_dyn_vec — type-erased dynamic array driven by
+ * cc_type_info.  Exercises:
+ *   - basic push/pop/at/clear on three different T's (int, char,
+ *     double) all going through the SAME implementation symbol
+ *     (proving the link-time footprint story: one impl, many T)
+ *   - move-out semantics on pop(out) vs. drop semantics on pop(NULL)
+ *   - drop_fn dispatch for a non-POD type (a tiny "owned counter"
+ *     pseudo-resource that bumps a global on drop)
+ *
+ * This is the proof that cc_type_info (Commit 1) is structured
+ * the way real generic container code wants to consume it.
+ */
+
+#include <ccc/cc_dyn_vec.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* ---- Drop-fn dispatch fixture ----
+ *
+ * `OwnedCounter` simulates a resource handle: it carries an int,
+ * and dropping it bumps a global tally.  When cc_dyn_vec runs
+ * drop_fn on each live element during clear()/free(), that
+ * tally should equal the number of dropped elements. */
+
+typedef struct OwnedCounter {
+    int value;
+} OwnedCounter;
+
+static int g_drops = 0;
+
+static void OwnedCounter_drop(void* p) {
+    OwnedCounter* o = (OwnedCounter*)p;
+    if (o) g_drops += 1;
+}
+
+static const cc_type_info __cc_ti_OwnedCounter = {
+    .name      = "OwnedCounter",
+    .mangled   = "OwnedCounter",
+    .id        = 0,
+    .size      = sizeof(OwnedCounter),
+    .align     = _Alignof(OwnedCounter),
+    .kind      = (uint16_t)CC_TK_STRUCT,
+    .nfields   = 0,                              /* fields[] introspection comes in Commit 3 */
+    .flags     = (uint16_t)CC_TF_POD,            /* bytewise copy is fine; non-trivial drop */
+    ._reserved = 0,
+    .fields    = NULL,
+    .copy_fn   = NULL,                           /* memcpy is correct */
+    .drop_fn   = OwnedCounter_drop,
+};
+
+static int test_pod_int(CCArena* arena) {
+    cc_dyn_vec v;
+    if (cc_dyn_vec_init(&v, arena, type_of(int), 4) != 0) return 1;
+
+    for (int i = 0; i < 5; i++) {
+        if (cc_dyn_vec_push(&v, &i) != 0) return 2;
+    }
+    if (cc_dyn_vec_len(&v) != 5) return 3;
+
+    /* Read via at() — same memory the push() wrote to. */
+    for (int i = 0; i < 5; i++) {
+        int* p = (int*)cc_dyn_vec_at(&v, (size_t)i);
+        if (!p || *p != i) return 4;
+    }
+
+    /* Pop with move semantics: caller gets the bytes, drop_fn
+     * is NOT called (irrelevant for int but locks the contract). */
+    int got = -1;
+    if (cc_dyn_vec_pop(&v, &got) != 0) return 5;
+    if (got != 4) return 6;
+    if (cc_dyn_vec_len(&v) != 4) return 7;
+
+    /* Pop with NULL: drop_fn (also NULL for int) would run. */
+    if (cc_dyn_vec_pop(&v, NULL) != 0) return 8;
+    if (cc_dyn_vec_len(&v) != 3) return 9;
+
+    cc_dyn_vec_free(&v);
+    return 0;
+}
+
+static int test_pod_char(CCArena* arena) {
+    cc_dyn_vec v;
+    if (cc_dyn_vec_init(&v, arena, type_of(char), 0) != 0) return 1;
+
+    const char* msg = "hello";
+    for (size_t i = 0; i < strlen(msg); i++) {
+        if (cc_dyn_vec_push(&v, &msg[i]) != 0) return 2;
+    }
+    if (cc_dyn_vec_len(&v) != 5) return 3;
+
+    /* Compare elementwise. */
+    for (size_t i = 0; i < 5; i++) {
+        char* p = (char*)cc_dyn_vec_at(&v, i);
+        if (!p || *p != msg[i]) return 4;
+    }
+
+    cc_dyn_vec_free(&v);
+    return 0;
+}
+
+static int test_pod_double(CCArena* arena) {
+    cc_dyn_vec v;
+    if (cc_dyn_vec_init(&v, arena, type_of(double), 0) != 0) return 1;
+
+    double xs[] = { 1.5, 2.5, 3.5 };
+    for (int i = 0; i < 3; i++) {
+        if (cc_dyn_vec_push(&v, &xs[i]) != 0) return 2;
+    }
+
+    double* a = (double*)cc_dyn_vec_at(&v, 0);
+    double* b = (double*)cc_dyn_vec_at(&v, 1);
+    double* c = (double*)cc_dyn_vec_at(&v, 2);
+    if (!a || !b || !c) return 3;
+    if (*a != 1.5 || *b != 2.5 || *c != 3.5) return 4;
+
+    cc_dyn_vec_free(&v);
+    return 0;
+}
+
+static int test_drop_fn_dispatch(CCArena* arena) {
+    g_drops = 0;
+    cc_dyn_vec v;
+    if (cc_dyn_vec_init(&v, arena, &__cc_ti_OwnedCounter, 4) != 0) return 1;
+
+    for (int i = 0; i < 7; i++) {
+        OwnedCounter o = { .value = i };
+        if (cc_dyn_vec_push(&v, &o) != 0) return 2;
+    }
+    if (cc_dyn_vec_len(&v) != 7) return 3;
+    if (g_drops != 0) return 4;  /* push doesn't drop */
+
+    /* Pop with move: ownership transfers, drop_fn must NOT run. */
+    OwnedCounter taken = { 0 };
+    if (cc_dyn_vec_pop(&v, &taken) != 0) return 5;
+    if (taken.value != 6) return 6;
+    if (g_drops != 0) return 7;  /* move-out does NOT drop */
+
+    /* Pop without move: drop_fn must run on the in-vec copy. */
+    if (cc_dyn_vec_pop(&v, NULL) != 0) return 8;
+    if (g_drops != 1) return 9;  /* discard DOES drop */
+
+    /* Clear drops all remaining. */
+    cc_dyn_vec_clear(&v);
+    if (g_drops != 1 + 5) return 10;  /* 1 from pop(NULL) + 5 remaining */
+    if (cc_dyn_vec_len(&v) != 0) return 11;
+
+    cc_dyn_vec_free(&v);
+    return 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(8 * 1024);
+    if (!arena.base) {
+        printf("FAIL arena: cc_arena_heap returned NULL base\n");
+        return 1;
+    }
+
+    int rc;
+    if ((rc = test_pod_int   (&arena)) != 0) { printf("FAIL int rc=%d\n",    rc); return 2; }
+    if ((rc = test_pod_char  (&arena)) != 0) { printf("FAIL char rc=%d\n",   rc); return 3; }
+    if ((rc = test_pod_double(&arena)) != 0) { printf("FAIL double rc=%d\n", rc); return 4; }
+    if ((rc = test_drop_fn_dispatch(&arena)) != 0) { printf("FAIL drop rc=%d\n", rc); return 5; }
+
+    cc_arena_destroy(&arena);
+    printf("cc_dyn_vec: 4 OK\n");
+    return 0;
+}

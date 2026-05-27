@@ -197,6 +197,41 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    parts of phase-1 chan_handle/slice/Generic lowering that re-run on
    already-lowered text, etc. Audit and remove.
 
+**4a. `cc_type_info` runtime type system + erased containers.**
+*Status: in progress (Commits 1 & 2 of 3 landed 2026-05-27).*
+
+This is the strategic foundation under "generics with selectable
+link-time footprint" and "performant + fully complete comptime."
+
+  - Commit 1 (`11251dd`): `cc_type_info` struct in
+    `cc/include/ccc/cc_type.cch` — fixed-shape on-disk record
+    (name, mangled, id, size, align, kind, nfields, flags,
+    fields[], copy_fn, drop_fn).  Primitive symbols
+    (`__cc_ti_int`, `__cc_ti_char`, …) emitted from
+    `cc/runtime/cc_type_info.c` and always linked.  `type_of(T)`
+    macro resolves to `(&__cc_ti_T)`.  Layout-locking smoke:
+    `tests/cc_type_info_primitives_smoke.ccs`.
+  - Commit 2 (this): `cc_dyn_vec` type-erased dynamic array in
+    `cc/include/ccc/cc_dyn_vec.cch` + `cc/runtime/cc_dyn_vec.c`.
+    SINGLE implementation (`cc_dyn_vec_push`, `_pop`, `_at`,
+    `_clear`, `_free`, `_init`, `_reserve`) handles any element
+    type via `ti->size`/`ti->align`/`ti->copy_fn`/`ti->drop_fn`.
+    Smoke (`tests/cc_dyn_vec_basic_smoke.ccs`) exercises int,
+    char, double AND a non-POD `OwnedCounter` with a `drop_fn`,
+    proving the dispatch contract end-to-end.  Symbol audit on
+    the test object confirms 7 undefined refs total — one per
+    op, regardless of element type.
+  - Commit 3 (separate session): teach the compiler that
+    `type_of(T)` is a parser-level builtin (so unregistered T
+    gives a sane diagnostic instead of a linker error), and
+    extend `@comptime` so `type_of(T).fields` walks struct
+    layouts.  This unlocks the "performant + fully complete"
+    half of the strategic goal.
+
+The legacy `cc_type_register(T, hooks)` API is untouched;
+unification (registering also emits a per-T `cc_type_info`) is
+part of Commit 3 work.
+
 **4b. Stable closure-IDs + delete `pass_closure_literal_ast.c`'s
 recovery path.**  Today closure literals are matched between passes
 by `(file, line_start, line_end, col_start)`.  That breaks whenever

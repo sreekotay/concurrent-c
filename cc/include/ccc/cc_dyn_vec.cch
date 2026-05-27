@@ -1,0 +1,80 @@
+#ifndef CC_DYN_VEC_H
+#define CC_DYN_VEC_H
+
+/*
+ * `cc_dyn_vec` — type-erased dynamic array.
+ *
+ * One implementation (in `cc/runtime/cc_dyn_vec.c`) handles ALL
+ * element types via `cc_type_info`.  Contrast with
+ * `CC_VEC_DECL_ARENA(T, Name)` which monomorphizes a fresh
+ * push/pop/at family per T.
+ *
+ * When to use which:
+ *   - `Vec<T>` / `CC_VEC_DECL_ARENA` — perf-critical paths,
+ *     hot loops, small T, where bytewise inlining wins.
+ *   - `cc_dyn_vec` — link-size-critical paths, generic library
+ *     code that needs to operate on any T, comptime-driven
+ *     code where T is only known at compile time.
+ *
+ * Both ABIs interoperate via `cc_type_info`: a `Vec<int>` whose
+ * element matches `__cc_ti_int` can be wrapped or fed into
+ * `cc_dyn_vec`-shaped APIs without copying.
+ *
+ * Memory: arena-backed via the existing `cc_vec_*` infra.  When
+ * the vec is freed (or the arena resets), `drop_fn` is called on
+ * each live element.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_vec.cch>
+
+typedef struct cc_dyn_vec {
+    CCVec               base;   /* leverages cc_vec_* growth/header */
+    const cc_type_info* ti;     /* dispatches copy_fn/drop_fn/size/align */
+} cc_dyn_vec;
+
+/* Initialize `v` to an empty type-erased vec backed by `arena`.
+ * Both `arena` and `ti` must be non-NULL.  Returns 0 on success,
+ * -1 on bad args or allocation failure. */
+int   cc_dyn_vec_init   (cc_dyn_vec* v, CCArena* arena,
+                         const cc_type_info* ti, size_t initial_cap);
+
+/* Number of live elements. */
+size_t cc_dyn_vec_len   (const cc_dyn_vec* v);
+
+/* Pointer to element `idx` (size = `v->ti->size`).  NULL if out of
+ * bounds.  Caller may dereference / mutate in place. */
+void*  cc_dyn_vec_at    (const cc_dyn_vec* v, size_t idx);
+
+/* Pre-grow capacity to at least `need` elements.  0 on success. */
+int    cc_dyn_vec_reserve(cc_dyn_vec* v, size_t need);
+
+/* Append a copy of `elem`.  Dispatch:
+ *   - if `ti->copy_fn` is non-NULL:  copy_fn(slot, elem)
+ *   - else:                          memcpy(slot, elem, ti->size)
+ * Returns 0 on success, -1 on bad args or allocation failure. */
+int    cc_dyn_vec_push  (cc_dyn_vec* v, const void* elem);
+
+/* Remove the last element.  Dispatch:
+ *   - if `out` is non-NULL:  memcpy(out, slot, ti->size) — move
+ *                            semantics; caller takes ownership;
+ *                            `drop_fn` is NOT called.
+ *   - else:                  drop_fn(slot) if non-NULL.
+ * Returns 0 on success, -1 on empty vec. */
+int    cc_dyn_vec_pop   (cc_dyn_vec* v, void* out);
+
+/* Drop all live elements (via `drop_fn` if non-NULL) and reset
+ * `len` to 0.  Capacity is retained for reuse. */
+void   cc_dyn_vec_clear (cc_dyn_vec* v);
+
+/* Like `cc_dyn_vec_clear` but also releases the data backing —
+ * the arena ultimately reclaims, but `v->base` is reset so
+ * subsequent ops behave as if uninitialized.  Future-proofing
+ * for non-arena backends. */
+void   cc_dyn_vec_free  (cc_dyn_vec* v);
+
+#endif /* CC_DYN_VEC_H */
