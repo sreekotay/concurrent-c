@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 (mechanical migration) ready to start.
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (1 / 13 batches landed).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -53,18 +53,18 @@ Today: zero behavior change.  After Phase 4: scanners ignore inert content AND h
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (Phase 1 close).
+Updated 2026-05-27 (post Batch A).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **8** |
-| Remaining to migrate | **94** |
-| — trivial | 58 |
-| — medium | 31 |
+| Already on `CCInertScan` | **11** (+3 from Batch A) |
+| Remaining to migrate | **91** |
+| — trivial | 56 |
+| — medium | 30 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
-Smoke baseline at Phase 1 close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
+Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
 
 ---
 
@@ -137,11 +137,11 @@ Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`
 | `cc__normalize_result_generic_bool_calls` (~1876) | rewrite | {str,chr} | ~25 | medium | No comments |
 | anon loop in `cc_async_rewrite_state_machine_ast` (~3170) | find-only | {lc,bc,str,chr} | ~25 | medium | Per-line type extraction |
 
-### `pass_ufcs.c` (900 LOC, 1 site, no `text_scan.h`)
+### `pass_ufcs.c` (900 LOC, 1 site, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__line_has_await_keyword` (~106) | find-only | {str,qch} + in_blk_cmt | ~28 | trivial | **Easy first win** |
+| `cc__line_has_await_keyword` (~106) | find-only | {str,qch} + in_blk_cmt | ~28 | trivial | **✓ Migrated (Batch A)** |
 
 ### `pass_match_syntax.c` (712 LOC, 7 sites, no `text_scan.h`)
 
@@ -180,17 +180,17 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Lower-priority mi
 | `cc__build_ufcs_arg_slices` (~702) | find-only | {str,chr} | ~40 | medium | Two-pass comma split; no comments |
 | anon loop in `cc__emit_closure_field_call` (~1511) | find-only | {str,qch} | ~18 | trivial | |
 
-### `checker.c` (1314 LOC, 1 site, no `text_scan.h`)
+### `checker.c` (1314 LOC, 1 site, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| anon loop in `cc_visit_checker` (~918) | find-only | {lc,bc,str,chr} | ~35 | trivial | **Easy first win** |
+| anon loop in `cc_visit_checker` (~918) | find-only | {lc,bc,str,chr} | ~35 | trivial | **✓ Migrated (Batch A)** |
 
-### `edit_buffer.c` (385 LOC, 1 site, no `text_scan.h`)
+### `edit_buffer.c` (385 LOC, 1 site, now uses `text_scan.h`)
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc_find_first_func_def_offset` (~174) | find-only | {lc,bc,str,chr} | ~45 | medium | brace_depth, ad-hoc `#` skip; offset correctness critical |
+| `cc_find_first_func_def_offset` (~174) | find-only | {lc,bc,str,chr} | ~45 | medium | **✓ Migrated (Batch A)** — `brace_depth` / `last_line_off` stayed alongside; ad-hoc `#`-skip replaced by `CCInertScan` in_pp; inert newlines tracked via post-step sweep |
 
 ### `visit_codegen.c` (5598 LOC, 10 inline + 2 migrated, has `text_scan.h`)
 
@@ -293,15 +293,20 @@ Each batch is one commit, with smoke verification (default + `CC_PRE_EXPAND=0`) 
 
 Ordering principle: **easy wins first to build muscle memory, then per-area sweeps, then complex/risky sites, then backward scanners last.**
 
-### Batch A — single-site easy wins (3 sites, 1 commit)
+### Batch A — single-site easy wins (3 sites, 1 commit) — **LANDED 2026-05-27**
 
 > Goal: lowest-risk start; establishes that the migration pattern works across diverse pass files.
 
-- [ ] `pass_ufcs.c::cc__line_has_await_keyword` (~28 LOC, trivial)
-- [ ] `checker.c::cc_visit_checker` anon (~35 LOC, trivial)
-- [ ] `edit_buffer.c::cc_find_first_func_def_offset` (~45 LOC, medium — `brace_depth` stays alongside)
+- [x] `pass_ufcs.c::cc__line_has_await_keyword` (~28 LOC, trivial)
+- [x] `checker.c::cc_visit_checker` anon (~35 LOC, trivial)
+- [x] `edit_buffer.c::cc_find_first_func_def_offset` (~45 LOC, medium — `brace_depth` + `last_line_off` stay alongside)
 
-**Expected diff**: ~-100 LOC scanner code, +6 `#include` lines + ~30 `cc_inert_scan_step` calls.  Smoke: 461/461 both modes.
+**Actual diff**: −101 / +37 (net −64).  Smoke 461/461 both modes.  Lowered C inspected on `r1_async_name_smoke` (rewrite paths produce identical `cc_nursery_spawn_async_named(...)` calls).
+
+**Surprises:**
+- For `cc__line_has_await_keyword`, the original ignored `#`-line directives (line is mid-buffer slice).  Migration sets `s.at_line_start = 0` after init to preserve exact behavior — otherwise `CCInertScan` would treat a leading `#` as a pp directive on subsequent lines (none reach this path in practice, but defensive).
+- For `cc_find_first_func_def_offset`, newlines inside inert regions still need to advance `last_line_off`.  Solved by sweeping the consumed `[before, i)` range after each `cc_inert_scan_step` returns 1.  Pattern is reusable for any "find-only with line tracking" site (e.g. `cc__cg_type_decl_end_top_level` in F2).
+- The ad-hoc `#`-directive skip in `cc_find_first_func_def_offset` was replaced by `CCInertScan`'s built-in `in_pp` handling, which is strictly more correct (handles line continuations + the at-line-start guard properly).
 
 ### Batch B — type-syntax sweep (7 sites, 1 commit)
 
