@@ -1382,42 +1382,15 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
             pp_len = strlen(prep);
         }
     }
-    /* M7.C (opt-in): pre-expand the FINAL reparse input (after all
-     * #include-emitting prelude steps: cc_preprocess_for_reparse +
-     * cc__prepend_reparse_prelude + parser-helper rewrites). Pre-expanding
-     * earlier causes subsequent prelude steps to re-include system headers
-     * and trigger double-decl errors (e.g. __mbstate_t from Apple SDK).
-     * After CPP runs, re-lower any CC type syntax that emerged from macro
-     * expansion.
-     *
-     * Gated behind CC_PRE_EXPAND_REPARSE (separate from CC_PRE_EXPAND)
-     * because CPP-expanding the full reparse buffer changes some AST
-     * shapes (e.g. async function bodies emitted by phase-3) in ways
-     * that confuse later AST walkers. Full macro-generated CC-syntax
-     * support requires the visitor refactor (M1) that consumes
-     * cc_build_parse_input's pre-expanded buffer directly; this opt-in
-     * path lets us validate the pipeline end-to-end for the macro cases
-     * in tests/macro/ without disturbing the 429/429 default. */
-    const char* _ppe_rp = getenv("CC_PRE_EXPAND_REPARSE");
-    if (prep && _ppe_rp && _ppe_rp[0] && _ppe_rp[0] != '0' && input_path) {
-        size_t exp_len = 0;
-        char* expanded = cc_cpp_expand(prep, pp_len, input_path, &exp_len);
-        if (expanded) {
-            if (getenv("CC_DEBUG_PRE_EXPAND")) {
-                fprintf(stderr, "[cc:pre-expand:reparse] stage=%s %zu -> %zu bytes\n",
-                        stage ? stage : "?", pp_len, exp_len);
-            }
-            free(prep);
-            prep = expanded;
-            pp_len = exp_len;
-            char* relowered = cc_relower_cc_type_syntax_preserving_registry(prep, pp_len, input_path);
-            if (relowered) {
-                free(prep);
-                prep = relowered;
-                pp_len = strlen(prep);
-            }
-        }
-    }
+    /* Note: an earlier prototype gated reparse-side pre-expand behind a
+     * separate `CC_PRE_EXPAND_REPARSE` env knob.  That path is removed:
+     * CPP-expanding the FINAL reparse buffer changes AST line/offset
+     * coordinates relative to `src_ufcs` (which is NOT re-expanded by the
+     * outer visitor), causing async_ast, UFCS, and other AST walkers to
+     * walk past their intended targets.  Proper macro-in-reparse support
+     * needs the full M1 swap (visitor consumes the pre-expand buffer
+     * end-to-end) — see PASS_INVENTORY.md and COMPILER_CLEANUP_STATUS.md.
+     * Until then, reparses use the unexpanded prelude+sanitize chain. */
 
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));

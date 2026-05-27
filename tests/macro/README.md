@@ -1,11 +1,16 @@
 # Macro-generated CC syntax tests
 
 **Status:** M7.A + M7.B + M7.C (partial) + M7.C3 (M1-lite plumbing)
-shipped. 436/436 smoke pass in both default and `CC_PRE_EXPAND=1`
-modes; the additional `CC_PRE_EXPAND_REPARSE=1` flag exercises the
-reparse-side CPP path but is opt-in because it changes AST shapes in
-4 unrelated smoke tests. The M7.C3 plumbing means the channel-pair
-scanner CAN now resolve macro-generated chan handle decls (e.g.
+shipped, and pre-expand is now the default (2026-05-26 flip). 447/447
+smoke pass under the new default (pre-expand on) AND under the legacy
+`CC_PRE_EXPAND=0` (or `CC_PRE_EXPAND=`) path. The earlier
+`CC_PRE_EXPAND_REPARSE=1` opt-in was removed: CPP-expanding the
+final reparse buffer broke AST coord alignment with the visitor's
+working buffer in 4 unrelated tests (`async_chan_await_works_smoke`,
+`async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`,
+`ufcs_nested_std_io_smoke`); the proper fix for that is the M1
+visitor swap. The M7.C3 plumbing means the channel-pair scanner
+CAN now resolve macro-generated chan handle decls (e.g.
 `CHAN(int) tx;` → `int[~4 >] tx;`) by falling back to
 `CCASTRoot.parse_buffer_pre_relower`; the remaining blocker for end-
 to-end macro CHAN compile is the reparse path itself, which still
@@ -46,11 +51,13 @@ Expected: `CHAN(int) tx;` expands to `int[~4 >] tx;` with `#line`
 markers preserved.
 
 End-to-end build (works for non-macro CC files today — the macro
-tests in this folder still fail until M7.B lands):
+tests in this folder still fail until full M1 lands):
 
 ```
-CC_PRE_EXPAND=1 cc/bin/ccc <your-file>.ccs
-CC_PRE_EXPAND=1 make smoke   # 429/429 pass
+cc/bin/ccc <your-file>.ccs              # pre-expand is now default
+CC_PRE_EXPAND=0 cc/bin/ccc <your-file>.ccs  # legacy path
+make smoke                              # 447/447 pass under default
+CC_PRE_EXPAND=0 make smoke              # 447/447 pass under legacy
 ```
 
 ## What landed in M7.B
@@ -76,15 +83,17 @@ during pre-expand.
    generated CC type syntax like `int[~4 >]` (from `#define CHAN(T)
    T[~4 >]`) is now lowered to `CCChanTx_int` and TCC's initial parse
    succeeds.
-2. Mirror of (1) inside `cc__reparse_source_to_ast` in
-   `visit_codegen.c`, but gated behind a separate env var
-   (`CC_PRE_EXPAND_REPARSE=1`) because CPP-expanding the full reparse
-   buffer (post-prelude) regresses 4 unrelated smoke tests
-   (`async_chan_await_works_smoke`, `async_channel_typed_lowered_smoke`,
-   `call_site_noblock_smoke`, `ufcs_nested_std_io_smoke`) by changing
-   AST shapes the async-AST and a few UFCS passes depend on. Useful
-   for validating the end-to-end CPP-through-reparse pipeline
-   without disturbing the default.
+2. ~~Mirror of (1) inside `cc__reparse_source_to_ast`~~ — **removed
+   2026-05-26**.  Was gated behind `CC_PRE_EXPAND_REPARSE=1`.  The
+   root cause of the 4 regressions (`async_chan_await_works_smoke`,
+   `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`,
+   `ufcs_nested_std_io_smoke`) is structural: the CPP-expanded
+   reparse buffer carries line/offset coordinates that do NOT line
+   up with `src_ufcs` (which the outer visitor does NOT re-expand).
+   AST walkers like `async_ast` then walk past their intended target
+   nodes.  Fixing this properly is the M1 visitor swap: feed the
+   visitor the pre-expanded buffer end-to-end so AST and source
+   agree on coordinates.
 
 ## What landed in M7.C3 (M1-lite visitor plumbing + heap-safety fix)
 
@@ -124,9 +133,9 @@ now resolve macro-generated `tx`/`rx`). The remaining blocker is the
 reparse path: `cc__reparse_source_to_ast` re-runs phase-1+phase-3 on
 the raw user source, so macros like `CHAN(int) tx;` are still opaque
 to chan-handle lowering on the reparse side and TCC chokes on the
-literal `CHAN(int)`. The fix is to enable `CC_PRE_EXPAND_REPARSE=1`
-by default after addressing the four regressions called out in the
-M7.C2 caveat. Tracked under "Recommended next work #1" in
+literal `CHAN(int)`. The proper fix is the M1 visitor swap (the
+visitor consumes the pre-expanded buffer end-to-end). Tracked under
+"Recommended next work" in
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).
 
 ## M5.5 (TCC fork) — still relevant if pre-expand turns out to be infeasible
@@ -143,8 +152,9 @@ pre-expand:
 ## Related
 
 - `CC_BATCH_PHASE3=1` — experimental Phase 3 batching (off by default)
-- `CC_PRE_EXPAND=1` — experimental TCC-CPP pre-expand of the initial
-  parse + post-expand re-lower (off by default; 429/429 smoke)
-- `CC_PRE_EXPAND_REPARSE=1` — also pre-expand the reparse buffer
-  (off by default; opt-in, regresses 4 smoke tests today)
+- `CC_PRE_EXPAND` — TCC-CPP pre-expand of the initial parse +
+  post-expand re-lower.  **Default-on (2026-05-26).**  Disable with
+  `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty).
+- ~~`CC_PRE_EXPAND_REPARSE=1`~~ — removed 2026-05-26 (broke AST coord
+  alignment for the reparse side; real fix is the M1 visitor swap).
 - `CC_DEBUG_PRE_EXPAND=1` — verbose pre-expand diagnostics

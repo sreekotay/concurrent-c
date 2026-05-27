@@ -1,15 +1,15 @@
 /* M7.A smoke: a representative CC program that exercises the
  * pre-expand pipeline end-to-end on the initial parse (containers,
- * channels, closures, result types, UFCS).  With `CC_PRE_EXPAND=1`,
- * `cc_cpp_expand` runs after `cc_preprocess_for_initial_parse` and
- * the prepended `#include` lines for `CCResult_int`,
- * `CCVec_int_init`, etc. must all resolve cleanly in a single CPP
- * pass.  Any regression where pre-expand re-triggers system-header
- * inclusion (e.g. `__mbstate_t` double-decl) would surface here too.
+ * channels, closures, result types, UFCS).  Pre-expand is now the
+ * DEFAULT (2026-05-26 flip): `cc_cpp_expand` runs after
+ * `cc_preprocess_for_initial_parse` and the prepended `#include`
+ * lines for `CCResult_int`, `CCVec_int_init`, etc. must all resolve
+ * cleanly in a single CPP pass.  Any regression where pre-expand
+ * re-triggers system-header inclusion (e.g. `__mbstate_t`
+ * double-decl) would surface here.
  *
- * Runs identically under the default pipeline AND under
- * `CC_PRE_EXPAND=1`; the smoke runner exercises the default,
- * `CC_PRE_EXPAND=1 make smoke` covers the opt-in path. */
+ * Runs identically under the new default AND under the legacy
+ * non-expanded path (`CC_PRE_EXPAND=0 make smoke`). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
