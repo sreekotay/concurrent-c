@@ -1,7 +1,8 @@
 # Compiler cleanup status (M0–M5.5)
 
 **Last updated:** 2026-05-26  
-**Smoke suite:** 436 tests passing (`make smoke`, default + `CC_PRE_EXPAND=1`)
+**Smoke suite:** 447 tests passing under the new default (pre-expand on)
+AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
 
 This is the single source of truth for the compiler cleanup workstream (M0–M5.5). See also [PIPELINE.md](../src/visitor/PIPELINE.md), [PASS_INVENTORY.md](../src/visitor/PASS_INVENTORY.md), [DIAG_AUDIT.md](../src/diag/DIAG_AUDIT.md), [M6_DEFERRED.md](../src/visitor/M6_DEFERRED.md).
 
@@ -179,12 +180,16 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
      to support this work and remains useful as a fallback for
      scanners that aren't yet `#line`-aware.
 
-3. **Flip `CC_PRE_EXPAND=1` to default** (post-M1). Once item #2 is
-   green and the macro CHAN tests in `tests/macro/` compile end-to-end,
-   make pre-expand the default. Remove the `.env` sidecar pinning
-   `tests/m0_5_diag_origin_line_fail.ccs` to non-pre-expand mode (the
-   source-map drift goes away when the visitor and AST agree on
-   coordinates).
+3. **Flip `CC_PRE_EXPAND=1` to default** — **DONE 2026-05-26**.  Pre-expand
+   is now the default for the initial parse; opt out with
+   `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty).  Same 447/447 smoke
+   under both new-default-on and legacy-off; same 47/47 stress.
+   The dead reparse-side knob `CC_PRE_EXPAND_REPARSE` was removed at
+   the same time (CPP-expanding the reparse buffer breaks AST coord
+   alignment with `src_ufcs` until the full M1 swap lands).
+   The `.env` sidecar pinning `tests/m0_5_diag_origin_line_fail.ccs`
+   to `CC_PRE_EXPAND=` stays until the M1 visitor + source-map align;
+   see that file's comment for the rationale.
 
 4. **Retire redundant text passes** (post-flip). With CPP handling
    `#include` resolution unconditionally, several legacy passes become
@@ -214,8 +219,8 @@ Then in priority order (independent of M1):
 | `CC_DEBUG_REPARSE_DUMP_DIR=...` | Write intermediate buffers per reparse |
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
 | `CC_BATCH_PHASE3=1` | Experimental batched Phase 3 collectors |
-| `CC_PRE_EXPAND=1` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse. Zero-regression opt-in |
-| `CC_PRE_EXPAND_REPARSE=1` | M7.C2: run CPP over the FINAL reparse buffer (after `cc_preprocess_for_reparse` + reparse prelude + parser-helper rewrites). Opt-in; see M7.C2 caveat above for the four regressing smoke tests |
+| `CC_PRE_EXPAND` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse.  **Default-on (2026-05-26).**  Opt out with `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty) |
+| ~~`CC_PRE_EXPAND_REPARSE=1`~~ | **Removed 2026-05-26.**  Was an opt-in CPP-expand of the FINAL reparse buffer; broke AST coord alignment with the visitor's working buffer.  Real fix requires the M1 visitor swap |
 | `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |
 | `CC_DEBUG_PRE_EXPAND_DUMP=/path` | Dump the post-expand buffer to a file (M7.A debugging) |
 

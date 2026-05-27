@@ -437,8 +437,9 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
      * macro-generated chan handles). The buffer ownership is transferred
      * to root; `cc_tcc_bridge_free_ast` frees it. */
     {
+        /* Default-on; see build_parse_input.c for the disable rules. */
         const char* _ppe = getenv("CC_PRE_EXPAND");
-        int _ppe_on = (_ppe && _ppe[0] && _ppe[0] != '0');
+        int _ppe_on = !_ppe ? 1 : (_ppe[0] && _ppe[0] != '0');
         if (root && _ppe_on && pp_buf) {
             root->parse_buffer = pp_buf;       /* take ownership */
             root->parse_buffer_len = prep.len;
