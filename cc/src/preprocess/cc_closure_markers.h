@@ -55,6 +55,49 @@
  * heuristic entirely once we trust the marker path on the
  * full smoke suite.
  *
+ * (d.2) IMPLEMENTATION NOTE — DUAL-INJECTION DOESN'T WORK:
+ *
+ * The obvious approach for letting the closure pass consume
+ * markers is to *also* inject markers into `src_all` (the
+ * visitor's working buffer in visit_codegen.c) so column-based
+ * AST resolution against src_all lands at the same logical
+ * position as in `root->parse_buffer` (which already has
+ * markers from `cc_build_parse_input`).  This was tried on
+ * 2026-05-27 and broke 8 unrelated smokes (closure_unsafe_ref,
+ * result_custom_types, closure_field_capture, etc.) — many
+ * text passes that walk src_all/src_ufcs are byte-position
+ * sensitive in ways the inline marker bytes disrupt, even
+ * though CCInertScan skips the marker comments.
+ *
+ * The proper consumer migration needs ONE of:
+ *
+ *   (A) A separate marker offset table, stored on `CCASTRoot`
+ *       or in the visitor ctx, populated from `root->parse_buffer`
+ *       at AST-build time and read by pass_closure_literal_ast.c
+ *       — no src_ufcs modification.  Cleanest but requires
+ *       widening the AST root + plumbing through every
+ *       reparse call site.
+ *
+ *   (B) Inject markers locally just before the closure pass
+ *       and strip them after, in a try/finally pattern around
+ *       `cc__rewrite_closure_literals_with_nodes_ex`.  Smaller
+ *       blast radius but introduces a stripping pass and only
+ *       protects the closure-literal pass — other consumers
+ *       (cc__infer_closure_end_off, etc.) still see no markers.
+ *
+ *   (C) Map markers from parse_buffer offsets to src_ufcs
+ *       offsets by walking both buffers line-by-line and
+ *       converting marker offsets via the line-table mapping.
+ *       Feasible (lines match between buffers because markers
+ *       and CPP-expanded headers preserve line numbers via
+ *       #line directives), but more code than (A).
+ *
+ * Recommendation: do (A).  The plumbing is one struct field
+ * + a malloc'd `(start_off, id)[]` table + reading it from the
+ * pass.  Defer until there's a concrete need beyond the
+ * "principled architecture" win — the current heuristic
+ * stack passes 458/458 smokes.
+ *
  * Returns a newly malloc'd buffer with markers injected
  * (caller frees), NULL when no closures were found (zero-cost
  * no-op path for source files without any `=>`), or NULL with
