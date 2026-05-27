@@ -151,61 +151,23 @@ static int cc__at_err_postfix(const char* s, size_t len, size_t i) {
 
 static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size_t* out_end) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    for (; i < len; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer probe */
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
         char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < len && s[i + 1] == '/') {
-                in_block_comment = 0;
-                i++;
-            }
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < len) {
-                i++;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '/') {
-            in_line_comment = 1;
-            i++;
-            continue;
-        }
-        if (ch == '/' && i + 1 < len && s[i + 1] == '*') {
-            in_block_comment = 1;
-            i++;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            in_str = 1;
-            qch = ch;
-            continue;
-        }
         if (ch == '(') par++;
-        else if (ch == ')') {
-            if (par) par--;
-        } else if (ch == '[')
-            brk++;
-        else if (ch == ']') {
-            if (brk) brk--;
-        } else if (ch == '{')
-            br++;
-        else if (ch == '}') {
-            if (br) br--;
-        } else if (ch == ';' && par == 0 && brk == 0 && br == 0) {
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == ';' && par == 0 && brk == 0 && br == 0) {
             if (out_end) *out_end = i + 1;
             return 1;
         }
+        i++;
     }
     return 0;
 }
@@ -290,17 +252,13 @@ static void cc__err_skip_block_comment_backward(const char* s, size_t* i) {
 static int cc__err_pos_in_line_comment(const char* s, size_t pos) {
     size_t line_start = pos;
     while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    int in_str = 0;
-    char qch = 0;
-    for (size_t k = line_start; k < pos; k++) {
-        char c = s[k];
-        if (in_str) {
-            if (c == '\\' && k + 1 < pos) { k++; continue; }
-            if (c == qch) in_str = 0;
-            continue;
-        }
-        if (c == '"' || c == '\'') { in_str = 1; qch = c; continue; }
-        if (c == '/' && k + 1 < pos && s[k + 1] == '/') return 1;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
+    size_t k = line_start;
+    while (k < pos) {
+        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
+        if (scan.in_line_comment) return 1;
     }
     return 0;
 }
@@ -532,55 +490,18 @@ static char* cc__expand_delegations(const char* body,
     }
     char* acc = NULL;
     size_t al = 0, ac = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* body is a mid-buffer slice */
     *ok = 1;
-    for (size_t i = 0; i < blen; i++) {
+    size_t i = 0;
+    while (i < blen) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, body, blen, &i)) {
+            cc__append_n(&acc, &al, &ac, body + before, i - before);
+            continue;
+        }
         char ch = body[i];
-        if (in_line_comment) {
-            cc__append_n(&acc, &al, &ac, body + i, 1);
-            if (ch == '\n') in_line_comment = 0;
-            continue;
-        }
-        if (in_block_comment) {
-            cc__append_n(&acc, &al, &ac, body + i, 1);
-            if (ch == '*' && i + 1 < blen && body[i + 1] == '/') {
-                cc__append_n(&acc, &al, &ac, body + i + 1, 1);
-                i++;
-                in_block_comment = 0;
-            }
-            continue;
-        }
-        if (in_str) {
-            cc__append_n(&acc, &al, &ac, body + i, 1);
-            if (ch == '\\' && i + 1 < blen) {
-                cc__append_n(&acc, &al, &ac, body + i + 1, 1);
-                i++;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && i + 1 < blen && body[i + 1] == '/') {
-            cc__append_n(&acc, &al, &ac, body + i, 2);
-            i++;
-            in_line_comment = 1;
-            continue;
-        }
-        if (ch == '/' && i + 1 < blen && body[i + 1] == '*') {
-            cc__append_n(&acc, &al, &ac, body + i, 2);
-            i++;
-            in_block_comment = 1;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            cc__append_n(&acc, &al, &ac, body + i, 1);
-            in_str = 1;
-            qch = ch;
-            continue;
-        }
 
         if (ch == '@' && i + 11 <= blen && memcmp(body + i, "@errhandler", 11) == 0 &&
             (i + 11 >= blen || !cc_is_ident_char(body[i + 11]))) {
@@ -624,12 +545,13 @@ static char* cc__expand_delegations(const char* body,
                     cc__append_str(&acc, &al, &ac, obody);
                     cc__append_str(&acc, &al, &ac, " } ");
                     free(obody);
-                    i = close - 1;
+                    i = close;
                     continue;
                 }
             }
         }
         cc__append_n(&acc, &al, &ac, body + i, 1);
+        i++;
     }
     if (out_len) *out_len = al;
     return acc;
@@ -703,52 +625,12 @@ static int cc__rewrite_colon_defaults(const CCVisitorCtx* ctx, const char* s, si
     size_t rl = 0, rc = 0;
     size_t copy_from = 0;
     int changed = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, ctx ? ctx->input_path : NULL);
     size_t i = 0;
 
     while (i < n) {
-        char ch = s[i];
-        if (in_line_comment) {
-            if (ch == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (ch == '*' && i + 1 < n && s[i + 1] == '/') {
-                in_block_comment = 0;
-                i += 2;
-            } else
-                i++;
-            continue;
-        }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            i++;
-            continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '/') {
-            in_line_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (ch == '/' && i + 1 < n && s[i + 1] == '*') {
-            in_block_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            in_str = 1;
-            qch = ch;
-            i++;
-            continue;
-        }
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
 
         size_t op_at = 0;
         size_t op_len = 0;

@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (10 / 14 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1).
+**Status:** Phase 1 (audit) complete — 2026-05-27.  Phase 2 in progress (12 / 15 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2).
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -21,7 +21,7 @@ Three sub-pieces, in order:
 |-------|------|-------|
 | **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
 | **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 65 sites migrated, 37 remaining (this doc) |
+| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 74 sites migrated, 28 remaining (this doc) |
 
 Why it matters: M1 unblocks four otherwise-stalled items —
 macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
@@ -63,15 +63,15 @@ Today: zero behavior change for happy-path rewrites.  After Phase 4: scanners ig
 
 ## Status snapshot (running tally)
 
-Updated 2026-05-27 (post Batch H1).
+Updated 2026-05-27 (post Batch I).
 
 | Metric | Count |
 |--------|-------|
 | Total scanner sites (inline + migrated) | **102** |
-| Already on `CCInertScan` | **65** (+6 from Batch H1) |
-| Remaining to migrate | **37** |
-| — trivial | 28 |
-| — medium | 4 |
+| Already on `CCInertScan` | **74** (+9 from Batch I) |
+| Remaining to migrate | **28** |
+| — trivial | 21 |
+| — medium | 2 |
 | — complex | 5 (or 7 counting full-file rewrites) |
 
 Smoke at last batch close: **461/461** both pre-expand-on (default) and `CC_PRE_EXPAND=0`.
@@ -253,30 +253,30 @@ Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for cons
 | ~~`cc__scan_stmt_end_semicolon` (~665)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~35~~ | ~~trivial~~ | **✓ Migrated (Batch H1)** — duplicate of pass_err_syntax's twin; identical migration shape |
 | `cc__rewrite_defer_syntax` main loop (~704) | rewrite | {str,qch,lc,bc,pp,als} | ~90 | **complex** | Full defer-stack pass with pp tracking (Batch H2) |
 
-### `pass_with_deadline_syntax.c` (412 LOC, 5 inline + 1 migrated outer, has `text_scan.h`)
+### `pass_with_deadline_syntax.c` (412 LOC, 0 inline + 6 migrated, has `text_scan.h`)
 
-**Migrated:** outer loop of `cc__collect_with_deadline_edits` (~274).
-
-| Site | Shape | State | LOC | Complexity | Notes |
-|------|-------|-------|-----|------------|-------|
-| `cc__rewrite_with_deadline_syntax` main loop (~11) | rewrite | {lc,bc,str,chr} | ~85 | medium | Legacy path; contains 2 nested scanners |
-| anon loop in `cc__rewrite_with_deadline_syntax` (~136) | find-only | {str,qch,lc,bc} | ~15 | trivial | |
-| anon loop in `cc__rewrite_with_deadline_syntax` (~191) | find-only | {str,qch,lc,bc} | ~15 | trivial | |
-| anon loop in `cc__collect_with_deadline_edits` (~321) | find-only | {str,qch,lc,bc} | ~15 | trivial | Nested INSIDE migrated outer |
-| anon loop in `cc__collect_with_deadline_edits` (~355) | find-only | {str,qch,lc,bc} | ~15 | trivial | |
-
-### `pass_err_syntax.c` (1468 LOC, 6 inline + 1 migrated, has `text_scan.h`)
-
-**Migrated:** `cc__find_matching_brace_text` (~213).
+**Migrated:** outer loop of `cc__collect_with_deadline_edits` (~274), plus Batch I1: `cc__rewrite_with_deadline_syntax` main loop (~11), 2 nested in rewrite (~136/~191), 2 nested in collect (~321/~355) — all 4 nested replaced with shared `cc_find_matching_paren`/`cc_find_matching_brace` helpers.
 
 | Site | Shape | State | LOC | Complexity | Notes |
 |------|-------|-------|-----|------------|-------|
-| `cc__scan_stmt_end_semicolon` (~152) | find-only | {str,qch,lc,bc} | ~35 | trivial | Duplicate of defer's |
-| `cc__err_pos_in_line_comment` (~290) | find-only | {str,qch} | ~16 | trivial | |
+| ~~`cc__rewrite_with_deadline_syntax` main loop (~11)~~ | ~~rewrite~~ | ~~{lc,bc,str,chr}~~ | ~~~85~~ | ~~medium~~ | **✓ Migrated (Batch I1)** — canonical rewrite template (snapshot before, append after) + nested scanners replaced with `cc_find_matching_paren`/`cc_find_matching_brace` |
+| ~~anon loop in `cc__rewrite_with_deadline_syntax` (~136)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~15~~ | ~~trivial~~ | **✓ Migrated (Batch I1)** — replaced wholesale with `cc_find_matching_paren(src, n, j, &expr_r)`; collapsed 16 LOC to 4 |
+| ~~anon loop in `cc__rewrite_with_deadline_syntax` (~191)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~15~~ | ~~trivial~~ | **✓ Migrated (Batch I1)** — replaced wholesale with `cc_find_matching_brace(src, n, body_s, &body_close); body_e = body_close + 1;` |
+| ~~anon loop in `cc__collect_with_deadline_edits` (~321)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~15~~ | ~~trivial~~ | **✓ Migrated (Batch I1)** — same `cc_find_matching_paren` substitution (twin of rewrite's ~136) |
+| ~~anon loop in `cc__collect_with_deadline_edits` (~355)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~15~~ | ~~trivial~~ | **✓ Migrated (Batch I1)** — same `cc_find_matching_brace` substitution (twin of rewrite's ~191) |
+
+### `pass_err_syntax.c` (1468 LOC, 2 inline + 5 migrated, has `text_scan.h`)
+
+**Migrated:** `cc__find_matching_brace_text` (~213), plus Batch I2: `cc__scan_stmt_end_semicolon` (~152), `cc__err_pos_in_line_comment` (~290), `cc__expand_delegations` (~523), `cc__rewrite_colon_defaults` (~700).
+
+| Site | Shape | State | LOC | Complexity | Notes |
+|------|-------|-------|-----|------------|-------|
+| ~~`cc__scan_stmt_end_semicolon` (~152)~~ | ~~find-only~~ | ~~{str,qch,lc,bc}~~ | ~~~35~~ | ~~trivial~~ | **✓ Migrated (Batch I2)** — byte-for-byte twin of pass_defer's same-named function |
+| ~~`cc__err_pos_in_line_comment` (~290)~~ | ~~find-only~~ | ~~{str,qch}~~ | ~~~16~~ | ~~trivial~~ | **✓ Migrated (Batch I2)** — twin of Batch G's `cc__pos_in_line_comment`; same post-step `scan.in_line_comment` probe |
 | `cc__err_stmt_start_backward` (~311) | find-only | hybrid backward | ~40 | **complex** | **Backward** — see cross-cutting risk #1 |
-| `cc__expand_delegations` (~523) | rewrite | {str,qch,lc,bc} | ~55 | medium | |
-| `cc__rewrite_colon_defaults` (~700) | rewrite | {str,qch,lc,bc} | ~45 | medium | |
-| `cc__rewrite_err_core` main loop (~859) | rewrite | {str,qch,lc,bc,pp,als} | ~100 | **complex** | Full pass + `ito[]` offset map.  Highest-risk in file |
+| ~~`cc__expand_delegations` (~523)~~ | ~~rewrite~~ | ~~{str,qch,lc,bc}~~ | ~~~55~~ | ~~medium~~ | **✓ Migrated (Batch I2)** — canonical rewrite template (snapshot before, append after); body `i = close - 1; continue;` (relied on for `++i`) → `i = close; continue;`; tail needs explicit `i++` |
+| ~~`cc__rewrite_colon_defaults` (~700)~~ | ~~rewrite~~ | ~~{str,qch,lc,bc}~~ | ~~~45~~ | ~~medium~~ | **✓ Migrated (Batch I2)** — `copy_from` block-copy bookkeeping means inert content isn't copied per-byte; just skip inert via `cc_inert_scan_step`.  No body-`continue;` audit needed (was already a `while` loop with explicit `i++` paths).  Dropped now-unused `char ch` local |
+| `cc__rewrite_err_core` main loop (~859) | rewrite | {str,qch,lc,bc,pp,als} | ~100 | **complex** | Full pass + `ito[]` offset map.  Highest-risk in file (Batch I3) |
 
 ---
 
@@ -491,17 +491,27 @@ H1 (6 trivial/medium) — **LANDED 2026-05-27**:
 H2 (complex full-pass rewrite, separate commit):
 - [ ] `cc__rewrite_defer_syntax` main loop (complex)
 
-### Batch I — pass_with_deadline_syntax + pass_err_syntax forward sites (8 sites, 1–2 commits)
+### Batch I — pass_with_deadline_syntax + pass_err_syntax forward sites (9 sites, 1 commit) — **LANDED 2026-05-27**
 
 I1 — with_deadline finish (5 sites):
-- [ ] `cc__rewrite_with_deadline_syntax` main loop (medium) + its 2 nested
-- [ ] `cc__collect_with_deadline_edits` 2 nested inside migrated outer
+- [x] `cc__rewrite_with_deadline_syntax` main loop — canonical rewrite template + nested replaced
+- [x] anon paren scanner ~136 — replaced with `cc_find_matching_paren`
+- [x] anon brace scanner ~191 — replaced with `cc_find_matching_brace`
+- [x] `cc__collect_with_deadline_edits` anon paren ~321 — replaced with `cc_find_matching_paren`
+- [x] `cc__collect_with_deadline_edits` anon brace ~355 — replaced with `cc_find_matching_brace`
 
 I2 — err forward sites (4 sites):
-- [ ] `pass_err_syntax.c::cc__scan_stmt_end_semicolon`
-- [ ] `pass_err_syntax.c::cc__err_pos_in_line_comment`
-- [ ] `pass_err_syntax.c::cc__expand_delegations` (medium)
-- [ ] `pass_err_syntax.c::cc__rewrite_colon_defaults` (medium)
+- [x] `cc__scan_stmt_end_semicolon` — twin of pass_defer; trivial drop-in
+- [x] `cc__err_pos_in_line_comment` — twin of Batch G's post-step probe
+- [x] `cc__expand_delegations` — canonical rewrite template
+- [x] `cc__rewrite_colon_defaults` — `copy_from` block-copy means just skip inert
+
+**Actual diff**: +73 / −213 (net **−140 LOC**, new biggest batch reduction — beats H1 by 2).  Smoke 461/461 both modes.
+
+**Surprises:**
+- **`cc_find_matching_paren` / `cc_find_matching_brace` in `util/text.h` already existed** and were sitting unused by these passes.  All 4 nested with_deadline scanners were reinventing the wheel — and identically wrong about brk/br tracking that the shared helpers do correctly.  Net effect: 64 LOC of duplicated inline state machine collapsed into 4 helper calls.  **Watch-out for future batches: GREP for nested paren/brace inline scanners; many will already have a shared helper.**
+- **`cc_find_matching_paren/brace` aren't yet on CCInertScan themselves** — they have their own inlined inert state.  Migrating them is a separate cleanup (future Batch M).  Today's `cc_find_matching_*` callers still get correct inert handling; it's just not unified with `CCInertScan`.
+- **`copy_from` block-copy rewrites are cheaper to migrate than canonical rewrites**: when the output is built via `cc__append_n(out, s + copy_from, ...)` jumps at rewrite points, the inert content is never per-byte copied.  No snapshot-before/append-after needed — just `if (cc_inert_scan_step) continue;` to skip inert.  Pattern: identify rewrite shape FIRST before choosing the migration template.
 
 I3 — err complex full-pass rewrite (separate commit):
 - [ ] `cc__rewrite_err_core` main loop (complex — `ito[]` offset map)
