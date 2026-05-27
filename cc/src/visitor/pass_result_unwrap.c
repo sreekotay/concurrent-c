@@ -385,17 +385,18 @@ static void cc__skip_block_comment_backward(const char* s, size_t* i) {
 static int cc__pos_in_line_comment(const char* s, size_t pos) {
     size_t line_start = pos;
     while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    int in_str = 0;
-    char qch = 0;
-    for (size_t k = line_start; k < pos; k++) {
-        char c = s[k];
-        if (in_str) {
-            if (c == '\\' && k + 1 < pos) { k++; continue; }
-            if (c == qch) in_str = 0;
-            continue;
-        }
-        if (c == '"' || c == '\'') { in_str = 1; qch = c; continue; }
-        if (c == '/' && k + 1 < pos && s[k + 1] == '/') return 1;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    /* We started right after a '\n' (or at SOF), so the scanner is
+     * literally at a line start.  `at_line_start = 1` makes a leading
+     * `#` look like a pp directive (which would also mean pos is "in
+     * inert text" — fine semantically for the caller, which uses this
+     * to skip CC-token matches sitting inside non-code regions). */
+    scan.at_line_start = 1;
+    size_t k = line_start;
+    while (k < pos) {
+        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
+        if (scan.in_line_comment) return 1;
     }
     return 0;
 }
@@ -974,25 +975,15 @@ static int cc__find_bang_token_from(const char* s, size_t n, size_t start,
 static int cc__bang_lhs_looks_like_decl(const char* s, size_t lhs_a,
                                         size_t lhs_b) {
     if (lhs_b <= lhs_a) return 0;
-    int in_lc = 0, in_bc = 0;
-    int in_str = 0; char q = 0;
-    for (size_t i = lhs_a; i < lhs_b; i++) {
-        char c  = s[i];
-        char c2 = (i + 1 < lhs_b) ? s[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < lhs_b) { i++; continue; }
-            if (c == q) in_str = 0;
-            continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"' || c == '\'') { in_str = 1; q = c; continue; }
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
+    size_t i = lhs_a;
+    while (i < lhs_b) {
+        if (cc_inert_scan_step(&scan, s, lhs_b, &i)) continue;
+        char c = s[i];
         if (c == '(' || c == ')') return 0;
+        i++;
     }
     return 1;
 }
@@ -1156,43 +1147,33 @@ static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
                                         const char** out_body,
                                         size_t* out_body_len,
                                         size_t* out_decl_pos) {
-    int in_str = 0;
-    char qch = 0;
-    int in_lc = 0, in_bc = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
     int found = 0;
     size_t end = (pos <= n) ? pos : n;
-    for (size_t i = 0; i < end; i++) {
+    size_t i = 0;
+    while (i < end) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
 
-        if (ch != '@') continue;
-        if (i + 11 > n) continue;
-        if (memcmp(s + i, "@errhandler", 11) != 0) continue;
-        if (i > 0 && cc_is_ident_char(s[i - 1])) continue;
-        if (i + 11 < n && cc_is_ident_char(s[i + 11])) continue;
+        if (ch != '@') { i++; continue; }
+        if (i + 11 > n) { i++; continue; }
+        if (memcmp(s + i, "@errhandler", 11) != 0) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(s[i - 1])) { i++; continue; }
+        if (i + 11 < n && cc_is_ident_char(s[i + 11])) { i++; continue; }
         size_t j = i + 11;
         while (j < n && isspace((unsigned char)s[j])) j++;
-        if (j >= n || s[j] != '(') continue;
+        if (j >= n || s[j] != '(') { i++; continue; }
         size_t rpar = 0;
-        if (!cc_find_matching_paren(s, n, j, &rpar)) continue;
+        if (!cc_find_matching_paren(s, n, j, &rpar)) { i++; continue; }
         size_t decl_a = j + 1, decl_b = rpar;
         while (decl_a < decl_b && isspace((unsigned char)s[decl_a])) decl_a++;
         while (decl_b > decl_a && isspace((unsigned char)s[decl_b - 1])) decl_b--;
         size_t k = rpar + 1;
         while (k < n && isspace((unsigned char)s[k])) k++;
-        if (k >= n || s[k] != '{') continue;
+        if (k >= n || s[k] != '{') { i++; continue; }
         size_t rbrace = 0;
-        if (!cc_find_matching_brace(s, n, k, &rbrace)) continue;
+        if (!cc_find_matching_brace(s, n, k, &rbrace)) { i++; continue; }
         /* A valid registration that sits before `pos`.  Record as the
          * running best and continue scanning so a later (closer) one
          * overwrites. */
@@ -1206,7 +1187,7 @@ static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
         if (out_decl_pos) *out_decl_pos = i;
         found = 1;
         /* Jump past the body to avoid re-scanning into it. */
-        i = rbrace;
+        i = rbrace + 1;
     }
     return found;
 }
@@ -1298,23 +1279,17 @@ static int cc__pu_stmt_diverges(const char* t, size_t a, size_t b) {
 static void cc__pu_next_stmt(const char* body, size_t blen,
                              size_t* io_i, size_t* out_a, size_t* out_b) {
     size_t i = *io_i;
-    /* Skip leading whitespace/comments. */
-    while (i < blen) {
-        char c = body[i];
-        char c2 = (i + 1 < blen) ? body[i + 1] : 0;
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
-        if (c == '/' && c2 == '/') {
-            i += 2;
-            while (i < blen && body[i] != '\n') i++;
-            continue;
+    /* Phase 1: skip leading whitespace/comments. */
+    {
+        CCInertScan skip;
+        cc_inert_scan_init(&skip, NULL);
+        skip.at_line_start = 0;  /* mid-buffer slice */
+        while (i < blen) {
+            if (cc_inert_scan_step(&skip, body, blen, &i)) continue;
+            char c = body[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
+            break;
         }
-        if (c == '/' && c2 == '*') {
-            i += 2;
-            while (i + 1 < blen && !(body[i] == '*' && body[i + 1] == '/')) i++;
-            if (i + 1 < blen) i += 2;
-            continue;
-        }
-        break;
     }
     if (i >= blen) {
         *io_i = i;
@@ -1325,27 +1300,17 @@ static void cc__pu_next_stmt(const char* body, size_t blen,
 
     *out_a = i;
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_lc = 0, in_bc = 0;
-    for (; i < blen; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
+    while (i < blen) {
+        if (cc_inert_scan_step(&scan, body, blen, &i)) continue;
         char ch = body[i];
-        char ch2 = (i + 1 < blen) ? body[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < blen) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '(') { par++; continue; }
-        if (ch == '[') { brk++; continue; }
-        if (ch == '{') { br++; continue; }
-        if (ch == ')') { if (par) par--; continue; }
-        if (ch == ']') { if (brk) brk--; continue; }
+        if (ch == '(') { par++; i++; continue; }
+        if (ch == '[') { brk++; i++; continue; }
+        if (ch == '{') { br++; i++; continue; }
+        if (ch == ')') { if (par) par--; i++; continue; }
+        if (ch == ']') { if (brk) brk--; i++; continue; }
         if (ch == '}') {
             if (br) {
                 br--;
@@ -1355,6 +1320,7 @@ static void cc__pu_next_stmt(const char* body, size_t blen,
                     return;
                 }
             }
+            i++;
             continue;
         }
         if (par == 0 && brk == 0 && br == 0 && ch == ';') {
@@ -1362,6 +1328,7 @@ static void cc__pu_next_stmt(const char* body, size_t blen,
             *io_i = i + 1;
             return;
         }
+        i++;
     }
     *out_b = blen;
     *io_i = blen;
@@ -1392,31 +1359,23 @@ static int cc__pu_body_diverges(const char* body, size_t blen) {
  * Returns the position of the `}`; if we fall off the end, returns n. */
 static size_t cc__pu_find_enclosing_brace_close(const char* s, size_t n, size_t from) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0;
-    char qch = 0;
-    int in_lc = 0, in_bc = 0;
-    for (size_t i = from; i < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer slice */
+    size_t i = from;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) {
-            if (ch == '\\' && i + 1 < n) { i++; continue; }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
-        if (ch == '(') { par++; continue; }
-        if (ch == '[') { brk++; continue; }
-        if (ch == '{') { br++; continue; }
-        if (ch == ')') { if (par) par--; continue; }
-        if (ch == ']') { if (brk) brk--; continue; }
+        if (ch == '(') { par++; i++; continue; }
+        if (ch == '[') { brk++; i++; continue; }
+        if (ch == '{') { br++; i++; continue; }
+        if (ch == ')') { if (par) par--; i++; continue; }
+        if (ch == ']') { if (brk) brk--; i++; continue; }
         if (ch == '}') {
-            if (par || brk || br) { if (br) br--; continue; }
+            if (par || brk || br) { if (br) br--; i++; continue; }
             return i;
         }
+        i++;
     }
     return n;
 }
@@ -1428,22 +1387,14 @@ static size_t cc__pu_find_enclosing_brace_close(const char* s, size_t n, size_t 
  * are not executable statements, and the dead-code rule is about
  * executable statements). */
 static size_t cc__pu_find_next_stmt_byte(const char* s, size_t from, size_t limit) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-buffer probe */
     size_t i = from;
     while (i < limit) {
+        if (cc_inert_scan_step(&scan, s, limit, &i)) continue;
         char ch = s[i];
-        char ch2 = (i + 1 < limit) ? s[i + 1] : 0;
         if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') { i++; continue; }
-        if (ch == '/' && ch2 == '/') {
-            i += 2;
-            while (i < limit && s[i] != '\n') i++;
-            continue;
-        }
-        if (ch == '/' && ch2 == '*') {
-            i += 2;
-            while (i + 1 < limit && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            if (i + 1 < limit) i += 2;
-            continue;
-        }
         /* Possibly a label: IDENT : */
         if (cc_is_ident_start(ch)) {
             size_t k = i + 1;
@@ -1494,60 +1445,18 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
     char* out = NULL;
     size_t ol = 0, oc = 0;
 
-    int in_str = 0;
-    char qch = 0;
-    int in_lc = 0, in_bc = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, ctx ? ctx->input_path : NULL);
+    scan.at_line_start = 0;  /* body is a mid-buffer slice */
     size_t i = 0;
     while (i < body_len) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, body, body_len, &i)) {
+            cc__append_n(&out, &ol, &oc, body + before, i - before);
+            continue;
+        }
         char ch = body[i];
         char ch2 = (i + 1 < body_len) ? body[i + 1] : 0;
-        if (in_lc) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\n') in_lc = 0;
-            i++;
-            continue;
-        }
-        if (in_bc) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '*' && ch2 == '/') {
-                cc__append_n(&out, &ol, &oc, &ch2, 1);
-                in_bc = 0;
-                i += 2;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\\' && i + 1 < body_len) {
-                cc__append_n(&out, &ol, &oc, &ch2, 1);
-                i += 2;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            i++;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') {
-            cc__append_n(&out, &ol, &oc, body + i, 2);
-            in_lc = 1;
-            i += 2;
-            continue;
-        }
-        if (ch == '/' && ch2 == '*') {
-            cc__append_n(&out, &ol, &oc, body + i, 2);
-            in_bc = 1;
-            i += 2;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            in_str = 1;
-            qch = ch;
-            i++;
-            continue;
-        }
 
         /* Look for `@err(` at word boundary — not `@errhandler`. */
         if (ch == '@' && i + 4 <= body_len &&
@@ -2534,23 +2443,12 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
         ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
 
     int any_err = 0;
-    int in_str = 0; char qch = 0;
-    int in_lc = 0, in_bc = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, ctx ? ctx->input_path : NULL);
     size_t i = 0;
     while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
         char c = s[i];
-        char c2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) { i += 2; continue; }
-            if (c == qch) in_str = 0;
-            i++;
-            continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"' || c == '\'') { in_str = 1; qch = c; i++; continue; }
 
         /* Look for identifier starts. */
         if (!cc_is_ident_start(c)) { i++; continue; }
