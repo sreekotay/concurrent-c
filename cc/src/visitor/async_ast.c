@@ -1712,18 +1712,27 @@ static char* cc__emit_awaits_in_expr(Emit* e, const char* expr, int* io_aw_next)
     size_t out_len = 0;
 
     int par = 0, brk = 0, br = 0;
-    int ins = 0; char q = 0;
-    int in_lc = 0, in_bc = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;  /* mid-expression slice */
 
-    for (size_t i = 0; i < sl; ) {
+    size_t i = 0;
+    while (i < sl) {
+        /* Copy inert spans (strings, comments, #line) verbatim. */
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, s, sl, &i)) {
+            size_t k = i - before;
+            if (out_len + k + 1 >= out_cap) {
+                out_cap = (out_len + k) * 2 + 64;
+                char* tmp = (char*)realloc(out, out_cap);
+                if (!tmp) { free(out); return NULL; }
+                out = tmp;
+            }
+            memcpy(out + out_len, s + before, k);
+            out_len += k;
+            continue;
+        }
         char ch = s[i];
-        char ch2 = (i + 1 < sl) ? s[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; out[out_len++] = ch; i++; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; out[out_len++] = ch; out[out_len++] = ch2; i += 2; continue; } out[out_len++] = ch; i++; continue; }
-        if (ins) { out[out_len++] = ch; if (ch == '\\' && i + 1 < sl) { out[out_len++] = s[i+1]; i += 2; continue; } if (ch == q) ins = 0; i++; continue; }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; out[out_len++] = ch; out[out_len++] = ch2; i += 2; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; out[out_len++] = ch; out[out_len++] = ch2; i += 2; continue; }
-        if (ch == '"' || ch == '\'') { ins = 1; q = ch; out[out_len++] = ch; i++; continue; }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -1741,27 +1750,29 @@ static char* cc__emit_awaits_in_expr(Emit* e, const char* expr, int* io_aw_next)
                 size_t expr_s = j;
                 /* read operand until a delimiter at depth0 */
                 int ppar = 0, pbrk = 0, pbr = 0;
-                int pins = 0; char pq = 0;
-                int pin_lc = 0, pin_bc = 0;
-                for (; j < sl; j++) {
+                CCInertScan pscan;
+                cc_inert_scan_init(&pscan, NULL);
+                pscan.at_line_start = 0;  /* mid-expression slice */
+                while (j < sl) {
+                    if (cc_inert_scan_step(&pscan, s, sl, &j)) continue;
                     char c = s[j];
-                    char c2 = (j + 1 < sl) ? s[j + 1] : 0;
-                    if (pin_lc) { if (c == '\n') pin_lc = 0; continue; }
-                    if (pin_bc) { if (c == '*' && c2 == '/') { pin_bc = 0; j++; } continue; }
-                    if (pins) { if (c == '\\' && j + 1 < sl) { j++; continue; } if (c == pq) pins = 0; continue; }
-                    if (c == '/' && c2 == '/') { pin_lc = 1; j++; continue; }
-                    if (c == '/' && c2 == '*') { pin_bc = 1; j++; continue; }
-                    if (c == '"' || c == '\'') { pins = 1; pq = c; continue; }
-                    if (c == '(') ppar++;
-                    else if (c == ')') { if (ppar) ppar--; else break; }
-                    else if (c == '[') pbrk++;
-                    else if (c == ']') { if (pbrk) pbrk--; }
-                    else if (c == '{') pbr++;
-                    else if (c == '}') { if (pbr) pbr--; }
-                    if (ppar == 0 && pbrk == 0 && pbr == 0) {
-                        if (c == ',' || c == ';') break;
-                        if (c == ']' || c == '}') break;
+                    if (c == '(') { ppar++; j++; continue; }
+                    if (c == ')') {
+                        if (ppar) { ppar--; j++; continue; }
+                        break;  /* unbalanced ')' terminates operand */
                     }
+                    if (c == '[') { pbrk++; j++; continue; }
+                    if (c == ']') {
+                        if (pbrk) { pbrk--; j++; continue; }
+                        break;  /* unbalanced ']' terminates operand */
+                    }
+                    if (c == '{') { pbr++; j++; continue; }
+                    if (c == '}') {
+                        if (pbr) { pbr--; j++; continue; }
+                        break;  /* unbalanced '}' terminates operand */
+                    }
+                    if (ppar == 0 && pbrk == 0 && pbr == 0 && (c == ',' || c == ';')) break;
+                    j++;
                 }
                 size_t expr_e = j;
                 while (expr_e > expr_s && (s[expr_e - 1] == ' ' || s[expr_e - 1] == '\t')) expr_e--;
@@ -1781,15 +1792,31 @@ static char* cc__emit_awaits_in_expr(Emit* e, const char* expr, int* io_aw_next)
                 free(operand);
 
                 size_t tl = strlen(tmp);
-                if (out_len + tl + 2 >= out_cap) { out_cap = out_cap * 2 + tl + 64; out = (char*)realloc(out, out_cap); if (!out) return NULL; }
+                if (out_len + tl + 2 >= out_cap) {
+                    out_cap = out_cap * 2 + tl + 64;
+                    char* tmpout = (char*)realloc(out, out_cap);
+                    if (!tmpout) { free(out); return NULL; }
+                    out = tmpout;
+                }
                 memcpy(out + out_len, tmp, tl);
                 out_len += tl;
                 i = expr_e; /* continue after operand */
+                /* Re-init outer scanner: we jumped past inert state the
+                 * outer scanner never saw (operand body may contain
+                 * comments/strings; the inner pscan tracked them, but
+                 * outer scan is stale).  Mid-expression reset is safe. */
+                cc_inert_scan_init(&scan, NULL);
+                scan.at_line_start = 0;
                 continue;
             }
         }
 
-        if (out_len + 2 >= out_cap) { out_cap = out_cap * 2 + 64; out = (char*)realloc(out, out_cap); if (!out) return NULL; }
+        if (out_len + 2 >= out_cap) {
+            out_cap = out_cap * 2 + 64;
+            char* tmp = (char*)realloc(out, out_cap);
+            if (!tmp) { free(out); return NULL; }
+            out = tmp;
+        }
         out[out_len++] = ch;
         i++;
     }
