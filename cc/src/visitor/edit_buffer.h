@@ -75,6 +75,22 @@ int cc_edit_buffer_add_defs(CCEditBuffer* eb, const char* defs, size_t len);
  */
 char* cc_edit_buffer_apply(CCEditBuffer* eb, size_t* out_len);
 
+/* Find the offset at which file-scope forward declarations should be
+ * inserted: just after the last top-level `#include` directive, or 0
+ * if the buffer has none.  Used by callers that emit forward decls
+ * (e.g. closure literal lifting) and want them visible to every call
+ * site without splicing into block scope. */
+size_t cc_find_protos_insertion_point(const char* src, size_t len);
+
+/* Find the offset of the start of the line containing the first
+ * top-level function DEFINITION (a depth-0 `T name(...) {` whose
+ * preceding identifier is not a control-flow keyword).  Returns
+ * src_len if none is found.  Useful when a caller wants to insert
+ * forward declarations AFTER all top-level type declarations
+ * (typedefs, structs) but BEFORE any function body that might call
+ * the declared symbols. */
+size_t cc_find_first_func_def_offset(const char* src, size_t len);
+
 /* Debug: dump all edits to stderr. */
 void cc_edit_buffer_dump(const CCEditBuffer* eb);
 

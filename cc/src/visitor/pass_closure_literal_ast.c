@@ -2647,6 +2647,24 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                            size_t* out_protos_len,
                                            char** out_defs,
                                            size_t* out_defs_len) {
+    return cc__rewrite_closure_literals_with_nodes_ex(root, ctx, in_src, in_len,
+                                                     out_src, out_len,
+                                                     out_protos, out_protos_len,
+                                                     out_defs, out_defs_len,
+                                                     /*skip_inline_protos=*/0);
+}
+
+int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
+                                              const CCVisitorCtx* ctx,
+                                              const char* in_src,
+                                              size_t in_len,
+                                              char** out_src,
+                                              size_t* out_len,
+                                              char** out_protos,
+                                              size_t* out_protos_len,
+                                              char** out_defs,
+                                              size_t* out_defs_len,
+                                              int skip_inline_protos) {
     if (!root || !ctx || !in_src || !out_src || !out_len || !out_protos || !out_protos_len || !out_defs || !out_defs_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -3625,23 +3643,47 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     d->id, is_nested, d->start_off, d->end_off);
         }
         if (!is_nested) {
-            char* local_proto = NULL;
-            size_t local_proto_len = 0, local_proto_cap = 0;
-            const char* local_cty = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
-            size_t insert_off = cc__closure_proto_insert_off(sigs, sig_n, d, in_src, in_len);
-            if (d->cap_count == 0) {
-                cc__append_fmt(&local_proto, &local_proto_len, &local_proto_cap,
-                               "static %s __cc_closure_make_%d(void);\n",
-                               local_cty, d->id);
-            } else {
-                cc__append_closure_make_proto(&local_proto, &local_proto_len, &local_proto_cap,
-                                              local_cty, d->id, 0, d);
-            }
-            if (local_proto) {
-                cc__queue_proto_insert(proto_inserts, &proto_insert_n,
-                                       (int)(sizeof(proto_inserts) / sizeof(proto_inserts[0])),
-                                       insert_off, local_proto);
-                free(local_proto);
+            /* Legacy path: emit an in-source forward decl of
+             * `__cc_closure_make_N` at the start of the closure's
+             * enclosing function body (`cc__closure_proto_insert_off`
+             * walks backwards from the closure to find that point).
+             *
+             * This is brittle in two ways:
+             *  - when the closure is nested inside a control-flow
+             *    block (`if (...) { () => [x] { ... } }`), the walker
+             *    can land the decl INSIDE that block instead of the
+             *    enclosing function body — and `static T fn();` at
+             *    block scope is a C constraint violation
+             *    (C99 6.7.1: only `extern` is allowed at block scope
+             *    for function decls).
+             *  - it duplicates the file-scope forward decl that the
+             *    same pass already writes into `*out_protos`.
+             *
+             * Callers that place `*out_protos` at file scope (after
+             * `#include`s, before the first definition) can pass
+             * `skip_inline_protos=1` to bypass this entirely.  That
+             * fixes the recipe_tcp_echo.ccs `function without file
+             * scope cannot be static` failure and lets us delete the
+             * walker once all callers migrate. */
+            if (!skip_inline_protos) {
+                char* local_proto = NULL;
+                size_t local_proto_len = 0, local_proto_cap = 0;
+                const char* local_cty = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
+                size_t insert_off = cc__closure_proto_insert_off(sigs, sig_n, d, in_src, in_len);
+                if (d->cap_count == 0) {
+                    cc__append_fmt(&local_proto, &local_proto_len, &local_proto_cap,
+                                   "static %s __cc_closure_make_%d(void);\n",
+                                   local_cty, d->id);
+                } else {
+                    cc__append_closure_make_proto(&local_proto, &local_proto_len, &local_proto_cap,
+                                                  local_cty, d->id, 0, d);
+                }
+                if (local_proto) {
+                    cc__queue_proto_insert(proto_inserts, &proto_insert_n,
+                                           (int)(sizeof(proto_inserts) / sizeof(proto_inserts[0])),
+                                           insert_off, local_proto);
+                    free(local_proto);
+                }
             }
             edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
         } else {
@@ -3708,10 +3750,15 @@ int cc__collect_closure_edits(const CCASTRoot* root,
     char* defs = NULL;
     size_t defs_len = 0;
 
-    int r = cc__rewrite_closure_literals_with_nodes(root, ctx, eb->src, eb->src_len,
-                                                    &rewritten, &rewritten_len,
-                                                    &protos, &protos_len,
-                                                    &defs, &defs_len);
+    /* EditBuffer places `protos` at file scope via
+     * `find_protos_insertion_point`, so the inner pass should NOT also
+     * splice forward decls into the enclosing function body — see the
+     * `skip_inline_protos` note in the inner function. */
+    int r = cc__rewrite_closure_literals_with_nodes_ex(root, ctx, eb->src, eb->src_len,
+                                                       &rewritten, &rewritten_len,
+                                                       &protos, &protos_len,
+                                                       &defs, &defs_len,
+                                                       /*skip_inline_protos=*/1);
     if (r < 0) {
         free(rewritten);
         free(protos);

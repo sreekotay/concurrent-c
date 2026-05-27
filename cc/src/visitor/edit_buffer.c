@@ -123,6 +123,8 @@ static int edit_cmp(const void* a, const void* b) {
     return 0;
 }
 
+size_t cc_find_protos_insertion_point(const char* src, size_t len);
+
 /* Find insertion point for protos (after last #include line) */
 static size_t find_protos_insertion_point(const char* src, size_t len) {
     size_t last_include_end = 0;
@@ -152,6 +154,120 @@ static size_t find_protos_insertion_point(const char* src, size_t len) {
     }
     
     return last_include_end;
+}
+
+size_t cc_find_protos_insertion_point(const char* src, size_t len) {
+    return find_protos_insertion_point(src, len);
+}
+
+/* Walk the buffer skipping C comments / strings / chars / preprocessor
+ * directives and return the start-of-line offset for the first top-level
+ * function DEFINITION.  A function definition is a depth-0 `{` whose
+ * preceding token sequence ends with `... ident (...) `, where `ident`
+ * is not a control-flow keyword (`if`/`for`/`while`/`switch`/`return`/
+ * `sizeof`/`do`).
+ *
+ * The exclusion of `do` is intentional: `do { ... } while(...)` could
+ * otherwise be mistaken for a function definition.  Returns `len` when
+ * the buffer has no top-level function definition (header-only file).
+ */
+size_t cc_find_first_func_def_offset(const char* src, size_t len) {
+    if (!src || len == 0) return len;
+    size_t i = 0;
+    size_t last_line_off = 0;
+    int brace_depth = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    while (i < len) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') { in_lc = 0; last_line_off = i + 1; }
+            i++; continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; }
+            if (c == '\n') last_line_off = i + 1;
+            i++; continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }
+            if (c == '"') in_str = 0;
+            if (c == '\n') last_line_off = i + 1;
+            i++; continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < len) { i += 2; continue; }
+            if (c == '\'') in_chr = 0;
+            if (c == '\n') last_line_off = i + 1;
+            i++; continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '\n') { last_line_off = i + 1; i++; continue; }
+        /* Treat #-directives as a single skipped line so a `#define foo(x) {}`
+         * line isn't misread as a function definition. */
+        if (c == '#' && (i == last_line_off
+                         || (i > 0 && (src[i - 1] == '\n' || src[i - 1] == ' ' || src[i - 1] == '\t')))) {
+            size_t j = i;
+            while (j < len && src[j] != '\n') {
+                if (src[j] == '\\' && j + 1 < len && src[j + 1] == '\n') { j += 2; continue; }
+                j++;
+            }
+            i = j;
+            continue;
+        }
+        if (c == '{') {
+            if (brace_depth == 0) {
+                size_t j = i;
+                while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' || src[j - 1] == '\n')) j--;
+                if (j > 0 && src[j - 1] == ')') {
+                    /* match the `(` that opens this paren group */
+                    size_t rp = j - 1;
+                    int par = 1;
+                    size_t lp = rp;
+                    while (lp > 0) {
+                        lp--;
+                        if (src[lp] == ')') par++;
+                        else if (src[lp] == '(') { par--; if (par == 0) break; }
+                    }
+                    if (par == 0) {
+                        /* identifier immediately before `(` */
+                        size_t k = lp;
+                        while (k > 0 && (src[k - 1] == ' ' || src[k - 1] == '\t')) k--;
+                        size_t id_end = k;
+                        while (k > 0 && (((src[k - 1] >= 'A' && src[k - 1] <= 'Z')) ||
+                                         ((src[k - 1] >= 'a' && src[k - 1] <= 'z')) ||
+                                         ((src[k - 1] >= '0' && src[k - 1] <= '9')) ||
+                                         src[k - 1] == '_')) k--;
+                        if (id_end > k) {
+                            size_t kw_n = id_end - k;
+                            const char* kw = src + k;
+                            int is_keyword = ((kw_n == 2 && strncmp(kw, "if", 2) == 0) ||
+                                              (kw_n == 2 && strncmp(kw, "do", 2) == 0) ||
+                                              (kw_n == 3 && strncmp(kw, "for", 3) == 0) ||
+                                              (kw_n == 5 && strncmp(kw, "while", 5) == 0) ||
+                                              (kw_n == 6 && strncmp(kw, "switch", 6) == 0) ||
+                                              (kw_n == 6 && strncmp(kw, "return", 6) == 0) ||
+                                              (kw_n == 6 && strncmp(kw, "sizeof", 6) == 0));
+                            if (!is_keyword) return last_line_off;
+                        }
+                    }
+                }
+            }
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            if (brace_depth > 0) brace_depth--;
+            i++;
+            continue;
+        }
+        i++;
+    }
+    return len;
 }
 
 char* cc_edit_buffer_apply(CCEditBuffer* eb, size_t* out_len) {
