@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  Phase 3 (pre-flight) **COMPLETE**.  Phase 4 step (b) (in_user_file guards) **LANDED**.  Phase 4 step (c) (buffer swap) **DEFERRED** — two architectural findings (see "Phase 4 surprises" below) require a replan before the swap can ship.  461/461 in both modes.
+**Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  Phase 3 (pre-flight) **COMPLETE**.  Phase 4 step (b) (in_user_file guards) **LANDED**.  Phase 4 step (c) (buffer swap) **DEFERRED** — Finding 2 fixed upstream in TCC (`pp_line` negative-delta swallow, 2026-05-27); Finding 1's replan was based on a misreading of the buffer state and needs correction before the swap can ship.  461/461 in both modes.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -800,17 +800,21 @@ The naive swap was attempted (`src_all = strdup(ctx->pre_expanded_buf)` when pre
 
 The two findings are recorded in detail below ("Phase 4 surprises") — the short version:
 
-- **Finding 1**: `pre_expanded_buf` is NOT what this doc previously said.  It's post-CPP-expand AND post-CC-type-relower AND post-early-text-rewrites (chan_send → cc_chan_result_with, etc.) — the visitor passes expect un-rewritten user-facing CC syntax.
-- **Finding 2**: The headline `m0_5_diag_origin_line_fail` bug has a different root cause — preprocessor-side, not visitor-side.
+- **Finding 1** (still real): `pre_expanded_buf` is NOT what this doc previously said.  It's post-CPP-expand AND post-CC-type-relower AND post-early-text-rewrites (chan_send → cc_chan_result_with, etc.) — the visitor passes expect un-rewritten user-facing CC syntax.
+- **Finding 2** (resolved): The headline `m0_5_diag_origin_line_fail` bug was a TCC `pp_line` swallow bug for negative `#line` deltas, fixed upstream in `third_party/tcc/tccpp.c` (2026-05-27 evening).  The `tests/m0_5_diag_origin_line_fail.env` pin has been deleted; the test passes on the default `CC_PRE_EXPAND=1` pipeline.  See the "Finding 2" entry below for the full story.
 
-**Replan**: Phase 4 step (c) is replaced by **Phase 4 path (a)**:
+**Replan**: Phase 4 step (c) is replaced by **Phase 4 path (a)**.  Important correction (2026-05-27 evening): the original replan said "capture immediately after `cc_cpp_expand` and before the relower", but that's NOT pre-rewrite either — the CC text rewrites (P1–P16 in PASS_INVENTORY) all run BEFORE `cc_cpp_expand` inside `cc_preprocess_for_initial_parse`.  The truly-pre-rewrite buffer would need to be produced by running CPP on `buf` (post-`#include`/nursery/create-destroy rewrites but pre-CC-syntax) BEFORE calling `cc_preprocess_for_initial_parse`.  That's two CPP invocations and requires verifying TCC's CPP cleanly handles un-rewritten CC syntax (`int[~4 >] tx;`, `Vec<int>`, `T!>(E)`, etc.).  M7.B's CHAN smoke proved CPP at least passes channel tokens through verbatim, but the broader surface needs a probe.
 
-1. **Capture a pre-rewrite snapshot.**  Add a new AST root field, e.g. `parse_buffer_post_cpp_pre_rewrite`, populated in `build_parse_input.c` immediately AFTER `cc_cpp_expand` returns and BEFORE the relower / chan-send-rewrite / etc.  ~30 LOC.
-2. **Plumb through walk.c.**  Extend `CCVisitorCtx` with `pre_rewrite_buf` / `pre_rewrite_len` (separate from `pre_expanded_buf`, which keeps its current semantics for the channel-syntax fallback users).
-3. **Swap `src_all`** to `pre_rewrite_buf` instead of `pre_expanded_buf` in `visit_codegen.c`.  This is the buffer the visitor passes are designed to consume.
-4. **Re-run full suite.**  Expected: 461/461 in both modes if the buffer is correctly pre-rewrite.  Any failures are real Phase 4 surprises (per-pass).
-5. **Add `tests/m1_basename_collision_smoke.ccs`** — user TU named e.g. `cc_channel.ccs` to verify `CCInertScan.in_user_file` doesn't false-match a header with the same basename.
-6. **Note**: removing the `CC_PRE_EXPAND=` pin on `tests/m0_5_diag_origin_line_fail.env` is NO LONGER a step (c) acceptance criterion — that bug is upstream of the visitor and gets its own fix.
+Updated plan:
+
+1. **Probe**: write a small standalone tool that runs `cc_cpp_expand(buf, ...)` on a few real `.ccs` files BEFORE any CC rewrites.  Verify the output is clean (no CPP errors, no unexpected token mangling) for at least channel handles, slices, generic containers, result types, and closure literals.
+2. **Capture a pre-rewrite snapshot.**  If the probe passes, add a new AST root field `parse_buffer_post_cpp_pre_rewrite`, populated in `build_parse_input.c` BEFORE `cc_preprocess_for_initial_parse` (i.e. run `cc_cpp_expand(buf, ...)` early and stash its output).
+3. **Plumb through walk.c.**  Extend `CCVisitorCtx` with `pre_rewrite_buf` / `pre_rewrite_len` (separate from `pre_expanded_buf`, which keeps its current semantics for the channel-syntax fallback users).
+4. **Swap `src_all`** to `pre_rewrite_buf` instead of `pre_expanded_buf` in `visit_codegen.c`.  This is the buffer the visitor passes are designed to consume.
+5. **Re-run full suite.**  Expected: 461/461 in both modes if the buffer is correctly pre-rewrite.  Any failures are real Phase 4 surprises (per-pass).
+6. **Add `tests/m1_basename_collision_smoke.ccs`** — user TU named e.g. `cc_channel.ccs` to verify `CCInertScan.in_user_file` doesn't false-match a header with the same basename.
+
+Cost estimate: ~30 LOC for capture + plumbing + swap, plus the probe (~50 LOC).  Risk: TCC's CPP might reject un-rewritten CC syntax in non-channel contexts (e.g. `T!>(E)` parens-with-bang form).  Mitigation: the probe identifies this before we commit to the architecture.
 
 ### Phase 4 surprises landing zone
 
@@ -828,28 +832,19 @@ The two findings are recorded in detail below ("Phase 4 surprises") — the shor
 
 **Watch-out**: The naming "pre-relower" was misleading.  Future PRs adding similar snapshots should name them by content semantics ("post-cpp / pre-any-rewrite", "post-relower / pre-codegen", etc.), not by relative position to one specific pass.
 
-#### Finding 2 (2026-05-27): `m0_5_diag_origin_line_fail` is a preprocessor bug, not a visitor bug
+#### Finding 2 (2026-05-27): `m0_5_diag_origin_line_fail` — initially misdiagnosed; actual root cause was a TCC bug, now fixed upstream
 
-**Symptom**: With `CC_PRE_EXPAND=1`, the diagnostic for `@arena_init` at original-line 15 reports line **56**.  With `CC_PRE_EXPAND=0`, it correctly reports line 15.  Suite passes today because `tests/m0_5_diag_origin_line_fail.env` pins `CC_PRE_EXPAND=` to sidestep the bug.
+**Symptom**: With `CC_PRE_EXPAND=1`, the diagnostic for `@arena_init` at original-line 15 reported line **56** (or 97 depending on platform CRT header sizes).
 
-**Investigation**: Dumped the post-pre-expand source.  `@arena_init` is at lowered-buffer-line 10323.  The LAST `#line` directive pointing to the user file is `#line 12 "...m0_5..."` at lowered-line 10278.  Between those two lines (10278 → 10323, gap of 45 lines), the buffer contains:
-```
-typedef struct __CCResultGeneric __CCResultGeneric;
-typedef struct CCResult_CCSlice_CCIoError CCResult_CCSlice_CCIoError;
-typedef struct CCResult_size_t_CCIoError  CCResult_size_t_CCIoError;
-... (many more synthetic typedefs) ...
-int main(void) { char buf[128]; @arena_init(buf, sizeof(buf)) { ... }
-```
+**Original 2026-05-27 hypothesis (now superseded)**: The synthetic result-spec typedefs injected by `cc/src/preprocess/` lacked a `#line N "<artificial>"` boundary around them, so TCC inflated the user-file line counter by ~45.  The original replan suggested wrapping the injection in synthetic-file `#line` directives.
 
-TCC's line counter, honoring `#line 12 "...m0_5..."`, correctly counts forward through those 45 intervening lines and arrives at line 12 + 44 = **56**.  Mathematically correct given the input.
+**Actual root cause (discovered 2026-05-27, evening)**: The preprocess DOES emit a resume `#line N "user.ccs"` directive after each injection.  But TCC's `pp_line` (third_party/tcc/tccpp.c around line 3878) silently dropped any user-emitted `#line N "file"` directive whose line delta was NEGATIVE — which is exactly the shape of those resume markers (large positive jump for the injection, then a large negative jump back to user line 13).  The inner `while (d > 0)` swallow loop was a no-op for d<0, so nothing was written to the preprocessed output, leaving TCC's parser to count blindly from the previous `#line`.
 
-**Root cause**: Those `typedef struct CCResult_...` lines are SYNTHETIC — they're injected by `cc/src/preprocess/` (the result-spec pre-emit path) to provide forward declarations for `CCResult_T_E` template instantiations.  The injection happens INSIDE the user file's `#line 12 "...m0_5..."` region without emitting a `#line N "<artificial>"` boundary around the injected text.  TCC then attributes those bytes to the user file, inflating the user-file line counter by ~45.
+The condition `level == 0 && f->line_ref && d < 8` should have been `d >= 0 && d < 8`.  See the upstream TCC commit on `third_party/tcc` for the one-line fix plus rationale comment.
 
-**Implication for M1**: This bug has NOTHING to do with the visitor passes or the `src_all` buffer swap.  Even after Phase 4 path (a) lands cleanly, the line-56 vs line-15 problem persists, because the bad `#line` accounting is in the buffer TCC parses, which is what produces the error.
+**Implication for M1**: With the TCC patch in place, `m0_5_diag_origin_line_fail` reports line 15 correctly on the default `CC_PRE_EXPAND=1` pipeline, and `tests/m0_5_diag_origin_line_fail.env` (the `CC_PRE_EXPAND=` pin) was deleted.  Other downstream consequences of the same bug — closure-literal AST line/col drift after `#include <ccc/...>` (see PASS_INVENTORY rule #8), the `cc__closure_start_off_best_effort` recovery branch in `pass_closure_literal_ast.c`, several "TCC line tracking is unreliable here" comments scattered through visitor passes — may also now be load-bearing only as defense-in-depth, not as functional necessity.  Worth re-auditing as a follow-up, but NOT urgent.
 
-**Fix**: Surgical, in the preprocessor.  When the result-spec injection writes its synthetic typedefs, wrap them with `#line 1 "<cc_result_spec_injection>"` (or similar synthetic-file marker) followed by `#line N "<originalfile>"` to restore the user-file counter at the right point.  Estimated ~10-30 LOC in the injection site.
-
-**Watch-out**: When fixing this, also audit other preprocess-side text injections (container forward-decls, comptime registrations) for the same anti-pattern.  If they also inject INTO user-file `#line` regions without resetting, they're silently inflating user-file line numbers for ANY diagnostic that comes after them — not just `@arena_init`.
+**Lesson**: When a CC-side fix needs a 30-line workaround that smells like "fighting the toolchain", check whether the toolchain has a fixable bug first.  The replan that proposed wrapping injections in artificial `#line` boundaries was correct in principle but treating the symptom; the real cure was a single-line condition change in TCC.
 
 ---
 

@@ -73,14 +73,20 @@ plus reparse plumbing.
 
 **M7.C — eventual cleanups (after M7.B):**
 
-- Flip `CC_PRE_EXPAND=1` to default.
+- ✅ Flip `CC_PRE_EXPAND=1` to default (landed 2026-05-26).
 - Retire `pass_channel_syntax` text scan and `cc__rewrite_chan_handle_types`
   in favor of the lexer-recognized form.
 - Retire the local/system `_cch → _h` include rewrites (CPP handles them).
 - Propagate the expanded buffer through reparses (`cc__reparse_source_to_ast`)
   instead of re-reading the original source.
-- Wire `CCSourceMap` into visitor passes that carry "original-source-span"
-  assumptions so diagnostics still point to user source after pre-expand.
+- ~~Wire `CCSourceMap` into visitor passes that carry "original-source-span"
+  assumptions so diagnostics still point to user source after pre-expand.~~
+  **Superseded** (2026-05-27): The driving symptom (`m0_5_diag_origin_line_fail`
+  reporting wrong line) was a TCC `pp_line` negative-delta swallow bug,
+  fixed upstream in `third_party/tcc/tccpp.c`.  No source-map plumbing
+  needed for that case.  A different, narrower source-map need still
+  exists for the visitor-AST-coords-vs-src_all drift discussed in Phase
+  4(c); see M1_MIGRATION.md for the corrected plan.
 
 ## Goal (original, M6)
 
