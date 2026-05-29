@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Track C2: `cc_emit_format(anchor, fmt, args...)` — parameterized comptime
+ * emission.  The compiler substitutes %s (string-literal) and %d (integer)
+ * at collection time and splices the resulting C at the plan anchor.  This is
+ * the primitive for user generic factories: build a type/decl from operands. */
+
+@comptime {
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                   "typedef struct { %s a; %s b; } %s;\n",
+                   "int", "double", "EmitFmtPair");
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                   "enum { EMIT_FMT_N = %d };\n", 7);
+}
+
+int main(void) {
+    EmitFmtPair p = { .a = 3, .b = 2.5 };
+    if (p.a != 3) return 1;
+    if (EMIT_FMT_N != 7) return 2;
+    printf("comptime_emit_format_smoke ok a=%d n=%d\n", p.a, EMIT_FMT_N);
+    return 0;
+}

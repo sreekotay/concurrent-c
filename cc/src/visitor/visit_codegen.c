@@ -3362,6 +3362,27 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     const char* reg_src = src_regs ? src_regs : src_all;
     size_t reg_src_len = src_regs ? strlen(src_regs) : src_len;
 
+    /* Seam: resolve `@comptime for`/`if` on the emit buffer BEFORE the comptime
+     * collection + blank below, so reflection-driven `cc_emit_*` calls nested
+     * inside `@comptime { ... }` blocks become concrete (and are collected)
+     * rather than being blanked away unexpanded.  Only `src_ufcs` is touched;
+     * `reg_src` (UFCS registration) intentionally stays on the raw buffer.
+     * This subsumes the post-blank resolve that used to run later. */
+    if (src_ufcs && src_ufcs_len) {
+        char* resolved = cc__resolve_comptime_if(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (resolved == (char*)-1) {
+            fclose(out);
+            free(src_regs);
+            free(src_all);
+            return -1;
+        }
+        if (resolved) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = resolved;
+            src_ufcs_len = strlen(resolved);
+        }
+    }
+
     /* Phase 2 currently means: collect the comptime-visible effects from the
        canonical CC source (type registrations, UFCS handlers, etc.). After
        that, phase 3 blanks source-local @comptime blocks out of the emitted TU
@@ -3425,7 +3446,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (blanked) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = blanked;
-            src_ufcs_len = src_len;
+            /* Blanking preserves layout (length == its input), which may already
+             * be longer than the original file because the seam resolve above
+             * expanded `@comptime for`/`if`.  Track the blanked length, not the
+             * original src_len, or the buffer gets truncated downstream. */
+            src_ufcs_len = strlen(blanked);
         }
     }
     free(src_regs);
@@ -3448,20 +3473,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* D2.0: resolve `@comptime if (...)` on the emit path too, before the D1
-     * fold — the emitted .c must contain only the taken branch. */
-    if (src_ufcs && src_ufcs_len) {
-        char* resolved = cc__resolve_comptime_if(src_ufcs, src_ufcs_len, ctx->input_path);
-        if (resolved == (char*)-1) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            return -1;
-        }
-        if (resolved) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = resolved;
-            src_ufcs_len = strlen(resolved);
-        }
-    }
+    /* (D2.0 `@comptime if`/`for` resolution now runs earlier, before the
+     * comptime collection + blank above — see the seam resolve near the top of
+     * this function.) */
 
     /* D1.0: fold `type_of(T).size`/`.align` -> `sizeof(T)`/`_Alignof(T)` so the
      * emitted host C sees integer constant expressions (static_assert/array dims),

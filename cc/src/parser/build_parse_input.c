@@ -42,6 +42,18 @@ int cc_build_parse_input(const char* file_buf,
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
     }
+    /* Seam: expand `@comptime for`/`if` on the whole buffer BEFORE collecting
+     * intrinsics, so reflection-driven cc_instantiate / cc_emit calls nested
+     * inside `@comptime { ... }` blocks are concrete by the time the collectors
+     * (and the block-blanker below) run.  The `for` resolver needs T's
+     * definition, which lives in this buffer, not in the block body alone.
+     * The later in-preprocess resolve (cc_preprocess_for_initial_parse) then
+     * no-ops on the already-expanded constructs. */
+    {
+        char* resolved = cc__resolve_comptime_if(buf, got, input_path);
+        if (resolved == (char*)-1) goto fail_buf;
+        if (resolved) { free(buf); buf = resolved; got = strlen(buf); }
+    }
     cc_emit_plan_clear_comptime_fragments();
     cc_emit_plan_collect_comptime_emits(buf, got);
     cc_emit_plan_clear_comptime_instantiations();

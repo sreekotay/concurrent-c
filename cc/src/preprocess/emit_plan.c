@@ -84,6 +84,83 @@ static int cc__emit_try_collect_cc_emit_cstr(const char* src, size_t len, size_t
     return 1;
 }
 
+/* cc_emit_format(anchor, "fmt", args...) — printf-style comptime emission.
+ * Supports %s (string-literal arg), %d/%i (integer-literal arg) and %%.  The
+ * substituted fragment is stored exactly like cc_emit_cstr, so it flows through
+ * the same anchor splice.  On any malformed/unsupported conversion we bail
+ * (return 0) and the call is simply not collected — matching cc_emit_cstr's
+ * best-effort contract at this text-collection stage. */
+static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size_t call_pos,
+                                               size_t site_pos) {
+    size_t p = call_pos + strlen("cc_emit_format");
+    CCEmitAnchor anchor;
+    char fmt[4096];
+    char frag[4096];
+    if (cc__comptime_frag_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != '(') return 0;
+    p++;
+    if (!cc__emit_parse_anchor(src, len, &p, &anchor)) return 0;
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != ',') return 0;
+    p = cc_skip_ws_len(src, len, p + 1);
+    if (!cc__emit_parse_c_string(src, len, &p, fmt, sizeof(fmt))) return 0;
+
+    size_t o = 0;
+    for (size_t i = 0; fmt[i]; i++) {
+        if (fmt[i] != '%') {
+            if (o + 1 >= sizeof(frag)) return 0;
+            frag[o++] = fmt[i];
+            continue;
+        }
+        char c = fmt[i + 1];
+        if (c == '%') {
+            if (o + 1 >= sizeof(frag)) return 0;
+            frag[o++] = '%';
+            i++;
+            continue;
+        }
+        if (c != 's' && c != 'd' && c != 'i') return 0;  /* unsupported conv */
+        /* pull the next argument: `, <arg>` */
+        p = cc_skip_ws_len(src, len, p);
+        if (p >= len || src[p] != ',') return 0;
+        p = cc_skip_ws_len(src, len, p + 1);
+        if (c == 's') {
+            char arg[1024];
+            if (!cc__emit_parse_c_string(src, len, &p, arg, sizeof(arg))) return 0;
+            for (size_t k = 0; arg[k]; k++) {
+                if (o + 1 >= sizeof(frag)) return 0;
+                frag[o++] = arg[k];
+            }
+        } else {
+            int neg = 0;
+            if (p < len && (src[p] == '+' || src[p] == '-')) { neg = (src[p] == '-'); p++; }
+            if (p >= len || src[p] < '0' || src[p] > '9') return 0;
+            long v = 0;
+            while (p < len && src[p] >= '0' && src[p] <= '9') { v = v * 10 + (src[p] - '0'); p++; }
+            if (neg) v = -v;
+            char num[32];
+            int nl = snprintf(num, sizeof(num), "%ld", v);
+            if (nl < 0) return 0;
+            for (int k = 0; k < nl; k++) {
+                if (o + 1 >= sizeof(frag)) return 0;
+                frag[o++] = num[k];
+            }
+        }
+        i++;  /* consumed the conversion char */
+    }
+    frag[o] = 0;
+
+    {
+        CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
+        f->anchor = anchor;
+        f->site_pos = site_pos;
+        f->text = strdup(frag);
+        if (!f->text) { cc__comptime_frag_count--; return 0; }
+    }
+    return 1;
+}
+
 /* --- comptime explicit instantiation requests (track C1) --- */
 
 typedef struct CCEmitComptimeInst {
@@ -162,11 +239,21 @@ static int cc__ci_collect_emit(const CCComptimeIntrinsicDesc* d,
     return cc__emit_try_collect_cc_emit_cstr(src, len, pos, splice_end);
 }
 
+static int cc__ci_collect_emit_format(const CCComptimeIntrinsicDesc* d,
+                                      const char* src, size_t len,
+                                      size_t pos, size_t splice_end) {
+    (void)d;
+    return cc__emit_try_collect_cc_emit_format(src, len, pos, splice_end);
+}
+
 static const CCComptimeIntrinsicDesc cc__comptime_intrinsics[] = {
-    { "cc_instantiate_vec",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate, CC_GRAPH_REQUEST_VEC,  1 },
-    { "cc_instantiate_map",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate, CC_GRAPH_REQUEST_MAP,  2 },
-    { "cc_instantiate_chan", CC_CI_INSTANTIATE, cc__ci_collect_instantiate, CC_GRAPH_REQUEST_CHAN, 1 },
-    { "cc_emit_cstr",        CC_CI_EMIT,        cc__ci_collect_emit,        (CCTypeGraphRequestKind)0, 0 },
+    { "cc_instantiate_vec",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_VEC,  1 },
+    { "cc_instantiate_map",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_MAP,  2 },
+    { "cc_instantiate_chan", CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_CHAN, 1 },
+    /* cc_emit_format before cc_emit_cstr is irrelevant (whole-ident match), but
+     * keep the more specific name listed so the table reads clearly. */
+    { "cc_emit_format",      CC_CI_EMIT,        cc__ci_collect_emit_format,  (CCTypeGraphRequestKind)0, 0 },
+    { "cc_emit_cstr",        CC_CI_EMIT,        cc__ci_collect_emit,         (CCTypeGraphRequestKind)0, 0 },
 };
 
 static const unsigned cc__ci_mask_instantiate = CC_CI_INSTANTIATE;
