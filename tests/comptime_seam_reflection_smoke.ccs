@@ -1,0 +1,41 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* The instantiation seam: `@comptime for` over a type's fields DRIVES the
+ * instantiation/emission intrinsics.  `f.typestr` yields the field's type as a
+ * string literal (for cc_instantiate_* operands); `f.name`/`f.index` feed
+ * cc_emit_format.  The for-loop is expanded before collection, so the loop body
+ * becomes concrete intrinsic calls that the compiler then acts on. */
+
+typedef struct { int a; int b; int c; } Triple;
+
+@comptime {
+    /* reflection -> monomorphization: a Vec for each field's type */
+    @comptime for (f in type_of(Triple).fields) {
+        cc_instantiate_vec(f.typestr);
+    }
+    /* reflection -> emission: a constant per field */
+    @comptime for (f in type_of(Triple).fields) {
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                       "enum { TRIPLE_HAS_%s = %d };\n", f.name, f.index);
+    }
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    /* CCVec_int exists only because reflection requested it above. */
+    CCVec_int v = CCVec_int_init(&arena, 4);
+    if (CCVec_int_push(&v, 100) != 0) return 2;
+    int* g = CCVec_int_get(&v, 0);
+    if (!g || *g != 100) return 3;
+
+    if (TRIPLE_HAS_a != 0 || TRIPLE_HAS_b != 1 || TRIPLE_HAS_c != 2) return 4;
+
+    printf("comptime_seam_reflection_smoke ok a=%d b=%d c=%d v0=%d\n",
+           TRIPLE_HAS_a, TRIPLE_HAS_b, TRIPLE_HAS_c, *g);
+    cc_arena_free(&arena);
+    return 0;
+}

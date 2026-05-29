@@ -8610,9 +8610,11 @@ static int cc__comptime_eval_pred_via_tcc(const char* pred, size_t n,
  * compile-time field iteration.  Unrolls BODY once per declared
  * field of struct T, substituting the loop variable F:
  *   F        -> the field's identifier   (so `p->F` -> `p->a`)
- *   F.name   -> "fieldname"              (string literal)
- *   F.type   -> the field's type spelling (bare tokens)
- *   F.index  -> the 0-based field index  (decimal literal)
+ *   F.name    -> "fieldname"              (string literal)
+ *   F.type    -> the field's type spelling (bare tokens)
+ *   F.typestr -> "type spelling"          (string literal; for cc_instantiate
+ *                                          / cc_emit_format operands)
+ *   F.index   -> the 0-based field index  (decimal literal)
  * T's definition must be in the same source buffer; fields are read
  * from the declared layout.  Unsupported field forms (arrays,
  * bitfields, function pointers, anonymous/nested aggregates, multi-
@@ -8808,6 +8810,14 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                     cc_sb_append(out, ol, oc, f->type, strlen(f->type));
                     i = m; emit = i; continue;
                 }
+                if (mlen == 7 && memcmp(body + ms, "typestr", 7) == 0) {
+                    /* B1: the field's type spelling as a string literal, for
+                     * feeding cc_instantiate / cc_emit_format operands. */
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    cc_sb_append(out, ol, oc, f->type, strlen(f->type));
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    i = m; emit = i; continue;
+                }
                 if (mlen == 5 && memcmp(body + ms, "index", 5) == 0) {
                     char num[32];
                     int nl = snprintf(num, sizeof(num), "%zu", idx);
@@ -8842,7 +8852,11 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     size_t hp_close;
     if (!cc_find_matching_paren(src, n, lp, &hp_close)) return 0;
 
-    /* header: NAME in type_of(T).fields */
+    /* header: NAME in type_of(T).fields
+     * Accept BOTH the surface form `type_of(T)` (bare T, seen on the parse
+     * path before CPP) and the macro-expanded runtime form `cc_type_of("T")`
+     * (string T, seen on the emit path after CPP expands the type_of macro).
+     * This makes the resolver order-independent w.r.t. type_of expansion. */
     size_t h = cc_skip_ws_len(src, n, lp + 1);
     size_t lv_s = h;
     while (h < hp_close && cc_is_ident_char(src[h])) h++;
@@ -8855,20 +8869,37 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     if (ok) {
         h = cc_skip_ws_len(src, n, h + 2);
         const size_t TOFN = sizeof("type_of") - 1;
-        if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0) {
-            h = cc_skip_ws_len(src, n, h + TOFN);
+        const size_t CTOFN = sizeof("cc_type_of") - 1;
+        int is_string_form = 0;
+        if (h + CTOFN <= hp_close && memcmp(src + h, "cc_type_of", CTOFN) == 0 &&
+            (h + CTOFN >= hp_close || !cc_is_ident_char(src[h + CTOFN]))) {
+            is_string_form = 1; h += CTOFN;
+        } else if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0 &&
+                   (h + TOFN >= hp_close || !cc_is_ident_char(src[h + TOFN]))) {
+            h += TOFN;
+        } else ok = 0;
+        if (ok) {
+            h = cc_skip_ws_len(src, n, h);
             size_t tpc;
             if (h < hp_close && src[h] == '(' &&
                 cc_find_matching_paren(src, n, h, &tpc) && tpc <= hp_close) {
-                ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
-                while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
+                if (is_string_form) {
+                    size_t q = cc_skip_ws_len(src, n, h + 1);
+                    if (q < tpc && src[q] == '"') {
+                        ts = q + 1; te = ts;
+                        while (te < tpc && src[te] != '"') te++;
+                    } else ok = 0;
+                } else {
+                    ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
+                    while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
+                }
                 size_t af = cc_skip_ws_len(src, n, tpc + 1);
-                if (af < hp_close && src[af] == '.') {
+                if (ok && af < hp_close && src[af] == '.') {
                     af = cc_skip_ws_len(src, n, af + 1);
                     ok = (af + 6 <= hp_close && memcmp(src + af, "fields", 6) == 0);
                 } else ok = 0;
             } else ok = 0;
-        } else ok = 0;
+        }
     }
     if (!ok) {
         fprintf(stderr,

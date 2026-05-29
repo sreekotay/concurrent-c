@@ -42,4 +42,14 @@ static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
     return 0;
 }
 
+/* Parameterized comptime emission (§3.2): printf-style fragment built at
+ * compile time and spliced at `anchor`.  The compiler interprets %s
+ * (string-literal arg), %d/%i (integer-literal arg) and %% at collection
+ * time; this inline body is the never-executed host stub. */
+static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
+    (void)anchor;
+    (void)fmt;
+    return 0;
+}
+
 #endif /* CC_INSTANTIATE_CCH */

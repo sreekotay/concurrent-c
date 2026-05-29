@@ -397,7 +397,8 @@ Each commit: 462/462 default + `CC_PRE_EXPAND=0`.
 | D1 | `type_of(T)` constexpr view (3c.3) | Comptime + runtime share `cc_type_info` — **D1.0 done** (numeric/layout) + **D1.1 done** (structural members) |
 | D2 | `@comptime if` + constexpr eval (C4) | Spec §14 — **D2.0 done** (predicate evaluator + branch selection) + **D2.1 done** (`else @comptime if` chains + `&&`/`||` short-circuit); D3 next |
 | D3 | TCC constexpr hooks (C5) | Replace dylib for simple hooks — **D3.0 done** (in-process `cc_tcc_eval_const_expr` seam) + **D3.1 done** (layout-aware `@comptime if`: (A) primitive/C-expr layout, (b) user-struct layout via in-scope type-def prelude); next: constant-hook fast path replacing dylib (D3.2) |
-| D4 | `type_of(T).fields` iteration (3c.3) | Reflection-driven codegen — **D4.0 done** (`@comptime for (F in type_of(T).fields) { ... }` unrolls per declared field with `F`/`F.name`/`F.type`/`F.index` substitution); next: instantiation seam (comptime-driven monomorphization) |
+| D4 | `type_of(T).fields` iteration (3c.3) | Reflection-driven codegen — **D4.0 done** (`@comptime for (F in type_of(T).fields) { ... }` unrolls per declared field with `F`/`F.name`/`F.type`/`F.typestr`/`F.index` substitution) |
+| D5 | Instantiation seam (comptime-driven monomorphization) | **D5.0 done** (`cc_emit_format` parameterized emission + reflection *drives* `cc_instantiate_*`/`cc_emit_*`: `@comptime for` over a type's fields, expanded before collection, generates monomorphs and code); next: graduate user generic factories |
 
 **D1 design (decided 2026-05-29): constexpr *hybrid* view, "layout out of scope".**
 `type_of(T)` is a constexpr view sharing the one `cc_type_info` shape, split by
@@ -455,6 +456,35 @@ zero. Tests: `comptime_for_fields_smoke` (bare/`.name`/`.index`/`.type` over a
 diagnostic). Suite **473/473** both default and `CC_PRE_EXPAND=0`. *Boundary:*
 header-defined structs aren't visible (same pre-expand seam as D3.1b); line numbers
 after a `for` shift (expansion adds lines) — only affects files using the construct.
+
+**D5.0 landed (2026-05-29):** the instantiation seam — reflection *drives*
+instantiation/emission. Two pieces:
+- **`cc_emit_format(anchor, fmt, args…)`** — parameterized comptime emission
+  (the §3.2 primitive). The compiler substitutes `%s` (string-literal arg),
+  `%d`/`%i` (integer-literal arg) and `%%` at collection time, then splices the
+  result through the same anchor machinery as `cc_emit_cstr`. New `F.typestr`
+  loop-substitution yields a field's type spelling *as a string literal*, so
+  reflection can feed `cc_instantiate_*`/`cc_emit_format` operands (`F.type`
+  stays bare for type positions).
+- **Compose reflection → collectors.** The intrinsic collectors only see calls
+  inside `@comptime { … }` blocks, and those blocks were blanked *before* the
+  `@comptime for`/`if` resolver ran — so a loop nested in a block was discarded
+  unexpanded. Fix: run `cc__resolve_comptime_if` on the **whole buffer before
+  collection** on both the parse path (`build_parse_input`) and the emit path
+  (`visit_codegen`, where it subsumes the old post-blank resolve). The resolver
+  needs `T`'s definition, which lives in the buffer, not the block body. The
+  `for`-header now accepts both `type_of(T)` (raw, parse path) and the
+  macro-expanded `cc_type_of("T")` (emit path), making it order-independent
+  w.r.t. `type_of` CPP expansion. Also fixed a latent truncation: the emit-path
+  blank reset `src_ufcs_len` to the original file length, which is now wrong
+  once the seam resolve expands the buffer (track the blanked length).
+- **End-to-end:** `@comptime { @comptime for (f in type_of(T).fields) {
+  cc_instantiate_vec(f.typestr); } }` materializes a `CCVec_<field-type>` per
+  field, and a parallel `cc_emit_format` loop emits a constant per field.
+  `tests/comptime_emit_format_smoke` (parameterized emission) +
+  `tests/comptime_seam_reflection_smoke` (reflection drives both a Vec
+  monomorph and per-field enum constants, runtime-checked). Suite **475/475**
+  both default and `CC_PRE_EXPAND=0`.
 
 **D3.1 landed (2026-05-29):** layout-aware `@comptime if`, consuming the D3.0
 seam. **(A)** When the self-contained D2 evaluator can't decide a predicate, the
