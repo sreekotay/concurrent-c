@@ -13,8 +13,11 @@
 #include <ccc/cc_slice.cch>
 
 #include "header/lower_header.h"
+#include "comptime/const_eval.h"
 #include "comptime/symbols.h"
+#include "preprocess/emit_plan.h"
 #include "preprocess/type_registry.h"
+#include "preprocess/type_graph.h"
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/result_fn_registry.h"
@@ -1917,6 +1920,11 @@ char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* in
 
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);
 static void cc__mangle_container_type_param(const char* src, size_t len, char* out, size_t out_sz);
+/* Cross-pass memo: container mangled-name -> real C type spellings of its
+ * parameters (see definition below for why phase-3 reparses need it). */
+static void cc__ctype_memo_put(const char* mangled, const char* type1, const char* type2);
+static const char* cc__ctype_memo_get_type1(const char* mangled);
+static const char* cc__ctype_memo_get_type2(const char* mangled);
 static void cc__canonicalize_ufcs_alias_target(char* out, size_t out_sz, const char* type_src);
 static const char* cc__lookup_scoped_type_alias(const char* src, size_t limit, const char* alias_name, char* out_type, size_t out_type_sz);
 static int cc__parse_typedef_alias_stmt(const char* stmt_start,
@@ -4510,98 +4518,6 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
 }
 
 
-/* Rewrite result constructors for parser mode:
-   - `cc_ok_CCResult_T_E(v)` -> `__CC_RESULT_OK(0, 0, v)`
-   - `cc_err_CCResult_T_E(e)` -> `__CC_RESULT_ERR(0, 0, e)`
-   This avoids typed constructors during TCC parsing while preserving arg checking. */
-static char* cc__rewrite_result_constructors(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    
-    size_t i = 0;
-    size_t last_emit = 0;
-    CCScannerState scan;
-    cc_scanner_init(&scan);
-    
-    while (i < n) {
-        /* Skip comments and strings using shared helper */
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
-        const char* ok_prefix = "cc_ok_CCResult_";
-        const char* err_prefix = "cc_err_CCResult_";
-        size_t ok_len = 15;  /* strlen("cc_ok_CCResult_") */
-        size_t err_len = 16; /* strlen("cc_err_CCResult_") */
-        
-        int is_ok = (i + ok_len < n && strncmp(src + i, ok_prefix, ok_len) == 0);
-        int is_err = (i + err_len < n && strncmp(src + i, err_prefix, err_len) == 0);
-        
-        if (is_ok || is_err) {
-            /* Ensure not part of a longer identifier */
-            if (i > 0 && cc_is_ident_char(src[i - 1])) {
-                i++;
-                continue;
-            }
-            
-            size_t prefix_len = is_ok ? ok_len : err_len;
-            size_t j = i + prefix_len;
-            
-            /* Skip mangled type name */
-            while (j < n && cc_is_ident_char(src[j])) j++;
-            
-            /* Skip whitespace to find '(' */
-            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-            if (j >= n || src[j] != '(') {
-                i++;
-                continue;
-            }
-            
-            /* Parse argument list */
-            size_t args_start = j + 1;
-            size_t k = args_start;
-            int depth = 1;
-            int in_s = 0, in_c = 0;
-            while (k < n && depth > 0) {
-                char ch = src[k];
-                if (in_s) { if (ch == '\\' && k + 1 < n) k++; else if (ch == '"') in_s = 0; k++; continue; }
-                if (in_c) { if (ch == '\\' && k + 1 < n) k++; else if (ch == '\'') in_c = 0; k++; continue; }
-                if (ch == '"') { in_s = 1; k++; continue; }
-                if (ch == '\'') { in_c = 1; k++; continue; }
-                if (ch == '(') depth++;
-                else if (ch == ')') depth--;
-                if (depth > 0) k++;
-            }
-            if (depth != 0) {
-                i++;
-                continue;
-            }
-            
-            size_t args_end = k;
-            size_t call_end = k + 1;
-            
-            /* Emit everything up to function name.
-               Route through the parser-mode helper macros so TCC sees the value/error
-               expression in the AST, but we avoid spelling a raw generic compound
-               literal inline in control-flow contexts like `return ...;` inside switch. */
-            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            if (is_ok) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_OK(0, 0, ");
-            } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_ERR(0, 0, ");
-            }
-            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-            last_emit = call_end;
-            i = call_end;
-            continue;
-        }
-        
-        i++;
-    }
-    
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
 
 /* ============================================================================
  * Generic container syntax lowering: CCVec::[T] -> CCVec_T, Map<K,V> -> Map_K_V
@@ -4820,7 +4736,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     CCScannerState scanner;
     cc_scanner_init(&scanner);
     
-    CCTypeRegistry* reg = cc_type_registry_get_global();
+    CCTypeGraph* graph = cc_type_graph_get_global();
+    CCTypeRegistry* reg = graph ? cc_type_graph_registry(graph) : NULL;
     
     while (i < n) {
         /* Skip comments and strings using shared helper */
@@ -4921,9 +4838,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 
                 cc__mangle_container_type_param(orig_elem_type, strlen(orig_elem_type), elem_type, sizeof(elem_type));
                 snprintf(mangled, sizeof(mangled), "CCVec_%s", elem_type);
+                cc__ctype_memo_put(mangled, orig_elem_type, NULL);
                 
-                if (reg) {
-                    cc_type_registry_add_vec(reg, orig_elem_type, mangled);
+                if (graph) {
+                    cc_type_graph_request_vec(graph, orig_elem_type, mangled);
                 }
             } else {
                 /* Two type parameters: K, V */
@@ -4981,9 +4899,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 cc__mangle_container_type_param(orig_key_type, strlen(orig_key_type), key_type, sizeof(key_type));
                 cc__mangle_container_type_param(orig_val_type, strlen(orig_val_type), val_type, sizeof(val_type));
                 snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
+                cc__ctype_memo_put(mangled, orig_key_type, orig_val_type);
                 
-                if (reg) {
-                    cc_type_registry_add_map(reg, orig_key_type, orig_val_type, mangled);
+                if (graph) {
+                    cc_type_graph_request_map(graph, orig_key_type, orig_val_type, mangled);
                 }
             }
             
@@ -5106,10 +5025,62 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     return out;
 }
 
+/* ---- Container type memo ----
+ *
+ * `Map<K,V>` / `CCVec::[T]` lower to the parser-safe macros `__CC_MAP(K_m, V_m)`
+ * / `__CC_VEC(T_m)`, where the parameter is the *mangled* token (`int*` becomes
+ * `intptr`).  The phase-3 reparse re-derives container instantiations by
+ * scanning those lowered macros (cc__register_lowered_{vec,map}_macros), but the
+ * mangled token is not a valid C type — and the real container bodies
+ * (map_impl.cch / vec.cch) now use the parameter as a real type (`V val`,
+ * `T *data`).  The old parser stubs hid this by never using the parameter as a
+ * type.  Mangling is lossy (`*`->`ptr`, `[:]`->`slice`, separators->`_`), so we
+ * cannot demangle reliably.  Instead, capture the real spelling at the lowering
+ * site (where `int*` is still present) keyed by mangled name, and recover it
+ * during the reparse rescan.  The memo is process-global and deterministic
+ * (mangled names are a pure function of the parameter types). */
+typedef struct {
+    char mangled[256];
+    char type1[128];
+    char type2[128];
+} CCContainerTypeMemo;
+static CCContainerTypeMemo cc__ctype_memo[1024];
+static size_t cc__ctype_memo_count = 0;
+
+static void cc__ctype_memo_put(const char* mangled, const char* type1, const char* type2) {
+    if (!mangled || !mangled[0]) return;
+    for (size_t i = 0; i < cc__ctype_memo_count; i++) {
+        if (strcmp(cc__ctype_memo[i].mangled, mangled) == 0) return; /* keep first */
+    }
+    if (cc__ctype_memo_count >= sizeof(cc__ctype_memo) / sizeof(cc__ctype_memo[0])) return;
+    CCContainerTypeMemo* m = &cc__ctype_memo[cc__ctype_memo_count++];
+    snprintf(m->mangled, sizeof(m->mangled), "%s", mangled);
+    snprintf(m->type1, sizeof(m->type1), "%s", type1 ? type1 : "");
+    snprintf(m->type2, sizeof(m->type2), "%s", type2 ? type2 : "");
+}
+
+static const CCContainerTypeMemo* cc__ctype_memo_get(const char* mangled) {
+    if (!mangled) return NULL;
+    for (size_t i = 0; i < cc__ctype_memo_count; i++) {
+        if (strcmp(cc__ctype_memo[i].mangled, mangled) == 0) return &cc__ctype_memo[i];
+    }
+    return NULL;
+}
+
+static const char* cc__ctype_memo_get_type1(const char* mangled) {
+    const CCContainerTypeMemo* m = cc__ctype_memo_get(mangled);
+    return (m && m->type1[0]) ? m->type1 : NULL;
+}
+
+static const char* cc__ctype_memo_get_type2(const char* mangled) {
+    const CCContainerTypeMemo* m = cc__ctype_memo_get(mangled);
+    return (m && m->type2[0]) ? m->type2 : NULL;
+}
+
 static void cc__register_lowered_vec_macros(const char* src) {
     if (!src) return;
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) return;
+    CCTypeGraph* graph = cc_type_graph_get_global();
+    if (!graph) return;
 
     const char* p = src;
     while ((p = strstr(p, "__CC_VEC(")) != NULL) {
@@ -5123,12 +5094,16 @@ static void cc__register_lowered_vec_macros(const char* src) {
         if (e > s) {
             char elem_type[128];
             char mangled[256];
+            const char* real_elem;
             size_t len = (size_t)(e - s);
             if (len >= sizeof(elem_type)) len = sizeof(elem_type) - 1;
             memcpy(elem_type, s, len);
             elem_type[len] = '\0';
             snprintf(mangled, sizeof(mangled), "CCVec_%s", elem_type);
-            cc_type_registry_add_vec(reg, elem_type, mangled);
+            /* Prefer the real type spelling captured at the lowering site; the
+             * scanned `elem_type` is the mangled token (e.g. `intptr`). */
+            real_elem = cc__ctype_memo_get_type1(mangled);
+            cc_type_graph_request_vec(graph, real_elem ? real_elem : elem_type, mangled);
         }
 
         p = end + 1;
@@ -5137,8 +5112,8 @@ static void cc__register_lowered_vec_macros(const char* src) {
 
 static void cc__register_lowered_map_macros(const char* src) {
     if (!src) return;
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) return;
+    CCTypeGraph* graph = cc_type_graph_get_global();
+    if (!graph) return;
 
     const char* p = src;
     while ((p = strstr(p, "__CC_MAP(")) != NULL) {
@@ -5178,7 +5153,17 @@ static void cc__register_lowered_map_macros(const char* src) {
             memcpy(val_type, vs, v_len);
             val_type[v_len] = '\0';
             snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
-            cc_type_registry_add_map(reg, key_type, val_type, mangled);
+            /* Prefer the real key/val spellings captured at the lowering site;
+             * the scanned key_type/val_type are mangled tokens (e.g. `intptr`),
+             * which the real CC_MAP_DECL_ARENA body cannot use as types. */
+            {
+                const char* real_key = cc__ctype_memo_get_type1(mangled);
+                const char* real_val = cc__ctype_memo_get_type2(mangled);
+                cc_type_graph_request_map(graph,
+                                          real_key ? real_key : key_type,
+                                          real_val ? real_val : val_type,
+                                          mangled);
+            }
         }
 
         p = end + 1;
@@ -5494,43 +5479,6 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
     return out;
 }
 
-/* Simple pass: rewrite @defer(err) -> @defer */
-static char* cc__rewrite_defer_syntax(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    
-    while (i + 6 < n) {
-        if (src[i] == '@' && strncmp(src + i + 1, "defer", 5) == 0) {
-            size_t j = i + 6;
-            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-            if (j < n && src[j] == '(') {
-                /* Found @defer( - skip parenthesized part */
-                size_t k = j + 1;
-                int paren = 1;
-                while (k < n && paren > 0) {
-                    if (src[k] == '(') paren++;
-                    else if (src[k] == ')') paren--;
-                    k++;
-                }
-                if (paren == 0) {
-                    /* Rewrite @defer(...) -> @defer */
-                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
-                    last_emit = k;
-                    i = k;
-                    continue;
-                }
-            }
-        }
-        i++;
-    }
-    
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
 
 /* ---- @async void return-type rewrite ----------------------------------- */
 /* `@async void fn(...)` is functionally the same as any other `@async` fn —
@@ -6859,13 +6807,13 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     int fd = mkstemps(tmp_path, 2); /* keep .c suffix */
     if (fd < 0) return -1;
 
-    /* Create type registry for this file (or reuse existing global) */
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) {
-        reg = cc_type_registry_new();
-        cc_type_registry_set_global(reg);
+    /* Per-TU type graph (wraps registry — see type_graph.h / COMPTIME_INSTANTIATION_SEAM.md). */
+    CCTypeGraph* graph = cc_type_graph_ensure_global_cleared();
+    if (!graph) {
+        close(fd);
+        unlink(tmp_path);
+        return -1;
     }
-    cc_type_registry_clear(reg);
     cc_result_spec_table_set_global(&cc__result_specs);
 
     FILE *in = fopen(input_path, "r");
@@ -6897,6 +6845,13 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     }
     size_t got = fread(buf, 1, (size_t)in_n, in);
     buf[got] = 0;
+
+    /* Explicit @comptime cc_instantiate_* requests (track C1).  Collect from
+     * the raw file (blocks not yet blanked) and replay into the graph. */
+    if (cc_emit_plan_comptime_instantiation_count() == 0) {
+        cc_emit_plan_collect_comptime_instantiations(buf, got);
+    }
+    cc_emit_plan_apply_comptime_instantiations(graph);
 
     /* Check for unawaited channel ops in @async functions (before rewrites).
        Skip this check for temp/reparse files (they have already been checked). */
@@ -6936,57 +6891,26 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
 
     /* Emit container type declarations from type registry */
     {
-        size_t n_vec = cc_type_registry_vec_count(reg);
-        size_t n_map = cc_type_registry_map_count(reg);
-        size_t n_chan = cc_type_registry_channel_count(reg);
+        size_t n_vec = cc_type_graph_vec_count(graph);
+        size_t n_map = cc_type_graph_map_count(graph);
+        size_t n_chan = cc_type_graph_channel_count(graph);
         
         if (n_vec > 0 || n_map > 0 || n_chan > 0) {
-            fprintf(out, "/* --- CC generic container declarations --- */\n");
-            fprintf(out, "#include <ccc/std/vec.h>\n");
-            fprintf(out, "#include <ccc/std/map.h>\n");
-            fprintf(out, "#include <ccc/cc_channel.h>\n");
+            cc_emit_plan_fprint_container_prelude(out, 0,
+                n_vec > 0, n_map > 0, n_chan > 0);
             
             /* Emit Vec declarations */
             for (size_t i = 0; i < n_vec; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
-                if (inst && inst->type1 && inst->mangled_name) {
-                    /* Extract mangled element name from CCVec_xxx */
-                    const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
-                    
-                    /* Skip CCVec_char - it's predeclared in string.cch */
-                    if (strcmp(mangled_elem, "char") == 0) {
-                        continue;
-                    }
-
-                    /* Optionals retired — always use the 2-arg macro.
-                     * vec.cch treats the legacy 3-arg form as ignoring OptT. */
-                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                }
+                cc_emit_plan_fprint_vec_decl(out, cc_type_graph_get_vec(graph, i));
             }
 
-            /* Emit Map declarations (using default hash functions for known types) */
+            /* Emit Map declarations */
             for (size_t i = 0; i < n_map; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
-                if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                    const char* hash_fn = "cc_map_hash_i32";
-                    const char* eq_fn = "cc_map_eq_i32";
-                    if (strcmp(inst->type1, "int") == 0) {
-                        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
-                    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
-                        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
-                    } else if (strstr(inst->type1, "64") != NULL) {
-                        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
-                    } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
-                    }
-                    /* Optionals retired — always use the 5-arg macro. */
-                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
-                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
-                }
+                cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
             }
 
             for (size_t i = 0; i < n_chan; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
+                const CCTypeInstantiation* inst = cc_type_graph_get_channel(graph, i);
                 if (inst && inst->type1 && inst->mangled_name) {
                 }
             }
@@ -7030,131 +6954,31 @@ chain_cleanup:
     return -1;
 }
 
-// Preprocess source string to output string (no temp files).
-// skip_checks: if true, skip validation checks (use for reparse passes).
-static size_t cc__find_ident_top_level_pp(const char* src, size_t start, size_t len, const char* ident) {
-    size_t ident_len = ident ? strlen(ident) : 0;
-    size_t pos = start;
-    if (!src || !ident || ident_len == 0 || start >= len) return len;
-    while (pos + ident_len <= len) {
-        pos = cc_find_substr_top_level(src, pos, len, ident, ident_len);
-        if (pos >= len) return len;
-        int left_ok = (pos == 0) || !cc_is_ident_char(src[pos - 1]);
-        int right_ok = (pos + ident_len >= len) || !cc_is_ident_char(src[pos + ident_len]);
-        if (left_ok && right_ok) return pos;
-        pos++;
-    }
-    return len;
-}
-
-static size_t cc__line_start_before_pp(const char* src, size_t pos) {
-    if (!src) return 0;
-    while (pos > 0 && src[pos - 1] != '\n') pos--;
-    return pos;
-}
-
-static size_t cc__type_decl_end_top_level_pp(const char* src, size_t len, const char* type_name) {
-    size_t p = 0;
-    if (!src || !type_name || !type_name[0]) return 0;
-    if (strcmp(type_name, "void") == 0 ||
-        strcmp(type_name, "bool") == 0 ||
-        strcmp(type_name, "char") == 0 ||
-        strcmp(type_name, "short") == 0 ||
-        strcmp(type_name, "int") == 0 ||
-        strcmp(type_name, "long") == 0 ||
-        strcmp(type_name, "float") == 0 ||
-        strcmp(type_name, "double") == 0 ||
-        strcmp(type_name, "size_t") == 0 ||
-        strcmp(type_name, "ssize_t") == 0 ||
-        strcmp(type_name, "CCError") == 0) {
-        return 0;
-    }
-    while (p < len) {
-        size_t line_start = p;
-        size_t line_end = line_start;
-        while (line_end < len && src[line_end] != '\n') line_end++;
-        size_t s = line_start;
-        while (s < line_end && (src[s] == ' ' || src[s] == '\t' || src[s] == '\r')) s++;
-        int is_type_decl =
-            (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) ||
-            (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ||
-            (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ||
-            (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4]));
-        if (!is_type_decl) {
-            p = (line_end < len) ? line_end + 1 : line_end;
-            continue;
-        }
-
-        size_t q = s;
-        int brace_depth = 0;
-        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        for (; q < len; q++) {
-            char c = src[q];
-            char c2 = (q + 1 < len) ? src[q + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; q++; } continue; }
-            if (in_str) { if (c == '\\' && c2) { q++; continue; } if (c == '"') in_str = 0; continue; }
-            if (in_chr) { if (c == '\\' && c2) { q++; continue; } if (c == '\'') in_chr = 0; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; q++; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; q++; continue; }
-            if (c == '"') { in_str = 1; continue; }
-            if (c == '\'') { in_chr = 1; continue; }
-            if (c == '{') { brace_depth++; continue; }
-            if (c == '}') { if (brace_depth > 0) brace_depth--; continue; }
-            if (c == ';' && brace_depth == 0) {
-                size_t end = q + 1;
-                int declares_type = 0;
-                if (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) {
-                    size_t e = q;
-                    while (e > s && (src[e - 1] == ' ' || src[e - 1] == '\t' || src[e - 1] == '\r' || src[e - 1] == '\n')) e--;
-                    size_t b = e;
-                    while (b > s && cc_is_ident_char(src[b - 1])) b--;
-                    size_t type_len = strlen(type_name);
-                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
-                } else {
-                    size_t kw_len =
-                        (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ? 6 :
-                        (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ? 5 :
-                        (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4])) ? 4 : 0;
-                    size_t b = s + kw_len;
-                    while (b < end && (src[b] == ' ' || src[b] == '\t' || src[b] == '\r' || src[b] == '\n')) b++;
-                    size_t e = b;
-                    while (e < end && cc_is_ident_char(src[e])) e++;
-                    size_t type_len = strlen(type_name);
-                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
-                }
-                if (declares_type) {
-                    if (end < len && src[end] == '\n') end++;
-                    return end;
-                }
-                p = (end < len && src[end] == '\n') ? end + 1 : end;
-                break;
-            }
-        }
-        if (q >= len) return 0;
-    }
-    return 0;
-}
-
 static int g_cc_preprocess_reparse_skip_phase1 = 0;
+
 
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks) {
     if (!input || input_len == 0) return NULL;
 
-    /* Create type registry for this file (or reuse existing global) */
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) {
-        reg = cc_type_registry_new();
-        cc_type_registry_set_global(reg);
-    }
-    cc_type_registry_clear(reg);
-
-    /* Make a copy of input since some rewrites modify in-place */
+    /* Per-TU type graph (wraps registry — see type_graph.h). */
+    CCTypeGraph* graph = cc_type_graph_ensure_global_cleared();
+    if (!graph) return NULL;
     char* buf = (char*)malloc(input_len + 1);
     if (!buf) return NULL;
     memcpy(buf, input, input_len);
     buf[input_len] = 0;
     size_t got = input_len;
+
+    if (cc_emit_plan_comptime_fragment_count() == 0) {
+        cc_emit_plan_collect_comptime_emits(buf, got);
+    }
+    if (cc_emit_plan_comptime_instantiation_count() == 0) {
+        cc_emit_plan_collect_comptime_instantiations(buf, got);
+    }
+    /* Replay explicit @comptime cc_instantiate_* requests into the graph so
+     * forced monomorphs are emitted even when the type is never spelled as
+     * CCVec::[T] / Map::[K,V] in source (track C1). */
+    cc_emit_plan_apply_comptime_instantiations(graph);
 
     /* Check for unawaited channel ops in @async functions (before rewrites).
        Skip if requested (reparse passes) or if path looks like a temp file. */
@@ -7205,59 +7029,9 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     fprintf(out, "#define __CC__ 1\n");
     fprintf(out, "#endif\n");
 
-    /* Emit container type declarations from type registry */
-    {
-        size_t n_vec = cc_type_registry_vec_count(reg);
-        size_t n_map = cc_type_registry_map_count(reg);
-        size_t n_chan = cc_type_registry_channel_count(reg);
-        
-        if (n_vec > 0 || n_map > 0 || n_chan > 0) {
-            fprintf(out, "/* --- CC generic container declarations --- */\n");
-            fprintf(out, "#include <ccc/std/vec.cch>\n");
-            fprintf(out, "#include <ccc/std/map.cch>\n");
-            fprintf(out, "#include <ccc/cc_channel.cch>\n");
-            
-            /* Emit Vec declarations */
-            for (size_t i = 0; i < n_vec; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
-                if (inst && inst->type1 && inst->mangled_name) {
-                    const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
-                    if (strcmp(mangled_elem, "char") == 0) continue;
-                    /* Optionals retired — always use the 2-arg macro. */
-                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                }
-            }
-
-            /* Emit Map declarations */
-            for (size_t i = 0; i < n_map; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
-                if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                    const char* hash_fn = "cc_map_hash_i32";
-                    const char* eq_fn = "cc_map_eq_i32";
-                    if (strcmp(inst->type1, "int") == 0) {
-                        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
-                    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
-                        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
-                    } else if (strstr(inst->type1, "64") != NULL) {
-                        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
-                    } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
-                    }
-                    /* Optionals retired — always use the 5-arg macro. */
-                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
-                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
-                }
-            }
-
-            for (size_t i = 0; i < n_chan; i++) {
-                const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
-                if (inst && inst->type1 && inst->mangled_name) {
-                }
-            }
-
-            fprintf(out, "/* --- end container declarations --- */\n\n");
-        }
-    }
+    /* Container declarations are spliced into the user source at
+     * `container_pos` (after leading #includes, before typedefs that
+     * reference container types).  See cc_emit_plan_compute_container_anchor. */
 
     /* Include cc_result.cch whenever:
      *   - the TU declares Result types (`cc__result_specs.count > 0`), OR
@@ -7315,136 +7089,87 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
         {
             size_t use_len = strlen(use);
-            size_t insert_pos = 0;
-            unsigned char delayed_result_specs[512] = {0};
-            size_t delayed_result_pos[512];
-            for (size_t i = 0; i < sizeof(delayed_result_pos) / sizeof(delayed_result_pos[0]); i++) {
-                delayed_result_pos[i] = use_len + 1;
-            }
-            while (insert_pos < use_len) {
-                size_t line_start = insert_pos;
-                size_t line_end = line_start;
-                while (line_end < use_len && use[line_end] != '\n') line_end++;
-                size_t p = line_start;
-                while (p < line_end && (use[p] == ' ' || use[p] == '\t' || use[p] == '\r')) p++;
-                if (p + 1 < use_len && use[p] == '/' && use[p + 1] == '*') {
-                    size_t end = p + 2;
-                    while (end + 1 < use_len && !(use[end] == '*' && use[end + 1] == '/')) end++;
-                    insert_pos = (end + 1 < use_len) ? end + 2 : use_len;
-                    if (insert_pos < use_len && use[insert_pos] == '\n') insert_pos++;
-                    continue;
+            size_t insert_pos = cc_emit_plan_compute_prelude_insert_pos(use, use_len);
+            CCEmitPlanResultDelay result_delay;
+            CCEmitPlanContainerSchedule ctnr_sched;
+            CCEmitPlanComptimeSchedule comptime_sched;
+            unsigned char comptime_emitted[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
+            memset(comptime_emitted, 0, sizeof(comptime_emitted));
+            cc_emit_plan_build_result_delays(use, use_len, &cc__result_specs, insert_pos, &result_delay);
+            cc_emit_plan_build_container_schedule(use, use_len, graph, &ctnr_sched);
+            size_t container_pos = ctnr_sched.anchor_pos;
+            size_t n_vec_ctnr = ctnr_sched.n_vec;
+            size_t n_map_ctnr = ctnr_sched.n_map;
+            int have_container_decls = (n_vec_ctnr > 0 || n_map_ctnr > 0);
+            cc_emit_plan_build_comptime_schedule(use, use_len, insert_pos, container_pos, &comptime_sched);
+            {
+                size_t cursor = have_container_decls ? container_pos : insert_pos;
+                if (have_container_decls) {
+                    fwrite(use, 1, container_pos, out);
+                    cc_emit_plan_fprint_container_prelude(out, 1,
+                        n_vec_ctnr > 0, n_map_ctnr > 0, 0);
+                    for (size_t i = 0; i < n_vec_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (ctnr_sched.vec_delayed[i]) continue;
+                        cc_emit_plan_fprint_vec_decl(out, cc_type_graph_get_vec(graph, i));
+                    }
+                    for (size_t i = 0; i < n_map_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (ctnr_sched.map_delayed[i]) continue;
+                        cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
+                    }
+                    cc_emit_plan_fprint_container_epilogue(out);
+                    cc_emit_plan_fprint_line_directive(out, use, container_pos, input_path);
+                } else {
+                    fwrite(use, 1, insert_pos, out);
                 }
-                if (p + 9 <= line_end && memcmp(use + p, "#include ", 9) == 0) {
-                    insert_pos = (line_end < use_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                /* Keep parser helper prototypes below leading preprocessor
-                   directives too, so user typedef/struct blocks that follow
-                   `#define`s can come before any helper signatures that mention
-                   their types. */
-                if (p < line_end && use[p] == '#') {
-                    insert_pos = (line_end < use_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                if (p == line_end || (p + 1 < line_end && use[p] == '/' && use[p + 1] == '/')) {
-                    insert_pos = (line_end < use_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                if ((p + 7 <= line_end && memcmp(use + p, "typedef", 7) == 0 && !cc_is_ident_char(use[p + 7])) ||
-                    (p + 6 <= line_end && memcmp(use + p, "struct", 6) == 0 && !cc_is_ident_char(use[p + 6])) ||
-                    (p + 5 <= line_end && memcmp(use + p, "union", 5) == 0 && !cc_is_ident_char(use[p + 5])) ||
-                    (p + 4 <= line_end && memcmp(use + p, "enum", 4) == 0 && !cc_is_ident_char(use[p + 4]))) {
-                    size_t q = p;
-                    int brace_depth = 0;
-                    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-                    for (; q < use_len; q++) {
-                        char c = use[q];
-                        char c2 = (q + 1 < use_len) ? use[q + 1] : 0;
-                        if (in_lc) {
-                            if (c == '\n') in_lc = 0;
-                            continue;
-                        }
-                        if (in_bc) {
-                            if (c == '*' && c2 == '/') { in_bc = 0; q++; }
-                            continue;
-                        }
-                        if (in_str) {
-                            if (c == '\\' && c2) { q++; continue; }
-                            if (c == '"') in_str = 0;
-                            continue;
-                        }
-                        if (in_chr) {
-                            if (c == '\\' && c2) { q++; continue; }
-                            if (c == '\'') in_chr = 0;
-                            continue;
-                        }
-                        if (c == '/' && c2 == '/') { in_lc = 1; q++; continue; }
-                        if (c == '/' && c2 == '*') { in_bc = 1; q++; continue; }
-                        if (c == '"') { in_str = 1; continue; }
-                        if (c == '\'') { in_chr = 1; continue; }
-                        if (c == '{') { brace_depth++; continue; }
-                        if (c == '}') { if (brace_depth > 0) brace_depth--; continue; }
-                        if (c == ';' && brace_depth == 0) {
-                            q++;
-                            if (q < use_len && use[q] == '\n') q++;
-                            insert_pos = q;
-                            break;
+                int insert_emitted = 0;
+                for (;;) {
+                    size_t next_pos = use_len + 1;
+                    if (!insert_emitted && cursor <= insert_pos && insert_pos < next_pos) {
+                        next_pos = insert_pos;
+                    }
+                    for (size_t i = 0; i < n_vec_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (!ctnr_sched.vec_delayed[i]) continue;
+                        if (ctnr_sched.vec_pos[i] > cursor && ctnr_sched.vec_pos[i] < next_pos) {
+                            next_pos = ctnr_sched.vec_pos[i];
                         }
                     }
-                    if (q >= use_len) insert_pos = use_len;
-                    continue;
-                }
-                break;
-            }
-            for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
-                const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                size_t ok_decl_end = spec ? cc__type_decl_end_top_level_pp(use, use_len, spec->ok_type) : 0;
-                size_t err_decl_end = spec ? cc__type_decl_end_top_level_pp(use, use_len, spec->err_type) : 0;
-                size_t decl_end = ok_decl_end > err_decl_end ? ok_decl_end : err_decl_end;
-                if (!spec || decl_end <= insert_pos) continue;
-
-                char concrete[256];
-                cc_result_spec_format_name(spec->mangled_ok, spec->mangled_err,
-                                           concrete, sizeof(concrete));
-                size_t first_use = cc__find_ident_top_level_pp(use, decl_end, use_len, concrete);
-                delayed_result_specs[i] = 1;
-                if (first_use < use_len) {
-                    delayed_result_pos[i] = cc__line_start_before_pp(use, first_use);
-                } else {
-                    delayed_result_pos[i] = decl_end;
-                }
-            }
-            fwrite(use, 1, insert_pos, out);
-            {
-                /* At `insert_pos` the TU's leading `#include` / `typedef`
-                 * prelude has been emitted, so user-defined payload/error
-                 * types (plus stdlib types pulled in via prelude) are in
-                 * scope.  This is where we synthesize the *real* typed
-                 * `CC_DECL_RESULT_SPEC(CCResult_X_Y, X, Y)` expansions for
-                 * every spec the TU mentions that isn't already declared
-                 * by a header — see the "parser-mode result-type collapse"
-                 * follow-up in docs/known-bugs/redis_idiomatic_async.md.
-                 *
-                 * The `CCResult_%s_%s_DEFINED` header guard matches the
-                 * one cc_result.cch / cc_io_error.cch stamp on their own
-                 * pre-declared specs, so duplicate-definition is avoided
-                 * when both a header and the user TU request the same
-                 * Result type.
-                 *
-                 * We emit this block unconditionally whenever we entered
-                 * the outer branch (Result syntax *or* `!>`/`?>` unwrap
-                 * use), so that the `_Generic` arms below pick up stdlib-
-                 * predeclared Result types (`CCResult_bool_CCIoError`
-                 * returned by channel sends, etc.) even when the source
-                 * never spells the typed `T!>(E)` name. */
-                fprintf(out, "/* --- CC result type declarations (typed, post-prelude) --- */\n");
+                    for (size_t i = 0; i < n_map_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (!ctnr_sched.map_delayed[i]) continue;
+                        if (ctnr_sched.map_pos[i] > cursor && ctnr_sched.map_pos[i] < next_pos) {
+                            next_pos = ctnr_sched.map_pos[i];
+                        }
+                    }
+                    for (size_t i = 0; i < cc__result_specs.count && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (!result_delay.delayed[i]) continue;
+                        if (result_delay.pos[i] > cursor && result_delay.pos[i] < next_pos) {
+                            next_pos = result_delay.pos[i];
+                        }
+                    }
+                    for (size_t i = 0; i < comptime_sched.n; i++) {
+                        if (comptime_emitted[i]) continue;
+                        if (comptime_sched.pos[i] > cursor && comptime_sched.pos[i] < next_pos) {
+                            next_pos = comptime_sched.pos[i];
+                        }
+                    }
+                    if (next_pos > use_len) {
+                        if (cursor < use_len) {
+                            fwrite(use + cursor, 1, use_len - cursor, out);
+                        }
+                        break;
+                    }
+                    if (next_pos > cursor) {
+                        fwrite(use + cursor, 1, next_pos - cursor, out);
+                    }
+                    if (!insert_emitted && next_pos == insert_pos) {
+                        insert_emitted = 1;
+                        fprintf(out, "/* --- CC result type declarations (typed, post-prelude) --- */\n");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
                     const char* ok_m = spec ? spec->mangled_ok : NULL;
                     const char* err_m = spec ? spec->mangled_err : NULL;
                     const char* ok_ty = spec ? spec->ok_type : NULL;
                     const char* err_ty = spec ? spec->err_type : NULL;
-                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
                     if (!ok_m || !err_m || !ok_ty || !err_ty) continue;
                     /* Stdlib-predeclared specs (`CCResult_CCDirIterptr_CCIoError`
                      * etc.) have their `CC_DECL_RESULT_SPEC` expansion baked
@@ -7487,7 +7212,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
                     const char* ok = spec ? spec->mangled_ok : NULL;
                     const char* err = spec ? spec->mangled_err : NULL;
-                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
                     if (!ok || !err) continue;
                     int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
                     fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
@@ -7593,14 +7318,14 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
                     if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     char key[192];
+                    char arm[256];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
-                    fprintf(out,
-                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
-                        key, key);
+                    cc_emit_plan_format_result_arm(arm, sizeof(arm), key, CC_RESULT_ARM_IS_ERR, 0, 0);
+                    fputs(arm, out);
                 }
                 /* Always include arms for stdlib-predeclared Result types
                  * (e.g. `CCResult_bool_CCIoError` for channel sends,
@@ -7614,9 +7339,12 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     if (!p) break;
                     if (!p->concrete_name) continue;
                     if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
-                    fprintf(out,
-                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
-                        p->concrete_name, p->concrete_name);
+                    {
+                        char arm[256];
+                        cc_emit_plan_format_result_arm(arm, sizeof(arm), p->concrete_name,
+                                                       CC_RESULT_ARM_IS_ERR, 0, 0);
+                        fputs(arm, out);
+                    }
                 }
                 fprintf(out,
                     "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n");
@@ -7633,7 +7361,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
                     if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     /* Void-result types have no `.u.value` field; skip their
                      * `__cc_uw_value` arm.  The `?>`/`!>` rewriter never
@@ -7642,11 +7370,11 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                      * and typed non-Result LHSs. */
                     if (strcmp(spec->ok_type, "void") == 0) continue;
                     char key[192];
+                    char arm[256];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
-                    fprintf(out,
-                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
-                        key, key);
+                    cc_emit_plan_format_result_arm(arm, sizeof(arm), key, CC_RESULT_ARM_VALUE, 0, 0);
+                    fputs(arm, out);
                 }
                 for (int si = 0; ; si++) {
                     const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
@@ -7654,9 +7382,12 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     if (!p->concrete_name || !p->ok_type) continue;
                     if (strcmp(p->ok_type, "void") == 0) continue;
                     if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
-                    fprintf(out,
-                        "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
-                        p->concrete_name, p->concrete_name);
+                    {
+                        char arm[256];
+                        cc_emit_plan_format_result_arm(arm, sizeof(arm), p->concrete_name,
+                                                       CC_RESULT_ARM_VALUE, 0, 0);
+                        fputs(arm, out);
+                    }
                 }
                 fprintf(out, "    default: (__x__))\n");
 
@@ -7672,103 +7403,121 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 (void)CC_UW_ARM_EMIT_CHECK(&seen, "__CCResultGeneric");
                 for (size_t i = 0; i < cc__result_specs.count; i++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    if (i < sizeof(delayed_result_specs) && delayed_result_specs[i]) continue;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
                     if (!spec || !spec->mangled_ok[0] || !spec->mangled_err[0]) continue;
                     char key[192];
+                    char arm[256];
                     snprintf(key, sizeof(key), "CCResult_%s_%s", spec->mangled_ok, spec->mangled_err);
                     if (CC_UW_ARM_EMIT_CHECK(&seen, key)) continue;
-                    fprintf(out,
-                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
-                        key, key);
+                    cc_emit_plan_format_result_arm(arm, sizeof(arm), key, CC_RESULT_ARM_ERR, 0, 0);
+                    fputs(arm, out);
                 }
                 for (int si = 0; ; si++) {
                     const CCStdlibPredeclaredResult* p = cc_result_spec_lookup_stdlib_predeclared_by_index(si);
                     if (!p) break;
                     if (!p->concrete_name) continue;
                     if (CC_UW_ARM_EMIT_CHECK(&seen, p->concrete_name)) continue;
-                    fprintf(out,
-                        "    %s: ((%s*)(void*)&(__x__))->u.error, \\\n",
-                        p->concrete_name, p->concrete_name);
+                    {
+                        char arm[256];
+                        cc_emit_plan_format_result_arm(arm, sizeof(arm), p->concrete_name,
+                                                       CC_RESULT_ARM_ERR, 0, 0);
+                        fputs(arm, out);
+                    }
                 }
                 fprintf(out,
                     "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
                 #undef CC_UW_ARM_EMIT_CHECK
 
                 fprintf(out, "/* --- end result type declarations --- */\n");
-                {
-                    int resume_line = 1;
-                    for (size_t i = 0; i < insert_pos; i++) {
-                        if (use[i] == '\n') resume_line++;
+                cc_emit_plan_fprint_line_directive(out, use, insert_pos, input_path);
                     }
-                    fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
-                }
-            }
-            {
-                size_t delayed_cursor = insert_pos;
-                for (;;) {
-                    size_t next_pos = use_len + 1;
-                    for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
-                        if (!delayed_result_specs[i]) continue;
-                        if (delayed_result_pos[i] > delayed_cursor && delayed_result_pos[i] < next_pos) {
-                            next_pos = delayed_result_pos[i];
-                        }
-                    }
-                    if (next_pos > use_len) break;
-
-                    fwrite(use + delayed_cursor, 1, next_pos - delayed_cursor, out);
-                    fprintf(out, "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
-                    for (size_t i = 0; i < cc__result_specs.count && i < sizeof(delayed_result_specs); i++) {
-                        const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                        if (!delayed_result_specs[i] || delayed_result_pos[i] != next_pos || !spec) continue;
-                        if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
-                        int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
-                        fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
-                        fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
-                        if (ok_is_void) {
-                            fprintf(out,
-                                "typedef struct CCResult_%s_%s {\n"
-                                "    bool ok;\n"
-                                "    union { char _dummy; %s error; } u;\n"
-                                "} CCResult_%s_%s;\n",
-                                spec->mangled_ok, spec->mangled_err, spec->err_type,
-                                spec->mangled_ok, spec->mangled_err);
-                        } else {
-                            fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
-                                    spec->mangled_ok, spec->mangled_err,
-                                    spec->ok_type, spec->err_type);
-                        }
-                        fprintf(out, "#endif\n");
-                        fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                spec->mangled_ok, spec->mangled_err,
-                                spec->mangled_ok, spec->mangled_err);
-                        fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                spec->mangled_ok, spec->mangled_err,
-                                spec->mangled_ok, spec->mangled_err);
-                        if (!ok_is_void) {
-                            fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                    spec->ok_type, spec->mangled_ok, spec->mangled_err,
-                                    spec->mangled_ok, spec->mangled_err);
-                        }
-                        fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                spec->err_type, spec->mangled_ok, spec->mangled_err,
-                                spec->mangled_ok, spec->mangled_err);
-                        if (!ok_is_void) {
-                            fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
-                                    spec->ok_type, spec->mangled_ok, spec->mangled_err,
-                                    spec->mangled_ok, spec->mangled_err, spec->ok_type);
-                        }
-                    }
-                    fprintf(out, "/* --- end delayed result type declarations --- */\n");
                     {
-                        int resume_line = 1;
-                        for (size_t i = 0; i < next_pos; i++) {
-                            if (use[i] == '\n') resume_line++;
+                        int emitted_delayed_container = 0;
+                        for (size_t i = 0; i < n_vec_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                            if (!ctnr_sched.vec_delayed[i] || ctnr_sched.vec_pos[i] != next_pos) continue;
+                            if (!emitted_delayed_container) {
+                                fprintf(out, "/* --- CC delayed container declarations --- */\n");
+                                emitted_delayed_container = 1;
+                            }
+                            cc_emit_plan_fprint_vec_decl(out, cc_type_graph_get_vec(graph, i));
                         }
-                        fprintf(out, "#line %d \"%s\"\n", resume_line, cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+                        for (size_t i = 0; i < n_map_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                            if (!ctnr_sched.map_delayed[i] || ctnr_sched.map_pos[i] != next_pos) continue;
+                            if (!emitted_delayed_container) {
+                                fprintf(out, "/* --- CC delayed container declarations --- */\n");
+                                emitted_delayed_container = 1;
+                            }
+                            cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
+                        }
+                        if (emitted_delayed_container) {
+                            fprintf(out, "/* --- end delayed container declarations --- */\n");
+                        }
                     }
-                    delayed_cursor = next_pos;
+                    {
+                        int emitted_delayed_result = 0;
+                        for (size_t i = 0; i < cc__result_specs.count && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                            const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                            if (!result_delay.delayed[i] || result_delay.pos[i] != next_pos || !spec) continue;
+                            if (!emitted_delayed_result) {
+                                fprintf(out, "/* --- CC delayed result type declarations (after local typedefs) --- */\n");
+                                emitted_delayed_result = 1;
+                            }
+                            if (cc_result_spec_is_stdlib_predeclared_name(spec->concrete_name)) continue;
+                            int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
+                            fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
+                            fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
+                            if (ok_is_void) {
+                                fprintf(out,
+                                    "typedef struct CCResult_%s_%s {\n"
+                                    "    bool ok;\n"
+                                    "    union { char _dummy; %s error; } u;\n"
+                                    "} CCResult_%s_%s;\n",
+                                    spec->mangled_ok, spec->mangled_err, spec->err_type,
+                                    spec->mangled_ok, spec->mangled_err);
+                            } else {
+                                fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                                        spec->mangled_ok, spec->mangled_err,
+                                        spec->ok_type, spec->err_type);
+                            }
+                            fprintf(out, "#endif\n");
+                            fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                    spec->mangled_ok, spec->mangled_err,
+                                    spec->mangled_ok, spec->mangled_err);
+                            fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                    spec->mangled_ok, spec->mangled_err,
+                                    spec->mangled_ok, spec->mangled_err);
+                            if (!ok_is_void) {
+                                fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                        spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                        spec->mangled_ok, spec->mangled_err);
+                            }
+                            fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                    spec->err_type, spec->mangled_ok, spec->mangled_err,
+                                    spec->mangled_ok, spec->mangled_err);
+                            if (!ok_is_void) {
+                                fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
+                                        spec->ok_type, spec->mangled_ok, spec->mangled_err,
+                                        spec->mangled_ok, spec->mangled_err, spec->ok_type);
+                            }
+                        }
+                        if (emitted_delayed_result) {
+                            fprintf(out, "/* --- end delayed result type declarations --- */\n");
+                        }
+                    }
+                    {
+                        int emitted_comptime = 0;
+                        for (size_t i = 0; i < comptime_sched.n; i++) {
+                            if (comptime_emitted[i] || comptime_sched.pos[i] != next_pos) continue;
+                            if (!emitted_comptime) {
+                                emitted_comptime = 1;
+                            }
+                            cc_emit_plan_fprint_comptime_fragment(out, comptime_sched.frag_index[i]);
+                            comptime_emitted[i] = 1;
+                        }
+                    }
+                    cc_emit_plan_fprint_line_directive(out, use, next_pos, input_path);
+                    cursor = next_pos;
                 }
-                fputs(use + delayed_cursor, out);
             }
         }
         free(lowered_system_use);
@@ -8096,18 +7845,12 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
                                            const char* input_path) {
     CCPassChain chain;
     char* out = NULL;
-    CCTypeRegistry* reg = NULL;
     if (!src || input_len == 0) return NULL;
 
     /* Header lowering should share the same type-syntax understanding as the
        main preprocess pipeline for syntax that must not survive into plain C
        headers. Keep this intentionally limited to header-safe rewrites. */
-    reg = cc_type_registry_get_global();
-    if (!reg) {
-        reg = cc_type_registry_new();
-        cc_type_registry_set_global(reg);
-    }
-    cc_type_registry_clear(reg);
+    if (!cc_type_graph_ensure_global_cleared()) return NULL;
 
     cc_pass_chain_init(&chain, src, input_len);
     if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
@@ -8198,17 +7941,1132 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     return buf;
 }
 
+/* D1.0 — constexpr `type_of(T)` view (numeric/layout members).
+ *
+ * Folds `type_of(T).size` -> `sizeof(T)` and `type_of(T).align` -> `_Alignof(T)`
+ * (both wrapped in a `(size_t)` cast to match the accessor return type).  These
+ * are genuine C integer constant expressions, so they work in `static_assert`,
+ * array dimensions, and `@comptime if` — and the backend, not a comptime VM,
+ * computes the actual layout number (the "(1) layout out of scope" decision).
+ *
+ * The bare value form `type_of(T)` is left untouched: it keeps lowering through
+ * the `type_of(T)` macro (`cc_type_of(#T)` -> runtime `const cc_type_info*`),
+ * so runtime introspection and pointer identity are unchanged.  Only the
+ * member-access shape `type_of(T).<member>` is recognized here; `type_of(T)->m`
+ * (pointer deref, runtime) is deliberately NOT matched.
+ *
+ * Structural members (`.kind`, `.nfields`, `.name`, `.fields[...]`) are a later
+ * D1 increment that reads the type graph; only numeric layout lands here.
+ * Runs in `cc__apply_phase1_canonical_passes` (parse path) AND on the
+ * visit_codegen emit path, since the emitted `.c` is produced by the latter.
+ *
+ * D1.1 adds the *structural* members the compiler can decide by name:
+ *   - `.name`    -> `"T"` (constexpr string literal; the display spelling)
+ *   - `.kind`    -> `CC_TK_PRIMITIVE` / `CC_TK_GENERIC_INST` for the reserved
+ *                   primitive + container name sets (constexpr enum constant),
+ *                   else the runtime `cc_type_of("T")->kind` read
+ *   - `.nfields` -> `0` for primitives (constexpr), else runtime read
+ * Members the compiler can't decide structurally fall back to the same runtime
+ * `cc_type_of(#T)->member` the bare macro already produces — so every
+ * `type_of(T).<member>` at least compiles, and the known cases are ICEs. */
+static int cc__ti_name_is_primitive(const char* s, size_t n) {
+    static const char* const prims[] = {
+        "int", "char", "short", "long", "float",
+        "double", "size_t", "intptr_t", "bool",
+    };
+    for (size_t k = 0; k < sizeof(prims) / sizeof(prims[0]); k++)
+        if (strlen(prims[k]) == n && memcmp(prims[k], s, n) == 0) return 1;
+    return 0;
+}
+static int cc__ti_name_is_container(const char* s, size_t n) {
+    static const char* const pre[] = { "CCVec_", "Map_", "CCChan" };
+    for (size_t k = 0; k < sizeof(pre) / sizeof(pre[0]); k++) {
+        size_t pl = strlen(pre[k]);
+        if (n >= pl && memcmp(s, pre[k], pl) == 0) return 1;
+    }
+    return 0;
+}
+
+char* cc__lower_type_of_constexpr(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    int changed = 0;
+    CCScannerState scan;
+    static const char KW[] = "type_of";
+    const size_t KWN = sizeof(KW) - 1;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        /* Match `type_of` at an identifier boundary (rejects `cc_type_of`,
+         * `type_of_x`, etc.). */
+        if (src[i] != 't' || i + KWN > n || memcmp(src + i, KW, KWN) != 0 ||
+            (i > 0 && cc_is_ident_char(src[i - 1])) ||
+            (i + KWN < n && cc_is_ident_char(src[i + KWN]))) {
+            i++;
+            continue;
+        }
+        size_t p = cc_skip_ws_len(src, n, i + KWN);
+        if (p >= n || src[p] != '(') { i++; continue; }
+        p = cc_skip_ws_len(src, n, p + 1);
+        size_t id0 = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        size_t idn = p - id0;
+        if (idn == 0) { i++; continue; }
+        size_t q = cc_skip_ws_len(src, n, p);
+        if (q >= n || src[q] != ')') { i++; continue; }   /* bare IDENT only */
+        q = cc_skip_ws_len(src, n, q + 1);
+        if (q >= n || src[q] != '.') { i++; continue; }    /* value/`->` forms untouched */
+        size_t m = cc_skip_ws_len(src, n, q + 1);
+        size_t mem0 = m;
+        while (m < n && cc_is_ident_char(src[m])) m++;
+        size_t memn = m - mem0;
+        const char* mem = src + mem0;
+        const char* T = src + id0;          /* the bare type identifier */
+        size_t Tn = idn;
+        enum { MK_NONE, MK_SIZE, MK_ALIGN, MK_NAME, MK_KIND, MK_NFIELDS } which = MK_NONE;
+        if (memn == 4 && memcmp(mem, "size", 4) == 0)        which = MK_SIZE;
+        else if (memn == 5 && memcmp(mem, "align", 5) == 0)  which = MK_ALIGN;
+        else if (memn == 4 && memcmp(mem, "name", 4) == 0)   which = MK_NAME;
+        else if (memn == 4 && memcmp(mem, "kind", 4) == 0)   which = MK_KIND;
+        else if (memn == 7 && memcmp(mem, "nfields", 7) == 0) which = MK_NFIELDS;
+        if (which == MK_NONE) { i++; continue; }  /* leave other members alone */
+
+        int is_prim = cc__ti_name_is_primitive(T, Tn);
+        int is_cont = cc__ti_name_is_container(T, Tn);
+
+        /* Emit prefix, then the folded/forwarded replacement for this member. */
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        switch (which) {
+        case MK_SIZE:
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)sizeof(");
+            cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "))");
+            break;
+        case MK_ALIGN:
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)_Alignof(");
+            cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "))");
+            break;
+        case MK_NAME:
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
+            cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
+            break;
+        case MK_KIND:
+            if (is_prim) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(CC_TK_PRIMITIVE)");
+            } else if (is_cont) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(CC_TK_GENERIC_INST)");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(cc_type_of(\"");
+                cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\")->kind)");
+            }
+            break;
+        case MK_NFIELDS:
+            if (is_prim) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)0)");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "((size_t)cc_type_of(\"");
+                cc_sb_append(&out, &out_len, &out_cap, T, Tn);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\")->nfields)");
+            }
+            break;
+        default: break;
+        }
+        last_emit = m;
+        i = m;
+        changed = 1;
+    }
+    if (!changed) { free(out); return NULL; }
+    if (last_emit < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* ===== D2.0 — `@comptime if (PRED) { ... } [else { ... }]` ===================
+ *
+ * Compile-time conditional code *selection*.  PRED is a self-contained integer
+ * constant expression the compiler decides statically:
+ *   - integer / char literals
+ *   - the `CC_TK_*` kind constants and `true`/`false`
+ *   - the structural `type_of(T).kind` / `type_of(T).nfields` views (classified
+ *     by name, exactly as D1.1) for the reserved primitive + container sets
+ *   - the full C operator set (`! ~ - +  * / %  + -  << >>  < <= > >=  == !=
+ *     &  ^  |  &&  ||`) and parentheses
+ * Anything the compiler can't fold statically is a *hard error*, never a silent
+ * `false`: `sizeof`/`_Alignof`/`type_of(T).size` (layout — deliberately out of
+ * scope, see the D1 "layout out of scope" decision), `cc_type_of(...)` runtime
+ * reads, unknown identifiers, casts, and calls.
+ *
+ * The taken branch body is spliced verbatim where the construct began; the rest
+ * is dropped, with newline-only padding so line numbers stay stable.  Runs as
+ * the *first* canonical pass (and the matching emit slot) so a dead branch is
+ * pruned before any other rewrite or instantiation collector sees it — true
+ * conditional compilation, not dead-code emission. */
+
+typedef struct { const char* s; size_t n; size_t i; int ok; } CCCEval;
+
+static long cc__ce_expr(CCCEval* e);
+
+static void cc__ce_ws(CCCEval* e) { e->i = cc_skip_ws_len(e->s, e->n, e->i); }
+
+static int cc__ce_kw_value(const char* s, size_t n, long* out) {
+    /* Mirror of `cc_type_kind` in include/ccc/cc_type.cch — keep in sync. */
+    static const struct { const char* k; long v; } tab[] = {
+        { "CC_TK_UNKNOWN", 0 }, { "CC_TK_PRIMITIVE", 1 }, { "CC_TK_POINTER", 2 },
+        { "CC_TK_STRUCT", 3 }, { "CC_TK_GENERIC_INST", 4 }, { "CC_TK_CLOSURE", 5 },
+        { "CC_TK_FUNCTION", 6 }, { "CC_TK_ARRAY", 7 }, { "true", 1 }, { "false", 0 },
+    };
+    for (size_t k = 0; k < sizeof(tab) / sizeof(tab[0]); k++)
+        if (strlen(tab[k].k) == n && memcmp(tab[k].k, s, n) == 0) { *out = tab[k].v; return 1; }
+    return 0;
+}
+
+/* `type_of` already consumed; parse `(IDENT).member` and fold structurally. */
+static long cc__ce_type_of_member(CCCEval* e) {
+    cc__ce_ws(e);
+    if (e->i >= e->n || e->s[e->i] != '(') { e->ok = 0; return 0; }
+    e->i++; cc__ce_ws(e);
+    size_t t0 = e->i;
+    while (e->i < e->n && cc_is_ident_char(e->s[e->i])) e->i++;
+    size_t tn = e->i - t0;
+    if (tn == 0) { e->ok = 0; return 0; }
+    cc__ce_ws(e);
+    if (e->i >= e->n || e->s[e->i] != ')') { e->ok = 0; return 0; }
+    e->i++; cc__ce_ws(e);
+    if (e->i >= e->n || e->s[e->i] != '.') { e->ok = 0; return 0; }
+    e->i++; cc__ce_ws(e);
+    size_t m0 = e->i;
+    while (e->i < e->n && cc_is_ident_char(e->s[e->i])) e->i++;
+    size_t mn = e->i - m0;
+    const char* T = e->s + t0;
+    const char* M = e->s + m0;
+    if (mn == 4 && memcmp(M, "kind", 4) == 0) {
+        if (cc__ti_name_is_primitive(T, tn)) return 1; /* CC_TK_PRIMITIVE */
+        if (cc__ti_name_is_container(T, tn)) return 4; /* CC_TK_GENERIC_INST */
+        e->ok = 0; return 0;                           /* not statically decidable */
+    }
+    if (mn == 7 && memcmp(M, "nfields", 7) == 0) {
+        if (cc__ti_name_is_primitive(T, tn)) return 0;
+        e->ok = 0; return 0;
+    }
+    e->ok = 0; return 0; /* .size/.align/.name -> layout/string, out of scope */
+}
+
+static long cc__ce_primary(CCCEval* e) {
+    cc__ce_ws(e);
+    if (e->i >= e->n) { e->ok = 0; return 0; }
+    char c = e->s[e->i];
+    if (c == '(') {
+        e->i++;
+        long v = cc__ce_expr(e);
+        cc__ce_ws(e);
+        if (e->i >= e->n || e->s[e->i] != ')') { e->ok = 0; return 0; }
+        e->i++;
+        return v;
+    }
+    if (c >= '0' && c <= '9') {
+        long v = 0;
+        int base = 10;
+        if (c == '0' && e->i + 1 < e->n && (e->s[e->i + 1] == 'x' || e->s[e->i + 1] == 'X')) {
+            base = 16; e->i += 2;
+        } else if (c == '0') {
+            base = 8;
+        }
+        size_t st = e->i;
+        while (e->i < e->n) {
+            char d = e->s[e->i];
+            int dv;
+            if (d >= '0' && d <= '9') dv = d - '0';
+            else if (base == 16 && d >= 'a' && d <= 'f') dv = 10 + (d - 'a');
+            else if (base == 16 && d >= 'A' && d <= 'F') dv = 10 + (d - 'A');
+            else break;
+            if (dv >= base) break;
+            v = v * base + dv;
+            e->i++;
+        }
+        if (e->i == st && base != 8) { e->ok = 0; return 0; }
+        while (e->i < e->n && (e->s[e->i] == 'u' || e->s[e->i] == 'U' ||
+                               e->s[e->i] == 'l' || e->s[e->i] == 'L')) e->i++;
+        return v;
+    }
+    if (c == '\'') {
+        e->i++;
+        long v;
+        if (e->i < e->n && e->s[e->i] == '\\') {
+            e->i++;
+            if (e->i >= e->n) { e->ok = 0; return 0; }
+            char esc = e->s[e->i++];
+            switch (esc) {
+            case 'n': v = '\n'; break; case 't': v = '\t'; break;
+            case 'r': v = '\r'; break; case '0': v = '\0'; break;
+            case '\\': v = '\\'; break; case '\'': v = '\''; break;
+            default: v = (unsigned char)esc; break;
+            }
+        } else if (e->i < e->n) {
+            v = (unsigned char)e->s[e->i++];
+        } else { e->ok = 0; return 0; }
+        if (e->i >= e->n || e->s[e->i] != '\'') { e->ok = 0; return 0; }
+        e->i++;
+        return v;
+    }
+    if (cc_is_ident_char(c)) {
+        size_t id0 = e->i;
+        while (e->i < e->n && cc_is_ident_char(e->s[e->i])) e->i++;
+        size_t idn = e->i - id0;
+        if (idn == 7 && memcmp(e->s + id0, "type_of", 7) == 0)
+            return cc__ce_type_of_member(e);
+        long kv;
+        if (cc__ce_kw_value(e->s + id0, idn, &kv)) return kv;
+        e->ok = 0; return 0; /* unknown identifier */
+    }
+    e->ok = 0; return 0;
+}
+
+static long cc__ce_unary(CCCEval* e) {
+    cc__ce_ws(e);
+    if (e->i < e->n) {
+        char c = e->s[e->i];
+        if (c == '!' || c == '~' || c == '-' || c == '+') {
+            e->i++;
+            long v = cc__ce_unary(e);
+            switch (c) {
+            case '!': return !v;
+            case '~': return ~v;
+            case '-': return -v;
+            default:  return v;
+            }
+        }
+    }
+    return cc__ce_primary(e);
+}
+
+static long cc__ce_mul(CCCEval* e) {
+    long v = cc__ce_unary(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char c = e->s[e->i];
+        if (c == '*') { e->i++; v = v * cc__ce_unary(e); }
+        else if (c == '/') { e->i++; long r = cc__ce_unary(e); if (r == 0) { e->ok = 0; return 0; } v = v / r; }
+        else if (c == '%') { e->i++; long r = cc__ce_unary(e); if (r == 0) { e->ok = 0; return 0; } v = v % r; }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_add(CCCEval* e) {
+    long v = cc__ce_mul(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char c = e->s[e->i];
+        if (c == '+') { e->i++; v = v + cc__ce_mul(e); }
+        else if (c == '-') { e->i++; v = v - cc__ce_mul(e); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_shift(CCCEval* e) {
+    long v = cc__ce_add(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i + 1 >= e->n) break;
+        if (e->s[e->i] == '<' && e->s[e->i + 1] == '<') { e->i += 2; v = v << cc__ce_add(e); }
+        else if (e->s[e->i] == '>' && e->s[e->i + 1] == '>') { e->i += 2; v = v >> cc__ce_add(e); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_rel(CCCEval* e) {
+    long v = cc__ce_shift(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char c = e->s[e->i];
+        char d = (e->i + 1 < e->n) ? e->s[e->i + 1] : 0;
+        if (c == '<' && d == '=') { e->i += 2; v = (v <= cc__ce_shift(e)); }
+        else if (c == '>' && d == '=') { e->i += 2; v = (v >= cc__ce_shift(e)); }
+        else if (c == '<' && d != '<') { e->i++; v = (v < cc__ce_shift(e)); }
+        else if (c == '>' && d != '>') { e->i++; v = (v > cc__ce_shift(e)); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_eq(CCCEval* e) {
+    long v = cc__ce_rel(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i + 1 >= e->n) break;
+        char c = e->s[e->i], d = e->s[e->i + 1];
+        if (c == '=' && d == '=') { e->i += 2; v = (v == cc__ce_rel(e)); }
+        else if (c == '!' && d == '=') { e->i += 2; v = (v != cc__ce_rel(e)); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_band(CCCEval* e) {
+    long v = cc__ce_eq(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char d = (e->i + 1 < e->n) ? e->s[e->i + 1] : 0;
+        if (e->s[e->i] == '&' && d != '&') { e->i++; v = v & cc__ce_eq(e); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_bxor(CCCEval* e) {
+    long v = cc__ce_band(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        if (e->s[e->i] == '^') { e->i++; v = v ^ cc__ce_band(e); }
+        else break;
+    }
+    return v;
+}
+
+static long cc__ce_bor(CCCEval* e) {
+    long v = cc__ce_bxor(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char d = (e->i + 1 < e->n) ? e->s[e->i + 1] : 0;
+        if (e->s[e->i] == '|' && d != '|') { e->i++; v = v | cc__ce_bxor(e); }
+        else break;
+    }
+    return v;
+}
+
+/* D2.1 short-circuit support: advance past one logical operand *without*
+ * requiring it to fold.  Stops at a depth-0 `||` (always) or `&&` (when
+ * `stop_andand`), at a closing `)`/`]` of an enclosing group, or at end of
+ * input.  Honors nested parens/brackets and string/char literals.  This lets
+ * `KNOWN_TRUE || <non-foldable>` and `KNOWN_FALSE && <non-foldable>` be decided
+ * without the dead operand having to be compile-time constant. */
+static void cc__ce_skip_balanced(CCCEval* e, int stop_andand) {
+    int depth = 0;
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i >= e->n) break;
+        char c = e->s[e->i];
+        char d = (e->i + 1 < e->n) ? e->s[e->i + 1] : 0;
+        if (depth == 0) {
+            if (c == '|' && d == '|') break;
+            if (stop_andand && c == '&' && d == '&') break;
+            if (c == ')' || c == ']') break;
+        }
+        if (c == '(' || c == '[') { depth++; e->i++; continue; }
+        if (c == ')' || c == ']') { depth--; e->i++; continue; }
+        if (c == '"' || c == '\'') {
+            char q = c;
+            e->i++;
+            while (e->i < e->n && e->s[e->i] != q) {
+                if (e->s[e->i] == '\\' && e->i + 1 < e->n) e->i++;
+                e->i++;
+            }
+            if (e->i < e->n) e->i++;
+            continue;
+        }
+        e->i++;
+    }
+    if (depth != 0) e->ok = 0; /* unbalanced -> not decidable */
+}
+
+static long cc__ce_land(CCCEval* e) {
+    long v = cc__ce_bor(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i + 1 >= e->n || !(e->s[e->i] == '&' && e->s[e->i + 1] == '&')) break;
+        e->i += 2;
+        if (e->ok && !v) {
+            cc__ce_skip_balanced(e, /*stop_andand=*/1); /* result already false */
+        } else {
+            long r = cc__ce_bor(e);
+            v = (v && r);
+        }
+    }
+    return v;
+}
+
+static long cc__ce_lor(CCCEval* e) {
+    long v = cc__ce_land(e);
+    for (;;) {
+        cc__ce_ws(e);
+        if (e->i + 1 >= e->n || !(e->s[e->i] == '|' && e->s[e->i + 1] == '|')) break;
+        e->i += 2;
+        if (e->ok && v) {
+            cc__ce_skip_balanced(e, /*stop_andand=*/0); /* result already true */
+        } else {
+            long r = cc__ce_land(e);
+            v = (v || r);
+        }
+    }
+    return v;
+}
+
+static long cc__ce_expr(CCCEval* e) { return cc__ce_lor(e); }
+
+/* Evaluate one predicate.  Returns 1 + sets *out on a fully-folded expression;
+ * 0 if any token isn't compile-time decidable or there's trailing garbage. */
+static int cc__comptime_eval_pred(const char* s, size_t n, long* out) {
+    CCCEval e = { s, n, 0, 1 };
+    long v = cc__ce_expr(&e);
+    cc__ce_ws(&e);
+    if (!e.ok || e.i != n) return 0;
+    *out = v;
+    return 1;
+}
+
+/* Append one '\n' to *out for each newline in src[a..b) — keeps line numbers
+ * stable when a span (header / dropped branch) is removed. */
+static void cc__sb_emit_newlines(char** out, size_t* len, size_t* cap,
+                                 const char* src, size_t a, size_t b) {
+    for (size_t k = a; k < b; k++)
+        if (src[k] == '\n') cc_sb_append_cstr(out, len, cap, "\n");
+}
+
+/* D2.1: given `p` at the start of a `@comptime if`, set *end to the index just
+ * past the *whole* construct, following any `else { ... }` / `else @comptime if
+ * ...` chain (recursively).  Returns 1 on a well-formed construct, 0 otherwise.
+ * Used to find what to drop when the head predicate selects a different arm. */
+static int cc__ct_if_extent(const char* src, size_t n, size_t p, size_t* end) {
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    if (p + ATCN > n || memcmp(src + p, ATC, ATCN) != 0) return 0;
+    size_t q = cc_skip_ws_len(src, n, p + ATCN);
+    if (!(q + 2 <= n && src[q] == 'i' && src[q + 1] == 'f' &&
+          (q + 2 >= n || !cc_is_ident_char(src[q + 2])))) return 0;
+    size_t lp = cc_skip_ws_len(src, n, q + 2);
+    if (lp >= n || src[lp] != '(') return 0;
+    size_t pclose;
+    if (!cc_find_matching_paren(src, n, lp, &pclose)) return 0;
+    size_t tb = cc_skip_ws_len(src, n, pclose + 1);
+    if (tb >= n || src[tb] != '{') return 0;
+    size_t tbc;
+    if (!cc_find_matching_brace(src, n, tb, &tbc)) return 0;
+    size_t cur = tbc + 1;
+    size_t after = cc_skip_ws_len(src, n, tbc + 1);
+    if (after + 4 <= n && memcmp(src + after, "else", 4) == 0 &&
+        (after + 4 >= n || !cc_is_ident_char(src[after + 4]))) {
+        size_t ep = cc_skip_ws_len(src, n, after + 4);
+        if (ep < n && src[ep] == '{') {
+            size_t ebc;
+            if (!cc_find_matching_brace(src, n, ep, &ebc)) return 0;
+            cur = ebc + 1;
+        } else {
+            size_t nend;
+            if (!cc__ct_if_extent(src, n, ep, &nend)) return 0; /* else @comptime if */
+            cur = nend;
+        }
+    }
+    *end = cur;
+    return 1;
+}
+
+/* D3.1b: brace-aware scan to the terminating `;` at the current nesting depth,
+ * starting at `from`.  Returns the index just past that `;` (or n if none). */
+static size_t cc__span_to_top_semicolon(const char* src, size_t n, size_t from) {
+    CCScannerState s;
+    cc_scanner_init(&s);
+    size_t j = from, depth = 0;
+    while (j < n) {
+        if (cc_scanner_skip_non_code(&s, src, n, &j)) continue;
+        char ch = src[j];
+        if (ch == '{') depth++;
+        else if (ch == '}') { if (depth) depth--; }
+        else if (ch == ';' && depth == 0) return j + 1;
+        j++;
+    }
+    return n;
+}
+
+/* D3.1b: a captured type-definition span is unusable as plain-C prelude text if
+ * it carries CC-only surface syntax (decorators `@`, generic instantiation
+ * `::`).  Such a def is dropped individually so it can't poison layout eval for
+ * the rest of the file. */
+static int cc__span_has_cc_syntax(const char* src, size_t a, size_t b) {
+    for (size_t k = a; k < b; k++) {
+        if (src[k] == '@') return 1;
+        if (src[k] == ':' && k + 1 < b && src[k + 1] == ':') return 1;
+    }
+    return 0;
+}
+
+/* D3.1b: collect top-level type *definitions* — `typedef ...;` and bare
+ * `struct/union/enum [TAG] { ... };` — from CC source so the TCC layout
+ * evaluator (D3.0) can resolve `sizeof`/`_Alignof`/`__builtin_offsetof` of
+ * user-declared types in `@comptime if` predicates.  Only bare definitions are
+ * captured (a trailing declarator means it's a variable like `struct S {..} g;`
+ * and is skipped), and CC-tainted spans are dropped individually.  Defs are
+ * emitted in source order so in-file dependencies resolve.  Returns a malloc'd
+ * string the caller frees (empty if none), or NULL on OOM. */
+static char* cc__extract_type_decls_prelude(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    size_t i = 0, depth = 0;
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
+        if (c == '{') { depth++; i++; continue; }
+        if (c == '}') { if (depth) depth--; i++; continue; }
+        if (depth != 0) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        size_t kwlen = 0;
+        int is_typedef = 0;
+        if (i + 7 <= n && memcmp(src + i, "typedef", 7) == 0 &&
+            (i + 7 == n || !cc_is_ident_char(src[i + 7]))) { kwlen = 7; is_typedef = 1; }
+        else if (i + 6 <= n && memcmp(src + i, "struct", 6) == 0 &&
+                 (i + 6 == n || !cc_is_ident_char(src[i + 6]))) kwlen = 6;
+        else if (i + 5 <= n && memcmp(src + i, "union", 5) == 0 &&
+                 (i + 5 == n || !cc_is_ident_char(src[i + 5]))) kwlen = 5;
+        else if (i + 4 <= n && memcmp(src + i, "enum", 4) == 0 &&
+                 (i + 4 == n || !cc_is_ident_char(src[i + 4]))) kwlen = 4;
+        if (!kwlen) { i++; continue; }
+        size_t start = i, end;
+        if (is_typedef) {
+            end = cc__span_to_top_semicolon(src, n, i + kwlen);
+        } else {
+            /* require `[TAG] { ... } ;` (a bare aggregate definition) */
+            size_t p = cc_skip_ws_len(src, n, i + kwlen);
+            while (p < n && cc_is_ident_char(src[p])) p++;   /* optional tag */
+            p = cc_skip_ws_len(src, n, p);
+            if (p >= n || src[p] != '{') { i += kwlen; continue; } /* fwd decl */
+            size_t bclose;
+            if (!cc_find_matching_brace(src, n, p, &bclose)) { i += kwlen; continue; }
+            size_t q = cc_skip_ws_len(src, n, bclose + 1);
+            if (q >= n || src[q] != ';') { i = bclose + 1; continue; } /* declarator */
+            end = q + 1;
+        }
+        if (!cc__span_has_cc_syntax(src, start, end)) {
+            cc_sb_append(&out, &out_len, &out_cap, src + start, end - start);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        }
+        i = end;
+    }
+    if (!out) out = strdup("");
+    return out;
+}
+
+/* D3.1(A): layout-aware fallback for predicates the self-contained D2 evaluator
+ * can't decide (anything touching `sizeof`/`_Alignof`/`type_of(T).size` layout
+ * or other host-C constant expressions).  Lower the structural `type_of` views
+ * via D1 so `type_of(T).size` -> `((size_t)sizeof(T))` etc., then hand the
+ * result to the in-process TCC constant evaluator (D3.0), which computes real
+ * target-ABI layout numbers.  A small prelude supplies `size_t` and the
+ * `CC_TK_*` enum so the lowered text resolves; `type_prelude` (D3.1b) appends
+ * the file's in-scope type definitions so user-struct layout resolves too.
+ * Predicates that still reference undefined names (e.g. an unclassified type's
+ * runtime `kind`, or a struct whose def pulls in header-only types) fail
+ * cleanly and fall through to the hard error.  Returns 1 + sets *out on a
+ * decided predicate, 0 otherwise. */
+static int cc__comptime_eval_pred_via_tcc(const char* pred, size_t n,
+                                          const char* type_prelude, long* out) {
+    char* work = (char*)malloc(n + 1);
+    if (!work) return 0;
+    memcpy(work, pred, n);
+    work[n] = '\0';
+    char* lowered = cc__lower_type_of_constexpr(work, n);
+    const char* expr = lowered ? lowered : work;
+    static const char base_prelude[] =
+        "#ifdef __SIZE_TYPE__\ntypedef __SIZE_TYPE__ size_t;\n"
+        "#else\ntypedef unsigned long size_t;\n#endif\n"
+        "#define true 1\n#define false 0\n"
+        "enum cc_type_kind { CC_TK_UNKNOWN=0, CC_TK_PRIMITIVE=1, CC_TK_POINTER=2,"
+        " CC_TK_STRUCT=3, CC_TK_GENERIC_INST=4, CC_TK_CLOSURE=5,"
+        " CC_TK_FUNCTION=6, CC_TK_ARRAY=7 };\n";
+    /* Combine the static prelude with the caller's in-scope type definitions
+     * so user-declared structs/unions/enums resolve under `sizeof`/`_Alignof`. */
+    size_t tplen = type_prelude ? strlen(type_prelude) : 0;
+    size_t base = sizeof(base_prelude) - 1;
+    char* prelude = (char*)malloc(base + tplen + 1);
+    if (!prelude) { free(work); free(lowered); return 0; }
+    memcpy(prelude, base_prelude, base);
+    if (tplen) memcpy(prelude + base, type_prelude, tplen);
+    prelude[base + tplen] = '\0';
+    int64_t v = 0;
+    int ok = cc_tcc_eval_const_expr(prelude, expr, &v);
+    free(prelude);
+    free(work);
+    free(lowered);
+    if (!ok) return 0;
+    *out = (long)v;
+    return 1;
+}
+
+/* ============================================================
+ * D4.0: `@comptime for (F in type_of(T).fields) { BODY }`
+ * compile-time field iteration.  Unrolls BODY once per declared
+ * field of struct T, substituting the loop variable F:
+ *   F        -> the field's identifier   (so `p->F` -> `p->a`)
+ *   F.name   -> "fieldname"              (string literal)
+ *   F.type   -> the field's type spelling (bare tokens)
+ *   F.index  -> the 0-based field index  (decimal literal)
+ * T's definition must be in the same source buffer; fields are read
+ * from the declared layout.  Unsupported field forms (arrays,
+ * bitfields, function pointers, anonymous/nested aggregates, multi-
+ * declarator members) and unknown types are a hard error, never a
+ * silent skip — reflection must see every field or none.
+ * ============================================================ */
+
+typedef struct { char* name; char* type; } CCCtField;
+
+static void cc__ct_free_fields(CCCtField* f, size_t n) {
+    if (!f) return;
+    for (size_t i = 0; i < n; i++) { free(f[i].name); free(f[i].type); }
+    free(f);
+}
+
+/* Locate the `{...}` body of the struct/union named `tname` (a typedef
+ * name, or a `struct Tag`/`union Tag` spelling).  Sets [*bo,*bc] to the
+ * brace offsets (bo at '{', bc at '}') and returns 1; 0 if not found. */
+static int cc__ct_find_struct_body(const char* src, size_t n,
+                                   const char* tname, size_t tlen,
+                                   size_t* bo, size_t* bc) {
+    int want_tag = 0;
+    const char* tag = tname; size_t taglen = tlen;
+    if (tlen > 7 && memcmp(tname, "struct ", 7) == 0) { want_tag = 1; tag = tname + 7; taglen = tlen - 7; }
+    else if (tlen > 6 && memcmp(tname, "union ", 6) == 0) { want_tag = 1; tag = tname + 6; taglen = tlen - 6; }
+    while (taglen && (tag[0] == ' ' || tag[0] == '\t')) { tag++; taglen--; }
+    while (taglen && (tag[taglen - 1] == ' ' || tag[taglen - 1] == '\t')) taglen--;
+
+    CCScannerState scan; cc_scanner_init(&scan);
+    size_t i = 0, depth = 0;
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
+        if (c == '{') { depth++; i++; continue; }
+        if (c == '}') { if (depth) depth--; i++; continue; }
+        if (depth != 0) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        int is_typedef = 0; size_t kwlen = 0;
+        if (i + 7 <= n && memcmp(src + i, "typedef", 7) == 0 &&
+            (i + 7 == n || !cc_is_ident_char(src[i + 7]))) { kwlen = 7; is_typedef = 1; }
+        else if (i + 6 <= n && memcmp(src + i, "struct", 6) == 0 &&
+                 (i + 6 == n || !cc_is_ident_char(src[i + 6]))) kwlen = 6;
+        else if (i + 5 <= n && memcmp(src + i, "union", 5) == 0 &&
+                 (i + 5 == n || !cc_is_ident_char(src[i + 5]))) kwlen = 5;
+        if (!kwlen) { i++; continue; }
+        if (is_typedef) {
+            size_t semi = cc__span_to_top_semicolon(src, n, i + kwlen); /* index past ';' */
+            size_t b1 = 0; int havebrace = 0;
+            CCScannerState s2; cc_scanner_init(&s2);
+            size_t j = i + kwlen;
+            while (j < semi) {
+                if (cc_scanner_skip_non_code(&s2, src, semi, &j)) continue;
+                if (src[j] == '{') { b1 = j; havebrace = 1; break; }
+                j++;
+            }
+            if (!want_tag && havebrace) {
+                size_t b2;
+                if (cc_find_matching_brace(src, n, b1, &b2) && semi > 0) {
+                    /* typedef name = last identifier before the ';' */
+                    size_t s = semi - 1;
+                    while (s > b2 && src[s] != ';') s--;
+                    size_t ne = s;
+                    while (ne > b2 && (src[ne - 1] == ' ' || src[ne - 1] == '\t' ||
+                                       src[ne - 1] == '\n' || src[ne - 1] == '\r')) ne--;
+                    size_t ns = ne;
+                    while (ns > b2 && cc_is_ident_char(src[ns - 1])) ns--;
+                    if (ne > ns && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
+                        *bo = b1; *bc = b2; return 1;
+                    }
+                }
+            }
+            i = semi; continue;
+        }
+        /* struct/union [TAG] { ... } */
+        size_t p = cc_skip_ws_len(src, n, i + kwlen);
+        size_t tags = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        size_t tage = p;
+        size_t bp = cc_skip_ws_len(src, n, p);
+        if (bp < n && src[bp] == '{') {
+            size_t b2;
+            if (cc_find_matching_brace(src, n, bp, &b2)) {
+                if (want_tag && tage > tags && (tage - tags) == taglen &&
+                    memcmp(src + tags, tag, taglen) == 0) {
+                    *bo = bp; *bc = b2; return 1;
+                }
+                i = b2 + 1; continue;
+            }
+        }
+        i += kwlen;
+    }
+    return 0;
+}
+
+/* Parse the member declarations in struct body (bo='{', bc='}') into a field
+ * list.  Returns 1 on success (caller frees *out via cc__ct_free_fields), 0 if
+ * any member uses a form D4.0 doesn't model (so the caller errors loudly). */
+static int cc__ct_parse_fields_from_body(const char* src, size_t bo, size_t bc,
+                                         CCCtField** out, size_t* out_n) {
+    CCCtField* fs = NULL; size_t fn = 0, fc = 0;
+    size_t i = bo + 1;
+    while (i < bc) {
+        CCScannerState s; cc_scanner_init(&s);
+        size_t j = i, depth = 0, semi = bc;
+        while (j < bc) {
+            if (cc_scanner_skip_non_code(&s, src, bc, &j)) continue;
+            char c = src[j];
+            if (c == '{' || c == '(' || c == '[') depth++;
+            else if (c == '}' || c == ')' || c == ']') { if (depth) depth--; }
+            else if (c == ';' && depth == 0) { semi = j; break; }
+            j++;
+        }
+        size_t ms = i, me = semi;
+        while (ms < me && (src[ms] == ' ' || src[ms] == '\t' || src[ms] == '\n' || src[ms] == '\r')) ms++;
+        while (me > ms && (src[me - 1] == ' ' || src[me - 1] == '\t' || src[me - 1] == '\n' || src[me - 1] == '\r')) me--;
+        if (me > ms) {
+            for (size_t k = ms; k < me; k++) {
+                char c = src[k];
+                if (c == '[' || c == ':' || c == '(' || c == ',' || c == '{') {
+                    cc__ct_free_fields(fs, fn); return 0;
+                }
+            }
+            const char* words[64]; size_t wlen[64]; int nw = 0, stars = 0, bad = 0;
+            size_t k = ms;
+            while (k < me) {
+                char c = src[k];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { k++; continue; }
+                if (c == '*') { stars++; k++; continue; }
+                if (cc_is_ident_char(c)) {
+                    size_t ws = k;
+                    while (k < me && cc_is_ident_char(src[k])) k++;
+                    if (nw < 64) { words[nw] = src + ws; wlen[nw] = k - ws; nw++; }
+                    else { bad = 1; break; }
+                    continue;
+                }
+                bad = 1; break;
+            }
+            if (bad || nw < 2) { cc__ct_free_fields(fs, fn); return 0; }
+            size_t namelen = wlen[nw - 1];
+            char* name = (char*)malloc(namelen + 1);
+            if (!name) { cc__ct_free_fields(fs, fn); return 0; }
+            memcpy(name, words[nw - 1], namelen); name[namelen] = 0;
+            size_t tcap = (size_t)stars + 2;
+            for (int w = 0; w < nw - 1; w++) tcap += wlen[w] + 1;
+            char* type = (char*)malloc(tcap);
+            if (!type) { free(name); cc__ct_free_fields(fs, fn); return 0; }
+            size_t tl = 0;
+            for (int w = 0; w < nw - 1; w++) {
+                if (w) type[tl++] = ' ';
+                memcpy(type + tl, words[w], wlen[w]); tl += wlen[w];
+            }
+            for (int sp = 0; sp < stars; sp++) type[tl++] = '*';
+            type[tl] = 0;
+            if (fn + 1 > fc) {
+                size_t nc = fc ? fc * 2 : 8;
+                CCCtField* nb = (CCCtField*)realloc(fs, nc * sizeof(CCCtField));
+                if (!nb) { free(name); free(type); cc__ct_free_fields(fs, fn); return 0; }
+                fs = nb; fc = nc;
+            }
+            fs[fn].name = name; fs[fn].type = type; fn++;
+        }
+        i = semi + 1;
+    }
+    *out = fs; *out_n = fn; return 1;
+}
+
+/* Append one unrolled copy of BODY (body[bs..be)) with the loop variable
+ * `lv` (length lvlen) substituted for field `f` at index `idx`. */
+static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
+                                     const char* body, size_t bs, size_t be,
+                                     const char* lv, size_t lvlen,
+                                     const CCCtField* f, size_t idx) {
+    CCScannerState s; cc_scanner_init(&s);
+    size_t i = bs, emit = bs;
+    while (i < be) {
+        if (cc_scanner_skip_non_code(&s, body, be, &i)) continue;
+        if ((i == 0 || !cc_is_ident_char(body[i - 1])) &&
+            i + lvlen <= be && memcmp(body + i, lv, lvlen) == 0 &&
+            (i + lvlen == be || !cc_is_ident_char(body[i + lvlen]))) {
+            cc_sb_append(out, ol, oc, body + emit, i - emit);
+            size_t a = i + lvlen;
+            if (a < be && body[a] == '.') {
+                size_t ms = a + 1, m = a + 1;
+                while (m < be && cc_is_ident_char(body[m])) m++;
+                size_t mlen = m - ms;
+                if (mlen == 4 && memcmp(body + ms, "name", 4) == 0) {
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    cc_sb_append(out, ol, oc, f->name, strlen(f->name));
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    i = m; emit = i; continue;
+                }
+                if (mlen == 4 && memcmp(body + ms, "type", 4) == 0) {
+                    cc_sb_append(out, ol, oc, f->type, strlen(f->type));
+                    i = m; emit = i; continue;
+                }
+                if (mlen == 5 && memcmp(body + ms, "index", 5) == 0) {
+                    char num[32];
+                    int nl = snprintf(num, sizeof(num), "%zu", idx);
+                    if (nl > 0) cc_sb_append(out, ol, oc, num, (size_t)nl);
+                    i = m; emit = i; continue;
+                }
+                /* unknown `.member` — fall through to bare-identifier subst */
+            }
+            cc_sb_append(out, ol, oc, f->name, strlen(f->name));
+            i += lvlen; emit = i; continue;
+        }
+        i++;
+    }
+    if (emit < be) cc_sb_append(out, ol, oc, body + emit, be - emit);
+}
+
+/* Try to expand a `@comptime for` whose `@comptime` keyword is at *io_i.
+ * Returns 1 = expanded (out appended, *io_i/*io_last_emit advanced past the
+ * construct), 0 = not a `@comptime for` here (caller handles `@comptime if`),
+ * -1 = hard error. */
+static int cc__try_expand_comptime_for(const char* src, size_t n, const char* input_path,
+                                       char** out, size_t* out_len, size_t* out_cap,
+                                       size_t* io_i, size_t* io_last_emit) {
+    size_t i = *io_i;
+    const size_t ATCN = sizeof("@comptime") - 1;
+    size_t p = cc_skip_ws_len(src, n, i + ATCN);
+    if (!(p + 3 <= n && memcmp(src + p, "for", 3) == 0 &&
+          (p + 3 >= n || !cc_is_ident_char(src[p + 3])))) return 0;
+
+    size_t lp = cc_skip_ws_len(src, n, p + 3);
+    if (lp >= n || src[lp] != '(') return 0;       /* not our shape; leave alone */
+    size_t hp_close;
+    if (!cc_find_matching_paren(src, n, lp, &hp_close)) return 0;
+
+    /* header: NAME in type_of(T).fields */
+    size_t h = cc_skip_ws_len(src, n, lp + 1);
+    size_t lv_s = h;
+    while (h < hp_close && cc_is_ident_char(src[h])) h++;
+    size_t lvlen = h - lv_s;
+    h = cc_skip_ws_len(src, n, h);
+    int ok = lvlen > 0 &&
+             h + 2 <= hp_close && src[h] == 'i' && src[h + 1] == 'n' &&
+             (h + 2 >= hp_close || !cc_is_ident_char(src[h + 2]));
+    size_t ts = 0, te = 0;
+    if (ok) {
+        h = cc_skip_ws_len(src, n, h + 2);
+        const size_t TOFN = sizeof("type_of") - 1;
+        if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0) {
+            h = cc_skip_ws_len(src, n, h + TOFN);
+            size_t tpc;
+            if (h < hp_close && src[h] == '(' &&
+                cc_find_matching_paren(src, n, h, &tpc) && tpc <= hp_close) {
+                ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
+                while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
+                size_t af = cc_skip_ws_len(src, n, tpc + 1);
+                if (af < hp_close && src[af] == '.') {
+                    af = cc_skip_ws_len(src, n, af + 1);
+                    ok = (af + 6 <= hp_close && memcmp(src + af, "fields", 6) == 0);
+                } else ok = 0;
+            } else ok = 0;
+        } else ok = 0;
+    }
+    if (!ok) {
+        fprintf(stderr,
+                "%s: error: malformed `@comptime for` — expected "
+                "`@comptime for (NAME in type_of(T).fields) { ... }`.\n",
+                input_path ? input_path : "<input>");
+        return -1;
+    }
+
+    size_t bb = cc_skip_ws_len(src, n, hp_close + 1);
+    if (bb >= n || src[bb] != '{') return 0;
+    size_t bb_close;
+    if (!cc_find_matching_brace(src, n, bb, &bb_close)) return 0;
+
+    CCCtField* fields = NULL; size_t nf = 0;
+    size_t body_o, body_c;
+    if (!cc__ct_find_struct_body(src, n, src + ts, te - ts, &body_o, &body_c) ||
+        !cc__ct_parse_fields_from_body(src, body_o, body_c, &fields, &nf)) {
+        cc__ct_free_fields(fields, nf);
+        fprintf(stderr,
+                "%s: error: `@comptime for` needs an in-scope struct type with "
+                "simple fields; `%.*s` is unknown or has unsupported field forms "
+                "(arrays/bitfields/function-pointers/multiple-declarators/nested "
+                "aggregates).\n",
+                input_path ? input_path : "<input>", (int)(te - ts), src + ts);
+        return -1;
+    }
+
+    cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
+    for (size_t fi = 0; fi < nf; fi++) {
+        cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
+                                 src + lv_s, lvlen, &fields[fi], fi);
+    }
+    cc__ct_free_fields(fields, nf);
+    *io_last_emit = bb_close + 1;
+    *io_i = bb_close + 1;
+    return 1;
+}
+
+/* One sweep: resolve each *outermost* `@comptime if`/`@comptime for`
+ * left-to-right.  Resolving strictly outermost-first (each construct's text is
+ * spliced/expanded into `out` and the scan jumps past it) makes the fixpoint
+ * loop handle arbitrary nesting: an `@comptime if` inside a `@comptime for`
+ * body sees the loop variable already substituted; a dead `@comptime if` branch
+ * is pruned before any `@comptime for` it contains is ever expanded. */
+static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char* input_path) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    int changed = 0;
+    CCScannerState scan;
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    size_t i = 0;
+    /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
+     * (and once) the first time a predicate needs the host evaluator. */
+    char* type_prelude = NULL;
+    int type_prelude_built = 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '@' || i + ATCN > n || memcmp(src + i, ATC, ATCN) != 0) { i++; continue; }
+        /* D4.0: `@comptime for (F in type_of(T).fields) { ... }` — expand here
+         * (outermost-first) before the `@comptime if` handling below. */
+        {
+            int fr = cc__try_expand_comptime_for(src, n, input_path,
+                                                 &out, &out_len, &out_cap, &i, &last_emit);
+            if (fr == -1) { free(type_prelude); free(out); return (char*)-1; }
+            if (fr == 1) { changed = 1; continue; }
+        }
+        size_t p = cc_skip_ws_len(src, n, i + ATCN);
+        /* Distinguish `@comptime if` from a plain `@comptime { }` block. */
+        if (!(p + 2 <= n && src[p] == 'i' && src[p + 1] == 'f' &&
+              (p + 2 >= n || !cc_is_ident_char(src[p + 2])))) { i++; continue; }
+        size_t lp = cc_skip_ws_len(src, n, p + 2);
+        if (lp >= n || src[lp] != '(') { i++; continue; }
+        size_t pred_close;
+        if (!cc_find_matching_paren(src, n, lp, &pred_close)) { i++; continue; }
+        long val = 0;
+        if (!cc__comptime_eval_pred(src + lp + 1, pred_close - (lp + 1), &val)) {
+            if (!type_prelude_built) {
+                type_prelude = cc__extract_type_decls_prelude(src, n);
+                type_prelude_built = 1;
+            }
+            if (!cc__comptime_eval_pred_via_tcc(src + lp + 1, pred_close - (lp + 1),
+                                                type_prelude, &val)) {
+                fprintf(stderr,
+                        "%s: error: `@comptime if` condition is not a compile-time "
+                        "constant the compiler can decide.\n"
+                        "  it must fold to an integer via structural type facts "
+                        "(type_of(T).kind/.nfields, CC_TK_*) or a host-C constant "
+                        "expression the backend can evaluate (sizeof/_Alignof/"
+                        "__builtin_offsetof over in-scope types, integer arithmetic).\n"
+                        "  it cannot reference runtime values or an unclassified "
+                        "user type's kind/layout.\n",
+                        input_path ? input_path : "<input>");
+                free(type_prelude);
+                free(out);
+                return (char*)-1;
+            }
+        }
+        size_t tb = cc_skip_ws_len(src, n, pred_close + 1);
+        if (tb >= n || src[tb] != '{') { i++; continue; }
+        size_t tb_close;
+        if (!cc_find_matching_brace(src, n, tb, &tb_close)) { i++; continue; }
+
+        /* Else arm: none, `else { ... }`, or `else @comptime if ...` (chain). */
+        enum { ELSE_NONE, ELSE_BLOCK, ELSE_CHAIN } else_kind = ELSE_NONE;
+        size_t eb = 0, eb_close = 0;   /* ELSE_BLOCK body braces                */
+        size_t chain_start = 0;        /* ELSE_CHAIN: nested `@comptime if` start */
+        size_t construct_end;          /* exclusive end of the whole construct  */
+        size_t after = cc_skip_ws_len(src, n, tb_close + 1);
+        if (after + 4 <= n && memcmp(src + after, "else", 4) == 0 &&
+            (after + 4 >= n || !cc_is_ident_char(src[after + 4]))) {
+            size_t ep = cc_skip_ws_len(src, n, after + 4);
+            if (ep < n && src[ep] == '{' && cc_find_matching_brace(src, n, ep, &eb_close)) {
+                else_kind = ELSE_BLOCK; eb = ep; construct_end = eb_close + 1;
+            } else if (cc__ct_if_extent(src, n, ep, &construct_end)) {
+                else_kind = ELSE_CHAIN; chain_start = ep;
+            } else {
+                fprintf(stderr,
+                        "%s: error: `@comptime if` else arm must be `else { ... }` "
+                        "or `else @comptime if (...) { ... }`.\n",
+                        input_path ? input_path : "<input>");
+                free(type_prelude);
+                free(out);
+                return (char*)-1;
+            }
+        } else {
+            construct_end = tb_close + 1;
+        }
+
+        /* Region spliced verbatim: the taken branch body, the else block body,
+         * or (for a chain whose head is false) the nested `@comptime if` text —
+         * which the fixpoint loop then resolves. */
+        size_t keep_l = 0, keep_r = 0;
+        if (val) {
+            keep_l = tb + 1; keep_r = tb_close;
+        } else if (else_kind == ELSE_BLOCK) {
+            keep_l = eb + 1; keep_r = eb_close;
+        } else if (else_kind == ELSE_CHAIN) {
+            keep_l = chain_start; keep_r = construct_end;
+        }
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        if (keep_r > keep_l) {
+            cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, keep_l);
+            cc_sb_append(&out, &out_len, &out_cap, src + keep_l, keep_r - keep_l);
+            cc__sb_emit_newlines(&out, &out_len, &out_cap, src, keep_r, construct_end);
+        } else {
+            cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, construct_end);
+        }
+        last_emit = construct_end;
+        i = construct_end;
+        changed = 1;
+    }
+    if (!changed) { free(type_prelude); free(out); return NULL; }
+    if (last_emit < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    if (!out) out = strdup(""); /* whole construct(s) elided to empty */
+    free(type_prelude);
+    return out;
+}
+
+/* Re-run the sweep to a fixpoint so nested `@comptime if` inside a kept branch
+ * (only visible after the outer splice) is also resolved. */
+char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path) {
+    char* cur = NULL;
+    const char* in = src;
+    size_t inn = n;
+    for (int iter = 0; iter < 64; iter++) {
+        char* r = cc__resolve_comptime_if_once(in, inn, input_path);
+        if (r == (char*)-1) { free(cur); return (char*)-1; }
+        if (!r) break;
+        free(cur);
+        cur = r;
+        in = cur;
+        inn = strlen(cur);
+    }
+    return cur;
+}
+
 static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
                                              const char* input_path) {
     if (!chain) return -1;
     /* Shared phase-1 bucket: normalize CC surface syntax into more canonical
        CC, but do not introduce parser stubs or host-C survival/lowering. */
+    /* D2.0: resolve `@comptime if (...)` first — dead branches must be pruned
+     * before any other rewrite or instantiation collector sees them. */
+    if (cc_pass_chain_apply(chain, cc__resolve_comptime_if(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_chan_handle_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_slice_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_containers(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
+    /* D1.0: fold `type_of(T).size`/`.align` to `sizeof(T)`/`_Alignof(T)`.  After
+     * container lowering so mangled names (`CCVec_int`) are already in place. */
+    if (cc_pass_chain_apply(chain, cc__lower_type_of_constexpr(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
     /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
@@ -8320,7 +9178,6 @@ static char* cc__canonicalize_cc_for_comptime(const char* input,
                                               const char* input_path) {
     CCPassChain chain;
     char* out = NULL;
-    CCTypeRegistry* reg = NULL;
     if (!input || input_len == 0) return NULL;
 
     /* Phase 1 should normalize CC surface syntax into a more canonical CC
@@ -8329,12 +9186,7 @@ static char* cc__canonicalize_cc_for_comptime(const char* input,
        normalize type/syntax sugar, not final C-facing mechanics. */
     cc_result_spec_table_reset(&cc__result_specs);
     cc_result_spec_table_set_global(&cc__result_specs);
-    reg = cc_type_registry_get_global();
-    if (!reg) {
-        reg = cc_type_registry_new();
-        cc_type_registry_set_global(reg);
-    }
-    cc_type_registry_clear(reg);
+    if (!cc_type_graph_ensure_global_cleared()) return NULL;
 
     cc_pass_chain_init(&chain, input, input_len);
     if (cc_pass_chain_apply(&chain, cc__rewrite_link_directives(chain.src, chain.len)) < 0) goto cleanup;

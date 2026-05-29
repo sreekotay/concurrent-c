@@ -1,0 +1,48 @@
+=== pigz bench_go_vs_cc.sh snapshot ===
+Date: Wed May 27 10:44:45 EDT 2026
+Commit: 75a773a preprocess: closure-ID markers — foundation pass (no consumer switch yet)
+Command: ./bench_go_vs_cc.sh 100 10
+
+==========================================================
+pigz Full Comparison: CC vs Go vs Zig vs Original
+==========================================================
+Input:  /Users/airm5/Documents/code/concurrent-c/real_projects/pigz/testdata/text_100mb.bin (100 MB)
+Runs:   10  (interleaved, best reported)
+OS:     Darwin 25.4.0
+==========================================================
+
+Measuring RSS (one pass per binary)...
+
+Running 10 interleaved rounds...
+Round  CC (Idiomatic)  CC (Full)       CC (Pthread)    Go (CGO+zlib)   Zig             Original pigz 
+    1  0.328           0.329           0.301           0.319           0.319           0.363         
+    2  0.302           0.344           0.303           0.329           0.298           0.382         
+    3  0.302           0.327           0.309           0.319           0.299           0.383         
+    4  0.299           0.331           0.313           0.331           0.303           0.376         
+    5  0.307           0.337           0.313           0.331           0.308           0.378         
+    6  0.307           0.335           0.311           0.336           0.305           0.378         
+    7  0.307           0.335           0.313           0.331           0.307           0.381         
+    8  0.306           0.337           0.314           0.329           0.311           0.382         
+    9  0.307           0.340           0.363           0.339           0.333           0.377         
+   10  0.332           0.358           0.473           0.336           0.341           0.380         
+
+============================================================================
+FINAL SUMMARY  (best of 10 interleaved runs)
+============================================================================
+Implementation  | Best(s)  | Worst(s) | Var      | Throughput   | Max RSS  | Bin Size
+--------------- | -------- | -------- | -------- | ------------ | -------- | --------
+CC (Idiomatic)  | 0.299s   | 0.332s   | 1.11x    | 334.4 MB/s   | 14MB     | 128K    
+CC (Full)       | 0.327s   | 0.358s   | 1.09x    | 305.8 MB/s   | 32MB     | 164K    
+CC (Pthread)    | 0.301s   | 0.473s   | 1.57x    | 332.2 MB/s   | 14MB     | 128K    
+Go (CGO+zlib)   | 0.319s   | 0.339s   | 1.06x    | 313.5 MB/s   | 27MB     | 1.6M    
+Zig             | 0.298s   | 0.341s   | 1.14x    | 335.6 MB/s   | 13MB     | 72K     
+Original pigz   | 0.363s   | 0.383s   | 1.06x    | 275.5 MB/s   | 8MB      | 106K    
+============================================================================
+
+Ratios vs CC (Pthread):
+  CC (Idiomatic)   0.993x
+  CC (Full)        1.086x
+  CC (Pthread)     1.000x
+  Go (CGO+zlib)    1.060x
+  Zig              0.990x
+  Original pigz    1.206x

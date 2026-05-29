@@ -1,0 +1,41 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct { int a; double b; } TOPair;
+
+/* Register TOPair so the `.kind`/`.nfields` runtime-forward path resolves. */
+CC_TYPE_INFO_BEGIN(TOPair)
+    CC_TYPE_INFO_FIELD(TOPair, a, int)
+    CC_TYPE_INFO_FIELD(TOPair, b, double)
+CC_TYPE_INFO_END(TOPair, "TOPair")
+
+/* D1.0 numeric members: integer constant expressions. */
+_Static_assert(type_of(int).size == sizeof(int), "type_of(int).size");
+_Static_assert(type_of(double).align == _Alignof(double), "type_of(double).align");
+_Static_assert(type_of(TOPair).size == sizeof(TOPair), "type_of(TOPair).size");
+
+/* D1.1 structural members the compiler decides by name are ICEs too. */
+_Static_assert(type_of(int).kind == CC_TK_PRIMITIVE, "type_of(int).kind");
+_Static_assert(type_of(int).nfields == 0, "type_of(int).nfields");
+
+int main(void) {
+    /* Constant-expression context: a (non-VLA) array dimension. */
+    char buf[type_of(TOPair).size];
+    if (sizeof(buf) != sizeof(TOPair)) return 1;
+    if (type_of(int).size != sizeof(int)) return 2;
+    if (type_of(double).align != _Alignof(double)) return 3;
+
+    /* `.name` folds to a string literal (display spelling). */
+    if (strcmp(type_of(int).name, "int") != 0) return 4;
+    if (strcmp(type_of(TOPair).name, "TOPair") != 0) return 5;
+
+    /* `.kind` for a non-primitive/non-container forwards to the runtime
+     * cc_type_info (TOPair is registered above). */
+    if (type_of(TOPair).kind != CC_TK_STRUCT) return 6;
+    if (type_of(TOPair).nfields != 2) return 7;
+
+    printf("type_of_constexpr_smoke ok\n");
+    return 0;
+}

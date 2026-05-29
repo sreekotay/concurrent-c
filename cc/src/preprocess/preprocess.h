@@ -138,5 +138,23 @@ char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
 // Returns newly allocated string on change, NULL if no rewrite applied.
 char* cc__rewrite_async_void_ret(const char* src, size_t n);
 
+// D1.0 — constexpr `type_of(T)` view: fold `type_of(T).size` -> `sizeof(T)` and
+// `type_of(T).align` -> `_Alignof(T)` (each `(size_t)`-cast), so they are usable
+// as integer constant expressions (static_assert / array dims / @comptime if).
+// The bare value form `type_of(T)` and the pointer form `type_of(T)->m` are
+// left untouched (runtime `cc_type_of` semantics).  Must run on BOTH the
+// preprocess-for-parse path and the visit_codegen emit path (the emitted .c is
+// produced by the latter).  Returns malloc'd string on change, NULL otherwise.
+char* cc__lower_type_of_constexpr(const char* src, size_t n);
+
+// D2.0: resolve `@comptime if (PRED) { ... } [else { ... }]` by evaluating the
+// compile-time-constant predicate and splicing the taken branch in place (the
+// rest dropped, newline-padded for stable line numbers).  Runs first on BOTH
+// the preprocess-for-parse path and the visit_codegen emit path.  Returns a
+// malloc'd string on change, NULL if no `@comptime if` present, or (char*)-1
+// on a hard error (non-constant predicate / unsupported `else if`), after
+// printing a diagnostic to stderr.
+char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path);
+
 #endif // CC_PREPROCESS_H
 

@@ -1,0 +1,79 @@
+=== pigz benchmark.sh snapshot ===
+Date: Wed May 27 10:44:18 EDT 2026
+Commit: 75a773a preprocess: closure-ID markers — foundation pass (no consumer switch yet)
+Command: ./benchmark.sh 100 8 4
+
+==============================================
+pigz Benchmark: Real Compressible Data
+==============================================
+
+Input size:   100 MB
+pigz workers: 8
+CC_WORKERS:   16 (fiber scheduler)
+Runs:         4
+
+=== Preparing Test Data ===
+
+==============================================
+COMPRESSION BENCHMARKS
+==============================================
+
+=== CC pigz (Concurrent-C) (Compression) ===
+Input:  95M ( 100000000 bytes)
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 8 workers
+  Run 1: 0.434s,  29314038 bytes (29.3%), 219.7 MB/s
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 8 workers
+  Run 2: 0.341s,  29314038 bytes (29.3%), 279.7 MB/s
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 8 workers
+  Run 3: 0.304s,  29314038 bytes (29.3%), 313.7 MB/s
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 8 workers
+  Run 4: 0.307s,  29314038 bytes (29.3%), 310.6 MB/s
+  Average: 0.346s (275.2 MB/s), avg ratio 29.3%
+
+=== Original pigz (pthread) (Compression) ===
+Input:  95M ( 100000000 bytes)
+  Run 1: 0.422s,  29314034 bytes (29.3%), 226.0 MB/s
+  Run 2: 0.350s,  29314034 bytes (29.3%), 272.5 MB/s
+  Run 3: 0.340s,  29314034 bytes (29.3%), 280.5 MB/s
+  Run 4: 0.353s,  29314034 bytes (29.3%), 270.2 MB/s
+  Average: 0.366s (260.4 MB/s), avg ratio 29.3%
+
+=== Preparing Compressed Files ===
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 8 workers
+CC pigz compressed:  28M
+Original pigz compressed:  28M
+
+==============================================
+DECOMPRESSION BENCHMARKS
+==============================================
+
+=== CC pigz (Concurrent-C) (Decompression) ===
+  Run 1: 0.107s,  100000000 bytes decompressed, 891.3 MB/s
+  Run 2: 0.104s,  100000000 bytes decompressed, 917.0 MB/s
+  Run 3: 0.103s,  100000000 bytes decompressed, 925.9 MB/s
+  Run 4: 0.104s,  100000000 bytes decompressed, 917.0 MB/s
+  Average: 0.104s (912.6 MB/s)
+
+=== Original pigz (pthread) (Decompression) ===
+  Run 1: 0.127s,  100000000 bytes decompressed, 750.9 MB/s
+  Run 2: 0.128s,  100000000 bytes decompressed, 745.1 MB/s
+  Run 3: 0.130s,  100000000 bytes decompressed, 733.6 MB/s
+  Run 4: 0.117s,  100000000 bytes decompressed, 815.1 MB/s
+  Average: 0.126s (759.9 MB/s)
+
+=== Correctness Check ===
+Total: 100000000 -> 29314005 bytes (29.3%), 763 blocks, 4 workers
+Original pigz: PASS
+CC pigz:       PASS
+
+=== Compression Summary ===
+Input:           95M ( 100000000 bytes)
+Original pigz:   28M ( 29314036 bytes) - 29.31%
+CC pigz:         28M ( 29314040 bytes) - 29.31%
+
+=== Benchmark Summary (avg over 4 runs) ===
+Implementation               Comp(s)    Comp(MB/s)       Ratio   Decomp(s)  Decomp(MB/s)
+pigz (pthread)                 0.366         260.4       29.3%       0.126         759.9
+pigz_cc (Concurrent-C)         0.346         275.2       29.3%       0.104         912.6
+
+Done.

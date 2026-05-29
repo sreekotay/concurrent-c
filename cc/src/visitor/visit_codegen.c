@@ -36,6 +36,7 @@
 #include "preprocess/preprocess.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/type_registry.h"
+#include "preprocess/emit_plan.h"
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
@@ -134,88 +135,6 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
                                            int* out_changed,
                                            CCPhase3Stage stage);
 
-static size_t cc__cg_line_start_before(const char* src, size_t pos) {
-    if (!src) return 0;
-    while (pos > 0 && src[pos - 1] != '\n') pos--;
-    return pos;
-}
-
-static size_t cc__cg_type_decl_end_top_level(const char* src, size_t len, const char* type_name) {
-    size_t p = 0;
-    if (!src || !type_name || !type_name[0]) return 0;
-    if (strcmp(type_name, "void") == 0 ||
-        strcmp(type_name, "bool") == 0 ||
-        strcmp(type_name, "char") == 0 ||
-        strcmp(type_name, "short") == 0 ||
-        strcmp(type_name, "int") == 0 ||
-        strcmp(type_name, "long") == 0 ||
-        strcmp(type_name, "float") == 0 ||
-        strcmp(type_name, "double") == 0 ||
-        strcmp(type_name, "size_t") == 0 ||
-        strcmp(type_name, "ssize_t") == 0 ||
-        strcmp(type_name, "CCError") == 0) {
-        return 0;
-    }
-    while (p < len) {
-        size_t line_start = p;
-        size_t line_end = line_start;
-        while (line_end < len && src[line_end] != '\n') line_end++;
-        size_t s = line_start;
-        while (s < line_end && (src[s] == ' ' || src[s] == '\t' || src[s] == '\r')) s++;
-        int is_type_decl =
-            (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) ||
-            (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ||
-            (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ||
-            (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4]));
-        if (!is_type_decl) {
-            p = (line_end < len) ? line_end + 1 : line_end;
-            continue;
-        }
-        size_t q = s;
-        int brace_depth = 0;
-        CCInertScan scan;
-        cc_inert_scan_init(&scan, NULL);
-        scan.at_line_start = 0;  /* mid-buffer slice */
-        while (q < len) {
-            if (cc_inert_scan_step(&scan, src, len, &q)) continue;
-            char c = src[q];
-            if (c == '{') { brace_depth++; q++; continue; }
-            if (c == '}') { if (brace_depth > 0) brace_depth--; q++; continue; }
-            if (c == ';' && brace_depth == 0) {
-                size_t end = q + 1;
-                int declares_type = 0;
-                if (s + 7 <= line_end && memcmp(src + s, "typedef", 7) == 0 && !cc_is_ident_char(src[s + 7])) {
-                    size_t e = q;
-                    while (e > s && (src[e - 1] == ' ' || src[e - 1] == '\t' || src[e - 1] == '\r' || src[e - 1] == '\n')) e--;
-                    size_t b = e;
-                    while (b > s && cc_is_ident_char(src[b - 1])) b--;
-                    size_t type_len = strlen(type_name);
-                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
-                } else {
-                    size_t kw_len =
-                        (s + 6 <= line_end && memcmp(src + s, "struct", 6) == 0 && !cc_is_ident_char(src[s + 6])) ? 6 :
-                        (s + 5 <= line_end && memcmp(src + s, "union", 5) == 0 && !cc_is_ident_char(src[s + 5])) ? 5 :
-                        (s + 4 <= line_end && memcmp(src + s, "enum", 4) == 0 && !cc_is_ident_char(src[s + 4])) ? 4 : 0;
-                    size_t b = s + kw_len;
-                    while (b < end && (src[b] == ' ' || src[b] == '\t' || src[b] == '\r' || src[b] == '\n')) b++;
-                    size_t e = b;
-                    while (e < end && cc_is_ident_char(src[e])) e++;
-                    size_t type_len = strlen(type_name);
-                    declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
-                }
-                if (declares_type) {
-                    if (end < len && src[end] == '\n') end++;
-                    return end;
-                }
-                p = (end < len && src[end] == '\n') ? end + 1 : end;
-                break;
-            }
-            q++;
-        }
-        if (q >= len) return 0;
-    }
-    return 0;
-}
 
 static const char* cc__canonicalize_placeholder_family_type_codegen(const char* type_name,
                                                                     char* scratch,
@@ -3500,6 +3419,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 fprintf(stderr, "  pattern[%zu] = %s\n", ti, pat);
             }
         }
+        cc_emit_plan_clear_comptime_fragments();
+        cc_emit_plan_collect_comptime_emits(src_ufcs, src_ufcs_len);
         char* blanked = cc__blank_comptime_blocks_preserve_layout(src_ufcs, src_ufcs_len);
         if (blanked) {
             if (src_ufcs != src_all) free(src_ufcs);
@@ -3524,6 +3445,33 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = lowered_system_includes;
             src_ufcs_len = strlen(lowered_system_includes);
+        }
+    }
+
+    /* D2.0: resolve `@comptime if (...)` on the emit path too, before the D1
+     * fold — the emitted .c must contain only the taken branch. */
+    if (src_ufcs && src_ufcs_len) {
+        char* resolved = cc__resolve_comptime_if(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (resolved == (char*)-1) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            return -1;
+        }
+        if (resolved) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = resolved;
+            src_ufcs_len = strlen(resolved);
+        }
+    }
+
+    /* D1.0: fold `type_of(T).size`/`.align` -> `sizeof(T)`/`_Alignof(T)` so the
+     * emitted host C sees integer constant expressions (static_assert/array dims),
+     * not a `.member` on the runtime `cc_type_of()` pointer. */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = cc__lower_type_of_constexpr(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
         }
     }
 
@@ -3592,6 +3540,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = strlen(rewritten);
         }
     }
+    /* Replay explicit @comptime cc_instantiate_* requests (track C1) into the
+     * global registry so forced monomorphs (never spelled as CCVec::[T] in
+     * source) still get CC_*_DECL_ARENA emitted in the final .c. */
+    cc_emit_plan_apply_comptime_instantiations(cc_type_graph_get_global());
 
     /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
        using @defer, so the rest of the pipeline sees valid parseable text. */
@@ -4845,8 +4797,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
                 for (size_t ri = 0; ri < cc__cg_result_specs.count && ri < sizeof(delayed_result_specs); ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
-                    size_t ok_decl_end = spec ? cc__cg_type_decl_end_top_level(src_ufcs, src_ufcs_len, spec->ok_type) : 0;
-                    size_t err_decl_end = spec ? cc__cg_type_decl_end_top_level(src_ufcs, src_ufcs_len, spec->err_type) : 0;
+                    size_t ok_decl_end = spec ? cc_emit_plan_type_decl_end_top_level(src_ufcs, src_ufcs_len, spec->ok_type) : 0;
+                    size_t err_decl_end = spec ? cc_emit_plan_type_decl_end_top_level(src_ufcs, src_ufcs_len, spec->err_type) : 0;
                     size_t decl_end = ok_decl_end > err_decl_end ? ok_decl_end : err_decl_end;
                     if (!spec || decl_end <= earliest_pos) continue;
                     size_t first_use = cc_find_ident_top_level(src_ufcs, decl_end, src_ufcs_len,
@@ -4854,7 +4806,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                                                strlen(spec->concrete_name));
                     delayed_result_specs[ri] = 1;
                     if (first_use < src_ufcs_len) {
-                        delayed_result_pos[ri] = cc__cg_line_start_before(src_ufcs, first_use);
+                        delayed_result_pos[ri] = cc_emit_plan_line_start_before(src_ufcs, first_use);
                     } else {
                         delayed_result_pos[ri] = decl_end;
                     }
@@ -4906,9 +4858,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[256];
-                    snprintf(line, sizeof(line),
-                        "    %s: (!((%s*)(void*)&(__x__))->ok), \\\n",
-                        spec->concrete_name, spec->concrete_name);
+                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
+                                                   CC_RESULT_ARM_IS_ERR, 0, 0);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
@@ -4921,15 +4872,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[256];
-                    if (strcmp(spec->ok_type, "void") == 0) {
-                        snprintf(line, sizeof(line),
-                            "    %s: ((void)0), \\\n",
-                            spec->concrete_name);
-                    } else {
-                        snprintf(line, sizeof(line),
-                            "    %s: ((%s*)(void*)&(__x__))->u.value, \\\n",
-                            spec->concrete_name, spec->concrete_name);
-                    }
+                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
+                                                   CC_RESULT_ARM_VALUE,
+                                                   strcmp(spec->ok_type, "void") == 0, 0);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
@@ -4947,9 +4892,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[320];
-                    snprintf(line, sizeof(line),
-                        "    %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((%s*)(void*)&(__x__))->u.error), \\\n",
-                        spec->concrete_name, spec->concrete_name);
+                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
+                                                   CC_RESULT_ARM_ERR, 0, /*with_diag=*/1);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
@@ -5021,97 +4965,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         /* Insert buffered container declarations after typedefs/structs but BEFORE
            any struct that references a container type (e.g. __CC_MAP, Map_). */
         if (container_decl_buf && container_decl_len > 0) {
-            size_t ctnr_pos = 0;
-            while (ctnr_pos < src_ufcs_len) {
-                size_t line_start = ctnr_pos;
-                size_t line_end = line_start;
-                while (line_end < src_ufcs_len && src_ufcs[line_end] != '\n') line_end++;
-                size_t p = line_start;
-                while (p < line_end && (src_ufcs[p] == ' ' || src_ufcs[p] == '\t' || src_ufcs[p] == '\r')) p++;
-                /* Skip blank lines */
-                if (p == line_end) {
-                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                /* Skip block comments */
-                if (p + 1 < src_ufcs_len && src_ufcs[p] == '/' && src_ufcs[p + 1] == '*') {
-                    size_t end = p + 2;
-                    while (end + 1 < src_ufcs_len && !(src_ufcs[end] == '*' && src_ufcs[end + 1] == '/')) end++;
-                    ctnr_pos = (end + 1 < src_ufcs_len) ? end + 2 : src_ufcs_len;
-                    if (ctnr_pos < src_ufcs_len && src_ufcs[ctnr_pos] == '\n') ctnr_pos++;
-                    continue;
-                }
-                /* Skip line comments */
-                if (p + 1 < line_end && src_ufcs[p] == '/' && src_ufcs[p + 1] == '/') {
-                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                /* Skip preprocessor directives */
-                if (src_ufcs[p] == '#') {
-                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
-                    continue;
-                }
-                /* Skip typedef, struct, union, enum blocks — but stop if the block
-                   references a container type (__CC_MAP, __CC_VEC, Map_, CCVec_) since
-                   the container macros must be emitted before that struct. */
-                if ((p + 7 <= line_end && memcmp(src_ufcs + p, "typedef", 7) == 0 && !cc_is_ident_char(src_ufcs[p + 7])) ||
-                    (p + 6 <= line_end && memcmp(src_ufcs + p, "struct", 6) == 0 && !cc_is_ident_char(src_ufcs[p + 6])) ||
-                    (p + 5 <= line_end && memcmp(src_ufcs + p, "union", 5) == 0 && !cc_is_ident_char(src_ufcs[p + 5])) ||
-                    (p + 4 <= line_end && memcmp(src_ufcs + p, "enum", 4) == 0 && !cc_is_ident_char(src_ufcs[p + 4]))) {
-                    int is_typedef_block =
-                        (p + 7 <= line_end && memcmp(src_ufcs + p, "typedef", 7) == 0 && !cc_is_ident_char(src_ufcs[p + 7]));
-                    size_t block_start = p;
-                    size_t q = p;
-                    int brace_depth = 0;
-                    size_t block_end = src_ufcs_len;
-                    while (q < src_ufcs_len) {
-                        char c = src_ufcs[q];
-                        if (c == '{') brace_depth++;
-                        else if (c == '}') { brace_depth--; if (brace_depth < 0) brace_depth = 0; }
-                        else if (c == ';' && brace_depth == 0) {
-                            q++;
-                            if (q < src_ufcs_len && src_ufcs[q] == '\n') q++;
-                            block_end = q;
-                            break;
-                        }
-                        q++;
-                    }
-                    if (q >= src_ufcs_len) block_end = src_ufcs_len;
-                    /* Check if this block references container types */
-                    size_t block_sz = block_end - block_start;
-                    int refs_container = 0;
-                    int typedef_uses_only_predeclared_vec_char = 0;
-                    for (size_t si = block_start; si + 7 < block_end && !refs_container; si++) {
-                        if (memcmp(src_ufcs + si, "__CC_MAP", 8) == 0 ||
-                            memcmp(src_ufcs + si, "__CC_VEC", 8) == 0) {
-                            refs_container = 1;
-                        } else if ((si + 4 < block_end && memcmp(src_ufcs + si, "Map_", 4) == 0) ||
-                                   (si + 6 < block_end && memcmp(src_ufcs + si, "CCVec_", 6) == 0)) {
-                            refs_container = 1;
-                        }
-                    }
-                    if (is_typedef_block && refs_container) {
-                        for (size_t si = block_start; si + 14 <= block_end; si++) {
-                            if (memcmp(src_ufcs + si, "__CC_VEC(char)", 14) == 0) {
-                                typedef_uses_only_predeclared_vec_char = 1;
-                                break;
-                            }
-                        }
-                    }
-                    (void)block_sz;
-                    if (refs_container && !is_typedef_block) {
-                        ctnr_pos = line_start;
-                        break;
-                    }
-                    if (refs_container && is_typedef_block && !typedef_uses_only_predeclared_vec_char) {
-                        ctnr_pos = line_start;
-                        break;
-                    }
-                    ctnr_pos = block_end;
-                    continue;
-                }
-                break;
-            }
+            size_t ctnr_pos = cc_emit_plan_compute_container_anchor(src_ufcs, src_ufcs_len);
             /* Splice container declarations into src_ufcs at ctnr_pos,
                then re-sync line numbers with a #line directive. */
             {
@@ -5175,6 +5029,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         free(container_decl_buf);
         container_decl_buf = NULL;
+
+        if (cc_emit_plan_splice_comptime_fragments(&src_ufcs, &src_ufcs_len, ctx->input_path) != 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
         
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);

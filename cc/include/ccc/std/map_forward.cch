@@ -1,0 +1,184 @@
+/*
+ * Map forward declarations — parser-safe surface (track A4).
+ *
+ * Included from prelude and any TU that only needs `Map::[K,V]` / `__CC_MAP`
+ * spelling before per-TU monomorph emission.  Real `CC_MAP_DECL_ARENA`
+ * expansions live in map_impl.cch, spliced at CC_EMIT_AFTER_PRELUDE.
+ */
+#ifndef CC_STD_MAP_FORWARD_H
+#define CC_STD_MAP_FORWARD_H
+
+#include <ccc/cc_compat.cch>
+#include <stdlib.h>
+#include <string.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+
+#ifdef __CC_MAP
+#undef __CC_MAP
+#endif
+#ifdef __CC_MAP_INIT
+#undef __CC_MAP_INIT
+#endif
+#define __CC_MAP(K, V) Map_##K##_##V
+#define __CC_MAP_INIT(K, V, arena) Map_##K##_##V##_init((arena))
+
+#ifndef __CC_MAP_GENERIC_DEFINED
+#define __CC_MAP_GENERIC_DEFINED
+typedef struct __CCMapGeneric {
+    size_t count;
+    void *keys;
+    void *vals;
+    void *arena;
+} __CCMapGeneric;
+#endif
+
+static __CCMapGeneric __cc_map_generic_dummy = {0, NULL, NULL, NULL};
+static inline __CCMapGeneric* __cc_map_generic_init(void *arena) {
+    (void)arena;
+    return &__cc_map_generic_dummy;
+}
+
+static inline int __cc_map_generic_insert(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
+}
+static inline int __cc_map_generic_put(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
+}
+static inline void* __cc_map_generic_get(__CCMapGeneric *m, ...) {
+    (void)m;
+    return NULL;
+}
+static inline int __cc_map_generic_remove(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
+}
+static inline int __cc_map_generic_del(__CCMapGeneric *m, ...) {
+    (void)m;
+    return 0;
+}
+static inline size_t __cc_map_generic_len(const __CCMapGeneric *m) {
+    return m ? m->count : 0;
+}
+static inline void __cc_map_generic_clear(__CCMapGeneric *m) {
+    (void)m;
+}
+static inline void __cc_map_generic_destroy(__CCMapGeneric *m) {
+    (void)m;
+}
+
+static inline size_t cc_map_hash_i32(int x) {
+    uint32_t h = (uint32_t)x;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return (size_t)h;
+}
+static inline int cc_map_eq_i32(int a, int b) { return a == b; }
+
+static inline size_t cc_map_hash_u64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return (size_t)(x ^ (x >> 31));
+}
+static inline int cc_map_eq_u64(uint64_t a, uint64_t b) { return a == b; }
+
+static inline size_t cc_map_hash_slice(CCSlice s) {
+    size_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char*)s.ptr;
+    for (size_t i = 0; i < s.len; ++i)
+        h ^= p[i], h *= 16777619;
+    return h;
+}
+static inline int cc_map_eq_slice(CCSlice a, CCSlice b) {
+    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+}
+
+static inline size_t cc_map_hash_slice_hdr(CCSliceHdr sh) {
+    size_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char *)sh.ptr;
+    for (size_t i = 0; i < sh.len; ++i)
+        h ^= p[i], h *= 16777619;
+    return h;
+}
+static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
+    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+}
+
+#define CC_MAP_DECL_UFCS(Name) typedef char __cc_map_decl_ufcs__##Name
+
+/*
+ * Parser-safe forward declarations for the cc_containers (`ccj_*`) surface that
+ * the real CC_MAP_DECL_ARENA bodies (map_impl.cch) reference.
+ *
+ * Under CC_PARSER_MODE the full <ccc/cc_containers.cch> (~9.7k lines) is gated
+ * out, but the stub-AST parse still needs these names declared so the *real*
+ * inline Map methods parse identically in both modes — there is no longer a
+ * separate parser-mode Map body to drift from the implementation.
+ *
+ * These declarations are PARSE-ONLY: the bodies never run during the parser
+ * pass, and the concrete definitions come from cc_containers at final emission
+ * (CC_PARSER_MODE undefined).  The `ccj_*` functions are intentionally declared
+ * unprototyped (`T ccj_x();`) so they accept the real call signatures without
+ * this surface having to mirror them — no signature drift.
+ */
+#ifdef CC_PARSER_MODE
+#ifndef CC_TYPEOF_XP
+#define CC_TYPEOF_XP(xp) __typeof__(xp)
+#endif
+#ifndef CC_MAP
+#define CC_MAP 3
+#endif
+#ifndef CC_DEFAULT_LOAD
+#define CC_DEFAULT_LOAD 0.9
+#endif
+
+typedef struct { uint64_t size; uint64_t align; } ccj_key_details_ty;
+typedef struct { void *new_cntr; void *other_ptr; } ccj_allocing_fn_result_ty;
+
+/* Address-taken placeholder + allocator hooks threaded into the ccj_* calls. */
+extern char ccj_map_placeholder;
+extern void *cc__containers_realloc;
+extern void *cc__containers_free;
+
+uint64_t ccj_layout();
+ccj_allocing_fn_result_ty ccj_map_reserve();
+ccj_allocing_fn_result_ty ccj_map_insert();
+void ccj_map_cleanup();
+void ccj_map_clear();
+void *ccj_map_get();
+void *ccj_map_erase();
+void *ccj_map_first();
+void *ccj_map_end();
+void *ccj_map_next();
+void *ccj_map_key_for();
+size_t ccj_map_size();
+size_t ccj_map_cap();
+size_t ccj_map_bucket_index_from_itr();
+#endif /* CC_PARSER_MODE */
+
+/* Convenience: common key types (parser stub or map_impl macro). */
+#define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
+#define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
+#define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
+
+#define CC_MAP_DECL_INT_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
+#define CC_MAP_DECL_U64_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
+#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV_ignored)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
+
+#define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
+
+/* Single real CC_MAP_DECL_ARENA body for both modes.  Under CC_PARSER_MODE the
+ * heavy cc_containers include inside map_impl.cch is gated out; the parser-safe
+ * ccj_* forward decls above stand in so the real bodies still parse. */
+#include "map_impl.cch"
+
+#endif /* CC_STD_MAP_FORWARD_H */

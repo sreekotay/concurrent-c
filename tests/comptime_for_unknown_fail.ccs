@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+
+/* D4.0 negative: `@comptime for` over a type with no in-scope definition is a
+ * hard error — reflection must see every field or none, never silently zero. */
+
+int main(void) {
+    int n = 0;
+    @comptime for (f in type_of(NoSuchTypeXYZ).fields) {
+        n += f.index;
+    }
+    return n;
+}

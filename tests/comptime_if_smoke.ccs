@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* File-scope selection: `chosen` is defined only in the taken branch.  The
+ * dead branch references an undefined function — proof that `@comptime if`
+ * prunes the untaken branch *before* it ever reaches the compiler. */
+@comptime if (type_of(int).kind == CC_TK_PRIMITIVE) {
+    static int chosen(void) { return 1; }
+} else {
+    static int chosen(void) { return undefined_symbol_xyz(); }
+}
+
+int main(void) {
+    int acc = 0;
+
+    /* `.nfields` of a primitive is the constant 0 -> take the first branch. */
+    @comptime if (type_of(int).nfields == 0) {
+        acc += 10;
+    } else {
+        acc += this_is_never_compiled;
+    }
+
+    /* `int` is not a struct -> take the else branch. */
+    @comptime if (type_of(double).kind == CC_TK_STRUCT) {
+        acc += also_never_compiled;
+    } else {
+        acc += 100;
+    }
+
+    /* Nested: outer true, inner false -> inner else runs. */
+    @comptime if (1 + 1 == 2) {
+        @comptime if (type_of(int).kind == CC_TK_GENERIC_INST) {
+            acc += nope_never_compiled;
+        } else {
+            acc += 1000;
+        }
+    }
+
+    acc += chosen();
+    printf("comptime_if_smoke acc=%d\n", acc);
+    return acc == 1111 ? 0 : 1;
+}

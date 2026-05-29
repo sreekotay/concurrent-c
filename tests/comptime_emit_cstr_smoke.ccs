@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+@comptime {
+    cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, "typedef int ComptimeEmitSmokeInt;\n");
+}
+
+int main(void) {
+    ComptimeEmitSmokeInt x = 42;
+    if (x != 42) return 1;
+    printf("comptime_emit_cstr_smoke ok\n");
+    return 0;
+}

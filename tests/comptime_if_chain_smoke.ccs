@@ -1,0 +1,46 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+int main(void) {
+    int acc = 0;
+
+    /* else-if chain: head false, middle true -> middle arm runs; the head and
+     * tail arms reference undefined symbols to prove they are pruned. */
+    @comptime if (type_of(double).kind == CC_TK_STRUCT) {
+        acc += head_never_compiled;
+    } else @comptime if (type_of(int).nfields == 0) {
+        acc += 3;
+    } else {
+        acc += tail_never_compiled;
+    }
+
+    /* else-if chain falling all the way through to the final else. */
+    @comptime if (type_of(int).kind == CC_TK_GENERIC_INST) {
+        acc += a_never;
+    } else @comptime if (type_of(double).kind == CC_TK_STRUCT) {
+        acc += b_never;
+    } else {
+        acc += 30;
+    }
+
+    /* `||` short-circuit: LHS true, so the non-foldable RHS (kind of an
+     * unclassified struct name) is skipped, not errored. */
+    @comptime if (type_of(int).kind == CC_TK_PRIMITIVE ||
+                  type_of(SomeUnregisteredStruct).kind == CC_TK_STRUCT) {
+        acc += 300;
+    } else {
+        acc += or_never;
+    }
+
+    /* `&&` short-circuit: LHS false, so the non-foldable RHS is skipped. */
+    @comptime if (type_of(int).kind == CC_TK_GENERIC_INST &&
+                  type_of(AnotherUnknown).nfields > 1) {
+        acc += and_never;
+    } else {
+        acc += 3000;
+    }
+
+    printf("comptime_if_chain_smoke acc=%d\n", acc);
+    return acc == 3333 ? 0 : 1;
+}

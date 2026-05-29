@@ -16,10 +16,12 @@
 #include "driver.h"
 #include "diag/diag.h"
 #include "preprocess/preprocess.h"
+#include "comptime/const_eval.h"
 
 // Forward decls for helpers used by multiple modes.
 static int file_exists(const char* path);
 static int ensure_out_dir(void);
+static int cc__selftest_const_eval(int argc, char** argv);
 
 // Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
@@ -3784,6 +3786,52 @@ parse_fail:
     return -1;
 }
 
+/* D3.0 seam self-test.  `ccc __eval-const "<expr>" ["<prelude>"]` prints the
+ * folded value or NONCONST; `ccc __eval-const --selftest` runs assertions and
+ * prints "const-eval selftest ok" on success. */
+static int cc__selftest_const_eval(int argc, char** argv) {
+    if (argc >= 3 && strcmp(argv[2], "--selftest") == 0) {
+        struct P_local { int a; double b; }; /* host mirror of the prelude struct */
+        struct { const char* prelude; const char* expr; int ok; int64_t want; } cases[] = {
+            { NULL, "1 + 2 * 3", 1, 7 },
+            { NULL, "sizeof(int)", 1, (int64_t)sizeof(int) },
+            { NULL, "_Alignof(double)", 1, (int64_t)_Alignof(double) },
+            { NULL, "(1 << 10) | 1", 1, 1025 },
+            { "enum { CE_A = 5, CE_B };", "CE_B * 2", 1, 12 },
+            { "struct P { int a; double b; };", "sizeof(struct P)", 1, (int64_t)sizeof(struct P_local) },
+            { NULL, "some_runtime_symbol", 0, 0 },
+        };
+        size_t n = sizeof(cases) / sizeof(cases[0]);
+        for (size_t i = 0; i < n; i++) {
+            int64_t got = 0;
+            int ok = cc_tcc_eval_const_expr(cases[i].prelude, cases[i].expr, &got);
+            if (ok != cases[i].ok || (ok && got != cases[i].want)) {
+                fprintf(stderr,
+                        "const-eval selftest FAIL: case %zu expr=\"%s\" ok=%d got=%lld want(ok=%d,val=%lld)\n",
+                        i, cases[i].expr, ok, (long long)got, cases[i].ok, (long long)cases[i].want);
+                return 1;
+            }
+        }
+        printf("const-eval selftest ok\n");
+        return 0;
+    }
+    if (argc < 3) {
+        fprintf(stderr, "usage: ccc __eval-const \"<expr>\" [\"<prelude>\"]\n");
+        return 2;
+    }
+    {
+        const char* expr = argv[2];
+        const char* prelude = (argc >= 4) ? argv[3] : NULL;
+        int64_t v = 0;
+        if (cc_tcc_eval_const_expr(prelude, expr, &v)) {
+            printf("%lld\n", (long long)v);
+            return 0;
+        }
+        printf("NONCONST\n");
+        return 0;
+    }
+}
+
 int main(int argc, char **argv) {
     cc_init_paths(argv[0]);
     cc_diag_init();
@@ -3808,6 +3856,12 @@ int main(int argc, char **argv) {
     if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
         printf("ccc 0.1.0-dev\n");
         return 0;
+    }
+    /* D3.0: hidden self-test for the in-process constexpr seam.
+     *   ccc __eval-const "<expr>" ["<prelude>"]   -> prints "<int64>" or "NONCONST"
+     *   ccc __eval-const --selftest               -> runs built-in assertions */
+    if (argc >= 2 && strcmp(argv[1], "__eval-const") == 0) {
+        return cc__selftest_const_eval(argc, argv);
     }
     if (argc >= 2 && strcmp(argv[1], "clean") == 0) {
         int all = 0;

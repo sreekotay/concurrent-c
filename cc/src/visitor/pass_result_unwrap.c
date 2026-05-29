@@ -1456,7 +1456,6 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
             continue;
         }
         char ch = body[i];
-        char ch2 = (i + 1 < body_len) ? body[i + 1] : 0;
 
         /* Look for `@err(` at word boundary — not `@errhandler`. */
         if (ch == '@' && i + 4 <= body_len &&

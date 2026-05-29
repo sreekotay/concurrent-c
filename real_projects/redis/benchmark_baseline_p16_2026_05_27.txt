@@ -1,0 +1,90 @@
+=== Benchmark Baseline (P=16) ===
+Date: Wed May 27 10:11:45 EDT 2026
+Commit: 9d37916 nursery: fix lost-wakeup race in worker-frees alive_count barrier
+Command: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16 MEMLOG_ON_EXIT=1 ./bench_robust.sh
+
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.HxcOrxYow8
+[warmup]
+   upstream  set   rps=1831501.88
+   idiomatic set   rps=2127659.50
+   idiomatic get   rps=1968503.88
+   upstream  get   rps=2439024.50
+   upstream  incr  rps=2358490.50
+   idiomatic incr  rps=2994012.00
+[round 1/6]
+   idiomatic set   rps=2840909.00
+   upstream  set   rps=1893939.38
+   upstream  get   rps=2369668.25
+   idiomatic get   rps=2906976.75
+   idiomatic incr  rps=3030303.00
+   upstream  incr  rps=2403846.00
+[round 2/6]
+   idiomatic set   rps=2890173.50
+   upstream  set   rps=1831501.88
+   idiomatic get   rps=2890173.50
+   upstream  get   rps=2450980.50
+   upstream  incr  rps=2369668.25
+   idiomatic incr  rps=2958580.00
+[round 3/6]
+   idiomatic set   rps=2873563.25
+   upstream  set   rps=1984127.00
+   idiomatic get   rps=2604166.75
+   upstream  get   rps=1207729.50
+   idiomatic incr  rps=2762431.00
+   upstream  incr  rps=2347417.75
+[round 4/6]
+   upstream  set   rps=1968503.88
+   idiomatic set   rps=2793296.00
+   idiomatic get   rps=2941176.50
+   upstream  get   rps=2475247.50
+   upstream  incr  rps=2415459.00
+   idiomatic incr  rps=2976190.50
+[round 5/6]
+   idiomatic set   rps=2873563.25
+   upstream  set   rps=1945525.25
+   upstream  get   rps=2439024.50
+   idiomatic get   rps=2793296.00
+   idiomatic incr  rps=3012048.25
+   upstream  incr  rps=2427184.50
+[round 6/6]
+   idiomatic set   rps=2857143.00
+   upstream  set   rps=1992032.00
+   upstream  get   rps=2427184.50
+   idiomatic get   rps=2906976.75
+   upstream  incr  rps=2427184.50
+   idiomatic incr  rps=3067484.50
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 cc_workers=default
+sample_interval=0.05s  samples_taken: upstream=160  idiomatic=159
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.936M   1.957M   1.832M   1.992M   0.062M   3.2%
+  idiomatic    2.855M   2.865M   2.793M   2.890M   0.034M   1.2%
+  idiomatic/upstream median: 1.464x  (SEPARATED)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.228M   2.433M   1.208M   2.475M   0.501M  22.5%
+  idiomatic    2.840M   2.899M   2.604M   2.941M   0.126M   4.4%
+  idiomatic/upstream median: 1.191x  (SEPARATED)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.398M   2.410M   2.347M   2.427M   0.033M   1.4%
+  idiomatic    2.968M   2.994M   2.762M   3.067M   0.108M   3.6%
+  idiomatic/upstream median: 1.243x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.6MB              3
+  idiomatic      19.8MB             17
+
+[IDIOMATIC DB ARENAS] (final CC.MEMLOG)
+  arena         slabs   overflow   metadata      gross
+  map           1.0KB     4.27MB         0B     4.27MB
+  key          2.27MB         0B       832B     2.27MB
+  value         1.0KB         0B         0B      1.0KB
+  sum                                           6.54MB
+
