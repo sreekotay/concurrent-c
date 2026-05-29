@@ -6,8 +6,10 @@
  * both CC and Pthread use pre-allocated buffers with bump-pointer allocation,
  * no malloc/free per alloc, no shared allocator contention.
  *
- * Go uses make([]byte, 16) which goes through its per-P mcache — also a
- * low-contention per-goroutine allocator, comparable to bump arenas.
+ * NOTE: the harness Go row is NOT comparable to this — its non-escaping
+ * make([]byte, 16) is stack-promoted by escape analysis (verified "does not
+ * escape"), so it never reaches mcache. Only CC vs this pthread arena is a
+ * like-for-like bump-arena comparison.
  */
 
 #include <stdio.h>

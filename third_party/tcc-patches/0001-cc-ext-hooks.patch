@@ -165,7 +165,7 @@ index 00000000..4426a146
 +    CC_AST_WITH_NODE(
 +        node->aux1 = op_tok;
 +        node->aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
-+        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by ccc AST consumer */
++        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by cccn parser */
 +        node->col_start = tok_col;
 +        if (op) node->col_end = tok_col + (int)strlen(op);
 +    );
@@ -205,10 +205,10 @@ index 00000000..4426a146
 +
 +#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..7061a988 100644
+index 171e3622..3d43150f 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,289 @@
+@@ -66,6 +66,661 @@
  
  #include "tcc.h"
  
@@ -378,18 +378,371 @@ index 171e3622..7061a988 100644
 +    char last_error[2048];
 +    const char* source_code;
 +    const char* original_path;
++    const char* virtual_filename;
 +} CCErrorContext;
++
++static int cc__is_digit_char(char c) {
++    return c >= '0' && c <= '9';
++}
++
++static int cc__parse_error_location(const char* msg, int* out_line, int* out_col) {
++    const char* mark;
++    const char* p;
++    const char* end;
++    int value = 0;
++    int mult = 1;
++    int col = 0;
++    int line = 0;
++    if (out_line) *out_line = 0;
++    if (out_col) *out_col = 0;
++    if (!msg) return 0;
++    mark = strstr(msg, ": error:");
++    if (!mark) return 0;
++    p = mark;
++    while (p > msg && p[-1] != ':') p--;
++    if (p <= msg) return 0;
++    end = p - 1;
++    if (end <= msg || !cc__is_digit_char(*end)) return 0;
++    value = 0;
++    mult = 1;
++    while (end >= msg && cc__is_digit_char(*end)) {
++        value += (*end - '0') * mult;
++        mult *= 10;
++        end--;
++    }
++    if (end > msg && *end == ':') {
++        col = value;
++        end--;
++        if (end < msg || !cc__is_digit_char(*end)) return 0;
++        value = 0;
++        mult = 1;
++        while (end >= msg && cc__is_digit_char(*end)) {
++            value += (*end - '0') * mult;
++            mult *= 10;
++            end--;
++        }
++        if (end < msg || *end != ':') return 0;
++        line = value;
++    } else {
++        line = value;
++    }
++    if (out_line) *out_line = line;
++    if (out_col) *out_col = col;
++    return line > 0;
++}
++
++static int cc__line_span(const char* src, int target_line,
++                         const char** out_start, const char** out_end) {
++    const char* p = src;
++    int line = 1;
++    if (out_start) *out_start = NULL;
++    if (out_end) *out_end = NULL;
++    if (!src || target_line <= 0) return 0;
++    while (*p && line < target_line) {
++        if (*p == '\n') line++;
++        p++;
++    }
++    if (line != target_line) return 0;
++    if (out_start) *out_start = p;
++    while (*p && *p != '\n') p++;
++    if (out_end) *out_end = p;
++    return 1;
++}
++
++static void cc__print_excerpt_line(int line_no, int highlight, const char* start, const char* end) {
++    size_t len = 0;
++    size_t shown = 0;
++    if (!start || !end || end < start) return;
++    len = (size_t)(end - start);
++    shown = len > 160 ? 160 : len;
++    fprintf(stderr, "  %c %4d | %.*s%s\n",
++            highlight ? '>' : ' ',
++            line_no,
++            (int)shown, start,
++            len > shown ? " ..." : "");
++}
++
++/* Best-effort read the original user-facing source so the Source window
++ * reflects what the user typed, not the post-rewrite whitespace-padded
++ * buffer the parser actually saw.  Caller owns the returned buffer (or
++ * NULL on failure).  We cache nothing; this is only hit on error. */
++static char* cc__read_original_file(const char* path) {
++    FILE* f = NULL;
++    long sz = 0;
++    char* buf = NULL;
++    if (!path || !path[0]) return NULL;
++    f = fopen(path, "rb");
++    if (!f) return NULL;
++    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
++    sz = ftell(f);
++    if (sz < 0 || sz > (long)(8 * 1024 * 1024)) { fclose(f); return NULL; }
++    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
++    buf = (char*)tcc_malloc((unsigned long)(sz + 1));
++    if (!buf) { fclose(f); return NULL; }
++    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { tcc_free(buf); fclose(f); return NULL; }
++    buf[sz] = 0;
++    fclose(f);
++    return buf;
++}
++
++/* Does the given line span contain any non-whitespace?  Used to decide
++ * whether the `source_code` window is informative or just lowered
++ * padding. */
++static int cc__line_has_content(const char* start, const char* end) {
++    if (!start || !end || end <= start) return 0;
++    for (const char* p = start; p < end; p++) {
++        if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') return 1;
++    }
++    return 0;
++}
++
++static void cc__print_error_source_window(CCErrorContext* ctx, int line, int col, const char* title) {
++    int from = 0;
++    int to = 0;
++    const char* src = NULL;
++    char* original_buf = NULL;
++    if (!ctx || line <= 0) return;
++    src = ctx->source_code;
++    /* Prefer the original file when available: the lowered source has
++     * comment bodies stripped and rewrite output squished onto the
++     * original line numbers, which makes the window misleading. */
++    if (ctx->original_path && ctx->original_path[0]) {
++        original_buf = cc__read_original_file(ctx->original_path);
++        if (original_buf) src = original_buf;
++    }
++    if (!src) {
++        if (original_buf) tcc_free(original_buf);
++        return;
++    }
++    from = line > 2 ? line - 2 : 1;
++    to = line + 2;
++    fprintf(stderr, "  %s:\n", title ? title : "Source window");
++    for (int cur = from; cur <= to; cur++) {
++        const char* start = NULL;
++        const char* end = NULL;
++        if (!cc__line_span(src, cur, &start, &end)) {
++            /* If we ran off the end of the original file, try falling
++             * back to the lowered source — the parser's line number may
++             * be past EOF of the original (rewrite produced extra
++             * lines).  Surface both situations clearly. */
++            if (src != ctx->source_code && ctx->source_code) {
++                cc__line_span(ctx->source_code, cur, &start, &end);
++            }
++            if (!start) {
++                if (cur == line) {
++                    fprintf(stderr, "  > %4d | <past end of file>\n", cur);
++                }
++                break;
++            }
++        }
++        /* If the preferred source (original) has real content OR the
++         * lowered source also is blank, print as-is; if the preferred
++         * line is blank but the lowered source has something, prefer
++         * the lowered line for that row only. */
++        if (src != ctx->source_code && !cc__line_has_content(start, end) &&
++            ctx->source_code) {
++            const char* ls = NULL;
++            const char* le = NULL;
++            if (cc__line_span(ctx->source_code, cur, &ls, &le) &&
++                cc__line_has_content(ls, le)) {
++                start = ls;
++                end = le;
++            }
++        }
++        cc__print_excerpt_line(cur, cur == line, start, end);
++        if (cur == line && col > 0) {
++            int line_len = (int)(end - start);
++            /* Suppress the caret when the reported column is obviously
++             * not in the original line (rewrite-inflated offsets tend
++             * to overshoot the real line by a large margin).  Keep a
++             * small tolerance for tab expansion. */
++            if (col <= line_len + 4) {
++                int caret_col = col > 120 ? 120 : col;
++                fprintf(stderr, "         | %*s^\n", caret_col - 1, "");
++            }
++        }
++    }
++    if (original_buf) tcc_free(original_buf);
++}
++
++static int cc__parse_line_directive(const char* start, const char* end,
++                                    int* out_line, char* out_file, size_t out_file_sz) {
++    const char* p = start;
++    int line = 0;
++    size_t fn = 0;
++    if (out_line) *out_line = 0;
++    if (out_file && out_file_sz) out_file[0] = '\0';
++    if (!start || !end || end <= start || *p != '#') return 0;
++    p++;
++    while (p < end && (*p == ' ' || *p == '\t')) p++;
++    if (p + 4 < end && memcmp(p, "line", 4) == 0) {
++        p += 4;
++        while (p < end && (*p == ' ' || *p == '\t')) p++;
++    }
++    if (p >= end || !cc__is_digit_char(*p)) return 0;
++    while (p < end && cc__is_digit_char(*p)) {
++        line = line * 10 + (*p - '0');
++        p++;
++    }
++    while (p < end && (*p == ' ' || *p == '\t')) p++;
++    if (p < end && *p == '"' && out_file && out_file_sz) {
++        p++;
++        while (p < end && *p != '"' && fn + 1 < out_file_sz) {
++            out_file[fn++] = *p++;
++        }
++        out_file[fn] = '\0';
++    }
++    if (out_line) *out_line = line;
++    return line > 0;
++}
++
++static int cc__map_logical_to_physical_line(const char* src,
++                                            const char* target_file,
++                                            int target_line,
++                                            int* out_physical_line) {
++    const char* line_start = src;
++    int physical_line = 1;
++    int logical_line = 1;
++    char logical_file[1024] = {0};
++    if (out_physical_line) *out_physical_line = 0;
++    if (!src || !target_file || !target_file[0] || target_line <= 0) return 0;
++    while (line_start && *line_start) {
++        const char* line_end = line_start;
++        int mapped_line = 0;
++        char mapped_file[1024] = {0};
++        while (*line_end && *line_end != '\n') line_end++;
++        if (cc__parse_line_directive(line_start, line_end, &mapped_line, mapped_file, sizeof(mapped_file))) {
++            logical_line = mapped_line;
++            if (mapped_file[0]) {
++                strncpy(logical_file, mapped_file, sizeof(logical_file) - 1);
++                logical_file[sizeof(logical_file) - 1] = '\0';
++            }
++        } else {
++            if (logical_file[0] && strcmp(logical_file, target_file) == 0 && logical_line == target_line) {
++                if (out_physical_line) *out_physical_line = physical_line;
++                return 1;
++            }
++            logical_line++;
++        }
++        if (*line_end == '\n') line_end++;
++        line_start = line_end;
++        physical_line++;
++    }
++    return 0;
++}
++
++static void cc__print_nearest_closure_hint(CCErrorContext* ctx, int line) {
++    int from = 0;
++    if (!ctx || !ctx->source_code || line <= 1) return;
++    from = line > 25 ? line - 25 : 1;
++    for (int cur = line - 1; cur >= from; cur--) {
++        const char* start = NULL;
++        const char* end = NULL;
++        const char* p = NULL;
++        if (!cc__line_span(ctx->source_code, cur, &start, &end)) continue;
++        for (p = start; p + 1 < end; p++) {
++            if (p[0] == '=' && p[1] == '>') {
++                fprintf(stderr, "  Nearest preceding closure-like line:\n");
++                cc__print_excerpt_line(cur, 1, start, end);
++                return;
++            }
++        }
++    }
++}
++
++static int cc__should_print_context(const char* msg) {
++    return msg &&
++           (strstr(msg, "missing terminating") != NULL ||
++            strstr(msg, "<eof>") != NULL ||
++            strstr(msg, "expected expression") != NULL ||
++            strstr(msg, "expected ';'") != NULL ||
++            strstr(msg, "';' expected") != NULL ||
++            strstr(msg, "',' expected") != NULL ||
++            strstr(msg, "struct or union expected") != NULL ||
++            strstr(msg, "expected '=>' after '()' for closure") != NULL);
++}
++
++/* Rewrite the primary error-line text for common TCC messages that map
++ * onto CC-level concepts, so users see CC semantics rather than
++ * implementation details.  Writes up to `cap - 1` chars to `out` and
++ * NUL-terminates.  Returns 1 if the message was rewritten, 0 otherwise. */
++static int cc__rewrite_primary_error(const char* msg, char* out, size_t cap) {
++    const char* colon;
++    const char* tail;
++    size_t pre_len;
++    if (!msg || !out || cap < 2) return 0;
++    /* `struct or union expected` is emitted by TCC when `(x).field` is
++     * applied to a non-struct — in CC sources this overwhelmingly means
++     * `!>` or `?>` was applied to something that is not a Result (the
++     * `cc_is_err(x)` / `cc_value(x)` / `cc_error(x)` macros project
++     * `.ok` / `.u.value` / `.u.error`).  Rephrase so the first line
++     * names the CC operator and the expected type directly. */
++    if (!strstr(msg, "struct or union expected")) return 0;
++    /* Preserve any leading `<file>:<line>: error:` prefix so the IDE /
++     * terminal location links still work. */
++    colon = strstr(msg, "error:");
++    if (!colon) return 0;
++    tail = colon + strlen("error:");
++    while (*tail == ' ' || *tail == '\t') tail++;
++    (void)tail;
++    pre_len = (size_t)(colon - msg) + strlen("error:");
++    if (pre_len + 2 >= cap) return 0;
++    memcpy(out, msg, pre_len);
++    snprintf(out + pre_len, cap - pre_len,
++             " expected a Result type on the left of `!>` / `?>`"
++             " (e.g. `T !>(CCError)`), but the expression has no `.ok` field"
++             " (internally: struct or union expected)");
++    return 1;
++}
 +
 +/* Helper: try to provide better error message for common CC patterns. */
 +static void cc_enhance_error_message(CCErrorContext* ctx, const char* msg) {
++    int line = 0;
++    int col = 0;
++    char rewritten[2048];
++    const char* display_msg = msg;
 +    /* Copy the raw message first. */
 +    strncpy(ctx->last_error, msg, sizeof(ctx->last_error) - 1);
 +    ctx->last_error[sizeof(ctx->last_error) - 1] = '\0';
-+    
-+    /* Print the raw error first. */
-+    fprintf(stderr, "%s\n", msg);
++
++    /* Rephrase cryptic TCC-level messages in CC terms before we print
++     * anything.  Detection below still keys off the original `msg` so
++     * the hint/source-window logic lines up with the underlying cause. */
++    if (cc__rewrite_primary_error(msg, rewritten, sizeof(rewritten))) {
++        display_msg = rewritten;
++    }
++
++    /* Print the (possibly rewritten) error first. */
++    fprintf(stderr, "%s\n", display_msg);
 +    
 +    /* Try to detect common CC errors and add helpful hints. */
++    if (cc__should_print_context(msg)) {
++        if (!cc__parse_error_location(msg, &line, &col)) {
++            if (file && file->line_num > 0) {
++                line = file->line_num;
++                col = tok_col > 0 ? tok_col : 0;
++            }
++        }
++    }
++    if (cc__should_print_context(msg) && line > 0) {
++        int physical_line = 0;
++        fprintf(stderr, "\n");
++        fprintf(stderr, "  NOTE: this parser error is often reported after the real failure.\n");
++        cc__print_error_source_window(ctx, line, col, "Source window");
++        if (ctx->virtual_filename && ctx->virtual_filename[0] &&
++            ctx->original_path && ctx->original_path[0] &&
++            strcmp(ctx->virtual_filename, ctx->original_path) != 0 &&
++            cc__map_logical_to_physical_line(ctx->source_code, ctx->original_path, line, &physical_line)) {
++            fprintf(stderr, "  Stub parse location:\n");
++            fprintf(stderr, "    file: %s\n", ctx->virtual_filename);
++            fprintf(stderr, "    line: %d\n", physical_line);
++            cc__print_error_source_window(ctx, physical_line, 0, "Stub window");
++        }
++        cc__print_nearest_closure_hint(ctx, line);
++        fprintf(stderr, "\n");
++        fprintf(stderr, "  TIP: Also inspect earlier local declarations/calls in the same closure body.\n");
++        fprintf(stderr, "\n");
++    }
 +    
 +    /* Pattern: "';' expected" often means Result type syntax issue. */
 +    if (strstr(msg, "';' expected") || strstr(msg, "expected ';'")) {
@@ -409,9 +762,27 @@ index 171e3622..7061a988 100644
 +        fprintf(stderr, "       - Unclosed braces { } in @nursery, @arena, @match blocks\n");
 +        fprintf(stderr, "       - Incomplete closure: () => [captures] { ... }\n");
 +        fprintf(stderr, "       - Missing ')' or '}' from previous statement\n");
++        fprintf(stderr, "       - A local declaration or call earlier in the same closure body\n");
 +        fprintf(stderr, "\n");
 +    }
 +    
++    /* Pattern: `cc_is_err(x)` / `cc_value(x)` applied to a non-struct
++     * (typically a raw pointer return from a plain C function).  TCC
++     * emits "struct or union expected" when the `(x).ok` inside the
++     * `cc_is_err` macro is applied to something without fields. */
++    if (strstr(msg, "struct or union expected")) {
++        fprintf(stderr, "\n");
++        fprintf(stderr, "  HINT: This often means `!>` or `?>` was applied to an expression\n");
++        fprintf(stderr, "        that is NOT a Result type (e.g. a raw `T*` returning C function).\n");
++        fprintf(stderr, "        The `cc_is_err(x)` / `cc_value(x)` macros require a Result struct;\n");
++        fprintf(stderr, "        a pointer has no `.ok` field so TCC reports this message.\n");
++        fprintf(stderr, "\n");
++        fprintf(stderr, "  TIP: If you want NULL-as-error semantics for a pointer-returning\n");
++        fprintf(stderr, "       function, wrap the call or change the function's return type\n");
++        fprintf(stderr, "       to `T !>(CCError)` so it participates in the Result protocol.\n");
++        fprintf(stderr, "\n");
++    }
++
 +    /* Pattern: declaration/statement confusion. */
 +    if (strstr(msg, "declaration") && strstr(msg, "expected")) {
 +        fprintf(stderr, "\n");
@@ -448,6 +819,7 @@ index 171e3622..7061a988 100644
 +    CCErrorContext err_ctx = {0};
 +    err_ctx.source_code = source_code;
 +    err_ctx.original_path = original_path;
++    err_ctx.virtual_filename = virtual_filename;
 +    
 +    TCCState *s = tcc_new();
 +    if (!s) return NULL;
@@ -498,7 +870,7 @@ index 171e3622..7061a988 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1021,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1393,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -506,7 +878,7 @@ index 171e3622..7061a988 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1243,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1615,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -523,7 +895,7 @@ index 171e3622..7061a988 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..4bc3b5d9 100644
+index e7a2f1e2..cb8d2cb9 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,93 @@ typedef struct TokenSym {
@@ -553,7 +925,7 @@ index e7a2f1e2..4bc3b5d9 100644
 +    CC_AST_NODE_PARAM     = 16,
 +    CC_AST_NODE_FUNC      = 17, /* function decl/def: aux_s1=name, aux_s2=return type, aux1=attrs */
 +    CC_AST_NODE_BINARY    = 18, /* binary expr: aux1=operator token */
-+    CC_AST_NODE_TRY       = 19, /* try expr: unwrap Result or propagate error */
++    /* 19 retired: CC_AST_NODE_TRY */
 +    CC_AST_NODE_IF        = 20, /* if statement: children are cond, then, [else] */
 +    CC_AST_NODE_FOR       = 21, /* for statement: init, cond, incr, body */
 +    CC_AST_NODE_WHILE     = 22, /* while statement: cond, body */
@@ -630,7 +1002,7 @@ index e7a2f1e2..4bc3b5d9 100644
      int line_ref;    /* tcc -E: last printed line */
      int ifndef_macro;  /* #ifndef macro / #endif search */
      int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +961,55 @@ struct TCCState {
+@@ -871,6 +961,65 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
@@ -650,7 +1022,7 @@ index e7a2f1e2..4bc3b5d9 100644
 +    int cc_last_member_flags; /* bit0=syntactic arrow (->), bit1=recv type is pointer */
 +    int cc_last_member_line;
 +    int cc_last_member_col;
-+    char cc_last_recv_type[128]; /* Receiver type name for UFCS (e.g., "Point", "Vec_int") */
++    char cc_last_recv_type[128]; /* Receiver type name for UFCS (e.g., "Point", "CCVec_int") */
 +    int cc_last_rparen_line;
 +    int cc_last_rparen_col;
 +    
@@ -665,6 +1037,16 @@ index e7a2f1e2..4bc3b5d9 100644
 +    int cc_ufcs_seq_line;
 +    int cc_ufcs_seq_count;
 +    int cc_ufcs_active; /* Set during UFCS call argument parsing */
++    /* Set right after a UFCS call's gfunc_call completes; consumed by
++       verify_assign_cast to silently coerce the synthesized int return
++       to whatever the enclosing declarator/assignment expects. This
++       is what lets `CCArenaCheckpoint cp = arena.checkpoint();` parse
++       without a hand-written stub: the real return type is resolved
++       later by the UFCS visitor; here we only need the stub parse to
++       succeed. Cleared by any op that consumes vtop (vpop/gen_op/
++       gfunc_call/verify_assign_cast) so the flag can't leak into an
++       unrelated later assignment. */
++    int cc_ufcs_result_pending;
 +    /* CC call stack: indices of recorded CC_AST_NODE_CALL nodes (for nested span end update). */
 +    int *cc_call_stack;
 +    int cc_call_stack_top;
@@ -686,7 +1068,7 @@ index e7a2f1e2..4bc3b5d9 100644
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1290,7 @@ struct filespec {
+@@ -1151,6 +1300,7 @@ struct filespec {
  #define TOK_TWODOTS 0xa2 /* C++ token ? */
  #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
  #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
@@ -694,7 +1076,7 @@ index e7a2f1e2..4bc3b5d9 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1366,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1376,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -748,7 +1130,7 @@ index e7a2f1e2..4bc3b5d9 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1521,8 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1531,8 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;
@@ -758,10 +1140,10 @@ index e7a2f1e2..4bc3b5d9 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..b9455b58 100644
+index 50802edf..89ebb972 100644
 --- a/tccgen.c
 +++ b/tccgen.c
-@@ -49,6 +49,93 @@ ST_DATA SValue *vtop;
+@@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
  static SValue _vstack[1 + VSTACK_SIZE];
  #define vstack (_vstack + 1)
  
@@ -850,12 +1232,22 @@ index 50802edf..b9455b58 100644
 +            strncmp(recv_type_name, "CCChanTx_", 9) == 0 ||
 +            strncmp(recv_type_name, "CCChanRx_", 9) == 0);
 +}
++
++static int cc_ufcs_needs_optional_generic_stub(const char *recv_type_name, const char *method_name) {
++    /* Optionals (T?) are retired. Vec.get / Map.get now return T* and Vec.pop
++     * returns bool with an out-parameter, both of which have determinate return
++     * types the main resolver can find. Keep the hook as a no-op so the
++     * surrounding decision tree falls through to the normal path. */
++    (void)recv_type_name;
++    (void)method_name;
++    return 0;
++}
 +#endif
 +
  ST_DATA int nocode_wanted; /* no code generation wanted */
  #define NODATA_WANTED (nocode_wanted > 0) /* no static data output wanted either */
  #define DATA_ONLY_WANTED 0x80000000 /* ON outside of functions and for static initializers */
-@@ -128,9 +215,10 @@ typedef struct {
+@@ -128,9 +225,10 @@ typedef struct {
  static void init_prec(void);
  #endif
  
@@ -867,7 +1259,7 @@ index 50802edf..b9455b58 100644
  
  static void gen_cast(CType *type);
  static void gen_cast_s(int t);
-@@ -143,7 +231,7 @@ static void init_putv(init_params *p, CType *type, unsigned long c);
+@@ -143,7 +241,7 @@ static void init_putv(init_params *p, CType *type, unsigned long c);
  static void decl_initializer(init_params *p, CType *type, unsigned long c, int flags);
  static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r, int has_init, int v, int scope);
  static int decl(int l);
@@ -876,7 +1268,7 @@ index 50802edf..b9455b58 100644
  static void vpush_type_size(CType *type, int *a);
  static int is_compatible_unqualified_types(CType *type1, CType *type2);
  static inline int64_t expr_const64(void);
-@@ -158,6 +246,9 @@ static int get_temp_local_var(int size,int align,int *r2);
+@@ -158,6 +256,9 @@ static int get_temp_local_var(int size,int align,int *r2);
  static void cast_error(CType *st, CType *dt);
  static void end_switch(void);
  static void do_Static_assert(void);
@@ -886,7 +1278,18 @@ index 50802edf..b9455b58 100644
  
  /* ------------------------------------------------------------------------- */
  /* Automagical code suppression */
-@@ -2727,8 +2818,18 @@ static void type_to_str(char *buf, int buf_size,
+@@ -912,6 +1013,10 @@ ST_FUNC void vswap(void)
+ ST_FUNC void vpop(void)
+ {
+     int v;
++#ifdef CONFIG_CC_EXT
++    /* vtop being discarded: the UFCS-result flag is consumed. */
++    if (tcc_state) tcc_state->cc_ufcs_result_pending = 0;
++#endif
+     v = vtop->r & VT_VALMASK;
+ #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
+     /* for x86, we need to pop the FP stack */
+@@ -2727,8 +2832,18 @@ static void type_to_str(char *buf, int buf_size,
      tstruct:
          pstrcat(buf, buf_size, tstr);
          v = type->ref->v & ~SYM_STRUCT;
@@ -906,7 +1309,18 @@ index 50802edf..b9455b58 100644
          else
              pstrcat(buf, buf_size, get_tok_str(v, NULL));
          break;
-@@ -3389,6 +3490,10 @@ error:
+@@ -3036,6 +3151,10 @@ ST_FUNC void gen_op(int op)
+     int t1, t2, bt1, bt2, t;
+     CType type1, combtype;
+     int op_class = op;
++#ifdef CONFIG_CC_EXT
++    /* Binary/unary op consumes vtop — UFCS coercion window closes. */
++    if (tcc_state) tcc_state->cc_ufcs_result_pending = 0;
++#endif
+ 
+     if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
+         op_class = SHIFT_OP;
+@@ -3389,6 +3508,10 @@ error:
          if (ds == ss && ds >= 4)
              goto done;
          if (dbt_bt == VT_PTR || sbt_bt == VT_PTR) {
@@ -917,17 +1331,28 @@ index 50802edf..b9455b58 100644
              tcc_warning("cast between pointer and integer of different size");
              if (sbt_bt == VT_PTR) {
                  /* put integer type to allow logical operations below */
-@@ -3592,7 +3697,8 @@ static void cast_error(CType *st, CType *dt)
+@@ -3592,7 +3715,19 @@ static void cast_error(CType *st, CType *dt)
  static void verify_assign_cast(CType *dt)
  {
      CType *st, *type1, *type2;
 -    int dbt, sbt, qualwarn, lvl;
 +    Sym *sym;
 +    int dbt, sbt, qualwarn, lvl, compat;
++
++#ifdef CONFIG_CC_EXT
++    /* UFCS result on vtop: silently accept. See gen_assign_cast for
++       the rationale; this branch covers direct verify_assign_cast
++       callers (e.g. vstore for plain `x = recv.method()`). */
++    if (tcc_state && tcc_state->cc_ufcs_result_pending) {
++        tcc_state->cc_ufcs_result_pending = 0;
++        vtop->type = *dt;
++        return;
++    }
++#endif
  
      st = &vtop->type; /* source type */
      dbt = dt->t & VT_BTYPE;
-@@ -3611,6 +3717,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3611,6 +3746,10 @@ static void verify_assign_cast(CType *dt)
              break;
          /* accept implicit pointer to integer cast with warning */
          if (is_integer_btype(sbt)) {
@@ -938,7 +1363,7 @@ index 50802edf..b9455b58 100644
              tcc_warning("assignment makes pointer from integer without a cast");
              break;
          }
-@@ -3646,8 +3756,29 @@ static void verify_assign_cast(CType *dt)
+@@ -3646,8 +3785,29 @@ static void verify_assign_cast(CType *dt)
  		   base types, though, in particular for unsigned enums
  		   and signed int targets.  */
              } else {
@@ -970,7 +1395,7 @@ index 50802edf..b9455b58 100644
              }
          }
          if (qualwarn)
-@@ -3658,6 +3789,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3658,6 +3818,10 @@ static void verify_assign_cast(CType *dt)
      case VT_INT:
      case VT_LLONG:
          if (sbt == VT_PTR || sbt == VT_FUNC) {
@@ -981,7 +1406,29 @@ index 50802edf..b9455b58 100644
              tcc_warning("assignment makes integer from pointer without a cast");
          } else if (sbt == VT_STRUCT) {
              goto case_VT_STRUCT;
-@@ -4496,6 +4631,24 @@ do_decl:
+@@ -3676,6 +3840,21 @@ static void verify_assign_cast(CType *dt)
+ 
+ static void gen_assign_cast(CType *dt)
+ {
++#ifdef CONFIG_CC_EXT
++    /* A UFCS call in the stub-AST parser synthesizes an implicit
++       `int method()` declaration. When the caller writes
++       `<StructType> x = recv.method();`, the int -> struct coercion
++       would otherwise error out in verify_assign_cast. The UFCS
++       visitor resolves the real return type later; here we only need
++       the stub parse to succeed, so silently morph vtop's type to
++       match dt and skip both the check and the cast codegen. This
++       replaces the hand-written parser-mode method stubs. */
++    if (tcc_state && tcc_state->cc_ufcs_result_pending) {
++        tcc_state->cc_ufcs_result_pending = 0;
++        vtop->type = *dt;
++        return;
++    }
++#endif
+     verify_assign_cast(dt);
+     gen_cast(dt);
+ }
+@@ -4496,6 +4675,24 @@ do_decl:
          if (s->c != -1
              && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
              tcc_error("struct/union/enum already defined");
@@ -1006,7 +1453,7 @@ index 50802edf..b9455b58 100644
          s->c = -2;
          /* cannot be empty */
          /* non empty enums are not allowed */
-@@ -4524,6 +4677,15 @@ do_decl:
+@@ -4524,6 +4721,15 @@ do_decl:
                  ss = sym_push(v, &t, VT_CONST, 0);
                  ss->enum_val = ll;
                  *ps = ss, ps = &ss->next;
@@ -1022,7 +1469,7 @@ index 50802edf..b9455b58 100644
                  if (ll < nl)
                      nl = ll;
                  if (ll > pl)
-@@ -4537,6 +4699,7 @@ do_decl:
+@@ -4537,6 +4743,7 @@ do_decl:
                      break;
              }
              skip('}');
@@ -1030,7 +1477,7 @@ index 50802edf..b9455b58 100644
  
              if (bt) {
                  t.t = bt;
-@@ -4671,6 +4834,19 @@ do_decl:
+@@ -4671,6 +4878,19 @@ do_decl:
                          ss->a = ad1.a;
                          *ps = ss;
                          ps = &ss->next;
@@ -1050,7 +1497,7 @@ index 50802edf..b9455b58 100644
                      }
                      if (tok == ';' || tok == TOK_EOF)
                          break;
-@@ -4679,6 +4855,12 @@ do_decl:
+@@ -4679,6 +4899,12 @@ do_decl:
                  skip(';');
              }
              skip('}');
@@ -1063,15 +1510,17 @@ index 50802edf..b9455b58 100644
  	    parse_attribute(&ad);
              if (ad.cleanup_func) {
                  tcc_warning("attribute '__cleanup__' ignored on type");
-@@ -4727,6 +4909,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+@@ -4727,6 +4953,40 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
  
      while(1) {
          switch(tok) {
 +#ifdef CONFIG_CC_EXT
 +        case '@': {
-+            /* CC extension: decl attributes (e.g. @async, @noblock, @latency_sensitive)
-+               are ignored by C parsing, but recorded into cc_pending_fn_attrs for the
-+               next function declarator node. This lets the CC frontend classify calls. */
++            /* CC extension: decl attributes (e.g. @async, @noblock, @blocking,
++               @latency_sensitive) are ignored by C parsing, but recorded into
++               cc_pending_fn_attrs for the next function declarator node.  This
++               lets the CC frontend classify calls.  Bit positions are stable
++               ABI with pass_autoblock.c / checker.c CC_FN_ATTR_* enums. */
 +            next(); /* consume '@' */
 +            const char* kw = get_tok_str(tok, NULL);
 +            if (kw && strcmp(kw, "async") == 0) {
@@ -1089,6 +1538,11 @@ index 50802edf..b9455b58 100644
 +                next();
 +                continue;
 +            }
++            if (kw && strcmp(kw, "blocking") == 0) {
++                tcc_state->cc_pending_fn_attrs |= 1u << 3;
++                next();
++                continue;
++            }
 +            /* Not a CC decl attribute: let normal parsing handle (will error if invalid). */
 +            unget_tok('@');
 +            goto the_end;
@@ -1097,7 +1551,7 @@ index 50802edf..b9455b58 100644
          case TOK_EXTENSION:
              /* currently, we really ignore extension */
              next();
-@@ -5605,6 +5814,18 @@ ST_FUNC void unary(void)
+@@ -5605,6 +5865,18 @@ ST_FUNC void unary(void)
      case TOK_CCHAR: 
  	t = VT_INT;
   push_tokc:
@@ -1116,7 +1570,7 @@ index 50802edf..b9455b58 100644
  	type.t = t;
  	vsetc(&type, VT_CONST, &tokc);
          next();
-@@ -5660,6 +5881,25 @@ ST_FUNC void unary(void)
+@@ -5660,6 +5932,25 @@ ST_FUNC void unary(void)
          /* string parsing */
          t = char_type.t;
      str_init:
@@ -1142,7 +1596,7 @@ index 50802edf..b9455b58 100644
          if (tcc_state->warn_write_strings & WARN_ON)
              t |= VT_CONSTANT;
          type.t = t;
-@@ -5669,10 +5909,34 @@ ST_FUNC void unary(void)
+@@ -5669,10 +5960,34 @@ ST_FUNC void unary(void)
          ad.section = rodata_section;
          decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
          break;
@@ -1177,7 +1631,7 @@ index 50802edf..b9455b58 100644
          /* cast ? */
          if (parse_btype(&type, &ad, 0)) {
              type_decl(&type, &ad, &n, TYPE_ABSTRACT);
-@@ -5725,11 +5989,14 @@ ST_FUNC void unary(void)
+@@ -5725,11 +6040,14 @@ ST_FUNC void unary(void)
          }
          break;
      case '*':
@@ -1192,7 +1646,7 @@ index 50802edf..b9455b58 100644
          next();
          unary();
          /* functions names must be treated as function pointers,
-@@ -5744,17 +6011,22 @@ ST_FUNC void unary(void)
+@@ -5744,17 +6062,22 @@ ST_FUNC void unary(void)
            vtop->sym->a.addrtaken = 1;
          mk_pointer(&vtop->type);
          gaddrof();
@@ -1215,7 +1669,7 @@ index 50802edf..b9455b58 100644
          break;
      case '+':
          next();
-@@ -5774,13 +6046,30 @@ ST_FUNC void unary(void)
+@@ -5774,13 +6097,30 @@ ST_FUNC void unary(void)
      case TOK_ALIGNOF2:
      case TOK_ALIGNOF3:
          t = tok;
@@ -1246,7 +1700,7 @@ index 50802edf..b9455b58 100644
          } else {
              type_size(&type, &align);
              s = NULL;
-@@ -5979,6 +6268,7 @@ ST_FUNC void unary(void)
+@@ -5979,6 +6319,7 @@ ST_FUNC void unary(void)
          inc(0, t);
          break;
      case '-':
@@ -1254,7 +1708,7 @@ index 50802edf..b9455b58 100644
          next();
          unary();
  	if (is_float(vtop->type.t)) {
-@@ -5988,6 +6278,7 @@ ST_FUNC void unary(void)
+@@ -5988,6 +6329,7 @@ ST_FUNC void unary(void)
              vswap();
              gen_op('-');
          }
@@ -1262,7 +1716,7 @@ index 50802edf..b9455b58 100644
          break;
      case TOK_LAND:
          if (!gnu_ext)
-@@ -6093,13 +6384,108 @@ special_math_val:
+@@ -6093,13 +6435,80 @@ special_math_val:
  
      default:
      tok_identifier:
@@ -1286,34 +1740,6 @@ index 50802edf..b9455b58 100644
 +                    if (sname && (strcmp(sname, "__CCResultGeneric") == 0 ||
 +                                  strncmp(sname, "CCResult_", 9) == 0)) {
 +                        vtop->type.t = VT_LLONG;  /* intptr_t */
-+                        vtop->type.ref = NULL;
-+                    }
-+                }
-+            }
-+            CC_AST_WITH_NODE(node->col_end = tok_col;);
-+            cc_ast_record_end();
-+            break;
-+        }
-+        /* CC extension: unary `try` - unwrap Result or propagate error.
-+           Like `await`, parsed as identifier in TCC, treated as unary operator. */
-+        if (tok >= TOK_IDENT && strcmp(get_tok_str(tok, NULL), "try") == 0) {
-+            cc_ast_record_start(CC_AST_NODE_TRY);
-+            CC_AST_WITH_NODE(
-+                node->col_start = tok_col;
-+                node->col_end = tok_col + 3;
-+            );
-+            next();
-+            unary();
-+            /* CC: try unwraps Result type to its inner value type.
-+               If operand is __CCResultGeneric or CCResult_*, change type to intptr_t
-+               so type checking passes. Real types are handled in ccc codegen. */
-+            if ((vtop->type.t & VT_BTYPE) == VT_STRUCT && vtop->type.ref) {
-+                int v = vtop->type.ref->v & ~SYM_STRUCT;
-+                if (v < SYM_FIRST_ANOM) {
-+                    const char *sname = get_tok_str(v, NULL);
-+                    if (sname && (strcmp(sname, "__CCResultGeneric") == 0 ||
-+                                  strncmp(sname, "CCResult_", 9) == 0)) {
-+                        vtop->type.t = VT_LLONG;  /* intptr_t - compatible with most types */
 +                        vtop->type.ref = NULL;
 +                    }
 +                }
@@ -1372,7 +1798,7 @@ index 50802edf..b9455b58 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6139,17 +6525,117 @@ special_math_val:
+@@ -6139,17 +6548,120 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -1465,6 +1891,9 @@ index 50802edf..b9455b58 100644
 +                if (cc_ufcs_needs_result_generic_stub(tcc_state->cc_last_recv_type, cc_method_name)) {
 +                    cc_have_custom_func_type =
 +                        cc_build_oldstyle_func_returning_typedef("__CCResultGeneric", &cc_ufcs_func_type);
++                } else if (cc_ufcs_needs_optional_generic_stub(tcc_state->cc_last_recv_type, cc_method_name)) {
++                    cc_have_custom_func_type =
++                        cc_build_oldstyle_func_returning_typedef("__CCOptionalGeneric", &cc_ufcs_func_type);
 +                }
 +                vpop();
 +                s = sym_find(cc_method_tok);
@@ -1494,7 +1923,7 @@ index 50802edf..b9455b58 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,13 +6654,28 @@ special_math_val:
+@@ -6168,13 +6680,28 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -1524,7 +1953,7 @@ index 50802edf..b9455b58 100644
          } else if (tok == '(') {
              SValue ret;
              Sym *sa;
-@@ -6182,6 +6683,8 @@ special_math_val:
+@@ -6182,6 +6709,8 @@ special_math_val:
              TokenString *p, *p2;
  
              /* function call  */
@@ -1533,7 +1962,7 @@ index 50802edf..b9455b58 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6190,6 +6693,53 @@ special_math_val:
+@@ -6190,6 +6719,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -1587,7 +2016,7 @@ index 50802edf..b9455b58 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6264,8 +6814,13 @@ special_math_val:
+@@ -6264,8 +6840,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -1602,7 +2031,7 @@ index 50802edf..b9455b58 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6282,10 +6837,39 @@ special_math_val:
+@@ -6282,10 +6863,51 @@ special_math_val:
                  vrev(n);
              }
  
@@ -1612,8 +2041,13 @@ index 50802edf..b9455b58 100644
 +                tcc_state->cc_last_rparen_line = file->line_num;
 +                tcc_state->cc_last_rparen_col = tok_col;
 +            }
-+            /* Clear UFCS marker after call is processed */
++            /* Snapshot the UFCS marker; we need to remember this across
++               gfunc_call so the result-pending flag is only set for
++               genuine UFCS callees. Then clear the active marker so
++               nested calls inside arg exprs re-trigger it cleanly. */
++            int cc_was_ufcs_call = 0;
 +            if (tcc_state) {
++                cc_was_ufcs_call = tcc_state->cc_ufcs_active;
 +                tcc_state->cc_ufcs_active = 0;
 +            }
 +#endif
@@ -1622,6 +2056,13 @@ index 50802edf..b9455b58 100644
              gfunc_call(nb_args);
  
 +#ifdef CONFIG_CC_EXT
++            /* Mark the just-produced vtop as a polymorphic UFCS result so
++               verify_assign_cast can coerce it to the LHS declarator type
++               without a hand-written method stub. Cleared as soon as any
++               op consumes vtop. */
++            if (tcc_state && cc_was_ufcs_call) {
++                tcc_state->cc_ufcs_result_pending = 1;
++            }
 +            /* Update recorded call span end now that the arglist has been parsed. */
 +            if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_call_stack && tcc_state->cc_call_stack_top >= 0) {
 +                int call_idx = tcc_state->cc_call_stack[tcc_state->cc_call_stack_top--];
@@ -1642,7 +2083,7 @@ index 50802edf..b9455b58 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6366,9 +6950,11 @@ static void expr_prod(void)
+@@ -6366,9 +6988,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -1654,7 +2095,7 @@ index 50802edf..b9455b58 100644
      }
  }
  
-@@ -6378,9 +6964,11 @@ static void expr_sum(void)
+@@ -6378,9 +7002,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -1666,7 +2107,7 @@ index 50802edf..b9455b58 100644
      }
  }
  
-@@ -6509,11 +7097,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7135,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -1680,7 +2121,7 @@ index 50802edf..b9455b58 100644
          }
          t = tok;
      }
-@@ -6703,12 +7293,13 @@ static void expr_cond(void)
+@@ -6703,12 +7331,13 @@ static void expr_cond(void)
      }
  }
  
@@ -1695,7 +2136,7 @@ index 50802edf..b9455b58 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6719,6 +7310,7 @@ static void expr_eq(void)
+@@ -6719,6 +7348,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -1703,7 +2144,7 @@ index 50802edf..b9455b58 100644
      }
  }
  
-@@ -7119,7 +7711,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7749,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -1727,7 +2168,7 @@ index 50802edf..b9455b58 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7750,74 @@ static void gexpr_decl(void)
+@@ -7142,14 +7788,76 @@ static void gexpr_decl(void)
      }
  }
  
@@ -1745,6 +2186,8 @@ index 50802edf..b9455b58 100644
 +    tcc_state->cc_at_arena_name_tok = 0;
 +    tcc_state->cc_at_arena_name_str = NULL;
 +    tcc_state->cc_at_arena_size_str = NULL;
++    /* Statement boundary: drop any stale UFCS coercion window. */
++    tcc_state->cc_ufcs_result_pending = 0;
 +#endif
  
  again:
@@ -1803,7 +2246,7 @@ index 50802edf..b9455b58 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +7828,40 @@ again:
+@@ -7160,24 +7868,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -1844,7 +2287,7 @@ index 50802edf..b9455b58 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,12 +7874,33 @@ again:
+@@ -7190,12 +7914,33 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -1878,7 +2321,7 @@ index 50802edf..b9455b58 100644
          /* handle local labels declarations */
          while (tok == TOK_LABEL) {
              do {
-@@ -7211,7 +7916,24 @@ again:
+@@ -7211,7 +7956,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -1903,7 +2346,7 @@ index 50802edf..b9455b58 100644
              }
          }
  
-@@ -7223,7 +7945,19 @@ again:
+@@ -7223,7 +7985,19 @@ again:
          else if (!nocode_wanted)
              check_func_return();
  
@@ -1923,7 +2366,7 @@ index 50802edf..b9455b58 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +7976,7 @@ again:
+@@ -7242,6 +8016,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -1931,7 +2374,7 @@ index 50802edf..b9455b58 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8004,7 @@ again:
+@@ -7269,6 +8044,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -1939,7 +2382,7 @@ index 50802edf..b9455b58 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8038,7 @@ again:
+@@ -7302,6 +8078,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -1947,7 +2390,7 @@ index 50802edf..b9455b58 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8225,7 @@ again:
+@@ -7488,6 +8265,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -1955,7 +2398,7 @@ index 50802edf..b9455b58 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8556,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8596,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -1965,7 +2408,27 @@ index 50802edf..b9455b58 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8672,6 +9413,15 @@ static int decl(int l)
+@@ -8116,6 +8897,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+             && is_compatible_unqualified_types(type, &vtop->type)) {
+         goto one_elem;
+ 
++#ifdef CONFIG_CC_EXT
++    } else if ((flags & DIF_HAVE_ELEM)
++        && tcc_state && tcc_state->cc_ufcs_result_pending) {
++        /* UFCS call result assigned to a struct/union variable: in the
++           stub-AST parser the UFCS method return type is synthesized as
++           `int`, which wouldn't match the declarator's struct type. The
++           UFCS visitor resolves the real return type later, so here we
++           just coerce vtop's type to match and funnel into the normal
++           single-element path. Replaces the hand-written method stubs. */
++        vtop->type = *type;
++        goto one_elem;
++#endif
++
+     } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
+         no_oblock = 1;
+         if ((flags & DIF_FIRST) || tok == '{') {
+@@ -8672,6 +9466,15 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -1981,7 +2444,7 @@ index 50802edf..b9455b58 100644
      while (1) {
  
          oldint = 0;
-@@ -8687,6 +9437,44 @@ static int decl(int l)
+@@ -8687,6 +9490,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2026,7 +2489,7 @@ index 50802edf..b9455b58 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8723,8 +9511,68 @@ static int decl(int l)
+@@ -8723,8 +9564,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2096,7 +2559,7 @@ index 50802edf..b9455b58 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8832,6 +9680,31 @@ static int decl(int l)
+@@ -8832,6 +9733,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2128,7 +2591,7 @@ index 50802edf..b9455b58 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9736,11 @@ static int decl(int l)
+@@ -8863,6 +9789,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2140,7 +2603,7 @@ index 50802edf..b9455b58 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8903,14 +9781,22 @@ static int decl(int l)
+@@ -8903,14 +9834,22 @@ static int decl(int l)
                  }
                  if (tok != ',') {
                      if (l == VT_JMP)
@@ -2165,7 +2628,7 @@ index 50802edf..b9455b58 100644
  }
  
 diff --git a/tccpp.c b/tccpp.c
-index e19e8504..a45991ee 100644
+index e19e8504..d16b3791 100644
 --- a/tccpp.c
 +++ b/tccpp.c
 @@ -32,6 +32,7 @@ ST_DATA int parse_flags;
@@ -2249,3 +2712,24 @@ index e19e8504..a45991ee 100644
      /* we add dummy defines for some special macros to speed up tests
         and to have working defined() */
      define_push(TOK___LINE__, MACRO_OBJ, NULL, NULL);
+@@ -3846,7 +3875,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
+ 
+     if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_NONE) {
+         ;
+-    } else if (level == 0 && f->line_ref && d < 8) {
++    } else if (level == 0 && f->line_ref && d >= 0 && d < 8) {
++	/* CC patch: the upstream condition was `d < 8` which fires for
++	 * negative deltas too (e.g. user code that emits `#line N
++	 * "file"` with N pointing back to a small line number after a
++	 * large synthetic injection — Concurrent-C does this routinely
++	 * to resume the user's source after prepending generated
++	 * declarations). The inner `while (d > 0)` loop is a no-op for
++	 * d < 0, so the directive was silently dropped from the
++	 * preprocessed output, leaving TCC's parser with stale line
++	 * tracking and emitting diagnostics with wrong line numbers
++	 * (see tests/m0_5_diag_origin_line_fail.ccs). Restricting the
++	 * swallow to non-negative deltas falls through to the regular
++	 * `#line` emission for the resume case. */
+ 	while (d > 0)
+ 	    fputs("\n", s1->ppfp), --d;
+     } else if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_STD) {

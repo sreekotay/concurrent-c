@@ -1,5 +1,5 @@
 /*
- * Test: Nested try expressions for error propagation
+ * Test: Nested !> expressions for error propagation (formerly try EXPR).
  */
 #include <ccc/std/prelude.cch>
 
@@ -11,12 +11,12 @@ int !> (CCError) level3(int x) {
 }
 
 int !> (CCError) level2(int x) {
-    int v = try level3(x);
+    int v = level3(x) !>(e) return cc_err(e);
     return cc_ok(v + 2);
 }
 
 int !> (CCError) level1(int x) {
-    int v = try level2(x);
+    int v = level2(x) !>(e) return cc_err(e);
     return cc_ok(v + 1);
 }
 

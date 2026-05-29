@@ -33,6 +33,19 @@ Editorial principles governing modifications to this specification, including th
 
 ---
 
+## Design Principles
+
+These are normative. Where a construct could be defined more than one way, the reading that upholds these wins.
+
+1. **No magic.** New behavior must be as predictable as C. A program is understood from what is on screen plus its lowering — never from hidden runtime policy.
+2. **The lowering is the language.** The source-to-C lowering is part of this specification, not an implementation detail (see intro). Two conforming implementations produce lowerings with identical observable behavior.
+3. **Mechanism, not policy.** The compiler provides seams (comptime type hooks); features — dispatch (UFCS), errors, generics, unwrap, string interpolation — are protocols implemented in CC. The stdlib is the reference client, not a privileged builtin.
+4. **No silent drop.** Every fallible result must be used. The safe forms (`?>`, `!>`) force handling at compile time; the explicit/lowered form traps loudly at runtime. Absence (nullable) may opt into the same unwrap protocol but is not forced into it.
+5. **Local resolution.** Cleanup (`@destroy`/`@defer`), error handlers (inline or function-level only), and dispatch (receiver type) resolve to a site visible at the use — never a dynamic search. Behaviors therefore compose by stacking, not by interaction.
+6. **Binding is semantic.** *Where* a construct attaches (declaration vs. statement) determines its static guarantees, even when the runtime lowering is identical. `@destroy` is RAII because it binds to the declaration; `@defer` is a statement.
+
+---
+
 ## 1. Primitives
 
 Concurrent-C extends C with six primitives. Everything else in this
@@ -378,7 +391,7 @@ int!>(IoError) read_int(char[:] data) {
     return cc_ok(parse_int(trimmed));
 }
 
-Vec::[int] numbers = vec_new::[int](&arena);
+CCVec::[int] numbers = cc_vec_new::[int](&arena);
 Map::[char[:], int] registry = map_new::[char[:], int](&arena);
 
 // Incorrect (visual noise, harder to parse)
@@ -2052,7 +2065,7 @@ Mutex::[struct { int x; int y; }] state = mutex({0, 0});
 }
 
 // Complex operations
-Mutex::[Vec::[int]] tasks = mutex(vec_new(&arena));
+Mutex::[CCVec::[int]] tasks = mutex(cc_vec_new::[int](&arena));
 @lock (tasks) as task_list {
     vec_push(task_list, 42);
     vec_push(task_list, 43);
@@ -4105,7 +4118,8 @@ Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, D
         int x;
         bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
 
-        if @try (err = got) {
+        if (got.is_err()) {
+            Cancelled err = got.error();
             if (err == Cancelled) return cc_ok(void);   // task was cancelled
             return cc_err(void, err);
         }
@@ -4851,11 +4865,13 @@ enum IoError {
 ```c
 @async void process_with_backoff() {
     CCFile !>(CCIoError) f = cc_file_open(&arena, path, "r");
-    if @try (CCFile file = f) {
+    if (f.is_ok()) {
+        CCFile file = f.value();
         int retry_count = 0;
         while (true) {
             char[:] !>(CCIoError) line_result = file.read_line(&arena);
-            if @try (char[:] line = line_result) {
+            if (line_result.is_ok()) {
+                char[:] line = line_result.value();
                 if (line.len == 0) break;    // EOF: empty slice
 
                 // ... process line ...
@@ -5261,7 +5277,7 @@ Functional composition becomes natural with direct library calls:
 int[] squared = vec_map(numbers, (int x) => x * x);
 
 // Chain via free functions
-Vec::[int] result = vec_map(vec_filter(input, is_even), double);
+CCVec::[int] result = vec_map(vec_filter(input, is_even), double);
 ```
 
 ---
@@ -6509,7 +6525,7 @@ c_process(s.ptr, s.len);  // decompose slice into ptr/len
 extern void c_fill_buffer(char* ptr, size_t len);
 
 CCArena arena = cc_arena_heap(megabytes(1));
-Vec::[char] buf = vec_with_capacity<char>(&arena, 1000);
+CCVec::[char] buf = cc_vec_with_capacity::[char](&arena, 1000);
 c_fill_buffer(buf.ptr, buf.cap());  // fill with C code
 ```
 
@@ -7822,7 +7838,8 @@ Desugars to:
     while (true) {
         char[:] !>(IoError) next_result = @await iter.next(arena);
 
-        if @try (char[:] chunk = next_result) {
+        if (next_result.is_ok()) {
+            char[:] chunk = next_result.value();
             if (chunk.len == 0) break;   // EOF: empty slice
             // Chunk is valid here; process it
             process(chunk);
@@ -7840,7 +7857,7 @@ Desugars to:
 - Exactly one `@await` per iteration (at `iter.next()`)
 - `next_result` variable is allocated on frame; reused each iteration
 - Compiler must not buffer or cache results across iterations
-- If `next_result` is an error, `try` propagates; loop does not continue
+- If `next_result` is an error, propagate with `!>` or handle the error branch; loop does not continue
 
 ---
 

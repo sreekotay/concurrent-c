@@ -254,10 +254,10 @@ s.append("Hello")
 
 ```c
 // Language surface: String
-// C ABI (prefixed): typedef Vec_char CCString;   // String = Vec<char>
+// C ABI (prefixed): typedef CCVec_char CCString; // String is backed by CCVec::[char]
 ```
 
-**Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a Vec<char>). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
+**Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a CCVec::[char]). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
 **Direct construction surface**
 
@@ -278,8 +278,8 @@ String* String.push_float(f64 value);         // Append formatted f64
 String* String.push_uint(u64 value);          // Append formatted u64
 String* String.clear();                       // Clear contents, reuse allocation
 char[:0] String.as_slice();                   // Get immutable sentinel view
-size_t String.len();                          // Length in bytes (Vec<T> UFCS)
-size_t String.cap();                          // Capacity (Vec<T> UFCS)
+size_t String.len();                          // Length in bytes (CCVec::[T] UFCS)
+size_t String.cap();                          // Capacity (CCVec::[T] UFCS)
 String <primitive>.to_str(Arena* a);          // e.g. 42.to_str(&arena)
 ```
 
@@ -494,7 +494,7 @@ Concurrent-C I/O wrappers provide safe alternatives to C's stdio.h and POSIX I/O
 - Allocate into arenas where needed.
 - Use UFCS methods for natural I/O operations.
 
-**Non-blocking guarantee:** All pure in-memory operations (String builder, Vec<T>, Map<K,V>, char[:] slicing, trimming, parsing) are `@noblock`—they never yield to the scheduler and are safe to call in deadline-sensitive code.
+**Non-blocking guarantee:** All pure in-memory operations (String builder, CCVec::[T], Map<K,V>, char[:] slicing, trimming, parsing) are `@noblock`—they never yield to the scheduler and are safe to call in deadline-sensitive code.
 
 **Blocking behavior:**
 
@@ -862,7 +862,7 @@ bool           CCVecIter::[T].next(T* out);        // true if a value was writte
 
 **Rule (get vs. get_mut):** Both return `T*` (a nullable pointer into the vector's buffer). `get` returns a `const`-like read-only view in source-level prose, but the underlying pointer is identical; `get_mut` exists as a distinct name for readability at call sites that will mutate. Returned pointers are valid until the next mutating operation on the vector (push/pop/set/clear or any growth).
 
-**Normative lowering:** `CCVec::[T]` first lowers to the concrete container family `CCVec_<mangledT>`. Legacy `Vec::[T]` and `Vec<T>` spellings lower to the same family during the transition period. UFCS then lowers to that family contract. The visible concrete C family names are normative for interop: `CCVec_<mangledT>`, `CCVec_<mangledT>_init`, `CCVec_<mangledT>_push`, `CCVec_<mangledT>_get`, and related family members. Shared erased-core helpers remain an implementation detail.
+**Normative lowering:** `CCVec::[T]` first lowers to the concrete container family `CCVec_<mangledT>`. Legacy `Vec::[T]`, `Vec<T>`, `vec_new::[T]`, and `vec_new<T>` spellings are retired. UFCS then lowers to that family contract. The visible concrete C family names are normative for interop: `CCVec_<mangledT>`, `CCVec_<mangledT>_init`, `CCVec_<mangledT>_push`, `CCVec_<mangledT>_get`, and related family members. Shared erased-core helpers remain an implementation detail.
 
 **Examples:**
 
@@ -1212,7 +1212,7 @@ bool !>(CCIoError) cc_env_unset(char[:] name);
 <std/fs.cch>             // Path utilities
 <std/dir.cch>            // Directory iteration, glob patterns
 <std/process.cch>        // Process spawning, environment
-<std/vec.cch>            // Vec<T> dynamic array with UFCS methods
+<std/vec.cch>            // CCVec::[T] dynamic array with UFCS methods
 <std/map.cch>            // Map<K, V> hash map with UFCS methods
 <std/net.cch>            // TCP/UDP sockets, Listener
 <std/tls.cch>            // TLS client/server (wraps BearSSL/mbedTLS)
@@ -1240,7 +1240,7 @@ bool !>(CCIoError) cc_env_unset(char[:] name);
     std_out.write("\n");
     
     // Work queue (UFCS)
-    Vec<Task<void>> tasks = vec_new<Task<void>>(&arena);
+    CCVec::[Task::[void]] tasks = cc_vec_new::[Task::[void]](&arena);
     tasks.push(async_work1());
     tasks.push(async_work2());
     
@@ -1249,7 +1249,7 @@ bool !>(CCIoError) cc_env_unset(char[:] name);
     state.insert(1, "processing");
     
     // Run all tasks
-    VecIter<Task<void>> it = tasks.iter();
+    CCVecIter::[Task::[void]] it = tasks.iter();
     Task<void> t;
     while (it.next(&t)) {
         await t;
@@ -1326,7 +1326,7 @@ Mutex<T>.lock()           // Future: if exposed
 char[:].trim()
 char[:].split()
 char[:].parse_i64()
-Vec<T>.push()
+CCVec::[T].push()
 Map<K,V>.insert()
 // All pure CPU computation
 ```
@@ -1421,7 +1421,6 @@ int* val = CCVec_int_get(&v, 0);
 | Surface Syntax | Lowered Form |
 |----------------|--------------|
 | `CCVec::[T]` | `CCVec_mangled` where `mangled` is the canonical type-parameter mangling for `T` |
-| `Vec::[T]` / `Vec<T>` | Same lowered family as `CCVec::[T]` during the transition period |
 | `cc_vec_new::[T](&arena)` | `CCVec_mangled_init(&arena, CC_VEC_INITIAL_CAP)` |
 | `Map<K, V>` | `Map_mangledK_mangledV` |
 | `map_new<K, V>(&arena)` | `Map_mangledK_mangledV_init(&arena)` |
@@ -1480,8 +1479,8 @@ All functions are covered by **Spec Tests**—normative, executable tests in `.c
 @test "vec and map methods" {
     Arena arena = arena(kilobytes(10));
 
-    // Vec<T> methods
-    Vec<int> v = vec_new<int>(&arena);
+    // CCVec::[T] methods
+    CCVec::[int] v = cc_vec_new::[int](&arena);
     v.push(10);
     v.push(20);
     assert(v.len() == 2);

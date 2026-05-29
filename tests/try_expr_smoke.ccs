@@ -1,5 +1,5 @@
 /*
- * Test: try expression for early error propagation
+ * Test: !> expression for early error propagation (formerly try EXPR).
  */
 #include <ccc/std/prelude.cch>
 
@@ -11,10 +11,10 @@ int !> (CCError) maybe_parse(int x) {
     return cc_ok(x * 2);
 }
 
-/* Function that uses try to propagate errors */
+/* Function that uses !> to propagate errors */
 int !> (CCError) compute(int a, int b) {
-    int x = try maybe_parse(a);
-    int y = try maybe_parse(b);
+    int x = maybe_parse(a) !>(e) return cc_err(e);
+    int y = maybe_parse(b) !>(e) return cc_err(e);
     return cc_ok(x + y);
 }
 

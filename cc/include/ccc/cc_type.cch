@@ -41,7 +41,7 @@ typedef enum cc_type_kind {
     CC_TK_PRIMITIVE     = 1,
     CC_TK_POINTER       = 2,
     CC_TK_STRUCT        = 3,
-    CC_TK_GENERIC_INST  = 4,    /* Vec<T>, Map<K,V>, Chan<T> */
+    CC_TK_GENERIC_INST  = 4,    /* CCVec::[T], Map<K,V>, Chan<T> */
     CC_TK_CLOSURE       = 5,
     CC_TK_FUNCTION      = 6,
     CC_TK_ARRAY         = 7,
@@ -70,7 +70,7 @@ typedef struct cc_type_field {
 } cc_type_field;
 
 typedef struct cc_type_info {
-    const char*           name;        /* display name: "int", "Point", "Vec<int>" */
+    const char*           name;        /* display name: "int", "Point", "CCVec::[int]" */
     const char*           mangled;     /* symbol-safe: "int", "Point", "CCVec_int" */
     /* `id`: reserved slot for a per-binary stable type ID.
      * Currently always 0; populated by a future commit once we

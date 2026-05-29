@@ -4,10 +4,10 @@
  *   including the two paths that didn't exist when the basic
  *   `cc_dyn_vec` smoke was written:
  *
- *     (1) Codegen-emitted container records — Vec<Point2> headers
+ *     (1) Codegen-emitted container records — CCVec::[Point2] headers
  *         stuffed into a type-erased outer container.  Exercises
  *         the `visit_codegen.c::cc__emit_container_cc_type_info`
- *         path: the inner Vec<Point2> usage causes the compiler
+ *         path: the inner CCVec::[Point2] usage causes the compiler
  *         to emit a `CCVec_Point2` `cc_type_info`, which the
  *         outer `cc_dyn_vec` looks up by name via `type_of(CCVec_Point2)`.
  *
@@ -21,7 +21,7 @@
  * pointer-identity also pins (lookup returns the same `cc_type_info*`
  * a hand-rolled `&__cc_ti_X` would yield).
  *
- * NOTE on (1) — the contained Vec<Point2> is "moved by header":
+ * NOTE on (1) — the contained CCVec::[Point2] is "moved by header":
  * its (data*, len) pair is bitwise-copied into the cc_dyn_vec slot.
  * The original `inner` still names the same underlying buffer (the
  * container header is documented as erasable but NOT trivial-copy
@@ -63,14 +63,14 @@ static void pin(int cond, const char* msg) {
     }
 }
 
-/* ---------- Case (1): cc_dyn_vec carrying codegen-emitted Vec<Point2> ---------- */
+/* ---------- Case (1): cc_dyn_vec carrying codegen-emitted CCVec::[Point2] ---------- */
 
 static void test_codegen_emitted_container_element(CCArena* arena) {
-    /* Use Vec<Point2> first so the codegen pass emits cc_type_info
+    /* Use CCVec::[Point2] first so the codegen pass emits cc_type_info
      * for `CCVec_Point2` (otherwise `type_of(CCVec_Point2)` would
      * return NULL — that's a different failure mode, covered by
      * the generic_emit smoke). */
-    Vec<Point2> inner = vec_new<Point2>(arena);
+    CCVec::[Point2] inner = cc_vec_new::[Point2](arena);
     Point2 a = { 11, 22 };
     Point2 b = { 33, 44 };
     inner.push(a);
@@ -79,22 +79,22 @@ static void test_codegen_emitted_container_element(CCArena* arena) {
     const cc_type_info* ti = type_of(CCVec_Point2);
     pin(ti != NULL, "type_of(CCVec_Point2) resolved");
     if (!ti) return;
-    pin(cc_ti_size(ti) == sizeof(Vec<Point2>),
-        "ti size matches sizeof(Vec<Point2>)");
+    pin(cc_ti_size(ti) == sizeof(CCVec::[Point2]),
+        "ti size matches sizeof(CCVec::[Point2])");
 
     cc_dyn_vec outer;
     pin(cc_dyn_vec_init(&outer, arena, ti, 2) == 0,
         "cc_dyn_vec_init with codegen-emitted container ti");
 
     pin(cc_dyn_vec_push(&outer, &inner) == 0,
-        "push Vec<Point2> header into cc_dyn_vec");
+        "push CCVec::[Point2] header into cc_dyn_vec");
     pin(cc_dyn_vec_len(&outer) == 1,
         "cc_dyn_vec len after one push == 1");
 
     /* Read back via at() and verify it's bit-identical to what
      * we pushed (memcpy contract — copy_fn is NULL on the
      * codegen-emitted ti). */
-    Vec<Point2>* slot = (Vec<Point2>*)cc_dyn_vec_at(&outer, 0);
+    CCVec::[Point2]* slot = (CCVec::[Point2]*)cc_dyn_vec_at(&outer, 0);
     pin(slot != NULL, "cc_dyn_vec_at(0) returned non-NULL");
     if (slot) {
         /* The container view in the slot must see the same two

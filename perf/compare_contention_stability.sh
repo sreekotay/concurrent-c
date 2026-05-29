@@ -83,4 +83,9 @@ for name in ("Pthread", "Concurrent-C", "Go", "Zig"):
         f"{fmt_triplet(values[name]['contention']):<22} "
         f"{fmt_triplet(values[name]['interference']):<22}"
     )
+print()
+print("Headline = absolute Contention (ms). Interference % is derived and")
+print("baseline-relative: a faster happy path inflates it, so a low % can just")
+print("mean a slow baseline. Read absolute ms in both states — CC bounds the")
+print("worst case without taxing the median.")
 PY

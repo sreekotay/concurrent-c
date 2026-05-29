@@ -531,17 +531,29 @@ static void cc__emit_range_with_call_spans(const char* src,
     if (cur < end) cc__append_n(io_out, io_len, io_cap, src + cur, end - cur);
 }
 
-int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
-                                            const CCVisitorCtx* ctx,
-                                            const char* in_src,
-                                            size_t in_len,
-                                            char** out_src,
-                                            size_t* out_len) {
-    if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
-    *out_src = NULL;
-    *out_len = 0;
+/* Per-span edit collector.  Walks non-UFCS CALL nodes whose callee resolves
+ * to a closure type (CCClosure1/CCClosure2) and emits one edit per
+ * top-level closure-call span — `[name_start, rparen_end)` replaced by
+ * `cc_closure1_call(callee, (intptr_t)(arg))` (or the 2-arg variant).
+ *
+ * Replaces the legacy `cc__rewrite_all_closure_calls_with_nodes()`
+ * wholesale rewriter.  Same setup pipeline (callee collection, occurrence
+ * numbering, decl-table lookup, type tagging, span finding, parent/child
+ * nesting tree); only the final streaming-output stage is swapped for
+ * direct edit emission.  Nested closure calls inside another call's arg
+ * list are still rewritten inline within the outer span's replacement
+ * text (via the recursive `cc__emit_call_replacement` helper), so each
+ * top-level span is exactly one edit and nested spans are subsumed.
+ *
+ * Returns the number of edits added (>= 0), or -1 on error. */
+int cc__collect_closure_calls_edits(const CCASTRoot* root,
+                                    const CCVisitorCtx* ctx,
+                                    CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
     const NodeView* n = (const NodeView*)root->nodes;
 
     /* Collect non-UFCS CALL nodes with a callee name. */
@@ -702,59 +714,37 @@ int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
         if (sp < (int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++] = i;
     }
 
-    /* Emit rewritten source */
-    char* out = NULL;
-    size_t out_len2 = 0, out_cap2 = 0;
-    size_t cur = 0;
+    /* Emit one edit per top-level closure-call span.  Nested closure calls
+     * are rewritten inline inside their parent's replacement text via the
+     * recursive `cc__emit_call_replacement` helper, so we explicitly skip
+     * non-root spans here — they're conceptually subsumed by their parent's
+     * edit range and would cause edit-buffer overlaps if also emitted. */
+    int edits_added = 0;
     for (int i = 0; i < sn; i++) {
         if (spans[i].parent != -1) continue;
-        if (spans[i].name_start > cur) cc__append_n(&out, &out_len2, &out_cap2, in_src + cur, spans[i].name_start - cur);
-        /* Emit rewritten call */
         size_t nm_s = spans[i].name_start;
         size_t nm_e = spans[i].lparen;
-        while (nm_e > nm_s && (in_src[nm_e - 1] == ' ' || in_src[nm_e - 1] == '\t' || in_src[nm_e - 1] == '\n' || in_src[nm_e - 1] == '\r')) nm_e--;
-        char nm[128];
+        while (nm_e > nm_s && (in_src[nm_e - 1] == ' ' || in_src[nm_e - 1] == '\t' ||
+                               in_src[nm_e - 1] == '\n' || in_src[nm_e - 1] == '\r')) nm_e--;
         size_t nn = nm_e > nm_s ? (nm_e - nm_s) : 0;
-        if (nn > 0 && nn < sizeof(nm)) {
-            memcpy(nm, in_src + nm_s, nn);
-            nm[nn] = '\0';
-            cc__emit_call_replacement(in_src, nm, spans, i, &out, &out_len2, &out_cap2);
-        } else {
-            cc__append_n(&out, &out_len2, &out_cap2, in_src + spans[i].name_start, spans[i].rparen_end - spans[i].name_start);
+        if (nn == 0 || nn >= 128) continue;
+        char nm[128];
+        memcpy(nm, in_src + nm_s, nn);
+        nm[nn] = '\0';
+
+        char* repl = NULL;
+        size_t repl_len = 0, repl_cap = 0;
+        cc__emit_call_replacement(in_src, nm, spans, i, &repl, &repl_len, &repl_cap);
+        if (!repl || repl_len == 0) { free(repl); continue; }
+
+        if (cc_edit_buffer_add(eb, spans[i].name_start, spans[i].rparen_end,
+                               repl, 90, "closure_calls") == 0) {
+            edits_added++;
         }
-        cur = spans[i].rparen_end;
+        free(repl);
     }
-    if (cur < in_len) cc__append_n(&out, &out_len2, &out_cap2, in_src + cur, in_len - cur);
 
     for (int i = 0; i < sn; i++) free(spans[i].children);
     free(spans);
-
-    if (!out) return 0;
-    *out_src = out;
-    *out_len = out_len2;
-    return 1;
-}
-
-/* NEW: Collect closure call edits into EditBuffer.
-   NOTE: This pass has complex span nesting logic.
-   For now, this function runs the rewrite and uses a coarse-grained edit.
-   Future: refactor to collect edits directly. */
-int cc__collect_closure_calls_edits(const CCASTRoot* root,
-                                    const CCVisitorCtx* ctx,
-                                    CCEditBuffer* eb) {
-    if (!root || !ctx || !eb || !eb->src) return 0;
-
-    char* rewritten = NULL;
-    size_t rewritten_len = 0;
-    int r = cc__rewrite_all_closure_calls_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    if (r <= 0 || !rewritten) return 0;
-
-    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
-        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 90, "closure_calls") == 0) {
-            free(rewritten);
-            return 1;
-        }
-    }
-    free(rewritten);
-    return 0;
+    return edits_added;
 }

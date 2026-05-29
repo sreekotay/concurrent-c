@@ -31,18 +31,21 @@
 #endif
 
 /*
- * TCC PARSER MODE: CCVec types use a generic placeholder during parsing.
- *
- * The CC preprocessor rewrites CCVec<T> / CCVec::[T] to __CC_VEC(T_mangled).
- * Legacy Vec<T> / Vec::[T] spellings are still accepted during migration.
- * In parser mode, this macro expands to __CCVecGeneric.
- * In codegen, it's rewritten to CCVec_T with proper declarations emitted.
+ * The CC preprocessor rewrites CCVec::[T] to __CC_VEC(T_mangled).
+ * The type registry emits matching CC_VEC_DECL_ARENA declarations before TCC
+ * parses the lowered TU, so parser mode can use the concrete CCVec_T names.
  */
-#ifdef CC_PARSER_MODE
+#ifdef __CC_VEC
+#undef __CC_VEC
+#endif
+#ifdef __CC_VEC_INIT
+#undef __CC_VEC_INIT
+#endif
+#define __CC_VEC(T) CCVec_##T
+#define __CC_VEC_INIT(T, arena) CCVec_##T##_init((arena), CC_VEC_INITIAL_CAP)
 
-/* Generic Vec placeholder struct for parser mode - any element type.
-   Field names match real Vec value layout so field access compiles.
-   Guard allows parser-mode stubs to predefine this. */
+/* Legacy generic fallback retained for parser-only stubs that have not yet
+ * been converted to concrete registry-backed Vec declarations. */
 #ifndef __CC_VEC_GENERIC_DEFINED
 #define __CC_VEC_GENERIC_DEFINED
 typedef struct __CCVecGeneric {
@@ -51,25 +54,15 @@ typedef struct __CCVecGeneric {
 } __CCVecGeneric;
 #endif
 
-/* THE KEY MACRO: In parser mode, all Vec types resolve to generic.
-   Usage: __CC_VEC(int) expands to __CCVecGeneric
-   Codegen rewrites this to CCVec_int */
-#ifndef __CC_VEC
-#define __CC_VEC(T) __CCVecGeneric
-#endif
-
-/* Generic constructor - parser mode doesn't actually run,
-   so just return a zeroed struct for type checking. */
+/* Generic constructor - parser fallback doesn't actually run, so just return a
+   zeroed struct for type checking. */
 static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
     __CCVecGeneric v = {NULL, 0};
     (void)arena;
     return v;
 }
 
-/* Macro-based init that accepts any type - parser mode just validates types. */
-#define __CC_VEC_INIT(T, arena) __cc_vec_generic_init((void*)(arena))
-
-/* Parser-mode method stubs - just need to type-check, not actually run.
+/* Parser fallback method stubs - just need to type-check, not actually run.
    get() returns void* (maps to T*) and pop(out) returns bool. */
 static inline int __cc_vec_generic_push(__CCVecGeneric *v, ...) {
     (void)v;
@@ -122,71 +115,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->len);
 }
 
-/* Parser-mode: common CCVec types are aliases to __CCVecGeneric */
-typedef __CCVecGeneric CCVec_int;
-typedef __CCVecGeneric CCVec_char;
-typedef __CCVecGeneric CCVec_size_t;
-typedef __CCVecGeneric CCVec_float;
-typedef __CCVecGeneric CCVec_double;
-typedef __CCVecGeneric CCVec_voidptr;
-typedef __CCVecGeneric CCVec_charptr;
-typedef __CCVecGeneric CCVec_intptr;
-
-/* Parser-mode: function aliases for common CCVec types.
-   Maps CCVec_T_method to generic stubs so direct function calls compile.
-   Uses macros since we can't do function aliasing in C. */
-#define CCVec_int_init(a, c)     __cc_vec_generic_init((void*)(a))
-#define CCVec_int_push(v, x)     __cc_vec_generic_push((v), (x))
-#define CCVec_int_pop(v, o)      __cc_vec_generic_pop((v), (o))
-#define CCVec_int_get(v, i)      __cc_vec_generic_get((v), (i))
-#define CCVec_int_get_ptr(v, i)  __cc_vec_generic_get((v), (i))
-#define CCVec_int_set(v, i, x)   __cc_vec_generic_set((v), (i), (x))
-#define CCVec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
-#define CCVec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
-#define CCVec_int_reserve(v, n)  __cc_vec_generic_reserve((v), (n))
-#define CCVec_int_clear(v)       __cc_vec_generic_clear((v))
-#define CCVec_int_len(v)         __cc_vec_generic_len((v))
-#define CCVec_int_cap(v)         __cc_vec_generic_cap((v))
-#define CCVec_int_begin(v)       __cc_vec_generic_begin((v))
-#define CCVec_int_end(v)         __cc_vec_generic_end((v))
-#define CCVec_int_data(v)        __cc_vec_generic_data((v))
-#define CCVec_int_as_slice(v)    __cc_vec_generic_as_slice((v))
-
-#define CCVec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
-#define CCVec_char_push(v, x)    __cc_vec_generic_push((v), (x))
-#define CCVec_char_pop(v, o)     __cc_vec_generic_pop((v), (o))
-#define CCVec_char_get(v, i)     __cc_vec_generic_get((v), (i))
-#define CCVec_char_get_ptr(v, i) __cc_vec_generic_get((v), (i))
-#define CCVec_char_set(v, i, x)  __cc_vec_generic_set((v), (i), (x))
-#define CCVec_char_at_grow(v, i) __cc_vec_generic_at_grow((v), (i))
-#define CCVec_char_push_ptr(v)   __cc_vec_generic_push_ptr((v))
-#define CCVec_char_reserve(v, n) __cc_vec_generic_reserve((v), (n))
-#define CCVec_char_clear(v)      __cc_vec_generic_clear((v))
-#define CCVec_char_len(v)        __cc_vec_generic_len((v))
-#define CCVec_char_cap(v)        __cc_vec_generic_cap((v))
-#define CCVec_char_begin(v)      __cc_vec_generic_begin((v))
-#define CCVec_char_end(v)        __cc_vec_generic_end((v))
-#define CCVec_char_data(v)       __cc_vec_generic_data((v))
-#define CCVec_char_as_slice(v)   __cc_vec_generic_as_slice((v))
-
-#define CCVec_size_t_init(a, c)  __cc_vec_generic_init((void*)(a))
-#define CCVec_size_t_push(v, x)  __cc_vec_generic_push((v), (x))
-#define CCVec_size_t_get(v, i)   __cc_vec_generic_get((v), (i))
-#define CCVec_size_t_set(v, i, x) __cc_vec_generic_set((v), (i), (x))
-#define CCVec_size_t_len(v)      __cc_vec_generic_len((v))
-#define CCVec_size_t_as_slice(v) __cc_vec_generic_as_slice((v))
-
-#else /* !CC_PARSER_MODE - real compilation */
-
-/* In real compilation, __CC_VEC expands to the actual type name.
-   The codegen pass ensures CC_VEC_DECL_ARENA is emitted for each type. */
-#define __CC_VEC(T) CCVec_##T
-
-/* In real mode, init calls the generated type-specific function */
-#define __CC_VEC_INIT(T, arena) CCVec_##T##_init((arena), CC_VEC_INITIAL_CAP)
-
-#endif /* CC_PARSER_MODE */
-
 /*
  * CC_VEC_DECLARE_GUARDED(T, Name)
  *
@@ -214,6 +142,77 @@ typedef __CCVecGeneric CCVec_intptr;
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
  */
+#ifdef CC_PARSER_MODE
+#define CC_VEC_DECL_ARENA(T, Name)                                                \
+    typedef struct {                                                              \
+        void *data;                                                               \
+        size_t len;                                                               \
+    } Name;                                                                       \
+                                                                                  \
+    static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
+        Name v = {NULL, 0};                                                       \
+        (void)arena; (void)initial_cap;                                           \
+        return v;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_reserve(Name *v, size_t need) {                      \
+        (void)v; (void)need;                                                      \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_push(Name *v, ...) {                                 \
+        (void)v;                                                                  \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline void* Name##_push_ptr(Name *v) {                                \
+        (void)v;                                                                  \
+        return NULL;                                                              \
+    }                                                                             \
+                                                                                  \
+    static inline bool Name##_pop(Name *v, void *out) {                           \
+        (void)v; (void)out;                                                       \
+        return false;                                                             \
+    }                                                                             \
+                                                                                  \
+    static inline void* Name##_get(Name *v, size_t i) {                           \
+        (void)v; (void)i;                                                         \
+        return NULL;                                                              \
+    }                                                                             \
+    static inline void* Name##_get_ptr(Name *v, size_t i) {                       \
+        return Name##_get(v, i);                                                  \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_set(Name *v, size_t i, ...) {                        \
+        (void)v; (void)i;                                                         \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline void* Name##_at_grow(Name *v, size_t i) {                       \
+        (void)v; (void)i;                                                         \
+        return NULL;                                                              \
+    }                                                                             \
+                                                                                  \
+    static inline void Name##_clear(Name *v) {                                    \
+        (void)v;                                                                  \
+    }                                                                             \
+                                                                                  \
+    static inline CCSlice Name##_as_slice(const Name *v) {                        \
+        (void)v;                                                                  \
+        return cc_slice_empty();                                                  \
+    }                                                                             \
+                                                                                  \
+    static inline uint64_t Name##_provenance(const Name *v) {                     \
+        (void)v;                                                                  \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
+    static inline size_t Name##_cap(const Name *v) { return v ? v->len : 0; }     \
+    static inline void *Name##_begin(Name *v) { return v ? v->data : NULL; }      \
+    static inline void *Name##_end(Name *v) { return v ? (char*)v->data + v->len : NULL; } \
+    static inline void *Name##_data(Name *v) { return v ? v->data : NULL; }
+#else
 #define CC_VEC_DECL_ARENA(T, Name)                                                \
     typedef struct {                                                              \
         T *data;                                                                  \
@@ -295,6 +294,7 @@ typedef __CCVecGeneric CCVec_intptr;
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
+#endif
 
 /* Backwards-compat alias: CC_VEC_DECL_ARENA_FULL used to take an extra OptT
    parameter for the optional return type. Optionals are retired; the third
@@ -302,11 +302,16 @@ typedef __CCVecGeneric CCVec_intptr;
 #define CC_VEC_DECL_ARENA_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
 #define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
 
-#ifndef CC_PARSER_MODE
+#ifdef CC_PARSER_MODE
+#ifndef CC_VEC_CHAR_DEFINED
+#define CC_VEC_CHAR_DEFINED 1
+CC_VEC_DECL_ARENA(char, CCVec_char)
+#endif
+#endif
+
 #ifndef CC_VEC_SIZE_T_DEFINED
 #define CC_VEC_SIZE_T_DEFINED 1
 CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
-#endif
 #endif
 
 /* Iteration helper */

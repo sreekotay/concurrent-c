@@ -100,8 +100,8 @@ that fiber can answer "what async task am I?" via
   lowered output (program lifetime in practice), so no copy / no
   allocation on the spawn path.
 - Non-`spawn_async` fiber births (closure spawn via `n->spawn(...)`,
-  legacy `cc_nursery_spawn`, the orphan `pass_nursery_spawn_ast.c`) do
-  not yet stamp names — those fibers report `"no info"` to the query.
+  legacy `cc_nursery_spawn`) do not yet stamp names — those fibers
+  report `"no info"` to the query.
   Closures don't have a single user-visible name; threading per-closure
   source markers is a follow-up.
 - The query requires `@noblock` at the call site inside `@async`

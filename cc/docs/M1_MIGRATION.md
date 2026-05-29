@@ -1,6 +1,6 @@
 # M1 — Visitor refactor (migration tracker)
 
-**Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  Phase 3 (pre-flight) **COMPLETE**.  Phase 4 step (b) (in_user_file guards) **LANDED**.  Phase 4 step (c) (buffer swap) **DEFERRED** — Finding 2 fixed upstream in TCC (`pp_line` negative-delta swallow, 2026-05-27); Finding 1's replan was based on a misreading of the buffer state and needs correction before the swap can ship.  461/461 in both modes.
+**Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  Phase 3 (pre-flight) **COMPLETE**.  Phase 4 path (a) (macro-expanded `src_all`) **SHELVED** (2026-05-28) — probe validated CPP-on-raw-CC-syntax, but the design conflicts with CC's `CC_PARSER_MODE`-polymorphic headers/macros.  `src_all` intentionally remains the raw user `.ccs`; the speculative capture/swap plumbing was removed.  461/461 default.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit
 updates the appropriate batch in this file: tick off the migrated sites,
@@ -19,15 +19,14 @@ Three sub-pieces, in order:
 
 | Piece | What | State |
 |-------|------|-------|
-| **(a)** Source-buffer unification | swap `src_all = file` → `src_all = root->parse_buffer` when pre-expand is on | **TODO** — blocked on (c) |
-| **(b)** Reparse prelude awareness | `CCReparseFlags.src_is_pre_expanded` so reparse skips re-prepending headers | **DONE** (M7.C3 plumbing) |
-| **(c)** `#line`-aware text scanners | every visitor pass that walks `src_all` filters by origin file via `CCInertScan` | **PARTIAL** — 102 / 102 forward sites complete; 3 backward sites (Batch L) + 1 special (Batch M) remain |
+| **(a)** Source-buffer unification | swap `src_all = file` → a macro-expanded buffer | **SHELVED** — conflicts with parser-mode vs emit-mode macro expansion (Finding 3) |
+| **(b)** Reparse prelude awareness | skip re-prepending headers when reparsing an already-inlined buffer | **DROPPED** with (a); reparses stay on the normal raw-source/prelude path |
+| **(c)** `#line`-aware text scanners | shared scanner cleanup via `CCInertScan` where useful | **FOUNDATION COMPLETE**; no longer required for a global `src_all` flip |
 
-Why it matters: M1 unblocks four otherwise-stalled items —
-macro CC-syntax end-to-end (CHAN test stops being a curiosity), retiring
-the `CC_PRE_EXPAND=0` opt-out, deleting redundant `_cch → _h` text
-passes, and fixing the `m0_5_diag_origin_line_fail` source-map drift.
-None of those move until (c) is complete enough to support (a)'s flip.
+Outcome: the TCC `#line` bug was fixed directly and `CCInertScan` remains
+useful scanner infrastructure, but macro-expanded `src_all` is no longer a
+target.  The existing split is intentional: reparses expand headers in
+`CC_PARSER_MODE`; final emit expands headers in normal mode.
 
 ---
 
@@ -111,7 +110,7 @@ State-var codes: `lc` = in_line_comment, `bc` = in_block_comment, `str` = in_str
 | `cc__last_top_level_semi_offset` (~819) | find-only | {lc,bc,str,chr} | ~25 | trivial | |
 | `cc__has_top_level_brace` (~863) | find-only | {str,chr} only | ~20 | medium | **Incomplete**: no comment skip; migration must not regress |
 | `cc__src_strip_comments_and_strings` (~995) | rewrite | {lc,bc,str,chr} | ~60 | trivial | Offset-preserving blank-out — clean rewrite template |
-| `cc__closure_proto_insert_off` (~2194) | find-only | {lc,bc,str,chr} | ~45 | medium | Also brace_depth, last_line_off; backward-ish from closure start |
+| ~~`cc__closure_proto_insert_off`~~ | — | — | — | — | **Deleted 2026-05-28** (fossil audit: only callable path had `skip_inline_protos=0` and no in-tree caller). |
 | `cc__parse_closure_from_src` body-brace scan (~2586) | find-only | {str,qch,lc,bc} | ~30 | trivial | Also `br` |
 
 Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`, `cc__amp_is_const_param_read`, `cc__find_mutation_in_body`, recovery forward scan ~2888 all DELEGATE to `cc__scan_skip_string_comment` — migrating the helper migrates them all.
@@ -182,15 +181,16 @@ Note: `cc__find_next_arrow_skipping_inert`, `cc__find_prev_arrow_skipping_inert`
 | `cc__ud_pos_in_line_comment` (~62) | find-only | {str,qch} | ~18 | trivial | Line-local forward rescan |
 | inline scanner in `cc__ud_stmt_start_backward` (~181) | find-only | {str,qch} | ~12 | medium | **Backward** — see cross-cutting risk #1 |
 
-### `pass_nursery_spawn_ast.c` (1342 LOC, 3 sites, now uses `text_scan.h`)
+### ~~`pass_nursery_spawn_ast.c`~~ (deleted 2026-05-28)
 
-| Site | Shape | State | LOC | Complexity | Notes |
-|------|-------|-------|-----|------------|-------|
-| `cc__scan_matching_rbrace` (~38) | find-only | {str,qch,lc,bc} | ~35 | trivial | **✓ Migrated (Batch D2)** — `depth` stays alongside; `for` → `while` |
-| `cc__split_top_level_commas` (~434) | find-only | {str,qch} | ~22 | medium | **✓ Migrated (Batch D2)** — **behavior change**: now comment-aware.  Mid-buffer slice — `at_line_start = 0` |
-| `cc__infer_spawn_stmt_end_off` (~460) | find-only | {str,qch} | ~20 | medium | **✓ Migrated (Batch D2)** — **behavior change**: now comment-aware (post-`(`).  Linear walk to first `(` kept (caller-anchored, no comments expected in gap); `CCInertScan` kicks in for the paren-balanced walk |
-
-Note: this whole file is ORPHAN (unwired, see header banner).  Migrated for consistency so the file-wide `CCInertScan` story is uniform when the orphan is wired up or deleted.
+Was 1326 LOC, 3 migrated sites under Batch D2.  **File deleted 2026-05-28** —
+fossil audit confirmed all four exported entry points
+(`cc__rewrite_spawn_stmts_with_nodes`, `cc__rewrite_nursery_blocks_with_nodes`,
+`cc__collect_spawn_edits`, `cc__collect_nursery_edits`) had zero callers.  The
+1993 prediction at the bottom of the original entry ("Migrated for
+consistency so the file-wide CCInertScan story is uniform when the orphan is
+wired up or deleted") played out the "deleted" branch.  Spawn/nursery
+lowering lives in `preprocess.c` + `pass_closure_literal_ast.c`.
 
 ### `ufcs.c` (2252 LOC, 3 sites, now uses `text_scan.h`)
 
@@ -387,9 +387,9 @@ Commit D1 (8 sites) — **LANDED 2026-05-27**:
 - **Loop-tail increment** in `cc__create_seed_registered_var_types`: original `i += type_len - 1` relied on `for`'s `++i` to give total advance of `type_len`; new while-loop changes to `i += type_len`.
 
 Commit D2 (6 sites) — **LANDED 2026-05-27**:
-- [x] `pass_nursery_spawn_ast.c::cc__scan_matching_rbrace`
-- [x] `pass_nursery_spawn_ast.c::cc__split_top_level_commas` — **behavior change**: now comment-aware
-- [x] `pass_nursery_spawn_ast.c::cc__infer_spawn_stmt_end_off` — **behavior change**: now comment-aware (post-`(`); leading linear-walk-to-`(` kept (caller-anchored)
+- [x] ~~`pass_nursery_spawn_ast.c::cc__scan_matching_rbrace`~~ — file deleted 2026-05-28 (orphan)
+- [x] ~~`pass_nursery_spawn_ast.c::cc__split_top_level_commas`~~ — file deleted 2026-05-28 (orphan)
+- [x] ~~`pass_nursery_spawn_ast.c::cc__infer_spawn_stmt_end_off`~~ — file deleted 2026-05-28 (orphan)
 - [x] `pass_match_syntax.c::cc__collect_match_edits` main loop (~415) — `line`/`col` preserved via post-step sweep + code-path `\n` handler
 - [x] `pass_match_syntax.c::cc__collect_match_edits` nested ~460 (body-brace matcher)
 - [x] `pass_match_syntax.c::cc__collect_match_edits` nested ~507 (case header `:` scanner)
@@ -398,7 +398,7 @@ Commit D2 (6 sites) — **LANDED 2026-05-27**:
 
 **Actual diff**: +72 / −127 (net **−55 LOC**).  Smoke 461/461 both modes.  Lowered C on `match_case_header_comment_bait_smoke` byte-for-byte identical to Batch D1 (collect path's expansion matches rewrite path's expansion).
 
-**Surprises:** None — D2 was a near-mechanical mirror of D1's pass_match_syntax work, and pass_nursery_spawn_ast's three sites all followed the standard "find-only with depth counters" pattern from Batch C.  The two "no comments" behavior changes in pass_nursery_spawn_ast are theoretical only since the file is orphaned today; even so, smoke would have caught any real regression because the helpers are still link-reachable.
+**Surprises:** None — D2 was a near-mechanical mirror of D1's pass_match_syntax work, and pass_nursery_spawn_ast's three sites all followed the standard "find-only with depth counters" pattern from Batch C.  The two "no comments" behavior changes in pass_nursery_spawn_ast were theoretical only — the file was orphaned and was deleted entirely on 2026-05-28.
 
 ### Batch E — ufcs duplicate consolidation (2 sites in different files, 1 commit) — **LANDED 2026-05-27**
 
@@ -592,13 +592,13 @@ K2 — trivial bulk (7 sites) — **LANDED 2026-05-27**:
 K3a — medium (3 sites) — **LANDED 2026-05-27**:
 - [x] `cc__has_top_level_brace` — straight migration; callers pass comment-stripped text so behavior is unchanged in practice (now defensively comment-aware for free)
 - [x] `cc__parse_closure_from_src` body-brace scan — replaced 22 LOC inline state machine with single `cc_find_matching_brace(s, n, body_start, &rbrace)` call.  3rd application of the "use util/text.h's matching helpers" pattern.
-- [x] `cc__closure_proto_insert_off` — preserves `last_line_off` line tracking via the Batch C pattern (post-step `[before, i)` newline sweep).  Code-path `\n` handler still explicit at the top of the code-byte branch.
+- [x] ~~`cc__closure_proto_insert_off`~~ — preserved `last_line_off` line tracking via the Batch C pattern (post-step `[before, i)` newline sweep).  **Function deleted 2026-05-28** (fossil audit).
 
 **Actual diff**: +37 / −114 (net **−77 LOC**).  Full suite 461/461 both modes.
 
 **Surprises:**
 - **`cc_find_matching_brace` 3rd sighting**: after Batches I and J each used it for nested scanners, K3a's `cc__parse_closure_from_src` body-brace site collapsed the same way.  This shared helper has now killed ~80 LOC of duplicated brace-balance inline state machines across 3 files.  **Standing recommendation: any inline `int br = 0; for (...) { if (ch == '{') br++; ... }` is a candidate.**
-- **`last_line_off` tracking in `cc__closure_proto_insert_off`** worked cleanly with Batch C's post-step sweep — no surprises.  The function's `best_func_off = last_line_off;` assignment runs on the code-byte branch (after `{` is detected at depth 0), so the line tracking only needs to be CURRENT, not retroactively-perfect for inert bytes.
+- **`last_line_off` tracking in `cc__closure_proto_insert_off`** worked cleanly with Batch C's post-step sweep — no surprises.  The function was then deleted 2026-05-28 along with its `skip_inline_protos=0` opt-out path; the K3a-era migration carried no future-work cost.
 
 K3b — complex (1 site) — **LANDED 2026-05-27**:
 - [x] `cc__infer_closure_end_off` — all 3 phases migrated:
@@ -712,16 +712,14 @@ Expected (per `.compile_err`): line **15**.  Bug only manifests with `CC_PRE_EXP
   - `visit_codegen.c:1995` (Batch M)
   - `checker.c:920`
 
-- **81 currently pass `NULL`**.  Triage needed for Phase 4 step (a):
-  - **Outer pass-level rewrite scanners** → plumb `ctx->input_path`; will need `in_user_file` filtering in Phase 4 step (b).
-  - **Inner bounded sub-scanners** (arg-list, expression-tail, brace-body sweeps) → keep `NULL`.  These operate on substrings already extracted by the outer pass, so file-origin was settled upstream.  No `#line` directives appear in those substrings; threading `input_path` would be pure ceremony.
-  - **Probe scanners** (e.g. `cc__*_pos_in_line_comment`, the Batch L parity helpers) → keep `NULL`.  They scan ≤1 line and never see a `#line` directive boundary.
-
-Per-pass triage is part of Phase 4 step (a), done file-by-file alongside the guard insertion.
+- **81 currently pass `NULL`**.  With path (a) shelved, these no longer block
+  a global source-buffer flip.  Migrate them opportunistically only when
+  `CCInertScan` removes duplicated lexer state or fixes a local bug.
 
 ### (4) Buffer swap point
 
-`visit_codegen.c:3642-3646`:
+`visit_codegen.c` intentionally keeps the raw user source as the visitor
+working buffer:
 
 ```c
 char* src_all = NULL;
@@ -732,31 +730,23 @@ if (ctx->input_path) {
 }
 ```
 
-Currently re-reads the raw `.ccs` file from disk.  Phase 4 step (c) replaces this with:
-
-```c
-if (ctx->pre_expanded_buf && ctx->pre_expanded_len) {
-    /* M1 Phase 4: use the post-pre-expand buffer; #line directives map
-     * every byte back to its origin file.  Outer rewrite scanners filter
-     * by scan.in_user_file to skip inlined header content. */
-    src_all = (char*)malloc(ctx->pre_expanded_len + 1);
-    if (!src_all) return ENOMEM;
-    memcpy(src_all, ctx->pre_expanded_buf, ctx->pre_expanded_len);
-    src_all[ctx->pre_expanded_len] = '\0';
-    src_len = ctx->pre_expanded_len;
-    ctx->src_is_pre_expanded = 1;  /* reparse fast-path */
-} else if (ctx->input_path) {
-    cc__read_entire_file(ctx->input_path, &src_all, &src_len);
-}
-```
+Do not replace this with a macro-expanded buffer without first addressing
+Finding 3's parser-mode/emit-mode macro split.
 
 ### (5) Pre-expanded buffer plumbing
 
-`ctx->pre_expanded_buf` is already populated in `walk.c:14-21` from `root->parse_buffer_pre_relower` (preferred — still has unlowered CC syntax) or `root->parse_buffer` (fallback).  `pass_channel_syntax.c:1039` proves the plumbing works: it consults `pre_expanded_buf` today as a SECONDARY fallback for macro-generated chan handle decls.
+`ctx->pre_expanded_buf` remains populated in `walk.c` from
+`root->parse_buffer_pre_relower` (preferred — still has unlowered CC syntax) or
+`root->parse_buffer` (fallback).  It is a **narrow fallback**, not a global
+source replacement: `pass_channel_syntax.c` consults it to recover
+macro-generated chan handle declarations when the raw file lacks a literal
+`T[~ ... >] name` declaration.
 
-### (6) `src_is_pre_expanded` reparse plumbing
+### (6) Reparse path
 
-`CCVisitorCtx.src_is_pre_expanded` (`visitor.h:24`) exists and is consumed in `visit_codegen.c:1258,1336,1394`.  When set, reparses skip `cc__prepend_reparse_prelude` and `cc_preprocess_for_reparse`'s `.cch → .h` rewrite to avoid double-decl on already-inlined system headers.  Plumbing is in place; Phase 4 step (c) just needs to SET the flag when the swap happens.
+Reparses always run the normal parser-mode preprocessing path and prepend the
+parser prelude.  The previous `src_is_pre_expanded` fast-path was removed with
+the shelved swap.
 
 ---
 
@@ -779,7 +769,7 @@ Order suggestion (lowest-risk first, by pass complexity):
 - [ ] `pass_create.c` (4 sites, simple)
 - [ ] `pass_defer_syntax.c` (6 sites)
 - [ ] `pass_with_deadline_syntax.c` (2 sites)
-- [ ] `pass_nursery_spawn_ast.c` (3 sites)
+- [x] ~~`pass_nursery_spawn_ast.c` (3 sites)~~ — file deleted 2026-05-28
 - [ ] `pass_channel_syntax.c` (remaining 5 NULL sites; 2 already on input_path)
 - [ ] `pass_unwrap_destroy.c` (2 sites, post-Batch L)
 - [ ] `pass_type_syntax.c` (remaining 6 NULL sites; 1 already on input_path)
@@ -796,27 +786,64 @@ Order suggestion (lowest-risk first, by pass complexity):
 
 ### Step (c) — the buffer swap — **DEFERRED 2026-05-27** (attempted, reverted with findings)
 
-The naive swap was attempted (`src_all = strdup(ctx->pre_expanded_buf)` when pre-expand is on, with `ctx->src_is_pre_expanded = 1`) and surfaced ~30+ test regressions across the channel/spawn/result/closure suites.  Reverted cleanly back to `cc__read_entire_file(input_path)`; left a long `M1 Phase 4 step (c) — DEFERRED` comment block in `visit_codegen.c` at the swap site as the audit-trail artifact.
+The naive swap was attempted (`src_all = strdup(ctx->pre_expanded_buf)` when pre-expand is on, with `ctx->src_is_pre_expanded = 1`) and surfaced ~30+ test regressions across the channel/spawn/result/closure suites.  It was reverted cleanly back to `cc__read_entire_file(input_path)`.
 
 The two findings are recorded in detail below ("Phase 4 surprises") — the short version:
 
 - **Finding 1** (still real): `pre_expanded_buf` is NOT what this doc previously said.  It's post-CPP-expand AND post-CC-type-relower AND post-early-text-rewrites (chan_send → cc_chan_result_with, etc.) — the visitor passes expect un-rewritten user-facing CC syntax.
 - **Finding 2** (resolved): The headline `m0_5_diag_origin_line_fail` bug was a TCC `pp_line` swallow bug for negative `#line` deltas, fixed upstream in `third_party/tcc/tccpp.c` (2026-05-27 evening).  The `tests/m0_5_diag_origin_line_fail.env` pin has been deleted; the test passes on the default `CC_PRE_EXPAND=1` pipeline.  See the "Finding 2" entry below for the full story.
 
-**Replan**: Phase 4 step (c) is replaced by **Phase 4 path (a)**.  Important correction (2026-05-27 evening): the original replan said "capture immediately after `cc_cpp_expand` and before the relower", but that's NOT pre-rewrite either — the CC text rewrites (P1–P16 in PASS_INVENTORY) all run BEFORE `cc_cpp_expand` inside `cc_preprocess_for_initial_parse`.  The truly-pre-rewrite buffer would need to be produced by running CPP on `buf` (post-`#include`/nursery/create-destroy rewrites but pre-CC-syntax) BEFORE calling `cc_preprocess_for_initial_parse`.  That's two CPP invocations and requires verifying TCC's CPP cleanly handles un-rewritten CC syntax (`int[~4 >] tx;`, `Vec<int>`, `T!>(E)`, etc.).  M7.B's CHAN smoke proved CPP at least passes channel tokens through verbatim, but the broader surface needs a probe.
-
-Updated plan:
-
-1. **Probe**: write a small standalone tool that runs `cc_cpp_expand(buf, ...)` on a few real `.ccs` files BEFORE any CC rewrites.  Verify the output is clean (no CPP errors, no unexpected token mangling) for at least channel handles, slices, generic containers, result types, and closure literals.
-2. **Capture a pre-rewrite snapshot.**  If the probe passes, add a new AST root field `parse_buffer_post_cpp_pre_rewrite`, populated in `build_parse_input.c` BEFORE `cc_preprocess_for_initial_parse` (i.e. run `cc_cpp_expand(buf, ...)` early and stash its output).
-3. **Plumb through walk.c.**  Extend `CCVisitorCtx` with `pre_rewrite_buf` / `pre_rewrite_len` (separate from `pre_expanded_buf`, which keeps its current semantics for the channel-syntax fallback users).
-4. **Swap `src_all`** to `pre_rewrite_buf` instead of `pre_expanded_buf` in `visit_codegen.c`.  This is the buffer the visitor passes are designed to consume.
-5. **Re-run full suite.**  Expected: 461/461 in both modes if the buffer is correctly pre-rewrite.  Any failures are real Phase 4 surprises (per-pass).
-6. **Add `tests/m1_basename_collision_smoke.ccs`** — user TU named e.g. `cc_channel.ccs` to verify `CCInertScan.in_user_file` doesn't false-match a header with the same basename.
-
-Cost estimate: ~30 LOC for capture + plumbing + swap, plus the probe (~50 LOC).  Risk: TCC's CPP might reject un-rewritten CC syntax in non-channel contexts (e.g. `T!>(E)` parens-with-bang form).  Mitigation: the probe identifies this before we commit to the architecture.
+**Final decision (2026-05-28):** Phase 4 path (a) was probed and then
+shelved.  CPP can preserve raw CC syntax, but pre-expanding `src_all` freezes
+CC's mode-polymorphic macros in one mode and breaks the parser-mode reparse /
+normal-mode emit split.  See Finding 3 below.  Do not add
+`tests/m1_basename_collision_smoke.ccs` unless a future design again places
+inlined header bytes in the visitor working buffer.
 
 ### Phase 4 surprises landing zone
+
+#### Finding 3 (2026-05-28): path (a) is shelved — pre-expanding `src_all` conflicts with `CC_PARSER_MODE`
+
+The path (a) probe answered the first question positively: TCC's CPP can expand
+a buffer that still contains raw CC syntax.  Across the corpus, user-facing
+tokens such as `int[~4 >]`, `=>`, `!>(E)`, and `Vec<T>` survived CPP expansion.
+Backtick string templates were the main known rejection case.
+
+The second question was more important: **should `src_all` be macro-expanded at
+all?**  The answer is no, at least with the current compiler architecture.
+
+CC intentionally has two expansion modes:
+
+- parser-mode reparses run with `CC_PARSER_MODE` and use parser-friendly header
+  shapes;
+- final emit runs in normal mode and needs runtime/emit-friendly header shapes.
+
+The existing raw-file `src_all` design preserves that split.  User macro calls
+remain unexpanded until each consumer expands them in its own mode.
+Pre-expanding `src_all` freezes every user macro in one mode before those
+consumers run.  That breaks mode-polymorphic CC headers/macros:
+
+- `CC_ERROR(CC_ERR_INVALID_ARG, "neg")` freezes into a normal-mode
+  `CCError` compound literal, then parser-mode reparses see hidden enum values
+  such as `CC_ERR_INVALID_ARG`;
+- `cc_concat(...)` freezes into a normal-mode `_Generic(...)` expansion, then
+  parser-mode stubs reject pieces of the runtime-only expression tree;
+- channel/result helpers similarly depend on whether the consumer is a parser
+  stub or final emitted C.
+
+The session explored several ways to make the swap survive (full inlined header
+buffer + guards, header blanking, compaction, restoring include lines).  The
+best simplified variant reduced the problem from hundreds of failures to 29
+true regressions, and those regressions all traced back to the same
+`CC_PARSER_MODE` duality.  A single pre-expanded buffer cannot satisfy both
+consumers without a bespoke partial macro expander that selectively expands only
+"safe" macros and leaves mode-polymorphic CC macros intact.
+
+**Decision:** do not build that partial expander now.  Remove the speculative
+capture/swap plumbing (`parse_buffer_post_cpp_pre_rewrite`,
+`CCVisitorCtx.pre_rewrite_buf`, `CC_M1_SRC_SWAP`, `src_is_pre_expanded`) and keep
+`src_all` as the raw user `.ccs`.  Bank the robust parts of M1: the TCC `#line`
+fix and `CCInertScan` scanner cleanup.
 
 #### Finding 1 (2026-05-27): `pre_expanded_buf` is partially rewritten, not just CPP-expanded
 
@@ -828,7 +855,10 @@ Cost estimate: ~30 LOC for capture + plumbing + swap, plus the probe (~50 LOC). 
 
 **Implication**: The visitor passes in `visit_codegen.c` are designed to consume the USER-FACING CC syntax (un-rewritten).  Feeding them the partially-rewritten `pre_expanded_buf` means their pattern matches misfire — they try to match `T[~N >]` and instead see `CCChanTx`; they try to match `chan_send(...)` and instead see `cc_chan_result_with(...)`.
 
-**Fix**: Phase 4 path (a) above — capture an EARLIER snapshot right after `cc_cpp_expand` and BEFORE any text rewrites.  Plumb through a new ctx field.
+**Superseded fix idea**: capture an earlier post-CPP/pre-rewrite snapshot and
+feed that to `src_all`.  Finding 3 proved that any single pre-expanded `src_all`
+conflicts with CC's parser-mode vs emit-mode macro split, so this path is
+shelved rather than completed.
 
 **Watch-out**: The naming "pre-relower" was misleading.  Future PRs adding similar snapshots should name them by content semantics ("post-cpp / pre-any-rewrite", "post-relower / pre-codegen", etc.), not by relative position to one specific pass.
 

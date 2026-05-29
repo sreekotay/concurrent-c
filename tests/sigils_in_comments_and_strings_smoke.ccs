@@ -3,7 +3,7 @@
 //
 // Text-scanning passes (`pass_result_unwrap`, `pass_err_syntax`,
 // `pass_autoblock`, `pass_channel_syntax`, `pass_defer_syntax`,
-// `pass_match_syntax`, `pass_nursery_spawn_ast`, `pass_unwrap_destroy`,
+// `pass_match_syntax`, `pass_unwrap_destroy`,
 // `pass_with_deadline_syntax`, `async_ast`, etc.) have historically
 // false-matched their own sigils inside comments and strings — see
 // bug family [F6]/[F11]/[F12] in docs/known-bugs/redis_idiomatic_async.md.

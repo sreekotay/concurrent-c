@@ -218,14 +218,7 @@ static inline bool cc_process_output_success(const CCProcessOutput* o) {
 
 #ifndef CCResult_CCProcessOutput_CCIoError_DEFINED
 #define CCResult_CCProcessOutput_CCIoError_DEFINED 1
-#ifdef CC_PARSER_MODE
-typedef struct CCResult_CCProcessOutput_CCIoError {
-    bool ok;
-    union { CCProcessOutput value; CCIoError error; } u;
-} CCResult_CCProcessOutput_CCIoError;
-#else
 CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoError)
-#endif
 #endif
 
 /*

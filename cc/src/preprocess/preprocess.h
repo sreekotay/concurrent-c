@@ -62,12 +62,6 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
                                            size_t input_len,
                                            const char* input_path);
 
-// Simple preprocessing for the experimental AST/codegen path: only adds #line directive, no CC syntax rewrites.
-// All CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
-// UNWIRED (M0): no production callers; reserved for tests / minimal-parse experiments.
-// Returns malloc'd string on success, NULL on error. Caller must free().
-char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path);
-
 // Rewrite `@slice(...)`, `@string(...)`, and backtick template literals in a
 // source fragment used by later text-based lowering/codegen passes.
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
@@ -77,8 +71,8 @@ char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* in
 char* cc__rewrite_link_directives(const char* src, size_t n);
 
 // Rewrite generic container syntax:
-//   CCVec<T> -> CCVec_T, Map<K,V> -> Map_K_V
-//   cc_vec_new<T>(&arena) -> CCVec_T_init(&arena, CC_VEC_INITIAL_CAP)
+//   CCVec::[T] -> CCVec_T, Map<K,V> -> Map_K_V
+//   cc_vec_new::[T](&arena) -> CCVec_T_init(&arena, CC_VEC_INITIAL_CAP)
 //   map_new<K,V>(&arena) -> Map_K_V_init(&arena)
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);

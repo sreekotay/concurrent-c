@@ -440,8 +440,8 @@ static void cc__set_fiber_v2_task(CCTask* t, fiber_v2* f) {
  * Post V2-promotion: this is a source-compat alias for
  * cc_fiber_spawn_task_v2. The V1 fiber pool (cc_fpool_*) is no longer
  * initialized or dispatched to; every task is a V2 fiber. The alias is kept
- * so compiler-emitted code (pass_nursery_spawn_ast.c, pass_channel_syntax.c,
- * pass_autoblock.c) and external callers continue to work untouched during
+ * so compiler-emitted code (pass_channel_syntax.c, pass_autoblock.c) and
+ * external callers continue to work untouched during
  * the V1 retirement window. */
 CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg) {
     return cc_fiber_spawn_task_v2(fn, arg);

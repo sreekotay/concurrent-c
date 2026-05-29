@@ -6,16 +6,15 @@
 #include "visitor/visitor.h"
 #include "visitor/edit_buffer.h"
 
-/* Await expression normalization pass: transforms complex await expressions into temp variables */
-int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
-                                      const CCVisitorCtx* ctx,
-                                      const char* in_src,
-                                      size_t in_len,
-                                      char** out_src,
-                                      size_t* out_len);
-
-/* NEW: Collect await normalization edits into EditBuffer without applying.
-   Returns number of edits added (>= 0), or -1 on error. */
+/* Await expression normalization pass: hoists complex `await EXPR` into
+ * temp-variable assignments at the enclosing statement's line start so the
+ * receiver's call/return site sees a stable lvalue (`tmp`) instead of the
+ * full await sub-expression.  Emits per-span edits (insertion at the
+ * statement line + replacement of the await expr with the temp) directly
+ * into `eb` — no whole-buffer rewrite, so this pass composes safely with
+ * other Phase-3 collectors in the stage-2 batched apply (see PIPELINE.md).
+ *
+ * Returns the number of edits added (>= 0), or -1 on error. */
 int cc__collect_await_normalize_edits(const CCASTRoot* root,
                                       const CCVisitorCtx* ctx,
                                       CCEditBuffer* eb);

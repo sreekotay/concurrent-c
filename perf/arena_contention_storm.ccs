@@ -3,8 +3,10 @@
  *
  * Each fiber allocates from its own private bump-pointer arena — the idiomatic
  * CC pattern. No shared state, no CAS contention. This measures pure allocation
- * throughput of the per-fiber arena strategy vs per-thread bump arenas (Pthread)
- * and Go's per-goroutine mcache heap allocator.
+ * throughput of the per-fiber arena strategy vs per-thread bump arenas (Pthread).
+ * NOTE: the harness Go/Zig rows measure DIFFERENT strategies, not bump arenas —
+ * Go's non-escaping make([]byte,16) is stack-promoted (never hits mcache) and
+ * Zig uses c_allocator malloc/free. Only CC vs Pthread is apples-to-apples here.
  */
 
 #include <ccc/cc_runtime.cch>

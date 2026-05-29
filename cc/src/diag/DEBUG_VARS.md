@@ -12,8 +12,10 @@ All debug output uses the prefix `[cc:<phase>]`.
 
 CLI: `--show-lowered=<phase>` dumps the post-phase buffer to stderr (I7).
 
-| Variable | Effect |
+## Retired
+
+| Variable | Status |
 |----------|--------|
-| `CC_BATCH_PHASE3=1` | Experimental: batch UFCS + closure_calls + autoblock + await_normalize in one apply (off by default) |
+| `CC_BATCH_PHASE3=1` | Removed 2026-05-28. Two-stage batched Phase 3 is now the only path; UFCS in stage 1, closure_calls + autoblock + await_normalize in stage 2. See [PIPELINE.md](../visitor/PIPELINE.md). |
 
 See [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).

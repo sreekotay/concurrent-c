@@ -705,11 +705,10 @@ static int cc__build_compile_and_load(const char* input_path,
 
     cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n#define __CC__ 1\n#endif\n");
     if (needs_cc_preprocess && !source_is_header) {
-        /* For .ccs batches: CC_PARSER_MODE keeps generic container
-           (`__CCVecGeneric`, `__CCMapGeneric`) and generic-result
-           (`__CCResultGeneric`) typedefs in scope so the TCC stub-AST
-           parser accepts `Vec<T>`/`Map<K,V>`/`T!>(E)` placeholders that
-           the later codegen pass rewrites to concrete types.  Eagerly
+        /* For .ccs batches: CC_PARSER_MODE keeps generic fallback result
+           typedefs in scope so the TCC stub-AST parser can survive rare
+           unresolved result placeholders while normal container/result names
+           stay concrete. Eagerly
            include cc_result.h AFTER defining CC_PARSER_MODE (the
            __CCResultGeneric definition lives inside that header's
            `#ifdef CC_PARSER_MODE` block) so any parser-mode typedef

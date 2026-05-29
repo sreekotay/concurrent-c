@@ -1,0 +1,1 @@
+retired Vec generic spelling 'Vec<T>'; use 'CCVec::[T]' and 'cc_vec_new::[T](...)'

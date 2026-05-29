@@ -36,15 +36,21 @@
 #endif
 
 /*
- * TCC PARSER MODE: Map types use a generic placeholder during parsing.
- *
  * The CC preprocessor rewrites Map<K,V> to __CC_MAP(K_mangled, V_mangled)*.
- * In parser mode, this macro expands to __CCMapGeneric.
- * In codegen, it's rewritten to Map_K_V with proper declarations emitted.
+ * The type registry emits matching CC_MAP_DECL_ARENA declarations before TCC
+ * parses the lowered TU, so parser mode can use concrete Map_K_V names.
  */
-#ifdef CC_PARSER_MODE
+#ifdef __CC_MAP
+#undef __CC_MAP
+#endif
+#ifdef __CC_MAP_INIT
+#undef __CC_MAP_INIT
+#endif
+#define __CC_MAP(K, V) Map_##K##_##V
+#define __CC_MAP_INIT(K, V, arena) Map_##K##_##V##_init((arena))
 
-/* Generic Map placeholder struct for parser mode - any key/value types.
+/* Legacy generic fallback retained for parser-only stubs that have not yet
+   been converted to concrete registry-backed Map declarations.
    Simplified struct that just needs to compile for type checking.
    Guard allows parser-mode stubs to predefine this. */
 #ifndef __CC_MAP_GENERIC_DEFINED
@@ -57,14 +63,7 @@ typedef struct __CCMapGeneric {
 } __CCMapGeneric;
 #endif
 
-/* THE KEY MACRO: In parser mode, all Map types resolve to generic.
-   Usage: __CC_MAP(int, int) expands to __CCMapGeneric
-   Codegen rewrites this to Map_int_int */
-#ifndef __CC_MAP
-#define __CC_MAP(K, V) __CCMapGeneric
-#endif
-
-/* Generic constructor - parser mode doesn't actually run,
+/* Generic constructor - parser fallback doesn't actually run,
    so just return a pointer to NULL-like value. Uses a static to have an address. */
 static __CCMapGeneric __cc_map_generic_dummy = {0, NULL, NULL, NULL};
 static inline __CCMapGeneric* __cc_map_generic_init(void *arena) {
@@ -72,10 +71,7 @@ static inline __CCMapGeneric* __cc_map_generic_init(void *arena) {
     return &__cc_map_generic_dummy;
 }
 
-/* Macro-based init that accepts any key/value types - parser mode just validates types. */
-#define __CC_MAP_INIT(K, V, arena) __cc_map_generic_init((void*)(arena))
-
-/* Parser-mode method stubs - just need to type-check, not actually run.
+/* Parser fallback method stubs - just need to type-check, not actually run.
    get() returns void* (treated as V*). */
 static inline int __cc_map_generic_insert(__CCMapGeneric *m, ...) {
     (void)m;
@@ -106,43 +102,6 @@ static inline void __cc_map_generic_clear(__CCMapGeneric *m) {
 static inline void __cc_map_generic_destroy(__CCMapGeneric *m) {
     (void)m;
 }
-
-/* Parser-mode: common Map types are aliases to __CCMapGeneric */
-typedef __CCMapGeneric Map_int_int;
-typedef __CCMapGeneric Map_int_voidptr;
-typedef __CCMapGeneric Map_int_charptr;
-typedef __CCMapGeneric Map_uint64_t_int;
-typedef __CCMapGeneric Map_uint64_t_voidptr;
-
-/* Parser-mode: function aliases for common Map types.
-   Maps Map_K_V_method to generic stubs so direct function calls compile. */
-#define Map_int_int_init(a)       __cc_map_generic_init((void*)(a))
-#define Map_int_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
-#define Map_int_int_put(m, k, v, r) __cc_map_generic_put((m), (k), (v), (r))
-#define Map_int_int_get(m, k)     __cc_map_generic_get((m), (k))
-#define Map_int_int_get_ptr(m, k) __cc_map_generic_get((m), (k))
-#define Map_int_int_remove(m, k)  __cc_map_generic_remove((m), (k))
-#define Map_int_int_del(m, k)     __cc_map_generic_del((m), (k))
-#define Map_int_int_len(m)        __cc_map_generic_len((m))
-#define Map_int_int_clear(m)      __cc_map_generic_clear((m))
-#define Map_int_int_destroy(m)    __cc_map_generic_destroy((m))
-
-#define Map_uint64_t_int_init(a)       __cc_map_generic_init((void*)(a))
-#define Map_uint64_t_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
-#define Map_uint64_t_int_get(m, k)     __cc_map_generic_get((m), (k))
-#define Map_uint64_t_int_get_ptr(m, k) __cc_map_generic_get((m), (k))
-#define Map_uint64_t_int_len(m)        __cc_map_generic_len((m))
-
-#else /* !CC_PARSER_MODE - real compilation */
-
-/* In real compilation, __CC_MAP expands to the actual type name.
-   The codegen pass ensures CC_MAP_DECL_ARENA is emitted for each type. */
-#define __CC_MAP(K, V) Map_##K##_##V
-
-/* In real mode, init calls the generated type-specific function */
-#define __CC_MAP_INIT(K, V, arena) Map_##K##_##V##_init((arena))
-
-#endif /* CC_PARSER_MODE */
 
 /*
  * Hash function helpers
@@ -208,14 +167,20 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
  */
 #ifdef CC_PARSER_MODE
 #define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \
-    typedef __CCMapGeneric Name;                                                     \
+    typedef struct {                                                                 \
+        size_t count;                                                                \
+        void *keys;                                                                  \
+        void *vals;                                                                  \
+        void *arena;                                                                 \
+    } Name;                                                                          \
                                                                                      \
     static inline uint64_t Name##__layout(void) {                                    \
         return 0;                                                                    \
     }                                                                                \
                                                                                      \
     static inline Name *Name##_init(CCArena *arena) {                                \
-        return (Name *)__cc_map_generic_init((void *)(arena));                       \
+        (void)arena;                                                                 \
+        return (Name *)&__cc_map_generic_dummy;                                      \
     }                                                                                \
                                                                                      \
     static inline Name *Name##_init_count(CCArena *arena, size_t count) {            \
@@ -224,36 +189,41 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
     }                                                                                \
                                                                                      \
     static inline void Name##_destroy(Name *h) {                                     \
-        __cc_map_generic_destroy((__CCMapGeneric *)(h));                             \
+        (void)h;                                                                     \
     }                                                                                \
                                                                                      \
-    static inline int Name##_insert(Name *h, K key, V val) {                         \
-        return __cc_map_generic_insert((__CCMapGeneric *)(h), key, val);             \
+    static inline int Name##_insert(Name *h, ...) {                                  \
+        (void)h;                                                                     \
+        return 0;                                                                    \
     }                                                                                \
                                                                                      \
-    static inline int Name##_put(Name *h, K key, V val, int *ret) {                  \
-        return __cc_map_generic_put((__CCMapGeneric *)(h), key, val, ret);           \
+    static inline int Name##_put(Name *h, ...) {                                     \
+        (void)h;                                                                     \
+        return 0;                                                                    \
     }                                                                                \
                                                                                      \
-    static inline V *Name##_get(Name *h, K key) {                                    \
-        (void)key;                                                                   \
-        return (V *)__cc_map_generic_get((__CCMapGeneric *)(h));                     \
+    static inline void *Name##_get(Name *h, ...) {                                   \
+        (void)h;                                                                     \
+        return NULL;                                                                 \
     }                                                                                \
                                                                                      \
-    static inline V *Name##_get_ptr(Name *h, K key) {                                \
-        return Name##_get(h, key);                                                   \
+    static inline void *Name##_get_ptr(Name *h, ...) {                               \
+        (void)h;                                                                     \
+        return NULL;                                                                 \
     }                                                                                \
                                                                                      \
-    static inline bool Name##_remove(Name *h, K key) {                               \
-        return __cc_map_generic_remove((__CCMapGeneric *)(h), key) != 0;             \
+    static inline bool Name##_remove(Name *h, ...) {                                 \
+        (void)h;                                                                     \
+        return false;                                                                \
     }                                                                                \
                                                                                      \
-    static inline bool Name##_del(Name *h, K key) {                                  \
-        return Name##_remove(h, key);                                                \
+    static inline bool Name##_del(Name *h, ...) {                                    \
+        (void)h;                                                                     \
+        return false;                                                                \
     }                                                                                \
                                                                                      \
     static inline size_t Name##_len(const Name *h) {                                 \
-        return __cc_map_generic_len((const __CCMapGeneric *)(h));                    \
+        return h ? h->count : 0;                                                     \
     }                                                                                \
                                                                                      \
     static inline size_t Name##_cap(const Name *h) {                                 \
@@ -261,7 +231,7 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
     }                                                                                \
                                                                                      \
     static inline void Name##_clear(Name *h) {                                       \
-        __cc_map_generic_clear((__CCMapGeneric *)(h));                               \
+        (void)h;                                                                     \
     }
 #else
 #define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                               \

@@ -193,6 +193,14 @@ perf-check: cc
 	fi; \
 	echo "All perf tests OK"
 
+# Compiler perf baseline / regression guard. See perf/README.md
+# "Compiler perf baseline" section for what each captured metric means.
+perf-baseline: cc tools
+	@./scripts/capture_baseline.sh
+
+perf-regress: cc tools
+	@./tools/cc_perf_check.sh
+
 # Run examples, stress, and perf in one go.
 full-check: examples-check stress-check perf-check
 

@@ -18,8 +18,9 @@ Environment variables and flags (see [DEBUG_VARS.md](../diag/DEBUG_VARS.md)):
 CC_DEBUG_REPARSE=1 ccc build foo.ccs
 CC_DEBUG_DIAG=1 ccc build foo.ccs
 ccc build foo.ccs --show-lowered=phase3
-CC_BATCH_PHASE3=1 ccc build foo.ccs   # experimental Phase 3 batching
 ```
+
+Phase 3 lowering runs in two batched stages (UFCS, then closure_calls + autoblock + await_normalize); see [PIPELINE.md](PIPELINE.md).
 
 Baseline metrics: `scripts/capture_baseline.sh` → `perf/baseline_M0.txt`.
 

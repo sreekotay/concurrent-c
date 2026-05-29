@@ -12,7 +12,7 @@
  *   - one of the 9 hardcoded primitives (int, char, …);
  *   - one of the 8 hardcoded pre-baked Vec typedefs (CCVec_int, …);
  *   - a generic container instantiation in this TU's
- *     `CCTypeRegistry` (Vec<T> → CCVec_T, Map<K,V> → Map_K_V);
+ *     `CCTypeRegistry` (CCVec::[T] → CCVec_T, Map<K,V> → Map_K_V);
  *   - a struct registered in this TU via
  *     CC_TYPE_INFO_BEGIN(T) / CC_TYPE_INFO_END(T, ...).
  *

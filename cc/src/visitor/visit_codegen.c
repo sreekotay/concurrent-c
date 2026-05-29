@@ -58,7 +58,7 @@
 
 /* Emit `static const cc_type_info __cc_ti_<mangled>` + the
  * auto-registering `cc__ti_reg_<mangled>` constructor for one
- * codegen-emitted container instantiation (Vec<T>, Map<K,V>).
+ * codegen-emitted container instantiation (CCVec::[T], Map<K,V>).
  * The shape is identical for both, so this helper exists to
  * keep the two call sites in sync.
  *
@@ -125,23 +125,14 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
-typedef int (*CCCodegenEditCollectorFn)(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        CCEditBuffer* eb);
-static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
-                                         const CCVisitorCtx* ctx,
-                                         char** src_io,
-                                         size_t* len_io,
-                                         const char* base_src,
-                                         CCCodegenEditCollectorFn collect,
-                                         int* out_changed);
-
+typedef enum CCPhase3Stage CCPhase3Stage;
 static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
                                            const CCVisitorCtx* ctx,
                                            char** src_io,
                                            size_t* len_io,
                                            const char* base_src,
-                                           int* out_changed);
+                                           int* out_changed,
+                                           CCPhase3Stage stage);
 
 static size_t cc__cg_line_start_before(const char* src, size_t pos) {
     if (!src) return 0;
@@ -807,51 +798,55 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
     return out;
 }
 
-static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
-                                         const CCVisitorCtx* ctx,
-                                         char** src_io,
-                                         size_t* len_io,
-                                         const char* base_src,
-                                         CCCodegenEditCollectorFn collect,
-                                         int* out_changed) {
-    CCEditBuffer eb;
-    if (out_changed) *out_changed = 0;
-    if (!root || !ctx || !src_io || !*src_io || !len_io || !collect) return 0;
-    cc_edit_buffer_init(&eb, *src_io, *len_io);
-    if (collect(root, ctx, &eb) < 0) {
-        cc_edit_buffer_free(&eb);
-        return -1;
-    }
-    if (eb.count > 0) {
-        size_t new_len = 0;
-        char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
-        if (rewritten) {
-            if (*src_io != base_src) free(*src_io);
-            *src_io = rewritten;
-            *len_io = new_len;
-            if (out_changed) *out_changed = 1;
-        }
-    }
-    cc_edit_buffer_free(&eb);
-    return 0;
-}
-
 /* M2: collect UFCS + closure_calls + autoblock + await_normalize in one apply. */
+/* Phase-3 batching is split into two stages because UFCS is a *producer* of
+ * new call sites that the other Phase-3 passes need to see:
+ *
+ *   - Stage 1 (UFCS_ONLY): collects UFCS edits only.  After applying, the
+ *     caller reparses so downstream passes see the lowered `method(obj)`
+ *     call form in the AST.
+ *
+ *   - Stage 2 (POST_UFCS): batches closure_calls + autoblock +
+ *     await_normalize.  These passes target disjoint constructs (closure
+ *     calls / blocking calls / await expressions) and are AST-driven
+ *     against the post-UFCS reparse, so they compose into a single edit
+ *     buffer apply and a single reparse.
+ *
+ * The single-stage variant (all four collectors into one buffer) collided
+ * for ~1% of programs because await's replacement of `await EXPR` covers
+ * the same byte range as UFCS's replacement of `EXPR` when `EXPR` is a
+ * UFCS call inside the await — a genuine semantic dependency that
+ * sequential mode resolved via an interleaved reparse.  Two-stage
+ * preserves the UFCS-first ordering while collapsing 4 → 2 reparses.
+ */
+typedef enum CCPhase3Stage {
+    CC_PHASE3_STAGE_UFCS_ONLY = 0,
+    CC_PHASE3_STAGE_POST_UFCS = 1,
+} CCPhase3Stage;
+
 static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
                                            const CCVisitorCtx* ctx,
                                            char** src_io,
                                            size_t* len_io,
                                            const char* base_src,
-                                           int* out_changed) {
+                                           int* out_changed,
+                                           CCPhase3Stage stage) {
     CCEditBuffer eb;
     if (out_changed) *out_changed = 0;
     if (!root || !ctx || !src_io || !*src_io || !len_io) return 0;
 
     cc_edit_buffer_init(&eb, *src_io, *len_io);
-    if (cc__collect_ufcs_edits(root, ctx, &eb) < 0 ||
-        cc__collect_closure_calls_edits(root, ctx, &eb) < 0 ||
-        cc__collect_autoblocking_edits(root, ctx, &eb) < 0 ||
-        cc__collect_await_normalize_edits(root, ctx, &eb) < 0) {
+    int rc = 0;
+    if (stage == CC_PHASE3_STAGE_UFCS_ONLY) {
+        if (cc__collect_ufcs_edits(root, ctx, &eb) < 0) rc = -1;
+    } else {
+        if (cc__collect_closure_calls_edits(root, ctx, &eb) < 0 ||
+            cc__collect_autoblocking_edits(root, ctx, &eb) < 0 ||
+            cc__collect_await_normalize_edits(root, ctx, &eb) < 0) {
+            rc = -1;
+        }
+    }
+    if (rc < 0) {
         cc_edit_buffer_free(&eb);
         return -1;
     }
@@ -863,8 +858,14 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
             *src_io = rewritten;
             *len_io = new_len;
             if (out_changed) *out_changed = 1;
-            cc_debug_log("lower", "phase3 batched apply: %d edits", eb.count);
-            cc_diag_maybe_dump_lowered("phase3", rewritten, new_len);
+            if (cc_debug_enabled("LOWER")) {
+                cc_debug_log("lower", "phase3 batched stage %d apply: %d edits",
+                             (int)stage, eb.count);
+            }
+            cc_diag_maybe_dump_lowered(stage == CC_PHASE3_STAGE_UFCS_ONLY
+                                           ? "phase3-stage1-ufcs"
+                                           : "phase3-stage2-post-ufcs",
+                                       rewritten, new_len);
         }
     }
     cc_edit_buffer_free(&eb);
@@ -1237,35 +1238,22 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
     return out;
 }
 
-/* Helper: reparse source string to AST (in-memory). */
-/* Per-reparse flags forwarded from the caller (visitor ctx).  Kept as a
- * separate small struct so we don't have to plumb the full CCVisitorCtx
- * through every reparse callsite. */
-typedef struct {
-    int src_is_pre_expanded;  /* M1: pp_in is already a pre-expanded buffer
-                               * (system headers inlined).  Skip the
-                               * reparse prelude prepend + .cch lowering. */
-} CCReparseFlags;
-
 static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                                                const char* input_path, CCSymbolTable* symbols,
-                                               const char* stage,
-                                               const CCReparseFlags* flags);
+                                               const char* stage);
 
 static CCASTRoot* cc__reparse_source_to_ast_ctx(const CCVisitorCtx* ctx,
                                                 const char* src, size_t src_len,
                                                 const char* stage) {
-    CCReparseFlags flags = { .src_is_pre_expanded = (ctx && ctx->src_is_pre_expanded) };
     return cc__reparse_source_to_ast_ex(src, src_len,
                                         ctx ? ctx->input_path : NULL,
                                         ctx ? ctx->symbols : NULL,
-                                        stage, &flags);
+                                        stage);
 }
 
 static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                                                const char* input_path, CCSymbolTable* symbols,
-                                               const char* stage,
-                                               const CCReparseFlags* flags) {
+                                               const char* stage) {
     CCTypeRegistryScope reg_scope;
     int reg_pushed = cc_type_registry_scope_push(&reg_scope);
     char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
@@ -1332,23 +1320,7 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     int strict_had_env = strict_env != NULL;
     char* strict_saved = strict_env ? strdup(strict_env) : NULL;
     unsetenv("CC_STRICT_RESULT_UNWRAP");
-    char* pp_buf = NULL;
-    if (flags && flags->src_is_pre_expanded) {
-        /* M1: when input is already pre-expanded, skip the heavy
-         * `cc_preprocess_for_reparse` chain.  Its outputs — phase-1
-         * lowering (chan handle, slice, generic containers) and the
-         * `#include <ccc/std/vec.cch>` + `cc_result.cch` prelude — would
-         * either re-process already-lowered tokens (no-op at best) or
-         * pull in system headers that are already inlined here
-         * (double-decl).  Just take the input as-is. */
-        pp_buf = (char*)malloc(pp_in_len + 1);
-        if (pp_buf) {
-            memcpy(pp_buf, pp_in, pp_in_len);
-            pp_buf[pp_in_len] = '\0';
-        }
-    } else {
-        pp_buf = cc_preprocess_for_reparse(pp_in, pp_in_len, input_path);
-    }
+    char* pp_buf = cc_preprocess_for_reparse(pp_in, pp_in_len, input_path);
     if (strict_had_env) {
         setenv("CC_STRICT_RESULT_UNWRAP", strict_saved ? strict_saved : "", 1);
     } else {
@@ -1386,19 +1358,9 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
         }
     }
     size_t pp_len = strlen(pp_buf);
-    char* prep = NULL;
-    /* M1: when the caller's working buffer is the pre-expanded form,
-     * container type declarations, result types, and system headers
-     * are already inlined.  Re-running `cc__prepend_reparse_prelude`
-     * would double-declare types like `__mbstate_t` from the Apple SDK. */
-    int src_pre_expanded = (flags && flags->src_is_pre_expanded);
-    if (src_pre_expanded) {
-        prep = pp_buf;
-    } else {
-        prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
-        free(pp_buf);
-        if (!prep) goto done;
-    }
+    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
+    free(pp_buf);
+    if (!prep) goto done;
     {
         char* parser_helpers = cc__rewrite_result_helper_calls_for_parser(prep, pp_len);
         if (parser_helpers) {
@@ -3407,159 +3369,6 @@ static int cc__is_parser_placeholder_type_codegen(const char* type_name) {
             strcmp(type_name, "__CCResultGeneric*") == 0);
 }
 
-/* Rewrite `if @try (T x = expr) { ... } else { ... }` into expanded form:
-   { __typeof__(expr) __cc_try_bind = (expr);
-     if (__cc_try_bind.ok) { T x = __cc_try_bind.u.value; ... }
-     else { ... } }
-*/
-static char* cc__rewrite_if_try_syntax(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    
-    while (i < n) {
-        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
-        /* Skip comments and strings */
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Look for `if @try (` */
-        if (c == 'i' && c2 == 'f') {
-            int ws = (i == 0) || !cc_is_ident_char(src[i-1]);
-            int we = (i+2 >= n) || !cc_is_ident_char(src[i+2]);
-            if (ws && we) {
-                size_t if_start = i, j = i + 2;
-                /* Skip whitespace after 'if' */
-                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-                /* Check for '@try' */
-                if (j+4 <= n && src[j] == '@' && src[j+1] == 't' && src[j+2] == 'r' && src[j+3] == 'y' &&
-                    (j+4 >= n || !cc_is_ident_char(src[j+4]))) {
-                    size_t after_try = j + 4;
-                    while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
-                    /* Expect '(' */
-                    if (after_try < n && src[after_try] == '(') {
-                        size_t cond_start = after_try + 1;
-                        /* Find matching ')' */
-                        size_t cond_end = cond_start;
-                        int paren = 1, in_s = 0, in_c = 0;
-                        while (cond_end < n && paren > 0) {
-                            char ec = src[cond_end];
-                            if (in_s) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '"') in_s = 0; cond_end++; continue; }
-                            if (in_c) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '\'') in_c = 0; cond_end++; continue; }
-                            if (ec == '"') { in_s = 1; cond_end++; continue; }
-                            if (ec == '\'') { in_c = 1; cond_end++; continue; }
-                            if (ec == '(') paren++;
-                            else if (ec == ')') { paren--; if (paren == 0) break; }
-                            cond_end++;
-                        }
-                        if (paren != 0) { i++; continue; }
-                        
-                        /* Parse T x = expr from cond_start to cond_end */
-                        size_t eq = cond_start;
-                        while (eq < cond_end && src[eq] != '=') eq++;
-                        if (eq >= cond_end) { i++; continue; }
-                        
-                        /* Type and var before '=' */
-                        size_t tv_end = eq;
-                        while (tv_end > cond_start && (src[tv_end-1] == ' ' || src[tv_end-1] == '\t')) tv_end--;
-                        size_t var_end = tv_end, var_start = var_end;
-                        while (var_start > cond_start && cc_is_ident_char(src[var_start-1])) var_start--;
-                        if (var_start >= var_end) { i++; continue; }
-                        
-                        size_t type_end = var_start;
-                        while (type_end > cond_start && (src[type_end-1] == ' ' || src[type_end-1] == '\t')) type_end--;
-                        size_t type_start = cond_start;
-                        while (type_start < type_end && (src[type_start] == ' ' || src[type_start] == '\t')) type_start++;
-                        if (type_start >= type_end) { i++; continue; }
-                        
-                        /* Expr after '=' */
-                        size_t expr_start = eq + 1;
-                        while (expr_start < cond_end && (src[expr_start] == ' ' || src[expr_start] == '\t')) expr_start++;
-                        size_t expr_end = cond_end;
-                        while (expr_end > expr_start && (src[expr_end-1] == ' ' || src[expr_end-1] == '\t')) expr_end--;
-                        if (expr_start >= expr_end) { i++; continue; }
-                        
-                        /* Find then-block */
-                        size_t k = cond_end + 1; /* skip ')' */
-                        while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
-                        if (k >= n || src[k] != '{') { i++; continue; }
-                        
-                        size_t then_start = k;
-                        int brace = 1; k++; in_s = 0; in_c = 0;
-                        while (k < n && brace > 0) {
-                            char ec = src[k];
-                            if (in_s) { if (ec == '\\' && k+1 < n) k++; else if (ec == '"') in_s = 0; k++; continue; }
-                            if (in_c) { if (ec == '\\' && k+1 < n) k++; else if (ec == '\'') in_c = 0; k++; continue; }
-                            if (ec == '"') { in_s = 1; k++; continue; }
-                            if (ec == '\'') { in_c = 1; k++; continue; }
-                            if (ec == '{') brace++; else if (ec == '}') brace--;
-                            k++;
-                        }
-                        size_t then_end = k;
-                        
-                        /* Check for else */
-                        size_t else_start = 0, else_end = 0, m = k;
-                        while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
-                        if (m+4 <= n && src[m] == 'e' && src[m+1] == 'l' && src[m+2] == 's' && src[m+3] == 'e' &&
-                            (m+4 >= n || !cc_is_ident_char(src[m+4]))) {
-                            m += 4;
-                            while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
-                            if (m < n && src[m] == '{') {
-                                else_start = m; brace = 1; m++; in_s = 0; in_c = 0;
-                                while (m < n && brace > 0) {
-                                    char ec = src[m];
-                                    if (in_s) { if (ec == '\\' && m+1 < n) m++; else if (ec == '"') in_s = 0; m++; continue; }
-                                    if (in_c) { if (ec == '\\' && m+1 < n) m++; else if (ec == '\'') in_c = 0; m++; continue; }
-                                    if (ec == '"') { in_s = 1; m++; continue; }
-                                    if (ec == '\'') { in_c = 1; m++; continue; }
-                                    if (ec == '{') brace++; else if (ec == '}') brace--;
-                                    m++;
-                                }
-                                else_end = m;
-                            }
-                        }
-                        
-                        /* Emit expansion */
-                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, if_start - last_emit);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "{ __typeof__(");
-                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_try_bind = (");
-                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); if (__cc_try_bind.ok) { ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + type_start, type_end - type_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_end - var_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " = __cc_try_bind.u.value; ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + then_start + 1, then_end - then_start - 2);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
-                        if (else_end > else_start) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, " else ");
-                            cc_sb_append(&out, &out_len, &out_cap, src + else_start, else_end - else_start);
-                        }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
-                        
-                        last_emit = (else_end > 0) ? else_end : then_end;
-                        i = last_emit;
-                        continue;
-                    }
-                }
-            }
-        }
-        i++;
-    }
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
 int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) {
     if (!ctx || !ctx->symbols || !output_path) return EINVAL;
     const char* src_path = ctx->input_path ? ctx->input_path : "<cc_input>";
@@ -3617,54 +3426,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        For final codegen we still read the original source and lower UFCS plus
        the remaining AST/text passes that operate on original spans
        here; the preprocessor's temp file exists only to make TCC parsing
-       succeed. Note: text-based rewrites like `if @try` run on original source
-       early in this function. */
+       succeed. */
     /* Read original source once; later passes still rewrite against original spans. */
-    /* M1 Phase 4 step (c) — DEFERRED (2026-05-27).
-     *
-     * The plan was to swap src_all here from `cc__read_entire_file(input_path)`
-     * to a duplicate of `ctx->pre_expanded_buf` when pre-expand is on.  The
-     * plumbing for the swap is all in place (ctx->pre_expanded_buf is
-     * populated by walk.c from root->parse_buffer_pre_relower; the
-     * ctx->src_is_pre_expanded reparse-skip flag exists in CCVisitorCtx;
-     * Phase 4 step (b) added in_user_file guards to 7 outer rewrite
-     * scanners) — but a smoke run of the swap surfaced ~30+ test
-     * regressions across channel/spawn/result/closure suites.
-     *
-     * Root cause (from spawn_into_smoke.ccs investigation):
-     *   `pre_expanded_buf` is NOT just-pre-expanded user source.  It has
-     *   already been through CPP expansion AND multiple early-pipeline
-     *   text rewrites (CC type re-lower, chan_send → cc_chan_result_with,
-     *   etc.).  E.g. user's `CCTask[~4 >] tx;` lands in pre_expanded_buf
-     *   as `CCChanTx tx;`, and `chan_send(tx, x)` lands as
-     *   `cc_chan_result_with(...)`.
-     *
-     *   The visitor passes here expect UN-rewritten user-facing CC syntax
-     *   so they can match patterns like `T[~N >]`, `cc_channel_pair`, etc.
-     *   Feeding them the already-rewritten buffer means matches that
-     *   previously fired on user source now fire (or fail to fire) on the
-     *   wrong-shape text, producing diagnostics that point at the
-     *   pre-expand buffer's coordinates instead of the user file.
-     *
-     * Right fix for a future commit (NOT this one):
-     *   Either (a) capture a SEPARATE pre-rewrite snapshot in the AST root
-     *   (e.g. `parse_buffer_post_cpp_pre_any_rewrite`) and have walk.c
-     *   expose it through a new ctx field, OR (b) reorder the pipeline so
-     *   the text rewrites that produce `cc_chan_result_with` etc. run as
-     *   part of the visitor chain (consuming src_all) instead of inline
-     *   in build_parse_input.c before the buffer is exposed.  Option (b)
-     *   is the architecturally cleaner one but a bigger lift.
-     *
-     * Phase 4 step (b) guards stay in tree as harmless no-ops (raw user
-     * source has no `#line` directives → in_user_file stays 1 → guards
-     * never fire) and become load-bearing once the right buffer reaches
-     * src_all.
-     *
-     * The m0_5_diag_origin_line_fail bug ALSO turned out to have a
-     * preprocessor-side root cause (synthetic CCResult_* typedefs are
-     * injected INTO the `#line N "user.ccs"` region without a fresh
-     * `#line` reset, so TCC's line counter overshoots).  That bug needs
-     * a fix in the preprocessor/result-spec path, NOT here. */
     char* src_all = NULL;
     char* src_regs = NULL;
     size_t src_len = 0;
@@ -3820,17 +3583,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* Rewrite `if @try (T x = expr) { ... }` into expanded form */
-    if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc__rewrite_if_try_syntax(src_ufcs, src_ufcs_len);
-        if (rewritten) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = strlen(rewritten);
-        }
-    }
-
-    /* Rewrite generic container syntax: CCVec<T> -> CCVec_T, cc_vec_new<T>() -> CCVec_T_init() */
+    /* Rewrite generic container syntax: CCVec::[T] -> CCVec_T, cc_vec_new::[T]() -> CCVec_T_init() */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);
         if (rewritten) {
@@ -3899,8 +3652,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         int phase3_changed = 0;
         /* The incoming `root` was parsed from `src_all` (the phase-1 canonical
          * source).  If any phase-2 text pass has rewritten `src_ufcs` since
-         * then — `cc__rewrite_result_unwrap`, `cc__rewrite_err_syntax`,
-         * `cc__rewrite_try_exprs_text`, etc. — the AST's line/col anchors no
+         * then — `cc__rewrite_result_unwrap`, `cc__rewrite_err_syntax`, etc. — the AST's line/col anchors no
          * longer align with the buffer that UFCS edit collection is about
          * to scan, and worse, TCC's resolved receiver types in `aux_s2` can
          * reflect parses where `@errhandler(CCError e) { ... }` was still
@@ -3927,92 +3679,32 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             phase3_root = phase3_owned_root;
         }
         cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
-        if (getenv("CC_BATCH_PHASE3")) {
-            if (src_ufcs &&
-                (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
-                 cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
-                char* cs = cc__rewrite_at_call_site_mode(src_ufcs, src_ufcs_len);
-                if (cs) {
-                    if (src_ufcs != src_all) free(src_ufcs);
-                    src_ufcs = cs;
-                    src_ufcs_len = strlen(cs);
-                }
-            }
-            phase3_changed = 0;
-            if (cc__apply_batched_phase3_passes(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
-                                                src_all, &phase3_changed) < 0) {
-                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-            if (phase3_changed) {
-                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-                phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
-                                                                  "phase3 after batched rewrite");
-                if (!phase3_owned_root) {
-                    fclose(out);
-                    if (src_ufcs != src_all) free(src_ufcs);
-                    free(src_all);
-                    free(closure_protos);
-                    free(closure_defs);
-                    return EINVAL;
-                }
-                phase3_root = phase3_owned_root;
-            } else if (phase3_owned_root) {
-                cc_tcc_bridge_free_ast(phase3_owned_root);
-                phase3_owned_root = NULL;
-            }
-        } else {
-        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
-                                          src_all, cc__collect_ufcs_edits, &phase3_changed) < 0) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            free(closure_protos);
-            free(closure_defs);
-            return EINVAL;
-        }
-        if (phase3_changed) {
-            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
-                                                              "phase3 after coarse UFCS rewrite");
-            if (!phase3_owned_root) {
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-            phase3_root = phase3_owned_root;
-        }
-        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
-                                          src_all, cc__collect_closure_calls_edits, &phase3_changed) < 0) {
-            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            free(closure_protos);
-            free(closure_defs);
-            return EINVAL;
-        }
-        if (phase3_changed) {
-            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
-                                                              "phase3 after closure-call rewrite");
-            if (!phase3_owned_root) {
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-            phase3_root = phase3_owned_root;
-        }
+        /* Phase 3 lowering — two-stage batched pipeline.
+         *
+         * Stage 0 (text): if any `@blocking` / `@noblock` call-site markers
+         * are present, rewrite them in-buffer first so the stage-1 AST is
+         * parsed against the marker-resolved form.  This is a pure text
+         * transform and does not perturb byte offsets at the granularity
+         * the AST passes care about.
+         *
+         * Stage 1 (UFCS): collects only `cc__collect_ufcs_edits` into the
+         * edit buffer and applies them.  UFCS lowers `obj.method(...)` →
+         * `method(obj, ...)`, *producing* new conventional call sites.
+         * Stage 2's collectors are AST-driven against CALL nodes whose
+         * `is_ufcs` flag has been cleared by lowering, so they need to see
+         * the post-UFCS AST — hence the mandatory reparse barrier here.
+         *
+         * Stage 2 (post-UFCS): collects closure_calls + autoblock +
+         * await_normalize into a single edit buffer and applies them in
+         * one shot.  These three passes target disjoint constructs
+         * (closure-typed CALL nodes / blocking CALL nodes inside @async /
+         * await expressions) and emit non-overlapping per-span edits, so
+         * one collect+apply+reparse cycle covers all three.
+         *
+         * Net reparses in Phase 3: 2 (one per stage when each produces
+         * changes; fewer when a stage emits no edits).  The legacy
+         * sequential pipeline did 4 (one per pass).  See PIPELINE.md.
+         */
         if (src_ufcs &&
             (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
              cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
@@ -4021,22 +3713,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = cs;
                 src_ufcs_len = strlen(cs);
-                if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-                phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
-                                                                  "phase3 after call-site mode rewrite");
-                if (!phase3_owned_root) {
-                    fclose(out);
-                    if (src_ufcs != src_all) free(src_ufcs);
-                    free(src_all);
-                    free(closure_protos);
-                    free(closure_defs);
-                    return EINVAL;
-                }
-                phase3_root = phase3_owned_root;
             }
         }
-        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
-                                          src_all, cc__collect_autoblocking_edits, &phase3_changed) < 0) {
+        phase3_changed = 0;
+        if (cc__apply_batched_phase3_passes(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                            src_all, &phase3_changed,
+                                            CC_PHASE3_STAGE_UFCS_ONLY) < 0) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -4048,7 +3730,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (phase3_changed) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
-                                                              "phase3 after autoblock rewrite");
+                                                              "phase3 stage 1 (UFCS) reparse");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -4059,8 +3741,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             phase3_root = phase3_owned_root;
         }
-        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
-                                          src_all, cc__collect_await_normalize_edits, &phase3_changed) < 0) {
+        phase3_changed = 0;
+        if (cc__apply_batched_phase3_passes(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                            src_all, &phase3_changed,
+                                            CC_PHASE3_STAGE_POST_UFCS) < 0) {
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -4069,8 +3753,23 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(closure_defs);
             return EINVAL;
         }
-        if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-        } /* !CC_BATCH_PHASE3 */
+        if (phase3_changed) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
+                                                              "phase3 stage 2 (post-UFCS) reparse");
+            if (!phase3_owned_root) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            phase3_root = phase3_owned_root;
+        } else if (phase3_owned_root) {
+            cc_tcc_bridge_free_ast(phase3_owned_root);
+            phase3_owned_root = NULL;
+        }
 
         /* Debug output for await rewrite */
         if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {
@@ -4134,7 +3833,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     /* Internal reparses need parser-safe container receiver types too. When
-       src_ufcs still carries raw `Vec<T>` / `Map<K,V>` syntax, direct field UFCS
+       src_ufcs still carries raw generic container syntax, direct field UFCS
        like `c.items.push(...)` can survive the initial parse but fail later
        during these in-memory reparses. Canonicalize containers here so the
        subsequent reparses see the same receiver shapes as the main parser. */
@@ -4226,8 +3925,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering.
-       These rewrites run before marker stripping to keep spans stable. */
-    if (src_ufcs && ctx && ctx->symbols) {
+       These rewrites run before marker stripping to keep spans stable.
+
+       Pre-check: the only consumer in this block today is the closure-literal
+       lift (`cc__rewrite_closure_literals_with_nodes`), which is a no-op for
+       any TU that contains no `=>` closure-literal tokens.  Gating the reparse
+       on `=>` presence skips an unconditional reparse + buffer alloc for the
+       ~70% of TUs that have no closures (measured 2026-05-28 across the 461
+       smoke suite).  The token check is inert-region-aware (skips `=>`
+       inside comments, string/char literals, and pp directive bodies). */
+    if (src_ufcs && src_ufcs_len && ctx && ctx->symbols &&
+        cc_contains_token_top_level(src_ufcs, src_ufcs_len, "=>")) {
         cc__debug_dump_reparse_source("stage1_pre_stmt", src_ufcs, src_ufcs_len, ctx->input_path);
         CCASTRoot* root3 = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
                                                          "statement-lowering input");
@@ -4240,13 +3948,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs.
          *
-         * Pass `skip_inline_protos=1` so the closure pass does NOT splice a
-         * forward decl into the enclosing function body — we place the
-         * file-scope protos at top-of-file ourselves below (see the
-         * `closure_protos` merge that uses cc__find_protos_insertion_point).
-         * The legacy in-source path is brittle: when the closure is nested
-         * inside an `if`/`for` block, the walker lands the decl inside that
-         * block, where `static T fn();` is a C constraint violation. */
+         * File-scope forward decls land at top-of-file via the
+         * `closure_protos` merge below (uses cc__find_protos_insertion_point).
+         * The legacy in-source walker that spliced forward decls into the
+         * enclosing function body was deleted 2026-05-28 — it was brittle
+         * when the closure sat inside an `if`/`for` block (C99 6.7.1
+         * forbids `static T fn();` at block scope). */
         {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
@@ -4254,11 +3961,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             size_t protos_len = 0;
             char* defs = NULL;
             size_t defs_len = 0;
-            int r = cc__rewrite_closure_literals_with_nodes_ex(root3, ctx, src_ufcs, src_ufcs_len,
-                                                               &rewritten, &rewritten_len,
-                                                               &protos, &protos_len,
-                                                               &defs, &defs_len,
-                                                               /*skip_inline_protos=*/1);
+            int r = cc__rewrite_closure_literals_with_nodes(root3, ctx, src_ufcs, src_ufcs_len,
+                                                            &rewritten, &rewritten_len,
+                                                            &protos, &protos_len,
+                                                            &defs, &defs_len);
             if (r < 0) {
                 cc_tcc_bridge_free_ast(root3);
                 fclose(out);
@@ -4421,8 +4127,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
                 cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
                     "/* --- CC container type macros (auto-positioned after typedefs) --- */\n");
-                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
-                    "#ifndef CC_PARSER_MODE\n");
                 
                 /* Emit Vec declarations */
                 for (size_t i = 0; i < n_vec; i++) {
@@ -4453,7 +4157,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             inst->mangled_name);
                     }
                 }
-                
+
                 /* Emit Map declarations (optionals retired — use the 5-arg convenience macro). */
                 for (size_t i = 0; i < n_map; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
@@ -4483,8 +4187,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     }
                 }
 
-                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
-                    "#endif /* !CC_PARSER_MODE */\n");
                 cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
                     "/* --- end container type macros --- */\n");
             }
@@ -4642,15 +4344,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = err_out_len;
             }
         }
-        /* Rewrite try expr -> cc_try(expr) */
-        {
-            char* rew_try = cc__rewrite_try_exprs_text(ctx, src_ufcs, src_ufcs_len);
-            if (rew_try) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rew_try;
-                src_ufcs_len = strlen(src_ufcs);
-            }
-        }
         /* (retired) The `*opt -> cc_unwrap_opt(opt)` pass used to run here
          * for variables declared with CCOptional_* type. Optionals are
          * retired; `*ptr` dereferences now resolve normally via C. */
@@ -4787,12 +4480,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             size_t defs_buf_len  = closure_defs_stripped ? closure_defs_stripped_len : closure_defs_len;
             /* M-closure refactor: place file-scope forward decls
              * (`closure_protos`) BEFORE the first function definition,
-             * not at the very end.  When the closure pass is invoked with
-             * `skip_inline_protos=1`, there is no longer an in-source
-             * forward decl spliced into the enclosing function; the only
-             * declaration the call site sees comes from this block.  If we
-             * leave it appended at end (after `main()`), the call site
-             * inside `main()` has no visible declaration of
+             * not at the very end.  The closure pass emits *only*
+             * file-scope forward decls into `closure_protos` (the legacy
+             * in-source walker was deleted 2026-05-28), so the only
+             * declaration the call site sees comes from this block.
+             * If we leave it appended at end (after `main()`), the call
+             * site inside `main()` has no visible declaration of
              * `__cc_closure_make_N` and TCC fails to parse.
              *
              * Critically, "before first function definition" — not "after

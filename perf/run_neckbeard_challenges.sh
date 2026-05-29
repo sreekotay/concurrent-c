@@ -156,7 +156,7 @@ fi
 # Go + Zig arena (not covered by compare_arena.sh)
 if [ "$SKIP_GO" -eq 0 ]; then
     echo ""
-    echo "--- Running Go (mcache) ---"
+    echo "--- Running Go (non-escaping alloc, stack-promoted) ---"
     if go run "$SCRIPT_DIR/go/arena_contention.go" > "$TMPDIR_HARNESS/arena_go.out" 2>&1; then
         # The Go program emits a short results block; surface it verbatim.
         cat "$TMPDIR_HARNESS/arena_go.out"

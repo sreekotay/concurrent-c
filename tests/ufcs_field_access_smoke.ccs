@@ -3,14 +3,14 @@
 #include <stdio.h>
 
 typedef struct {
-    Vec<int> items;
+    CCVec::[int] items;
 } Container;
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     
     Container c;
-    c.items = vec_new<int>(&arena);
+    c.items = cc_vec_new::[int](&arena);
     
     /* Value receiver on a struct field should lower with &field. */
     c.items.push(10);
@@ -30,7 +30,7 @@ int main(void) {
     
     /* Pointer receiver on a pointer-valued field should pass the field directly. */
     typedef struct {
-        Vec<int>* items;
+        CCVec::[int]* items;
     } PtrContainer;
     PtrContainer pc;
     pc.items = &c.items;
