@@ -3440,21 +3440,26 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 fprintf(stderr, "  pattern[%zu] = %s\n", ti, pat);
             }
         }
+    }
+    free(src_regs);
+    src_regs = NULL;
+
+    if (src_ufcs && src_ufcs_len) {
         cc_emit_plan_clear_comptime_fragments();
+        if (cc_emit_plan_exec_comptime_blocks(src_ufcs, src_ufcs_len, ctx->input_path) != 0) {
+            fclose(out);
+            free(src_all);
+            if (src_ufcs != src_all) free(src_ufcs);
+            return EINVAL;
+        }
         cc_emit_plan_collect_comptime_emits(src_ufcs, src_ufcs_len);
         char* blanked = cc__blank_comptime_blocks_preserve_layout(src_ufcs, src_ufcs_len);
         if (blanked) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = blanked;
-            /* Blanking preserves layout (length == its input), which may already
-             * be longer than the original file because the seam resolve above
-             * expanded `@comptime for`/`if`.  Track the blanked length, not the
-             * original src_len, or the buffer gets truncated downstream. */
             src_ufcs_len = strlen(blanked);
         }
     }
-    free(src_regs);
-    src_regs = NULL;
 
     if (src_ufcs && src_ufcs_len) {
         char* lowered_includes = cc_rewrite_local_cch_includes_to_lowered_headers(src_ufcs, src_ufcs_len, ctx->input_path);

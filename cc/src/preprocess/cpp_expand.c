@@ -1,9 +1,9 @@
-/* M5.5/M6 alternative spike: run TCC's preprocessor on a source buffer and
- * return the expanded text. Lets existing text passes see post-CPP source so
- * macro-generated CC syntax (e.g. #define CHAN(T) T[~4 >]) works without
- * forking TCC.
+/* Run TCC's preprocessor on a source buffer and return the expanded text.
+ * Lets existing text passes see post-CPP source so macro-generated CC syntax
+ * (e.g. #define CHAN(T) T[~4 >]) works without forking TCC.
  *
- * Enable via CC_PRE_EXPAND=1 (off by default; this is a spike). */
+ * This is now the only initial-parse path: pre-expansion is unconditional
+ * (the CC_PRE_EXPAND opt-out was collapsed 2026-05-29). */
 
 #include "cpp_expand.h"
 

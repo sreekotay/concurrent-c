@@ -118,6 +118,22 @@ size_t cc_emit_plan_comptime_instantiation_count(void);
 void cc_emit_plan_collect_comptime_instantiations(const char* src, size_t len);
 void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph);
 
+/* --- user generic factories (D6.0: declarative templates) ---
+ *
+ * `@comptime { cc_generic_template("Pair", 2, "...$0...$1...$2..."); }` lets a
+ * library register how its generic lowers to C, keyed by name + arity.  At a
+ * `Pair::[int,double]` use site the compiler computes a mangled name, expands
+ * the template ($0 = mangled name, $1..$N = the type args), emits it once via
+ * the comptime-fragment channel, and rewrites the use site to the mangled name.
+ * Modeled on UFCS (library owns the C lowering; compiler owns the splice). */
+#define CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES 64
+void cc_emit_plan_register_generic_template(const char* name, int arity,
+                                            const char* template_src);
+const char* cc_emit_plan_lookup_generic_template(const char* name, int* out_arity);
+/* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
+ * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
+int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);
+
 /* --- comptime fragment buffer (track B2) --- */
 void cc_emit_plan_clear_comptime_fragments(void);
 size_t cc_emit_plan_comptime_fragment_count(void);
@@ -127,5 +143,19 @@ void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
                                           CCEmitPlanComptimeSchedule* out);
 void cc_emit_plan_fprint_comptime_fragment(FILE* out, size_t frag_index);
 int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* input_path);
+
+/* --- comptime executor host API (Stage 0) ---
+ * Injected into libtcc-compiled @comptime blocks via tcc_add_symbol. */
+void cc_emit_plan_host_ctx_begin(size_t site_pos);
+void cc_emit_plan_host_ctx_end(void);
+void cc_emit_plan_host_emit_raw(int anchor, const char* ptr, size_t len);
+void cc_emit_plan_host_instantiate_vec(const char* elem);
+void cc_emit_plan_host_instantiate_map(const char* key, const char* val);
+void cc_emit_plan_host_instantiate_result(const char* ok, const char* err);
+void cc_emit_plan_host_instantiate_chan(const char* elem);
+const void* cc_emit_plan_host_type_of(const char* name);
+
+/* Execute @comptime {} blocks that contain control flow (for/while/do). */
+int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path);
 
 #endif /* CC_EMIT_PLAN_H */
