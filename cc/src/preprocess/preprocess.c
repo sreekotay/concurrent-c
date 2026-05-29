@@ -2834,13 +2834,8 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
             }
         }
     }
-    if (((size_t)(base_end - start) > 4 && memcmp(start, "Vec<", 4) == 0 && base_end[-1] == '>') ||
-        ((size_t)(base_end - start) > 6 && memcmp(start, "Vec::[", 6) == 0 && base_end[-1] == ']') ||
-        ((size_t)(base_end - start) > 6 && memcmp(start, "CCVec<", 6) == 0 && base_end[-1] == '>') ||
-        ((size_t)(base_end - start) > 8 && memcmp(start, "CCVec::[", 8) == 0 && base_end[-1] == ']')) {
-        size_t prefix = ((size_t)(base_end - start) > 8 && memcmp(start, "CCVec::[", 8) == 0) ? 8 :
-                        (((size_t)(base_end - start) > 6 && memcmp(start, "CCVec<", 6) == 0) ? 6 :
-                         ((start[3] == ':') ? 6 : 4));
+    if ((size_t)(base_end - start) > 8 && memcmp(start, "CCVec::[", 8) == 0 && base_end[-1] == ']') {
+        size_t prefix = 8;
         size_t inner_len = (size_t)(base_end - (start + prefix) - 1);
         snprintf(out, out_sz, "__CC_VEC(%.*s)%.*s",
                  (int)inner_len, start + prefix, ptr_count, "********");
@@ -4609,9 +4604,8 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
 }
 
 /* ============================================================================
- * Generic container syntax lowering: CCVec<T> -> CCVec_T, Map<K,V> -> Map_K_V
- * Also: cc_vec_new<T>(...) -> CCVec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
- * Legacy Vec/vec_new spellings remain accepted during migration.
+ * Generic container syntax lowering: CCVec::[T] -> CCVec_T, Map<K,V> -> Map_K_V
+ * Also: cc_vec_new::[T](...) -> CCVec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
  * ============================================================================ */
 
 /* Normalize T[:] -> CCSlice, T[:!] -> CCSliceUnique in a type string */
@@ -4650,15 +4644,10 @@ static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
     cc__trim_type_string(type);
     cc__normalize_slice_in_type(type, type_sz);
 
-    if ((strncmp(type, "Vec::[", 6) == 0 && type[strlen(type) - 1] == ']') ||
-        (strncmp(type, "Vec<", 4) == 0 && type[strlen(type) - 1] == '>') ||
-        (strncmp(type, "CCVec::[", 8) == 0 && type[strlen(type) - 1] == ']') ||
-        (strncmp(type, "CCVec<", 6) == 0 && type[strlen(type) - 1] == '>') ||
+    if ((strncmp(type, "CCVec::[", 8) == 0 && type[strlen(type) - 1] == ']') ||
         (strncmp(type, "__CC_VEC(", 9) == 0 && type[strlen(type) - 1] == ')')) {
         size_t prefix = (strncmp(type, "__CC_VEC(", 9) == 0) ? 9 :
-                        ((strncmp(type, "CCVec::[", 8) == 0) ? 8 :
-                         ((strncmp(type, "CCVec<", 6) == 0) ? 6 :
-                          ((type[3] == ':') ? 6 : 4)));
+                        8;
         size_t inner_len = strlen(type) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, type + prefix, inner_len);
@@ -4814,12 +4803,12 @@ static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, 
 }
 
 /* Rewrite generic container syntax:
-   - CCVec<T> / CCVec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
+   - CCVec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
    - Map<K, V> / Map::[K, V] -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
-   - cc_vec_new<T>(...) / cc_vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
+   - cc_vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
    - map_new<K, V>(...) / map_new::[K, V](...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
-   CCVec::[T] is the preferred syntax; legacy Vec::[T] and <T> spellings are
-   accepted for backward compatibility during migration.
+   Vec<T>, Vec::[T], CCVec<T>, vec_new<T>, vec_new::[T], and cc_vec_new<T>
+   are retired; only the CC-prefixed bracket Vec spelling is accepted.
    Also tracks variable declarations for UFCS resolution. */
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
@@ -4837,10 +4826,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
         
-        /* Look for CCVec<, CCVec::[, legacy Vec<, Vec::[, cc_vec_new<, cc_vec_new::[,
-           legacy vec_new<, vec_new::[, and map_new variants. */
+        /* Look for canonical CCVec::[ / cc_vec_new::[ and Map forms. */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
         int use_bracket = 0;
+        const char* retired_vec_syntax = NULL;
         size_t kw_start = i;
         size_t kw_len = 0;
         
@@ -4848,11 +4837,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             if (i + 8 <= n && memcmp(src + i, "CCVec::[", 8) == 0) {
                 is_vec_type = 1; kw_len = 5; use_bracket = 1;
             } else if (i + 6 <= n && memcmp(src + i, "CCVec<", 6) == 0) {
-                is_vec_type = 1; kw_len = 5;
+                retired_vec_syntax = "CCVec<T>";
             } else if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
-                is_vec_type = 1; kw_len = 3; use_bracket = 1;
+                retired_vec_syntax = "Vec::[T]";
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
-                is_vec_type = 1; kw_len = 3;
+                retired_vec_syntax = "Vec<T>";
             } else if (i + 6 <= n && memcmp(src + i, "Map::[", 6) == 0) {
                 is_map_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
@@ -4860,16 +4849,26 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             } else if (i + 13 <= n && memcmp(src + i, "cc_vec_new::[", 13) == 0) {
                 is_vec_new = 1; kw_len = 10; use_bracket = 1;
             } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
-                is_vec_new = 1; kw_len = 10;
+                retired_vec_syntax = "cc_vec_new<T>";
             } else if (i + 10 <= n && memcmp(src + i, "vec_new::[", 10) == 0) {
-                is_vec_new = 1; kw_len = 7; use_bracket = 1;
+                retired_vec_syntax = "vec_new::[T]";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
-                is_vec_new = 1; kw_len = 7;
+                retired_vec_syntax = "vec_new<T>";
             } else if (i + 10 <= n && memcmp(src + i, "map_new::[", 10) == 0) {
                 is_map_new = 1; kw_len = 7; use_bracket = 1;
             } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
                 is_map_new = 1; kw_len = 7;
             }
+        }
+
+        if (retired_vec_syntax) {
+            char rel[1024];
+            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                    scanner.line, scanner.col, "type",
+                    "retired Vec generic spelling '%s'; use 'CCVec::[T]' and 'cc_vec_new::[T](...)'",
+                    retired_vec_syntax);
+            free(out);
+            return NULL;
         }
         
         if (is_vec_type || is_map_type || is_vec_new || is_map_new) {
@@ -4993,8 +4992,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             
             if (is_vec_type || is_map_type) {
                 /* Emit parser-safe macro call instead of bare type name.
-                   In parser mode: __CC_VEC(T) -> __CCVecGeneric
-                   In real mode:   __CC_VEC(T) -> CCVec_T */
+                   Vec now resolves to concrete registry-backed CCVec_T in both
+                   modes; Map remains placeholder-backed in parser mode. */
                 if (is_vec_type) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
@@ -5105,6 +5104,85 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
+}
+
+static void cc__register_lowered_vec_macros(const char* src) {
+    if (!src) return;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) return;
+
+    const char* p = src;
+    while ((p = strstr(p, "__CC_VEC(")) != NULL) {
+        const char* arg = p + 9;
+        const char* end = strchr(arg, ')');
+        if (!end) break;
+
+        const char* s = arg;
+        const char* e = end;
+        cc__trim_span_ws(&s, &e);
+        if (e > s) {
+            char elem_type[128];
+            char mangled[256];
+            size_t len = (size_t)(e - s);
+            if (len >= sizeof(elem_type)) len = sizeof(elem_type) - 1;
+            memcpy(elem_type, s, len);
+            elem_type[len] = '\0';
+            snprintf(mangled, sizeof(mangled), "CCVec_%s", elem_type);
+            cc_type_registry_add_vec(reg, elem_type, mangled);
+        }
+
+        p = end + 1;
+    }
+}
+
+static void cc__register_lowered_map_macros(const char* src) {
+    if (!src) return;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) return;
+
+    const char* p = src;
+    while ((p = strstr(p, "__CC_MAP(")) != NULL) {
+        const char* arg = p + 9;
+        const char* end = strchr(arg, ')');
+        if (!end) break;
+
+        const char* s = arg;
+        const char* e = end;
+        const char* comma = NULL;
+        int depth = 0;
+        for (const char* q = s; q < e; q++) {
+            char c = *q;
+            if (c == '(' || c == '[' || c == '<' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '>' || c == '}') depth--;
+            else if (c == ',' && depth == 0) {
+                comma = q;
+                break;
+            }
+        }
+        if (comma) {
+            char key_type[128];
+            char val_type[128];
+            char mangled[256];
+            const char* ks = s;
+            const char* ke = comma;
+            const char* vs = comma + 1;
+            const char* ve = e;
+            cc__trim_span_ws(&ks, &ke);
+            cc__trim_span_ws(&vs, &ve);
+            size_t k_len = (size_t)(ke - ks);
+            size_t v_len = (size_t)(ve - vs);
+            if (k_len >= sizeof(key_type)) k_len = sizeof(key_type) - 1;
+            if (v_len >= sizeof(val_type)) v_len = sizeof(val_type) - 1;
+            memcpy(key_type, ks, k_len);
+            key_type[k_len] = '\0';
+            memcpy(val_type, vs, v_len);
+            val_type[v_len] = '\0';
+            snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
+            cc_type_registry_add_map(reg, key_type, val_type, mangled);
+        }
+
+        p = end + 1;
+    }
 }
 
 static CCResultSpecTable cc__result_specs = {0};
@@ -5327,8 +5405,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     
     /* Result types are collected for codegen to emit CC_DECL_RESULT_SPEC declarations.
-       Parser mode uses the __CC_RESULT(T, E) macro which expands to __CCResultGeneric,
-       so no explicit typedefs needed here - the macro in cc_result.cch handles it. */
+       __CC_RESULT(T, E) preserves the concrete CCResult_T_E name in parser and
+       real modes; later declaration emission supplies the typed struct. */
     (void)cc__result_specs.count;
     (void)input_path;
     return out;
@@ -5412,188 +5490,6 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
         i++;
     }
 
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
-/* Simple pass: convert `if @try (` to `if (try ` so the main rewriter handles both syntaxes */
-static char* cc__normalize_if_try_syntax(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    
-    while (i + 9 < n) {  /* "if @try (" is 9 chars minimum */
-        /* Look for "if" followed by whitespace, "@try", whitespace, "(" */
-        if (src[i] == 'i' && src[i+1] == 'f' && 
-            (i == 0 || !cc_is_ident_char(src[i-1])) &&
-            (src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\n')) {
-            size_t j = i + 2;
-            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-            if (j + 4 < n && src[j] == '@' && src[j+1] == 't' && src[j+2] == 'r' && src[j+3] == 'y') {
-                size_t k = j + 4;
-                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
-                if (k < n && src[k] == '(') {
-                    /* Found "if @try (" - convert to "if (try " */
-                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "if (try ");
-                    last_emit = k + 1;  /* Skip past the '(' */
-                    i = k + 1;
-                    continue;
-                }
-            }
-        }
-        i++;
-    }
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
-/* Rewrite if (try T x = expr) { ... } else { ... } to expanded form */
-static char* cc__rewrite_try_binding(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    
-    while (i < n) {
-        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Detect if (try ...) */
-        if (c == 'i' && c2 == 'f') {
-            int ws = (i == 0) || !cc_is_ident_char(src[i-1]);
-            int we = (i+2 >= n) || !cc_is_ident_char(src[i+2]);
-            if (ws && we) {
-                size_t if_start = i, j = i + 2;
-                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-                if (j < n && src[j] == '(') {
-                    j++;
-                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-                    /* Check for 'try' */
-                    if (j+3 <= n && src[j] == 't' && src[j+1] == 'r' && src[j+2] == 'y' &&
-                        (j+3 >= n || !cc_is_ident_char(src[j+3]))) {
-                        size_t after_try = j + 3;
-                        while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
-                        
-                        /* Find closing ')' */
-                        size_t cond_end = after_try;
-                        int paren = 1, in_s = 0, in_c = 0;
-                        while (cond_end < n && paren > 0) {
-                            char ec = src[cond_end];
-                            if (in_s) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '"') in_s = 0; cond_end++; continue; }
-                            if (in_c) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '\'') in_c = 0; cond_end++; continue; }
-                            if (ec == '"') { in_s = 1; cond_end++; continue; }
-                            if (ec == '\'') { in_c = 1; cond_end++; continue; }
-                            if (ec == '(') paren++;
-                            else if (ec == ')') { paren--; if (paren == 0) break; }
-                            cond_end++;
-                        }
-                        if (paren != 0) { i++; continue; }
-                        
-                        /* Find '=' */
-                        size_t eq = after_try;
-                        while (eq < cond_end && src[eq] != '=') eq++;
-                        if (eq >= cond_end) { i++; continue; }
-                        
-                        /* Type and var: after_try to eq, var is last ident */
-                        size_t tv_end = eq;
-                        while (tv_end > after_try && (src[tv_end-1] == ' ' || src[tv_end-1] == '\t' || src[tv_end-1] == '\n')) tv_end--;
-                        size_t var_end = tv_end, var_start = var_end;
-                        while (var_start > after_try && cc_is_ident_char(src[var_start-1])) var_start--;
-                        if (var_start >= var_end) { i++; continue; }
-                        
-                        size_t type_end = var_start;
-                        while (type_end > after_try && (src[type_end-1] == ' ' || src[type_end-1] == '\t' || src[type_end-1] == '\n')) type_end--;
-                        size_t type_start = after_try;
-                        while (type_start < type_end && (src[type_start] == ' ' || src[type_start] == '\t' || src[type_start] == '\n')) type_start++;
-                        if (type_start >= type_end) { i++; continue; }
-                        
-                        /* Expr: eq+1 to cond_end */
-                        size_t expr_start = eq + 1;
-                        while (expr_start < cond_end && (src[expr_start] == ' ' || src[expr_start] == '\t' || src[expr_start] == '\n')) expr_start++;
-                        size_t expr_end = cond_end;
-                        while (expr_end > expr_start && (src[expr_end-1] == ' ' || src[expr_end-1] == '\t' || src[expr_end-1] == '\n')) expr_end--;
-                        if (expr_start >= expr_end) { i++; continue; }
-                        
-                        /* Find then-block */
-                        size_t k = cond_end + 1;
-                        while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
-                        if (k >= n || src[k] != '{') { i++; continue; }
-                        
-                        size_t then_start = k;
-                        int brace = 1; k++; in_s = 0; in_c = 0;
-                        while (k < n && brace > 0) {
-                            char ec = src[k];
-                            if (in_s) { if (ec == '\\' && k+1 < n) k++; else if (ec == '"') in_s = 0; k++; continue; }
-                            if (in_c) { if (ec == '\\' && k+1 < n) k++; else if (ec == '\'') in_c = 0; k++; continue; }
-                            if (ec == '"') { in_s = 1; k++; continue; }
-                            if (ec == '\'') { in_c = 1; k++; continue; }
-                            if (ec == '{') brace++; else if (ec == '}') brace--;
-                            k++;
-                        }
-                        size_t then_end = k;
-                        
-                        /* Check for else */
-                        size_t else_start = 0, else_end = 0, m = k;
-                        while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
-                        if (m+4 <= n && src[m] == 'e' && src[m+1] == 'l' && src[m+2] == 's' && src[m+3] == 'e' &&
-                            (m+4 >= n || !cc_is_ident_char(src[m+4]))) {
-                            m += 4;
-                            while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
-                            if (m < n && src[m] == '{') {
-                                else_start = m; brace = 1; m++; in_s = 0; in_c = 0;
-                                while (m < n && brace > 0) {
-                                    char ec = src[m];
-                                    if (in_s) { if (ec == '\\' && m+1 < n) m++; else if (ec == '"') in_s = 0; m++; continue; }
-                                    if (in_c) { if (ec == '\\' && m+1 < n) m++; else if (ec == '\'') in_c = 0; m++; continue; }
-                                    if (ec == '"') { in_s = 1; m++; continue; }
-                                    if (ec == '\'') { in_c = 1; m++; continue; }
-                                    if (ec == '{') brace++; else if (ec == '}') brace--;
-                                    m++;
-                                }
-                                else_end = m;
-                            }
-                        }
-                        
-                        /* Emit expansion */
-                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, if_start - last_emit);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "{ __typeof__(");
-                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_try_bind = (");
-                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); if (__cc_try_bind.ok) { ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + type_start, type_end - type_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_end - var_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " = __cc_try_bind.u.value; ");
-                        cc_sb_append(&out, &out_len, &out_cap, src + then_start + 1, then_end - then_start - 2);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
-                        if (else_end > else_start) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, " else ");
-                            cc_sb_append(&out, &out_len, &out_cap, src + else_start, else_end - else_start);
-                        }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
-                        
-                        last_emit = (else_end > 0) ? else_end : then_end;
-                        i = last_emit;
-                        continue;
-                    }
-                }
-            }
-        }
-        i++;
-    }
-    if (last_emit == 0) return NULL;
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
@@ -6025,91 +5921,6 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
 
     if (!changed) { free(out); return NULL; }
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src+last_emit, n-last_emit);
-    return out;
-}
-
-/* Rewrite try expressions: try expr -> cc_try(expr) */
-static char* cc__rewrite_try_exprs(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    
-    size_t i = 0;
-    size_t last_emit = 0;
-    CCScannerState scan;
-    cc_scanner_init(&scan);
-    
-    while (i < n) {
-        /* Skip comments and strings using shared helper */
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        
-        char c = src[i];
-        
-        /* Detect 'try' keyword followed by expression (not try { block } form) */
-        if (c == 't' && i + 2 < n && src[i+1] == 'r' && src[i+2] == 'y') {
-            /* Check word boundary before */
-            int word_start = (i == 0) || !cc_is_ident_char(src[i-1]);
-            /* Check word boundary after */
-            int word_end = (i + 3 >= n) || !cc_is_ident_char(src[i+3]);
-            
-            if (word_start && word_end) {
-                size_t after_try = i + 3;
-                /* Skip whitespace */
-                while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
-                
-                /* Check it's not try { block } form */
-                if (after_try < n && src[after_try] == '{') {
-                    /* try { ... } block form - skip, not handled here */
-                } else if (after_try < n && (cc_is_ident_start(src[after_try]) || src[after_try] == '(')) {
-                    /* 'try expr' form - find end of expression */
-                    size_t expr_start = after_try;
-                    size_t expr_end = expr_start;
-                    
-                    /* Scan expression with balanced parens/braces */
-                    int paren = 0, brace = 0, bracket = 0;
-                    int in_s = 0, in_c = 0;
-                    while (expr_end < n) {
-                        char ec = src[expr_end];
-                        
-                        if (in_s) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '"') in_s = 0; expr_end++; continue; }
-                        if (in_c) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '\'') in_c = 0; expr_end++; continue; }
-                        if (ec == '"') { in_s = 1; expr_end++; continue; }
-                        if (ec == '\'') { in_c = 1; expr_end++; continue; }
-                        
-                        if (ec == '(' ) { paren++; expr_end++; continue; }
-                        if (ec == ')' ) { if (paren > 0) { paren--; expr_end++; continue; } else break; }
-                        if (ec == '{' ) { brace++; expr_end++; continue; }
-                        if (ec == '}' ) { if (brace > 0) { brace--; expr_end++; continue; } else break; }
-                        if (ec == '[' ) { bracket++; expr_end++; continue; }
-                        if (ec == ']' ) { if (bracket > 0) { bracket--; expr_end++; continue; } else break; }
-                        
-                        /* End expression at ';', ',', or unbalanced ')' */
-                        if (paren == 0 && brace == 0 && bracket == 0) {
-                            if (ec == ';' || ec == ',') break;
-                        }
-                        
-                        expr_end++;
-                    }
-                    
-                    /* Only rewrite if we found a valid expression */
-                    if (expr_end > expr_start) {
-                        /* Emit: everything up to 'try', then 'cc_try(', then expr, then ')' */
-                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_try(");
-                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-                        last_emit = expr_end;
-                        i = expr_end;
-                        continue;
-                    }
-                }
-            }
-        }
-        
-        i++;
-    }
-    
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
 
@@ -7118,6 +6929,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     CC_CHAIN(chain, cc_rewrite_nursery_create_destroy_proto(chain.src, chain.len, input_path));
     /* Shared phase-3 host lowering bucket. */
     if (cc__apply_phase3_host_lowering_passes(&chain, input_path) != 0) goto chain_cleanup;
+    cc__register_lowered_vec_macros(chain.src);
+    cc__register_lowered_map_macros(chain.src);
     
     const char* use = chain.src;
 
@@ -7132,9 +6945,6 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             fprintf(out, "#include <ccc/std/vec.h>\n");
             fprintf(out, "#include <ccc/std/map.h>\n");
             fprintf(out, "#include <ccc/cc_channel.h>\n");
-            /* Vec/Map declarations must be skipped in parser mode where they're
-               already typedef'd to generic placeholders in vec.cch/map.cch */
-            fprintf(out, "#ifndef CC_PARSER_MODE\n");
             
             /* Emit Vec declarations */
             for (size_t i = 0; i < n_vec; i++) {
@@ -7153,7 +6963,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                     fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                 }
             }
-            
+
             /* Emit Map declarations (using default hash functions for known types) */
             for (size_t i = 0; i < n_map; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
@@ -7180,14 +6990,13 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                 if (inst && inst->type1 && inst->mangled_name) {
                 }
             }
-            
-            fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
+
             fprintf(out, "/* --- end container declarations --- */\n\n");
         }
     }
 
-    /* If result types are used, include cc_result.cch with CC_PARSER_MODE
-       so that __CC_RESULT(T, E) expands to __CCResultGeneric for TCC parsing. */
+    /* If result types are used, include cc_result.cch with CC_PARSER_MODE so
+       parser-only fallbacks remain available while concrete Result names stay intact. */
     if (cc__result_specs.count > 0) {
         fprintf(out, "/* --- CC result type support --- */\n");
         fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -7377,6 +7186,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     }
     /* Shared phase-3 bucket: parser/host-C survival and lowering. */
     if (cc__apply_phase3_host_lowering_passes(&chain, input_path) != 0) goto chain_cleanup;
+    cc__register_lowered_vec_macros(chain.src);
+    cc__register_lowered_map_macros(chain.src);
     const char* use = chain.src;
     (void)chain.len;  /* use_n not needed here */
 
@@ -7405,7 +7216,6 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
             fprintf(out, "#include <ccc/std/vec.cch>\n");
             fprintf(out, "#include <ccc/std/map.cch>\n");
             fprintf(out, "#include <ccc/cc_channel.cch>\n");
-            fprintf(out, "#ifndef CC_PARSER_MODE\n");
             
             /* Emit Vec declarations */
             for (size_t i = 0; i < n_vec; i++) {
@@ -7417,7 +7227,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                 }
             }
-            
+
             /* Emit Map declarations */
             for (size_t i = 0; i < n_map; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
@@ -7444,8 +7254,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                 if (inst && inst->type1 && inst->mangled_name) {
                 }
             }
-            
-            fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
+
             fprintf(out, "/* --- end container declarations --- */\n\n");
         }
     }
@@ -8414,8 +8223,6 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     /* @await fname(...) -> cc_block_on(ReturnType, fname(...)).  Runs after
      * result-type rewriting so the return types are already in canonical form. */
     if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__normalize_if_try_syntax(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_try_binding(chain->src, chain->len)) < 0) return -1;
     return 0;
 }
 
@@ -8502,7 +8309,6 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
        type-check as-is, so the rewrite is both redundant and harmful
        (it forced a __CCResultGeneric return into a typed Result slot). */
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_try_exprs(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_unwrap(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_cc_concurrent(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_link_directives(chain->src, chain->len)) < 0) return -1;
@@ -8554,281 +8360,4 @@ char* cc_preprocess_comptime_source(const char* input_path) {
     canonical = cc__canonicalize_cc_for_comptime(expanded, strlen(expanded), input_path);
     free(expanded);
     return canonical;
-}
-
-/* Inline parse-time stubs - minimal definitions for TCC to accept CC types.
-   Uses guard macros so real CC headers can skip their own definitions. */
-static const char* cc__parse_stubs = 
-    "#ifndef CC_PARSE_STUBS_INLINE\n"
-    "#define CC_PARSE_STUBS_INLINE 1\n"
-    "#define CC_PARSER_MODE 1\n"
-    /* Guard macros to prevent redefinition when real headers are included */
-    "#define __CC_OPTIONAL_GENERIC_VALUE_DEFINED 1\n"
-    "#define __CC_OPTIONAL_GENERIC_DEFINED 1\n"
-    "#define __CC_GENERIC_ERROR_DEFINED 1\n"
-    "#define __CC_RESULT_GENERIC_DEFINED 1\n"
-    /* Struct definitions compatible with real headers' field layout.
-       Use unsigned long instead of size_t since stddef.h may not be included yet. */
-    "typedef struct __CCOptionalGenericValue { long x,y,z,w; void* ptr; void* data; unsigned long len; int id,kind,code; long _scalar; } __CCOptionalGenericValue;\n"
-    "typedef struct __CCOptionalGeneric { int has; union { __CCOptionalGenericValue value; long _scalar; } u; } __CCOptionalGeneric;\n"
-    "typedef struct __CCGenericError { int kind; int os_errno; int os_code; const char* message; } __CCGenericError;\n"
-    "typedef struct __CCResultGeneric { int ok; union { long value; __CCGenericError error; } u; } __CCResultGeneric;\n"
-    /* Channel handle stubs */
-    "#define __CC_CHAN_TX_DEFINED 1\n"
-    "#define __CC_CHAN_RX_DEFINED 1\n"
-    "typedef struct CCChan CCChan;\n"
-    "typedef struct { CCChan* raw; } CCChanTx;\n"
-    "typedef struct { CCChan* raw; } CCChanRx;\n"
-    /* Generic container stubs - define guards so real headers skip.
-       Field counts must match real headers to allow their initializers. */
-    "#define __CC_VEC_GENERIC_DEFINED 1\n"
-    "#define __CC_MAP_GENERIC_DEFINED 1\n"
-    "typedef struct { unsigned long len; unsigned long cap; void* arena; void* data; } __CCVecGeneric;\n"
-    "typedef struct { unsigned long count; void* keys; void* vals; void* arena; } __CCMapGeneric;\n"
-    "#define __CC_VEC(T) __CCVecGeneric\n"
-    "#define __CC_MAP(K, V) __CCMapGeneric\n"
-    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0, 0})\n"
-    "#define __CC_MAP_INIT(K, V, arena) ((__CCMapGeneric){0, 0})\n"
-    /* Common Vec/Map types */
-    "typedef __CCVecGeneric CCVec_int;\n"
-    "typedef __CCVecGeneric CCVec_char;\n"
-    "typedef __CCVecGeneric CCVec_float;\n"
-    "typedef __CCMapGeneric Map_int_int;\n"
-    "typedef __CCMapGeneric Map_charptr_int;\n"
-    /* Key macros: rewritten T!>(E) -> __CC_RESULT(T,E).
-     * (retired) __CC_OPTIONAL(T) and the `__cc_optional_*_impl` parser stubs
-     * were removed along with the optional surface. */
-    "#define __CC_RESULT(T, E) CCResult_##T##_##E\n"
-    "/* Helper functions - extern (not inline) so TCC records the calls */\n"
-    "__CCResultGeneric __cc_result_ok_impl(long v);\n"
-    "__CCResultGeneric __cc_result_err_impl(int kind, const char* msg);\n"
-    /* Common result types */
-    "typedef __CCResultGeneric CCResult_int_CCError;\n"
-    "typedef __CCResultGeneric CCResult_bool_CCError;\n"
-    "typedef __CCResultGeneric CCResult_void_CCError;\n"
-    "typedef __CCResultGeneric CCResult_size_t_CCError;\n"
-    "typedef __CCResultGeneric CCResult_charptr_CCError;\n"
-    "typedef __CCResultGeneric CCResult_voidptr_CCError;\n"
-    /* CCError type */
-    "#ifndef __CC_ERROR_TYPE_DEFINED\n"
-    "#define __CC_ERROR_TYPE_DEFINED\n"
-    "typedef struct { int kind; const char* message; } CCError;\n"
-    "static inline CCError __cc_error_make(int kind, const char* msg) { CCError e = {kind, msg}; return e; }\n"
-    "#define CC_ERROR(kind, msg) __cc_error_make((kind), (msg))\n"
-    "#endif\n"
-    /* Result constructors - variadic macros to accept any type.
-       We use a comma expression to evaluate the arg (so it appears in AST) then return generic.
-      the experimental AST/codegen path handles the real types later. */
-    "#ifndef __CC_RESULT_CTORS_DEFINED\n"
-    "#define __CC_RESULT_CTORS_DEFINED\n"
-    "#define cc_ok(v) __cc_result_generic_ok()\n"
-    "#define cc_err(...) __cc_result_generic_err()\n"
-    "#endif\n"
-    /* Accessor macros (optional-family macros retired). */
-    "#define cc_is_ok(res) ((res).ok)\n"
-    "#define cc_is_err(res) (!(res).ok)\n"
-    "#define cc_unwrap(res) ((res).u.value)\n"
-    "#define cc_unwrap_as(res, T) (*(T*)(void*)&(res).u.value)\n"
-    "#define cc_unwrap_err(res) ((res).u.error)\n"
-    "#define cc_unwrap_err_as(res, T) (*(T*)(void*)&(res).u.error)\n"
-    "#endif\n";
-
-// Simple preprocessing for the experimental AST/codegen path: rewrites type syntax and adds parse-time stubs.
-// Type syntax (T?, T!>(E), T[~N>], Vec<T>) is rewritten to C-compatible names.
-// Parse-time stubs provide placeholder definitions.
-// Other CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
-char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path) {
-    if (!input || input_len == 0) return NULL;
-    
-    /* Reset type collectors */
-    cc_result_spec_table_reset(&cc__result_specs);
-    cc_result_spec_table_set_global(&cc__result_specs);
-    
-    /* Create type registry for this file (or reuse existing global) */
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) {
-        reg = cc_type_registry_new();
-        cc_type_registry_set_global(reg);
-    }
-    cc_type_registry_clear(reg);
-    
-    /* Chain of preprocessing passes - each takes previous output */
-    const char* cur = input;
-    size_t cur_len = input_len;
-    char* buffers[16] = {0};
-    int buf_idx = 0;
-    
-    /* Pass 0: Rewrite @link("lib") -> marker comments for linker */
-    buffers[buf_idx] = cc__rewrite_link_directives(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-
-    /* Pass 1: Rewrite @slice/@string forms and eliminate raw backtick templates early. */
-    buffers[buf_idx] = cc__rewrite_string_templates(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-
-    /* Pass 2: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
-    buffers[buf_idx] = cc__rewrite_chan_handle_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-
-    /* Pass 3: Rewrite slice types T[:]/T[n:]/T[:k]/T[:k!] -> CCSlice */
-    buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-
-    /* Pass 4: Rewrite Vec<T>/Map<K,V> into parser-safe container forms early,
-       so parser-survival UFCS can resolve field receiver types correctly. */
-    buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 4: Diagnose any lingering `T?` — optional types are retired. */
-    buffers[buf_idx] = cc__rewrite_optional_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 5: Infer result constructor types from enclosing function:
-       cc_ok(x) -> cc_ok_CCResult_T_E(x) when inside a function returning T!E
-       This must run BEFORE type rewrite so we can still detect T!E syntax. */
-    buffers[buf_idx] = cc__rewrite_inferred_result_ctors(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 5b: (retired) used to rewrite typed cc_ok_CCResult_T_E(v)
-       to the generic __CC_RESULT_OK(0, 0, v) placeholder.  See the
-       companion comment in cc__run_phase1_canonical_passes for why
-       this pass is obsolete now that parser mode emits real typed
-       result structs. */
-    
-    /* Pass 5c: Rewrite T!>(E) -> CCResult_T_E */
-    buffers[buf_idx] = cc__rewrite_result_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    cc__seed_ufcs_receiver_types(cur, cur_len);
-    /* Parser-only tolerance: raw closure literals can still contain already-
-       concrete family UFCS before later AST passes lower those closures.
-       Normalize those concrete family calls here so TCC can build the stub AST. */
-    buffers[buf_idx] = cc_rewrite_generic_family_ufcs_parser_safe(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    /* Pass 6: Normalize if @try ( -> if (try  */
-    buffers[buf_idx] = cc__normalize_if_try_syntax(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 7: Rewrite if (try T x = expr) to expanded form */
-    buffers[buf_idx] = cc__rewrite_try_binding(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-
-    /* Pass 7b: Prototype explicit nursery-handle create/destroy declarations. */
-    buffers[buf_idx] = cc_rewrite_nursery_create_destroy_proto(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Note: try expressions are handled natively by TCC (CC_AST_NODE_TRY) */
-    
-    /* Pass 8: Rewrite @defer(err) -> @defer */
-    buffers[buf_idx] = cc__rewrite_defer_syntax(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 9: Rewrite *opt_var and *result_var to unwrap calls */
-    buffers[buf_idx] = cc__rewrite_optional_unwrap(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Build output with stubs and #line directive */
-    char* out_buf = NULL;
-    size_t out_size = 0;
-    FILE* out = open_memstream(&out_buf, &out_size);
-    if (!out) {
-        for (int i = 0; i < buf_idx; i++) {
-            if (buffers[i]) free(buffers[i]);
-        }
-        return NULL;
-    }
-    
-    /* Prepend parse-time stubs (only once) */
-    fputs(cc__parse_stubs, out);
-    
-    /* Note: User-defined Optional types (CCOptional_Point etc.) are emitted inline
-       in the source at first use, so they have access to the actual type definition.
-       This allows field access like p.u.value.x to work correctly. */
-    
-    /* Emit typedefs and constructor macros for user-defined Result types.
-       In parser mode, we emit macros that cast away the value/error and call generic helpers.
-       This allows type-checking to pass even though the actual types aren't fully defined. */
-    for (size_t i = 0; i < cc__result_specs.count; i++) {
-        const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-        const char* ok = spec ? spec->mangled_ok : NULL;
-        const char* err = spec ? spec->mangled_err : NULL;
-        if (!ok || !err) continue;
-        /* Emit only the parse-time alias here. Typed helper stubs are inserted
-           after the source's leading includes, once payload/error types exist. */
-        fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
-        fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
-        fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
-        fprintf(out, "#endif\n");
-    }
-    
-    /* Add #line directive for source mapping */
-    char rel[1024];
-    fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
-    
-    /* Output processed source */
-    fwrite(cur, 1, cur_len, out);
-    
-    fclose(out);
-    
-    /* Clean up intermediate buffers */
-    for (int i = 0; i < buf_idx; i++) {
-        if (buffers[i]) free(buffers[i]);
-    }
-    
-    return out_buf;
 }

@@ -151,7 +151,7 @@ pre-expand:
 
 ## Related
 
-- `CC_BATCH_PHASE3=1` — experimental Phase 3 batching (off by default)
+- ~~`CC_BATCH_PHASE3=1`~~ — removed 2026-05-28; two-stage batched Phase 3 (UFCS, then closure_calls + autoblock + await_normalize) is now the only path. See [cc/src/visitor/PIPELINE.md](../../cc/src/visitor/PIPELINE.md).
 - `CC_PRE_EXPAND` — TCC-CPP pre-expand of the initial parse +
   post-expand re-lower.  **Default-on (2026-05-26).**  Disable with
   `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty).

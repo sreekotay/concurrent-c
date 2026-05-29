@@ -11,7 +11,7 @@
 #include <ccc/std/prelude.cch>
 
 typedef struct {
-    Vec<int> items;
+    CCVec::[int] items;
 } Container;
 
 int main(void) {
@@ -29,11 +29,11 @@ int main(void) {
         
         // Case 3: Field receivers respect value vs pointer type
         Container c;
-        c.items = vec_new<int>(arena);
+        c.items = cc_vec_new::[int](arena);
         c.items.push(10);  // Value receiver - must become CCVec_int_push(&c.items, 10)
 
         typedef struct {
-            Vec<int>* items;
+            CCVec::[int]* items;
         } PtrContainer;
         PtrContainer pc;
         pc.items = &c.items;

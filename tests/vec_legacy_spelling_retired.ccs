@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Vec<int> values = vec_new<int>(&arena);
+    (void)values;
+    cc_arena_free(&arena);
+    return 0;
+}

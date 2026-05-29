@@ -155,6 +155,42 @@ Use these scripts to compare against the Go runtime directly.
 
 ## Interpreting Results
 
+- **Read absolute latency first, ratios second.** Channel Isolation reports min/mean/max absolute ms for both baseline and contention; the Interference % is *derived* and baseline-relative — a faster happy path inflates it, so a low % can simply mean a slow baseline. Compare absolute Contention (ms): CC bounds the worst case without taxing the happy path.
 - Negative interference in Channel Isolation means concurrent load did not slow the independent channel pairs down.
+- **Syscall Kidnapping:** CC's V2 sysmon orphan-and-replaces workers pinned in blocking syscalls (detach off-pool, fresh worker takes the slot), so CC drains all kidnappers like a 1:1 runtime instead of capping at worker count. Any "tops out near N" baseline in the harness text is the *non-promoting* M:N strawman CC beats, not CC's behavior.
+- **Arena Contention compares strategies, not one workload.** CC and Pthread run true bump arenas (pointer-bump, no per-alloc free) — apples-to-apples, and they land close. The harness's Go and Zig rows are *different strategies*: Go's non-escaping `make([]byte,16)` is **stack-promoted** by escape analysis (verified `does not escape` — it never reaches mcache), so its huge number is stack-bump throughput; Zig uses `c_allocator` malloc/free per alloc. Treat the headline as CC-vs-Pthread arena parity; the Go/Zig columns are cross-strategy context, not a like-for-like win/loss.
 - High jitter in herd tests usually points to OS scheduling overhead rather than channel semantics.
 - The Noisy Neighbor score is just total heartbeat ticks over the fixed run window, so higher is better.
+
+---
+
+## Compiler perf baseline
+
+Separate from the runtime benchmarks above, the compiler itself has a perf baseline tracked in [`compiler_baseline.txt`](compiler_baseline.txt). It captures the metrics the recent visitor refactor (M2 Phase-3 batching, M4.a Phase-5 gating, fossil sweeps) was measured against — without a baseline, any future change touching `cc/src/visitor/` or `cc/src/parser/` could silently regress reparse counts or wall time. The baseline + a tiny regression check guard against that.
+
+### Workflow
+
+```bash
+make perf-baseline     # capture current numbers into perf/compiler_baseline.txt
+make perf-regress      # compare current numbers vs the committed baseline
+```
+
+Under the hood these run `scripts/capture_baseline.sh` and `tools/cc_perf_check.sh` respectively. Both target a warm smoke-suite run (`tools/cc_test --jobs 8`) and take ~60-100s.
+
+### What each metric guards against
+
+| Metric | Source | Regression rule | What it catches |
+|--------|--------|-----------------|-----------------|
+| `reparse_sites_visit_codegen` | static grep | must equal baseline | A new `cc__reparse_source_to_ast_(ctx\|ex)` call site appearing somewhere — every new reparse site is an architectural decision worth reviewing. |
+| `loc_visit_codegen`, `loc_closure_pass`, `loc_visitor_dir` | `wc -l` | NOTICE if growth > +25% | Catches accidental code bloat in the most-rewritten files; not a hard fail (legit features grow code). |
+| `suite_tests` | `cc_test:` line | must equal baseline | Detects accidentally-skipped or accidentally-added tests. |
+| `reparses_phase3`, `reparses_statement_lowering`, `reparses_async_lowering`, `reparses_final_ufcs`, `reparses_total` | `CC_DEBUG_REPARSE=1` aggregated across suite | must be ≤ baseline | The big one. Deterministic per pipeline shape. Any code that newly forces an unconditional reparse — e.g., dropping a `cc_contains_token_top_level` gate, or merging the phase-3 stages so they reparse twice — fails this check. |
+| `wall_real_seconds` | `/usr/bin/time -p` on warm suite | **informational only — never fails** | Wall time on a developer machine is dominated by OS scheduler noise; we measured 48s → 66s back-to-back on an unmodified tree. The deterministic reparse counts are the real perf guard. Wall-clock is reported as OK (≤ +5%), INFO (≤ +30%), or NOTICE (> +30% — a manual look is warranted if reparse counts are unchanged but wall is way off). |
+
+### When to update the baseline
+
+Re-run `make perf-baseline` (or `./tools/cc_perf_check.sh --update`) **after** any intentional change that legitimately changes one of these numbers — e.g., a new visitor pass, deliberately adding a reparse for a new feature, or a major LOC cleanup. The new numbers should be committed in the same PR that introduces the change so reviewers can see the perf delta.
+
+### Historical context
+
+`baseline_M0.txt` (deleted 2026-05-28) was an empty placeholder created at the start of the M1 visitor refactor — it tracked the same idea but was never populated with actual measurements. The current `compiler_baseline.txt` captures the **post-M4.a state** (after the Phase-3 batching flip, fossil sweeps, and Phase-5 gating; see [`cc/docs/ARCHITECTURE.md` §6](../cc/docs/ARCHITECTURE.md) for what landed).

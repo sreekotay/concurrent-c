@@ -21,10 +21,12 @@
 #include <ccc/cc_ufcs.cch>
 #include <ccc/std/vec.cch>
 
-/* In parser mode, keep CCString field-compatible with the surface API.
-   Real compilation overlays the trailing storage for inline bytes. */
-#ifndef CC_PARSER_MODE
+/* CCVec_char may already be declared by vec.cch in parser mode. */
+#ifndef CC_VEC_CHAR_DEFINED
+#define CC_VEC_CHAR_DEFINED 1
 CC_VEC_DECL_ARENA(char, CCVec_char)
+#endif
+
 typedef struct CCString {
     union {
         char *data;
@@ -34,19 +36,12 @@ typedef struct CCString {
     uint32_t len;
     uint32_t cap;
 } CCString;
-#else
-typedef struct CCString {
-    char *data;
-    uint32_t len;
-    uint32_t cap;
-} CCString;
-#endif
 
 #ifndef CC_STRING_INLINE_CAP
 #define CC_STRING_INLINE_CAP (sizeof(void *))
 #endif
 
-#if !defined(CC_PARSER_MODE) && UINTPTR_MAX == UINT64_MAX
+#if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(CCString) == 16, "CCString should stay compact on 64-bit targets");
 #endif
 
@@ -207,22 +202,13 @@ static inline size_t cc_string_cap(const CCString *str) {
 }
 
 static inline bool cc_string_is_inline(const CCString *str) {
-#ifdef CC_PARSER_MODE
-    (void)str;
-    return false;
-#else
     return str && str->cap > 0 && str->cap <= CC_STRING_INLINE_CAP;
-#endif
 }
 
 static inline const char *cc_string_data_const(const CCString *str) {
     if (!str) return NULL;
-#ifdef CC_PARSER_MODE
-    return str->data;
-#else
     if (cc_string_is_inline(str)) return str->inline_buf;
     return str->data;
-#endif
 }
 
 static inline char *cc_string_data(CCString *str) {
@@ -231,11 +217,7 @@ static inline char *cc_string_data(CCString *str) {
 
 static inline const char *cc_string_heap_data_const(const CCString *str) {
     if (!str) return NULL;
-#ifdef CC_PARSER_MODE
-    return str->data;
-#else
     return cc_string_is_inline(str) ? NULL : str->data;
-#endif
 }
 
 static inline char *cc_string_heap_data(CCString *str) {
@@ -270,7 +252,6 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     if (cc_string_is_inline(str) && need <= CC_STRING_INLINE_CAP) return cc_string_data(str);
     if (!cc_string_is_inline(str) && cc_string_heap_data(str) && need <= str->cap) return cc_string_data(str);
     if (!arena) return NULL;
-#ifndef CC_PARSER_MODE
     if (need <= CC_STRING_INLINE_CAP) {
         if (str->cap == 0) {
             str->cap = CC_STRING_INLINE_CAP;
@@ -278,12 +259,10 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
         }
         return cc_string_data(str);
     }
-#endif
     new_cap = str->cap ? str->cap : CC_STRING_INLINE_CAP;
     if (new_cap < CC_STRING_INLINE_CAP) new_cap = CC_STRING_INLINE_CAP;
     while (new_cap < need) new_cap <<= 1;
     if (new_cap > UINT32_MAX) return NULL;
-#ifndef CC_PARSER_MODE
     if (cc_string_is_inline(str) || !cc_string_heap_data(str)) {
         saved_len = str->len + 1;
         if (saved_len > sizeof(saved)) saved_len = sizeof(saved);
@@ -299,7 +278,6 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
         if (saved_len > 0) memcpy(str->data, saved, saved_len);
         return cc_string_heap_data(str);
     }
-#endif
     header = cc__string_heap_header(str);
     if (!header || !header->arena) return NULL;
     old_arena = header->arena;

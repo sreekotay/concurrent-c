@@ -2,7 +2,9 @@
 
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
-**Last updated**: 2026-05-26 (post M0–M5.5 — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
+**Last updated**: 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
+
+> **WHY this many passes? WHY this split between text and AST?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §2 (the four constraints) and §3 (the three architectural layers). The Phase 1–9 numbering below is an artifact of how the code grew; the three layers in ARCHITECTURE.md are the right mental model.
 
 ## Invariants for new text scanners (MUST follow)
 
@@ -123,7 +125,7 @@ so it CAN, not to work around them in a single pass.
 ## Current Stats
 
 - **Total lines**: ~21k across pass files
-- **TCC reparses**: ~9 call sites in `visit_codegen.c` + 1 initial parse (not 4)
+- **TCC reparses**: ≤6 call sites in `visit_codegen.c` + 1 initial parse (down from ~9 pre-2026-05-28). Both Phase-3 stage reparses skip when their edit buffer is empty.
 - **Text-based passes in preprocess.c**: 19 functions
 - **AST-based passes**: 8
 
@@ -137,24 +139,20 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | P2 | cc__rewrite_match_syntax | `@match` → switch + cc_chan_match_select | ~310 | Channel select |
 | P3 | cc__rewrite_slice_types | `T[:]` → CCSlice_T | ~110 | Type syntax |
 | P4 | cc__rewrite_chan_handle_types | `int[~4 >]` → CCChanTx_int | ~510 | Channel types |
-| P5 | cc_rewrite_generic_containers | `Vec<T>` → Vec_T | ~250 | Generic types |
+| P5 | cc_rewrite_generic_containers | `CCVec::[T]` → CCVec_T | ~250 | Generic types |
 | P6 | cc__rewrite_optional_types | `T?` → diagnostic (retired) | ~60 | Type syntax (emits error) |
 | P7 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~260 | Constructor inference ⚠️ BEFORE P10 |
 | P8 | cc__rewrite_result_types | `T!>(E)` → CCResult_T_E | ~155 | Type syntax |
 | P9 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → macro | ~70 | Parse stub |
-| P10 | cc__normalize_if_try_syntax | `if @try (` → `if (try ` | ~25 | Syntax normalize |
-| P11 | cc__rewrite_try_binding | `if (try T x = expr)` → expanded | ~150 | Result unwrap |
-| P12 | cc__rewrite_try_exprs | `try expr` → `cc_try(expr)` | ~95 | Result unwrap |
-| P13 | cc__rewrite_optional_unwrap | `cc_try(r)` for CCResult (optional arm retired) | ~180 | Result unwrap |
-| P14 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
-| P15 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
-| P16 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
+| P10 | cc__rewrite_optional_unwrap | `*res` → `cc_unwrap(res)` for CCResult (optional arm retired) | ~180 | Result unwrap |
+| P11 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
+| P12 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
+| P13 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
 
 **Note**: P8 must run before P10 (needs to see `T!>(E)` syntax for type inference).
 
 **Consolidation candidates:**
-- P8+P9+P16 → single "optional pass" (3 scans → 1)
-- P11+P12 → single "result types pass" (2 scans → 1, P10 stays separate due to ordering)
+- P8+P9+P13 → single "optional pass" (3 scans → 1)
 - P3+P4+P5 → single "type syntax pass" (potential, needs analysis)
 
 ## visit_codegen.c Pipeline — 1,214 lines
@@ -164,7 +162,6 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | # | Pass File | Function | Transform |
 |---|-----------|----------|-----------|
 | 1 | visit_codegen.c | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery |
-| 2 | visit_codegen.c | cc__rewrite_if_try_syntax | `if try` → result unwrap |
 
 ### Phase 2: Text Passes (batched)
 
@@ -173,18 +170,21 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | 3 | pass_with_deadline_syntax.c | 430 | `with_deadline(ms)` → CCDeadline + @defer |
 | 4 | pass_match_syntax.c | 600 | `@match` → switch + cc_chan_match_select |
 
-### Phase 3: Initial AST Passes (EditBuffer; sequential reparse by default)
+### Phase 3: Initial AST Passes (EditBuffer; two-stage batched, 2 reparses max)
 
-| # | Pass File | Lines | Transform |
-|---|-----------|-------|-----------|
-| 5 | pass_ufcs.c | 432 | `x.method(y)` → `method(&x, y)` |
-| 6 | pass_closure_calls.c | 748 | `c(x)` → `c.fn(c.env, x)` |
-| 7 | pass_autoblock.c | 1,260 | Insert cc_block() wrappers |
-| 8 | pass_await_normalize.c | 529 | `await expr` → temp binding |
+| # | Pass File | Lines | Transform | Stage |
+|---|-----------|-------|-----------|-------|
+| 5 | pass_ufcs.c | 432 | `x.method(y)` → `method(&x, y)` | 1 |
+| 6 | pass_closure_calls.c | 748 | `c(x)` → `c.fn(c.env, x)` | 2 |
+| 7 | pass_autoblock.c | 1,260 | Insert cc_block() wrappers | 2 |
+| 8 | pass_await_normalize.c | 529 | `await expr` → temp binding | 2 |
 
-**M2 status (2026-05-26):**
-- **Default:** sequential `cc__apply_coarse_codegen_pass` + reparse between collectors (429 smoke tests).
-- **Experimental:** `CC_BATCH_PHASE3=1` → `cc__apply_batched_phase3_passes()` (one apply, one reparse). Not default until AST merge ordering is fixed.
+**Pipeline status (2026-05-28):**
+- **Default and only path:** `cc__apply_batched_phase3_passes()` runs in two stages — Stage 1 (UFCS only) and Stage 2 (closure_calls + autoblock + await_normalize batched into a single edit buffer). 461/461 smoke tests pass.
+- Stage 1 is mandatory because UFCS *produces* new call sites that Stage 2's AST-driven passes must observe in the reparse.
+- Stage 2's three passes target disjoint constructs and emit non-overlapping per-span edits, so they compose into one collect+apply+reparse cycle.
+- Reparse cost: 2 max in Phase 3 (was 4 in the legacy sequential path). Stage reparses skip when their edit buffer is empty.
+- The legacy sequential branch and `CC_BATCH_PHASE3=1` env-var gate were removed; `cc__apply_coarse_codegen_pass()` is deleted.
 
 ### Phase 4: Channel Syntax (text, REPARSE #2)
 
@@ -197,13 +197,13 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 11 | pass_closure_literal_ast.c | 2,094 | `() => {...}` → __cc_closure_make_N |
+| 11 | pass_closure_literal_ast.c | 3,523 | `() => {...}` → `<base>_make()` (location-tagged: `cc_closure__N<id>__line<L>_col<C>` from `cc_diag_mangle_symbol`, 2026-05-28). |
 
 ### Phase 6: Structured Concurrency (batched, REPARSE #4)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 12 | pass_nursery_spawn_ast.c | 1,071 | spawn/nursery lowering (**ORPHAN**: `cc__collect_nursery_edits` unwired; nursery in preprocess + closure_literal) |
+| — | ~~pass_nursery_spawn_ast.c~~ | — | **Deleted 2026-05-28.** Was a 1,326-LOC orphan: all four exported entry points (`cc__rewrite_spawn_stmts_with_nodes`, `cc__rewrite_nursery_blocks_with_nodes`, `cc__collect_spawn_edits`, `cc__collect_nursery_edits`) had zero callers anywhere in the tree. Spawn/nursery lowering is handled by `preprocess.c` + `pass_closure_literal_ast.c`. |
 
 ### Phase 7: Defer (text)
 
@@ -228,10 +228,10 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 ### High Value (reduces reparses)
 
-1. **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
-   - **Partial (2026-05-26):** `cc__apply_batched_phase3_passes()` behind `CC_BATCH_PHASE3=1`
-   - **Default path:** still sequential reparses (see PIPELINE.md)
-   - **Next:** make batching safe by default (fix AST/type state between collectors)
+1. ✅ **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
+   - **Done (2026-05-28):** two-stage batched is the only path. Phase-3 reparses: 4 → 2.
+   - Stage 1 (UFCS) cannot fold into Stage 2 — UFCS produces new call sites the other AST-driven collectors must see post-reparse.
+   - **Next:** see PIPELINE.md "Target" — fold Stage-1 reparse into the closure-literal reparse (M6_DEFERRED).
 
 2. **Merge closure_literals + spawn/nursery** — share one reparse
    - BLOCKED: closure_literals uses coarse-grained whole-file edit
@@ -244,7 +244,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 ### Medium Value (reduces complexity)
 
-4. **Consolidate preprocessor type transforms** (P8+P9+P16, P11+P12)
+4. **Consolidate preprocessor type transforms** (P8+P9+P13)
    - Currently: 19 separate text scans
    - Target: ~12 scans (merge related passes)
    - Note: P10 must stay separate (ordering constraint)
@@ -262,7 +262,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 1. ✅ Compiler cleanup M0–M5.5 infrastructure (2026-05-26) — diag core, `cc_build_parse_input`, preprocess reparse APIs, `tcc_ext_api`, macro recognizer hooks; see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md)
 2. ✅ Update this inventory to match reality (2026-02-01)
 3. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
-4. ✅ Phase 3 EditBuffer infrastructure (2026-02-01); batched apply optional via `CC_BATCH_PHASE3` (2026-05-26)
+4. ✅ Phase 3 EditBuffer infrastructure (2026-02-01); batched apply optional via `CC_BATCH_PHASE3` (2026-05-26); **two-stage batched is now the only path** (2026-05-28) — all four collectors emit per-span edits; UFCS in stage 1, closure_calls+autoblock+await_normalize in stage 2; reparses 4 → 2.
 5. ✅ Dynamic type registries - `cc__cg_result_types` and `cc__cg_optional_types` are
    now heap-allocated dynamic arrays (previously fixed [64]). No limit on Result/Optional
    type count per compilation unit. (2026-03-09)
@@ -275,7 +275,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
    function stores its result directly via cc_task_result_ptr (evidenced by returning
    the same buffer pointer). The thunk no longer overwrites the caller's structured
    result. The `spawn into(ch)?` form now uses discard-on-backpressure semantics
-   (cc_task_free) instead of the incorrect cc_try propagation. (2026-03-09)
+   (cc_task_free) instead of incorrect result propagation. (2026-03-09)
 
 ## AST Migration Investigation (2026-03-09)
 
@@ -297,16 +297,29 @@ surface syntax tokens before TCC sees them. As a result:
 | Nursery nesting checks | Already AST-based via `@nursery` node matching | ✅ |
 | Arena/await interaction check | Retired with `@arena` block syntax removal | ✅ |
 | Result type collection | Only in text form (no AST nodes for `T!>E`) | BLOCKED |
-| Try expr rewriting (P15) | Only in text form (no AST nodes for `try expr`) | BLOCKED |
 | Closure literal lowering (P11) | Partially AST-based; whole-file edit blocks batching | MEDIUM |
 
 ### Reparse reduction: the real migration target
 
-The `5 reparses` (AST passes that require TCC re-parsing) is the primary cost.
-Reducing to 4 reparses requires making `pass_closure_literal_ast.c` use fine-grained
-`CCEditBuffer` edits instead of whole-file text replacement. This would allow Phase 5
-to batch with Phase 6 (spawn/nursery/arena). Effort: ~2-3 days. Not blocked technically,
-only by refactoring risk.
+**Update 2026-05-28:** the historical "make Phase 5 per-span to fold into Phase 3" plan
+was reanalyzed and found to be a non-win. Closure-literal lift is a *producer* for
+closure_calls (closure literals inside closure-typed call arg lists must be lowered
+to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text).
+Folding it into Phase 3 Stage 2 would require a 3rd Phase-3 stage with its own reparse
+barrier — net zero reparse savings. See [`ARCHITECTURE.md` §6 "Targets that aren't
+worth it"](../../docs/ARCHITECTURE.md).
+
+**What actually shipped (M4.a, 2026-05-28):** the Phase-5 reparse + closure-pass call
+were gated on `cc_contains_token_top_level(src_ufcs, ..., "=>")` in
+`visit_codegen.c`. Phase-5 reparse went from **461 → 155** across the smoke suite
+(−306, −66%). 70% of real TUs have no closure literals; they now skip Phase 5
+entirely. The whole-file rewrite inside `cc__rewrite_closure_literals_with_nodes`
+is preserved as-is because per-span migration alone wouldn't change any reparse
+count.
+
+**Historical context (pre-M4.a):** the 5-reparse total above was a worst case;
+the actual smoke-suite total post-M4.a is 1170 reparses across 461 TUs, averaging
+~2.5 reparses/TU (including the initial parse and unconditional final-UFCS sweep).
 
 ## Known issues (closure literals in deeply-rewritten call sites)
 
@@ -316,14 +329,16 @@ Two pre-existing failures share a root cause area in `pass_closure_literal_ast.c
   inside `if (test_mode) { ... }` inside a nursery `{ ... } @destroy` block.
   **Layer 1 fixed (May 2026):** the block-scope `static __cc_closure_make_N(void);`
   decl that triggered `function without file scope cannot be static` was
-  caused by `cc__closure_proto_insert_off` landing the legacy in-source
-  forward decl inside the enclosing `if` block.  We now pass
-  `skip_inline_protos=1` to `cc__rewrite_closure_literals_with_nodes_ex`
-  from `visit_codegen.c` and place file-scope forward decls via the new
-  `cc_find_first_func_def_offset` helper (just before the first
-  top-level function definition, so user typedefs that appear between
-  `#include`s and the first function — e.g. `HolReqTx` in
-  `tests/redis_owner_reply_try_send_hol_smoke.ccs` — are still in scope).
+  caused by the legacy in-source walker (formerly named
+  `cc__closure_proto_insert_off`) landing the forward decl inside the
+  enclosing `if` block.  `visit_codegen.c` was switched to the
+  file-scope-only path of `cc__rewrite_closure_literals_with_nodes`,
+  placing decls via `cc_find_first_func_def_offset` (just before the
+  first top-level function definition, so user typedefs that appear
+  between `#include`s and the first function — e.g. `HolReqTx` in
+  `tests/redis_owner_reply_try_send_hol_smoke.ccs` — are still in
+  scope).  The walker and its `skip_inline_protos=0` opt-out were
+  deleted entirely 2026-05-28.
   **Layer 2 fixed (May 2026 — verified after closure scanner fix):**
   the captured `sock` was previously reported as not unpacked from
   `__env`.  After the closure proto-placement refactor (Layer 1) plus
@@ -355,10 +370,11 @@ The proto-placement layer (Layer 1) is fixed; the syscall_kidnap
 detection layer is fixed; the `recipe_tcp_echo.ccs` capture-emission
 layer (Layer 2 above) remains open.
 
-The legacy `cc__closure_proto_insert_off` walker is still present in
-`pass_closure_literal_ast.c` for backward compat with the default
-(`skip_inline_protos=0`) path, but no in-tree caller exercises it.  It
-can be deleted once we're sure no out-of-tree consumer depends on it.
+The legacy `cc__closure_proto_insert_off` walker and its
+`skip_inline_protos=0` opt-out were **deleted 2026-05-28** (fossil
+audit confirmed both in-tree callers passed `=1`).  The non-`_ex`
+wrapper was deleted at the same time; the surviving entry point
+is `cc__rewrite_closure_literals_with_nodes` (file-scope-only).
 
 ## Next Steps
 
@@ -367,9 +383,8 @@ can be deleted once we're sure no out-of-tree consumer depends on it.
    - Effort: Medium (2-3 days)
    - Saves: 1 TCC reparse per compilation unit
 
-2. **Optional/Result pass merging** (P8+P9, P11+P12): DEFERRED
-   - Analysis: 19 → 17 scans = ~10% reduction, minimal real impact
-   - Note: P16 must stay separate (runs after try passes)
+2. **Optional/Result pass merging** (P8+P9): DEFERRED
+   - Analysis: marginal scan reduction, minimal real impact
    - Decision: Not worth the refactoring effort
 
 3. **Dead code removed**: visitor_pipeline.c was deleted (2026-02-01)
@@ -379,7 +394,7 @@ can be deleted once we're sure no out-of-tree consumer depends on it.
 
 The major consolidation wins have been achieved:
 - ✅ CCPassChain helper (cleaner pass chaining)
-- ✅ Phase 3 EditBuffer batching (4 passes → 1 apply)
+- ✅ Phase 3 EditBuffer two-stage batching (4 passes → 2 applies, 2 reparses) — default since 2026-05-28
 - ✅ CCScannerState refactoring (5 passes converted)
 - ✅ Documentation updated
 
@@ -391,8 +406,7 @@ All suitable passes have been converted to use the shared `CCScannerState` helpe
 - `cc__rewrite_optional_types` (P8)
 - `cc__rewrite_result_types` (P11)
 - `cc__rewrite_slice_types` (P3)
-- `cc__rewrite_try_exprs` (P15)
-- `cc__rewrite_optional_unwrap` (P16)
+- `cc__rewrite_optional_unwrap` (P10)
 - `cc__rewrite_match_syntax` (P2)
 - `cc__rewrite_optional_constructors` (P9)
 - `cc__rewrite_result_constructors` (P12)

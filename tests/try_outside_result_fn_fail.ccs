@@ -1,6 +1,6 @@
 /*
- * Test: try used outside a function returning T !> (E) (should fail)
- * The try macro requires the enclosing function to return a compatible Result type.
+ * Test: !> used outside a function returning T !> (E) (should fail)
+ * Propagation requires the enclosing function to return a compatible Result type.
  */
 #include <ccc/std/prelude.cch>
 
@@ -11,9 +11,9 @@ int !> (CCError) maybe_fail(int x) {
     return cc_ok(x);
 }
 
-/* This function returns int, not int !> (CCError), so try should fail */
+/* This function returns int, not int !> (CCError), so !> should fail */
 int broken(int x) {
-    int v = try maybe_fail(x);  /* ERROR: can't return CCResult from int function */
+    int v = maybe_fail(x) !>(e) return cc_err(e);
     return v;
 }
 

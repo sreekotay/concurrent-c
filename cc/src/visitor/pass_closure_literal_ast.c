@@ -343,6 +343,15 @@ static void cc__append_fmt(char** buf, size_t* len, size_t* cap, const char* fmt
     cc__append_n(buf, len, cap, tmp, (size_t)n);
 }
 
+/* Rewrite a `<base>_make(args)` closure constructor call to its
+ * nursery-aware variant `<base>_make_nursery(nursery, args)`.  Used when a
+ * closure-make expression is being spawned into a nursery (the nursery
+ * variant uses the nursery's arena for the env allocation instead of malloc).
+ *
+ * Detection: the function name ends in `_make` (suffix-based since the
+ * 2026-05-28 mangler integration; the legacy `__cc_closure_make_<id>` prefix
+ * naming was retired so this scanner can no longer rely on a fixed prefix
+ * shape and instead looks at the trailing role tag).  */
 static char* cc__rewrite_closure_make_for_nursery(const char* s, size_t n, const char* nursery_expr) {
     if (!s || !nursery_expr) return NULL;
     size_t lo = 0, hi = n;
@@ -354,7 +363,15 @@ static char* cc__rewrite_closure_make_for_nursery(const char* s, size_t n, const
     if (!(isalpha((unsigned char)s[fn_s]) || s[fn_s] == '_')) return NULL;
     size_t fn_e = fn_s + 1;
     while (fn_e < hi && (isalnum((unsigned char)s[fn_e]) || s[fn_e] == '_')) fn_e++;
-    if ((fn_e - fn_s) <= 18 || memcmp(s + fn_s, "__cc_closure_make_", 18) != 0) return NULL;
+
+    /* Require the function name to end with `_make` (5 chars).  Allows us to
+     * splice in `_nursery` after `_make` without touching the location-tagged
+     * base prefix.  Reject anything that doesn't end this way so callers
+     * passing in unrelated calls fall back to keeping the original expression. */
+    static const char make_suffix[] = "_make";
+    const size_t make_suffix_len = sizeof(make_suffix) - 1;
+    if ((fn_e - fn_s) <= make_suffix_len) return NULL;
+    if (memcmp(s + fn_e - make_suffix_len, make_suffix, make_suffix_len) != 0) return NULL;
 
     size_t p = fn_e;
     while (p < hi && (s[p] == ' ' || s[p] == '\t')) p++;
@@ -367,8 +384,9 @@ static char* cc__rewrite_closure_make_for_nursery(const char* s, size_t n, const
 
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    cc__append_str(&out, &out_len, &out_cap, "__cc_closure_make_nursery_");
-    cc__append_n(&out, &out_len, &out_cap, s + fn_s + 18, fn_e - fn_s - 18);
+    /* Emit `<base>_make_nursery` where `<base>` is everything before `_make`. */
+    cc__append_n(&out, &out_len, &out_cap, s + fn_s, fn_e - fn_s - make_suffix_len);
+    cc__append_str(&out, &out_len, &out_cap, "_make_nursery");
     cc__append_str(&out, &out_len, &out_cap, "(");
     cc__append_str(&out, &out_len, &out_cap, nursery_expr);
     if (args_e > args_s) {
@@ -1421,11 +1439,6 @@ typedef struct {
     int line_end;        /* Line where function body ends */
 } CCFuncSig;
 
-typedef struct {
-    size_t off;
-    char* text;
-} CCProtoInsert;
-
 static const char* cc__lookup_param_type_in_sig(const CCFuncSig* sig, const char* name);
 
 /* Fallback: look up a captured name in the nearest function signature. */
@@ -1451,10 +1464,6 @@ static const char* cc__lookup_param_type_for_closure(const CCFuncSig* sigs,
         if (nm && ty && strcmp(nm, name) == 0) return ty;
     }
     return NULL;
-}
-
-static int cc__is_ident_boundary_char(char c) {
-    return !(cc__is_ident_char2(c));
 }
 
 static const char* cc__lookup_param_type_by_src(const CCFuncSig* sigs,
@@ -1771,6 +1780,17 @@ static int cc__find_mutation_in_body(const char* body,
 
 typedef struct {
     int id;
+    /* `sym_base` is the location-tagged base symbol used for every emitted
+     * closure helper (entry / make / make_nursery / env / env_drop /
+     * env_nursery_drop). It comes from `cc_diag_mangle_symbol` and takes the
+     * form `cc_closure__N<id>__line<L>_col<C>` — so any name appearing in a
+     * crash backtrace or symbolicated profile is immediately self-locating
+     * (sequence #, source line, source column). Two closures expanded by the
+     * same macro at identical line/col still get unique names via the N<id>
+     * sequence tiebreaker. Populated once per descriptor build; freed in
+     * cc__free_closure_desc. The legacy `__cc_closure_<role>_<id>` integer
+     * naming was retired 2026-05-28 (M4: mangler integration). */
+    char* sym_base;
     int start_line;
     int end_line;
     int start_col;
@@ -2016,13 +2036,12 @@ static void cc__append_closure_make_proto(char** buf,
                                           size_t* len,
                                           size_t* cap,
                                           const char* closure_type,
-                                          int closure_id,
+                                          const char* sym_base,
                                           int nursery_variant,
                                           const CCClosureDesc* d) {
-    if (!buf || !len || !cap || !closure_type || !d) return;
-    cc__append_fmt(buf, len, cap, "static %s __cc_closure_make", closure_type);
-    if (nursery_variant) cc__append_fmt(buf, len, cap, "_nursery_%d(", closure_id);
-    else cc__append_fmt(buf, len, cap, "_%d(", closure_id);
+    if (!buf || !len || !cap || !closure_type || !sym_base || !d) return;
+    if (nursery_variant) cc__append_fmt(buf, len, cap, "static %s %s_make_nursery(", closure_type, sym_base);
+    else cc__append_fmt(buf, len, cap, "static %s %s_make(", closure_type, sym_base);
     if (nursery_variant) {
         cc__append_str(buf, len, cap, "CCNursery* __cc_nursery");
         if (d->cap_count > 0) cc__append_str(buf, len, cap, ", ");
@@ -2042,106 +2061,6 @@ static void cc__append_closure_make_proto(char** buf,
     }
     if (!nursery_variant && d->cap_count == 0) cc__append_str(buf, len, cap, "void");
     cc__append_str(buf, len, cap, ");\n");
-}
-
-static size_t cc__closure_proto_insert_off(const CCFuncSig* sigs,
-                                           int sig_n,
-                                           const CCClosureDesc* d,
-                                           const char* src,
-                                           size_t len) {
-    size_t i = 0;
-    size_t limit = 0;
-    size_t last_line_off = 0;
-    size_t best_func_off = (size_t)-1;
-    int brace_depth = 0;
-    CCInertScan scan;
-    (void)sigs;
-    (void)sig_n;
-    if (!d || !src) return 0;
-    limit = d->start_off;
-    if (limit > len) limit = len;
-    cc_inert_scan_init(&scan, NULL);
-    while (i < limit) {
-        size_t before = i;
-        if (cc_inert_scan_step(&scan, src, limit, &i)) {
-            /* Sweep consumed inert range for newlines (Batch C pattern):
-             * `last_line_off` must keep tracking line starts across
-             * inert content (comment bodies / string bodies / pp lines). */
-            for (size_t k = before; k < i; k++) {
-                if (src[k] == '\n') last_line_off = k + 1;
-            }
-            continue;
-        }
-        char c = src[i];
-        if (c == '\n') {
-            last_line_off = i + 1;
-            i++;
-            continue;
-        }
-        if (c == '{') {
-            if (brace_depth == 0) {
-                size_t j = i;
-                while (j > 0 && isspace((unsigned char)src[j - 1])) j--;
-                if (j > 0 && src[j - 1] == ')') {
-                    size_t rp = j - 1;
-                    int par = 1;
-                    size_t lp = rp;
-                    while (lp > 0) {
-                        lp--;
-                        if (src[lp] == ')') par++;
-                        else if (src[lp] == '(') {
-                            par--;
-                            if (par == 0) break;
-                        }
-                    }
-                    if (par == 0) {
-                        size_t k = lp;
-                        while (k > 0 && isspace((unsigned char)src[k - 1])) k--;
-                        size_t id_end = k;
-                        while (k > 0 && cc__is_ident_char2(src[k - 1])) k--;
-                        if (id_end > k) {
-                            size_t kw_n = id_end - k;
-                            const char* kw = src + k;
-                            int is_control = ((kw_n == 2 && strncmp(kw, "if", 2) == 0) ||
-                                              (kw_n == 3 && strncmp(kw, "for", 3) == 0) ||
-                                              (kw_n == 5 && strncmp(kw, "while", 5) == 0) ||
-                                              (kw_n == 6 && strncmp(kw, "switch", 6) == 0));
-                            if (!is_control) best_func_off = last_line_off;
-                        }
-                    }
-                }
-            }
-            brace_depth++;
-        }
-        else if (c == '}') {
-            if (brace_depth > 0) brace_depth--;
-        }
-        i++;
-    }
-    if (best_func_off != (size_t)-1) return best_func_off;
-    return cc__offset_of_line_1based(src, len, d->start_line);
-}
-
-static void cc__queue_proto_insert(CCProtoInsert* inserts,
-                                   int* insert_count,
-                                   int insert_cap,
-                                   size_t off,
-                                   const char* text) {
-    if (!inserts || !insert_count || insert_cap <= 0 || !text) return;
-    for (int i = 0; i < *insert_count; i++) {
-        if (inserts[i].off != off) continue;
-        {
-            size_t len = inserts[i].text ? strlen(inserts[i].text) : 0;
-            size_t cap = len + 1;
-            cc__append_str(&inserts[i].text, &len, &cap, text);
-        }
-        return;
-    }
-    if (*insert_count >= insert_cap) return;
-    inserts[*insert_count].off = off;
-    inserts[*insert_count].text = strdup(text);
-    if (!inserts[*insert_count].text) return;
-    (*insert_count)++;
 }
 
 static char* cc__lower_nested_closures_in_body(int parent_idx,
@@ -2443,6 +2362,7 @@ static int cc__parse_closure_from_src(const char* src,
 
 static void cc__free_closure_desc(CCClosureDesc* d) {
     if (!d) return;
+    free(d->sym_base);
     free(d->param0_name);
     free(d->param1_name);
     free(d->param0_type);
@@ -2483,7 +2403,7 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
     if (!d) return NULL;
     char* b = NULL;
     size_t bl = 0, bc = 0;
-    cc__append_fmt(&b, &bl, &bc, "__cc_closure_make_%d(", d->id);
+    cc__append_fmt(&b, &bl, &bc, "%s_make(", d->sym_base);
     if (d->cap_count == 0) {
         cc__append_str(&b, &bl, &bc, ")");
     } else {
@@ -2502,33 +2422,15 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
 }
 
 int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
-                                           const CCVisitorCtx* ctx,
-                                           const char* in_src,
-                                           size_t in_len,
-                                           char** out_src,
-                                           size_t* out_len,
-                                           char** out_protos,
-                                           size_t* out_protos_len,
-                                           char** out_defs,
-                                           size_t* out_defs_len) {
-    return cc__rewrite_closure_literals_with_nodes_ex(root, ctx, in_src, in_len,
-                                                     out_src, out_len,
-                                                     out_protos, out_protos_len,
-                                                     out_defs, out_defs_len,
-                                                     /*skip_inline_protos=*/0);
-}
-
-int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
-                                              const CCVisitorCtx* ctx,
-                                              const char* in_src,
-                                              size_t in_len,
-                                              char** out_src,
-                                              size_t* out_len,
-                                              char** out_protos,
-                                              size_t* out_protos_len,
-                                              char** out_defs,
-                                              size_t* out_defs_len,
-                                              int skip_inline_protos) {
+                                            const CCVisitorCtx* ctx,
+                                            const char* in_src,
+                                            size_t in_len,
+                                            char** out_src,
+                                            size_t* out_len,
+                                            char** out_protos,
+                                            size_t* out_protos_len,
+                                            char** out_defs,
+                                            size_t* out_defs_len) {
     if (!root || !ctx || !in_src || !out_src || !out_len || !out_protos || !out_protos_len || !out_defs || !out_defs_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -2767,7 +2669,29 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
         d->start_col = start_col1 - 1;
         d->end_col = (n[i].col_end > 0) ? (n[i].col_end - 1) : -1;
         d->start_off = start_off;
-        
+
+        /* Mint the location-tagged base symbol for every emitted helper
+         * (entry/make/env/...). N<id> is the dedup tiebreaker; line+col
+         * carries the source location into every backtrace frame. See the
+         * comment on `sym_base` in the CCClosureDesc struct definition. */
+        {
+            char user_ident[16];
+            snprintf(user_ident, sizeof(user_ident), "N%d", d->id);
+            int col1_for_sym = (d->start_col >= 0) ? (d->start_col + 1) : 1;
+            d->sym_base = cc_diag_mangle_symbol(CC_CONSTRUCT_CLOSURE,
+                                                user_ident,
+                                                d->start_line,
+                                                col1_for_sym);
+            if (!d->sym_base) {
+                /* OOM: fall back to a deterministic, non-empty string so the
+                 * emit loop below cannot dereference NULL. The compile will
+                 * still likely fail downstream, but we won't crash here. */
+                char fallback[32];
+                snprintf(fallback, sizeof(fallback), "cc_closure__N%d__line0_col0", d->id);
+                d->sym_base = strdup(fallback);
+            }
+        }
+
         /* Check for `@unsafe` prefix before the closure span (TCC consumes it separately).
            If found, expand the start_off to include it so the rewrite removes it. */
         if (start_off >= 7) {
@@ -3206,9 +3130,6 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
     size_t protos_len = 0, protos_cap = 0;
     char* defs = NULL;
     size_t defs_len = 0, defs_cap = 0;
-    CCProtoInsert proto_inserts[512];
-    int proto_insert_n = 0;
-    memset(proto_inserts, 0, sizeof(proto_inserts));
 
     Edit edits[2048];
     int en = 0;
@@ -3224,21 +3145,27 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
         if (!d->body_text) continue;
 
         /* Emit exact closure declarations for the EOF-generated section, where
-           all user-visible types are already in scope. */
+           all user-visible types are already in scope.  We inline what
+           `CC_CLOSURE0_DECL` would have produced rather than using the macro:
+           since 2026-05-28 names use a location-tagged base symbol (`d->sym_base`,
+           e.g. `cc_closure__N7__line42_col15`) that doesn't fit the macro's
+           `__cc_closure_<role>_##n` token-paste shape. The macros in
+           `cc_closure_helper.h` remain as conveniences for any non-pass user. */
         if (d->param_count == 0 && d->cap_count == 0) {
-            cc__append_fmt(&protos, &protos_len, &protos_cap, "CC_CLOSURE0_DECL(%d);\n", d->id);
-            cc__append_fmt(&protos, &protos_len, &protos_cap, "static CCClosure0 __cc_closure_make_nursery_%d(CCNursery* __cc_nursery);\n", d->id);
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* %s_entry(void*);\n", d->sym_base);
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static CCClosure0 %s_make(void);\n", d->sym_base);
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static CCClosure0 %s_make_nursery(CCNursery* __cc_nursery);\n", d->sym_base);
         } else {
-            if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*);\n", d->id);
-            else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
-            else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", d->id);
+            if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* %s_entry(void*);\n", d->sym_base);
+            else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* %s_entry(void*, intptr_t);\n", d->sym_base);
+            else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* %s_entry(void*, intptr_t, intptr_t);\n", d->sym_base);
             const char* cty_p = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
             if (d->cap_count == 0) {
-                cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_%d(void);\n", cty_p, d->id);
-                cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery);\n", cty_p, d->id);
+                cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s %s_make(void);\n", cty_p, d->sym_base);
+                cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s %s_make_nursery(CCNursery* __cc_nursery);\n", cty_p, d->sym_base);
             } else {
-                cc__append_closure_make_proto(&protos, &protos_len, &protos_cap, cty_p, d->id, 0, d);
-                cc__append_closure_make_proto(&protos, &protos_len, &protos_cap, cty_p, d->id, 1, d);
+                cc__append_closure_make_proto(&protos, &protos_len, &protos_cap, cty_p, d->sym_base, 0, d);
+                cc__append_closure_make_proto(&protos, &protos_len, &protos_cap, cty_p, d->sym_base, 1, d);
             }
         }
         /* Blank line between adjacent closure proto groups so the
@@ -3260,7 +3187,7 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
                        "/* CC closure %d */\n", d->id);
 
         if (d->cap_count > 0) {
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "typedef struct __cc_closure_env_%d {\n", d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "typedef struct %s_env {\n", d->sym_base);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
@@ -3272,15 +3199,15 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
                 }
             }
             cc__append_str(&defs, &defs_len, &defs_cap, "} ");
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "__cc_closure_env_%d;\n", d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "%s_env;\n", d->sym_base);
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "static void __cc_closure_env_%d_drop(void* p) { if (p) free(p); }\n",
-                           d->id);
+                           "static void %s_env_drop(void* p) { if (p) free(p); }\n",
+                           d->sym_base);
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "static void __cc_closure_env_%d_nursery_drop(void* p) { (void)p; }\n",
-                           d->id);
+                           "static void %s_env_nursery_drop(void* p) { (void)p; }\n",
+                           d->sym_base);
 
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s __cc_closure_make_%d(", cty, d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s %s_make(", cty, d->sym_base);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 if (ci) cc__append_str(&defs, &defs_len, &defs_cap, ", ");
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
@@ -3299,8 +3226,8 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             }
             cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  CC_CLOSURE_ENV_ALLOC(__cc_closure_env_%d, __env);\n",
-                           d->id);
+                           "  CC_CLOSURE_ENV_ALLOC(%s_env, __env);\n",
+                           d->sym_base);
             /* Cast opaque void* params back to their concrete types.  These
              * casts are safe because the definitions live at end-of-file where
              * all user-defined types are in scope. */
@@ -3325,11 +3252,11 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             /* TSan release: ensure captured values are visible to worker thread */
             cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_RELEASE(__env);\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  return %s(__cc_closure_entry_%d, __env, __cc_closure_env_%d_drop);\n",
-                           mkfn, d->id, d->id);
+                           "  return %s(%s_entry, __env, %s_env_drop);\n",
+                           mkfn, d->sym_base, d->sym_base);
             cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
 
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery", cty, d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s %s_make_nursery(CCNursery* __cc_nursery", cty, d->sym_base);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 cc__append_str(&defs, &defs_len, &defs_cap, ", ");
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
@@ -3347,8 +3274,8 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             }
             cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  CC_CLOSURE_ENV_NURSERY_ALLOC(__cc_nursery, __cc_closure_env_%d, __env);\n",
-                           d->id);
+                           "  CC_CLOSURE_ENV_NURSERY_ALLOC(__cc_nursery, %s_env, __env);\n",
+                           d->sym_base);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
@@ -3369,36 +3296,45 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
             }
             cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_RELEASE(__env);\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  return %s(__cc_closure_entry_%d, __env, __cc_closure_env_%d_nursery_drop);\n",
-                           mkfn, d->id, d->id);
+                           "  return %s(%s_entry, __env, %s_env_nursery_drop);\n",
+                           mkfn, d->sym_base, d->sym_base);
             cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
         } else {
-            /* Use macro for simple CCClosure0 with no captures */
+            /* Inline what `CC_CLOSURE0_SIMPLE` would have produced — see note
+             * at the proto cluster above re: location-tagged base symbol. */
             if (d->param_count == 0) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "CC_CLOSURE0_SIMPLE(%d) {\n  (void)__p;\n", d->id);
+                cc__append_fmt(&defs, &defs_len, &defs_cap,
+                               "static CCClosure0 %s_make(void) { return cc_closure0_make(%s_entry, NULL, NULL); }\n",
+                               d->sym_base, d->sym_base);
+                cc__append_fmt(&defs, &defs_len, &defs_cap,
+                               "static void* %s_entry(void* __p) {\n  (void)__p;\n",
+                               d->sym_base);
             } else {
                 cc__append_fmt(&defs, &defs_len, &defs_cap,
-                               "static %s __cc_closure_make_%d(void) { return %s(__cc_closure_entry_%d, NULL, NULL); }\n",
-                               cty, d->id, mkfn, d->id);
+                               "static %s %s_make(void) { return %s(%s_entry, NULL, NULL); }\n",
+                               cty, d->sym_base, mkfn, d->sym_base);
                 cc__append_fmt(&defs, &defs_len, &defs_cap,
-                               "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery) { (void)__cc_nursery; return __cc_closure_make_%d(); }\n",
-                               cty, d->id, d->id);
+                               "static %s %s_make_nursery(CCNursery* __cc_nursery) { (void)__cc_nursery; return %s_make(); }\n",
+                               cty, d->sym_base, d->sym_base);
             }
         }
 
-        /* defs: entry (skip for simple CCClosure0 - handled by macro) */
+        /* defs: entry function body. For simple CCClosure0 (no params, no
+         * captures), the entry-fn header was already emitted inline above
+         * (right after the make function) along with `(void)__p;` — so the
+         * loop here only emits headers for the other variants. */
         int simple_closure0 = (d->param_count == 0 && d->cap_count == 0);
         if (!simple_closure0) {
             if (d->param_count == 0) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p) {\n", d->id);
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* %s_entry(void* __p) {\n", d->sym_base);
             } else if (d->param_count == 1) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0) {\n", d->id);
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* %s_entry(void* __p, intptr_t __arg0) {\n", d->sym_base);
             } else {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0, intptr_t __arg1) {\n", d->id);
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* %s_entry(void* __p, intptr_t __arg0, intptr_t __arg1) {\n", d->sym_base);
             }
         }
         if (d->cap_count > 0) {
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", d->id, d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s_env* __env = (%s_env*)__p;\n", d->sym_base, d->sym_base);
             cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_ACQUIRE(__env);\n");
             for (int ci = 0; ci < d->cap_count; ci++) {
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
@@ -3511,8 +3447,8 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
         cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
         if (simple_closure0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "static CCClosure0 __cc_closure_make_nursery_%d(CCNursery* __cc_nursery) { (void)__cc_nursery; return __cc_closure_make_%d(); }\n\n",
-                           d->id, d->id);
+                           "static CCClosure0 %s_make_nursery(CCNursery* __cc_nursery) { (void)__cc_nursery; return %s_make(); }\n\n",
+                           d->sym_base, d->sym_base);
         }
 
         char* call = cc__make_call_expr(d);
@@ -3526,57 +3462,21 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
                     d->id, is_nested, d->start_off, d->end_off);
         }
         if (!is_nested) {
-            /* Legacy path: emit an in-source forward decl of
-             * `__cc_closure_make_N` at the start of the closure's
-             * enclosing function body (`cc__closure_proto_insert_off`
-             * walks backwards from the closure to find that point).
-             *
-             * This is brittle in two ways:
-             *  - when the closure is nested inside a control-flow
-             *    block (`if (...) { () => [x] { ... } }`), the walker
-             *    can land the decl INSIDE that block instead of the
-             *    enclosing function body — and `static T fn();` at
-             *    block scope is a C constraint violation
-             *    (C99 6.7.1: only `extern` is allowed at block scope
-             *    for function decls).
-             *  - it duplicates the file-scope forward decl that the
-             *    same pass already writes into `*out_protos`.
-             *
-             * Callers that place `*out_protos` at file scope (after
-             * `#include`s, before the first definition) can pass
-             * `skip_inline_protos=1` to bypass this entirely.  That
-             * fixes the recipe_tcp_echo.ccs `function without file
-             * scope cannot be static` failure and lets us delete the
-             * walker once all callers migrate. */
-            if (!skip_inline_protos) {
-                char* local_proto = NULL;
-                size_t local_proto_len = 0, local_proto_cap = 0;
-                const char* local_cty = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
-                size_t insert_off = cc__closure_proto_insert_off(sigs, sig_n, d, in_src, in_len);
-                if (d->cap_count == 0) {
-                    cc__append_fmt(&local_proto, &local_proto_len, &local_proto_cap,
-                                   "static %s __cc_closure_make_%d(void);\n",
-                                   local_cty, d->id);
-                } else {
-                    cc__append_closure_make_proto(&local_proto, &local_proto_len, &local_proto_cap,
-                                                  local_cty, d->id, 0, d);
-                }
-                if (local_proto) {
-                    cc__queue_proto_insert(proto_inserts, &proto_insert_n,
-                                           (int)(sizeof(proto_inserts) / sizeof(proto_inserts[0])),
-                                           insert_off, local_proto);
-                    free(local_proto);
-                }
-            }
+            /* File-scope forward decls written into `*out_protos` are the
+             * only proto-placement strategy.  The caller places them after
+             * `#include`s and before the first function definition via
+             * `find_protos_insertion_point` (see edit_buffer.c).  The
+             * legacy in-source walker `cc__closure_proto_insert_off` —
+             * which tried to land `static T fn();` decls at the top of
+             * the closure's enclosing function body — was deleted
+             * 2026-05-28 along with its `skip_inline_protos=0` opt-out
+             * (the walker was brittle when closures sat inside `if`/`for`
+             * blocks because `static` decls are not allowed at block
+             * scope per C99 6.7.1). */
             edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
         } else {
             free(call);
         }
-    }
-    for (int i = 0; i < proto_insert_n && en < (int)(sizeof(edits) / sizeof(edits[0])); i++) {
-        if (!proto_inserts[i].text) continue;
-        edits[en++] = (Edit){ .start = proto_inserts[i].off, .end = proto_inserts[i].off, .repl = proto_inserts[i].text };
-        proto_inserts[i].text = NULL;
     }
     if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
         fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: applying %d edits to source (len=%zu)\n", en, in_len);
@@ -3586,7 +3486,6 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
     size_t rewritten_len = 0;
     char* rewritten = cc__rewrite_with_edits(in_src, in_len, edits, en, &rewritten_len);
     for (int i = 0; i < en; i++) free(edits[i].repl);
-    for (int i = 0; i < proto_insert_n; i++) free(proto_inserts[i].text);
 
     /* cleanup scope maps */
     for (int dd = 0; dd < 256; dd++) {
@@ -3617,62 +3516,9 @@ int cc__rewrite_closure_literals_with_nodes_ex(const CCASTRoot* root,
     return 1;
 }
 
-/* NEW: Collect closure literal edits into EditBuffer.
-   NOTE: This pass generates protos and defs that must be emitted separately.
-   The function adds the source edits to eb, and protos/defs via add_protos/add_defs.
-   Returns number of edits added (>= 0), or -1 on error. */
-int cc__collect_closure_edits(const CCASTRoot* root,
-                              const CCVisitorCtx* ctx,
-                              CCEditBuffer* eb) {
-    if (!root || !ctx || !eb || !eb->src) return 0;
-
-    char* rewritten = NULL;
-    size_t rewritten_len = 0;
-    char* protos = NULL;
-    size_t protos_len = 0;
-    char* defs = NULL;
-    size_t defs_len = 0;
-
-    /* EditBuffer places `protos` at file scope via
-     * `find_protos_insertion_point`, so the inner pass should NOT also
-     * splice forward decls into the enclosing function body — see the
-     * `skip_inline_protos` note in the inner function. */
-    int r = cc__rewrite_closure_literals_with_nodes_ex(root, ctx, eb->src, eb->src_len,
-                                                       &rewritten, &rewritten_len,
-                                                       &protos, &protos_len,
-                                                       &defs, &defs_len,
-                                                       /*skip_inline_protos=*/1);
-    if (r < 0) {
-        free(rewritten);
-        free(protos);
-        free(defs);
-        return -1;
-    }
-    if (r == 0 || !rewritten) {
-        free(protos);
-        free(defs);
-        return 0;
-    }
-
-    int edits_added = 0;
-
-    /* Add protos and defs to the EditBuffer */
-    if (protos && protos_len > 0) {
-        cc_edit_buffer_add_protos(eb, protos, protos_len);
-    }
-    if (defs && defs_len > 0) {
-        cc_edit_buffer_add_defs(eb, defs, defs_len);
-    }
-
-    /* Add source replacement edit */
-    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
-        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 60, "closure_literals") == 0) {
-            edits_added = 1;
-        }
-    }
-
-    free(rewritten);
-    free(protos);
-    free(defs);
-    return edits_added;
-}
+/* `cc__collect_closure_edits` (fake-per-span CCEditBuffer wrapper around
+ * `cc__rewrite_closure_literals_with_nodes`) was deleted 2026-05-28 — it had
+ * zero callers and would have emitted a wholesale `[0, src_len)` edit anyway,
+ * which doesn't compose with the genuinely per-span Phase-3 stage-2 batch.
+ * The whole-file API above is the only supported closure-literal entry point;
+ * see `visit_codegen.c` Phase 5 and ARCHITECTURE.md §6. */

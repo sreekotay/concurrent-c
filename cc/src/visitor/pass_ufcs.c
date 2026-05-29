@@ -838,58 +838,273 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
 
 /* Path helpers are now in pass_common.h */
 
-/* NEW: Collect UFCS edits into EditBuffer.
-   NOTE: UFCS is complex (incremental processing with chain extension).
-   For now, this function runs the rewrite and diffs the result to extract edits.
-   Future: refactor to collect edits directly without intermediate rewrite. */
+/* Per-span edit collector.  Walks UFCS-flagged CALL nodes in TCC's stub AST,
+ * resolves each call's source span against `eb->src`, runs
+ * `cc_ufcs_rewrite_line_full()` on the extracted text, and pushes a
+ * `[span.start, span.end) → lowered_text` edit per non-subsumed call.
+ *
+ * The legacy `cc__rewrite_ufcs_spans_with_nodes()` rewriter performed
+ * in-place buffer mutation between nodes (processing bottom-up so unmutated
+ * regions kept their TCC-reported line/col offsets).  That worked but
+ * produced a single whole-buffer edit when wrapped in this collector,
+ * which would have collided with other Phase-3 collectors once batching
+ * became the default Phase-3 path (see PIPELINE.md).
+ *
+ * This per-span variant resolves every span against the ORIGINAL `eb->src`
+ * (offsets stay consistent because the source never mutates) and uses the
+ * same `done[]` containment check the wholesale path used to suppress
+ * subsumed nested chain segments.  The result: each UFCS call site
+ * produces exactly one edit, surgical and non-overlapping, so other
+ * collectors can run in the same edit buffer without collision.
+ *
+ * `CC_UFCS_TEXT_FALLBACK=1` (debug only, off by default) preserves the
+ * legacy wholesale fallback path — emits a single whole-buffer edit.
+ * This is intentionally compatible only with the non-batched pipeline;
+ * it exists purely as a diagnostic for AST-resolver regressions.
+ */
 int cc__collect_ufcs_edits(const CCASTRoot* root,
                            const CCVisitorCtx* ctx,
                            CCEditBuffer* eb) {
-    if (!root || !ctx || !eb || !eb->src) return 0;
+    if (!root || !ctx || !ctx->input_path || !eb || !eb->src) return 0;
+    if (!root->nodes || root->node_count <= 0) {
+        /* Even with no AST nodes the text-only fallback may want to run. */
+        if (!getenv("CC_UFCS_TEXT_FALLBACK")) return 0;
+    }
 
     cc_ufcs_set_symbols(ctx->symbols);
-    char* rewritten = NULL;
-    size_t rewritten_len = 0;
-    int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    /* AST-only UFCS: the text fallback is off by default.  The final-UFCS
-     * sweep in visit_codegen splices lifted closure bodies into src_ufcs
-     * before reparsing so TCC sees every UFCS call site in the translation
-     * unit, including those inside `() => { ... }` bodies.  Set
-     * CC_UFCS_TEXT_FALLBACK=1 to re-enable the legacy text pass as a
-     * diagnostic safety net while debugging UFCS rewrites. */
-    if (getenv("CC_UFCS_TEXT_FALLBACK") && eb->src && eb->src_len > 0) {
-        const char* base_src = rewritten ? rewritten : eb->src;
-        size_t base_len = rewritten ? rewritten_len : eb->src_len;
+
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
+
+    /* CC_UFCS_TEXT_FALLBACK debug path: run the legacy whole-buffer text
+     * rewriter and emit a single coarse edit.  Mutually exclusive with
+     * batched mode (would collide); intended only for AST-resolver
+     * debugging where bypassing the AST path is the whole point. */
+    if (getenv("CC_UFCS_TEXT_FALLBACK")) {
         char* fallback = NULL;
         size_t fallback_len = 0;
-        int fr = cc__rewrite_ufcs_text_fallback(ctx, base_src, base_len, &fallback, &fallback_len);
-        if (fr < 0) {
-            cc_ufcs_set_symbols(NULL);
-            free(rewritten);
-            return -1;
+        int fr = cc__rewrite_ufcs_text_fallback(ctx, in_src, in_len, &fallback, &fallback_len);
+        cc_ufcs_set_symbols(NULL);
+        if (fr < 0) { free(fallback); return -1; }
+        if (fr <= 0 || !fallback) { free(fallback); return 0; }
+        if (fallback_len == in_len && memcmp(fallback, in_src, in_len) == 0) {
+            free(fallback);
+            return 0;
         }
-        if (fr > 0 && fallback) {
-            if (rewritten) free(rewritten);
-            rewritten = fallback;
-            rewritten_len = fallback_len;
-            r = 1;
-        }
+        int rc = cc_edit_buffer_add(eb, 0, in_len, fallback, 100, "ufcs");
+        free(fallback);
+        return rc == 0 ? 1 : -1;
     }
-    cc_ufcs_set_symbols(NULL);
-    if (r < 0) return -1;
-    if (r == 0 || !rewritten) return 0;
 
-    /* UFCS does many small same-line transforms. Rather than diff, for now we use a
-       single "replace all" edit which is semantically correct but coarse.
-       Future: track individual span rewrites for finer-grained edits. */
-    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
-        /* Replace entire source - this works but loses granularity.
-           Since UFCS is typically first in its group, this is acceptable. */
-        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 100, "ufcs") == 0) {
-            free(rewritten);
-            return 1;
+    typedef CCNodeView NodeView;
+    const NodeView* n = (const NodeView*)root->nodes;
+
+    /* Collect UFCS-flagged CALL nodes.  Mirrors the rewriter exactly. */
+    struct UFCSNode {
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        const char* method;
+        const char* recv_type;
+        int occurrence_1based;
+        int is_under_await;
+        int recv_type_is_ptr;
+    };
+    struct UFCSNode* nodes = NULL;
+    int node_count = 0;
+    int node_cap = 0;
+
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 5) continue;          /* CALL */
+        if ((n[i].aux2 & 4) == 0) continue;    /* UFCS marker */
+        if (!n[i].aux_s1) continue;
+        int ls = n[i].line_start;
+        int le = n[i].line_end;
+        if (ls <= 0) continue;
+        if (le < ls) le = ls;
+        if (node_count == node_cap) {
+            int new_cap = node_cap ? node_cap * 2 : 32;
+            struct UFCSNode* nn = (struct UFCSNode*)realloc(nodes, (size_t)new_cap * sizeof(*nn));
+            if (!nn) { free(nodes); cc_ufcs_set_symbols(NULL); return 0; }
+            nodes = nn;
+            node_cap = new_cap;
+        }
+        int occ = (n[i].aux2 >> 8) & 0x00ffffff;
+        if (occ <= 0) occ = 1;
+        int recv_type_is_ptr = (n[i].aux2 & 2) ? 1 : 0;
+        int under_await = 0;
+        for (int p = n[i].parent; p >= 0 && p < root->node_count; p = n[p].parent) {
+            if (n[p].kind == 6) { under_await = 1; break; }
+        }
+        nodes[node_count++] = (struct UFCSNode){
+            .line_start = ls,
+            .line_end = le,
+            .col_start = n[i].col_start,
+            .col_end = n[i].col_end,
+            .method = n[i].aux_s1,
+            .recv_type = n[i].aux_s2,
+            .occurrence_1based = occ,
+            .is_under_await = under_await,
+            .recv_type_is_ptr = recv_type_is_ptr,
+        };
+    }
+
+    if (node_count == 0) {
+        free(nodes);
+        cc_ufcs_set_symbols(NULL);
+        return 0;
+    }
+
+    /* Bottom-up sort: process later-source nodes first so the `done[]`
+     * containment check catches nested chain segments (inner `.m1()` calls
+     * that get absorbed by the outer chain's receiver scan).  Order doesn't
+     * affect offset validity (we never mutate in_src), but matches the
+     * original rewriter's iteration order so containment relationships
+     * resolve identically. */
+    for (int i = 0; i < node_count; i++) {
+        for (int j = i + 1; j < node_count; j++) {
+            int swap = 0;
+            if (nodes[j].line_start > nodes[i].line_start) swap = 1;
+            else if (nodes[j].line_start == nodes[i].line_start) {
+                if (nodes[j].col_start > 0 && nodes[i].col_start > 0) {
+                    if (nodes[j].col_start > nodes[i].col_start) swap = 1;
+                    else if (nodes[j].col_start == nodes[i].col_start &&
+                             nodes[j].col_end > nodes[i].col_end) swap = 1;
+                } else if (nodes[j].line_end > nodes[i].line_end) {
+                    swap = 1;
+                }
+            }
+            if (swap) {
+                struct UFCSNode tmp = nodes[i];
+                nodes[i] = nodes[j];
+                nodes[j] = tmp;
+            }
         }
     }
-    free(rewritten);
-    return 0;
+
+    struct CC__UFCSSpan* done = NULL;
+    int done_count = 0;
+    int done_cap = 0;
+
+    int edits_added = 0;
+    int err = 0;
+
+    for (int i = 0; i < node_count && !err; i++) {
+        int ls = nodes[i].line_start;
+        int le = nodes[i].line_end;
+        if (ls <= 0) continue;
+        if (le < ls) le = ls;
+        size_t rs = cc__offset_of_line_1based(in_src, in_len, ls);
+        size_t re = cc__offset_of_line_1based(in_src, in_len, le + 1);
+        if (re > in_len) re = in_len;
+        if (rs >= re) continue;
+
+        struct CC__UFCSSpan sp;
+        int have_span = 0;
+        struct CC__UFCSSpan lax_sp;
+        int have_lax = 0;
+        if (nodes[i].col_start > 0 && nodes[i].col_end > 0 && nodes[i].line_end > 0) {
+            size_t sep_pos = cc__offset_of_line_col_1based(in_src, in_len, nodes[i].line_start, nodes[i].col_start);
+            size_t end_pos = cc__offset_of_line_col_1based(in_src, in_len, nodes[i].line_end, nodes[i].col_end);
+            if (cc__span_from_anchor_and_end(in_src, rs, sep_pos, end_pos, &sp)) {
+                have_span = 1;
+            } else if (sep_pos >= rs && sep_pos < end_pos && end_pos <= in_len) {
+                lax_sp.start = cc__scan_receiver_start_left(in_src, rs, sep_pos);
+                lax_sp.end = end_pos;
+                if (lax_sp.start < lax_sp.end) have_lax = 1;
+            }
+        }
+        if (!have_span) {
+            if (cc__find_ufcs_span_in_range(in_src, rs, re, nodes[i].method, nodes[i].occurrence_1based, &sp)) {
+                have_span = 1;
+            }
+        }
+        if (!have_span && have_lax) {
+            sp = lax_sp;
+            have_span = 1;
+        }
+        if (!have_span) continue;
+        if (sp.end > in_len || sp.start >= sp.end) continue;
+
+        sp.end = cc__ufcs_extend_chain_end(in_src, in_len, sp.end);
+
+        int covered = 0;
+        for (int k = 0; k < done_count; k++) {
+            if (sp.start >= done[k].start && sp.end <= done[k].end) {
+                covered = 1;
+                break;
+            }
+        }
+        if (covered) continue;
+
+        size_t expr_len = sp.end - sp.start;
+        size_t out_cap = expr_len * 2 + 256;
+        char* out_buf = (char*)malloc(out_cap);
+        if (!out_buf) continue;
+        char* expr = (char*)malloc(expr_len + 1);
+        if (!expr) { free(out_buf); continue; }
+        memcpy(expr, in_src + sp.start, expr_len);
+        expr[expr_len] = '\0';
+        {
+            const char* p = expr;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+            size_t p_len = strlen(p);
+            int defers = cc_find_substr_top_level(p, 0, p_len, "@defer", 6) < p_len;
+            if ((strncmp(p, "@defer", 6) == 0 &&
+                 (p[6] == '\0' || p[6] == ' ' || p[6] == '\t' || p[6] == '\n' || p[6] == '\r' || p[6] == '(')) ||
+                defers) {
+                free(expr);
+                free(out_buf);
+                continue;
+            }
+        }
+        cc_ufcs_set_source_context(in_src, sp.start);
+        int rewrite_rc = cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await,
+                                                   nodes[i].recv_type_is_ptr, nodes[i].recv_type);
+        cc_ufcs_set_source_context(NULL, 0);
+
+        if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
+            char rel[1024];
+            char recv_expr[256];
+            const char* file = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            int col = nodes[i].col_start > 0 ? nodes[i].col_start : 1;
+            cc__ufcs_extract_receiver_expr(expr, recv_expr, sizeof(recv_expr));
+            if (nodes[i].recv_type && nodes[i].recv_type[0]) {
+                cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                                  "no UFCS method '%s' for receiver type '%s'",
+                                  nodes[i].method ? nodes[i].method : "<unknown>",
+                                  nodes[i].recv_type);
+            } else {
+                cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                                  "cannot resolve UFCS method '%s' because the receiver type is unknown",
+                                  nodes[i].method ? nodes[i].method : "<unknown>");
+            }
+            if (recv_expr[0]) {
+                cc_pass_note(file, nodes[i].line_start, col, "receiver expression: %s", recv_expr);
+            }
+            cc_pass_note(file, nodes[i].line_start, col, "offending call: %s", expr);
+            cc_pass_note(file, nodes[i].line_start, col,
+                         "hint: UFCS dispatch is strict; register an exact or wildcard owner, or call the lowered function explicitly");
+            err = -1;
+        } else if (rewrite_rc == CC_UFCS_REWRITE_OK) {
+            if (cc_edit_buffer_add(eb, sp.start, sp.end, out_buf, 100, "ufcs") == 0) {
+                edits_added++;
+                if (done_count == done_cap) {
+                    int new_cap = done_cap ? done_cap * 2 : 16;
+                    struct CC__UFCSSpan* nd = (struct CC__UFCSSpan*)realloc(done, (size_t)new_cap * sizeof(*nd));
+                    if (nd) { done = nd; done_cap = new_cap; }
+                }
+                if (done && done_count < done_cap) done[done_count++] = sp;
+            }
+        }
+        free(expr);
+        free(out_buf);
+    }
+
+    free(nodes);
+    free(done);
+    cc_ufcs_set_symbols(NULL);
+    if (err < 0) return -1;
+    return edits_added;
 }

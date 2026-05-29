@@ -10,13 +10,13 @@
  * push/pop/at family per T.
  *
  * When to use which:
- *   - `Vec<T>` / `CC_VEC_DECL_ARENA` — perf-critical paths,
+ *   - `CCVec::[T]` / `CC_VEC_DECL_ARENA` — perf-critical paths,
  *     hot loops, small T, where bytewise inlining wins.
  *   - `cc_dyn_vec` — link-size-critical paths, generic library
  *     code that needs to operate on any T, comptime-driven
  *     code where T is only known at compile time.
  *
- * Both ABIs interoperate via `cc_type_info`: a `Vec<int>` whose
+ * Both ABIs interoperate via `cc_type_info`: a `CCVec::[int]` whose
  * element matches `__cc_ti_int` can be wrapped or fed into
  * `cc_dyn_vec`-shaped APIs without copying.
  *

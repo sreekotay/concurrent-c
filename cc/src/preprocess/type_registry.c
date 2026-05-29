@@ -404,15 +404,10 @@ static void cc__normalize_registry_container_param_name(CCTypeRegistry* reg,
         snprintf(work, sizeof(work), "CCVec_char");
     }
 
-    if ((strncmp(work, "Vec::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
-        (strncmp(work, "Vec<", 4) == 0 && work[strlen(work) - 1] == '>') ||
-        (strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
-        (strncmp(work, "CCVec<", 6) == 0 && work[strlen(work) - 1] == '>') ||
+    if ((strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "__CC_VEC(", 9) == 0 && work[strlen(work) - 1] == ')')) {
         size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 :
-                        ((strncmp(work, "CCVec::[", 8) == 0) ? 8 :
-                         ((strncmp(work, "CCVec<", 6) == 0) ? 6 :
-                          ((work[3] == ':') ? 6 : 4)));
+                        8;
         size_t inner_len = strlen(work) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, work + prefix, inner_len);
@@ -498,15 +493,10 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
         if (!alias || !alias[0] || strcmp(alias, work) == 0) break;
         snprintf(work, sizeof(work), "%s", alias);
     }
-    if ((strncmp(work, "Vec::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
-        (strncmp(work, "Vec<", 4) == 0 && work[strlen(work) - 1] == '>') ||
-        (strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
-        (strncmp(work, "CCVec<", 6) == 0 && work[strlen(work) - 1] == '>') ||
+    if ((strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "__CC_VEC(", 9) == 0 && work[strlen(work) - 1] == ')')) {
         size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 :
-                        ((strncmp(work, "CCVec::[", 8) == 0) ? 8 :
-                         ((strncmp(work, "CCVec<", 6) == 0) ? 6 :
-                          ((work[3] == ':') ? 6 : 4)));
+                        8;
         size_t inner_len = strlen(work) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, work + prefix, inner_len);

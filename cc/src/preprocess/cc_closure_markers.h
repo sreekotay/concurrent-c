@@ -80,7 +80,7 @@
  *
  *   (B) Inject markers locally just before the closure pass
  *       and strip them after, in a try/finally pattern around
- *       `cc__rewrite_closure_literals_with_nodes_ex`.  Smaller
+ *       `cc__rewrite_closure_literals_with_nodes`.  Smaller
  *       blast radius but introduces a stripping pass and only
  *       protects the closure-literal pass — other consumers
  *       (cc__infer_closure_end_off, etc.) still see no markers.

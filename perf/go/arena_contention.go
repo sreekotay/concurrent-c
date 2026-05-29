@@ -21,7 +21,11 @@ func mallocWorker() {
 	var localSuccess int64
 	for i := 0; i < ALLOCS_PER_ROUTINE; i++ {
 		buf := make([]byte, 16)
-		// Touch the memory to prevent escape-analysis-driven elimination.
+		// Touch the slice so the loop body isn't dead-code eliminated. NOTE:
+		// this does NOT force a heap allocation — the slice does not escape, so
+		// the compiler stack-promotes it (verified via `go build -gcflags=-m`:
+		// "make([]byte, 16) does not escape"). This measures idiomatic-Go local
+		// allocation (stack-promoted), NOT the mcache heap path.
 		buf[0] = byte(i)
 		_ = buf
 		localSuccess++

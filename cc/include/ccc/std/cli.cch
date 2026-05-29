@@ -63,14 +63,7 @@ typedef struct CCParsedArg {
 
 #ifndef CC_VEC_CCPARSEDARG_DEFINED
 #define CC_VEC_CCPARSEDARG_DEFINED 1
-#ifdef CC_PARSER_MODE
-typedef __CCVecGeneric CCVec_CCParsedArg;
-#define CCVec_CCParsedArg_init(a, c) __cc_vec_generic_init((void*)(a))
-#define CCVec_CCParsedArg_push(v, x) __cc_vec_generic_push((v), (x))
-#define CCVec_CCParsedArg_len(v) __cc_vec_generic_len((v))
-#else
 CC_VEC_DECL_ARENA(CCParsedArg, CCVec_CCParsedArg)
-#endif
 #endif
 
 typedef struct CCParsedArgs {

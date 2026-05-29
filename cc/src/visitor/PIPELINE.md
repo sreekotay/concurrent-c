@@ -1,32 +1,56 @@
 # Concurrent-C Codegen Pipeline (authoritative)
 
-**Last updated:** 2026-05-26 (post M0–M5.5 ship)
+**Last updated:** 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
 
-Authoritative call-site map for `visit_codegen.c` and `parse.c`. Status summary: [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
+Authoritative call-site map for `visit_codegen.c` and `parse.c`.
+
+> **WHY does the pipeline have this shape?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) — the four constraints, three layers, and six ADRs that constrain every part of the pipeline. Read it before proposing structural changes.
+
+Status summary: [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
 
 ## Reparse count (per translation unit)
 
-| Stage | Function | Notes |
+| Stage | Function | Conditional? | Measured hit rate (461 smoke) |
+|-------|----------|--------------|-------------------------------|
+| Initial | `cc_tcc_bridge_parse_string_to_ast` | always | 461 |
+| Phase3 pre-UFCS | `cc__reparse_source_to_ast` | only when `src_ufcs != src_all` after phase-2 | n/a |
+| Phase3 stage 1 (UFCS) | `cc__reparse_source_to_ast` | only when stage 1 produced edits | counted in `phase3` (548 total across both stages) |
+| Phase3 stage 2 (post-UFCS) | `cc__reparse_source_to_ast` | only when stage 2 produced edits | counted in `phase3` |
+| Channel/type text | buffer + parse | text-only, no reparse | — |
+| Statement-lowering (Phase 5 closure-lift) | `cc__reparse_source_to_ast` | **gated on `=>` token presence** (2026-05-28) | **155** (was 461 unconditional pre-M4.a) |
+| Async SM | `cc__reparse_source_to_ast` | gated on `@async` / `await` token presence | 74 |
+| Final UFCS sweep | `cc__reparse_source_to_ast` | always (38% of invocations produce ≥1 edit; see ARCHITECTURE.md §6 fossil audit) | 393 |
+
+**Measured totals (461 smoke suite, 2026-05-28):**
+
+| Stage | Reparses | Notes |
 |-------|----------|-------|
-| Initial | `cc_tcc_bridge_parse_string_to_ast` | `parse.c` / codegen entry; full preprocess |
-| Phase3 pre-UFCS | `cc__reparse_source_to_ast` | When `src_ufcs != src_all` after phase-2 |
-| Phase3 post-UFCS | `cc__reparse_source_to_ast` | After UFCS apply (sequential path) |
-| Phase3 post-closure-calls | `cc__reparse_source_to_ast` | After closure-call rewrite |
-| Phase3 post-call-site-mode | `cc__reparse_source_to_ast` | `@blocking` / `@noblock` markers |
-| Phase3 post-autoblock | `cc__reparse_source_to_ast` | After autoblock |
-| Phase3 batched | `cc__reparse_source_to_ast` | **Only if `CC_BATCH_PHASE3=1`** — single reparse after batched apply |
-| Channel/type text | buffer + parse | Channel pair + type syntax |
-| Closure literal | `cc__reparse_source_to_ast` | Whole-file closure lift |
-| Async SM | `cc__reparse_source_to_ast` | State machine |
+| `phase3` (stages 1 + 2 combined) | 548 | conditional per stage |
+| `statement-lowering` (Phase 5) | 155 | gated on `=>`; was 461 pre-M4.a (−306) |
+| `async-lowering` | 74 | gated on `@async`/`await` |
+| `final-UFCS` | 393 | always; 150/393 produce edits |
+| **Total reparses** | **1170** | **was ~1476 pre-M4.a** (−306, −21%) |
+| Initial parses | 461 | always |
 
-**Current total:** ~9 `cc__reparse_source_to_ast` call sites (sequential default) + 1 initial parse.
-
-**Target:** 3–4 (initial + post-Phase-3 + post-closure + post-async) after M2 default batch + M4 fine-grained edits.
+Typical TUs hit 4 reparses (initial + final-UFCS + maybe phase3 + maybe Phase-5/async). Feature-heavy TUs hit 5–6.
 
 ## Phase 3 status
 
-- **Default:** UFCS → reparse → closure_calls → reparse → (call-site mode) → autoblock → reparse → await_normalize (sequential). Uses `cc__apply_coarse_codegen_pass` per collector.
-- **Experimental:** `CC_BATCH_PHASE3=1` runs `cc__apply_batched_phase3_passes()` (all four collectors, one apply, one reparse). Not default — caused test regressions when enabled without further AST merge work.
+**Default (and only) pipeline:** two-stage batched.
+
+1. **Stage 0 (text)** — `@blocking` / `@noblock` call-site markers rewritten in-buffer if present (no reparse, no AST dependency).
+2. **Stage 1 (UFCS only)** — `cc__apply_batched_phase3_passes(..., CC_PHASE3_STAGE_UFCS_ONLY)` runs `cc__collect_ufcs_edits` into a fresh `CCEditBuffer`, applies, and reparses (if any edits). Required because UFCS *produces* new conventional call sites that the stage-2 passes are AST-driven against.
+3. **Stage 2 (post-UFCS)** — `cc__apply_batched_phase3_passes(..., CC_PHASE3_STAGE_POST_UFCS)` runs `cc__collect_closure_calls_edits` + `cc__collect_autoblocking_edits` + `cc__collect_await_normalize_edits` into one `CCEditBuffer`, applies, and reparses (if any edits). These three target disjoint constructs (closure-typed CALL / blocking CALL under `@async` / `await EXPR`) and emit non-overlapping per-span edits.
+
+**Reparse cost:** 2 max in Phase 3 (down from 4 in the legacy sequential path). Each stage skips its reparse if it produced no edits.
+
+The legacy `cc__apply_coarse_codegen_pass()` per-collector path and the `CC_BATCH_PHASE3=1` env-var gate were removed on 2026-05-28; the four collectors are the same ones the old path used.
+
+## Phase 5 status (M4.a)
+
+**As of 2026-05-28:** the Phase-5 closure-literal lift (`cc__rewrite_closure_literals_with_nodes`) reparse + call are gated on `cc_contains_token_top_level(src_ufcs, ..., "=>")`. TUs without closure literals skip the reparse + buffer alloc entirely. 306/461 (66%) of smoke TUs benefit.
+
+**Why not fold Phase 5 into Phase 3 Stage 2?** Closure-literal lift is a *producer* for closure_calls (closure literals inside closure-typed call arg lists must be lowered to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text). That's the same producer/consumer pattern UFCS has — folding would require a 3rd Phase-3 stage with its own reparse barrier, net zero reparse savings. See [`ARCHITECTURE.md` §6 "Targets that aren't worth it"](../../docs/ARCHITECTURE.md).
 
 ## Preprocess entry points (M3)
 
@@ -48,7 +72,6 @@ Authoritative call-site map for `visit_codegen.c` and `parse.c`. Status summary:
 
 | Component | Status |
 |-----------|--------|
-| `pass_nursery_spawn_ast.c` | Compiled; `cc__collect_nursery_edits` unwired — nursery in `preprocess.c` + `pass_closure_literal_ast.c` |
 | `cc_preprocess_simple()` | Declared; never invoked — experimental AST path only |
 
 ## Diagnostics (M0.5)

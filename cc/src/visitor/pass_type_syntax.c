@@ -245,7 +245,7 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
 /* Scan for result type patterns and collect type pairs.
    Handles these formats:
    - __CC_RESULT(T, E) - from preprocessor macro approach
-   - CCRes(T, E)       - convenience macro (parser mode expands to __CCResultGeneric)
+   - CCRes(T, E)       - convenience macro for concrete CCResult_T_E names
    - CCResPtr(T, E)    - convenience macro for pointer types
    - CCResult_T_E      - legacy or direct usage */
 /* Scan for result type patterns and collect type pairs (ACCUMULATES - does not reset).
@@ -1018,89 +1018,6 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
     }
     
     if (last_emit == 0) return NULL;  /* No rewrites done */
-    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
-/* Rewrite try expressions: try expr -> cc_try(expr) */
-char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
-    (void)ctx;
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-
-    size_t i = 0;
-    size_t last_emit = 0;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-
-    while (i < n) {
-        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
-        char c = src[i];
-
-        /* Detect 'try' keyword followed by space and not followed by '{' (try-block form, handled elsewhere) */
-        if (c == 't' && i + 3 < n && src[i+1] == 'r' && src[i+2] == 'y') {
-            /* Check word boundary before */
-            int word_start = (i == 0) || !cc__is_ident_char_local(src[i-1]);
-            if (word_start) {
-                size_t after_try = i + 3;
-                /* Skip whitespace */
-                while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t')) after_try++;
-                
-                /* Check it's not try { block } form */
-                if (after_try < n && src[after_try] != '{' && cc__is_ident_char_local(src[after_try]) == 0 && src[after_try] != '(') {
-                    /* Not a try-block or try identifier, skip */
-                } else if (after_try < n && src[after_try] == '{') {
-                    /* try { ... } block form - skip, not handled here */
-                } else if (after_try < n && (cc__is_ident_start_local2(src[after_try]) || src[after_try] == '(')) {
-                    /* 'try expr' form - need to find end of expression */
-                    size_t expr_start = after_try;
-                    size_t expr_end = expr_start;
-                    
-                    /* Scan expression with balanced parens/braces */
-                    int paren = 0, brace = 0, bracket = 0;
-                    int in_s = 0, in_c = 0;
-                    while (expr_end < n) {
-                        char ec = src[expr_end];
-                        
-                        if (in_s) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '"') in_s = 0; expr_end++; continue; }
-                        if (in_c) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '\'') in_c = 0; expr_end++; continue; }
-                        if (ec == '"') { in_s = 1; expr_end++; continue; }
-                        if (ec == '\'') { in_c = 1; expr_end++; continue; }
-                        
-                        if (ec == '(' ) { paren++; expr_end++; continue; }
-                        if (ec == ')' ) { if (paren > 0) { paren--; expr_end++; continue; } else break; }
-                        if (ec == '{' ) { brace++; expr_end++; continue; }
-                        if (ec == '}' ) { if (brace > 0) { brace--; expr_end++; continue; } else break; }
-                        if (ec == '[' ) { bracket++; expr_end++; continue; }
-                        if (ec == ']' ) { if (bracket > 0) { bracket--; expr_end++; continue; } else break; }
-                        
-                        /* End expression at ';', ',', or unbalanced ')' */
-                        if (paren == 0 && brace == 0 && bracket == 0) {
-                            if (ec == ';' || ec == ',') break;
-                        }
-                        
-                        expr_end++;
-                    }
-                    
-                    /* Only rewrite if we found a valid expression */
-                    if (expr_end > expr_start) {
-                        /* Emit: everything up to 'try', then 'cc_try(', then expr, then ')' */
-                        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_try(");
-                        cc__sb_append_local(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
-                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
-                        last_emit = expr_end;
-                        i = expr_end;
-                        continue;
-                    }
-                }
-            }
-        }
-        
-        i++;
-    }
-    
     if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }

@@ -61,7 +61,7 @@ enum {
     CC_AST_NODE_PARAM = 16,
     CC_AST_NODE_FUNC = 17,
     CC_AST_NODE_BINARY = 18,
-    CC_AST_NODE_TRY = 19,
+    /* 19 retired: CC_AST_NODE_TRY */
     CC_AST_NODE_IF = 20,
     CC_AST_NODE_FOR = 21,
     CC_AST_NODE_WHILE = 22,

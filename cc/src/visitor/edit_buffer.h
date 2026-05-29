@@ -100,11 +100,13 @@ void cc_edit_buffer_dump(const CCEditBuffer* eb);
  * Each pass becomes an "edit collector" that adds edits to the buffer
  * without modifying the source directly:
  *
- *   int cc__collect_closure_edits(const CCASTRoot* ast, CCEditBuffer* eb);
- *   int cc__collect_spawn_edits(const CCASTRoot* ast, CCEditBuffer* eb);
- *   int cc__collect_nursery_edits(const CCASTRoot* ast, CCEditBuffer* eb);
  *   int cc__collect_ufcs_edits(const CCASTRoot* ast, CCEditBuffer* eb);
- *   etc.
+ *   int cc__collect_closure_calls_edits(const CCASTRoot* ast, CCEditBuffer* eb);
+ *   int cc__collect_autoblocking_edits(const CCASTRoot* ast, CCEditBuffer* eb);
+ *   int cc__collect_await_normalize_edits(const CCASTRoot* ast, CCEditBuffer* eb);
+ *
+ * (Closure-literal lift uses a whole-file rewrite API instead — see
+ *  `pass_closure_literal_ast.h` and ARCHITECTURE.md §6.)
  *
  * The orchestrator then:
  *   1. Parses once

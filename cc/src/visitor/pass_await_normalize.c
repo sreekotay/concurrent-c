@@ -234,17 +234,29 @@ consume_unary_prefix:
     return i;
 }
 
-int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
+/* Per-span edit collector: walks AST await nodes, builds hoist/replace records,
+ * and emits them as discrete edits into `eb`.  Replaces the legacy
+ * `cc__rewrite_await_exprs_with_nodes` whole-buffer rewriter — same AST walk,
+ * same hoist/substitute logic, but the streaming output stage is replaced by
+ * direct `cc_edit_buffer_add()` calls so this pass can compose with the other
+ * Phase-3 collectors in the stage-2 batched apply without producing
+ * whole-buffer (0..len) edits that would collide with sibling passes.
+ *
+ * The non-batched path (single collector + apply + reparse) sees byte-identical
+ * results because the edit-buffer's end-to-start application reconstructs the
+ * exact streaming layout: hoisted decl/assign blocks at the statement line
+ * (insertion edits, priority-ordered inner-first), then the await expression
+ * itself replaced by its `tmp` (replacement edit), with nested replacements
+ * suppressed because the enclosing replacement already covers them.
+ */
+int cc__collect_await_normalize_edits(const CCASTRoot* root,
                                       const CCVisitorCtx* ctx,
-                                      const char* in_src,
-                                      size_t in_len,
-                                      char** out_src,
-                                      size_t* out_len) {
-    if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
-    *out_src = NULL;
-    *out_len = 0;
+                                      CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
     const NodeView* n = (const NodeView*)root->nodes;
 
     enum { CC_FN_ATTR_ASYNC = 1u << 0 };
@@ -439,91 +451,55 @@ int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
         }
     }
 
-    /* Build output streaming: emit insertions when reaching an insertion offset. */
-    char* out = NULL;
-    size_t outl = 0, outc = 0;
-
-    int ins_idx[128];
-    for (int i = 0; i < rep_n; i++) ins_idx[i] = i;
-    /* sort indices by insert_off asc */
+    /* Emit per-span edits.  Each rep produces:
+     *   (a) a pure insertion at `insert_off` (the enclosing statement's line
+     *       start) carrying the hoisted decl + assignment.
+     *   (b) a replacement of [start, end) with the temp name — UNLESS this
+     *       rep is nested inside another rep, in which case the enclosing
+     *       rep's replacement already covers this range (matching the
+     *       streaming version, where cur_off skipped past inner.start after
+     *       jumping to outer.end).
+     *
+     * Ordering of multiple insertions at the same `insert_off`: the edit
+     * buffer applies edits end-to-start; at equal start_off it sorts by
+     * priority descending and applies higher priority first, leaving lower
+     * priority edits to the LEFT of higher in the final output.  We want
+     * inner-first (larger source start) to appear LEFTMOST in the hoisted
+     * block, so larger start → lower priority.  Bounded positive priority
+     * keeps us out of the way of other passes (which use small positive
+     * priorities like 70–90). */
+    int edits_added = 0;
     for (int i = 0; i < rep_n; i++) {
-        for (int j = i + 1; j < rep_n; j++) {
-            if (reps[ins_idx[j]].insert_off < reps[ins_idx[i]].insert_off) {
-                int t = ins_idx[i]; ins_idx[i] = ins_idx[j]; ins_idx[j] = t;
-            }
+        /* Insertion: hoisted decl + assignment.  Skipped only if insert_text
+         * was never built (pathological empty operand). */
+        if (reps[i].insert_text) {
+            int ins_prio = (1 << 28) - (int)(reps[i].start & 0x0FFFFFFFu);
+            (void)cc_edit_buffer_add(eb, reps[i].insert_off, reps[i].insert_off,
+                                     reps[i].insert_text, ins_prio, "await_normalize");
+            edits_added++;
         }
-    }
-    int ins_p = 0;
 
-    size_t cur_off = 0;
-    int rep_i = 0;
-    while (cur_off < in_len) {
-        /* Emit any insertions at this offset (may be multiple). */
-        if (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == cur_off) {
-            /* Collect all with this insert_off, then emit in descending start order (inner first). */
-            int tmp_idx[128];
-            int tmp_n = 0;
-            size_t off = reps[ins_idx[ins_p]].insert_off;
-            while (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == off) {
-                tmp_idx[tmp_n++] = ins_idx[ins_p++];
-            }
-            for (int a = 0; a < tmp_n; a++) {
-                for (int b = a + 1; b < tmp_n; b++) {
-                    if (reps[tmp_idx[b]].start > reps[tmp_idx[a]].start) {
-                        int t = tmp_idx[a]; tmp_idx[a] = tmp_idx[b]; tmp_idx[b] = t;
-                    }
-                }
-            }
-            for (int k = 0; k < tmp_n; k++) {
-                const char* it = reps[tmp_idx[k]].insert_text;
-                if (it) cc__append_str(&out, &outl, &outc, it);
+        /* Replacement of the await expression with the temp name.  Suppress
+         * when this rep is contained inside another rep's [start, end) — the
+         * outer's replacement is what reaches the source position, and the
+         * outer's insert_text already substituted this rep's tmp into the
+         * hoisted assignment. */
+        int nested = 0;
+        for (int j = 0; j < rep_n; j++) {
+            if (j == i) continue;
+            if (reps[j].start <= reps[i].start &&
+                reps[i].start < reps[j].end) {
+                nested = 1;
+                break;
             }
         }
-        /* Apply next replacement if it starts here. */
-        if (rep_i < rep_n && reps[rep_i].start == cur_off) {
-            cc__append_str(&out, &outl, &outc, reps[rep_i].tmp);
-            cur_off = reps[rep_i].end;
-            rep_i++;
-            continue;
+        if (!nested) {
+            (void)cc_edit_buffer_add(eb, reps[i].start, reps[i].end,
+                                     reps[i].tmp, 70, "await_normalize");
+            edits_added++;
         }
-        /* Otherwise copy one byte */
-        cc__append_n(&out, &outl, &outc, in_src + cur_off, 1);
-        cur_off++;
-    }
-    /* Insertions at EOF */
-    while (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == cur_off) {
-        const char* it = reps[ins_idx[ins_p]].insert_text;
-        if (it) cc__append_str(&out, &outl, &outc, it);
-        ins_p++;
     }
 
     for (int i = 0; i < rep_n; i++) free(reps[i].insert_text);
-    if (!out) return 0;
-    *out_src = out;
-    *out_len = outl;
-    return 1;
-}
-
-/* NEW: Collect await normalization edits into EditBuffer.
-   NOTE: This pass has complex insertion and replacement logic.
-   For now, this function runs the rewrite and uses a coarse-grained edit.
-   Future: refactor to collect edits directly. */
-int cc__collect_await_normalize_edits(const CCASTRoot* root,
-                                      const CCVisitorCtx* ctx,
-                                      CCEditBuffer* eb) {
-    if (!root || !ctx || !eb || !eb->src) return 0;
-
-    char* rewritten = NULL;
-    size_t rewritten_len = 0;
-    int r = cc__rewrite_await_exprs_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    if (r <= 0 || !rewritten) return 0;
-
-    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
-        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 70, "await_normalize") == 0) {
-            free(rewritten);
-            return 1;
-        }
-    }
-    free(rewritten);
-    return 0;
+    return edits_added;
 }

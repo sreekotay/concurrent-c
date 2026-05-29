@@ -1,5 +1,5 @@
-// Test: if @try (T x = expr) - try binding in conditionals
-#include <stdio.h>
+// Test: manual result binding in conditionals (formerly if @try)
+#include <ccc/std/prelude.cch>
 
 int !> (CCError) succeed(int v) {
     return cc_ok(v);
@@ -10,9 +10,10 @@ int !> (CCError) fail_it(void) {
 }
 
 int main(void) {
-    // Test 1: try binding on success
+    // Test 1: binding on success
     int !> (CCError) r1 = succeed(42);
-    if @try (int x = r1) {
+    if (r1.is_ok()) {
+        int x = r1.value();
         printf("success: x = %d\n", x);
         if (x != 42) {
             printf("ERROR: expected 42, got %d\n", x);
@@ -23,9 +24,9 @@ int main(void) {
         return 1;
     }
     
-    // Test 2: try binding on error
+    // Test 2: binding on error
     int !> (CCError) r2 = fail_it();
-    if @try (int y = r2) {
+    if (r2.is_ok()) {
         printf("ERROR: should not reach then branch\n");
         return 1;
     } else {
@@ -33,19 +34,26 @@ int main(void) {
     }
     
     // Test 3: inline result expression
-    if @try (int z = succeed(100)) {
-        printf("inline success: z = %d\n", z);
-        if (z != 100) {
-            printf("ERROR: expected 100\n");
-            return 1;
+  {
+        int !> (CCError) z_res = succeed(100);
+        if (z_res.is_ok()) {
+            int z = z_res.value();
+            printf("inline success: z = %d\n", z);
+            if (z != 100) {
+                printf("ERROR: expected 100\n");
+                return 1;
+            }
         }
     }
     
-    if @try (int w = fail_it()) {
-        printf("ERROR: inline fail should not succeed\n");
-        return 1;
-    } else {
-        printf("inline error handled\n");
+  {
+        int !> (CCError) w_res = fail_it();
+        if (w_res.is_ok()) {
+            printf("ERROR: inline fail should not succeed\n");
+            return 1;
+        } else {
+            printf("inline error handled\n");
+        }
     }
     
     printf("All try binding tests passed!\n");

@@ -1,8 +1,10 @@
 # Compiler cleanup status (M0–M5.5)
 
-**Last updated:** 2026-05-27  
+**Last updated:** 2026-05-28
 **Smoke suite:** 461 tests passing under the new default (pre-expand on)
 AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
+
+> **Reading order:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the *why* (constraints, layers, ADRs, non-goals). This doc is the *what / when* (milestones, ship status, next work). [`PIPELINE.md`](../src/visitor/PIPELINE.md) is the *where* (call-site map). [`PASS_INVENTORY.md`](../src/visitor/PASS_INVENTORY.md) is the *how* (per-pass catalog).
 
 ### Recent (this session — 2026-05-27)
 
@@ -36,8 +38,8 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 | Milestone | Done | Remaining |
 |-----------|------|-----------|
 | **M1** | `cc_build_parse_input()` in `parse.c` | `visit_codegen.c` still duplicates prep; source map not threaded through codegen |
-| **M2** | `cc__apply_batched_phase3_passes()` | **Default is sequential** (429 tests). Opt-in: `CC_BATCH_PHASE3=1` (experimental; had regressions when default-on) |
-| **M4** | `mangle.h` included in closure pass | Whole-file closure lift unchanged; `cc_diag_mangle_symbol` not used for emitted names |
+| **M2** | `cc__apply_batched_phase3_passes()` — **two-stage batched is now the only Phase-3 path (2026-05-28)**: Stage 1 = UFCS, Stage 2 = closure_calls + autoblock + await_normalize. Phase-3 reparses 4 → 2. All four collectors emit per-span edits. 461/461 tests pass. | Stage 1's mandatory reparse could fold into the closure-literal reparse — see M6_DEFERRED. |
+| **M4** | **M4.a shipped 2026-05-28**: Phase-5 closure-lift reparse + closure pass gated on `=>` token presence. Smoke-suite Phase-5 reparses 461 → 155 (−66%). **M4.d shipped 2026-05-28**: `cc_diag_mangle_symbol` integrated for all emitted closure-helper names (entry/make/make_nursery/env/env_drop/env_nursery_drop). Symbols are now location-tagged (`cc_closure__N<id>__line<L>_col<C>_<role>`), so any closure that appears in a backtrace, profile, or symbol table is self-locating from the symbol alone. 461/461 tests pass; reparse counts unchanged. | **M4.b/c deferred** (per-span migration of `cc__rewrite_closure_literals_with_nodes` internals; fold Phase 5 into Phase 3 Stage 2) — found to have zero reparse-savings payoff (closure_literals is a producer for closure_calls; folding needs a 3rd stage with its own reparse). See [ARCHITECTURE.md §6 "Targets that aren't worth it"](ARCHITECTURE.md). |
 | **M5.5** | `cc_macro_recognizer.c` hooks registered at parse | **Token synthesis into TCC lexer not implemented** — `#define CHAN(T) T[~4 >]` still fails; see [tests/macro/README.md](../../tests/macro/README.md) |
 | **Runtime R0** | `cc/runtime/cc_rt_diag.c` stubs in runtime | R4, R5 (e.g. exact send/recv source location at the stuck-on site) not implemented |
 | **Runtime R1** | per-fiber name + spawn-site `(file, line)`; UFCS lowering wired; `cc_rt_diag_current_async_info` user API | only `@async` spawns named today — closure spawn / legacy `cc_nursery_spawn` still anonymous |
@@ -66,8 +68,21 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 
 ## Reparse count (current)
 
-- **~9** `cc__reparse_source_to_ast` sites in `visit_codegen.c` + 1 initial parse
-- **Target** (after M2 default batch + M4 fine-grained): 3–4
+- **9** `cc__reparse_source_to_ast_(ctx|ex)` call sites in `visit_codegen.c` + 1 initial parse (the "≤6" used elsewhere is the per-TU dynamic count, not the static call-site count).
+- **Measured smoke-suite total (2026-05-28, post M4.a):** 1170 reparses across 461 TUs (~2.5/TU average), down from ~1476 pre-M4.a (−306, −21%).
+- Conditional gating per site: Phase-3 Stage 1/2 (only when edits), Phase-5 closure-lift (on `=>` presence), async-SM (on `@async`/`await`). Final-UFCS sweep + initial parse are unconditional.
+- See [PIPELINE.md](../src/visitor/PIPELINE.md) for the full table.
+
+### Perf regression guard
+
+The baseline is captured in [`perf/compiler_baseline.txt`](../../perf/compiler_baseline.txt) (post-M4.a snapshot, 2026-05-28). Use:
+
+```bash
+make perf-baseline   # re-capture after a deliberate change
+make perf-regress    # verify current numbers haven't regressed
+```
+
+The check fails if any reparse count exceeds baseline or wall-clock regresses by more than +20%. See [`perf/README.md` "Compiler perf baseline"](../../perf/README.md#compiler-perf-baseline) for what each metric guards against and when to update it.
 
 ---
 
@@ -90,9 +105,11 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 > support it), but it is bigger than one commit.
 
 1. **Closure-literal refactor — DONE (proto-placement layer).**
-   `visit_codegen.c` now calls `cc__rewrite_closure_literals_with_nodes_ex`
-   with `skip_inline_protos=1`, bypassing the brittle in-source walker
-   (`cc__closure_proto_insert_off`).  File-scope forward decls are placed
+   `visit_codegen.c` calls `cc__rewrite_closure_literals_with_nodes`,
+   which writes only file-scope forward decls (the brittle in-source
+   walker `cc__closure_proto_insert_off` was deleted 2026-05-28; the
+   `skip_inline_protos` parameter and `_ex` variant were retired with
+   it).  File-scope forward decls are placed
    via the new `cc_find_first_func_def_offset` helper (just before the
    first top-level function definition — past `#include`s AND user
    typedefs).  Fixes the block-scope `static` failure in
@@ -140,62 +157,30 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
    — are present in the runtime headers themselves, so scanners
    match against header content and emit spurious diagnostics or
    rewrites.
-   The real M1 lift is therefore three pieces:
-   - **(a) Source-buffer unification.** One-line swap of `src_all`
-     to `root->parse_buffer` when pre-expand is on.  **TODO** —
-     blocked on (c) below.
-   - **(b) Reparse prelude awareness.**  `cc__reparse_source_to_ast`
-     skips `cc_preprocess_for_reparse` + `cc__prepend_reparse_prelude`
-     when its input is pre-expanded (system headers + container
-     `.cch` files already inlined → re-prepending double-decls
-     `__mbstate_t` etc.).  Plumbing for this is already in place:
-     `CCReparseFlags.src_is_pre_expanded` + the
-     `cc__reparse_source_to_ast_ctx` wrapper.  Confirmed end-to-end
-     in the spike: with the swap on and the flag set, reparse made
-     it past the `__mbstate_t` wall before hitting the next class
-     of failures.  **DONE (plumbing).**
-   - **(c) `#line`-aware text scanners.**  Each visitor pass that
-     scans `src_all` for syntactic patterns needs to filter by
-     origin file (the file the nearest preceding `#line N "..."`
-     points to) so it only acts on tokens that originated in the
-     user TU.  **PARTIAL.**  Foundation landed (May 2026):
-       - `cc/src/util/text_scan.h` exposes `CCInertScan` — the
-         visitor-side shared scanner state.  It tracks comments,
-         string/char literals, preprocessor-directive bodies
-         (with `\`-line-continuation handling), and parses `#line`
-         directives to maintain an `in_user_file` flag (by
-         basename match against `ctx->input_path`).
-       - `pass_result_unwrap.c::cc__find_bang_token_from` migrated
-         to use `CCInertScan` (replaces ~50 lines of inline state
-         machine with 10 lines of helper calls).  Proves the
-         migration pattern for find-only scanners.
-       - `tests/line_directive_origin_filter_smoke.ccs` validates
-         that `#line` directives don't break compilation today (the
-         test will be extended to also include CC tokens in
-         non-user-TU regions once per-pass migrations land).
-     **TODO (per-pass migration).** Roughly 10–15 visitor passes
-     still inline their own comment/string/pp state machines.  Each
-     should follow the `cc__find_bang_token_from` template:
-       1. Add `#include "util/text_scan.h"`.
-       2. Replace the inline state vars (`in_str`/`qch`/`in_lc`/
-          `in_bc`/`in_pp`/etc.) with a `CCInertScan` initialized
-          from `ctx->input_path`.
-       3. At the top of each loop iteration, call
-          `cc_inert_scan_step(&scan, src, n, &i)` and `continue`
-          if it returns 1 (with output passes also appending the
-          consumed range to their output buffer).
-       4. After the step, optionally check `scan.in_user_file` to
-          skip rewriting tokens that came from inlined headers.
-     Until (a) lands, the `in_user_file` flag is always 1 (because
-     `src_all` is still the raw user file with no `#line`
-     directives), so today the migration is mechanical and risk-
-     free — purely deduplicates the state machines.  When (a)
-     flips on, the `in_user_file` filter kicks in automatically.
+   The real M1 lesson is simpler than the original plan:
+   - **(a) Source-buffer unification is shelved (2026-05-28).**
+     `src_all` intentionally remains the raw user `.ccs`.  A probe proved
+     TCC can CPP-expand raw CC syntax, but pre-expanding `src_all` freezes
+     CC's mode-polymorphic macros (`CC_ERROR`, `cc_concat`, result/channel
+     helpers) in one mode.  Parser-mode reparses and final emit need those
+     macros expanded differently (`CC_PARSER_MODE` vs normal mode), so a
+     single macro-expanded `src_all` conflicts with the architecture.  The
+     speculative `parse_buffer_post_cpp_pre_rewrite`, `CC_M1_SRC_SWAP`,
+     `src_is_pre_expanded`, and reparse-prelude skip plumbing was removed.
+     See [M1_MIGRATION.md](./M1_MIGRATION.md) "Finding 3".
+   - **(b) Reparse prelude awareness was dropped with (a).**  Reparses stay
+     on the normal path: preprocess in parser mode, then prepend the parser
+     prelude.  This preserves the parser-mode/emit-mode split instead of
+     trying to share one pre-expanded buffer across both consumers.
+   - **(c) `CCInertScan` remains useful scanner cleanup.**  The helper
+     still centralizes comment/string/char/preprocessor skipping and can be
+     adopted by individual passes when it reduces duplicated lexer state.
+     `in_user_file` is no longer a prerequisite for a global `src_all` flip.
    - The M7.C3 plumbing (`CCASTRoot.parse_buffer*`,
      `CCVisitorCtx.pre_expanded_buf`,
-     `cc__find_chan_decl_before` alt_buf pattern) is already there
-     to support this work and remains useful as a fallback for
-     scanners that aren't yet `#line`-aware.
+     `cc__find_chan_decl_before` alt_buf pattern) remains useful as a narrow
+     fallback for macro-generated channel declarations; it is not a global
+     source-buffer replacement.
 
 3. **Flip `CC_PRE_EXPAND=1` to default** — **DONE 2026-05-26**.  Pre-expand
    is now the default for the initial parse; opt out with
@@ -423,12 +408,54 @@ attribute parser, the unary-operator parser, etc.  Don't start
 this until 4c's catalog gives a prioritized list; otherwise
 risk doing the work in the wrong order.
 
+**Finding (2026-05-29): `CC_PARSER_MODE` removal bottoms out here.**
+A campaign to delete `CC_PARSER_MODE` dissolved every *type-identity*
+divergence (try retirement, `cc_unwrap`, `CCError`/`CCIoError`,
+Vec/Map names, Result constructors, header lowering, process/cli/string
+layouts).  What remained — `CCClosure0/1/2 → intptr_t`, `CCTask → int`,
+the Vec/Map type-erased `*_DECL_ARENA` bodies, and the
+`__CCResultGeneric`/`__CCGenericError` fallback — was assumed to be
+removable by the same header-unification technique.  A spike proved
+otherwise.
+
+Spike: forced the *real* `CC_VEC_DECL_ARENA` body in parser mode
+(`std/vec.cch`) and ran the full suite.  Result: **only 4 failures**,
+and every one was a **struct-payload** container (`CCVec::[CCString]`,
+nested `CCVec::[CharVec]`, the erased-container type-info tests).
+`CCVec::[int]` and all primitive Vecs compiled cleanly.  The exact
+error was `';' expected (got 'CCString')` — TCC's stub-AST parser
+choking on the inline method `Name_push(Name *v, T value)` that takes a
+struct **by value**.  This is independently corroborated by the comment
+already in `cc_sched.cch` / `std/task.cch`: *"TCC doesn't like
+assigning/returning structs during stub-AST parsing."*
+
+Conclusion: all remaining `CC_PARSER_MODE` divergences collapse to a
+single root cause — **the stub-AST parser rejects by-value struct
+params/returns/assignments** (and, for async/closures, un-lowered
+control flow).  The `void*` erasure and `int`/`intptr_t` stubs exist
+solely to keep every such operation scalar so the stub parse survives;
+final emit (normal mode) handles all of it.  Therefore `CC_PARSER_MODE`
+is **not** removable by further header unification — the genuine unlock
+is widening the stub-AST parser (this 4d/L3 item).  Once that lands the
+removal order is: Vec/Map bodies → Result fallback → `CCTask` (also
+needs `@async` prototype lowering before the blocking parse) → closures
+(couple with 4b stable closure-IDs) → delete the define sites + the
+macro.
+
+Already banked under this campaign: the dead orphan
+`cc_preprocess_simple` + `cc__parse_stubs` (never invoked per
+PIPELINE.md) were deleted (~260 LOC, one `CC_PARSER_MODE` block gone).
+
 Then in priority order (independent of M1):
 
 5. **Doc sync** — this file; keep PIPELINE/PASS_INVENTORY aligned (ongoing)
 6. **`tests/diag/` harness** — `EXPECT-DIAG` parsing; 3–5 smoke tests (protects I1–I8)
-7. **M2 finish** — fix AST ordering so `CC_BATCH_PHASE3=1` is safe by default
-8. **M4** — fine-grained closure `EditBuffer` + use `cc_diag_mangle_symbol` for entry names
+7. ✅ **M2 finish** — two-stage batched Phase 3 is default (2026-05-28). Sequential path removed.
+8. **M4** ✅ shipped 2026-05-28 — both pieces:
+   - **M4.a**: Phase-5 closure-lift gated on `=>` presence. Smoke-suite Phase-5 reparses 461 → 155 (−66%).
+   - **M4.d**: `cc_diag_mangle_symbol` integrated for all emitted closure-helper names. Symbols like `cc_closure__N7__line42_col15_entry` replace opaque `__cc_closure_entry_7` — self-locating in backtraces / profiles / symbol tables.
+
+   **M4.b/c deferred** (no perf payoff — see [ARCHITECTURE.md §6 "Targets that aren't worth it"](ARCHITECTURE.md)).
 9. **Runtime R1+** — consume serialized `.ccs.map` from compile
 10. **M5.5 fallback** — only if M7/M1 turns out to need TCC-side help after all; otherwise drop. Current evidence says drop.
 
@@ -444,7 +471,7 @@ Then in priority order (independent of M1):
 | `CC_DEBUG_DIAG=1` | Log every `cc_diag_emit` |
 | `CC_DEBUG_REPARSE_DUMP_DIR=...` | Write intermediate buffers per reparse |
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
-| `CC_BATCH_PHASE3=1` | Experimental batched Phase 3 collectors |
+| ~~`CC_BATCH_PHASE3=1`~~ | **Removed 2026-05-28.** Two-stage batched Phase 3 is now the only path (UFCS in stage 1; closure_calls + autoblock + await_normalize in stage 2). |
 | `CC_PRE_EXPAND` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse.  **Default-on (2026-05-26).**  Opt out with `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty) |
 | ~~`CC_PRE_EXPAND_REPARSE=1`~~ | **Removed 2026-05-26.**  Was an opt-in CPP-expand of the FINAL reparse buffer; broke AST coord alignment with the visitor's working buffer.  Real fix requires the M1 visitor swap |
 | `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |

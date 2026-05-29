@@ -54,6 +54,12 @@ if [ "$(python3 -c "print(1 if float($CC_TP) > float($PTHREAD_TP) else 0)")" -eq
 else
     echo "RESULT: COMPARABLE - Pthread per-thread arena matches or beats CC per-fiber arena."
 fi
+echo "Note: CC and Pthread here are true bump arenas (pointer-bump, no per-alloc"
+echo "free) — apples-to-apples. The harness Go/Zig arena rows are DIFFERENT"
+echo "strategies, not a like-for-like ranking: Go's non-escaping make([]byte,16)"
+echo "is stack-promoted by escape analysis (verified 'does not escape' — it never"
+echo "reaches mcache), and Zig uses c_allocator malloc/free per alloc. Read this"
+echo "as CC-vs-Pthread bump-arena parity; cross-language is context only."
 echo "================================================================="
 
 rm arena_pthread_out.txt arena_cc_out.txt

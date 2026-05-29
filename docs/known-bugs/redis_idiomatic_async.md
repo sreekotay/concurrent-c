@@ -1164,7 +1164,7 @@ macro redefinition plus one shared utility.
 `cc__skip_ws_comments_forward` for exactly this reason, so it was not
 affected.  Other text-based rewrite passes (`visit_codegen.c`,
 `pass_channel_syntax.c`, `pass_create.c`, `pass_await_normalize.c`,
-`pass_nursery_spawn_ast.c`, `pass_type_syntax.c`) still use the
+`pass_type_syntax.c`) still use the
 ws-only skip; if a similar "comment hides syntax" bug surfaces there,
 the same one-line macro swap to `cc_skip_ws_and_comments_ptr` is the
 cheap fix.

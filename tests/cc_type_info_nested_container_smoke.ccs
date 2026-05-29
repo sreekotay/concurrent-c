@@ -1,11 +1,11 @@
-/* Pin that nested container instantiations (Vec<Vec<int>>) flow
+/* Pin that nested container instantiations (CCVec::[CCVec::[int]]) flow
  * through the codegen emission path correctly:
  *   - Each layer gets its own `cc_type_info` registered.
- *   - The outer layer's size matches `sizeof(Vec<inner>)`.
+ *   - The outer layer's size matches `sizeof(CCVec::[inner])`.
  *   - Both layers report `CC_TK_GENERIC_INST`.
  *
  * This catches a class of bug where the codegen emission only
- * walks the top-level Vec<T> in the type registry and forgets
+ * walks the top-level CCVec::[T] in the type registry and forgets
  * that T itself was a generic the registry knew about.
  */
 
@@ -19,10 +19,10 @@ int main(void) {
 
     /* Use both the inner and outer instantiation in user code
      * so the codegen pass has to emit cc_type_info for both. */
-    Vec<int> inner = vec_new<int>(&arena);
+    CCVec::[int] inner = cc_vec_new::[int](&arena);
     inner.push(7);
 
-    Vec<Vec<int>> outer = vec_new<Vec<int>>(&arena);
+    CCVec::[CCVec::[int]] outer = cc_vec_new::[CCVec::[int]](&arena);
     outer.push(inner);
 
     int fails = 0;
@@ -37,8 +37,8 @@ int main(void) {
         fails++;
     }
 
-    /* The mangled name for Vec<Vec<int>> follows CC's mangler.
-     * `CCVec_CCVec_int` is the convention (Vec<T> mangles to
+    /* The mangled name for CCVec::[CCVec::[int]] follows CC's mangler.
+     * `CCVec_CCVec_int` is the convention (CCVec::[T] mangles to
      * CCVec_<mangled(T)>).  If this fails, the codegen path
      * isn't emitting nested instantiations — or the mangler
      * changed and this assertion needs updating in lockstep. */
@@ -56,11 +56,11 @@ int main(void) {
             printf("FAIL: outer missing CC_TF_ERASABLE\n");
             fails++;
         }
-        /* Outer size must equal sizeof(Vec<int>) — they share
+        /* Outer size must equal sizeof(CCVec::[int]) — they share
          * the __CCVecGeneric layout regardless of nesting depth. */
-        if (cc_ti_size(outer_ti) != sizeof(Vec<int>)) {
-            printf("FAIL: outer size %zu != sizeof(Vec<int>) %zu\n",
-                   cc_ti_size(outer_ti), sizeof(Vec<int>));
+        if (cc_ti_size(outer_ti) != sizeof(CCVec::[int])) {
+            printf("FAIL: outer size %zu != sizeof(CCVec::[int]) %zu\n",
+                   cc_ti_size(outer_ti), sizeof(CCVec::[int]));
             fails++;
         }
     }

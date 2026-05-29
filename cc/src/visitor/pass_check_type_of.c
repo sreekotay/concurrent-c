@@ -248,7 +248,7 @@ static void cc__emit_unregistered_warning(const char* phase,
 
     char hint[384];
     snprintf(hint, sizeof(hint),
-        "register '%.*s' by either (a) using `Vec<%.*s>` somewhere "
+        "register '%.*s' by either (a) using `CCVec::[%.*s]` somewhere "
         "in this TU so the compiler emits its cc_type_info, or "
         "(b) declaring it explicitly with "
         "CC_TYPE_INFO_BEGIN(%.*s) ... CC_TYPE_INFO_END(%.*s, \"%.*s\")",

@@ -530,16 +530,30 @@ static int cc__relocate_call_span_on_line(const char* src,
 
 /* ---- end small helpers ---- */
 
-int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
-                                                     const CCVisitorCtx* ctx,
-                                                     const char* in_src,
-                                                     size_t in_len,
-                                                     char** out_src,
-                                                     size_t* out_len) {
-    if (!root || !ctx || !ctx->symbols || !in_src || !out_src || !out_len) return 0;
-    *out_src = NULL;
-    *out_len = 0;
+/* Per-span edit collector.  Walks blocking CALL sites under @async, builds
+ * autoblock dispatch records (with coalescing of adjacent sync calls into
+ * batched dispatches and optional trailing return/assign folding), then
+ * emits one edit per non-overlapping Replace record into `eb`.
+ *
+ * Replaces the legacy `cc__rewrite_autoblocking_calls_with_nodes()` whole
+ * buffer rewriter.  The setup pipeline (rep collection, overlap filtering,
+ * batch coalescing, descending sort) is unchanged.  The two streaming
+ * splice points at the tail of the rewrite loop — one for the BATCH_*
+ * kinds, one for the per-stmt kinds — are replaced by direct
+ * `cc_edit_buffer_add()` calls.  Reps are guaranteed non-overlapping by
+ * the upstream filter, so each rep produces exactly one edit and they
+ * compose safely with other Phase-3 collectors in the stage-2 batched apply.
+ *
+ * Returns the number of edits added (>= 0), or -1 on error. */
+int cc__collect_autoblocking_edits(const CCASTRoot* root,
+                                   const CCVisitorCtx* ctx,
+                                   CCEditBuffer* eb) {
+    if (!root || !ctx || !ctx->symbols || !eb || !eb->src) return 0;
     if (!root->nodes || root->node_count <= 0) return 0;
+
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
+    int edits_added = 0;
 
     const NodeView* n = (const NodeView*)root->nodes;
 
@@ -1369,10 +1383,14 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
     }
 
-    char* cur_src = (char*)malloc(in_len + 1);
-    if (!cur_src) { free(reps); return 0; }
-    memcpy(cur_src, in_src, in_len);
-    cur_src[in_len] = 0;
+    /* Per-span model: we never mutate the source buffer.  These aliases
+     * keep the splice-loop body byte-identical (reads from `cur_src` /
+     * `cur_len`) while the trailing splice writes are replaced by edit
+     * emission.  Reps are pre-sorted DESC by start, but emission order
+     * doesn't matter — the edit buffer sorts by start_off at apply time
+     * and refuses overlapping ranges (which can't occur here because the
+     * overlap-filter step above guarantees non-overlapping reps). */
+    const char* cur_src = in_src;
     size_t cur_len = in_len;
 
     for (int ri = 0; ri < rep_n; ri++) {
@@ -1604,18 +1622,10 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             free(ind);
             if (!repl) continue;
 
-            /* Splice */
-            size_t new_len = cur_len - (e - s) + repl_len;
-            char* next = (char*)malloc(new_len + 1);
-            if (!next) { free(repl); continue; }
-            memcpy(next, cur_src, s);
-            memcpy(next + s, repl, repl_len);
-            memcpy(next + s + repl_len, cur_src + e, cur_len - e);
-            next[new_len] = 0;
+            if (cc_edit_buffer_add(eb, s, e, repl, 80, "autoblock") == 0) {
+                edits_added++;
+            }
             free(repl);
-            free(cur_src);
-            cur_src = next;
-            cur_len = new_len;
             continue;
         }
 
@@ -2059,18 +2069,10 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         free(ind);
         if (!repl) continue;
 
-        /* Splice */
-        size_t new_len = cur_len - (e - s) + repl_len;
-        char* next = (char*)malloc(new_len + 1);
-        if (!next) { free(repl); continue; }
-        memcpy(next, cur_src, s);
-        memcpy(next + s, repl, repl_len);
-        memcpy(next + s + repl_len, cur_src + e, cur_len - e);
-        next[new_len] = 0;
+        if (cc_edit_buffer_add(eb, s, e, repl, 80, "autoblock") == 0) {
+            edits_added++;
+        }
         free(repl);
-        free(cur_src);
-        cur_src = next;
-        cur_len = new_len;
     }
 
     for (int i = 0; i < rep_n; i++) {
@@ -2095,31 +2097,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
     }
     free(reps);
-    *out_src = cur_src;
-    *out_len = cur_len;
-    return 1;
-}
-
-/* NEW: Collect autoblocking edits into EditBuffer.
-   NOTE: This pass has complex batching and nesting logic.
-   For now, this function runs the rewrite and uses a coarse-grained edit.
-   Future: refactor to collect edits directly. */
-int cc__collect_autoblocking_edits(const CCASTRoot* root,
-                                   const CCVisitorCtx* ctx,
-                                   CCEditBuffer* eb) {
-    if (!root || !ctx || !ctx->symbols || !eb || !eb->src) return 0;
-
-    char* rewritten = NULL;
-    size_t rewritten_len = 0;
-    int r = cc__rewrite_autoblocking_calls_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    if (r <= 0 || !rewritten) return 0;
-
-    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
-        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 80, "autoblock") == 0) {
-            free(rewritten);
-            return 1;
-        }
-    }
-    free(rewritten);
-    return 0;
+    (void)cur_src;
+    (void)cur_len;
+    return edits_added;
 }

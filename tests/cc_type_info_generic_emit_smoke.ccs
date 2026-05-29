@@ -36,7 +36,7 @@ int main(void) {
 
     /* Force CCVec_Pair AND Map_int_int through the codegen
      * emission path by actually using them in the user TU. */
-    Vec<Pair> v = vec_new<Pair>(&arena);
+    CCVec::[Pair] v = cc_vec_new::[Pair](&arena);
     Pair p = { 1, 2 };
     v.push(p);
 

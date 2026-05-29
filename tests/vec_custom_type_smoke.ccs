@@ -1,26 +1,24 @@
-/* Smoke test for Vec<T> - verifies parser-safe generic container implementation.
-   Note: Custom struct types with Vec<T> require manual CC_VEC_DECL_ARENA_FULL 
-   before first use because the codegen emits declarations at file start. */
+/* Smoke test for CCVec::[T] - verifies parser-safe generic container implementation. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     
-    /* Test Vec<int> - primitive type */
-    Vec<int> nums = vec_new<int>(&arena);
+    /* Test CCVec::[int] - primitive type */
+    CCVec::[int] nums = cc_vec_new::[int](&arena);
     nums.push(42);
     nums.push(100);
     
     if (nums.len() != 2) {
-        printf("FAIL: Vec<int> expected len 2, got %zu\n", nums.len());
+        printf("FAIL: CCVec::[int] expected len 2, got %zu\n", nums.len());
         cc_arena_free(&arena);
         return 1;
     }
     
     int* first = nums.get(0);
     if (!first || *first != 42) {
-        printf("FAIL: Vec<int>.get(0) failed\n");
+        printf("FAIL: CCVec::[int].get(0) failed\n");
         cc_arena_free(&arena);
         return 1;
     }
@@ -28,7 +26,7 @@ int main(void) {
     /* Pointer access: same API as get */
     int* ptr = nums.get(1);
     if (!ptr || *ptr != 100) {
-        printf("FAIL: Vec<int>.get(1) failed\n");
+        printf("FAIL: CCVec::[int].get(1) failed\n");
         cc_arena_free(&arena);
         return 1;
     }
@@ -36,7 +34,7 @@ int main(void) {
     /* Pop writes last element via out-param. */
     int popped = 0;
     if (!nums.pop(&popped) || popped != 100) {
-        printf("FAIL: Vec<int>.pop() failed\n");
+        printf("FAIL: CCVec::[int].pop() failed\n");
         cc_arena_free(&arena);
         return 1;
     }
@@ -47,7 +45,7 @@ int main(void) {
         return 1;
     }
     
-    printf("OK: Vec<T> works\n");
+    printf("OK: CCVec::[T] works\n");
     cc_arena_free(&arena);
     return 0;
 }
