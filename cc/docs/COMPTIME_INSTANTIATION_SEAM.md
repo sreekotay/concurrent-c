@@ -486,6 +486,119 @@ instantiation/emission. Two pieces:
   monomorph and per-field enum constants, runtime-checked). Suite **475/475**
   both default and `CC_PRE_EXPAND=0`.
 
+---
+
+## D6 — user generic factories (libraries own their lowering), modeled on UFCS
+
+**Goal.** Let a *library* decide how its generic lowers to C — fully
+monomorphic, type-erased core + typed shims, SoA, whatever — exactly as UFCS
+lets a library decide how `recv.method(args)` lowers. `CCVec`/`Map`/`Chan` stop
+being hardcoded compiler templates and become the first *registered* factories.
+
+**The UFCS model we are copying** (`cc/src/visitor/ufcs.c`,
+`cc/src/comptime/hook_compile.c`): a library writes a `@comptime` handler;
+`cc_symbols_collect_type_registrations` scans for it; the referenced functions
+are compiled into one refcounted dylib (`cc_comptime_compile_type_hooks`),
+`dlopen`'d, and stored as a function pointer keyed by a *type pattern*. At a
+call site the compiler invokes
+`CCSlice fn(recv_type, method, mode, argv, arg_types, arena)` and the hook
+*returns the C text* (the lowered callee) to splice. **Invariant: the library
+owns the decision (returns C text); the compiler owns the splice.**
+
+**The parallel for generics.** A factory is keyed by *generic name* (`Pair`),
+triggered by an *instantiation* (`Pair::[int,double]`) rather than a call site,
+and invoked once per unique type-argument tuple. The one delta vs UFCS: a
+factory has **two outputs** — the *mangled name* (for use-site rewrite, the
+direct analogue of UFCS's returned callee) and the *definition(s)* emitted once.
+
+**Key constraint that shapes the staging:** a dylib-compiled factory runs *in
+the compiler process*, where `cc_emit_format`/`cc_emit_cstr` are inert host
+stubs. So a compiled factory must **return** its definition text (like a UFCS
+hook returns a callee); it cannot call the emit intrinsics. The discovery →
+instantiate → emit → rewrite machinery is identical regardless of whether the
+"chosen lowering" comes from a declarative template or a compiled function, so:
+
+- **D6.0 (declarative template, no dylib) — slice 1.** Library registers a
+  template keyed by name + arity:
+  ```c
+  @comptime {
+      cc_generic_template("Pair", 2,
+          "typedef struct { $1 first; $2 second; } $0;\n"
+          "static inline $0 $0_make($1 a, $2 b){ $0 r; r.first=a; r.second=b; return r; }\n");
+  }
+  ```
+  `$0` = compiler-computed mangled name (`Pair_int_double`), `$1..$N` = the type
+  args. The compiler recognizes `Pair::[args]` in the *same* place it recognizes
+  `CCVec::[T]` (`cc_rewrite_generic_containers`), computes the mangle, expands
+  the template once per unique instantiation into the emit-fragment channel
+  (`CC_EMIT_AFTER_PRELUDE`, dedup by mangled name), and rewrites use-sites to the
+  mangled name. Proves the whole seam (discovery + emit + rewrite) with minimal
+  risk. The library still chooses the lowering strategy — a type-erased variant
+  is just a different template (emit a shared core behind an include-guard +
+  typed shims). *Mangling is compiler-default for now (`Name_arg1_arg2`).*
+
+- **D6.1 (compiled factory) — slice 2.** Swap `cc_generic_template` for
+  `cc_generic_register("Pair", pair_factory)` where `pair_factory` is a real
+  `@comptime` function compiled through the *same* UFCS dylib path
+  (`cc_comptime_compile_type_hooks`, new hook kind + wrapper). Contract:
+  `CCSlice factory(CCSlice name, CCSlice mangled, CCSliceArray type_args,
+  CCArena*)` returning the definition text. Arbitrary compile-time logic
+  (branch on arity/N, choose monomorph vs type-erased) now possible.
+
+- **D6.2 (value params).** Allow `SmallVec::[int, 8]` — non-type args threaded as
+  string slices to the template/factory.
+
+- **D6.3 (reflection in factories).** Pass field descriptors (or a reflection
+  callback) so a factory can branch on `type_of(T).fields` — the deep piece;
+  deferred until the simpler factories prove the contract.
+
+- **D6.4 (collapse the builtins).** Re-express `CCVec`/`Map`/`Chan` as
+  default-registered factories so `cc_emit_plan_fprint_vec_decl`'s hardcoded
+  `CC_VEC_DECL_ARENA(...)` is just the first library factory, unifying the path.
+
+---
+
+## E0 — comptime executor keystone (Stage 0: real `@comptime {}` execution)
+
+**Goal.** Replace "inert emit stubs + text scanning" with a real **in-process
+executor** so running `@comptime` code can call live compiler APIs. This is the
+foundation for spec §14.2/§14.5 (`@comptime` functions, `@comptime {}` loops).
+
+**Engine (`cc/src/comptime/executor.c`).** Generalizes the D3.0 libtcc path
+(`TCC_OUTPUT_MEMORY`): compile a driver TU wrapping the block body as
+`__cc_ct_entry()`, register host symbols via `tcc_add_symbol`, relocate, run.
+Watchdog via `longjmp` + `CC_COMPTIME_EXEC_TIMEOUT_MS` (default 5000ms), checked
+on each host callback.
+
+**Host API (`cc_emit_plan_host_*` in `emit_plan.c`).** Injected into the running
+TU:
+- `cc_emit_raw(anchor, ptr, len)` → emit-plan fragment buffer (coalesces
+  consecutive emits at the same anchor/site into one splice block)
+- `cc_instantiate_vec/map/chan` → comptime-instantiation list
+- `cc_type_of` → stub (NULL) for now; reflection callback deferred
+
+**Wiring.** `cc_emit_plan_exec_comptime_blocks` scans `@comptime {}` blocks;
+those containing `for`/`while`/`do` run through the executor (static text
+collection skipped for executed blocks). Invoked on both parse path
+(`build_parse_input.c`) and emit path (`visit_codegen.c`).
+
+**Prerequisite fixes (landed with E0):**
+- **Fix A:** `cc_type_of("T")` → `type_of(T)` normalization at
+  `cc__resolve_comptime_if` entry; `@comptime for` header accepts canonical form
+  only (dual-handling removed from the resolver; `pass_check_type_of` still accepts
+  both spellings for user code).
+- **Fix B:** include-expanded view (`cc_cpp_expand`) for `cc__ct_find_struct_body`
+  only — header-defined structs visible to `@comptime for`. Local-buffer prelude
+  kept for TCC layout predicates (expanded headers poison the evaluator).
+
+**Proof:** `tests/comptime_crc_table_smoke` — `@comptime {}` loop builds a CRC32
+table at compile time via `cc_emit_format`, runtime-verified against known values.
+Suite **477/477** (one known-flaky nursery timing test under parallel load).
+
+**Deferred (re-decide after keystone):** `@comptime fn` calls + result marshaling,
+compiled user factories (D6.1), value-param generics (D6.2), types-as-values,
+converging static intrinsic collectors onto the executor.
+
 **D3.1 landed (2026-05-29):** layout-aware `@comptime if`, consuming the D3.0
 seam. **(A)** When the self-contained D2 evaluator can't decide a predicate, the
 resolver falls back to `cc__comptime_eval_pred_via_tcc`: it D1-lowers the

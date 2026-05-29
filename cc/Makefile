@@ -77,11 +77,13 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/ir/ir.c \
 	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
+	src/preprocess/cpp_expand.c \
 	src/preprocess/type_registry.c \
 	src/preprocess/type_graph.c \
 	src/preprocess/emit_plan.c \
 	src/result_spec.c \
 	src/comptime/const_eval.c \
+	src/comptime/executor.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
 	src/visitor/pass_err_syntax.c \

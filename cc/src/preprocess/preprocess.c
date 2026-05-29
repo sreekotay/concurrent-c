@@ -15,6 +15,7 @@
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
 #include "comptime/symbols.h"
+#include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/type_registry.h"
 #include "preprocess/type_graph.h"
@@ -4726,6 +4727,121 @@ static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, 
    Vec<T>, Vec::[T], CCVec<T>, vec_new<T>, vec_new::[T], and cc_vec_new<T>
    are retired; only the CC-prefixed bracket Vec spelling is accepted.
    Also tracks variable declarations for UFCS resolution. */
+/* D6.0: handle a user generic-factory use site `Name::[arg, ...]`.  Returns 1 if
+ * `*io_i` is at such a site for a library-registered template (output appended,
+ * indices advanced past the `]`), 0 otherwise (caller falls through to the
+ * built-in CCVec/Map handling).  The library owns the C lowering (its template);
+ * the compiler owns the mangle (`Name_arg1_arg2`), the dedup, and the splice. */
+static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* input_path,
+                                        char** out, size_t* out_len, size_t* out_cap,
+                                        size_t* io_i, size_t* io_last_emit) {
+    size_t i = *io_i;
+    size_t id_e, br_open, br_close, params_len;
+    const char* params;
+    char gname[128];
+    char orig_args[8][128];
+    char mang_args[8][128];
+    int nargs = 0, arity = 0;
+    const char* tmpl;
+
+    if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
+    if (i >= n || !cc_is_ident_start(src[i])) return 0;
+    id_e = i;
+    while (id_e < n && cc_is_ident_char(src[id_e])) id_e++;
+    if (!(id_e + 3 <= n && src[id_e] == ':' && src[id_e + 1] == ':' && src[id_e + 2] == '[')) return 0;
+    if (id_e - i == 0 || id_e - i >= sizeof(gname)) return 0;
+    memcpy(gname, src + i, id_e - i);
+    gname[id_e - i] = 0;
+    tmpl = cc_emit_plan_lookup_generic_template(gname, &arity);
+    if (!tmpl) return 0;
+
+    br_open = id_e + 2; /* '[' */
+    if (!cc__find_matching_bracket(src, n, br_open, &br_close)) return 0;
+    params = src + br_open + 1;
+    params_len = br_close - br_open - 1;
+
+    /* split top-level args (respecting <>, [], () nesting) */
+    {
+        size_t a_s = 0;
+        int depth = 0;
+        for (size_t k = 0; k <= params_len; k++) {
+            char pc = (k < params_len) ? params[k] : ',';
+            if (k < params_len && (pc == '<' || pc == '[' || pc == '(')) { depth++; continue; }
+            if (k < params_len && (pc == '>' || pc == ']' || pc == ')')) { depth--; continue; }
+            if (pc == ',' && depth == 0) {
+                size_t s = a_s, e = k;
+                while (s < e && (params[s] == ' ' || params[s] == '\t')) s++;
+                while (e > s && (params[e - 1] == ' ' || params[e - 1] == '\t')) e--;
+                if (e > s) {
+                    size_t cl = e - s;
+                    if (nargs >= 8) return 0;
+                    if (cl >= sizeof(orig_args[0])) cl = sizeof(orig_args[0]) - 1;
+                    memcpy(orig_args[nargs], params + s, cl);
+                    orig_args[nargs][cl] = 0;
+                    cc__canonicalize_container_param_type(orig_args[nargs], sizeof(orig_args[nargs]));
+                    cc__mangle_container_type_param(orig_args[nargs], strlen(orig_args[nargs]),
+                                                    mang_args[nargs], sizeof(mang_args[nargs]));
+                    nargs++;
+                }
+                a_s = k + 1;
+            }
+        }
+    }
+    if (nargs == 0) return 0;
+    if (arity > 0 && nargs != arity) {
+        char rel[1024];
+        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        0, 0, "type",
+                        "generic '%s' expects %d type argument(s), got %d", gname, arity, nargs);
+        return 0;
+    }
+
+    /* mangled name: Name_marg1_marg2... */
+    char mangled[256];
+    {
+        int mo = snprintf(mangled, sizeof(mangled), "%s", gname);
+        for (int a = 0; a < nargs && mo > 0 && (size_t)mo < sizeof(mangled); a++)
+            mo += snprintf(mangled + mo, sizeof(mangled) - (size_t)mo, "_%s", mang_args[a]);
+    }
+
+    /* expand template once: $0 -> mangled, $k -> orig arg k, $$ -> $ */
+    {
+        char def[8192];
+        size_t o = 0;
+        for (size_t t = 0; tmpl[t] && o + 1 < sizeof(def); t++) {
+            if (tmpl[t] == '$') {
+                char c = tmpl[t + 1];
+                if (c == '$') { def[o++] = '$'; t++; continue; }
+                if (c == '0') {
+                    for (size_t k = 0; mangled[k] && o + 1 < sizeof(def); k++) def[o++] = mangled[k];
+                    t++;
+                    continue;
+                }
+                if (c >= '1' && c <= '9') {
+                    int idx = c - '1';
+                    if (idx < nargs) {
+                        const char* a = orig_args[idx];
+                        for (size_t k = 0; a[k] && o + 1 < sizeof(def); k++) def[o++] = a[k];
+                    }
+                    t++;
+                    continue;
+                }
+                def[o++] = '$';
+                continue;
+            }
+            def[o++] = tmpl[t];
+        }
+        def[o] = 0;
+        cc_emit_plan_generic_def_emit_once(mangled, def);
+    }
+
+    cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
+    cc_sb_append(out, out_len, out_cap, mangled, strlen(mangled));
+    *io_last_emit = br_close + 1;
+    *io_i = br_close + 1;
+    return 1;
+}
+
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     
@@ -4742,7 +4858,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     while (i < n) {
         /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
-        
+
+        /* D6.0: library-registered generic factory `Name::[args]` (checked
+         * before the built-in CCVec/Map keywords; those names are never
+         * registered as templates, so they fall through unaffected). */
+        if (cc__try_rewrite_user_generic(src, n, input_path, &out, &out_len, &out_cap,
+                                         &i, &last_emit)) {
+            continue;
+        }
+
         /* Look for canonical CCVec::[ / cc_vec_new::[ and Map forms. */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
         int use_bracket = 0;
@@ -8605,6 +8729,67 @@ static int cc__comptime_eval_pred_via_tcc(const char* pred, size_t n,
     return 1;
 }
 
+/* Fix A: rewrite macro-expanded `cc_type_of("T")` back to the canonical
+ * `type_of(T)` spelling so comptime if/for logic only handles one form.
+ * Users may still write `cc_type_of("T")` by hand; pass_check_type_of keeps
+ * accepting both.  Only rewrites the string-literal call form. */
+static char* cc__normalize_cc_type_of_to_type_of(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last = 0;
+    static const char KW[] = "cc_type_of";
+    const size_t KWN = sizeof(KW) - 1;
+    int changed = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!(i == 0 || !cc_is_ident_char(src[i - 1])) ||
+            i + KWN > n || memcmp(src + i, KW, KWN) != 0 ||
+            (i + KWN < n && cc_is_ident_char(src[i + KWN]))) {
+            i++;
+            continue;
+        }
+        size_t p = cc_skip_ws_len(src, n, i + KWN);
+        if (p >= n || src[p] != '(') { i++; continue; }
+        size_t close;
+        if (!cc_find_matching_paren(src, n, p, &close)) { i++; continue; }
+        size_t q = cc_skip_ws_len(src, n, p + 1);
+        if (q >= close || src[q] != '"') { i++; continue; }
+        size_t qs = q + 1, qe = qs;
+        while (qe < close && src[qe] != '"') qe++;
+        if (qe >= close) { i++; continue; }
+        size_t tail = cc_skip_ws_len(src, n, qe + 1);
+        if (tail != close) { i++; continue; }
+        cc_sb_append(&out, &out_len, &out_cap, src + last, i - last);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "type_of(");
+        cc_sb_append(&out, &out_len, &out_cap, src + qs, qe - qs);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last = close + 1;
+        i = last;
+        changed = 1;
+    }
+    if (!changed) return NULL;
+    if (last < n) cc_sb_append(&out, &out_len, &out_cap, src + last, n - last);
+    if (!out) out = strdup("");
+    return out;
+}
+
+/* Fix B: include-expanded view for reflection (struct bodies from headers). */
+static char* cc__build_reflection_view(const char* src, size_t n,
+                                       const char* input_path,
+                                       size_t* out_n) {
+    size_t exp_len = 0;
+    char* expanded = cc_cpp_expand(src, n, input_path, &exp_len);
+    if (expanded && exp_len > 0) {
+        *out_n = exp_len;
+        return expanded;
+    }
+    free(expanded);
+    *out_n = n;
+    return NULL;
+}
+
 /* ============================================================
  * D4.0: `@comptime for (F in type_of(T).fields) { BODY }`
  * compile-time field iteration.  Unrolls BODY once per declared
@@ -8839,6 +9024,7 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
  * construct), 0 = not a `@comptime for` here (caller handles `@comptime if`),
  * -1 = hard error. */
 static int cc__try_expand_comptime_for(const char* src, size_t n, const char* input_path,
+                                       const char* reflect_src, size_t reflect_n,
                                        char** out, size_t* out_len, size_t* out_cap,
                                        size_t* io_i, size_t* io_last_emit) {
     size_t i = *io_i;
@@ -8852,11 +9038,8 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     size_t hp_close;
     if (!cc_find_matching_paren(src, n, lp, &hp_close)) return 0;
 
-    /* header: NAME in type_of(T).fields
-     * Accept BOTH the surface form `type_of(T)` (bare T, seen on the parse
-     * path before CPP) and the macro-expanded runtime form `cc_type_of("T")`
-     * (string T, seen on the emit path after CPP expands the type_of macro).
-     * This makes the resolver order-independent w.r.t. type_of expansion. */
+    /* header: NAME in type_of(T).fields (canonical spelling only; Fix A
+     * normalizes cc_type_of("T") -> type_of(T) before we run). */
     size_t h = cc_skip_ws_len(src, n, lp + 1);
     size_t lv_s = h;
     while (h < hp_close && cc_is_ident_char(src[h])) h++;
@@ -8869,13 +9052,8 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     if (ok) {
         h = cc_skip_ws_len(src, n, h + 2);
         const size_t TOFN = sizeof("type_of") - 1;
-        const size_t CTOFN = sizeof("cc_type_of") - 1;
-        int is_string_form = 0;
-        if (h + CTOFN <= hp_close && memcmp(src + h, "cc_type_of", CTOFN) == 0 &&
-            (h + CTOFN >= hp_close || !cc_is_ident_char(src[h + CTOFN]))) {
-            is_string_form = 1; h += CTOFN;
-        } else if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0 &&
-                   (h + TOFN >= hp_close || !cc_is_ident_char(src[h + TOFN]))) {
+        if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0 &&
+            (h + TOFN >= hp_close || !cc_is_ident_char(src[h + TOFN]))) {
             h += TOFN;
         } else ok = 0;
         if (ok) {
@@ -8883,18 +9061,10 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
             size_t tpc;
             if (h < hp_close && src[h] == '(' &&
                 cc_find_matching_paren(src, n, h, &tpc) && tpc <= hp_close) {
-                if (is_string_form) {
-                    size_t q = cc_skip_ws_len(src, n, h + 1);
-                    if (q < tpc && src[q] == '"') {
-                        ts = q + 1; te = ts;
-                        while (te < tpc && src[te] != '"') te++;
-                    } else ok = 0;
-                } else {
-                    ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
-                    while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
-                }
+                ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
+                while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
                 size_t af = cc_skip_ws_len(src, n, tpc + 1);
-                if (ok && af < hp_close && src[af] == '.') {
+                if (af < hp_close && src[af] == '.') {
                     af = cc_skip_ws_len(src, n, af + 1);
                     ok = (af + 6 <= hp_close && memcmp(src + af, "fields", 6) == 0);
                 } else ok = 0;
@@ -8916,8 +9086,10 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
 
     CCCtField* fields = NULL; size_t nf = 0;
     size_t body_o, body_c;
-    if (!cc__ct_find_struct_body(src, n, src + ts, te - ts, &body_o, &body_c) ||
-        !cc__ct_parse_fields_from_body(src, body_o, body_c, &fields, &nf)) {
+    const char* rsrc = reflect_src ? reflect_src : src;
+    size_t rn = reflect_src ? reflect_n : n;
+    if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
+        !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
         cc__ct_free_fields(fields, nf);
         fprintf(stderr,
                 "%s: error: `@comptime for` needs an in-scope struct type with "
@@ -8953,6 +9125,10 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     static const char ATC[] = "@comptime";
     const size_t ATCN = sizeof(ATC) - 1;
     size_t i = 0;
+    /* Fix B: include-expanded view for struct-body reflection. */
+    size_t reflect_n = n;
+    char* reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
+    const char* reflect_src = reflect_view ? reflect_view : src;
     /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
      * (and once) the first time a predicate needs the host evaluator. */
     char* type_prelude = NULL;
@@ -8965,8 +9141,9 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
          * (outermost-first) before the `@comptime if` handling below. */
         {
             int fr = cc__try_expand_comptime_for(src, n, input_path,
+                                                 reflect_src, reflect_n,
                                                  &out, &out_len, &out_cap, &i, &last_emit);
-            if (fr == -1) { free(type_prelude); free(out); return (char*)-1; }
+            if (fr == -1) { free(type_prelude); free(reflect_view); free(out); return (char*)-1; }
             if (fr == 1) { changed = 1; continue; }
         }
         size_t p = cc_skip_ws_len(src, n, i + ATCN);
@@ -8980,6 +9157,9 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         long val = 0;
         if (!cc__comptime_eval_pred(src + lp + 1, pred_close - (lp + 1), &val)) {
             if (!type_prelude_built) {
+                /* Layout predicates: keep the local-buffer prelude (expanded
+                 * headers poison the in-process TCC evaluator).  Fix B uses the
+                 * include-expanded view only for struct-body reflection. */
                 type_prelude = cc__extract_type_decls_prelude(src, n);
                 type_prelude_built = 1;
             }
@@ -8996,6 +9176,7 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                         "user type's kind/layout.\n",
                         input_path ? input_path : "<input>");
                 free(type_prelude);
+                free(reflect_view);
                 free(out);
                 return (char*)-1;
             }
@@ -9024,6 +9205,7 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                         "or `else @comptime if (...) { ... }`.\n",
                         input_path ? input_path : "<input>");
                 free(type_prelude);
+                free(reflect_view);
                 free(out);
                 return (char*)-1;
             }
@@ -9055,29 +9237,34 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         i = construct_end;
         changed = 1;
     }
-    if (!changed) { free(type_prelude); free(out); return NULL; }
+    if (!changed) { free(type_prelude); free(reflect_view); free(out); return NULL; }
     if (last_emit < n)
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     if (!out) out = strdup(""); /* whole construct(s) elided to empty */
     free(type_prelude);
+    free(reflect_view);
     return out;
 }
 
 /* Re-run the sweep to a fixpoint so nested `@comptime if` inside a kept branch
  * (only visible after the outer splice) is also resolved. */
 char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path) {
+    /* Fix A: normalize cc_type_of("T") -> type_of(T) once before the fixpoint. */
+    char* normalized = cc__normalize_cc_type_of_to_type_of(src, n);
+    if (normalized) { src = normalized; n = strlen(normalized); }
     char* cur = NULL;
     const char* in = src;
     size_t inn = n;
     for (int iter = 0; iter < 64; iter++) {
         char* r = cc__resolve_comptime_if_once(in, inn, input_path);
-        if (r == (char*)-1) { free(cur); return (char*)-1; }
+        if (r == (char*)-1) { free(cur); free(normalized); return (char*)-1; }
         if (!r) break;
         free(cur);
         cur = r;
         in = cur;
         inn = strlen(cur);
     }
+    free(normalized);
     return cur;
 }
 

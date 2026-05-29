@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Stage 0 comptime executor: a real @comptime {} loop runs at compile time
+ * and emits a CRC32 lookup table via cc_emit_format (host API injected via
+ * libtcc tcc_add_symbol).  Runtime checks known table entries. */
+
+@comptime {
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "static const unsigned crc32_table[256] = {\n");
+    for (int i = 0; i < 256; i++) {
+        unsigned c = (unsigned)i;
+        for (int k = 0; k < 8; k++)
+            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE, "    0x%08xu%s\n",
+                       c, (i < 255) ? "," : "");
+    }
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "};\n");
+}
+
+int main(void) {
+    if (crc32_table[0] != 0x00000000u) return 1;
+    if (crc32_table[1] != 0x77073096u) return 2;
+    if (crc32_table[255] != 0x2D02EF8Du) return 3;
+    printf("comptime_crc_table_smoke ok\n");
+    return 0;
+}

@@ -12,6 +12,11 @@
 #define CC_INSTANTIATE_CCH
 
 #include <stddef.h>
+#include <string.h>
+#ifdef CC_COMPTIME_EXEC
+#include <stdarg.h>
+#include <stdio.h>
+#endif
 
 typedef enum CCEmitAnchor {
     CC_EMIT_AFTER_PRELUDE = 0,
@@ -20,6 +25,14 @@ typedef enum CCEmitAnchor {
 } CCEmitAnchor;
 
 /* Built-in instantiation requests (compiler lowers syntax to graph today). */
+#ifdef CC_COMPTIME_EXEC
+extern void cc_instantiate_vec(const char* elem_mangled);
+extern void cc_instantiate_map(const char* key_mangled, const char* val_mangled);
+extern void cc_instantiate_chan(const char* elem_mangled);
+static inline void cc_instantiate_result(const char* ok_mangled, const char* err_mangled) {
+    (void)ok_mangled; (void)err_mangled;
+}
+#else
 static inline void cc_instantiate_vec(const char* elem_mangled) {
     (void)elem_mangled;
 }
@@ -34,8 +47,26 @@ static inline void cc_instantiate_result(const char* ok_mangled, const char* err
 static inline void cc_instantiate_chan(const char* elem_mangled) {
     (void)elem_mangled;
 }
+#endif
 
 /* Comptime emission (C2): host-side fragments spliced at plan anchors. */
+#ifdef CC_COMPTIME_EXEC
+extern void cc_emit_raw(int anchor, const char* ptr, size_t len);
+static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
+    if (!c_fragment) return 0;
+    cc_emit_raw((int)anchor, c_fragment, strlen(c_fragment));
+    return 0;
+}
+static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
+    char buf[16384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    cc_emit_raw((int)anchor, buf, strlen(buf));
+    return 0;
+}
+#else
 static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
     (void)anchor;
     (void)c_fragment;
@@ -49,6 +80,19 @@ static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
 static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
     (void)anchor;
     (void)fmt;
+    return 0;
+}
+#endif
+
+/* User generic factories (D6.0): register how a library generic lowers to C,
+ * keyed by name + arity.  At a `Name::[args]` use site the compiler expands the
+ * template ($0 = mangled name, $1..$N = type args) once and rewrites the use
+ * site to the mangled name.  The compiler interprets this at collection time;
+ * this inline body is the never-executed host stub. */
+static inline int cc_generic_template(const char* name, int arity, const char* template_src) {
+    (void)name;
+    (void)arity;
+    (void)template_src;
     return 0;
 }
 

@@ -55,6 +55,7 @@ int cc_build_parse_input(const char* file_buf,
         if (resolved) { free(buf); buf = resolved; got = strlen(buf); }
     }
     cc_emit_plan_clear_comptime_fragments();
+    if (cc_emit_plan_exec_comptime_blocks(buf, got, input_path) != 0) goto fail_buf;
     cc_emit_plan_collect_comptime_emits(buf, got);
     cc_emit_plan_clear_comptime_instantiations();
     cc_emit_plan_collect_comptime_instantiations(buf, got);
@@ -128,17 +129,15 @@ int cc_build_parse_input(const char* file_buf,
      * call site. Full end-to-end support for macro-produced CC syntax
      * still requires post-expand re-lowering (M7.C) which needs the type
      * registry to survive the second pass — tracked separately. */
-    /* Default-on (2026-05-26): pre-expand the initial-parse buffer through
-     * TCC's CPP unless explicitly disabled.  Disable rules:
-     *   unset        -> on   (new default; was off pre-2026-05-26)
-     *   ""           -> off  (`.env` sidecars use this to pin a test to
-     *                         the legacy non-expanded path)
-     *   "0"          -> off
-     *   anything else-> on
-     */
-    const char* _ppe = getenv("CC_PRE_EXPAND");
-    int _ppe_on = !_ppe ? 1 : (_ppe[0] && _ppe[0] != '0');
-    if (!for_reparse && _ppe_on) {
+    /* Unconditional (2026-05-29): the initial-parse buffer is always
+     * pre-expanded through TCC's CPP.  The legacy non-expanded path and its
+     * `CC_PRE_EXPAND` opt-out were collapsed once the full suite + real
+     * projects (redis, pigz) passed identically both ways and the emit path
+     * was confirmed to read the (never-pre-expanded) `src_ufcs` text, so the
+     * mode never affected emitted C — only the strength of initial-parse
+     * analysis.  Reparses still never pre-expand (they bypass this function
+     * entirely; see cc__reparse_source_to_ast_ex in visit_codegen.c). */
+    if (!for_reparse) {
         size_t pp_len = strlen(pp);
         size_t exp_len = 0;
         char* expanded = cc_cpp_expand(pp, pp_len, input_path, &exp_len);

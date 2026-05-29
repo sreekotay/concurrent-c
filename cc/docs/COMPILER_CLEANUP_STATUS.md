@@ -1,8 +1,22 @@
 # Compiler cleanup status (M0–M5.5)
 
-**Last updated:** 2026-05-28
-**Smoke suite:** 461 tests passing under the new default (pre-expand on)
-AND under the legacy non-expanded path (`CC_PRE_EXPAND=0 make smoke`)
+**Last updated:** 2026-05-29
+**Smoke suite:** 476 tests passing. Pre-expand is now the **only** initial-parse
+path — the `CC_PRE_EXPAND` opt-out (and the legacy non-expanded path) were
+collapsed 2026-05-29 (see "Pre-expand collapse" note below).
+
+> **Pre-expand collapse (2026-05-29).** The `CC_PRE_EXPAND=0` / `""` opt-out is
+> gone; the env var is now inert. Initial parse always runs `cc_cpp_expand` +
+> registry-preserving re-lower (`build_parse_input.c`, `parse.c`). Safe because:
+> (1) full suite passed identically both ways; (2) real projects (redis, all
+> pigz variants) built clean both ways; (3) nothing pinned `=0`; (4) the emit
+> path reads the never-pre-expanded `src_ufcs` text, so the mode never affected
+> emitted C — only initial-parse *analysis* strength. **Reparse is unchanged**:
+> it bypasses `cc_build_parse_input` entirely (`cc__reparse_source_to_ast_ex` →
+> `cc_preprocess_for_reparse`) and still never pre-expands — that desync is the
+> M7.C2 caveat below and is a separate, still-open problem. The `type_of(T)` vs
+> `cc_type_of("T")` parse-path/emit-path dual-spelling is *also* separate and
+> untouched by this collapse.
 
 > **Reading order:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the *why* (constraints, layers, ADRs, non-goals). This doc is the *what / when* (milestones, ship status, next work). [`PIPELINE.md`](../src/visitor/PIPELINE.md) is the *where* (call-site map). [`PASS_INVENTORY.md`](../src/visitor/PASS_INVENTORY.md) is the *how* (per-pass catalog).
 

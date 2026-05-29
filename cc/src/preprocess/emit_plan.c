@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "comptime/executor.h"
 #include "util/path.h"
 #include "util/text.h"
 
@@ -17,6 +18,8 @@ typedef struct CCEmitComptimeFragment {
 
 static CCEmitComptimeFragment cc__comptime_frags[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
 static size_t cc__comptime_frag_count = 0;
+
+static void cc__exec_ranges_clear(void);
 
 /* Thin aliases onto the shared scanners in util/text.h.  Kept as file-local
  * names so the @comptime intrinsic collectors below read uniformly; the logic
@@ -161,6 +164,128 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
     return 1;
 }
 
+/* --- user generic factories (D6.0: declarative templates) --- */
+
+typedef struct CCGenericTemplate {
+    char* name;
+    int   arity;
+    char* tmpl;
+} CCGenericTemplate;
+
+static CCGenericTemplate cc__generic_templates[CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES];
+static size_t cc__generic_template_count = 0;
+
+/* Mangled names whose definition has already been emitted this TU (dedup). */
+static char* cc__generic_emitted[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
+static size_t cc__generic_emitted_count = 0;
+
+void cc_emit_plan_register_generic_template(const char* name, int arity,
+                                            const char* template_src) {
+    if (!name || !template_src) return;
+    for (size_t i = 0; i < cc__generic_template_count; i++) {
+        if (strcmp(cc__generic_templates[i].name, name) == 0) {
+            char* nt = strdup(template_src);
+            if (!nt) return;
+            free(cc__generic_templates[i].tmpl);
+            cc__generic_templates[i].tmpl = nt;
+            cc__generic_templates[i].arity = arity;
+            return;
+        }
+    }
+    if (cc__generic_template_count >= CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES) return;
+    {
+        CCGenericTemplate* t = &cc__generic_templates[cc__generic_template_count];
+        t->name = strdup(name);
+        t->tmpl = strdup(template_src);
+        t->arity = arity;
+        if (!t->name || !t->tmpl) { free(t->name); free(t->tmpl); return; }
+        cc__generic_template_count++;
+    }
+}
+
+const char* cc_emit_plan_lookup_generic_template(const char* name, int* out_arity) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < cc__generic_template_count; i++) {
+        if (strcmp(cc__generic_templates[i].name, name) == 0) {
+            if (out_arity) *out_arity = cc__generic_templates[i].arity;
+            return cc__generic_templates[i].tmpl;
+        }
+    }
+    return NULL;
+}
+
+int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text) {
+    if (!mangled || !def_text) return 0;
+    for (size_t i = 0; i < cc__generic_emitted_count; i++)
+        if (strcmp(cc__generic_emitted[i], mangled) == 0) return 0;
+    if (cc__comptime_frag_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
+    if (cc__generic_emitted_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
+    {
+        char* m = strdup(mangled);
+        char* d = strdup(def_text);
+        if (!m || !d) { free(m); free(d); return 0; }
+        CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
+        f->anchor = CC_EMIT_AFTER_PRELUDE;
+        f->site_pos = 0;
+        f->text = d;
+        cc__generic_emitted[cc__generic_emitted_count++] = m;
+    }
+    return 1;
+}
+
+static void cc__generic_templates_clear(void) {
+    for (size_t i = 0; i < cc__generic_template_count; i++) {
+        free(cc__generic_templates[i].name);
+        free(cc__generic_templates[i].tmpl);
+    }
+    cc__generic_template_count = 0;
+    for (size_t i = 0; i < cc__generic_emitted_count; i++) free(cc__generic_emitted[i]);
+    cc__generic_emitted_count = 0;
+}
+
+/* cc_generic_template("Name", arity, "template...") — register a library
+ * generic.  Template is one or more adjacent C string literals; $0 expands to
+ * the mangled name and $1..$N to the type arguments at the use site. */
+static int cc__emit_try_collect_cc_generic_template(const char* src, size_t len, size_t call_pos) {
+    size_t p = call_pos + strlen("cc_generic_template");
+    char name[128];
+    char tmpl[8192];
+    size_t tlen = 0;
+    int arity = 0;
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != '(') return 0;
+    p++;
+    if (!cc__emit_parse_c_string(src, len, &p, name, sizeof(name))) return 0;
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != ',') return 0;
+    p = cc_skip_ws_len(src, len, p + 1);
+    if (p >= len || src[p] < '0' || src[p] > '9') return 0;
+    while (p < len && src[p] >= '0' && src[p] <= '9') { arity = arity * 10 + (src[p] - '0'); p++; }
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != ',') return 0;
+    p = cc_skip_ws_len(src, len, p + 1);
+    {
+        char piece[4096];
+        int got_any = 0;
+        for (;;) {
+            p = cc_skip_ws_len(src, len, p);
+            if (p >= len || src[p] != '"') break;
+            if (!cc__emit_parse_c_string(src, len, &p, piece, sizeof(piece))) break;
+            {
+                size_t pl = strlen(piece);
+                if (tlen + pl >= sizeof(tmpl)) pl = sizeof(tmpl) - 1 - tlen;
+                memcpy(tmpl + tlen, piece, pl);
+                tlen += pl;
+            }
+            got_any = 1;
+        }
+        if (!got_any) return 0;
+        tmpl[tlen] = 0;
+    }
+    cc_emit_plan_register_generic_template(name, arity, tmpl);
+    return 1;
+}
+
 /* --- comptime explicit instantiation requests (track C1) --- */
 
 typedef struct CCEmitComptimeInst {
@@ -246,6 +371,13 @@ static int cc__ci_collect_emit_format(const CCComptimeIntrinsicDesc* d,
     return cc__emit_try_collect_cc_emit_format(src, len, pos, splice_end);
 }
 
+static int cc__ci_collect_generic_template(const CCComptimeIntrinsicDesc* d,
+                                           const char* src, size_t len,
+                                           size_t pos, size_t splice_end) {
+    (void)d; (void)splice_end;
+    return cc__emit_try_collect_cc_generic_template(src, len, pos);
+}
+
 static const CCComptimeIntrinsicDesc cc__comptime_intrinsics[] = {
     { "cc_instantiate_vec",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_VEC,  1 },
     { "cc_instantiate_map",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_MAP,  2 },
@@ -254,6 +386,9 @@ static const CCComptimeIntrinsicDesc cc__comptime_intrinsics[] = {
      * keep the more specific name listed so the table reads clearly. */
     { "cc_emit_format",      CC_CI_EMIT,        cc__ci_collect_emit_format,  (CCTypeGraphRequestKind)0, 0 },
     { "cc_emit_cstr",        CC_CI_EMIT,        cc__ci_collect_emit,         (CCTypeGraphRequestKind)0, 0 },
+    /* generic-factory registration: collected in the EMIT pass; records a
+     * template (side effect), emits no fragment of its own. */
+    { "cc_generic_template", CC_CI_EMIT,        cc__ci_collect_generic_template, (CCTypeGraphRequestKind)0, 0 },
 };
 
 static const unsigned cc__ci_mask_instantiate = CC_CI_INSTANTIATE;
@@ -341,14 +476,153 @@ void cc_emit_plan_clear_comptime_fragments(void) {
         cc__comptime_frags[i].text = NULL;
     }
     cc__comptime_frag_count = 0;
+    cc__generic_templates_clear();
+    cc__exec_ranges_clear();
 }
 
 size_t cc_emit_plan_comptime_fragment_count(void) {
     return cc__comptime_frag_count;
 }
 
+/* --- comptime executor host API (Stage 0) --- */
+
+static size_t cc__host_site_pos = 0;
+
+typedef struct { size_t body_l; size_t body_r; } CCExecRange;
+static CCExecRange cc__exec_ranges[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
+static size_t cc__exec_range_count = 0;
+
+static void cc__exec_ranges_clear(void) {
+    cc__exec_range_count = 0;
+}
+
+static int cc__exec_range_contains(size_t body_l, size_t body_r) {
+    for (size_t i = 0; i < cc__exec_range_count; i++)
+        if (cc__exec_ranges[i].body_l == body_l && cc__exec_ranges[i].body_r == body_r)
+            return 1;
+    return 0;
+}
+
+static void cc__exec_range_mark(size_t body_l, size_t body_r) {
+    if (cc__exec_range_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return;
+    cc__exec_ranges[cc__exec_range_count].body_l = body_l;
+    cc__exec_ranges[cc__exec_range_count].body_r = body_r;
+    cc__exec_range_count++;
+}
+
+void cc_emit_plan_host_ctx_begin(size_t site_pos) {
+    cc__host_site_pos = site_pos;
+}
+
+void cc_emit_plan_host_ctx_end(void) {
+    cc__host_site_pos = 0;
+}
+
+void cc_emit_plan_host_emit_raw(int anchor, const char* ptr, size_t len) {
+    if (!ptr || len == 0) return;
+    /* Coalesce consecutive emits at the same anchor/site so multi-call loops
+     * (e.g. CRC table generation) splice as one block, not N inserts at the
+     * same prelude offset. */
+    if (cc__comptime_frag_count > 0) {
+        CCEmitComptimeFragment* last = &cc__comptime_frags[cc__comptime_frag_count - 1];
+        if (last->text && last->anchor == (CCEmitAnchor)anchor &&
+            last->site_pos == cc__host_site_pos) {
+            size_t old_len = strlen(last->text);
+            char* nv = (char*)realloc(last->text, old_len + len + 1);
+            if (nv) {
+                memcpy(nv + old_len, ptr, len);
+                nv[old_len + len] = '\0';
+                last->text = nv;
+                return;
+            }
+        }
+    }
+    if (cc__comptime_frag_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return;
+    char* dup = (char*)malloc(len + 1);
+    if (!dup) return;
+    memcpy(dup, ptr, len);
+    dup[len] = '\0';
+    CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
+    f->anchor = (CCEmitAnchor)anchor;
+    f->site_pos = cc__host_site_pos;
+    f->text = dup;
+}
+
+static void cc__host_add_inst(CCTypeGraphRequestKind kind, const char* a, const char* b) {
+    if (cc__comptime_inst_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return;
+    CCEmitComptimeInst* inst = &cc__comptime_insts[cc__comptime_inst_count++];
+    memset(inst, 0, sizeof(*inst));
+    inst->kind = kind;
+    if (a) snprintf(inst->a, sizeof(inst->a), "%s", a);
+    if (b) snprintf(inst->b, sizeof(inst->b), "%s", b);
+}
+
+void cc_emit_plan_host_instantiate_vec(const char* elem) {
+    if (elem) cc__host_add_inst(CC_GRAPH_REQUEST_VEC, elem, NULL);
+}
+
+void cc_emit_plan_host_instantiate_map(const char* key, const char* val) {
+    if (key && val) cc__host_add_inst(CC_GRAPH_REQUEST_MAP, key, val);
+}
+
+void cc_emit_plan_host_instantiate_result(const char* ok, const char* err) {
+    (void)ok; (void)err;
+    /* Result monomorph collection deferred; stub for ABI completeness. */
+}
+
+void cc_emit_plan_host_instantiate_chan(const char* elem) {
+    if (elem) cc__host_add_inst(CC_GRAPH_REQUEST_CHAN, elem, NULL);
+}
+
+const void* cc_emit_plan_host_type_of(const char* name) {
+    (void)name;
+    return NULL;
+}
+
+static int cc__block_needs_executor(const char* src, size_t body_l, size_t body_r) {
+    for (size_t j = body_l + 1; j + 2 < body_r; j++) {
+        if (cc_match_ident_kw(src, body_r, j, "for")) return 1;
+        if (cc_match_ident_kw(src, body_r, j, "while")) return 1;
+        if (cc_match_ident_kw(src, body_r, j, "do")) return 1;
+    }
+    return 0;
+}
+
+static int cc__exec_failed = 0;
+
+static void cc__exec_visit_block(const char* src, size_t len,
+                                 size_t body_l, size_t body_r, void* ctx) {
+    const char* input_path = (const char*)ctx;
+    if (!cc__block_needs_executor(src, body_l, body_r)) return;
+    if (cc__exec_range_contains(body_l, body_r)) return;
+
+    CCComptimeExecOpts opts = {0};
+    opts.input_path = input_path;
+    opts.site_pos = body_l;
+    char err[512];
+    if (cc_comptime_exec_block_body(src + body_l + 1, body_r - body_l - 1,
+                                    &opts, err, sizeof(err)) != 0) {
+        fprintf(stderr, "%s: error: @comptime block execution failed: %s\n",
+                input_path ? input_path : "<input>", err[0] ? err : "unknown");
+        cc__exec_failed = 1;
+    }
+    cc__exec_range_mark(body_l, body_r);
+}
+
+int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {
+    cc__exec_failed = 0;
+    cc__emit_for_each_comptime_block(src, len, cc__exec_visit_block, (void*)input_path);
+    return cc__exec_failed ? -1 : 0;
+}
+
+static void cc__emit_visit_dispatch_skip_exec(const char* src, size_t len,
+                                              size_t body_l, size_t body_r, void* ctx) {
+    if (cc__exec_range_contains(body_l, body_r)) return;
+    cc__emit_visit_dispatch(src, len, body_l, body_r, ctx);
+}
+
 void cc_emit_plan_collect_comptime_emits(const char* src, size_t len) {
-    cc__emit_for_each_comptime_block(src, len, cc__emit_visit_dispatch,
+    cc__emit_for_each_comptime_block(src, len, cc__emit_visit_dispatch_skip_exec,
                                      (void*)&cc__ci_mask_emit);
 }
 
