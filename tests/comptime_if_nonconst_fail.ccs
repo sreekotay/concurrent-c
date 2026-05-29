@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+int main(int argc, char** argv) {
+    (void)argv;
+    /* `argc` is a runtime value — a `@comptime if` predicate must be a
+     * compile-time constant the compiler can decide, so this is an error. */
+    @comptime if (argc > 1) {
+        printf("many\n");
+    } else {
+        printf("few\n");
+    }
+    return 0;
+}

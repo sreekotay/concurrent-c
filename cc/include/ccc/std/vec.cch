@@ -142,77 +142,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
  */
-#ifdef CC_PARSER_MODE
-#define CC_VEC_DECL_ARENA(T, Name)                                                \
-    typedef struct {                                                              \
-        void *data;                                                               \
-        size_t len;                                                               \
-    } Name;                                                                       \
-                                                                                  \
-    static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
-        Name v = {NULL, 0};                                                       \
-        (void)arena; (void)initial_cap;                                           \
-        return v;                                                                 \
-    }                                                                             \
-                                                                                  \
-    static inline int Name##_reserve(Name *v, size_t need) {                      \
-        (void)v; (void)need;                                                      \
-        return 0;                                                                 \
-    }                                                                             \
-                                                                                  \
-    static inline int Name##_push(Name *v, ...) {                                 \
-        (void)v;                                                                  \
-        return 0;                                                                 \
-    }                                                                             \
-                                                                                  \
-    static inline void* Name##_push_ptr(Name *v) {                                \
-        (void)v;                                                                  \
-        return NULL;                                                              \
-    }                                                                             \
-                                                                                  \
-    static inline bool Name##_pop(Name *v, void *out) {                           \
-        (void)v; (void)out;                                                       \
-        return false;                                                             \
-    }                                                                             \
-                                                                                  \
-    static inline void* Name##_get(Name *v, size_t i) {                           \
-        (void)v; (void)i;                                                         \
-        return NULL;                                                              \
-    }                                                                             \
-    static inline void* Name##_get_ptr(Name *v, size_t i) {                       \
-        return Name##_get(v, i);                                                  \
-    }                                                                             \
-                                                                                  \
-    static inline int Name##_set(Name *v, size_t i, ...) {                        \
-        (void)v; (void)i;                                                         \
-        return 0;                                                                 \
-    }                                                                             \
-                                                                                  \
-    static inline void* Name##_at_grow(Name *v, size_t i) {                       \
-        (void)v; (void)i;                                                         \
-        return NULL;                                                              \
-    }                                                                             \
-                                                                                  \
-    static inline void Name##_clear(Name *v) {                                    \
-        (void)v;                                                                  \
-    }                                                                             \
-                                                                                  \
-    static inline CCSlice Name##_as_slice(const Name *v) {                        \
-        (void)v;                                                                  \
-        return cc_slice_empty();                                                  \
-    }                                                                             \
-                                                                                  \
-    static inline uint64_t Name##_provenance(const Name *v) {                     \
-        (void)v;                                                                  \
-        return 0;                                                                 \
-    }                                                                             \
-                                                                                  \
-    static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
-    static inline size_t Name##_cap(const Name *v) { return v ? v->len : 0; }     \
-    static inline void *Name##_begin(Name *v) { return v ? v->data : NULL; }      \
-    static inline void *Name##_end(Name *v) { return v ? (char*)v->data + v->len : NULL; } \
-    static inline void *Name##_data(Name *v) { return v ? v->data : NULL; }
-#else
 #define CC_VEC_DECL_ARENA(T, Name)                                                \
     typedef struct {                                                              \
         T *data;                                                                  \
@@ -294,7 +223,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
-#endif
 
 /* Backwards-compat alias: CC_VEC_DECL_ARENA_FULL used to take an extra OptT
    parameter for the optional return type. Optionals are retired; the third
@@ -302,11 +230,9 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 #define CC_VEC_DECL_ARENA_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
 #define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
 
-#ifdef CC_PARSER_MODE
 #ifndef CC_VEC_CHAR_DEFINED
 #define CC_VEC_CHAR_DEFINED 1
 CC_VEC_DECL_ARENA(char, CCVec_char)
-#endif
 #endif
 
 #ifndef CC_VEC_SIZE_T_DEFINED

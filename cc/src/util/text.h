@@ -23,6 +23,91 @@ static inline int cc_is_ident_char(char c) {
     return cc_is_ident_start(c) || (c >= '0' && c <= '9');
 }
 
+/* ---- Positional keyword match ----
+ *
+ * Word-bounded keyword recognizer used by every raw-text scanner that asks
+ * "does identifier `kw` start exactly at `pos`?" (the @comptime intrinsic
+ * scanners in emit_plan.c / symbols.c, sigil lowering passes, etc.).  A match
+ * requires `kw` at `pos` AND that neither the char before nor after is an
+ * identifier char, so `cc_instantiate_vec` does not match inside
+ * `my_cc_instantiate_vector`.  Returns 1 on match, 0 otherwise. */
+static inline int cc_match_ident_kw(const char* src, size_t len, size_t pos, const char* kw) {
+    size_t klen;
+    if (!src || !kw) return 0;
+    klen = strlen(kw);
+    if (klen == 0 || pos + klen > len) return 0;
+    if (memcmp(src + pos, kw, klen) != 0) return 0;
+    if (pos > 0 && cc_is_ident_char(src[pos - 1])) return 0;
+    if (pos + klen < len && cc_is_ident_char(src[pos + klen])) return 0;
+    return 1;
+}
+
+/* ---- @comptime block recognizer ----
+ *
+ * If `src[at]` begins a `@comptime { ... }` block, set `*out_body_l` to the
+ * index of the opening `{` and `*out_body_r` to its matching `}`, and return
+ * 1; otherwise return 0.  Whitespace and comments between `comptime` and the
+ * `{` are skipped.  This is the single definition of "what is a comptime
+ * block, and where does its body span" shared by every comptime-intrinsic
+ * scanner (emit_plan.c, symbols.c).  Forward-declared helpers used here are
+ * defined below in this header. */
+static inline size_t cc_skip_ws_and_comments(const char* src, size_t len, size_t i);
+static inline int cc_find_matching_brace(const char* b, size_t bl, size_t lbrace, size_t* out_rbrace);
+
+static inline int cc_match_comptime_block(const char* src, size_t len, size_t at,
+                                          size_t* out_body_l, size_t* out_body_r) {
+    size_t body_l, body_r = 0;
+    if (!src || at >= len || src[at] != '@') return 0;
+    if (!cc_match_ident_kw(src, len, at + 1, "comptime")) return 0;
+    body_l = cc_skip_ws_and_comments(src, len, at + 1 + (sizeof("comptime") - 1));
+    if (body_l >= len || src[body_l] != '{') return 0;
+    if (!cc_find_matching_brace(src, len, body_l, &body_r)) return 0;
+    if (out_body_l) *out_body_l = body_l;
+    if (out_body_r) *out_body_r = body_r;
+    return 1;
+}
+
+/* ---- C string-literal parse ----
+ *
+ * Decode a `"..."` literal starting at `*io_pos` (which must point at the
+ * opening quote) into `out`, advancing `*io_pos` past the closing quote.
+ * Recognizes the common escapes (`\n \t \r \\ \" \0`); any other escaped
+ * char is taken literally.  Overlong content is truncated to `out_cap-1`
+ * (the scan still consumes through the closing quote).  Returns 1 on a
+ * well-formed literal, 0 otherwise.  This is the single decoder shared by
+ * the @comptime intrinsic scanners (string-literal args like type names,
+ * instantiation operands, and `cc_emit_cstr` fragments). */
+static inline int cc_parse_c_string_literal(const char* src, size_t len, size_t* io_pos,
+                                            char* out, size_t out_cap) {
+    size_t i, o = 0;
+    if (!src || !io_pos || !out || out_cap == 0) return 0;
+    i = *io_pos;
+    if (i >= len || src[i] != '"') return 0;
+    i++;
+    while (i < len) {
+        char c = src[i++];
+        if (c == '"') {
+            out[o < out_cap ? o : out_cap - 1] = '\0';
+            *io_pos = i;
+            return 1;
+        }
+        if (c == '\\' && i < len) {
+            char e = src[i++];
+            switch (e) {
+            case 'n': c = '\n'; break;
+            case 't': c = '\t'; break;
+            case 'r': c = '\r'; break;
+            case '\\': c = '\\'; break;
+            case '"': c = '"'; break;
+            case '0': c = '\0'; break;
+            default: c = e; break;
+            }
+        }
+        if (o + 1 < out_cap) out[o++] = c;
+    }
+    return 0;
+}
+
 /* ---- Whitespace helpers ---- */
 
 static inline const char* cc_skip_ws(const char* s) {

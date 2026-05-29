@@ -140,25 +140,6 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     (result_var).u.error = (err);                 \
 } while(0)
 
-/* Parser-mode generic fallback error type.
- *
- * The unguarded `CC_DECL_RESULT_SPEC(CCResult_*_CCError, *, CCError)`
- * invocations below now use the real `CCError` type in both modes.  The
- * generic parser fallback remains only for old placeholder paths and TCC-ext
- * UFCS stubs that still need a catch-all result shape. */
-#ifdef CC_PARSER_MODE
-#ifndef __CC_GENERIC_ERROR_DEFINED
-#define __CC_GENERIC_ERROR_DEFINED
-typedef struct __CCGenericError {
-    int kind;
-    int os_errno;
-    int os_code;
-    const char* message;
-    char __pad[48];
-} __CCGenericError;
-#endif
-#endif /* CC_PARSER_MODE */
-
 /* Common result types over `CCError` - emitted in both parser mode and
  * real mode as real distinct typed structs.  Guards allow codegen to
  * pre-emit specific specs without
@@ -230,6 +211,10 @@ static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
  * Parser mode and real compilation both preserve the concrete CCResult_T_E
  * name; generated declarations provide the matching typed struct/helpers.
  */
+#define __CC_RESULT(T, E) CCResult_##T##_##E
+#define __CC_RESULT_OK(T, E, v) cc_ok_CCResult_##T##_##E(v)
+#define __CC_RESULT_ERR(T, E, e) cc_err_CCResult_##T##_##E(e)
+
 #ifdef CC_PARSER_MODE
 
 /* Generic error struct for parser-mode fallback paths.
@@ -291,57 +276,20 @@ typedef struct __CCResultGeneric {
  * the internal pre-parse reparse phase when a forward reference leaves
  * a payload or error type genuinely undeclared — but it is no longer
  * the default shape.
+ *
+ * Irreducible core (2026-05-29): the old generic ctors
+ * (`__cc_result_generic_ok/err`) and the nine generic UFCS accessor
+ * methods (`__CCResultGeneric_value/unwrap/is_ok/is_err/...`) were
+ * verified dead and removed (465/465 both modes).  What remains is
+ * load-bearing and pinned to two things that cannot go until C3:
+ *   1. the `__CCGenericError` / `__CCResultGeneric` tags — TCC-ext's
+ *      UFCS stub emits `__CCResultGeneric` as a return type during the
+ *      stub-AST parse (see preprocess.c's `__CC_RESULT_GENERIC_FWD_DECLARED`
+ *      output), so the tag must be a complete type here; and
+ *   2. the `cc_ok` / `cc_err` stubs below, which keep an un-rewritten
+ *      `cc_ok(...)` / `cc_err(...)` parseable so the intended diagnostic
+ *      surfaces rather than "undeclared function".
  */
-
-/* In parser mode, preserve the concrete result name so headers that provide
-   typed parser-mode declarations (for struct payloads) keep their value shape. */
-#define __CC_RESULT(T, E) CCResult_##T##_##E
-
-/* Generic fallback constructors retained for parse stubs that genuinely do not
-   have a concrete result declaration in scope. */
-static inline __CCResultGeneric __cc_result_generic_ok(void) {
-    __CCResultGeneric r = {0};
-    r.ok = 1;
-    return r;
-}
-static inline __CCResultGeneric __cc_result_generic_err(void) {
-    __CCResultGeneric r = {0};
-    r.ok = 0;
-    return r;
-}
-
-/* Generic UFCS methods for parser mode - code compiles but doesn't run.
-   These handle r.value(), r.error(), r.is_ok(), r.is_err(), and
-   r.unwrap_or(default) via UFCS. */
-static inline intptr_t __CCResultGeneric_value(__CCResultGeneric r) {
-    (void)r;
-    return 0;
-}
-static inline intptr_t __CCResultGeneric_unwrap(__CCResultGeneric r) {
-    return __CCResultGeneric_value(r);
-}
-static inline bool __CCResultGeneric_is_ok(__CCResultGeneric r) {
-    return r.ok;
-}
-static inline bool __CCResultGeneric_is_err(__CCResultGeneric r) {
-    return !r.ok;
-}
-static inline intptr_t __CCResultGeneric_unwrap_or(__CCResultGeneric r, intptr_t def) {
-    (void)r; (void)def;
-    return 0;
-}
-static inline __CCGenericError __CCResultGeneric_error(__CCResultGeneric r) {
-    (void)r;
-    __CCGenericError e = {0};
-    return e;
-}
-static inline __CCGenericError __CCResultGeneric_unwrap_err(__CCResultGeneric r) {
-    return __CCResultGeneric_error(r);
-}
-
-/* Constructor macros use the same typed helpers as real compilation. */
-#define __CC_RESULT_OK(T, E, v) cc_ok_CCResult_##T##_##E(v)
-#define __CC_RESULT_ERR(T, E, e) cc_err_CCResult_##T##_##E(e)
 
 /*
  * Simplified result constructors for parser mode.
@@ -351,6 +299,14 @@ static inline __CCGenericError __CCResultGeneric_unwrap_err(__CCResultGeneric r)
  */
 #ifndef __CC_RESULT_CTORS_DEFINED
 #define __CC_RESULT_CTORS_DEFINED
+/* These generic stubs are the *declaration* that lets a `cc_ok(...)` /
+ * `cc_err(...)` call parse even when it is NOT inside a result-returning
+ * function (where preprocess.c rewrites it to a typed `cc_ok_CCResult_T_E`).
+ * Without them, e.g. `cc_err(e)` in a plain `int` function would be an
+ * "undeclared function" error; with them it parses and then surfaces the
+ * intended "cannot convert" type-mismatch diagnostic (see
+ * tests/try_outside_result_fn_fail).  They are the last text-matching
+ * fallback; removing them is coupled to retiring `__CCResultGeneric`. */
 static inline __CCResultGeneric cc_ok(long __v) {
     __CCResultGeneric __r; __r.ok = 1; __r.u.value = __v; return __r;
 }
@@ -365,18 +321,6 @@ static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
  * the typed `CC_DECL_RESULT_SPEC(CCResult_X_CCIoError, X, CCIoError)`
  * at `insert_pos` in the TU (after the user's `#include` of the
  * defining header), so `X` and `CCIoError` are both in scope. */
-
-#else /* !CC_PARSER_MODE - real compilation */
-
-/* In real compilation, __CC_RESULT expands to the actual type name.
-   The codegen pass ensures CC_DECL_RESULT_SPEC is emitted for each type. */
-#define __CC_RESULT(T, E) CCResult_##T##_##E
-
-/* Real ok/err constructors use the generated type-specific functions.
-   These are placeholder definitions - the compiler rewrites cc_ok(v)/cc_err(e)
-   to cc_ok_CCResult_T_E(v) based on the enclosing function's return type. */
-#define __CC_RESULT_OK(T, E, v) cc_ok_CCResult_##T##_##E(v)
-#define __CC_RESULT_ERR(T, E, e) cc_err_CCResult_##T##_##E(e)
 
 #endif /* CC_PARSER_MODE */
 

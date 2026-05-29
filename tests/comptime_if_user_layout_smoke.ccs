@@ -1,0 +1,47 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* D3.1b: `@comptime if` predicates over *user-declared* type layout.  The
+ * resolver feeds the in-process TCC constexpr seam a prelude built from the
+ * file's top-level type definitions, so `type_of(UserType).size`/`.align`,
+ * `sizeof(struct Tag)`, and `__builtin_offsetof` fold at compile time.  Each
+ * untaken branch references an undefined symbol, proving the predicate is
+ * decided and the dead arm pruned before host compilation.
+ *
+ * Layout assumptions hold on the LP64 targets this repo builds on. */
+
+typedef struct { int a; int b; } TwoInts;        /* size 8,  align 4 */
+typedef struct { char c; double d; } Padded;     /* size 16, align 8 */
+struct Tagged { long x; long y; long z; };        /* size 24, align 8 */
+
+int main(void) {
+    int acc = 0;
+
+    @comptime if (type_of(TwoInts).size == 8) {
+        acc += 1;
+    } else {
+        acc += never1;
+    }
+
+    @comptime if (type_of(Padded).size == 16 && type_of(Padded).align == 8) {
+        acc += 10;
+    } else {
+        acc += never2;
+    }
+
+    @comptime if (sizeof(struct Tagged) == 24) {
+        acc += 100;
+    } else {
+        acc += never3;
+    }
+
+    @comptime if (__builtin_offsetof(Padded, d) == 8) {
+        acc += 1000;
+    } else {
+        acc += never4;
+    }
+
+    printf("comptime_if_user_layout_smoke acc=%d\n", acc);
+    return acc == 1111 ? 0 : 1;
+}

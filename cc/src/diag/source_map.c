@@ -50,6 +50,7 @@ int cc_source_map_lookup(CCSourceMap* map,
                          const char** out_phase,
                          CCConstructKind* out_kind,
                          const char** out_macro_chain) {
+    (void)gen_col; /* lookup is line-based; column reserved in the API */
     if (!map || !out_origin) return -1;
     for (size_t i = map->count; i > 0; i--) {
         const CCSourceMapEntry* e = &map->entries[i - 1];

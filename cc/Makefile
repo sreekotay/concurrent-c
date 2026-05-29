@@ -40,6 +40,10 @@ ifeq ($(TCC_EXT),1)
     override TCC_INC := $(TCC_INC_ABS)
   endif
   CFLAGS += -DCC_TCC_EXT_AVAILABLE -DCONFIG_CC_EXT -I$(TCC_INC)
+  # Absolute dir holding libtcc1.a, so the in-process constexpr seam
+  # (comptime/const_eval.c) can point TCC at its runtime support lib for
+  # TCC_OUTPUT_MEMORY relocation regardless of cwd.
+  CFLAGS += -DCC_TCC_LIB_DIR='"$(TCC_INC)"'
   # If TCC_LIB points to a directory, link -Ldir -ltcc; if it points to an
   # archive, link that archive directly.
   ifneq ($(suffix $(TCC_LIB)),.a)
@@ -74,7 +78,10 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
 	src/preprocess/type_registry.c \
+	src/preprocess/type_graph.c \
+	src/preprocess/emit_plan.c \
 	src/result_spec.c \
+	src/comptime/const_eval.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
 	src/visitor/pass_err_syntax.c \

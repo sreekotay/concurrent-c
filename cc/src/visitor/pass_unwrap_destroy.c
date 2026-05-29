@@ -12,7 +12,6 @@
 
 #define cc__append_n   cc_sb_append
 #define cc__append_str cc_sb_append_cstr
-CC_DEFINE_SB_APPEND_FMT
 
 /* Ambient symbol table consulted for bodyless `@destroy;` on user types
  * registered via `@comptime cc_type_register(...)`.  Callers that have a

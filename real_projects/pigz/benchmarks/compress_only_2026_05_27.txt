@@ -1,0 +1,67 @@
+=== pigz bench_compress_only.sh snapshot ===
+Date: Wed May 27 10:44:27 EDT 2026
+Commit: 75a773a preprocess: closure-ID markers — foundation pass (no consumer switch yet)
+Command: ./bench_compress_only.sh 200 5
+
+==============================================
+Compression-Only Benchmark (best of 5)
+==============================================
+Input:   200 MB (Silesia corpus)
+Runs:    5
+Workers: 8 (pigz -p 8)
+
+Input file: 191M ( 200000000 bytes)
+
+=== pigz (original, pthreads) ===
+  Run 1: 0.699s  272.9 MB/s  ratio=31.4%  ( 62791250 bytes)  [OK]
+  Run 2: 0.670s  284.7 MB/s  ratio=31.4%  ( 62791250 bytes)  [OK]
+  Run 3: 0.669s  285.1 MB/s  ratio=31.4%  ( 62791250 bytes)  [OK]
+  Run 4: 0.676s  282.2 MB/s  ratio=31.4%  ( 62791250 bytes)  [OK]
+  Run 5: 0.670s  284.7 MB/s  ratio=31.4%  ( 62791250 bytes)  [OK]
+  >> Best: 0.669s  285.1 MB/s
+
+=== pigz_idiomatic (fibers, @spawn) ===
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 1: 0.723s  263.8 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 2: 0.657s  290.3 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 3: 0.571s  334.0 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 4: 0.562s  339.4 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 5: 0.565s  337.6 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+  >> Best: 0.562s  339.4 MB/s
+
+=== pigz_pthread (cc_thread_spawn) ===
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 1: 0.739s  258.1 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 2: 0.565s  337.6 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 3: 0.565s  337.6 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 4: 0.731s  260.9 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+Compressed /tmp/bench_pigz_input.bin -> /tmp/bench_pigz_input.bin.gz
+Stats: 200000000 bytes in, 64125765 bytes out, 1526 blocks
+  Run 5: 0.568s  335.8 MB/s  ratio=32.1%  ( 64125765 bytes)  [OK]
+  >> Best: 0.565s  337.6 MB/s
+
+==============================================
+SUMMARY (200MB, best of 5, compression only)
+==============================================
+Implementation                       Best(s)        MB/s     Correct
+-------------------------------     --------    --------    --------
+pigz (original, pthreads)              0.669       285.1      ALL OK
+pigz_idiomatic (fibers)                0.562       339.4      ALL OK
+pigz_pthread (cc_thread_spawn)         0.565       337.6      ALL OK
+

@@ -429,22 +429,153 @@ struct **by value**.  This is independently corroborated by the comment
 already in `cc_sched.cch` / `std/task.cch`: *"TCC doesn't like
 assigning/returning structs during stub-AST parsing."*
 
-Conclusion: all remaining `CC_PARSER_MODE` divergences collapse to a
-single root cause — **the stub-AST parser rejects by-value struct
-params/returns/assignments** (and, for async/closures, un-lowered
-control flow).  The `void*` erasure and `int`/`intptr_t` stubs exist
-solely to keep every such operation scalar so the stub parse survives;
-final emit (normal mode) handles all of it.  Therefore `CC_PARSER_MODE`
-is **not** removable by further header unification — the genuine unlock
-is widening the stub-AST parser (this 4d/L3 item).  Once that lands the
-removal order is: Vec/Map bodies → Result fallback → `CCTask` (also
-needs `@async` prototype lowering before the blocking parse) → closures
-(couple with 4b stable closure-IDs) → delete the define sites + the
-macro.
+Conclusion (updated 2026-05-29): the spike's "TCC rejects struct by-value"
+finding was **wrong**.  Vec/Map parser-mode stubs were hiding a **container
+declaration ordering bug** in `preprocess.c` (payload types not in scope
+when `CC_VEC_DECL_ARENA` expanded).  **Stage 1 fix:** splice container
+decls at `insert_pos` after the user's `#include` prelude (mirroring
+`visit_codegen.c` + Result delayed-splice).  With that fix, **Vec**
+parser-mode body deleted — 462/462 both pipeline modes.
+
+**Map** parser-mode body **deleted (2026-05-29)** — 465/465 both pipeline
+modes.  Took the "parser-safe `ccj` forward stubs" path: the ~9.7k-line
+`<ccc/cc_containers.cch>` stays `#ifndef CC_PARSER_MODE`, but the handful of
+`ccj_*` names the real `CC_MAP_DECL_ARENA` bodies reference are forward-declared
+in `map_forward.cch` under `#ifdef CC_PARSER_MODE` (structs
+`ccj_key_details_ty` / `ccj_allocing_fn_result_ty`; macros `CC_MAP` /
+`CC_DEFAULT_LOAD` / `CC_TYPEOF_XP`; the map functions declared *unprototyped* —
+`T ccj_x();` — so they accept the real call signatures with zero drift).
+`map_forward.cch` now always `#include`s `map_impl.cch`; the cc_containers
+include inside `map_impl.cch` is the only remaining `#ifndef CC_PARSER_MODE`
+piece.  One real body, both modes.
+
+*Latent pointer-type bug surfaced + fixed by this.*  The old Vec/Map stubs never
+used the value/key as a real type (variadic args, `void*` returns), so they
+tolerated the **mangled** parameter token that phase-3 reparses recover from the
+lowered `__CC_MAP(K_m, V_m)` / `__CC_VEC(T_m)` forms (`int*` -> `intptr`).  The
+real bodies use the parameter as a type (`V val`), so `intptr val;` is "invalid
+type".  Mangling is lossy (`*`->`ptr`, `[:]`->`slice`, separators->`_`) and
+can't be demangled; instead `preprocess.c` now memoizes the real spelling
+(`int*`) at the `Map<K,V>` / `CCVec::[T]` lowering site keyed by mangled name,
+and `cc__register_lowered_{vec,map}_macros` recover it during the reparse
+rescan.  This also closes the same latent landmine for pointer-element **Vec**
+(not previously exercised by the suite).
+
+**Result fallback shrunk to irreducible core (2026-05-29).**  The
+`#ifdef CC_PARSER_MODE` block in `cc_result.cch` had accreted a generic
+constructor pair (`__cc_result_generic_ok/err`) and nine generic UFCS
+accessor methods (`__CCResultGeneric_value/unwrap/unwrap_or/error/
+unwrap_err/is_ok/is_err/...`).  A spike removed all eleven and ran clean:
+**465/465 both pipeline modes** — they were dead (no pass references them,
+and nothing lowers a `.value()`/`.is_ok()` onto a `__CCResultGeneric`
+receiver in the suite; `async_ast.c` rewrites any `__CCResultGeneric_is_ok(`
+text to `cc_is_ok(` before final compile).  Removed.
+
+What remains is **load-bearing and pinned to C3 (TCC-ext UFCS tolerance)**,
+not removable by header unification:
+  - the `__CCGenericError` / `__CCResultGeneric` *tags* — TCC-ext's UFCS
+    stub emits `__CCResultGeneric` as a return type during the stub-AST
+    parse, so `preprocess.c` forward-declares it into output
+    (`__CC_RESULT_GENERIC_FWD_DECLARED`) and the parser-mode body must keep
+    it a complete type;
+  - the `cc_ok(long)` / `cc_err(int,const char*)` generic stubs — these are
+    the *declaration* that lets an un-rewritten `cc_ok(...)`/`cc_err(...)`
+    (e.g. a `cc_err(e)` in a plain `int` function) parse, so the intended
+    "cannot convert" diagnostic surfaces instead of "undeclared function".
+    A spike removing them broke exactly one negative test
+    (`try_outside_result_fn_fail`, which asserts the "cannot convert"
+    message), confirming the role.  Restored.
+
+Net: the Result divergence is now the minimal two-tag + two-ctor core.
+
+Remaining `CC_PARSER_MODE` divergences for **CCTask → int** and
+**CCClosure → intptr_t** are unchanged — see stage 3/4 investigations below.
+
+### C3 scope (2026-05-29) — what the TCC-ext "parser-mode tolerance" really is
+
+A scoping pass corrected an earlier oversimplification ("Result/CCTask/CCClosure
+all co-retire at one TCC stub").  **Only Result is name-coupled to TCC**;
+`CCTask` and `CCClosure` have *zero* references in `third_party/tcc` (verified
+by grep).  Accurate map:
+
+**Master switch (NOT a C3 target):** `tcc_state->cc_parser_mode` (`tcc.h:1010`)
+gates the stub-AST tolerance the whole reparse architecture stands on (record
+spans, tolerate unknown idents at `tccgen.c:6507`, parse closure-call args under
+`nocode_wanted` at `:6726`).  Removing it means replacing parse-to-stub-AST
+entirely (the M1 visitor-swap north star), not C3.  C3 only removes the *type-
+placeholder* tolerances layered on top:
+
+| # | TCC hunk | What it does | Coupling |
+|---|----------|--------------|----------|
+| 1 | `tccgen.c` ~6635 `cc_ufcs_needs_result_generic_stub` | `chan.{send,recv,try_send,try_recv}()` UFCS call gets return type `__CCResultGeneric` | **THE** Result-tag dependency |
+| 2 | `tccgen.c` ~6447 await coercion | `await <__CCResultGeneric \| CCResult_*>` → `intptr_t` | partial — `CCResult_*` arm survives `__CCResultGeneric` removal |
+| 3 | ~~`tccgen.c` ~6638 `__CCOptionalGeneric` branch~~ | predicate was a hard `return 0` (Optionals retired) | **REMOVED 2026-05-29** (predicate + dead `else if` branch deleted; patch regen'd; 465/465 both modes) |
+| 4 | `tccgen.c` 3511/3749/3821 + 6126 `cc_in_closure_body` | suppress int/ptr cast warnings & default the result stub inside closure bodies | symptom of CCClosure→intptr_t, behavior-coupled |
+
+**The three divergences, accurately:**
+- **Result `__CCResultGeneric`** — genuinely TCC-coupled (hunk 1, partial hunk 2).
+  Exists because at stub-parse time `chan.recv()`'s real `CCResult_T_E` return type
+  isn't resolvable (channel-monomorph + Result-monomorph ordering).  Removal paths:
+  *(A)* pre-lower `chan.recv()` → `CCChanRx_T_recv(&chan)` in preprocess **before**
+  the stub parse (blocker: text-level element-type resolution; channel lowering is
+  currently a *post*-parse visitor in `ufcs.c`/`pass_channel_syntax.c` precisely
+  because it needs symbol info — significant CC work);
+  *(B)* teach the TCC stub to construct `CCResult_<elem>_<err>` from
+  `cc_last_recv_type` + require that monomorph spliced before parse (more TCC
+  surgery + ordering than the status quo);
+  *(C)* **accept**: it is a ~30-line, `cc_parser_mode`-gated, well-documented
+  residual that is not spreading and does not block Track D.
+- **CCTask → int** — header-only stub (`cc_sched.cch`); **not** TCC-coupled.
+  Removal = CC-side ordering (lower `@async` returns to `CCTask` before the stub
+  parse).  Independent of C3.
+- **CCClosure → intptr_t** — header stub (`cc_closure.cch`) + the behavioral
+  `cc_in_closure_body` warning suppressions (hunk 4) + stable closure-IDs (4b).
+  Removal = emit closure struct decls at post-prelude splice once closure-literal
+  lowering runs earlier; hunk 4 then falls away as a symptom.  Mostly CC-side.
+
+**Recommendation:** (a) ✅ **done** — deleted the dead `__CCOptionalGeneric`
+branch (hunk 3) + `make tcc-patch-regen`; (b) reclassify CCTask/CCClosure as
+independent CC-side ordering tasks (above), not C3; (c) treat `__CCResultGeneric`
+removal as Path A, worthwhile only if channel methods get pre-lowered for other
+reasons — otherwise Path C (intentional residual).  **None of this is major debt
+or a comptime/Track-D blocker.**
 
 Already banked under this campaign: the dead orphan
 `cc_preprocess_simple` + `cc__parse_stubs` (never invoked per
 PIPELINE.md) were deleted (~260 LOC, one `CC_PARSER_MODE` block gone).
+
+### Stage 3 investigation — `CCTask` → `int` (2026-05-29)
+
+**Finding:** `cc_sched.cch` / `std/task.cch` stub `CCTask` to `int` because
+TCC stub-AST parse rejects **struct assignment/return** on the opaque
+128-byte `CCTask` handle (`cc_sched.cch:37-53`).  This is **not** an
+ordering bug.  `task.cch` adds permissive macros (`cc_block_on_intptr` →
+`0`, `cc_block_on(T,...)` → `(T)0`) so code like
+`cc_block_on_intptr(f())` survives when `@async` callee `f` is still
+seen as `void` at first parse.
+
+**Fix approach (deferred):** lower `@async` return-type to `CCTask` (or
+poll-task typedef) **before** the blocking stub parse, *or* teach TCC-ext
+struct-by-value tolerance for this one handle type.  CC-side prototype
+timing is cheaper than TCC surgery; decide after a spike on moving async
+return lowering into preprocess phase-3.
+
+### Stage 4 investigation — `CCClosure` → `intptr_t` (2026-05-29)
+
+**Finding:** `cc_closure.cch:37-44` stubs `CCClosure0/1/2` to `intptr_t`
+so `() => {}` / closure literals parse before closure-literal lift
+(reparse).  Real ABI is `{ fn, env, drop }` struct (`cc_closure.cch:47-69`).
+Coupled with **4b stable closure-IDs** (`COMPILER_CLEANUP_STATUS.md`).
+
+**Fix approach (deferred):** emit stable closure struct declarations at
+post-prelude splice (like Vec/Result) once closure-literal lowering runs
+earlier, *or* keep intptr_t stub until `CC_PARSER_MODE` retires.
+
+**Unified architecture (2026-05-29):** see
+[`cc/docs/COMPTIME_INSTANTIATION_SEAM.md`](COMPTIME_INSTANTIATION_SEAM.md) —
+converges registry monomorph, `@comptime` emission, `cc_type_info`, and UFCS
+on one **instantiation seam**; target is parse-once host C and full comptime
+availability (phased C0–C5).
 
 Then in priority order (independent of M1):
 

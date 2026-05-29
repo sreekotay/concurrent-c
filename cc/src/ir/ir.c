@@ -336,10 +336,6 @@ static size_t cc_ir_find_lhs_start_ex(const char* s, size_t from_pos,
     return 0;
 }
 
-static size_t cc_ir_find_lhs_start(const char* s, size_t from_pos) {
-    return cc_ir_find_lhs_start_ex(s, from_pos, NULL);
-}
-
 /* Trim leading whitespace/newlines from [a..b) in src, returning the
  * new left edge.  Used to normalise LHS spans so the emitted
  * lhs_text doesn't start with stray whitespace the scanner left

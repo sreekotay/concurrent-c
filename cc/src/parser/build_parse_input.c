@@ -8,6 +8,7 @@
 #include "../visitor/pass_check_type_of.h"
 #include "../visitor/pass_create.h"
 #include "../visitor/pass_unwrap_destroy.h"
+#include "../preprocess/emit_plan.h"
 #include "preprocess/preprocess.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,10 @@ int cc_build_parse_input(const char* file_buf,
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
     }
+    cc_emit_plan_clear_comptime_fragments();
+    cc_emit_plan_collect_comptime_emits(buf, got);
+    cc_emit_plan_clear_comptime_instantiations();
+    cc_emit_plan_collect_comptime_instantiations(buf, got);
     {
         char* blanked = cc_blank_comptime_blocks_for_prep(buf, got);
         if (blanked) { free(buf); buf = blanked; got = strlen(buf); }

@@ -11,6 +11,7 @@
 #include <ccc/std/string.cch>
 
 #include "comptime/symbols.h"
+#include "preprocess/type_graph.h"
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
 #include "util/text.h"
@@ -493,13 +494,112 @@ static const char* cc__builtin_to_str_callee(const char* type_name) {
     return NULL;
 }
 
+/* ============================================================
+ * Builtin UFCS receiver-family registry (Track B4).
+ *
+ * The set of receiver type spellings that participate in builtin UFCS
+ * dispatch (Vec/Map/Result/channel families, plus their TCC parser-mode
+ * stub spellings) used to live as a fan of ad-hoc strncmp/strcmp predicate
+ * functions scattered across this file.  They are now declared once as a
+ * data table seeded by `cc__register_builtin_ufcs_families` and queried via
+ * `cc__ufcs_classify_family`; the predicate functions below are thin
+ * membership tests over that classification.  This is the single home where
+ * a future user-declared family (`cc_type_define`) would be appended.
+ *
+ * The classified kinds are mutually exclusive by construction (no receiver
+ * spelling matches two descriptors), so classification order is irrelevant.
+ * NOTE: the string/slice "stringifiable"/"sliceable" predicates are a
+ * separate, overlapping axis (e.g. `__CCVecGeneric` is both a parser-vec
+ * receiver and a string receiver) and deliberately stay out of this table.
+ * ============================================================ */
+typedef enum {
+    CC_UFCS_FAM_NONE = 0,
+    CC_UFCS_FAM_VEC,               /* concrete CCVec_<T>            */
+    CC_UFCS_FAM_MAP,               /* concrete Map_<K>_<V>          */
+    CC_UFCS_FAM_RESULT,            /* concrete CCResult_<T>_<E>     */
+    CC_UFCS_FAM_PARSER_MACRO_VEC,  /* __CC_VEC( ... )               */
+    CC_UFCS_FAM_PARSER_MACRO_MAP,  /* __CC_MAP( ... )               */
+    CC_UFCS_FAM_PARSER_VEC,        /* __CCVecGeneric[ * ]           */
+    CC_UFCS_FAM_PARSER_MAP,        /* __CCMapGeneric[ * ]           */
+    CC_UFCS_FAM_PARSER_RESULT,     /* __CCResultGeneric[ * ]        */
+    CC_UFCS_FAM_CHAN_TX,           /* CCChanTx[_<T>][ * ]           */
+    CC_UFCS_FAM_CHAN_RX,           /* CCChanRx[_<T>][ * ]           */
+    CC_UFCS_FAM_CHAN_RAW,          /* CCChan[ * ]                   */
+} CCUfcsFamilyKind;
+
+/* `CC_UFCS_FAM_F_NAME_DISPATCH`: family uses the `<ConcreteType>_<method>`
+ * callee convention and is reported by `cc__is_family_recv_type` (concrete
+ * Vec/Map/Result + their parser-macro spellings that canonicalize to one). */
+#define CC_UFCS_FAM_F_NAME_DISPATCH 0x1u
+
+typedef struct {
+    CCUfcsFamilyKind kind;
+    const char*      name;
+    const char*      exacts[4];   /* NULL-terminated exact spellings    */
+    const char*      prefixes[3]; /* NULL-terminated strncmp prefixes   */
+    unsigned         flags;
+} CCUfcsFamilyDesc;
+
+static const CCUfcsFamilyDesc cc__ufcs_builtin_families[] = {
+    { CC_UFCS_FAM_VEC,              "vec",
+      { NULL },                                  { "CCVec_",     NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+    { CC_UFCS_FAM_MAP,              "map",
+      { NULL },                                  { "Map_",       NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+    { CC_UFCS_FAM_RESULT,           "result",
+      { NULL },                                  { "CCResult_",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+    { CC_UFCS_FAM_PARSER_MACRO_VEC, "vec-macro",
+      { NULL },                                  { "__CC_VEC(",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+    { CC_UFCS_FAM_PARSER_MACRO_MAP, "map-macro",
+      { NULL },                                  { "__CC_MAP(",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+    { CC_UFCS_FAM_PARSER_VEC,       "parser-vec",
+      { "__CCVecGeneric", "__CCVecGeneric*", NULL },       { NULL }, 0u },
+    { CC_UFCS_FAM_PARSER_MAP,       "parser-map",
+      { "__CCMapGeneric", "__CCMapGeneric*", NULL },       { NULL }, 0u },
+    { CC_UFCS_FAM_PARSER_RESULT,    "parser-result",
+      { "__CCResultGeneric", "__CCResultGeneric*", NULL }, { NULL }, 0u },
+    { CC_UFCS_FAM_CHAN_TX,          "chan-tx",
+      { "CCChanTx", "CCChanTx*", NULL },         { "CCChanTx_", NULL }, 0u },
+    { CC_UFCS_FAM_CHAN_RX,          "chan-rx",
+      { "CCChanRx", "CCChanRx*", NULL },         { "CCChanRx_", NULL }, 0u },
+    { CC_UFCS_FAM_CHAN_RAW,         "chan-raw",
+      { "CCChan", "CCChan*", NULL },             { NULL }, 0u },
+};
+
+/* Builtin-family table is static/const and TU-invariant; this hook exists so
+ * the seam reads as an explicit registration step (and as the insertion point
+ * for future dynamic/user families).  Idempotent and side-effect free. */
+static const CCUfcsFamilyDesc* cc__register_builtin_ufcs_families(size_t* out_count) {
+    if (out_count) {
+        *out_count = sizeof(cc__ufcs_builtin_families) / sizeof(cc__ufcs_builtin_families[0]);
+    }
+    return cc__ufcs_builtin_families;
+}
+
+static CCUfcsFamilyKind cc__ufcs_classify_family(const char* type_name) {
+    size_t n = 0;
+    const CCUfcsFamilyDesc* fams;
+    if (!type_name || !type_name[0]) return CC_UFCS_FAM_NONE;
+    fams = cc__register_builtin_ufcs_families(&n);
+    for (size_t i = 0; i < n; ++i) {
+        const CCUfcsFamilyDesc* d = &fams[i];
+        for (size_t e = 0; e < (sizeof(d->exacts) / sizeof(d->exacts[0])) && d->exacts[e]; ++e) {
+            if (strcmp(type_name, d->exacts[e]) == 0) return d->kind;
+        }
+        for (size_t p = 0; p < (sizeof(d->prefixes) / sizeof(d->prefixes[0])) && d->prefixes[p]; ++p) {
+            if (strncmp(type_name, d->prefixes[p], strlen(d->prefixes[p])) == 0) return d->kind;
+        }
+    }
+    return CC_UFCS_FAM_NONE;
+}
+
 static int cc__is_family_recv_type(const char* type_name) {
-    return type_name &&
-           (strncmp(type_name, "CCVec_", 6) == 0 ||
-            strncmp(type_name, "Map_", 4) == 0 ||
-            strncmp(type_name, "__CC_VEC(", 9) == 0 ||
-            strncmp(type_name, "__CC_MAP(", 9) == 0 ||
-            strncmp(type_name, "CCResult_", 9) == 0);
+    size_t n = 0;
+    const CCUfcsFamilyDesc* fams = cc__register_builtin_ufcs_families(&n);
+    CCUfcsFamilyKind k = cc__ufcs_classify_family(type_name);
+    for (size_t i = 0; i < n; ++i) {
+        if (fams[i].kind == k) return (fams[i].flags & CC_UFCS_FAM_F_NAME_DISPATCH) != 0;
+    }
+    return 0;
 }
 
 static const char* cc__canonicalize_parser_family_macro(const char* type_name,
@@ -589,41 +689,23 @@ static const char* cc__canonicalize_family_recv_type(const char* type_name,
 }
 
 static int cc__is_parser_result_recv_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "__CCResultGeneric") == 0 ||
-            strcmp(type_name, "__CCResultGeneric*") == 0);
+    return cc__ufcs_classify_family(type_name) == CC_UFCS_FAM_PARSER_RESULT;
 }
 
 static int cc__is_parser_vec_recv_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "__CCVecGeneric") == 0 ||
-            strcmp(type_name, "__CCVecGeneric*") == 0);
+    return cc__ufcs_classify_family(type_name) == CC_UFCS_FAM_PARSER_VEC;
 }
 
 static int cc__is_parser_map_recv_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "__CCMapGeneric") == 0 ||
-            strcmp(type_name, "__CCMapGeneric*") == 0);
+    return cc__ufcs_classify_family(type_name) == CC_UFCS_FAM_PARSER_MAP;
 }
 
-static int cc__is_channel_tx_recv_type(const char* type_name) {
-    return type_name &&
-           (strncmp(type_name, "CCChanTx_", 9) == 0 ||
-            strcmp(type_name, "CCChanTx") == 0 ||
-            strcmp(type_name, "CCChanTx*") == 0);
-}
-
-static int cc__is_channel_rx_recv_type(const char* type_name) {
-    return type_name &&
-           (strncmp(type_name, "CCChanRx_", 9) == 0 ||
-            strcmp(type_name, "CCChanRx") == 0 ||
-            strcmp(type_name, "CCChanRx*") == 0);
-}
-
+/* Note: per-channel-kind tx/rx predicates were dead after the B4 family
+ * registry landed (callers test channel kind via cc_ufcs_channel_callee /
+ * typed_chan_type, or strcmp directly).  Only the raw-channel predicate is
+ * still consulted by the convention-based dispatch guard below. */
 static int cc__is_raw_channel_recv_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "CCChan") == 0 ||
-            strcmp(type_name, "CCChan*") == 0);
+    return cc__ufcs_classify_family(type_name) == CC_UFCS_FAM_CHAN_RAW;
 }
 
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
@@ -782,7 +864,7 @@ static CCSliceArray cc__build_ufcs_arg_slices(CCArena* arena, const char* args_s
 static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* args_src) {
     CCSliceArray argv = cc__build_ufcs_arg_slices(arena, args_src);
     CCSlice* items = NULL;
-    CCTypeRegistry* reg = cc_type_registry_get_global();
+    CCTypeRegistry* reg = cc_type_graph_active_registry(cc_type_graph_get_global());
     if (!arena || !argv.items || argv.len == 0) {
         CCSliceArray empty = {0};
         return empty;
@@ -1082,7 +1164,7 @@ static const char* cc__ufcs_canonicalize_family_macro(const char* type_name,
 }
 
 static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
-    CCTypeRegistry* reg = cc_type_registry_get_global();
+    CCTypeRegistry* reg = cc_type_graph_active_registry(cc_type_graph_get_global());
     const char* reg_type_name = NULL;
     const char* alias_target = NULL;
     char local_type_buf[256];
@@ -1432,7 +1514,7 @@ static int cc__emit_closure_field_call(char* out,
     while (*type_for_lookup == ' ' || *type_for_lookup == '\t') type_for_lookup++;
     if (!*type_for_lookup) return CC_UFCS_EMIT_UNRESOLVED;
 
-    CCTypeRegistry* reg = cc_type_registry_get_global();
+    CCTypeRegistry* reg = cc_type_graph_active_registry(cc_type_graph_get_global());
     if (!reg) return CC_UFCS_EMIT_UNRESOLVED;
     const char* field_type = cc_type_registry_lookup_field(reg, type_for_lookup, method);
     if (!field_type) return CC_UFCS_EMIT_UNRESOLVED;

@@ -1,0 +1,45 @@
+/*
+ * cc_instantiate.cch — comptime instantiation API (track B1).
+ *
+ * Built-in monomorphs (Vec/Map/Result/Chan) are collected by the compiler
+ * from surface syntax (`CCVec::[T]`, `Map::[K,V]`, etc.) into the per-TU
+ * type graph; user code normally does not call these directly.
+ *
+ * Future: `@comptime` blocks call cc_instantiate / cc_emit_* to define
+ * user generic factories (spec §12, §14).  See COMPTIME_INSTANTIATION_SEAM.md.
+ */
+#ifndef CC_INSTANTIATE_CCH
+#define CC_INSTANTIATE_CCH
+
+#include <stddef.h>
+
+typedef enum CCEmitAnchor {
+    CC_EMIT_AFTER_PRELUDE = 0,
+    CC_EMIT_BEFORE_FIRST_USE = 1,
+    CC_EMIT_AT_COMPTIME_SITE = 2,
+} CCEmitAnchor;
+
+/* Built-in instantiation requests (compiler lowers syntax to graph today). */
+static inline void cc_instantiate_vec(const char* elem_mangled) {
+    (void)elem_mangled;
+}
+static inline void cc_instantiate_map(const char* key_mangled, const char* val_mangled) {
+    (void)key_mangled;
+    (void)val_mangled;
+}
+static inline void cc_instantiate_result(const char* ok_mangled, const char* err_mangled) {
+    (void)ok_mangled;
+    (void)err_mangled;
+}
+static inline void cc_instantiate_chan(const char* elem_mangled) {
+    (void)elem_mangled;
+}
+
+/* Comptime emission (C2): host-side fragments spliced at plan anchors. */
+static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
+    (void)anchor;
+    (void)c_fragment;
+    return 0;
+}
+
+#endif /* CC_INSTANTIATE_CCH */

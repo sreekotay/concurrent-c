@@ -22,7 +22,7 @@
 #include "string.cch"
 #include "io.cch"
 #include "vec.cch"
-#include "map.cch"
+#include "map_forward.cch"
 #include "dir.cch"
 #include "process.cch"
 #include "exec.cch"

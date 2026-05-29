@@ -1,0 +1,38 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stddef.h>
+
+/* D4.0: `@comptime for (F in type_of(T).fields) { ... }` unrolls the body once
+ * per declared field, substituting the loop variable:
+ *   F        -> the field identifier   (so `t.F` -> `t.a`, `t.b`, ...)
+ *   F.name   -> "fieldname"            (string literal)
+ *   F.index  -> 0-based field index
+ *   F.type   -> the field's type spelling
+ * The struct definition is read from the same source buffer. */
+
+typedef struct {
+    int a;
+    int b;
+    int c;
+} Triple;
+
+int main(void) {
+    Triple t = { .a = 10, .b = 20, .c = 30 };
+
+    int sum = 0;
+    int idxsum = 0;
+    @comptime for (f in type_of(Triple).fields) {
+        printf("%s[%d]=%d\n", f.name, f.index, t.f);
+        sum += t.f;
+        idxsum += f.index;
+    }
+
+    size_t total_bytes = 0;
+    @comptime for (g in type_of(Triple).fields) {
+        total_bytes += sizeof(g.type);
+    }
+
+    printf("sum=%d idxsum=%d total_bytes=%zu\n", sum, idxsum, total_bytes);
+    return (sum == 60 && idxsum == 3 && total_bytes == 12) ? 0 : 1;
+}

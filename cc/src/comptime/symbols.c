@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
+
 typedef struct {
     char* name;
     long long value;
@@ -507,81 +509,34 @@ const char* cc_symbols_type_name(CCSymbolTable* t, size_t idx) {
     return t->types[idx].type_name;
 }
 
+/* Single source of truth lives in util/text.h; this remains as a local name
+ * so the many call sites below read unchanged. */
 static int cc__match_kw_reg(const char* src, size_t n, size_t pos, const char* kw) {
-    size_t klen = strlen(kw);
-    if (!src || !kw || pos + klen > n) return 0;
-    if (memcmp(src + pos, kw, klen) != 0) return 0;
-    if (pos > 0 && (isalnum((unsigned char)src[pos - 1]) || src[pos - 1] == '_')) return 0;
-    if (pos + klen < n && (isalnum((unsigned char)src[pos + klen]) || src[pos + klen] == '_')) return 0;
-    return 1;
+    return cc_match_ident_kw(src, n, pos, kw);
 }
 
+/* Single source of truth lives in util/text.h (comment/string-aware ws skip). */
 static size_t cc__skip_ws_reg(const char* src, size_t n, size_t i) {
-    for (;;) {
-        while (i < n && isspace((unsigned char)src[i])) i++;
-        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
-            i += 2;
-            while (i < n && src[i] != '\n') i++;
-            continue;
-        }
-        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
-            if (i + 1 < n) i += 2;
-            continue;
-        }
-        break;
-    }
-    return i;
+    return cc_skip_ws_and_comments(src, n, i);
 }
 
+/* Single source of truth lives in util/text.h.  symbols.c only ever matches
+ * `(`/`{` pairs; the close_ch arg is implied by the opener and kept for the
+ * existing call-site signatures. */
 static int cc__find_matching_reg(const char* src, size_t n, size_t open_idx, char open_ch, char close_ch, size_t* out_close) {
-    int depth = 0;
-    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    if (!src || open_idx >= n || src[open_idx] != open_ch) return 0;
-    for (size_t i = open_idx; i < n; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == open_ch) depth++;
-        else if (c == close_ch) {
-            depth--;
-            if (depth == 0) {
-                *out_close = i;
-                return 1;
-            }
-        }
-    }
+    (void)close_ch;
+    if (open_ch == '{') return cc_find_matching_brace(src, n, open_idx, out_close);
+    if (open_ch == '(') return cc_find_matching_paren(src, n, open_idx, out_close);
+    if (open_ch == '[') return cc_find_matching_bracket(src, n, open_idx, out_close);
     return 0;
 }
 
+/* Single source of truth lives in util/text.h (cc_parse_c_string_literal),
+ * which additionally decodes \r \\ \" \0 and truncates overlong content
+ * rather than failing — neither matters for the short type-name / callee
+ * literals parsed here, all of which are escape-free. */
 static int cc__parse_string_literal_reg(const char* src, size_t n, size_t* io_pos, char* out, size_t out_sz) {
-    size_t p = io_pos ? *io_pos : 0;
-    size_t len = 0;
-    if (!src || !io_pos || !out || out_sz == 0 || p >= n || src[p] != '"') return 0;
-    p++;
-    while (p < n && src[p] != '"') {
-        if (src[p] == '\\' && p + 1 < n) {
-            char c = src[p + 1];
-            if (len + 1 >= out_sz) return 0;
-            out[len++] = (c == 'n') ? '\n' : (c == 't') ? '\t' : c;
-            p += 2;
-            continue;
-        }
-        if (len + 1 >= out_sz) return 0;
-        out[len++] = src[p++];
-    }
-    if (p >= n || src[p] != '"') return 0;
-    out[len] = '\0';
-    *io_pos = p + 1;
-    return 1;
+    return cc_parse_c_string_literal(src, n, io_pos, out, out_sz);
 }
 
 static int cc__parse_helper_call_1(const char* src,
@@ -983,17 +938,27 @@ int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
                 continue;
             }
         }
-        if (c != '@' || !cc__match_kw_reg(src, n, i + 1, "comptime")) continue;
+        if (c != '@') continue;
         {
-            size_t body_l = cc__skip_ws_reg(src, n, i + 1 + strlen("comptime"));
-            size_t body_r = 0;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_reg(src, n, body_l, '{', '}', &body_r)) continue;
+            size_t body_l = 0, body_r = 0;
+            /* Shared recognizer (util/text.h): same "what is a @comptime block"
+             * definition used by emit_plan.c's intrinsic enumerator. */
+            if (!cc_match_comptime_block(src, n, i, &body_l, &body_r)) continue;
             for (size_t j = body_l + 1; j < body_r; ++j) {
                 char type_name[256];
                 size_t lpar = 0, rpar = 0, p = 0, obj_l = 0, obj_r = 0;
-                if (!cc__match_kw_reg(src, body_r, j, "cc_type_register")) continue;
-                lpar = cc__skip_ws_reg(src, body_r, j + strlen("cc_type_register"));
+                const char* reg_kw = NULL;
+                /* Accept both the legacy `cc_type_register` and the
+                 * forward-looking `cc_type_define` spelling (B3).  Both take an
+                 * identical ("name", CCTypeHooks{...}) shape, so the parse below
+                 * is unchanged — only the matched keyword length differs. */
+                if (cc__match_kw_reg(src, body_r, j, "cc_type_register")) {
+                    reg_kw = "cc_type_register";
+                } else if (cc__match_kw_reg(src, body_r, j, "cc_type_define")) {
+                    reg_kw = "cc_type_define";
+                }
+                if (!reg_kw) continue;
+                lpar = cc__skip_ws_reg(src, body_r, j + strlen(reg_kw));
                 if (lpar >= body_r || src[lpar] != '(') continue;
                 if (!cc__find_matching_reg(src, body_r, lpar, '(', ')', &rpar)) continue;
                 p = cc__skip_ws_reg(src, body_r, lpar + 1);

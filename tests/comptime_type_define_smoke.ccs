@@ -1,0 +1,64 @@
+/* Track B3: cc_type_define is recognized identically to cc_type_register by
+ * the comptime registration scanner (named handler + lambda handler work). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <ccc/cc_type.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int value;
+} DefinedToy;
+
+typedef struct {
+    int value;
+} DefinedLambdaToy;
+
+static CCSlice defined_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    return cc_ufcs_concat2(arena,
+        cc_slice_from_buffer("defined_toy_", sizeof("defined_toy_") - 1),
+        method);
+}
+
+static void defined_toy_ping(DefinedToy* toy) {
+    toy->value += 1;
+}
+
+static void defined_lambda_toy_ping(DefinedLambdaToy* toy) {
+    toy->value += 10;
+}
+
+@comptime {
+    (void)cc_type_define("DefinedToy", (CCTypeHooks){
+        .ufcs = defined_toy_ufcs_rewrite,
+    });
+    (void)cc_type_define("DefinedLambdaToy", (CCTypeHooks){
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
+            (void)recv_type;
+            (void)mode;
+            (void)argv;
+            (void)arg_types;
+            return cc_ufcs_concat2(arena,
+                cc_slice_from_buffer("defined_lambda_toy_", sizeof("defined_lambda_toy_") - 1),
+                method);
+        },
+    });
+}
+
+int main(void) {
+    DefinedToy named = { 1 };
+    DefinedLambdaToy lambda = { 2 };
+
+    named.ping();
+    lambda.ping();
+
+    assert(named.value == 2);
+    assert(lambda.value == 12);
+
+    printf("comptime_type_define_smoke: PASS\n");
+    return 0;
+}
