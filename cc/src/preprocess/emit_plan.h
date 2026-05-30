@@ -130,9 +130,18 @@ void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph);
 void cc_emit_plan_register_generic_template(const char* name, int arity,
                                             const char* template_src);
 const char* cc_emit_plan_lookup_generic_template(const char* name, int* out_arity);
+/* D6.1 compiled factory registration + dylib invoke. */
+void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name);
+const void* cc_emit_plan_lookup_generic_factory(const char* name);
+int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
+                                           const char* input_path);
+int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
+                                        const char type_args[8][128], int nargs,
+                                        char* def_out, size_t def_cap);
 /* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);
+void cc_emit_plan_clear_generic_factory_registrations(void);
 
 /* --- comptime fragment buffer (track B2) --- */
 void cc_emit_plan_clear_comptime_fragments(void);
@@ -155,7 +164,33 @@ void cc_emit_plan_host_instantiate_result(const char* ok, const char* err);
 void cc_emit_plan_host_instantiate_chan(const char* elem);
 const void* cc_emit_plan_host_type_of(const char* name);
 
-/* Execute @comptime {} blocks that contain control flow (for/while/do). */
+/* --- comptime reflection host API (D6.3) ---
+ *
+ * Structured type info crosses the user-space bind point as bytes only:
+ * callers pass a type name (C string) and read field name / type-spelling
+ * strings back into their own buffers.  No compiler-internal pointer (e.g.
+ * `cc_type_info*`) ever escapes, so the narrow waist that keeps `@comptime`
+ * code and compiled factories decoupled from compiler internals stays intact.
+ * The same three symbols are injected into the libtcc executor and resolved by
+ * compiled factory dylibs (via `-undefined dynamic_lookup`), so executed
+ * comptime code and library factories share one reflection contract.
+ *
+ * Backed by an on-demand scan of the current source buffer's struct
+ * definitions: the global type registry is not yet populated with struct
+ * fields at the point @comptime blocks / generic factories run (see the
+ * ordering in cc_build_parse_input), so reflection parses the named struct's
+ * fields from source text.  `type` spellings can be fed straight back into
+ * `cc_reflect_field_count` to recurse into nested struct fields.
+ *
+ * Returns: field count (>=0) or -1 for an unknown type; for name/type the
+ * number of bytes written (excluding NUL) or -1 if idx is out of range. */
+void cc_emit_plan_set_reflect_source(const char* src, size_t len);
+int cc_reflect_field_count(const char* type_name);
+int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+
+/* Execute @comptime {} blocks that need the libtcc executor (control flow or
+ * calls to registered @comptime functions). */
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path);
 
 #endif /* CC_EMIT_PLAN_H */

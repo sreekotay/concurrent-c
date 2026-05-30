@@ -6,6 +6,7 @@
 typedef enum {
     CC_COMPTIME_TYPE_HOOK_CREATE = 0,
     CC_COMPTIME_TYPE_HOOK_UFCS = 1,
+    CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY = 2,
 } CCComptimeTypeHookKind;
 
 /*
@@ -78,5 +79,14 @@ int cc_comptime_compile_type_hooks(const char* registration_input_path,
    the dylib and unlinks the temporary files. */
 void cc_comptime_type_hook_owner_retain(void* owner);
 void cc_comptime_type_hook_owner_free(void* owner);
+
+/* Compile hooks from an isolated TU body (handler defs only, no full-file filter).
+   Used by D6.1 generic factories where the handler is a top-level @comptime fn. */
+int cc_comptime_compile_type_hooks_tu(const char* registration_input_path,
+                                      const char* tu_body,
+                                      const CCComptimeHookSpec* specs,
+                                      size_t n_specs,
+                                      void** out_owner,
+                                      const void** out_fn_ptrs);
 
 #endif

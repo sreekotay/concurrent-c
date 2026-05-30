@@ -1,0 +1,1 @@
+comptime_reflect_fields_smoke ok nfields=3 id:int weight:double tag:char

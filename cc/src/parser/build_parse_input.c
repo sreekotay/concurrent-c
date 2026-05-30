@@ -54,9 +54,11 @@ int cc_build_parse_input(const char* file_buf,
         if (resolved == (char*)-1) goto fail_buf;
         if (resolved) { free(buf); buf = resolved; got = strlen(buf); }
     }
+    cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     if (cc_emit_plan_exec_comptime_blocks(buf, got, input_path) != 0) goto fail_buf;
     cc_emit_plan_collect_comptime_emits(buf, got);
+    if (cc_emit_plan_compile_generic_factories(buf, got, input_path) != 0) goto fail_buf;
     cc_emit_plan_clear_comptime_instantiations();
     cc_emit_plan_collect_comptime_instantiations(buf, got);
     {

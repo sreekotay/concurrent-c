@@ -1,0 +1,72 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* D6.3: a compiled generic factory introspects its struct type argument via
+ * the reflection callback (resolved against the compiler binary) and emits one
+ * accessor per field.  Structured type info reaches the factory as bytes only —
+ * the same narrow waist the executor uses. */
+
+typedef struct {
+    int id;
+    double weight;
+} Widget;
+
+@comptime CCSlice describe_factory(CCSlice generic_name, CCSlice mangled,
+                                   CCSliceArray type_args, CCArena* arena) {
+    static char buf[4096];
+    (void)generic_name;
+    (void)arena;
+    if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
+
+    char tname[128];
+    int tl = (int)type_args.items[0].len;
+    if (tl > 127) tl = 127;
+    memcpy(tname, (char*)type_args.items[0].ptr, (size_t)tl);
+    tname[tl] = '\0';
+
+    int nf = cc_reflect_field_count(tname);
+    if (nf < 0) nf = 0;
+    int n = snprintf(buf, sizeof(buf),
+        "typedef struct { int nfields; } %.*s;\n"
+        "static inline int %.*s_nfields(void) { return %d; }\n",
+        (int)mangled.len, (char*)mangled.ptr,
+        (int)mangled.len, (char*)mangled.ptr,
+        nf);
+    for (int i = 0; i < nf && n > 0 && n < (int)sizeof(buf); i++) {
+        char fn[64];
+        char ft[64];
+        cc_reflect_field_name(tname, i, fn, (int)sizeof(fn));
+        cc_reflect_field_type(tname, i, ft, (int)sizeof(ft));
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+            "static inline const char* %.*s_field%d_name(void) { return \"%s\"; }\n"
+            "static inline const char* %.*s_field%d_type(void) { return \"%s\"; }\n",
+            (int)mangled.len, (char*)mangled.ptr, i, fn,
+            (int)mangled.len, (char*)mangled.ptr, i, ft);
+    }
+    if (n <= 0) return cc_slice_empty();
+    return cc_slice_from_parts(buf, (size_t)n, CC_SLICE_ID_UNTRACKED, sizeof(buf));
+}
+
+@comptime {
+    cc_generic_register("Describe", describe_factory);
+}
+
+int main(void) {
+    Describe::[Widget] d;
+    d.nfields = Describe_Widget_nfields();
+
+    if (d.nfields != 2) return 1;
+    if (strcmp(Describe_Widget_field0_name(), "id") != 0) return 2;
+    if (strcmp(Describe_Widget_field0_type(), "int") != 0) return 3;
+    if (strcmp(Describe_Widget_field1_name(), "weight") != 0) return 4;
+    if (strcmp(Describe_Widget_field1_type(), "double") != 0) return 5;
+
+    printf("comptime_reflect_factory_smoke ok nfields=%d %s:%s %s:%s\n",
+           d.nfields,
+           Describe_Widget_field0_name(), Describe_Widget_field0_type(),
+           Describe_Widget_field1_name(), Describe_Widget_field1_type());
+    return 0;
+}

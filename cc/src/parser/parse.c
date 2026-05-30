@@ -13,6 +13,7 @@
 #include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
 #include "util/text.h"
+#include "util/text.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_unwrap_destroy.h"
@@ -81,12 +82,44 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc__skip_ws_parse(src, n, kw_end);
             size_t body_r;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_brace_parse(src, n, body_l, &body_r)) continue;
-            for (size_t k = i; k <= body_r; ++k) {
-                if (out[k] != '\n') out[k] = ' ';
+            if (body_l >= n) continue;
+            if (src[body_l] == '{') {
+                if (!cc__find_matching_brace_parse(src, n, body_l, &body_r)) continue;
+                for (size_t k = i; k <= body_r; ++k) {
+                    if (out[k] != '\n') out[k] = ' ';
+                }
+                i = body_r;
+                continue;
             }
-            i = body_r;
+            /* @comptime fn/const decl — blank through body or ';'. */
+            {
+                size_t p = body_l, lpar = 0, rpar = 0, end = 0;
+                for (; p < n; p++) {
+                    if (src[p] == '(') { lpar = p; break; }
+                }
+                if (lpar) {
+                    if (!cc_find_matching_paren(src, n, lpar, &rpar)) continue;
+                    p = cc__skip_ws_parse(src, n, rpar + 1);
+                    if (p < n && src[p] == '{') {
+                        if (!cc__find_matching_brace_parse(src, n, p, &body_r)) continue;
+                        end = body_r;
+                    } else {
+                        for (; p < n; p++) {
+                            if (src[p] == ';') { end = p; break; }
+                        }
+                        if (!end) continue;
+                    }
+                } else {
+                    for (; p < n; p++) {
+                        if (src[p] == ';') { end = p; break; }
+                    }
+                    if (!end) continue;
+                }
+                for (size_t k = i; k <= end; ++k) {
+                    if (out[k] != '\n') out[k] = ' ';
+                }
+                i = end;
+            }
         }
     }
     return out;

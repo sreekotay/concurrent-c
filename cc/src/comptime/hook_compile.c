@@ -160,6 +160,39 @@ static int cc__match_keyword(const char* src, size_t n, size_t pos, const char* 
     return 1;
 }
 
+static int cc__chunk_is_comptime_fn(const char* src, size_t start, size_t end) {
+    size_t i = start;
+    if (!src || end <= start) return 0;
+    while (i < end) {
+        if (src[i] != '@') { i++; continue; }
+        if (!cc__match_keyword(src, end, i + 1, "comptime")) { i++; continue; }
+        {
+            size_t p = cc__skip_ws(src, end, i + 1 + strlen("comptime"));
+            if (p < end && src[p] != '{') return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static void cc__emit_chunk_stripped(char** out, size_t* out_len, size_t* out_cap,
+                                    const char* src, size_t start, size_t end) {
+    size_t i = start;
+    while (i < end) {
+        if (src[i] == '@' && cc__match_keyword(src, end, i + 1, "comptime")) {
+            size_t p = cc__skip_ws(src, end, i + 1 + strlen("comptime"));
+            if (p < end && src[p] != '{') {
+                cc__hc_sb_append(out, out_len, out_cap, src + p, end - p);
+                cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
+                return;
+            }
+        }
+        i++;
+    }
+    cc__hc_sb_append(out, out_len, out_cap, src + start, end - start);
+    cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
+}
+
 static int cc__chunk_contains_at(const char* src, size_t start, size_t end) {
     if (!src || end <= start) return 0;
     for (size_t i = start; i < end; ++i) {
@@ -338,19 +371,33 @@ static void cc__emit_top_level_filtered(char** out,
                     size_t body_r = 0;
                     if (!cc__find_matching_brace(src, n, j, &body_r)) { return; }
                     if (!saw_top_paren_close) { j = body_r; continue; }
-                    if (!cc__chunk_contains_at(src, start, body_r + 1) &&
-                        !cc__chunk_contains_ufcs_shaped_call(src, start, body_r + 1)) {
-                        cc__hc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
+                    {
+                        int drop_at = cc__chunk_contains_at(src, start, body_r + 1) &&
+                                      !cc__chunk_is_comptime_fn(src, start, body_r + 1);
+                        if (!drop_at &&
+                            !cc__chunk_contains_ufcs_shaped_call(src, start, body_r + 1)) {
+                        if (cc__chunk_is_comptime_fn(src, start, body_r + 1))
+                            cc__emit_chunk_stripped(out, out_len, out_cap, src, start, body_r + 1);
+                        else
+                            cc__hc_sb_append(out, out_len, out_cap, src + start, body_r + 1 - start);
                         cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
+                        }
                     }
                     j = body_r;
                     break;
                 }
                 if (c == ';' && depth == 0) {
-                    if (!cc__chunk_contains_at(src, start, j + 1) &&
-                        !cc__chunk_contains_ufcs_shaped_call(src, start, j + 1)) {
-                        cc__hc_sb_append(out, out_len, out_cap, src + start, j + 1 - start);
-                        cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
+                    {
+                        int drop_at = cc__chunk_contains_at(src, start, j + 1) &&
+                                      !cc__chunk_is_comptime_fn(src, start, j + 1);
+                        if (!drop_at &&
+                            !cc__chunk_contains_ufcs_shaped_call(src, start, j + 1)) {
+                            if (cc__chunk_is_comptime_fn(src, start, j + 1))
+                                cc__emit_chunk_stripped(out, out_len, out_cap, src, start, j + 1);
+                            else
+                                cc__hc_sb_append(out, out_len, out_cap, src + start, j + 1 - start);
+                            cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
+                        }
                     }
                     break;
                 }
@@ -374,8 +421,19 @@ static int cc__emit_lambda_definition(char** out,
                                       CCComptimeTypeHookKind kind) {
     static const char* param_types_ufcs[6]   = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *" };
     static const char* param_types_create[4] = { "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *" };
-    const char** param_types = (kind == CC_COMPTIME_TYPE_HOOK_UFCS) ? param_types_ufcs : param_types_create;
-    int expected_params = (kind == CC_COMPTIME_TYPE_HOOK_UFCS) ? 6 : 4;
+    static const char* param_types_factory[4] = { "CCSlice", "CCSlice", "CCSliceArray", "CCArena *" };
+    const char** param_types;
+    int expected_params;
+    if (kind == CC_COMPTIME_TYPE_HOOK_UFCS) {
+        param_types = param_types_ufcs;
+        expected_params = 6;
+    } else if (kind == CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY) {
+        param_types = param_types_factory;
+        expected_params = 4;
+    } else {
+        param_types = param_types_create;
+        expected_params = 4;
+    }
     char params[6][64];
     size_t lpar = 0, rpar = 0, p = 0, body_s = 0, body_e = expr_len;
     int param_count = 0;
@@ -443,6 +501,11 @@ static void cc__emit_wrapper(char** out,
                               "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
         cc__hc_sb_append_cstr(out, out_len, out_cap, callable_name);
         cc__hc_sb_append_cstr(out, out_len, out_cap, "(recv_type, method, mode, argv, arg_types, arena);\n}\n");
+    } else if (kind == CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY) {
+        cc__hc_sb_append_cstr(out, out_len, out_cap,
+                              "(CCSlice generic_name, CCSlice mangled, CCSliceArray type_args, CCArena *arena) {\n    return ");
+        cc__hc_sb_append_cstr(out, out_len, out_cap, callable_name);
+        cc__hc_sb_append_cstr(out, out_len, out_cap, "(generic_name, mangled, type_args, arena);\n}\n");
     } else {
         cc__hc_sb_append_cstr(out, out_len, out_cap,
                               "(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
@@ -633,6 +696,7 @@ static int cc__build_compile_and_load(const char* input_path,
                                       const char* original_src,
                                       size_t original_len,
                                       const char* lambda_defs,      /* optional, already valid C */
+                                      const char* isolated_body,    /* optional: handler-only TU body */
                                       const CCComptimeHookSpec* specs,
                                       size_t n_specs,
                                       CCComptimeDlModule** out_module,
@@ -669,8 +733,12 @@ static int cc__build_compile_and_load(const char* input_path,
        understand (e.g. @result macro expansions in cc_result.cch).  Decide
        per batch based on kinds present. */
     for (size_t i = 0; i < n_specs; ++i) {
-        if (specs[i].kind == CC_COMPTIME_TYPE_HOOK_UFCS) { needs_cc_preprocess = 1; break; }
+        if (specs[i].kind == CC_COMPTIME_TYPE_HOOK_UFCS) {
+            needs_cc_preprocess = 1;
+            break;
+        }
     }
+    if (isolated_body) needs_cc_preprocess = 0;
 
     /* Isolate type-registry side-effects of the comptime preprocess step so
        they don't leak into the main-pass registry. */
@@ -678,18 +746,22 @@ static int cc__build_compile_and_load(const char* input_path,
         (void)cc_type_registry_scope_push(&reg_scope);
     }
 
-    blanked_src = cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
-    if (!blanked_src) { snprintf(err_buf, sizeof(err_buf), "failed to blank comptime blocks"); goto done; }
-    {
+    blanked_src = isolated_body ? NULL
+                                : cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
+    if (!isolated_body && !blanked_src) {
+        snprintf(err_buf, sizeof(err_buf), "failed to blank comptime blocks");
+        goto done;
+    }
+    if (!isolated_body) {
         char* lowered_local = cc_rewrite_local_cch_includes_to_lowered_headers(blanked_src, strlen(blanked_src), input_path);
         if (lowered_local) { free(blanked_src); blanked_src = lowered_local; }
-    }
-    {
-        char* lowered_system = cc_rewrite_system_cch_includes_to_lowered_headers(blanked_src, strlen(blanked_src));
-        if (lowered_system) { free(blanked_src); blanked_src = lowered_system; }
+        {
+            char* lowered_system = cc_rewrite_system_cch_includes_to_lowered_headers(blanked_src, strlen(blanked_src));
+            if (lowered_system) { free(blanked_src); blanked_src = lowered_system; }
+        }
     }
 
-    if (needs_cc_preprocess) {
+    if (needs_cc_preprocess && !isolated_body) {
         if (input_path) {
             size_t pl = strlen(input_path);
             if (pl >= 4 && strcmp(input_path + pl - 4, ".cch") == 0) {
@@ -704,7 +776,20 @@ static int cc__build_compile_and_load(const char* input_path,
     }
 
     cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n#define __CC__ 1\n#endif\n");
-    if (needs_cc_preprocess && !source_is_header) {
+    if (isolated_body) {
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_slice.h>\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_arena.h>\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <stdio.h>\n");
+        /* D6.3: reflection callback, resolved against the compiler binary at
+         * dlopen time (dylibs are built with -undefined dynamic_lookup).  Same
+         * contract as the executor — bytes in, field name/type strings out. */
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap,
+            "extern int cc_reflect_field_count(const char* type_name);\n"
+            "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n"
+            "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+    } else if (needs_cc_preprocess && !source_is_header) {
         /* For .ccs batches: CC_PARSER_MODE keeps generic fallback result
            typedefs in scope so the TCC stub-AST parser can survive rare
            unresolved result placeholders while normal container/result names
@@ -724,7 +809,7 @@ static int cc__build_compile_and_load(const char* input_path,
            (no @-decorated chunks to filter). */
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, pp_src);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
-    } else {
+    } else if (!isolated_body) {
         /* Filter out top-level chunks containing @-decorated CC syntax (e.g.
            main()'s @create / @detach), then emit the rest.  Use pp_src when
            available (UFCS batches), otherwise the cch-rewritten blanked_src. */
@@ -921,6 +1006,7 @@ int cc_comptime_compile_type_hooks(const char* registration_input_path,
     if (cc__build_compile_and_load(compile_path,
                                    compile_src, compile_len,
                                    lambda_defs,
+                                   NULL,
                                    specs_copy, n_specs,
                                    &module,
                                    out_fn_ptrs) != 0) {
@@ -988,4 +1074,30 @@ int cc_comptime_compile_type_hook_callable(const char* registration_input_path,
                                             out_owner, &fn_ptr);
     if (rc == 0) *out_fn_ptr = fn_ptr;
     return rc;
+}
+
+int cc_comptime_compile_type_hooks_tu(const char* registration_input_path,
+                                      const char* tu_body,
+                                      const CCComptimeHookSpec* specs,
+                                      size_t n_specs,
+                                      void** out_owner,
+                                      const void** out_fn_ptrs) {
+    CCComptimeDlModule* module = NULL;
+    if (!registration_input_path || !tu_body || !specs || n_specs == 0 ||
+        !out_owner || !out_fn_ptrs) {
+        return -1;
+    }
+    *out_owner = NULL;
+    for (size_t i = 0; i < n_specs; ++i) out_fn_ptrs[i] = NULL;
+    if (cc__build_compile_and_load(registration_input_path,
+                                   "", 0,
+                                   NULL,
+                                   tu_body,
+                                   specs, n_specs,
+                                   &module,
+                                   out_fn_ptrs) != 0) {
+        return -1;
+    }
+    *out_owner = module;
+    return 0;
 }

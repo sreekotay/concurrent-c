@@ -4743,6 +4743,7 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     char mang_args[8][128];
     int nargs = 0, arity = 0;
     const char* tmpl;
+    int use_factory = 0;
 
     if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
     if (i >= n || !cc_is_ident_start(src[i])) return 0;
@@ -4753,7 +4754,11 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     memcpy(gname, src + i, id_e - i);
     gname[id_e - i] = 0;
     tmpl = cc_emit_plan_lookup_generic_template(gname, &arity);
-    if (!tmpl) return 0;
+    if (!tmpl) {
+        if (!cc_emit_plan_lookup_generic_factory(gname)) return 0;
+        use_factory = 1;
+        arity = 0;
+    }
 
     br_open = id_e + 2; /* '[' */
     if (!cc__find_matching_bracket(src, n, br_open, &br_close)) return 0;
@@ -4804,34 +4809,48 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
             mo += snprintf(mangled + mo, sizeof(mangled) - (size_t)mo, "_%s", mang_args[a]);
     }
 
-    /* expand template once: $0 -> mangled, $k -> orig arg k, $$ -> $ */
+    /* expand template or invoke compiled factory once per mangled name. */
     {
         char def[8192];
-        size_t o = 0;
-        for (size_t t = 0; tmpl[t] && o + 1 < sizeof(def); t++) {
-            if (tmpl[t] == '$') {
-                char c = tmpl[t + 1];
-                if (c == '$') { def[o++] = '$'; t++; continue; }
-                if (c == '0') {
-                    for (size_t k = 0; mangled[k] && o + 1 < sizeof(def); k++) def[o++] = mangled[k];
-                    t++;
-                    continue;
-                }
-                if (c >= '1' && c <= '9') {
-                    int idx = c - '1';
-                    if (idx < nargs) {
-                        const char* a = orig_args[idx];
-                        for (size_t k = 0; a[k] && o + 1 < sizeof(def); k++) def[o++] = a[k];
-                    }
-                    t++;
-                    continue;
-                }
-                def[o++] = '$';
-                continue;
+        if (use_factory) {
+            /* D6.3: point the reflection callback at the buffer we're rewriting
+             * so the factory can introspect struct fields of its type args. */
+            cc_emit_plan_set_reflect_source(src, n);
+            if (!cc_emit_plan_invoke_generic_factory(gname, mangled, orig_args, nargs,
+                                                     def, sizeof(def))) {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                0, 0, "type",
+                                "compiled generic factory '%s' failed for '%s'", gname, mangled);
+                return 0;
             }
-            def[o++] = tmpl[t];
+        } else {
+            size_t o = 0;
+            for (size_t t = 0; tmpl[t] && o + 1 < sizeof(def); t++) {
+                if (tmpl[t] == '$') {
+                    char c = tmpl[t + 1];
+                    if (c == '$') { def[o++] = '$'; t++; continue; }
+                    if (c == '0') {
+                        for (size_t k = 0; mangled[k] && o + 1 < sizeof(def); k++) def[o++] = mangled[k];
+                        t++;
+                        continue;
+                    }
+                    if (c >= '1' && c <= '9') {
+                        int idx = c - '1';
+                        if (idx < nargs) {
+                            const char* a = orig_args[idx];
+                            for (size_t k = 0; a[k] && o + 1 < sizeof(def); k++) def[o++] = a[k];
+                        }
+                        t++;
+                        continue;
+                    }
+                    def[o++] = '$';
+                    continue;
+                }
+                def[o++] = tmpl[t];
+            }
+            def[o] = 0;
         }
-        def[o] = 0;
         cc_emit_plan_generic_def_emit_once(mangled, def);
     }
 
@@ -8807,8 +8826,6 @@ static char* cc__build_reflection_view(const char* src, size_t n,
  * silent skip — reflection must see every field or none.
  * ============================================================ */
 
-typedef struct { char* name; char* type; } CCCtField;
-
 static void cc__ct_free_fields(CCCtField* f, size_t n) {
     if (!f) return;
     for (size_t i = 0; i < n; i++) { free(f[i].name); free(f[i].type); }
@@ -8964,6 +8981,21 @@ static int cc__ct_parse_fields_from_body(const char* src, size_t bo, size_t bc,
         i = semi + 1;
     }
     *out = fs; *out_n = fn; return 1;
+}
+
+int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_name,
+                                CCCtField** out, size_t* out_n) {
+    if (out) *out = NULL;
+    if (out_n) *out_n = 0;
+    if (!src || !type_name || !type_name[0] || !out || !out_n) return 0;
+    size_t bo, bc;
+    if (!cc__ct_find_struct_body(src, len, type_name, strlen(type_name), &bo, &bc))
+        return 0;
+    return cc__ct_parse_fields_from_body(src, bo, bc, out, out_n);
+}
+
+void cc_ct_free_fields(CCCtField* fields, size_t n) {
+    cc__ct_free_fields(fields, n);
 }
 
 /* Append one unrolled copy of BODY (body[bs..be)) with the loop variable
