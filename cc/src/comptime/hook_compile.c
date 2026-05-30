@@ -581,19 +581,76 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
     return 0;
 }
 
-static int cc__spawn_and_wait(char* const argv[]) {
+static int cc__spawn_and_wait(char* const argv[], char* err_out, size_t err_cap) {
+    int pipefd[2];
     pid_t pid = 0;
-    int rc = posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ);
-    if (rc != 0) {
-        fprintf(stderr, "posix_spawnp(%s) failed: %s\n", argv[0], strerror(rc));
+    int status = 0;
+    char cap_buf[4096];
+    size_t cap_len = 0;
+
+    if (err_out && err_cap) err_out[0] = '\0';
+    if (pipe(pipefd) != 0) {
+        if (err_out && err_cap)
+            snprintf(err_out, err_cap, "failed to capture compiler output");
         return -1;
     }
-    int status = 0;
+    {
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+        posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+        int rc = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&actions);
+        close(pipefd[1]);
+        if (rc != 0) {
+            close(pipefd[0]);
+            fprintf(stderr, "posix_spawnp(%s) failed: %s\n", argv[0], strerror(rc));
+            if (err_out && err_cap)
+                snprintf(err_out, err_cap, "posix_spawnp(%s) failed", argv[0]);
+            return -1;
+        }
+    }
+    for (;;) {
+        ssize_t n = read(pipefd[0], cap_buf + cap_len, sizeof(cap_buf) - 1 - cap_len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        cap_len += (size_t)n;
+        if (cap_len >= sizeof(cap_buf) - 1) break;
+    }
+    close(pipefd[0]);
+    cap_buf[cap_len] = '\0';
+
     while (waitpid(pid, &status, 0) < 0) {
         if (errno == EINTR) continue;
         return -1;
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (err_out && err_cap && cap_len > 0) {
+            const char* msg = cap_buf;
+            const char* hit = strstr(cap_buf, "error:");
+            if (hit) msg = hit;
+            else hit = strstr(cap_buf, "Error:");
+            if (hit) msg = hit;
+            {
+                const char* end = msg;
+                while (*end && *end != '\n') end++;
+                if ((size_t)(end - msg) >= err_cap) {
+                    memcpy(err_out, msg, err_cap - 1);
+                    err_out[err_cap - 1] = '\0';
+                } else {
+                    memcpy(err_out, msg, (size_t)(end - msg));
+                    err_out[end - msg] = '\0';
+                }
+            }
+        } else if (err_out && err_cap) {
+            snprintf(err_out, err_cap, "host compile failed");
+        }
+        return -1;
+    }
     return 0;
 }
 
@@ -700,7 +757,10 @@ static int cc__build_compile_and_load(const char* input_path,
                                       const CCComptimeHookSpec* specs,
                                       size_t n_specs,
                                       CCComptimeDlModule** out_module,
-                                      const void** out_fn_ptrs) {
+                                      const void** out_fn_ptrs,
+                                      char* out_err,
+                                      size_t out_err_sz,
+                                      int quiet) {
     char err_buf[1024] = {0};
     char* blanked_src = NULL;
     char* pp_src = NULL;
@@ -780,13 +840,8 @@ static int cc__build_compile_and_load(const char* input_path,
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_slice.h>\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_arena.h>\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <stdio.h>\n");
-        /* D6.3: reflection callback, resolved against the compiler binary at
-         * dlopen time (dylibs are built with -undefined dynamic_lookup).  Same
-         * contract as the executor — bytes in, field name/type strings out. */
-        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap,
-            "extern int cc_reflect_field_count(const char* type_name);\n"
-            "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n"
-            "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#define CC_COMPTIME_EXEC 1\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_instantiate.cch>\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
     } else if (needs_cc_preprocess && !source_is_header) {
@@ -892,8 +947,9 @@ static int cc__build_compile_and_load(const char* input_path,
             snprintf(err_buf, sizeof(err_buf), "failed to build compile argv");
             goto done;
         }
-        if (cc__spawn_and_wait(argv.items) != 0) {
-            snprintf(err_buf, sizeof(err_buf), "host compile failed for %s", module->obj_path);
+        if (cc__spawn_and_wait(argv.items, err_buf, sizeof(err_buf)) != 0) {
+            if (!err_buf[0])
+                snprintf(err_buf, sizeof(err_buf), "host compile failed for %s", module->obj_path);
             goto done;
         }
         /* TU source is no longer needed; the dylib is what we keep. */
@@ -919,12 +975,15 @@ static int cc__build_compile_and_load(const char* input_path,
 
 done:
     if (rc != 0 && err_buf[0]) {
+        if (out_err && out_err_sz)
+            snprintf(out_err, out_err_sz, "%s", err_buf);
         if (tu_src) {
             FILE* dbg = fopen("/tmp/cc_last_type_hook_fail.c", "w");
             if (dbg) { fputs(tu_src, dbg); fclose(dbg); }
         }
-        fprintf(stderr, "%s: error: failed to compile @comptime hook batch: %s\n",
-                input_path ? input_path : "<input>", err_buf);
+        if (!quiet)
+            fprintf(stderr, "%s: error: failed to compile @comptime hook batch: %s\n",
+                    input_path ? input_path : "<input>", err_buf);
     }
     if (module) {
         cc_comptime_type_hook_owner_free(module);
@@ -1009,7 +1068,8 @@ int cc_comptime_compile_type_hooks(const char* registration_input_path,
                                    NULL,
                                    specs_copy, n_specs,
                                    &module,
-                                   out_fn_ptrs) != 0) {
+                                   out_fn_ptrs,
+                                   NULL, 0, 0) != 0) {
         goto done;
     }
     *out_owner = module;
@@ -1082,6 +1142,19 @@ int cc_comptime_compile_type_hooks_tu(const char* registration_input_path,
                                       size_t n_specs,
                                       void** out_owner,
                                       const void** out_fn_ptrs) {
+    return cc_comptime_compile_type_hooks_tu_ex(registration_input_path, tu_body,
+                                                specs, n_specs, out_owner, out_fn_ptrs,
+                                                NULL, 0);
+}
+
+int cc_comptime_compile_type_hooks_tu_ex(const char* registration_input_path,
+                                         const char* tu_body,
+                                         const CCComptimeHookSpec* specs,
+                                         size_t n_specs,
+                                         void** out_owner,
+                                         const void** out_fn_ptrs,
+                                         char* err_buf,
+                                         size_t err_sz) {
     CCComptimeDlModule* module = NULL;
     if (!registration_input_path || !tu_body || !specs || n_specs == 0 ||
         !out_owner || !out_fn_ptrs) {
@@ -1095,7 +1168,9 @@ int cc_comptime_compile_type_hooks_tu(const char* registration_input_path,
                                    tu_body,
                                    specs, n_specs,
                                    &module,
-                                   out_fn_ptrs) != 0) {
+                                   out_fn_ptrs,
+                                   err_buf, err_sz,
+                                   err_buf ? 1 : 0) != 0) {
         return -1;
     }
     *out_owner = module;

@@ -81,6 +81,10 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 // source fragment used by later text-based lowering/codegen passes.
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
 
+/* Scan a backtick template literal starting at tick_pos (which must point at '`').
+ * On success sets *tick_end_out to the closing backtick index and returns 0. */
+int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);
+
 // Rewrite @link("lib") directives to marker comments for linker extraction.
 // Returns newly allocated string, or NULL if no rewrites needed.
 char* cc__rewrite_link_directives(const char* src, size_t n);
@@ -164,12 +168,12 @@ char* cc__lower_type_of_constexpr(const char* src, size_t n);
 
 // D2.0: resolve `@comptime if (PRED) { ... } [else { ... }]` by evaluating the
 // compile-time-constant predicate and splicing the taken branch in place (the
-// rest dropped, newline-padded for stable line numbers).  Runs first on BOTH
-// the preprocess-for-parse path and the visit_codegen emit path.  Returns a
+// rest dropped, newline-padded for stable line numbers).  Returns a
 // malloc'd string on change, NULL if no `@comptime if` present, or (char*)-1
 // on a hard error (non-constant predicate / unsupported `else if`), after
 // printing a diagnostic to stderr.
 char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path);
 
-#endif // CC_PREPROCESS_H
+#include "preprocess/comptime_prepare.h"
 
+#endif // CC_PREPROCESS_H

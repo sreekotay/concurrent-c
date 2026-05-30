@@ -5,18 +5,17 @@
  * from surface syntax (`CCVec::[T]`, `Map::[K,V]`, etc.) into the per-TU
  * type graph; user code normally does not call these directly.
  *
- * Future: `@comptime` blocks call cc_instantiate / cc_emit_* to define
- * user generic factories (spec §12, §14).  See COMPTIME_INSTANTIATION_SEAM.md.
+ * `@comptime` blocks call cc_instantiate / cc_emit_* / cc_generic_* to define
+ * user generic factories (spec §12, §14).  The compiler auto-provides real
+ * host bindings in comptime TUs (libtcc executor + compiled-factory dylibs);
+ * the declarations here are the public surface only.
  */
 #ifndef CC_INSTANTIATE_CCH
 #define CC_INSTANTIATE_CCH
 
 #include <stddef.h>
 #include <string.h>
-#ifdef CC_COMPTIME_EXEC
-#include <stdarg.h>
-#include <stdio.h>
-#endif
+#include <ccc/cc_emit_tpl.cch>
 
 typedef enum CCEmitAnchor {
     CC_EMIT_AFTER_PRELUDE = 0,
@@ -24,39 +23,37 @@ typedef enum CCEmitAnchor {
     CC_EMIT_AT_COMPTIME_SITE = 2,
 } CCEmitAnchor;
 
-/* Built-in instantiation requests (compiler lowers syntax to graph today). */
-#ifdef CC_COMPTIME_EXEC
+/* Host-provided in comptime TUs; never called from runtime code after blanking. */
 extern void cc_instantiate_vec(const char* elem_mangled);
 extern void cc_instantiate_map(const char* key_mangled, const char* val_mangled);
 extern void cc_instantiate_chan(const char* elem_mangled);
+extern void cc_emit_raw(int anchor, const char* ptr, size_t len);
+extern int cc_reflect_field_count(const char* type_name);
+extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
+extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+
 static inline void cc_instantiate_result(const char* ok_mangled, const char* err_mangled) {
     (void)ok_mangled; (void)err_mangled;
 }
-#else
-static inline void cc_instantiate_vec(const char* elem_mangled) {
-    (void)elem_mangled;
-}
-static inline void cc_instantiate_map(const char* key_mangled, const char* val_mangled) {
-    (void)key_mangled;
-    (void)val_mangled;
-}
-static inline void cc_instantiate_result(const char* ok_mangled, const char* err_mangled) {
-    (void)ok_mangled;
-    (void)err_mangled;
-}
-static inline void cc_instantiate_chan(const char* elem_mangled) {
-    (void)elem_mangled;
-}
-#endif
 
-/* Comptime emission (C2): host-side fragments spliced at plan anchors. */
-#ifdef CC_COMPTIME_EXEC
-extern void cc_emit_raw(int anchor, const char* ptr, size_t len);
-static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
-    if (!c_fragment) return 0;
-    cc_emit_raw((int)anchor, c_fragment, strlen(c_fragment));
+/* Value-based reflection sugar over cc_reflect_field_* (compiled factories). */
+typedef struct CCReflectField {
+    char name[128];
+    char type[128];
+    int index;
+} CCReflectField;
+
+static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {
+    if (!out || idx < 0) return -1;
+    out->index = idx;
+    if (cc_reflect_field_name(type_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;
+    if (cc_reflect_field_type(type_name, idx, out->type, (int)sizeof(out->type)) < 0) return -1;
     return 0;
 }
+
+#ifdef CC_COMPTIME_EXEC
+#include <stdarg.h>
+#include <stdio.h>
 static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
     char buf[16384];
     va_list ap;
@@ -67,69 +64,30 @@ static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
     return 0;
 }
 #else
-static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
-    (void)anchor;
-    (void)c_fragment;
-    return 0;
-}
-
-/* Parameterized comptime emission (§3.2): printf-style fragment built at
- * compile time and spliced at `anchor`.  The compiler interprets %s
- * (string-literal arg), %d/%i (integer-literal arg) and %% at collection
- * time; this inline body is the never-executed host stub. */
 static inline int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...) {
-    (void)anchor;
-    (void)fmt;
+    (void)anchor; (void)fmt;
     return 0;
 }
 #endif
 
-/* User generic factories (D6.0): register how a library generic lowers to C,
- * keyed by name + arity.  At a `Name::[args]` use site the compiler expands the
- * template ($0 = mangled name, $1..$N = type args) once and rewrites the use
- * site to the mangled name.  The compiler interprets this at collection time;
- * this inline body is the never-executed host stub. */
+static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
+    if (!c_fragment) return 0;
+    cc_emit_raw((int)anchor, c_fragment, strlen(c_fragment));
+    return 0;
+}
+
+/* User generic factories: register how a library generic lowers to C.
+ * `cc_generic_template` accepts a backtick template (${name}, ${0}..${N}) or
+ * legacy quoted strings ($0, $1..).  `cc_generic_register` binds a compiled
+ * factory handler returning a definition fragment via @emit(`...`). */
 static inline int cc_generic_template(const char* name, int arity, const char* template_src) {
-    (void)name;
-    (void)arity;
-    (void)template_src;
+    (void)name; (void)arity; (void)template_src;
     return 0;
 }
 
 static inline int cc_generic_register(const char* name, void* factory) {
-    (void)name;
-    (void)factory;
+    (void)name; (void)factory;
     return 0;
 }
-
-/* Comptime reflection (D6.3): structured type info as bytes across the bind
- * point.  Inside `@comptime { ... }` blocks (run by the libtcc executor) and
- * inside compiled generic factories these resolve to the real host callback;
- * the inline bodies below are the never-executed stubs the normal C compile
- * sees after comptime constructs are blanked.  Pass a type name; read field
- * name / type-spelling strings into your own buffers.  `cc_reflect_field_count`
- * returns the field count (or -1 for an unknown type); the accessors return the
- * bytes written (excluding NUL) or -1 when idx is out of range.  Feed a returned
- * type spelling back into these to recurse into nested struct fields. */
-#ifdef CC_COMPTIME_EXEC
-extern int cc_reflect_field_count(const char* type_name);
-extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
-extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
-#else
-static inline int cc_reflect_field_count(const char* type_name) {
-    (void)type_name;
-    return -1;
-}
-static inline int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz) {
-    (void)type_name; (void)idx;
-    if (buf && buf_sz > 0) buf[0] = '\0';
-    return -1;
-}
-static inline int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz) {
-    (void)type_name; (void)idx;
-    if (buf && buf_sz > 0) buf[0] = '\0';
-    return -1;
-}
-#endif
 
 #endif /* CC_INSTANTIATE_CCH */

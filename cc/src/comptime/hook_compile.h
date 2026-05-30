@@ -89,4 +89,13 @@ int cc_comptime_compile_type_hooks_tu(const char* registration_input_path,
                                       void** out_owner,
                                       const void** out_fn_ptrs);
 
+int cc_comptime_compile_type_hooks_tu_ex(const char* registration_input_path,
+                                         const char* tu_body,
+                                         const CCComptimeHookSpec* specs,
+                                         size_t n_specs,
+                                         void** out_owner,
+                                         const void** out_fn_ptrs,
+                                         char* err_buf,
+                                         size_t err_sz);
+
 #endif

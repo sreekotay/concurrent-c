@@ -6,10 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "comptime/executor.h"
 #include "comptime/hook_compile.h"
+#include "preprocess/emit_limits.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/template_scan.h"
 #include "util/path.h"
 #include "util/text.h"
 
@@ -94,6 +97,10 @@ static int cc__emit_try_collect_cc_emit_cstr(const char* src, size_t len, size_t
     if (p >= len || src[p] != ',') return 0;
     p = cc_skip_ws_len(src, len, p + 1);
     if (!cc__emit_parse_c_string(src, len, &p, frag, sizeof(frag))) return 0;
+    if (strlen(frag) + 1 >= sizeof(frag)) {
+        fprintf(stderr, "error: cc_emit_cstr fragment exceeds %d bytes\n", CC_EMIT_FRAGMENT_MAX);
+        return 0;
+    }
     {
         CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
         f->anchor = anchor;
@@ -132,7 +139,11 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
     size_t o = 0;
     for (size_t i = 0; fmt[i]; i++) {
         if (fmt[i] != '%') {
-            if (o + 1 >= sizeof(frag)) return 0;
+            if (o + 1 >= sizeof(frag)) {
+                fprintf(stderr, "error: cc_emit_format fragment exceeds %d bytes\n",
+                        CC_EMIT_FRAGMENT_MAX);
+                return 0;
+            }
             frag[o++] = fmt[i];
             continue;
         }
@@ -199,12 +210,38 @@ static size_t cc__generic_template_count = 0;
 static char* cc__generic_emitted[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
 static size_t cc__generic_emitted_count = 0;
 
+/* Mangled names already reported as producing invalid C this TU (dedup across
+ * the preprocess and codegen rewrite passes). */
+static char* cc__generic_invalid[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
+static size_t cc__generic_invalid_count = 0;
+
+int cc_emit_plan_generic_invalid_report_once(const char* mangled) {
+    if (!mangled) return 0;
+    for (size_t i = 0; i < cc__generic_invalid_count; i++)
+        if (strcmp(cc__generic_invalid[i], mangled) == 0) return 0;
+    if (cc__generic_invalid_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 1;
+    {
+        char* m = strdup(mangled);
+        if (!m) return 1;
+        cc__generic_invalid[cc__generic_invalid_count++] = m;
+    }
+    return 1;
+}
+
 void cc_emit_plan_register_generic_template(const char* name, int arity,
                                             const char* template_src) {
+    char norm[CC_GENERIC_TEMPLATE_MAX];
+    const char* stored = template_src;
     if (!name || !template_src) return;
+    if (!cc_template_normalize_legacy_positional(template_src, norm, sizeof(norm))) {
+        fprintf(stderr, "error: generic template '%s' exceeds %d bytes\n",
+                name, CC_GENERIC_TEMPLATE_MAX);
+        return;
+    }
+    stored = norm;
     for (size_t i = 0; i < cc__generic_template_count; i++) {
         if (strcmp(cc__generic_templates[i].name, name) == 0) {
-            char* nt = strdup(template_src);
+            char* nt = strdup(stored);
             if (!nt) return;
             free(cc__generic_templates[i].tmpl);
             cc__generic_templates[i].tmpl = nt;
@@ -216,7 +253,7 @@ void cc_emit_plan_register_generic_template(const char* name, int arity,
     {
         CCGenericTemplate* t = &cc__generic_templates[cc__generic_template_count];
         t->name = strdup(name);
-        t->tmpl = strdup(template_src);
+        t->tmpl = strdup(stored);
         t->arity = arity;
         if (!t->name || !t->tmpl) { free(t->name); free(t->tmpl); return; }
         cc__generic_template_count++;
@@ -261,6 +298,8 @@ static void cc__generic_templates_clear(void) {
     cc__generic_template_count = 0;
     for (size_t i = 0; i < cc__generic_emitted_count; i++) free(cc__generic_emitted[i]);
     cc__generic_emitted_count = 0;
+    for (size_t i = 0; i < cc__generic_invalid_count; i++) free(cc__generic_invalid[i]);
+    cc__generic_invalid_count = 0;
 }
 
 void cc_emit_plan_clear_generic_factory_registrations(void) {
@@ -273,22 +312,22 @@ typedef struct CCGenericFactoryReg {
     char* name;
     char* handler_name;
     const void* fn_ptr;
+    void* owner;
 } CCGenericFactoryReg;
 
 static CCGenericFactoryReg cc__generic_factories[CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES];
 static size_t cc__generic_factory_count = 0;
-static void* cc__generic_factory_owner = NULL;
 
 static void cc__generic_factories_clear(void) {
     for (size_t i = 0; i < cc__generic_factory_count; i++) {
         free(cc__generic_factories[i].name);
         free(cc__generic_factories[i].handler_name);
+        if (cc__generic_factories[i].owner) {
+            cc_comptime_type_hook_owner_free(cc__generic_factories[i].owner);
+            cc__generic_factories[i].owner = NULL;
+        }
     }
     cc__generic_factory_count = 0;
-    if (cc__generic_factory_owner) {
-        cc_comptime_type_hook_owner_free(cc__generic_factory_owner);
-        cc__generic_factory_owner = NULL;
-    }
 }
 
 void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name) {
@@ -310,6 +349,7 @@ void cc_emit_plan_register_generic_factory(const char* name, const char* handler
         f->name = strdup(name);
         f->handler_name = strdup(handler_name);
         f->fn_ptr = NULL;
+        f->owner = NULL;
         if (!f->name || !f->handler_name) {
             free(f->name);
             free(f->handler_name);
@@ -323,6 +363,15 @@ const void* cc_emit_plan_lookup_generic_factory(const char* name) {
     for (size_t i = 0; i < cc__generic_factory_count; i++) {
         if (strcmp(cc__generic_factories[i].name, name) == 0)
             return cc__generic_factories[i].fn_ptr;
+    }
+    return NULL;
+}
+
+const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        if (strcmp(cc__generic_factories[i].name, name) == 0)
+            return cc__generic_factories[i].handler_name;
     }
     return NULL;
 }
@@ -367,91 +416,95 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                   cc__factory_slice_cstr(mangled),
                   args,
                   NULL);
-    if (!result.ptr || result.len == 0 || result.len >= def_cap) return 0;
+    if (!result.ptr || result.len == 0) return 0;
+    if (result.len >= def_cap) {
+        fprintf(stderr,
+                "error: compiled generic factory '%s' output (%zu bytes) exceeds %zu byte limit\n",
+                name, result.len, def_cap);
+        return 0;
+    }
     memcpy(def_out, result.ptr, result.len);
     def_out[result.len] = '\0';
     return 1;
 }
 
+static int cc__compile_generic_factory_reg(CCGenericFactoryReg* f, const char* input_path,
+                                           char* err_buf, size_t err_sz) {
+    static char entry_name[128];
+    CCComptimeHookSpec spec = {0};
+    const void* fn_ptr = NULL;
+    void* owner = NULL;
+    const char* def;
+    if (!f) return -1;
+    if (f->fn_ptr) return 0;
+    def = cc_comptime_fn_registry_lookup_def(f->handler_name);
+    if (!def || !def[0]) {
+        if (err_buf && err_sz)
+            snprintf(err_buf, err_sz, "factory handler '%s' not found in registry",
+                     f->handler_name);
+        return -1;
+    }
+    snprintf(entry_name, sizeof(entry_name), "__cc_gen_factory_%s", f->handler_name);
+    spec.kind = CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY;
+    spec.entry_name = entry_name;
+    spec.handler_name = f->handler_name;
+    if (cc_comptime_compile_type_hooks_tu_ex(input_path, def, &spec, 1, &owner, &fn_ptr,
+                                             err_buf, err_sz) != 0)
+        return -1;
+    f->fn_ptr = fn_ptr;
+    f->owner = owner;
+    return 0;
+}
+
+int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* input_path,
+                                        char* err_buf, size_t err_sz) {
+    if (!generic_name) return -1;
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        if (strcmp(cc__generic_factories[i].name, generic_name) == 0)
+            return cc__compile_generic_factory_reg(&cc__generic_factories[i], input_path,
+                                                   err_buf, err_sz);
+    }
+    if (err_buf && err_sz)
+        snprintf(err_buf, err_sz, "generic '%s' is not registered", generic_name);
+    return -1;
+}
+
 int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
                                            const char* input_path) {
-    CCComptimeHookSpec* specs = NULL;
-    const void** fn_ptrs = NULL;
-    char* tu_body = NULL;
-    size_t tu_len = 0, tu_cap = 0;
-    size_t n = cc__generic_factory_count;
     (void)src;
     (void)len;
-    if (n == 0) return 0;
-    specs = (CCComptimeHookSpec*)calloc(n, sizeof(*specs));
-    fn_ptrs = (const void**)calloc(n, sizeof(*fn_ptrs));
-    if (!specs || !fn_ptrs) {
-        free(specs);
-        free(fn_ptrs);
-        return -1;
-    }
-    for (size_t i = 0; i < n; i++) {
-        const char* def = cc_comptime_fn_registry_lookup_def(cc__generic_factories[i].handler_name);
-        if (!def || !def[0]) {
-            fprintf(stderr, "%s: error: generic factory handler '%s' not found in @comptime fn registry\n",
-                    input_path ? input_path : "<input>", cc__generic_factories[i].handler_name);
-            free(specs);
-            free(fn_ptrs);
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        if (cc__compile_generic_factory_reg(&cc__generic_factories[i], input_path, NULL, 0) != 0)
             return -1;
-        }
-        {
-            size_t dlen = strlen(def);
-            size_t need = tu_len + dlen + 2;
-            char* nb = (char*)realloc(tu_body, need);
-            if (!nb) {
-                free(tu_body);
-                free(specs);
-                free(fn_ptrs);
-                return -1;
-            }
-            tu_body = nb;
-            memcpy(tu_body + tu_len, def, dlen);
-            tu_len += dlen;
-            tu_body[tu_len++] = '\n';
-            tu_body[tu_len] = '\0';
-        }
     }
-    static char entry_names[CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES][128];
-    for (size_t i = 0; i < n; i++) {
-        CCGenericFactoryReg* f = &cc__generic_factories[i];
-        snprintf(entry_names[i], sizeof(entry_names[i]),
-                 "__cc_gen_factory_%s_%zu", f->handler_name, i);
-        specs[i].kind = CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY;
-        specs[i].entry_name = entry_names[i];
-        specs[i].handler_name = f->handler_name;
-    }
-    if (cc__generic_factory_owner) {
-        cc_comptime_type_hook_owner_free(cc__generic_factory_owner);
-        cc__generic_factory_owner = NULL;
-    }
-    if (cc_comptime_compile_type_hooks_tu(input_path, tu_body, specs, n,
-                                          &cc__generic_factory_owner,
-                                          fn_ptrs) != 0) {
-        free(tu_body);
-        free(specs);
-        free(fn_ptrs);
-        return -1;
-    }
-    for (size_t i = 0; i < n; i++)
-        cc__generic_factories[i].fn_ptr = fn_ptrs[i];
-    free(tu_body);
-    free(specs);
-    free(fn_ptrs);
     return 0;
 }
 
 /* cc_generic_template("Name", arity, "template...") — register a library
- * generic.  Template is one or more adjacent C string literals; $0 expands to
- * the mangled name and $1..$N to the type arguments at the use site. */
+ * generic.  Template is one or more adjacent C string literals or a single
+ * backtick template; ${name} expands to the mangled name and ${0}..${N} to
+ * the type arguments at the use site.  Legacy $0/$1 are normalized at registration. */
+static int cc__emit_scan_backtick_template(const char* src, size_t len, size_t* pos,
+                                           char* out, size_t out_cap) {
+    size_t p = cc_skip_ws_len(src, len, *pos);
+    if (p >= len || src[p] != '`') return 0;
+    size_t tick_e = 0;
+    if (cc_scan_template_literal_end(src, len, p, &tick_e) != 0) return 0;
+    {
+        size_t start = p + 1;
+        size_t n = tick_e - start;
+        if (n >= out_cap) return 0;
+        memcpy(out, src + start, n);
+        out[n] = '\0';
+        *pos = tick_e + 1;
+        return 1;
+    }
+}
+
 static int cc__emit_try_collect_cc_generic_template(const char* src, size_t len, size_t call_pos) {
     size_t p = call_pos + strlen("cc_generic_template");
     char name[128];
-    char tmpl[8192];
+    char tmpl[CC_GENERIC_TEMPLATE_MAX];
     size_t tlen = 0;
     int arity = 0;
     p = cc_skip_ws_len(src, len, p);
@@ -466,8 +519,12 @@ static int cc__emit_try_collect_cc_generic_template(const char* src, size_t len,
     p = cc_skip_ws_len(src, len, p);
     if (p >= len || src[p] != ',') return 0;
     p = cc_skip_ws_len(src, len, p + 1);
+    if (cc__emit_scan_backtick_template(src, len, &p, tmpl, sizeof(tmpl))) {
+        cc_emit_plan_register_generic_template(name, arity, tmpl);
+        return 1;
+    }
     {
-        char piece[4096];
+        char piece[CC_EMIT_FRAGMENT_MAX];
         int got_any = 0;
         for (;;) {
             p = cc_skip_ws_len(src, len, p);
@@ -475,7 +532,12 @@ static int cc__emit_try_collect_cc_generic_template(const char* src, size_t len,
             if (!cc__emit_parse_c_string(src, len, &p, piece, sizeof(piece))) break;
             {
                 size_t pl = strlen(piece);
-                if (tlen + pl >= sizeof(tmpl)) pl = sizeof(tmpl) - 1 - tlen;
+                if (tlen + pl >= sizeof(tmpl)) {
+                    fprintf(stderr,
+                            "error: generic template '%s' exceeds %d bytes\n",
+                            name, CC_GENERIC_TEMPLATE_MAX);
+                    return 0;
+                }
                 memcpy(tmpl + tlen, piece, pl);
                 tlen += pl;
             }
@@ -879,8 +941,20 @@ static int cc__block_has_comptime_fn_call(const char* src, size_t body_l, size_t
     return 0;
 }
 
+static int cc__span_contains(const char* hay, size_t hay_len, const char* needle) {
+    size_t nlen = needle ? strlen(needle) : 0;
+    if (!hay || nlen == 0 || hay_len < nlen) return 0;
+    for (size_t i = 0; i + nlen <= hay_len; i++) {
+        if (memcmp(hay + i, needle, nlen) == 0) return 1;
+    }
+    return 0;
+}
+
 static int cc__block_needs_executor(const char* src, size_t body_l, size_t body_r) {
     if (cc__block_has_comptime_fn_call(src, body_l, body_r)) return 1;
+    if (body_r > body_l + 1 &&
+        cc__span_contains(src + body_l + 1, body_r - body_l - 1, "cc_emit_tpl_"))
+        return 1;
     for (size_t j = body_l + 1; j + 2 < body_r; j++) {
         if (cc_match_ident_kw(src, body_r, j, "for")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "while")) return 1;
@@ -913,7 +987,13 @@ static void cc__exec_visit_block(const char* src, size_t len,
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {
     cc__exec_failed = 0;
     cc_emit_plan_set_reflect_source(src, len);
-    cc_comptime_fn_registry_scan(src, len);
+    if (cc_comptime_fn_registry_scan(src, len) < 0) {
+        const char* err = cc_comptime_fn_registry_scan_error();
+        fprintf(stderr, "%s: error: %s\n",
+                input_path ? input_path : "<input>",
+                err ? err : "@comptime function registry scan failed");
+        cc__exec_failed = 1;
+    }
     cc__emit_for_each_comptime_block(src, len, cc__exec_visit_block, (void*)input_path);
     return cc__exec_failed ? -1 : 0;
 }
@@ -1014,12 +1094,17 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
         size_t si = order[oi];
         size_t frag_i = sched.frag_index[si];
         const CCEmitComptimeFragment* f = &cc__comptime_frags[frag_i];
-        char block[8192];
+        char block[CC_EMIT_SPLICE_BLOCK_MAX];
         int n = snprintf(block, sizeof(block),
                          "\n/* --- comptime cc_emit_cstr --- */\n%s%s",
                          f->text ? f->text : "",
                          (f->text && f->text[0] && f->text[strlen(f->text) - 1] == '\n') ? "" : "\n");
-        if (n <= 0 || (size_t)n >= sizeof(block)) return -1;
+        if (n <= 0 || (size_t)n >= sizeof(block)) {
+            fprintf(stderr,
+                    "%s: error: comptime emit splice block exceeds %d bytes\n",
+                    input_path ? input_path : "<input>", CC_EMIT_SPLICE_BLOCK_MAX);
+            return -1;
+        }
         if (cc__emit_splice_at(src, len, sched.pos[si], block, input_path) != 0) return -1;
     }
     return 0;

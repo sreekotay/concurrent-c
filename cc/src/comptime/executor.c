@@ -7,6 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../comptime/emit_tpl_prelude.inc.h"
 #include "preprocess/emit_plan.h"
 #include "util/text.h"
 
@@ -18,14 +19,17 @@ typedef struct CCComptimeFnEntry {
     char  name[CC_COMPTIME_FN_NAME_MAX];
     char* def;
     size_t def_len;
+    int   def_line;
 } CCComptimeFnEntry;
 
 static CCComptimeFnEntry cc__comptime_fns[CC_COMPTIME_FN_MAX];
 static size_t cc__comptime_fn_count = 0;
 static char* cc__comptime_fn_defs_blob = NULL;
 static size_t cc__comptime_fn_defs_len = 0;
+static char cc__comptime_fn_scan_err[512];
 
 void cc_comptime_fn_registry_clear(void) {
+    cc__comptime_fn_scan_err[0] = '\0';
     for (size_t i = 0; i < cc__comptime_fn_count; i++)
         free(cc__comptime_fns[i].def);
     cc__comptime_fn_count = 0;
@@ -52,9 +56,22 @@ static void cc__comptime_fn_rebuild_blob(void) {
         cc__comptime_fn_defs_blob[cc__comptime_fn_defs_len] = '\0';
 }
 
-static int cc__comptime_fn_register(const char* name, const char* def, size_t def_len) {
+static int cc__line_at(const char* src, size_t at) {
+    int line = 1;
+    if (!src) return 1;
+    for (size_t k = 0; k < at && src[k]; k++)
+        if (src[k] == '\n') line++;
+    return line;
+}
+
+static int cc__comptime_fn_register(const char* name, const char* def, size_t def_len,
+                                    int def_line) {
     if (!name || !name[0] || !def || def_len == 0) return 0;
-    if (cc__comptime_fn_count >= CC_COMPTIME_FN_MAX) return 0;
+    if (cc__comptime_fn_count >= CC_COMPTIME_FN_MAX) {
+        snprintf(cc__comptime_fn_scan_err, sizeof(cc__comptime_fn_scan_err),
+                 "too many @comptime functions (max %d)", CC_COMPTIME_FN_MAX);
+        return -1;
+    }
     for (size_t i = 0; i < cc__comptime_fn_count; i++) {
         if (strcmp(cc__comptime_fns[i].name, name) == 0) {
             char* nd = (char*)malloc(def_len + 1);
@@ -64,6 +81,7 @@ static int cc__comptime_fn_register(const char* name, const char* def, size_t de
             free(cc__comptime_fns[i].def);
             cc__comptime_fns[i].def = nd;
             cc__comptime_fns[i].def_len = def_len;
+            cc__comptime_fns[i].def_line = def_line;
             cc__comptime_fn_rebuild_blob();
             return 1;
         }
@@ -76,6 +94,7 @@ static int cc__comptime_fn_register(const char* name, const char* def, size_t de
         memcpy(e->def, def, def_len);
         e->def[def_len] = '\0';
         e->def_len = def_len;
+        e->def_line = def_line;
         cc__comptime_fn_rebuild_blob();
     }
     return 1;
@@ -100,6 +119,18 @@ const char* cc_comptime_fn_registry_lookup_def(const char* name) {
     return NULL;
 }
 
+int cc_comptime_fn_registry_lookup_line(const char* name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+        if (strcmp(cc__comptime_fns[i].name, name) == 0)
+            return cc__comptime_fns[i].def_line;
+    return 0;
+}
+
+const char* cc_comptime_fn_registry_scan_error(void) {
+    return cc__comptime_fn_scan_err[0] ? cc__comptime_fn_scan_err : NULL;
+}
+
 static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size_t* out_end) {
     size_t p, def_start, lparen = 0, rparen = 0, body_l = 0, body_r = 0;
     size_t name_start = 0, name_end = 0;
@@ -111,6 +142,9 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
     if (!cc_match_ident_kw(src, len, at + 1, "comptime")) return 0;
     p = cc_skip_ws_and_comments(src, len, at + 1 + (sizeof("comptime") - 1));
     if (p >= len || src[p] == '{') return 0;
+    /* `@comptime for` / `@comptime if` are control-flow, not fn definitions. */
+    if (cc_match_ident_kw(src, len, p, "for")) return 0;
+    if (cc_match_ident_kw(src, len, p, "if")) return 0;
 
     def_start = p;
     for (p = def_start; p < len; p++) {
@@ -137,10 +171,16 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
     if (!cc_find_matching_brace(src, len, body_l, &body_r)) return 0;
 
     dlen = body_r + 1 - def_start;
-    if (dlen >= sizeof(def)) dlen = sizeof(def) - 1;
+    if (dlen >= sizeof(def)) {
+        snprintf(cc__comptime_fn_scan_err, sizeof(cc__comptime_fn_scan_err),
+                 "@comptime function '%s' body exceeds %zu bytes (max %zu)",
+                 name, dlen, sizeof(def) - 1);
+        return -1;
+    }
     memcpy(def, src + def_start, dlen);
     def[dlen] = '\0';
-    cc__comptime_fn_register(name, def, dlen);
+    if (cc__comptime_fn_register(name, def, dlen, cc__line_at(src, def_start)) < 0)
+        return -1;
     if (out_end) *out_end = body_r + 1;
     return 1;
 }
@@ -151,7 +191,11 @@ int cc_comptime_fn_registry_scan(const char* src, size_t len) {
     cc_comptime_fn_registry_clear();
     while (i < len) {
         size_t end = 0;
-        if (src[i] == '@' && cc__try_scan_comptime_fn(src, len, i, &end)) {
+        int sr = 0;
+        if (src[i] == '@')
+            sr = cc__try_scan_comptime_fn(src, len, i, &end);
+        if (sr < 0) return -1;
+        if (sr) {
             i = end;
             continue;
         }
@@ -237,35 +281,8 @@ static const char* cc__exec_lib_dir(char* buf, size_t cap) {
     return NULL;
 }
 
-/* Minimal comptime TU prelude: host API externs + cc_emit_format wrapper. */
-static const char CC__EXEC_PRELUDE[] =
-    "#include <stddef.h>\n"
-    "#include <stdio.h>\n"
-    "#include <stdarg.h>\n"
-    "#include <string.h>\n"
-    "typedef enum { CC_EMIT_AFTER_PRELUDE=0, CC_EMIT_BEFORE_FIRST_USE=1,"
-    " CC_EMIT_AT_COMPTIME_SITE=2 } CCEmitAnchor;\n"
-    "extern void cc_emit_raw(int anchor, const char* ptr, size_t len);\n"
-    "extern void cc_instantiate_vec(const char* elem);\n"
-    "extern void cc_instantiate_map(const char* key, const char* val);\n"
-    "extern void cc_instantiate_chan(const char* elem);\n"
-    "extern int cc_reflect_field_count(const char* type_name);\n"
-    "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n"
-    "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n"
-    "static int cc_emit_cstr(int anchor, const char* cstr) {\n"
-    "  if (!cstr) return 0;\n"
-    "  cc_emit_raw(anchor, cstr, strlen(cstr));\n"
-    "  return 0;\n"
-    "}\n"
-    "static int cc_emit_format(int anchor, const char* fmt, ...) {\n"
-    "  char buf[16384];\n"
-    "  va_list ap;\n"
-    "  va_start(ap, fmt);\n"
-    "  vsnprintf(buf, sizeof(buf), fmt, ap);\n"
-    "  va_end(ap);\n"
-    "  cc_emit_raw(anchor, buf, strlen(buf));\n"
-    "  return 0;\n"
-    "}\n";
+/* Minimal comptime TU prelude: host API externs + emit-template + cc_emit_format. */
+static const char CC__EXEC_PRELUDE[] = CC_COMPTIME_EMIT_TPL_PRELUDE;
 
 static char* cc__exec_build_tu(const char* body, size_t body_len) {
     static const char entry[] = "\nvoid __cc_ct_entry(void) {\n";
@@ -461,3 +478,115 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
     return rc;
 #endif
 }
+
+/* --- generated-fragment validation (factory/template emit-site check) --- */
+
+#ifdef CC_TCC_EXT_AVAILABLE
+
+/* Minimal prelude for validating a standalone generated fragment.  Pulls in the
+ * common scalar/typedef surface a factory definition is allowed to assume.  A
+ * `#line 1` marker follows so libtcc reports fragment-relative line numbers. */
+static const char CC__FRAG_PRELUDE[] =
+    "#include <stddef.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdbool.h>\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#line 1 \"<generic-fragment>\"\n";
+
+typedef struct {
+    char buf[512];
+    int  got;       /* a message was captured */
+    int  line;      /* fragment-relative line parsed from the first message */
+} CCFragErrSink;
+
+static void cc__frag_err_capture(void* opaque, const char* msg) {
+    CCFragErrSink* sink = (CCFragErrSink*)opaque;
+    if (!sink || !msg) return;
+    if (getenv("CC_DEBUG_COMPTIME_EXEC"))
+        fprintf(stderr, "[cc:frag-validate] tcc: %s\n", msg);
+    if (sink->got) return;       /* keep only the first message */
+    sink->got = 1;
+    snprintf(sink->buf, sizeof(sink->buf), "%s", msg);
+    /* Messages look like `<generic-fragment>:LINE: error: ...`; pull the line. */
+    {
+        const char* tag = "<generic-fragment>:";
+        const char* p = strstr(msg, tag);
+        if (p) {
+            p += strlen(tag);
+            int v = 0, any = 0;
+            while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; any = 1; }
+            if (any) sink->line = v;
+        }
+    }
+}
+
+/* True when the message names a syntax defect intrinsic to the fragment, rather
+ * than a missing dependency (unknown type, undeclared name) that only the
+ * merged TU can resolve.  High-precision allowlist: never blocks on context. */
+static int cc__frag_msg_is_syntax(const char* msg) {
+    if (!msg || !msg[0]) return 0;
+    return strstr(msg, "expected") != NULL ||
+           strstr(msg, "stray") != NULL ||
+           strstr(msg, "unterminated") != NULL ||
+           strstr(msg, "invalid number") != NULL ||
+           strstr(msg, "_Generic") != NULL ||
+           strstr(msg, "controlling expression") != NULL ||
+           strstr(msg, "incompatible types") != NULL;
+}
+
+int cc_comptime_validate_c_fragment(const char* fragment,
+                                    int* out_frag_line,
+                                    char* err_buf, size_t err_sz) {
+    if (out_frag_line) *out_frag_line = 0;
+    if (err_buf && err_sz) err_buf[0] = '\0';
+    if (!fragment || !fragment[0]) return 0;
+    if (getenv("CC_NO_FRAGMENT_VALIDATE")) return 0;
+
+    size_t pre = sizeof(CC__FRAG_PRELUDE) - 1;
+    size_t fl = strlen(fragment);
+    char* tu = (char*)malloc(pre + fl + 2);
+    if (!tu) return 0;   /* OOM: don't block compilation on a missing check */
+    memcpy(tu, CC__FRAG_PRELUDE, pre);
+    memcpy(tu + pre, fragment, fl);
+    tu[pre + fl] = '\n';
+    tu[pre + fl + 1] = '\0';
+
+    TCCState* s = tcc_new();
+    if (!s) { free(tu); return 0; }
+    CCFragErrSink sink;
+    sink.buf[0] = '\0';
+    sink.got = 0;
+    sink.line = 0;
+    tcc_set_error_func(s, &sink, cc__frag_err_capture);
+    {
+        char dirbuf[1024];
+        const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));
+        if (libdir) { tcc_set_lib_path(s, libdir); tcc_add_library_path(s, libdir); }
+    }
+    if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) { tcc_delete(s); free(tu); return 0; }
+
+    int compiled = tcc_compile_string(s, tu);
+    tcc_delete(s);
+    free(tu);
+
+    if (compiled >= 0) return 0;                 /* clean parse */
+    if (!cc__frag_msg_is_syntax(sink.buf)) return 0;  /* missing context: skip */
+
+    if (err_buf && err_sz) snprintf(err_buf, err_sz, "%s", sink.buf);
+    if (out_frag_line) *out_frag_line = sink.line;
+    return -1;
+}
+
+#else  /* !CC_TCC_EXT_AVAILABLE */
+
+int cc_comptime_validate_c_fragment(const char* fragment,
+                                    int* out_frag_line,
+                                    char* err_buf, size_t err_sz) {
+    (void)fragment;
+    if (out_frag_line) *out_frag_line = 0;
+    if (err_buf && err_sz) err_buf[0] = '\0';
+    return 0;   /* no validator without libtcc */
+}
+
+#endif /* CC_TCC_EXT_AVAILABLE */

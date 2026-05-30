@@ -133,8 +133,12 @@ const char* cc_emit_plan_lookup_generic_template(const char* name, int* out_arit
 /* D6.1 compiled factory registration + dylib invoke. */
 void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name);
 const void* cc_emit_plan_lookup_generic_factory(const char* name);
+const char* cc_emit_plan_lookup_generic_factory_handler(const char* name);
 int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
                                            const char* input_path);
+/* Compile a registered factory dylib on first use (errors attributed at call site). */
+int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* input_path,
+                                        char* err_buf, size_t err_sz);
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
                                         char* def_out, size_t def_cap);
@@ -142,6 +146,10 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);
 void cc_emit_plan_clear_generic_factory_registrations(void);
+/* Returns 1 the first time `mangled` is reported as producing invalid C this
+ * TU, 0 thereafter — used to suppress duplicate emit-site diagnostics across
+ * the preprocess and codegen rewrite passes. */
+int cc_emit_plan_generic_invalid_report_once(const char* mangled);
 
 /* --- comptime fragment buffer (track B2) --- */
 void cc_emit_plan_clear_comptime_fragments(void);
