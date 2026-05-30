@@ -41,11 +41,19 @@ static void cc__cpp_err_silent(void* opaque, const char* msg) {
  * updating diagnostic location, which is all we want here.
  *
  * Returns a freshly-malloc'd buffer (caller frees old `buf`); writes
- * the new length to `*out_len`. The rewrite cannot grow lines so a
- * same-size allocation always suffices. Returns NULL on OOM. */
+ * the new length to `*out_len`. Returns NULL on OOM.
+ *
+ * Sizing: rewriting `# N "file" flags...` to `#line N "file"` replaces the
+ * 2-byte `# ` prefix with the 6-byte `#line ` prefix (+4 bytes) while only
+ * dropping the trailing flags (as little as ` 1`, -2 bytes), so a marker
+ * line can grow by up to +4 bytes. A same-size buffer is therefore NOT
+ * sufficient; reserve 4 extra bytes per line (every '\n' plus the final
+ * unterminated line) as a safe upper bound. */
 static char* cc__normalize_line_markers(const char* buf, size_t len, size_t* out_len) {
     if (!buf) { if (out_len) *out_len = 0; return NULL; }
-    char* dst = (char*)malloc(len + 1);
+    size_t line_count = 1;
+    for (size_t i = 0; i < len; i++) if (buf[i] == '\n') line_count++;
+    char* dst = (char*)malloc(len + 4 * line_count + 1);
     if (!dst) return NULL;
     char* out = dst;
     const char* in = buf;

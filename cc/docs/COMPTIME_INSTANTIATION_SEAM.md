@@ -548,9 +548,39 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
 - **D6.2 (value params).** Allow `SmallVec::[int, 8]` — non-type args threaded as
   string slices to the template/factory.
 
-- **D6.3 (reflection in factories).** Pass field descriptors (or a reflection
-  callback) so a factory can branch on `type_of(T).fields` — the deep piece;
-  deferred until the simpler factories prove the contract.
+- **D6.3 (reflection in factories) — landed 2026-05-29.** A reflection callback
+  crosses the user-space bind point as **bytes only** — no `cc_type_info*` (or
+  any compiler-internal pointer) escapes, so the narrow waist that decouples
+  `@comptime` code and compiled factories from compiler internals stays intact.
+  Three host symbols are shared by both consumers:
+
+  ```c
+  int cc_reflect_field_count(const char* type_name);                       /* -1 if unknown */
+  int cc_reflect_field_name (const char* type_name, int idx, char* buf, int buf_sz);
+  int cc_reflect_field_type (const char* type_name, int idx, char* buf, int buf_sz);
+  ```
+
+  - **Executor path:** injected via `tcc_add_symbol` + externs in the executor
+    prelude, so running `@comptime {}` blocks (and `@comptime fn`s) can read a
+    struct's fields and drive codegen from that structured input.
+  - **Factory path:** declared in the compiled-factory dylib TU and resolved
+    against the compiler binary at `dlopen` time (dylibs build with `-undefined
+    dynamic_lookup`; the symbols are global `T` in `.ccc-bin`). One contract
+    serves both.
+  - **Backing:** an on-demand scan of the current source buffer's `struct` /
+    `typedef struct {…} Name;` definitions. The global type registry is **not
+    yet populated with struct fields** when `@comptime` blocks / factories run
+    (see `cc_build_parse_input` ordering), so reflection parses fields from
+    source text. A returned `type` spelling can be fed straight back into
+    `cc_reflect_field_count` to **recurse** into nested struct fields — recursion
+    is preserved without a flattened snapshot or any node graph.
+  - **Proofs:** `tests/comptime_reflect_fields_smoke` (executor block reflects a
+    struct → emits per-field name/type accessors) and
+    `tests/comptime_reflect_factory_smoke` (compiled `Describe::[Widget]` factory
+    introspects its struct type arg and emits one accessor per field).
+  - **Known v1 limits:** offsets are not provided (emitted C names fields
+    directly, so the host C compiler computes layout); nested-aggregate field
+    declarations (those containing `{`) are skipped; one declarator per field.
 
 - **D6.4 (collapse the builtins).** Re-express `CCVec`/`Map`/`Chan` as
   default-registered factories so `cc_emit_plan_fprint_vec_decl`'s hardcoded
@@ -575,12 +605,31 @@ TU:
 - `cc_emit_raw(anchor, ptr, len)` → emit-plan fragment buffer (coalesces
   consecutive emits at the same anchor/site into one splice block)
 - `cc_instantiate_vec/map/chan` → comptime-instantiation list
-- `cc_type_of` → stub (NULL) for now; reflection callback deferred
+- `cc_reflect_field_count/name/type` → struct-field reflection over the current
+  source buffer (D6.3; shared with compiled factories via dynamic_lookup)
+- `cc_type_of` → still a NULL stub; the bytes-only field reflection above is the
+  landed reflection surface (a richer `cc_type_info` snapshot remains future work)
 
 **Wiring.** `cc_emit_plan_exec_comptime_blocks` scans `@comptime {}` blocks;
-those containing `for`/`while`/`do` run through the executor (static text
-collection skipped for executed blocks). Invoked on both parse path
-(`build_parse_input.c`) and emit path (`visit_codegen.c`).
+those containing `for`/`while`/`do` or calls to registered `@comptime` functions
+run through the executor (static text collection skipped for executed blocks).
+Top-level `@comptime int fib(...)` defs are scanned into the executor TU prelude.
+`cc_comptime_exec_eval_int` marshals integer results via `__cc_ce_result`.
+Invoked on both parse path (`build_parse_input.c`) and emit path
+(`visit_codegen.c`).
+
+**E0.1 landed (2026-05-29):** `@comptime fn` calls + integer result marshaling.
+Registry scan (`cc_comptime_fn_registry_scan`), executor TU includes collected
+defs, blocks calling registered comptime fns route through libtcc. Proof:
+`tests/comptime_fn_fib_smoke` — recursive `fib(10)`/`fib(15)` inside
+`cc_emit_format` at compile time.
+
+**D6.1 landed (2026-05-29):** compiled generic factories via
+`cc_generic_register("Pair", pair_factory)` + dylib batch
+(`CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY`, isolated handler TU via
+`cc_comptime_compile_type_hooks_tu`). Factory returns definition text as
+`CCSlice`; rewrite/emit/dedup unchanged from D6.0. Proof:
+`tests/comptime_compiled_generic_factory_smoke`.
 
 **Prerequisite fixes (landed with E0):**
 - **Fix A:** `cc_type_of("T")` → `type_of(T)` normalization at
@@ -595,9 +644,8 @@ collection skipped for executed blocks). Invoked on both parse path
 table at compile time via `cc_emit_format`, runtime-verified against known values.
 Suite **477/477** (one known-flaky nursery timing test under parallel load).
 
-**Deferred (re-decide after keystone):** `@comptime fn` calls + result marshaling,
-compiled user factories (D6.1), value-param generics (D6.2), types-as-values,
-converging static intrinsic collectors onto the executor.
+**Deferred (re-decide after keystone):** value-param generics (D6.2),
+types-as-values, converging static intrinsic collectors onto the executor.
 
 **D3.1 landed (2026-05-29):** layout-aware `@comptime if`, consuming the D3.0
 seam. **(A)** When the self-contained D2 evaluator can't decide a predicate, the

@@ -5,6 +5,21 @@
 
 typedef struct CCSymbolTable CCSymbolTable;
 
+/* Compile-time struct-field reflection — the single field parser shared by
+ * `@comptime for (f in type_of(T).fields)` and the `cc_reflect_field_*` host
+ * callback.  Parses the declared members of the struct/typedef `type_name`
+ * (a typedef name, or a `struct Tag`/`union Tag` spelling) from `src`.
+ *
+ * Returns 1 and sets *out (free with cc_ct_free_fields) and *out_n on success.
+ * Returns 0 if the type is not found OR any member uses a form not modeled
+ * (array, bitfield, function pointer, nested/anonymous aggregate, or multi-
+ * declarator): callers must treat 0 as "no reflection" — every field or none,
+ * never a partial or guessed result. */
+typedef struct CCCtField { char* name; char* type; } CCCtField;
+int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_name,
+                                CCCtField** out, size_t* out_n);
+void cc_ct_free_fields(CCCtField* fields, size_t n);
+
 // Preprocess a CC source file, rewriting CC syntax (e.g., UFCS) into
 // plain C that TCC can parse. Writes to a temporary file path (returned via
 // out_path), nul-terminated. Returns 0 on success; caller must unlink the

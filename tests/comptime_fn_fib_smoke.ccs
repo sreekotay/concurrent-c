@@ -1,0 +1,19 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+@comptime int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+@comptime {
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { FIB10 = %d, FIB15 = %d };\n", fib(10), fib(15));
+}
+
+int main(void) {
+    if (FIB10 != 55) return 1;
+    if (FIB15 != 610) return 2;
+    printf("comptime_fn_fib_smoke ok fib10=%d fib15=%d\n", FIB10, FIB15);
+    return 0;
+}

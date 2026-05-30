@@ -5,8 +5,11 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "comptime/executor.h"
+#include "comptime/hook_compile.h"
+#include "preprocess/preprocess.h"
 #include "util/path.h"
 #include "util/text.h"
 
@@ -20,6 +23,7 @@ static CCEmitComptimeFragment cc__comptime_frags[CC_EMIT_PLAN_MAX_COMPTIME_FRAGM
 static size_t cc__comptime_frag_count = 0;
 
 static void cc__exec_ranges_clear(void);
+static void cc__generic_factories_clear(void);
 
 /* Thin aliases onto the shared scanners in util/text.h.  Kept as file-local
  * names so the @comptime intrinsic collectors below read uniformly; the logic
@@ -27,6 +31,22 @@ static void cc__exec_ranges_clear(void);
 #define cc__emit_match_kw(src, len, pos, kw)  cc_match_ident_kw((src), (len), (pos), (kw))
 #define cc__emit_parse_c_string(src, len, pos, out, cap) \
     cc_parse_c_string_literal((src), (len), (pos), (out), (cap))
+
+static int cc__emit_parse_ident(const char* src, size_t len, size_t* pos,
+                                char* out, size_t cap) {
+    size_t p = cc_skip_ws_len(src, len, *pos);
+    size_t start;
+    size_t n;
+    if (p >= len || !cc_is_ident_start(src[p])) return 0;
+    start = p++;
+    while (p < len && cc_is_ident_char(src[p])) p++;
+    n = p - start;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, src + start, n);
+    out[n] = '\0';
+    *pos = p;
+    return 1;
+}
 
 static int cc__emit_parse_anchor(const char* src, size_t len, size_t* pos, CCEmitAnchor* out) {
     size_t p = cc_skip_ws_len(src, len, *pos);
@@ -243,6 +263,188 @@ static void cc__generic_templates_clear(void) {
     cc__generic_emitted_count = 0;
 }
 
+void cc_emit_plan_clear_generic_factory_registrations(void) {
+    cc__generic_factories_clear();
+}
+
+/* --- user generic factories (D6.1: compiled handlers) --- */
+
+typedef struct CCGenericFactoryReg {
+    char* name;
+    char* handler_name;
+    const void* fn_ptr;
+} CCGenericFactoryReg;
+
+static CCGenericFactoryReg cc__generic_factories[CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES];
+static size_t cc__generic_factory_count = 0;
+static void* cc__generic_factory_owner = NULL;
+
+static void cc__generic_factories_clear(void) {
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        free(cc__generic_factories[i].name);
+        free(cc__generic_factories[i].handler_name);
+    }
+    cc__generic_factory_count = 0;
+    if (cc__generic_factory_owner) {
+        cc_comptime_type_hook_owner_free(cc__generic_factory_owner);
+        cc__generic_factory_owner = NULL;
+    }
+}
+
+void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name) {
+    if (!name || !handler_name) return;
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        if (strcmp(cc__generic_factories[i].name, name) == 0) {
+            char* nh = strdup(handler_name);
+            if (!nh) return;
+            if (strcmp(cc__generic_factories[i].handler_name, handler_name) != 0)
+                cc__generic_factories[i].fn_ptr = NULL;
+            free(cc__generic_factories[i].handler_name);
+            cc__generic_factories[i].handler_name = nh;
+            return;
+        }
+    }
+    if (cc__generic_factory_count >= CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES) return;
+    {
+        CCGenericFactoryReg* f = &cc__generic_factories[cc__generic_factory_count++];
+        f->name = strdup(name);
+        f->handler_name = strdup(handler_name);
+        f->fn_ptr = NULL;
+        if (!f->name || !f->handler_name) {
+            free(f->name);
+            free(f->handler_name);
+            cc__generic_factory_count--;
+        }
+    }
+}
+
+const void* cc_emit_plan_lookup_generic_factory(const char* name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < cc__generic_factory_count; i++) {
+        if (strcmp(cc__generic_factories[i].name, name) == 0)
+            return cc__generic_factories[i].fn_ptr;
+    }
+    return NULL;
+}
+
+/* ABI mirrors cc_slice.cch / cc_arena.cch for dylib factory calls. */
+typedef struct CCFactorySlice {
+    void*    ptr;
+    size_t   len;
+    uint64_t id;
+    size_t   alen;
+} CCFactorySlice;
+
+typedef struct {
+    CCFactorySlice* items;
+    size_t          len;
+} CCFactorySliceArray;
+
+static CCFactorySlice cc__factory_slice_cstr(const char* s) {
+    CCFactorySlice sl = {0};
+    if (s) { sl.ptr = (void*)s; sl.len = strlen(s); }
+    return sl;
+}
+
+typedef CCFactorySlice (*CCGenericFactoryFn)(CCFactorySlice, CCFactorySlice,
+                                               CCFactorySliceArray, void*);
+
+int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
+                                        const char type_args[8][128], int nargs,
+                                        char* def_out, size_t def_cap) {
+    const void* fn = cc_emit_plan_lookup_generic_factory(name);
+    CCFactorySliceArray args = {0};
+    CCFactorySlice arg_slices[8];
+    CCGenericFactoryFn call;
+    CCFactorySlice result;
+    if (!fn || !mangled || !def_out || def_cap == 0 || nargs <= 0 || nargs > 8) return 0;
+    for (int i = 0; i < nargs; i++)
+        arg_slices[i] = cc__factory_slice_cstr(type_args[i]);
+    args.items = arg_slices;
+    args.len = (size_t)nargs;
+    call = (CCGenericFactoryFn)(uintptr_t)fn;
+    result = call(cc__factory_slice_cstr(name),
+                  cc__factory_slice_cstr(mangled),
+                  args,
+                  NULL);
+    if (!result.ptr || result.len == 0 || result.len >= def_cap) return 0;
+    memcpy(def_out, result.ptr, result.len);
+    def_out[result.len] = '\0';
+    return 1;
+}
+
+int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
+                                           const char* input_path) {
+    CCComptimeHookSpec* specs = NULL;
+    const void** fn_ptrs = NULL;
+    char* tu_body = NULL;
+    size_t tu_len = 0, tu_cap = 0;
+    size_t n = cc__generic_factory_count;
+    (void)src;
+    (void)len;
+    if (n == 0) return 0;
+    specs = (CCComptimeHookSpec*)calloc(n, sizeof(*specs));
+    fn_ptrs = (const void**)calloc(n, sizeof(*fn_ptrs));
+    if (!specs || !fn_ptrs) {
+        free(specs);
+        free(fn_ptrs);
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const char* def = cc_comptime_fn_registry_lookup_def(cc__generic_factories[i].handler_name);
+        if (!def || !def[0]) {
+            fprintf(stderr, "%s: error: generic factory handler '%s' not found in @comptime fn registry\n",
+                    input_path ? input_path : "<input>", cc__generic_factories[i].handler_name);
+            free(specs);
+            free(fn_ptrs);
+            return -1;
+        }
+        {
+            size_t dlen = strlen(def);
+            size_t need = tu_len + dlen + 2;
+            char* nb = (char*)realloc(tu_body, need);
+            if (!nb) {
+                free(tu_body);
+                free(specs);
+                free(fn_ptrs);
+                return -1;
+            }
+            tu_body = nb;
+            memcpy(tu_body + tu_len, def, dlen);
+            tu_len += dlen;
+            tu_body[tu_len++] = '\n';
+            tu_body[tu_len] = '\0';
+        }
+    }
+    static char entry_names[CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES][128];
+    for (size_t i = 0; i < n; i++) {
+        CCGenericFactoryReg* f = &cc__generic_factories[i];
+        snprintf(entry_names[i], sizeof(entry_names[i]),
+                 "__cc_gen_factory_%s_%zu", f->handler_name, i);
+        specs[i].kind = CC_COMPTIME_TYPE_HOOK_GENERIC_FACTORY;
+        specs[i].entry_name = entry_names[i];
+        specs[i].handler_name = f->handler_name;
+    }
+    if (cc__generic_factory_owner) {
+        cc_comptime_type_hook_owner_free(cc__generic_factory_owner);
+        cc__generic_factory_owner = NULL;
+    }
+    if (cc_comptime_compile_type_hooks_tu(input_path, tu_body, specs, n,
+                                          &cc__generic_factory_owner,
+                                          fn_ptrs) != 0) {
+        free(tu_body);
+        free(specs);
+        free(fn_ptrs);
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++)
+        cc__generic_factories[i].fn_ptr = fn_ptrs[i];
+    free(tu_body);
+    free(specs);
+    free(fn_ptrs);
+    return 0;
+}
+
 /* cc_generic_template("Name", arity, "template...") — register a library
  * generic.  Template is one or more adjacent C string literals; $0 expands to
  * the mangled name and $1..$N to the type arguments at the use site. */
@@ -283,6 +485,23 @@ static int cc__emit_try_collect_cc_generic_template(const char* src, size_t len,
         tmpl[tlen] = 0;
     }
     cc_emit_plan_register_generic_template(name, arity, tmpl);
+    return 1;
+}
+
+/* cc_generic_register("Name", handler_fn) — register a compiled factory. */
+static int cc__emit_try_collect_cc_generic_register(const char* src, size_t len, size_t call_pos) {
+    size_t p = call_pos + strlen("cc_generic_register");
+    char name[128];
+    char handler[128];
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != '(') return 0;
+    p++;
+    if (!cc__emit_parse_c_string(src, len, &p, name, sizeof(name))) return 0;
+    p = cc_skip_ws_len(src, len, p);
+    if (p >= len || src[p] != ',') return 0;
+    p = cc_skip_ws_len(src, len, p + 1);
+    if (!cc__emit_parse_ident(src, len, &p, handler, sizeof(handler))) return 0;
+    cc_emit_plan_register_generic_factory(name, handler);
     return 1;
 }
 
@@ -378,6 +597,13 @@ static int cc__ci_collect_generic_template(const CCComptimeIntrinsicDesc* d,
     return cc__emit_try_collect_cc_generic_template(src, len, pos);
 }
 
+static int cc__ci_collect_generic_register(const CCComptimeIntrinsicDesc* d,
+                                           const char* src, size_t len,
+                                           size_t pos, size_t splice_end) {
+    (void)d; (void)splice_end;
+    return cc__emit_try_collect_cc_generic_register(src, len, pos);
+}
+
 static const CCComptimeIntrinsicDesc cc__comptime_intrinsics[] = {
     { "cc_instantiate_vec",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_VEC,  1 },
     { "cc_instantiate_map",  CC_CI_INSTANTIATE, cc__ci_collect_instantiate,  CC_GRAPH_REQUEST_MAP,  2 },
@@ -389,6 +615,7 @@ static const CCComptimeIntrinsicDesc cc__comptime_intrinsics[] = {
     /* generic-factory registration: collected in the EMIT pass; records a
      * template (side effect), emits no fragment of its own. */
     { "cc_generic_template", CC_CI_EMIT,        cc__ci_collect_generic_template, (CCTypeGraphRequestKind)0, 0 },
+    { "cc_generic_register", CC_CI_EMIT,        cc__ci_collect_generic_register, (CCTypeGraphRequestKind)0, 0 },
 };
 
 static const unsigned cc__ci_mask_instantiate = CC_CI_INSTANTIATE;
@@ -579,7 +806,81 @@ const void* cc_emit_plan_host_type_of(const char* name) {
     return NULL;
 }
 
+/* --- comptime reflection host API (D6.3) --- */
+
+static const char* cc__reflect_src = NULL;
+static size_t cc__reflect_src_len = 0;
+
+void cc_emit_plan_set_reflect_source(const char* src, size_t len) {
+    cc__reflect_src = src;
+    cc__reflect_src_len = len;
+}
+
+/* Copy `s` into out (NUL-terminated, truncated to out_sz). Returns bytes written. */
+static int cc__rfl_emit(const char* s, char* out, int out_sz) {
+    int wlen = (int)strlen(s);
+    if (!out || out_sz <= 0) return wlen;
+    int cap = wlen < out_sz - 1 ? wlen : out_sz - 1;
+    memcpy(out, s, (size_t)cap);
+    out[cap] = '\0';
+    return cap;
+}
+
+int cc_reflect_field_count(const char* type_name) {
+    CCCtField* fields = NULL;
+    size_t nf = 0;
+    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                     type_name, &fields, &nf))
+        return -1;
+    cc_ct_free_fields(fields, nf);
+    return (int)nf;
+}
+
+static int cc__reflect_field_member(const char* type_name, int idx, int want_type,
+                                    char* buf, int buf_sz) {
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    CCCtField* fields = NULL;
+    size_t nf = 0;
+    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                     type_name, &fields, &nf))
+        return -1;
+    int rc = -1;
+    if (idx >= 0 && (size_t)idx < nf)
+        rc = cc__rfl_emit(want_type ? fields[idx].type : fields[idx].name, buf, buf_sz);
+    cc_ct_free_fields(fields, nf);
+    return rc;
+}
+
+int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_field_member(type_name, idx, 0, buf, buf_sz);
+}
+
+int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_field_member(type_name, idx, 1, buf, buf_sz);
+}
+
+static int cc__block_has_comptime_fn_call(const char* src, size_t body_l, size_t body_r) {
+    for (size_t j = body_l + 1; j < body_r; j++) {
+        if (!cc_is_ident_start(src[j])) continue;
+        if (j > body_l + 1 && cc_is_ident_char(src[j - 1])) continue;
+        {
+            size_t id_e = j;
+            char name[CC_COMPTIME_FN_NAME_MAX];
+            size_t nlen;
+            while (id_e < body_r && cc_is_ident_char(src[id_e])) id_e++;
+            if (id_e >= body_r || src[id_e] != '(') continue;
+            nlen = id_e - j;
+            if (nlen >= sizeof(name)) continue;
+            memcpy(name, src + j, nlen);
+            name[nlen] = '\0';
+            if (cc_comptime_fn_is_registered(name)) return 1;
+        }
+    }
+    return 0;
+}
+
 static int cc__block_needs_executor(const char* src, size_t body_l, size_t body_r) {
+    if (cc__block_has_comptime_fn_call(src, body_l, body_r)) return 1;
     for (size_t j = body_l + 1; j + 2 < body_r; j++) {
         if (cc_match_ident_kw(src, body_r, j, "for")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "while")) return 1;
@@ -611,6 +912,8 @@ static void cc__exec_visit_block(const char* src, size_t len,
 
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {
     cc__exec_failed = 0;
+    cc_emit_plan_set_reflect_source(src, len);
+    cc_comptime_fn_registry_scan(src, len);
     cc__emit_for_each_comptime_block(src, len, cc__exec_visit_block, (void*)input_path);
     return cc__exec_failed ? -1 : 0;
 }

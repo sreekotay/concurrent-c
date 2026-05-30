@@ -96,4 +96,40 @@ static inline int cc_generic_template(const char* name, int arity, const char* t
     return 0;
 }
 
+static inline int cc_generic_register(const char* name, void* factory) {
+    (void)name;
+    (void)factory;
+    return 0;
+}
+
+/* Comptime reflection (D6.3): structured type info as bytes across the bind
+ * point.  Inside `@comptime { ... }` blocks (run by the libtcc executor) and
+ * inside compiled generic factories these resolve to the real host callback;
+ * the inline bodies below are the never-executed stubs the normal C compile
+ * sees after comptime constructs are blanked.  Pass a type name; read field
+ * name / type-spelling strings into your own buffers.  `cc_reflect_field_count`
+ * returns the field count (or -1 for an unknown type); the accessors return the
+ * bytes written (excluding NUL) or -1 when idx is out of range.  Feed a returned
+ * type spelling back into these to recurse into nested struct fields. */
+#ifdef CC_COMPTIME_EXEC
+extern int cc_reflect_field_count(const char* type_name);
+extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
+extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+#else
+static inline int cc_reflect_field_count(const char* type_name) {
+    (void)type_name;
+    return -1;
+}
+static inline int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz) {
+    (void)type_name; (void)idx;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    return -1;
+}
+static inline int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz) {
+    (void)type_name; (void)idx;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    return -1;
+}
+#endif
+
 #endif /* CC_INSTANTIATE_CCH */

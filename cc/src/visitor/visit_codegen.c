@@ -1988,12 +1988,43 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
             size_t body_r;
-            if (body_l >= n || src[body_l] != '{') { i++; continue; }
-            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
-            for (size_t k = i; k <= body_r; ++k) {
-                if (out[k] != '\n') out[k] = ' ';
+            if (body_l >= n) { i++; continue; }
+            if (src[body_l] == '{') {
+                if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
+                for (size_t k = i; k <= body_r; ++k) {
+                    if (out[k] != '\n') out[k] = ' ';
+                }
+                i = body_r + 1;
+                continue;
             }
-            i = body_r + 1;
+            {
+                size_t p = body_l, lpar = 0, rpar = 0, end = 0;
+                for (; p < n; p++) {
+                    if (src[p] == '(') { lpar = p; break; }
+                }
+                if (lpar) {
+                    if (!cc__find_matching_paren_codegen(src, n, lpar, &rpar)) { i++; continue; }
+                    p = cc__skip_ws_codegen(src, n, rpar + 1);
+                    if (p < n && src[p] == '{') {
+                        if (!cc__find_matching_brace_codegen(src, n, p, &body_r)) { i++; continue; }
+                        end = body_r;
+                    } else {
+                        for (; p < n; p++) {
+                            if (src[p] == ';') { end = p; break; }
+                        }
+                        if (!end) { i++; continue; }
+                    }
+                } else {
+                    for (; p < n; p++) {
+                        if (src[p] == ';') { end = p; break; }
+                    }
+                    if (!end) { i++; continue; }
+                }
+                for (size_t k = i; k <= end; ++k) {
+                    if (out[k] != '\n') out[k] = ' ';
+                }
+                i = end + 1;
+            }
         }
     }
     return out;

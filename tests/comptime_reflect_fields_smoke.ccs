@@ -1,0 +1,45 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* D6.3: reflection-into-execution — a @comptime block reads a user struct's
+ * fields (name + type spelling) from the host reflection callback and drives
+ * codegen from that structured input.  Only bytes cross the bind point. */
+
+typedef struct {
+    int id;
+    double weight;
+    char tag;
+} Widget;
+
+@comptime {
+    int nf = cc_reflect_field_count("Widget");
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { WIDGET_NFIELDS = %d };\n", nf);
+    for (int i = 0; i < nf; i++) {
+        char nm[64];
+        char ty[64];
+        cc_reflect_field_name("Widget", i, nm, sizeof(nm));
+        cc_reflect_field_type("Widget", i, ty, sizeof(ty));
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+            "static const char* widget_f%d_name = \"%s\";\n", i, nm);
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+            "static const char* widget_f%d_type = \"%s\";\n", i, ty);
+    }
+}
+
+int main(void) {
+    if (WIDGET_NFIELDS != 3) return 1;
+    if (strcmp(widget_f0_name, "id") != 0) return 2;
+    if (strcmp(widget_f0_type, "int") != 0) return 3;
+    if (strcmp(widget_f1_name, "weight") != 0) return 4;
+    if (strcmp(widget_f1_type, "double") != 0) return 5;
+    if (strcmp(widget_f2_name, "tag") != 0) return 6;
+    if (strcmp(widget_f2_type, "char") != 0) return 7;
+    printf("comptime_reflect_fields_smoke ok nfields=%d %s:%s %s:%s %s:%s\n",
+           WIDGET_NFIELDS,
+           widget_f0_name, widget_f0_type,
+           widget_f1_name, widget_f1_type,
+           widget_f2_name, widget_f2_type);
+    return 0;
+}

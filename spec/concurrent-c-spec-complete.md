@@ -7,8 +7,7 @@ A C preprocessor that extends C syntax with first-class concurrency, desugaring 
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
-**Draft Version:** 1.0-draft.11  
-**Last Updated:** 2026-04-03 (added CCArenaPool)
+**Draft Version:** 1.0-draft.11
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
@@ -6012,7 +6011,7 @@ Generic instantiation uses compile-time monomorphization.
 - `swap::[T]` lowers to `swap__T_<mangled>(...)` per instantiation.
 - `Pair::[A, B]` lowers to `Pair__A_<mangledA>__B_<mangledB>` per instantiation.
 - For built-in generic families, the visible lowered family names at the C boundary are part of the language contract.
-- For future user-defined generic functions and types, exact mangling remains implementation-defined; uniqueness is required.
+- User-defined generic functions and types lower through library-owned compile-time factories (§14.10). Their mangling is implementation-defined; distinct instantiations must map to distinct lowered names.
 
 ---
 
@@ -6090,7 +6089,7 @@ Intentionally omitted:
 - User-defined compile-time interfaces
 - Generic impl blocks / methods parameterized on `Self`
 - Specialization by overload sets (only `@comptime if` specialization is supported)
-- Runtime reflection over type `T`
+- Runtime reflection over type `T` (type introspection is compile-time only; see §14.11)
 
 **Rule:** Built-in generic families (`Task::[T]`, `Mutex::[T]`, `Map::[K,V]`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
 
@@ -6137,6 +6136,9 @@ This section defines compile-time computation as a restricted evaluation mode us
 - **§14.6 Built-ins** — minimal type/ABI queries
 - **§14.7 Static assertions** — compile-time invariants
 - **§14.8 Restrictions** — what `@comptime` cannot do
+- **§14.9 Compile-time emission** — generating C from `@comptime` code
+- **§14.10 User-defined generic lowering** — templates and compiled factories
+- **§14.11 Compile-time reflection** — type and field introspection
 
 ---
 
@@ -6344,6 +6346,95 @@ At compile time, the following are forbidden:
 - Relying on undefined behavior
 
 **Rule:** A violation is a compile-time error.
+
+**Scope:** These restrictions govern constant-expression evaluation and the computation of `@comptime` values. Code-generation `@comptime` code (§14.9–§14.10) — registration blocks, generic factories, and UFCS handlers — runs in the compile-time evaluator and builds output text through the emission and `CCArena` APIs. It performs no program I/O and touches no runtime concurrency primitives.
+
+---
+
+### 14.9 Compile-Time Emission
+
+`@comptime {}` blocks and `@comptime` functions execute in an in-process compile-time evaluator. Emitted C is spliced into the translation unit at a named anchor.
+
+```c
+int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment);
+int cc_emit_format(CCEmitAnchor anchor, const char* fmt, ...);   // printf-style
+
+void cc_instantiate_vec(const char* elem_mangled);
+void cc_instantiate_map(const char* key_mangled, const char* val_mangled);
+void cc_instantiate_chan(const char* elem_mangled);
+```
+
+```c
+typedef enum CCEmitAnchor {
+    CC_EMIT_AFTER_PRELUDE    = 0,   // after the file prelude, before first use
+    CC_EMIT_BEFORE_FIRST_USE = 1,   // immediately before the first use site
+    CC_EMIT_AT_COMPTIME_SITE = 2,   // at the @comptime block's source position
+} CCEmitAnchor;
+```
+
+**Rule:** `cc_emit_*` text is splice-once per anchor/site; consecutive emits at the same anchor/site concatenate into one block.
+
+**Rule:** `cc_instantiate_*` forces monomorphization of a built-in family even when the type is never spelled in source.
+
+---
+
+### 14.10 User-Defined Generic Lowering
+
+A library defines how its generic lowers to C by registering it in `@comptime {}`. Two forms:
+
+```c
+int cc_generic_template(const char* name, int arity, const char* template_src);
+int cc_generic_register(const char* name, void* factory);
+```
+
+**Template form.** `template_src` is C text with substitution markers: `$0` is the mangled instantiation name; `$1`..`$N` are the type-argument spellings.
+
+**Factory form.** `factory` is a compiled `@comptime` function returning the definition text:
+
+```c
+CCSlice factory(CCSlice generic_name, CCSlice mangled, CCSliceArray type_args, CCArena* arena);
+```
+
+**Rule:** At a `Name::[args]` use site the compiler computes a unique mangled name, expands the template or invokes the factory once per distinct instantiation, splices the result, and rewrites the use site to the mangled name. Returning the empty slice is a lowering failure.
+
+**Rule:** This is the same registration machinery as UFCS custom lowering (§9.0): the library owns the C lowering, the compiler owns the splice.
+
+---
+
+### 14.11 Compile-Time Reflection
+
+`type_of(T)` yields compile-time type information. Numeric and structural members fold to constant expressions usable anywhere a constant is required:
+
+```c
+type_of(T).size        // size_t  — sizeof(T)
+type_of(T).align       // size_t  — alignof(T)
+type_of(T).kind        // cc_type_kind
+type_of(T).nfields     // field count
+type_of(T).name        // const char* display spelling
+```
+
+`@comptime for` unrolls a body once per declared field of a struct `T`:
+
+```c
+@comptime for (f in type_of(T).fields) {
+    // f        -> the field identifier   (t.f resolves to t.<field>)
+    // f.name   -> field name as a string literal
+    // f.index  -> 0-based field index
+    // f.type   -> the field's type spelling (usable in sizeof, declarations, ...)
+}
+```
+
+Compiled factories and `@comptime` blocks read the same field set through a string-only callback:
+
+```c
+int cc_reflect_field_count(const char* type_name);                              // -1 if unknown
+int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+```
+
+**Rule:** Field name and type accessors write at most `buf_sz - 1` bytes plus a NUL and return the byte count, or `-1` when `idx` is out of range. A returned type spelling may be passed back into `cc_reflect_field_count` to descend into nested struct fields.
+
+**Rule:** Field reflection is all-or-nothing. `type_of(T).fields`, `@comptime for`, and `cc_reflect_field_*` share one field parser. If `T` is not found, or any member uses a form not modeled (array, bitfield, function pointer, nested or anonymous aggregate, multi-declarator), reflection yields no fields: `cc_reflect_field_count` returns `-1` and `@comptime for` is a compile-time error. A partial or guessed field set is never produced.
 
 ---
 
