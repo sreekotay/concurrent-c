@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* ${...} slots must use types supported by cc_emit_tpl_append_slot (_Generic). */
+
+@comptime CCSlice bad_slot_factory(CCSlice generic_name, CCSlice mangled,
+                                   CCSliceArray type_args, CCArena *arena) {
+    (void)generic_name;
+    (void)type_args;
+    (void)arena;
+    (void)mangled;
+    typedef struct { int x; } BadSlotFoo;
+    BadSlotFoo foo = { .x = 1 };
+    return @emit(`static int bad_slot_val = ${foo};`);
+}
+
+@comptime {
+    cc_generic_register("BadSlot", bad_slot_factory);
+}
+
+int main(void) {
+    BadSlot::[int] b;
+    (void)b;
+    return 0;
+}

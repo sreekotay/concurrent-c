@@ -37,6 +37,7 @@
 #include "preprocess/cpp_expand.h"
 #include "preprocess/type_registry.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/comptime_prepare.h"
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
@@ -1304,7 +1305,11 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * walk past their intended targets.  Proper macro-in-reparse support
      * needs the full M1 swap (visitor consumes the pre-expand buffer
      * end-to-end) — see PASS_INVENTORY.md and COMPILER_CLEANUP_STATUS.md.
-     * Until then, reparses use the unexpanded prelude+sanitize chain. */
+     * Until then, reparses use the unexpanded prelude+sanitize chain.
+     *
+     * (Pre-expanding here was also measured to be a net wall-clock loss:
+     * cc_cpp_expand performs the same header preprocessing the TCC parse
+     * would, plus an extra re-lower pass over the expanded buffer.) */
 
     /* L2 prelude rewriter: same standard-C-to-TCC-friendly token
      * rewrites applied in the initial parse path
@@ -3393,25 +3398,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     const char* reg_src = src_regs ? src_regs : src_all;
     size_t reg_src_len = src_regs ? strlen(src_regs) : src_len;
 
-    /* Seam: resolve `@comptime for`/`if` on the emit buffer BEFORE the comptime
-     * collection + blank below, so reflection-driven `cc_emit_*` calls nested
-     * inside `@comptime { ... }` blocks become concrete (and are collected)
-     * rather than being blanked away unexpanded.  Only `src_ufcs` is touched;
-     * `reg_src` (UFCS registration) intentionally stays on the raw buffer.
-     * This subsumes the post-blank resolve that used to run later. */
+    /* Seam: resolve `@comptime for`/`if` and lower templates before comptime
+     * collection (see cc_comptime_prepare_source). */
     if (src_ufcs && src_ufcs_len) {
-        char* resolved = cc__resolve_comptime_if(src_ufcs, src_ufcs_len, ctx->input_path);
-        if (resolved == (char*)-1) {
+        int ufcs_is_all = (src_ufcs == src_all);
+        if (cc_comptime_prepare_source(&src_ufcs, &src_ufcs_len, ctx->input_path) != 0) {
             fclose(out);
             free(src_regs);
             free(src_all);
             return -1;
         }
-        if (resolved) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = resolved;
-            src_ufcs_len = strlen(resolved);
-        }
+        if (ufcs_is_all) src_all = src_ufcs;
     }
 
     /* Phase 2 currently means: collect the comptime-visible effects from the

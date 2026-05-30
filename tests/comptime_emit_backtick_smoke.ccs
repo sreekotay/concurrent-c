@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* @emit(CC_EMIT_AFTER_PRELUDE, `...`) — backtick comptime emission at an anchor. */
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        typedef struct { int x; int y; } EmitBacktickPoint;
+        enum { EMIT_BACKTICK_N = ${7} };
+    `);
+}
+
+int main(void) {
+    EmitBacktickPoint p = { .x = 3, .y = 4 };
+    if (p.x != 3) return 1;
+    if (EMIT_BACKTICK_N != 7) return 2;
+    printf("comptime_emit_backtick_smoke ok x=%d n=%d\n", p.x, EMIT_BACKTICK_N);
+    return 0;
+}

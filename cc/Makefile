@@ -77,6 +77,8 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/ir/ir.c \
 	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
+	src/preprocess/template_scan.c \
+	src/preprocess/comptime_prepare.c \
 	src/preprocess/cpp_expand.c \
 	src/preprocess/type_registry.c \
 	src/preprocess/type_graph.c \
@@ -165,6 +167,15 @@ clean:
 	# Clean legacy in-tree objects from earlier layouts.
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc
+
+EMIT_TPL_PRELUDE := src/comptime/emit_tpl_prelude.inc.h
+EMIT_TPL_CORE := include/ccc/cc_emit_tpl_core.inc.cch
+GEN_EMIT_TPL := ../tools/gen_emit_tpl_prelude.sh
+
+$(EMIT_TPL_PRELUDE): $(GEN_EMIT_TPL) $(EMIT_TPL_CORE)
+	$(GEN_EMIT_TPL)
+
+$(OBJDIR)/src/comptime/executor.o: $(EMIT_TPL_PRELUDE)
 
 .PHONY: all clean
 

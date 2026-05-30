@@ -2,17 +2,13 @@
 #include <ccc/cc_instantiate.cch>
 #include <stdio.h>
 
-/* D6.0: user generic factories (modeled on UFCS).  A library registers HOW its
- * generic lowers to C via a declarative template; the compiler recognizes
- * `Pair::[A, B]` use sites, computes a mangled name (`Pair_A_B`), expands the
- * template once per unique instantiation ($0 = mangled name, $1..$N = the type
- * args), emits it at the prelude anchor, and rewrites the use site to the
- * mangled name.  The library owns the lowering; the compiler owns the splice. */
+/* cc_generic_template with backtick ${...} grammar (canonical sugar). */
 
 @comptime {
     cc_generic_template("Pair", 2,
-        "typedef struct { $1 first; $2 second; } $0;\n"
-        "static inline $0 $0_make($1 a, $2 b) { $0 r; r.first = a; r.second = b; return r; }\n");
+        `typedef struct { ${0} first; ${1} second; } ${name};
+static inline ${name} ${name}_make(${0} a, ${1} b) { ${name} r; r.first = a; r.second = b; return r; }
+`);
 }
 
 int main(void) {

@@ -6376,6 +6376,19 @@ typedef enum CCEmitAnchor {
 
 **Rule:** `cc_instantiate_*` forces monomorphization of a built-in family even when the type is never spelled in source.
 
+**Two `@emit` spellings.**
+
+| Form | Returns | Use when |
+|------|---------|----------|
+| `@emit(\`...\`)` | `CCSlice` | Generic factories and any `@comptime` function that builds definition text and returns it |
+| `@emit(CCEmitAnchor, \`...\`)` | `void` (lowers to splice side effect) | `@comptime {}` blocks and `@comptime for` bodies that emit declarations at a named anchor |
+
+Both forms share the same backtick `${...}` grammar as `@string`. Each `${expr}` slot uses type-driven dispatch (`cc_emit_tpl_append_slot` / C11 `_Generic`); supported types are `CCSlice`, C strings (`char*` / `const char*` / char arrays), integers, and floating-point.
+
+**Rule:** `@comptime for` bodies that contain a backtick `@emit` are wrapped in `@comptime { }` per unrolled iteration so template lowering runs through the comptime executor.
+
+**Buffer limits (hard errors):** `@emit` template buffers, generic definition expansion, and comptime splice blocks have fixed caps (8192 bytes for template/definition text unless documented otherwise). Overflow is a compile error, not silent truncation.
+
 ---
 
 ### 14.10 User-Defined Generic Lowering
@@ -6387,15 +6400,31 @@ int cc_generic_template(const char* name, int arity, const char* template_src);
 int cc_generic_register(const char* name, void* factory);
 ```
 
-**Template form.** `template_src` is C text with substitution markers: `$0` is the mangled instantiation name; `$1`..`$N` are the type-argument spellings.
-
-**Factory form.** `factory` is a compiled `@comptime` function returning the definition text:
+**Template form.** `template_src` is C text with substitution markers using the same backtick grammar as `@string` / `@emit`:
 
 ```c
-CCSlice factory(CCSlice generic_name, CCSlice mangled, CCSliceArray type_args, CCArena* arena);
+cc_generic_template("Pair", 2,
+    `typedef struct { ${0} first; ${1} second; } ${name};
+static inline ${name} ${name}_make(${0} a, ${1} b) { ... }`);
+```
+
+- `${name}` — the mangled instantiation name at the use site
+- `${0}`..`${N}` — the type-argument spellings (arity + 1 slots total including `${name}`)
+
+**Legacy (deprecated):** quoted strings with `$0` (mangled name) and `$1`..`$N` (type args) are normalized to `${name}` / `${0}`.. at registration. Prefer backtick templates for new code.
+
+**Factory form.** `factory` is a compiled `@comptime` function returning the definition text via `@emit(\`...\`)`:
+
+```c
+@comptime CCSlice factory(CCSlice generic_name, CCSlice mangled,
+                          CCSliceArray type_args, CCArena* arena) {
+    return @emit(`typedef struct { ${type_args.items[0]} x; } ${mangled};`);
+}
 ```
 
 **Rule:** At a `Name::[args]` use site the compiler computes a unique mangled name, expands the template or invokes the factory once per distinct instantiation, splices the result, and rewrites the use site to the mangled name. Returning the empty slice is a lowering failure.
+
+**Rule:** Each `${expr}` slot in `@emit(\`...\`)` lowers to `cc_emit_tpl_append_slot(...)`, which uses C11 `_Generic` on the expression type to pick the append helper (`CCSlice`, integers, floating-point, or C string). Slot dispatch does not depend on variable names.
 
 **Rule:** This is the same registration machinery as UFCS custom lowering (§9.0): the library owns the C lowering, the compiler owns the splice.
 
@@ -6424,17 +6453,24 @@ type_of(T).name        // const char* display spelling
 }
 ```
 
-Compiled factories and `@comptime` blocks read the same field set through a string-only callback:
+Compiled factories and `@comptime` blocks read the same field set through value helpers or the legacy byte callbacks:
 
 ```c
+typedef struct CCReflectField { char name[128]; char type[128]; int index; } CCReflectField;
+int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out);  // 0 ok, -1 err
+
 int cc_reflect_field_count(const char* type_name);                              // -1 if unknown
 int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
 ```
 
+**Rule:** `@comptime for` loop variables (`f.name`, `f.type`, `f.typestr`, `f.index`) and `${...}` slots inside `@emit(\`...\`)` share the same field metadata.
+
 **Rule:** Field name and type accessors write at most `buf_sz - 1` bytes plus a NUL and return the byte count, or `-1` when `idx` is out of range. A returned type spelling may be passed back into `cc_reflect_field_count` to descend into nested struct fields.
 
 **Rule:** Field reflection is all-or-nothing. `type_of(T).fields`, `@comptime for`, and `cc_reflect_field_*` share one field parser. If `T` is not found, or any member uses a form not modeled (array, bitfield, function pointer, nested or anonymous aggregate, multi-declarator), reflection yields no fields: `cc_reflect_field_count` returns `-1` and `@comptime for` is a compile-time error. A partial or guessed field set is never produced.
+
+**Implementation note:** By default the compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor (`CC_COMPTIME_UNIFIED_EXEC=1`). Set `CC_COMPTIME_UNIFIED_EXEC=0` to use the legacy structural text resolver only. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
 
 ---
 

@@ -1,0 +1,34 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* D6: a compiled generic factory that emits syntactically invalid C must be
+ * rejected at the emit site, attributed to the use site, instead of surfacing
+ * as a confusing error deep in the merged translation unit. */
+
+@comptime CCSlice bad_factory(CCSlice generic_name, CCSlice mangled,
+                              CCSliceArray type_args, CCArena *arena) {
+    static char buf[4096];
+    (void)generic_name;
+    (void)arena;
+    if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
+    /* Missing the separating ';' after `first` — a definite syntax error. */
+    int n = snprintf(buf, sizeof(buf),
+        "typedef struct { %.*s first %.*s second; } %.*s;\n",
+        (int)type_args.items[0].len, (char*)type_args.items[0].ptr,
+        (int)type_args.items[0].len, (char*)type_args.items[0].ptr,
+        (int)mangled.len, (char*)mangled.ptr);
+    if (n <= 0) return cc_slice_empty();
+    return cc_slice_from_parts(buf, (size_t)n, CC_SLICE_ID_UNTRACKED, sizeof(buf));
+}
+
+@comptime {
+    cc_generic_register("Bad", bad_factory);
+}
+
+int main(void) {
+    Bad::[int] b;
+    (void)b;
+    return 0;
+}

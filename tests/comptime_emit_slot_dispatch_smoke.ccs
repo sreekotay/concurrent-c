@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* ${...} slots in @emit use type-driven dispatch (_Generic), not identifier names. */
+
+@comptime CCSlice slot_dispatch_factory(CCSlice gname, CCSlice sym,
+                                        CCSliceArray type_args, CCArena *arena) {
+    (void)gname;
+    (void)arena;
+    if (type_args.len < 2 || !sym.ptr) return cc_slice_empty();
+    CCSlice elem0 = type_args.items[0];
+    CCSlice elem1 = type_args.items[1];
+    int slot_n = 42;
+    return @emit(`
+        typedef struct { ${elem0} a; ${elem1} b; } ${sym};
+        enum { ${sym}_marker = ${slot_n} };
+    `);
+}
+
+@comptime {
+    cc_generic_register("SlotPair", slot_dispatch_factory);
+}
+
+int main(void) {
+    SlotPair::[int, double] p;
+    (void)p;
+    if (SlotPair_int_double_marker != 42) return 1;
+    printf("comptime_emit_slot_dispatch_smoke ok\n");
+    return 0;
+}

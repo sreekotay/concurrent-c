@@ -9,6 +9,7 @@
 #include "../visitor/pass_create.h"
 #include "../visitor/pass_unwrap_destroy.h"
 #include "../preprocess/emit_plan.h"
+#include "../preprocess/comptime_prepare.h"
 #include "preprocess/preprocess.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,23 +43,14 @@ int cc_build_parse_input(const char* file_buf,
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
     }
-    /* Seam: expand `@comptime for`/`if` on the whole buffer BEFORE collecting
-     * intrinsics, so reflection-driven cc_instantiate / cc_emit calls nested
-     * inside `@comptime { ... }` blocks are concrete by the time the collectors
-     * (and the block-blanker below) run.  The `for` resolver needs T's
-     * definition, which lives in this buffer, not in the block body alone.
-     * The later in-preprocess resolve (cc_preprocess_for_initial_parse) then
-     * no-ops on the already-expanded constructs. */
-    {
-        char* resolved = cc__resolve_comptime_if(buf, got, input_path);
-        if (resolved == (char*)-1) goto fail_buf;
-        if (resolved) { free(buf); buf = resolved; got = strlen(buf); }
-    }
+    /* Seam: expand `@comptime for`/`if`, then lower `@emit`/`@string` templates
+     * before comptime execution (see cc_comptime_prepare_source). */
+    if (cc_comptime_prepare_source(&buf, &got, input_path) != 0) goto fail_buf;
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
     if (cc_emit_plan_exec_comptime_blocks(buf, got, input_path) != 0) goto fail_buf;
     cc_emit_plan_collect_comptime_emits(buf, got);
-    if (cc_emit_plan_compile_generic_factories(buf, got, input_path) != 0) goto fail_buf;
+    /* Generic factory dylibs compile lazily at Name::[args] use sites. */
     cc_emit_plan_clear_comptime_instantiations();
     cc_emit_plan_collect_comptime_instantiations(buf, got);
     {

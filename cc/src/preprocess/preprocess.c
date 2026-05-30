@@ -14,9 +14,13 @@
 
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
+#include "comptime/executor.h"
 #include "comptime/symbols.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/comptime_prepare.h"
+#include "preprocess/emit_limits.h"
+#include "preprocess/template_scan.h"
 #include "preprocess/type_registry.h"
 #include "preprocess/type_graph.h"
 #include "result_spec.h"
@@ -1631,74 +1635,87 @@ static int cc__rewrite_template_body(char** out,
                                      const char* builder_name,
                                      const char* policy_name,
                                      const char* arena_name) {
-    size_t i = body_s;
-    size_t lit_start = body_s;
-    while (i < body_e) {
-        if (src[i] == '$' && i + 1 < body_e) {
-            size_t tag_s = 0, tag_e = 0, brace_pos = 0;
-            int tagged = 0;
-            int ok = 0;
-            if (src[i + 1] == '{') {
-                brace_pos = i + 1;
-                ok = 1;
-            } else if (i + 2 < body_e && src[i + 1] == '~' &&
-                       cc__is_template_tag_start(src, body_e, i + 2)) {
-                size_t t = i + 2;
-                while (t < body_e && cc_is_ident_char(src[t])) t++;
-                if (t < body_e && src[t] == '{') {
-                    tagged = 1;
-                    tag_s = i + 2;
-                    tag_e = t;
-                    brace_pos = t;
-                    ok = 1;
-                }
-            }
-            if (ok && cc__is_escaped_dollar(src, body_s, i)) ok = 0;
-            if (!ok) {
-                i++;
-                continue;
-            }
-            if (lit_start < i) {
-                cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name, src + lit_start, i - lit_start);
-            }
-            {
-                size_t expr_end = 0;
-                if (cc__scan_interp_body(src, n, brace_pos, &expr_end) != 0) return -1;
-                if (policy_name && policy_name[0]) {
-                    cc__sb_append_fmt_local(out, out_len, out_cap,
-                                            "cc_string_push_policy(&%s, %s, %s, ",
-                                            builder_name, policy_name, arena_name);
-                    if (tagged) {
-                        cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
-                        cc__append_c_string_escaped(out, out_len, out_cap, src + tag_s, tag_e - tag_s);
-                        cc_sb_append_cstr(out, out_len, out_cap, "), ");
-                    } else {
-                        cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty(), ");
-                    }
-                    cc_sb_append_cstr(out, out_len, out_cap, "cc__string_slot_arg((");
-                    cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
+    size_t pos = body_s;
+    while (pos < body_e) {
+        CCTemplatePiece piece;
+        int r = cc_template_next_piece(src, n, body_s, body_e, &pos, &piece);
+        if (r < 0) return -1;
+        if (r == 0) break;
+        if (piece.lit_len > 0) {
+            cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name,
+                                           src + piece.lit_off, piece.lit_len);
+        }
+        if (piece.kind == CC_TPL_PIECE_SLOT || piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
+            if (policy_name && policy_name[0]) {
+                cc__sb_append_fmt_local(out, out_len, out_cap,
+                                        "cc_string_push_policy(&%s, %s, %s, ",
+                                        builder_name, policy_name, arena_name);
+                if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
+                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
+                    cc__append_c_string_escaped(out, out_len, out_cap,
+                                                src + piece.tag_off, piece.tag_len);
                     cc_sb_append_cstr(out, out_len, out_cap, "), ");
-                    cc_sb_append_cstr(out, out_len, out_cap, arena_name);
-                    cc_sb_append_cstr(out, out_len, out_cap, ")); ");
                 } else {
-                    if (tagged) return -2;
-                    cc__sb_append_fmt_local(out, out_len, out_cap,
-                                            "cc__string_slot_push(&%s, (",
-                                            builder_name);
-                    cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
-                    cc_sb_append_cstr(out, out_len, out_cap, "), ");
-                    cc_sb_append_cstr(out, out_len, out_cap, arena_name);
-                    cc_sb_append_cstr(out, out_len, out_cap, "); ");
+                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty(), ");
                 }
-                i = expr_end + 1;
-                lit_start = i;
-                continue;
+                cc_sb_append_cstr(out, out_len, out_cap, "cc__string_slot_arg((");
+                cc_sb_append(out, out_len, out_cap, src + piece.expr_off, piece.expr_len);
+                cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+                cc_sb_append_cstr(out, out_len, out_cap, ")); ");
+            } else {
+                if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) return -2;
+                cc__sb_append_fmt_local(out, out_len, out_cap,
+                                        "cc__string_slot_push(&%s, (",
+                                        builder_name);
+                cc_sb_append(out, out_len, out_cap, src + piece.expr_off, piece.expr_len);
+                cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+                cc_sb_append_cstr(out, out_len, out_cap, "); ");
             }
         }
-        i++;
     }
-    if (lit_start < body_e) {
-        cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name, src + lit_start, body_e - lit_start);
+    return 0;
+}
+
+/* Append a decoded template literal chunk into a comptime emit buffer. */
+static void cc__emit_tpl_literal_push(char** out, size_t* out_len, size_t* out_cap,
+                                      const char* buf_name, const char* pos_name,
+                                      const char* cap_name, const char* src, size_t len) {
+    if (!buf_name || !src || len == 0) return;
+    cc__sb_append_fmt_local(out, out_len, out_cap,
+                            "cc_emit_tpl_append_lit(%s, &%s, %s, ",
+                            buf_name, pos_name, cap_name);
+    cc__append_c_string_escaped(out, out_len, out_cap, src, len);
+    cc__sb_append_fmt_local(out, out_len, out_cap, ", %zu); ",
+                            cc__template_literal_decoded_len(src, len));
+}
+
+/* Rewrite a backtick body into cc_emit_tpl_append_* calls (same ${...} slots as
+ * @string, but targeting a fixed char buffer instead of CCString). */
+static int cc__rewrite_emit_template_body(char** out, size_t* out_len, size_t* out_cap,
+                                          const char* src, size_t n,
+                                          size_t body_s, size_t body_e,
+                                          const char* buf_name, const char* pos_name,
+                                          const char* cap_name) {
+    size_t pos = body_s;
+    while (pos < body_e) {
+        CCTemplatePiece piece;
+        int r = cc_template_next_piece(src, n, body_s, body_e, &pos, &piece);
+        if (r < 0) return -1;
+        if (r == 0) break;
+        if (piece.lit_len > 0) {
+            cc__emit_tpl_literal_push(out, out_len, out_cap, buf_name, pos_name,
+                                      cap_name, src + piece.lit_off, piece.lit_len);
+        }
+        if (piece.kind == CC_TPL_PIECE_SLOT || piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
+            if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) return -2;
+            cc__sb_append_fmt_local(out, out_len, out_cap,
+                                    "cc_emit_tpl_append_slot(%s, &%s, %s, (",
+                                    buf_name, pos_name, cap_name);
+            cc_sb_append(out, out_len, out_cap, src + piece.expr_off, piece.expr_len);
+            cc_sb_append_cstr(out, out_len, out_cap, ")); ");
+        }
     }
     return 0;
 }
@@ -1741,6 +1758,115 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             last_emit = arg_e + 1;
             i = arg_e + 1;
             continue;
+        }
+        if (c == '@' && i + 5 < n && memcmp(src + i, "@emit(", 6) == 0) {
+            size_t arg1_s = cc_skip_ws_and_comments(src, n, i + 6);
+            int has_anchor = 0;
+            int anchor_val = 0;
+            size_t tick_s = arg1_s;
+            size_t tick_e = 0;
+            char buf_name[64], pos_name[64], cap_name[64];
+            if (arg1_s < n && src[arg1_s] != '`') {
+                size_t anchor_e = cc__scan_to_top_level_delim(src, n, arg1_s, ',', ')');
+                if (anchor_e >= n) {
+                    char rel[1024];
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax", "unterminated @emit(...)");
+                    free(out);
+                    return (char*)-1;
+                }
+                if (src[anchor_e] == ')') {
+                    char rel[1024];
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax", "@emit(anchor, `...`) requires a template literal");
+                    free(out);
+                    return (char*)-1;
+                }
+                if (src[arg1_s] >= '0' && src[arg1_s] <= '9') {
+                    while (arg1_s < anchor_e && src[arg1_s] >= '0' && src[arg1_s] <= '9')
+                        anchor_val = anchor_val * 10 + (src[arg1_s++] - '0');
+                    has_anchor = 1;
+                } else if (anchor_e - arg1_s == (int)strlen("CC_EMIT_AFTER_PRELUDE") &&
+                           memcmp(src + arg1_s, "CC_EMIT_AFTER_PRELUDE", anchor_e - arg1_s) == 0) {
+                    anchor_val = 0; has_anchor = 1;
+                } else if (anchor_e - arg1_s == (int)strlen("CC_EMIT_BEFORE_FIRST_USE") &&
+                           memcmp(src + arg1_s, "CC_EMIT_BEFORE_FIRST_USE", anchor_e - arg1_s) == 0) {
+                    anchor_val = 1; has_anchor = 1;
+                } else if (anchor_e - arg1_s == (int)strlen("CC_EMIT_AT_COMPTIME_SITE") &&
+                           memcmp(src + arg1_s, "CC_EMIT_AT_COMPTIME_SITE", anchor_e - arg1_s) == 0) {
+                    anchor_val = 2; has_anchor = 1;
+                } else {
+                    char rel[1024];
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax", "unknown @emit anchor");
+                    free(out);
+                    return (char*)-1;
+                }
+                tick_s = cc_skip_ws_and_comments(src, n, anchor_e + 1);
+            }
+            if (tick_s >= n || src[tick_s] != '`') {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax", "@emit(...) requires a backtick template literal");
+                free(out);
+                return (char*)-1;
+            }
+            if (cc__scan_template_literal(src, n, tick_s, &tick_e) != 0) {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax", "unterminated template literal in @emit(...)");
+                free(out);
+                return (char*)-1;
+            }
+            {
+                size_t close_p = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                if (close_p >= n || src[close_p] != ')') {
+                    char rel[1024];
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax", "unterminated @emit(...)");
+                    free(out);
+                    return (char*)-1;
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                snprintf(buf_name, sizeof(buf_name), "__cc_et_b_%d", rewrite_count);
+                snprintf(pos_name, sizeof(pos_name), "__cc_et_p_%d", rewrite_count);
+                snprintf(cap_name, sizeof(cap_name), "sizeof(%s)", buf_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "({ static char ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, buf_name);
+                cc__sb_append_fmt_local(&out, &out_len, &out_cap, "[%d]; size_t ",
+                                        CC_EMIT_TPL_BUF_SIZE);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, pos_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, " = 0; ");
+                {
+                    int tpl_rc = cc__rewrite_emit_template_body(&out, &out_len, &out_cap, src, n,
+                                                                tick_s + 1, tick_e,
+                                                                buf_name, pos_name, cap_name);
+                    if (tpl_rc != 0) {
+                        char rel[1024];
+                        const char* msg = (tpl_rc == -2)
+                            ? "tagged template slots require @string(policy, `...`, arena)"
+                            : "unterminated interpolation in @emit template";
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", msg);
+                        free(out);
+                        return (char*)-1;
+                    }
+                }
+                if (has_anchor) {
+                    cc__sb_append_fmt_local(&out, &out_len, &out_cap,
+                                            "cc_emit_tpl_splice(%d, cc_emit_tpl_finish(%s, %s, %s)); ",
+                                            anchor_val, buf_name, pos_name, cap_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "0; })");
+                } else {
+                    cc__sb_append_fmt_local(&out, &out_len, &out_cap,
+                                            "cc_emit_tpl_finish(%s, %s, %s); })",
+                                            buf_name, pos_name, cap_name);
+                }
+                rewrite_count++;
+                last_emit = close_p + 1;
+                i = close_p + 1;
+                continue;
+            }
         }
         if (c == '@' && i + 7 < n && memcmp(src + i, "@string(", 8) == 0) {
             size_t arg1_s = cc_skip_ws_and_comments(src, n, i + 8);
@@ -1917,6 +2043,10 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
 
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path) {
     return cc__rewrite_string_templates(src, n, input_path);
+}
+
+int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out) {
+    return cc__scan_template_literal(src, n, tick_pos, tick_end_out);
 }
 
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);
@@ -4755,7 +4885,7 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     gname[id_e - i] = 0;
     tmpl = cc_emit_plan_lookup_generic_template(gname, &arity);
     if (!tmpl) {
-        if (!cc_emit_plan_lookup_generic_factory(gname)) return 0;
+        if (!cc_emit_plan_lookup_generic_factory_handler(gname)) return 0;
         use_factory = 1;
         arity = 0;
     }
@@ -4811,45 +4941,88 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
 
     /* expand template or invoke compiled factory once per mangled name. */
     {
-        char def[8192];
+        char def[CC_GENERIC_DEF_MAX];
+        char rel[1024];
+        int use_line = 1, use_col = 1;
+        for (size_t k = 0; k < i && k < n; k++) {
+            if (src[k] == '\n') { use_line++; use_col = 1; } else { use_col++; }
+        }
         if (use_factory) {
-            /* D6.3: point the reflection callback at the buffer we're rewriting
-             * so the factory can introspect struct fields of its type args. */
+            char ferr[512];
             cc_emit_plan_set_reflect_source(src, n);
+            if (cc_emit_plan_ensure_generic_factory(gname, input_path, ferr, sizeof(ferr)) != 0) {
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                use_line, use_col, "type",
+                                "compiled generic factory '%s' failed to compile: %s",
+                                gname, ferr);
+                {
+                    const char* handler = cc_emit_plan_lookup_generic_factory_handler(gname);
+                    int hline = handler ? cc_comptime_fn_registry_lookup_line(handler) : 0;
+                    if (handler && hline > 0)
+                        fprintf(stderr,
+                                "  note: in @comptime factory '%s' at line %d\n",
+                                handler, hline);
+                }
+                return -1;
+            }
             if (!cc_emit_plan_invoke_generic_factory(gname, mangled, orig_args, nargs,
                                                      def, sizeof(def))) {
-                char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                0, 0, "type",
-                                "compiled generic factory '%s' failed for '%s'", gname, mangled);
-                return 0;
+                                use_line, use_col, "type",
+                                "compiled generic factory '%s' failed for '%s' "
+                                "(returned empty slice, @emit buffer overflow, or runtime error)",
+                                gname, mangled);
+                return -1;
             }
         } else {
-            size_t o = 0;
-            for (size_t t = 0; tmpl[t] && o + 1 < sizeof(def); t++) {
-                if (tmpl[t] == '$') {
-                    char c = tmpl[t + 1];
-                    if (c == '$') { def[o++] = '$'; t++; continue; }
-                    if (c == '0') {
-                        for (size_t k = 0; mangled[k] && o + 1 < sizeof(def); k++) def[o++] = mangled[k];
-                        t++;
-                        continue;
-                    }
-                    if (c >= '1' && c <= '9') {
-                        int idx = c - '1';
-                        if (idx < nargs) {
-                            const char* a = orig_args[idx];
-                            for (size_t k = 0; a[k] && o + 1 < sizeof(def); k++) def[o++] = a[k];
-                        }
-                        t++;
-                        continue;
-                    }
-                    def[o++] = '$';
-                    continue;
-                }
-                def[o++] = tmpl[t];
+            const char* arg_ptrs[8];
+            for (int ai = 0; ai < nargs && ai < 8; ai++) arg_ptrs[ai] = orig_args[ai];
+            if (!cc_template_expand_generic(tmpl, mangled, arg_ptrs, nargs, def, sizeof(def))) {
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                use_line, use_col, "type",
+                                "generic template '%s' expansion for '%s' exceeds %d bytes",
+                                gname, mangled, CC_GENERIC_DEF_MAX);
+                return -1;
             }
-            def[o] = 0;
+        }
+        /* Validate the generated definition at the emit site so a malformed
+         * factory/template fails here, attributed to the use site, rather than
+         * surfacing as a confusing error deep in the merged translation unit. */
+        {
+            char verr[512];
+            int frag_line = 0;
+            if (cc_comptime_validate_c_fragment(def, &frag_line, verr, sizeof(verr)) != 0) {
+                if (!cc_emit_plan_generic_invalid_report_once(mangled)) return -1;
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                use_line, use_col, "type",
+                                "%s '%s' produced invalid C for '%s': %s",
+                                use_factory ? "compiled generic factory" : "generic template",
+                                gname, mangled, verr);
+                if (frag_line > 0) {
+                    fprintf(stderr, "  note: in generated definition, line %d\n", frag_line);
+                    /* Echo the offending generated line for context. */
+                    {
+                        int cur = 1;
+                        const char* ls = def;
+                        const char* p = def;
+                        while (*p && cur < frag_line) { if (*p == '\n') { cur++; ls = p + 1; } p++; }
+                        if (cur == frag_line) {
+                            const char* le = ls;
+                            while (*le && *le != '\n') le++;
+                            fprintf(stderr, "  %.*s\n", (int)(le - ls), ls);
+                        }
+                    }
+                }
+                if (use_factory) {
+                    const char* handler = cc_emit_plan_lookup_generic_factory_handler(gname);
+                    int hline = handler ? cc_comptime_fn_registry_lookup_line(handler) : 0;
+                    if (handler && hline > 0)
+                        fprintf(stderr,
+                                "  note: in @comptime factory '%s' at line %d\n",
+                                handler, hline);
+                }
+                return -1;
+            }
         }
         cc_emit_plan_generic_def_emit_once(mangled, def);
     }
@@ -4881,9 +5054,14 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         /* D6.0: library-registered generic factory `Name::[args]` (checked
          * before the built-in CCVec/Map keywords; those names are never
          * registered as templates, so they fall through unaffected). */
-        if (cc__try_rewrite_user_generic(src, n, input_path, &out, &out_len, &out_cap,
-                                         &i, &last_emit)) {
-            continue;
+        {
+            int gr = cc__try_rewrite_user_generic(src, n, input_path, &out, &out_len, &out_cap,
+                                                  &i, &last_emit);
+            if (gr < 0) {
+                free(out);
+                return (char*)-1;
+            }
+            if (gr) continue;
         }
 
         /* Look for canonical CCVec::[ / cc_vec_new::[ and Map forms. */
@@ -8033,6 +8211,23 @@ chain_cleanup:
     return out;
 }
 
+/* Process-local memo for the include-expanded form of a source file.
+ *
+ * `cc_preprocess_include_expanded` shells out to the system C preprocessor
+ * (`cc -E`) — a full subprocess fork/exec plus a complete preprocess of the
+ * file and all of its system/CC includes.  Within one compile the same TU is
+ * expanded up to three times (const pass → main-pass parse → visit_codegen),
+ * always producing identical output because the file does not change during
+ * the build.  Caching the last result by path collapses those redundant
+ * subprocess spawns to one.  Calls for a given TU arrive consecutively, so a
+ * single-entry cache captures the redundancy; switching files evicts it.
+ *
+ * The function is pure (reads `input_path`, returns freshly-allocated text),
+ * so returning a strdup of the cached buffer is behaviourally identical to a
+ * fresh expansion. */
+static char* cc__incexp_cache_path = NULL;
+static char* cc__incexp_cache_buf = NULL;
+
 char* cc_preprocess_include_expanded(const char* input_path) {
     char repo_root[1024];
     char cmd[4096];
@@ -8041,6 +8236,10 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     size_t len = 0;
     size_t cap = 64 * 1024;
     if (!input_path || !input_path[0]) return NULL;
+    if (cc__incexp_cache_buf && cc__incexp_cache_path &&
+        strcmp(cc__incexp_cache_path, input_path) == 0) {
+        return strdup(cc__incexp_cache_buf);
+    }
     repo_root[0] = '\0';
     if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
         snprintf(cmd, sizeof(cmd),
@@ -8081,6 +8280,23 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     }
     buf[len] = '\0';
     pclose(pp);
+    /* Cache as the master copy; hand the caller an independent copy so its
+     * free() never touches the cache. */
+    {
+        char* dup = strdup(buf);
+        if (dup) {
+            free(cc__incexp_cache_path);
+            free(cc__incexp_cache_buf);
+            cc__incexp_cache_path = strdup(input_path);
+            if (cc__incexp_cache_path) {
+                cc__incexp_cache_buf = buf;   /* master retained */
+                return dup;                   /* caller owns dup */
+            }
+            /* strdup(input_path) failed: don't cache, return buf directly. */
+            cc__incexp_cache_buf = NULL;
+            free(dup);
+        }
+    }
     return buf;
 }
 
@@ -8748,6 +8964,33 @@ static int cc__comptime_eval_pred_via_tcc(const char* pred, size_t n,
     return 1;
 }
 
+/* Phase-2 unified engine: evaluate @comptime if predicates exclusively via the
+ * libtcc executor when CC_COMPTIME_UNIFIED_EXEC=1.  Falls back to the legacy
+ * structural + TCC path when the flag is unset or the executor rejects the pred. */
+static int cc__comptime_eval_pred_unified(const char* src, size_t n,
+                                          const char* pred, size_t pred_n,
+                                          const char* type_prelude, long* out) {
+    if (cc_comptime_unified_exec_enabled()) {
+        char* work = (char*)malloc(pred_n + 1);
+        if (work) {
+            memcpy(work, pred, pred_n);
+            work[pred_n] = '\0';
+            cc_comptime_fn_registry_scan(src, n);
+            {
+                int64_t iv = 0;
+                if (cc_comptime_exec_eval_int(work, NULL, &iv, NULL, 0) == 0) {
+                    *out = (long)iv;
+                    free(work);
+                    return 1;
+                }
+            }
+            free(work);
+        }
+    }
+    if (cc__comptime_eval_pred(pred, pred_n, out)) return 1;
+    return cc__comptime_eval_pred_via_tcc(pred, pred_n, type_prelude, out);
+}
+
 /* Fix A: rewrite macro-expanded `cc_type_of("T")` back to the canonical
  * `type_of(T)` spelling so comptime if/for logic only handles one form.
  * Users may still write `cc_type_of("T")` by hand; pass_check_type_of keeps
@@ -8998,6 +9241,37 @@ void cc_ct_free_fields(CCCtField* fields, size_t n) {
     cc__ct_free_fields(fields, n);
 }
 
+/* Phase-2 unified engine: load struct fields via cc_reflect_field_* instead of
+ * parsing the struct body from source when CC_COMPTIME_UNIFIED_EXEC=1. */
+static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
+                                          CCCtField** out, size_t* out_n) {
+    if (!tname || tlen == 0 || tlen >= 256) return 0;
+    char name[256];
+    memcpy(name, tname, tlen);
+    name[tlen] = '\0';
+    int nf = cc_reflect_field_count(name);
+    if (nf <= 0) return 0;
+    CCCtField* fs = (CCCtField*)calloc((size_t)nf, sizeof(CCCtField));
+    if (!fs) return 0;
+    for (int i = 0; i < nf; i++) {
+        char nbuf[256], tbuf[256];
+        if (cc_reflect_field_name(name, i, nbuf, (int)sizeof(nbuf)) < 0 ||
+            cc_reflect_field_type(name, i, tbuf, (int)sizeof(tbuf)) < 0) {
+            cc__ct_free_fields(fs, (size_t)nf);
+            return 0;
+        }
+        fs[i].name = strdup(nbuf);
+        fs[i].type = strdup(tbuf);
+        if (!fs[i].name || !fs[i].type) {
+            cc__ct_free_fields(fs, (size_t)nf);
+            return 0;
+        }
+    }
+    *out = fs;
+    *out_n = (size_t)nf;
+    return 1;
+}
+
 /* Append one unrolled copy of BODY (body[bs..be)) with the loop variable
  * `lv` (length lvlen) substituted for field `f` at index `idx`. */
 static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
@@ -9120,22 +9394,32 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     size_t body_o, body_c;
     const char* rsrc = reflect_src ? reflect_src : src;
     size_t rn = reflect_src ? reflect_n : n;
-    if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
-        !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
-        cc__ct_free_fields(fields, nf);
-        fprintf(stderr,
-                "%s: error: `@comptime for` needs an in-scope struct type with "
-                "simple fields; `%.*s` is unknown or has unsupported field forms "
-                "(arrays/bitfields/function-pointers/multiple-declarators/nested "
-                "aggregates).\n",
-                input_path ? input_path : "<input>", (int)(te - ts), src + ts);
-        return -1;
+    {
+        int unified = cc_comptime_unified_exec_enabled();
+        if (unified && cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields, &nf)) {
+            /* fields loaded via host reflection callbacks */
+        } else if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
+                   !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
+            cc__ct_free_fields(fields, nf);
+            fprintf(stderr,
+                    "%s: error: `@comptime for` needs an in-scope struct type with "
+                    "simple fields; `%.*s` is unknown or has unsupported field forms "
+                    "(arrays/bitfields/function-pointers/multiple-declarators/nested "
+                    "aggregates).\n",
+                    input_path ? input_path : "<input>", (int)(te - ts), src + ts);
+            return -1;
+        }
     }
 
     cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
-    for (size_t fi = 0; fi < nf; fi++) {
-        cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
-                                 src + lv_s, lvlen, &fields[fi], fi);
+    {
+        int wrap_exec = cc_template_body_needs_emit_exec(src, n, bb + 1, bb_close);
+        for (size_t fi = 0; fi < nf; fi++) {
+            if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, "@comptime { ");
+            cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
+                                     src + lv_s, lvlen, &fields[fi], fi);
+            if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, " } ");
+        }
     }
     cc__ct_free_fields(fields, nf);
     *io_last_emit = bb_close + 1;
@@ -9157,9 +9441,23 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     static const char ATC[] = "@comptime";
     const size_t ATCN = sizeof(ATC) - 1;
     size_t i = 0;
-    /* Fix B: include-expanded view for struct-body reflection. */
+    /* Fix B: include-expanded view for struct-body reflection.
+     *
+     * `cc__build_reflection_view` runs a full TCC CPP expansion of the TU
+     * (≈the cost of a whole parse) and is only ever consumed by
+     * `cc__try_expand_comptime_for` below, which fires solely for
+     * `@comptime for (F in type_of(T).fields)`.  The vast majority of TUs
+     * contain no `@comptime` construct at all, yet this function is invoked
+     * (in a fixpoint) from three pipeline sites per compile — so the
+     * unconditional expansion was a dominant, pure-waste hotspot.  Gate it on
+     * the presence of an actual `@comptime` token in code; when absent, the
+     * scan loop below never enters the `@comptime` branch, so skipping the
+     * view is behaviourally identical. */
     size_t reflect_n = n;
-    char* reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
+    char* reflect_view = NULL;
+    if (cc_contains_token_top_level(src, n, "@comptime")) {
+        reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
+    }
     const char* reflect_src = reflect_view ? reflect_view : src;
     /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
      * (and once) the first time a predicate needs the host evaluator. */
@@ -9187,31 +9485,27 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         size_t pred_close;
         if (!cc_find_matching_paren(src, n, lp, &pred_close)) { i++; continue; }
         long val = 0;
-        if (!cc__comptime_eval_pred(src + lp + 1, pred_close - (lp + 1), &val)) {
-            if (!type_prelude_built) {
-                /* Layout predicates: keep the local-buffer prelude (expanded
-                 * headers poison the in-process TCC evaluator).  Fix B uses the
-                 * include-expanded view only for struct-body reflection. */
-                type_prelude = cc__extract_type_decls_prelude(src, n);
-                type_prelude_built = 1;
-            }
-            if (!cc__comptime_eval_pred_via_tcc(src + lp + 1, pred_close - (lp + 1),
-                                                type_prelude, &val)) {
-                fprintf(stderr,
-                        "%s: error: `@comptime if` condition is not a compile-time "
-                        "constant the compiler can decide.\n"
-                        "  it must fold to an integer via structural type facts "
-                        "(type_of(T).kind/.nfields, CC_TK_*) or a host-C constant "
-                        "expression the backend can evaluate (sizeof/_Alignof/"
-                        "__builtin_offsetof over in-scope types, integer arithmetic).\n"
-                        "  it cannot reference runtime values or an unclassified "
-                        "user type's kind/layout.\n",
-                        input_path ? input_path : "<input>");
-                free(type_prelude);
-                free(reflect_view);
-                free(out);
-                return (char*)-1;
-            }
+        if (!type_prelude_built) {
+            type_prelude = cc__extract_type_decls_prelude(src, n);
+            type_prelude_built = 1;
+        }
+        if (!cc__comptime_eval_pred_unified(src, n,
+                                            src + lp + 1, pred_close - (lp + 1),
+                                            type_prelude, &val)) {
+            fprintf(stderr,
+                    "%s: error: `@comptime if` condition is not a compile-time "
+                    "constant the compiler can decide.\n"
+                    "  it must fold to an integer via structural type facts "
+                    "(type_of(T).kind/.nfields, CC_TK_*) or a host-C constant "
+                    "expression the backend can evaluate (sizeof/_Alignof/"
+                    "__builtin_offsetof over in-scope types, integer arithmetic).\n"
+                    "  it cannot reference runtime values or an unclassified "
+                    "user type's kind/layout.\n",
+                    input_path ? input_path : "<input>");
+            free(type_prelude);
+            free(reflect_view);
+            free(out);
+            return (char*)-1;
         }
         size_t tb = cc_skip_ws_len(src, n, pred_close + 1);
         if (tb >= n || src[tb] != '{') { i++; continue; }

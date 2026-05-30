@@ -3,27 +3,18 @@
 #include <ccc/cc_slice.cch>
 #include <stdio.h>
 
-/* D6.1: compiled generic factory — handler returns definition text via CCSlice. */
+/* @emit backtick builder — same ${...} grammar as @string, returns CCSlice. */
 
 @comptime CCSlice pair_factory(CCSlice generic_name, CCSlice mangled,
                                CCSliceArray type_args, CCArena *arena) {
-    static char buf[4096];
     (void)generic_name;
     (void)arena;
     if (type_args.len < 2 || !mangled.ptr) return cc_slice_empty();
-    int n = snprintf(buf, sizeof(buf),
-        "typedef struct { %.*s first; %.*s second; } %.*s;\n"
-        "static inline %.*s %.*s_make(%.*s a, %.*s b) { %.*s r; r.first=a; r.second=b; return r; }\n",
-        (int)type_args.items[0].len, (char*)type_args.items[0].ptr,
-        (int)type_args.items[1].len, (char*)type_args.items[1].ptr,
-        (int)mangled.len, (char*)mangled.ptr,
-        (int)mangled.len, (char*)mangled.ptr,
-        (int)mangled.len, (char*)mangled.ptr,
-        (int)type_args.items[0].len, (char*)type_args.items[0].ptr,
-        (int)type_args.items[1].len, (char*)type_args.items[1].ptr,
-        (int)mangled.len, (char*)mangled.ptr);
-    if (n <= 0) return cc_slice_empty();
-    return cc_slice_from_parts(buf, (size_t)n, CC_SLICE_ID_UNTRACKED, sizeof(buf));
+    return @emit(`
+        typedef struct { ${type_args.items[0]} first; ${type_args.items[1]} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${type_args.items[0]} a, ${type_args.items[1]} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }`);
 }
 
 @comptime {

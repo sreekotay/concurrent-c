@@ -1,0 +1,68 @@
+/* Shared @emit template builder core — included by cc_emit_tpl.cch; codegen'd into libtcc prelude. */
+
+static inline void cc_emit_tpl_append_lit(char *buf, size_t *pos, size_t cap,
+                                          const char *lit, size_t lit_len) {
+    if (!buf || !pos || !lit || lit_len == 0) return;
+    if (*pos >= cap) return;
+    if (*pos + lit_len >= cap) {
+        *pos = cap;
+        return;
+    }
+    memcpy(buf + *pos, lit, lit_len);
+    *pos += lit_len;
+}
+
+static inline void cc_emit_tpl_append_cstr(char *buf, size_t *pos, size_t cap,
+                                           const char *s) {
+    if (!s) return;
+    cc_emit_tpl_append_lit(buf, pos, cap, s, strlen(s));
+}
+
+static inline void cc_emit_tpl_append_slice(char *buf, size_t *pos, size_t cap,
+                                            CCSlice s) {
+    if (!s.ptr || s.len == 0) return;
+    cc_emit_tpl_append_lit(buf, pos, cap, (const char *)s.ptr, s.len);
+}
+
+static inline void cc_emit_tpl_append_int(char *buf, size_t *pos, size_t cap,
+                                          long long v) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%lld", v);
+    if (n > 0) cc_emit_tpl_append_lit(buf, pos, cap, tmp, (size_t)n);
+}
+
+static inline void cc_emit_tpl_append_uint(char *buf, size_t *pos, size_t cap,
+                                           unsigned long long v) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%llu", v);
+    if (n > 0) cc_emit_tpl_append_lit(buf, pos, cap, tmp, (size_t)n);
+}
+
+static inline void cc_emit_tpl_append_double(char *buf, size_t *pos, size_t cap,
+                                             double v) {
+    char tmp[64];
+    int n = snprintf(tmp, sizeof(tmp), "%g", v);
+    if (n > 0) cc_emit_tpl_append_lit(buf, pos, cap, tmp, (size_t)n);
+}
+
+#define cc_emit_tpl_append_slot(buf, pos, cap, data) _Generic((data), \
+    CCSlice: cc_emit_tpl_append_slice, \
+    char *: cc_emit_tpl_append_cstr, \
+    const char *: cc_emit_tpl_append_cstr, \
+    int: cc_emit_tpl_append_int, \
+    unsigned int: cc_emit_tpl_append_uint, \
+    long: cc_emit_tpl_append_int, \
+    unsigned long: cc_emit_tpl_append_uint, \
+    long long: cc_emit_tpl_append_int, \
+    unsigned long long: cc_emit_tpl_append_uint, \
+    float: cc_emit_tpl_append_double, \
+    double: cc_emit_tpl_append_double, \
+    default: cc_emit_tpl_append_cstr \
+)((buf), (pos), (cap), (data))
+
+static inline CCSlice cc_emit_tpl_finish(char *buf, size_t pos, size_t cap) {
+    if (!buf || cap == 0) return cc_slice_empty();
+    if (pos >= cap) return cc_slice_empty();
+    buf[pos] = '\0';
+    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED, cap);
+}
