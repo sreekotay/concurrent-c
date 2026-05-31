@@ -1,0 +1,51 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Edge-push #1: enum reflection — a @comptime block reads a user enum's
+ * members (name + value, with C auto-increment over explicit gaps) from the
+ * host reflection callbacks and bakes an enum<->string table.  Only bytes and
+ * a scalar value cross the bind point. */
+
+typedef enum {
+    LOG_TRACE,        /* 0 (auto) */
+    LOG_DEBUG,        /* 1 (auto) */
+    LOG_INFO = 10,    /* 10 (explicit) */
+    LOG_WARN,         /* 11 (auto after explicit) */
+    LOG_ERROR = 20,   /* 20 (explicit) */
+} LogLevel;
+
+@comptime {
+    int nc = cc_reflect_enum_count("LogLevel");
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { LOGLEVEL_COUNT = ${nc} };
+        static const char* loglevel_name(long long v) {
+          switch (v) {
+    `);
+    for (int i = 0; i < nc; i++) {
+        char nm[64];
+        long long val = 0;
+        cc_reflect_enum_name("LogLevel", i, nm, sizeof(nm));
+        cc_reflect_enum_value("LogLevel", i, &val);
+        @emit(CC_EMIT_AFTER_PRELUDE, `    case ${val}: return "${nm}";`);
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+            default: return "?";
+          }
+        }
+    `);
+}
+
+int main(void) {
+    if (LOGLEVEL_COUNT != 5) return 1;
+    if (strcmp(loglevel_name(0),  "LOG_TRACE") != 0) return 2;
+    if (strcmp(loglevel_name(1),  "LOG_DEBUG") != 0) return 3;
+    if (strcmp(loglevel_name(10), "LOG_INFO")  != 0) return 4;
+    if (strcmp(loglevel_name(11), "LOG_WARN")  != 0) return 5;
+    if (strcmp(loglevel_name(20), "LOG_ERROR") != 0) return 6;
+    if (strcmp(loglevel_name(99), "?")         != 0) return 7;
+    printf("comptime_reflect_enum_smoke ok count=%d 0:%s 10:%s 20:%s\n",
+           LOGLEVEL_COUNT, loglevel_name(0), loglevel_name(10), loglevel_name(20));
+    return 0;
+}

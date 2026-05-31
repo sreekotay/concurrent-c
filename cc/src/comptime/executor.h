@@ -51,4 +51,16 @@ int cc_comptime_validate_c_fragment(const char* fragment,
                                     int* out_frag_line,
                                     char* err_buf, size_t err_sz);
 
+/* In-process compiled-factory backend.  cc_comptime_exec_compile_tu compiles a
+ * full factory TU with libtcc and relocates it, returning a live opaque state in
+ * *out_state.  Entry points (e.g. `__cc_gen_factory_<handler>`) are resolved via
+ * cc_comptime_exec_lookup_symbol, and the state is freed with
+ * cc_comptime_exec_release once no resolved pointer remains in use.  Returns 0 on
+ * success, -1 on failure (including when libtcc is unavailable) so callers can
+ * fall back to the host-cc dylib path. */
+int cc_comptime_exec_compile_tu(const char* tu_src, void** out_state,
+                                char* err_buf, size_t err_sz);
+const void* cc_comptime_exec_lookup_symbol(void* state, const char* name);
+void cc_comptime_exec_release(void* state);
+
 #endif /* CC_COMPTIME_EXECUTOR_H */

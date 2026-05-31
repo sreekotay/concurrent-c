@@ -37,9 +37,9 @@ static CCSlice generic_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode,
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("generic_toy_", sizeof("generic_toy_") - 1),
-        method);
+        method, arena);
 }
 
 static CCSlice override_toy_legacy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
@@ -47,9 +47,9 @@ static CCSlice override_toy_legacy_ufcs(CCSlice recv_type, CCSlice method, CCSli
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("override_toy_legacy_", sizeof("override_toy_legacy_") - 1),
-        method);
+        method, arena);
 }
 
 static CCSlice override_toy_type_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
@@ -57,9 +57,9 @@ static CCSlice override_toy_type_ufcs(CCSlice recv_type, CCSlice method, CCSlice
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("override_toy_type_", sizeof("override_toy_type_") - 1),
-        method);
+        method, arena);
 }
 
 static CCSlice legacy_wild_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
@@ -67,9 +67,9 @@ static CCSlice legacy_wild_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode,
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("legacy_wild_alpha_", sizeof("legacy_wild_alpha_") - 1),
-        method);
+        method, arena);
 }
 
 @comptime {

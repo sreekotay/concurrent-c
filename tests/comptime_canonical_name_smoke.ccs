@@ -1,0 +1,37 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Naming/composition: cc_canonical_name produces the exact mangled name the
+ * compiler uses for base::[args].  We compute "Pair_int_double" in comptime and
+ * prove it is the real type name by also using Pair::[int,double] (which the
+ * rewriter mangles identically) — the helper can't drift from the compiler. */
+
+CC_GENERIC_FACTORY(Pair) {
+    (void)generic_name;
+    if (type_args.len < 2 || !mangled.ptr) return cc_slice_empty();
+    return @emit(`typedef struct { ${type_args.items[0]} first; ${type_args.items[1]} second; } ${mangled};`, arena);
+}
+
+@comptime {
+    const char* args[2] = { "int", "double" };
+    char name[128];
+    cc_canonical_name("Pair", args, 2, name, (int)sizeof(name));
+    @emit(CC_EMIT_AFTER_PRELUDE, `static const char* pair_canonical = "${name}";`);
+}
+
+int main(void) {
+    Pair::[int, double] p;
+    p.first = 7;
+    p.second = 1.5;
+    /* The compiler mangled the instantiation to this same name: */
+    Pair_int_double q = p;
+
+    if (strcmp(pair_canonical, "Pair_int_double") != 0) return 1;
+    if (q.first != 7) return 2;
+    printf("comptime_canonical_name_smoke ok name=%s first=%d\n",
+           pair_canonical, q.first);
+    return 0;
+}

@@ -483,6 +483,12 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
                 prep.buffer_pre_relower = NULL;
                 prep.buffer_pre_relower_len = 0;
             }
+            if (prep.buffer_codegen) {
+                root->codegen_buffer = prep.buffer_codegen;
+                root->codegen_buffer_len = prep.buffer_codegen_len;
+                prep.buffer_codegen = NULL;
+                prep.buffer_codegen_len = 0;
+            }
         }
     }
     cc_build_parse_input_free(&prep);

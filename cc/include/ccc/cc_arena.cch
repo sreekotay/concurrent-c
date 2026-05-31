@@ -365,6 +365,22 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
 #define cc_arena_alloc_T_count(T, arena, count) \
     ((T*)cc_arena_alloc((arena), sizeof(T) * (size_t)(count), _Alignof(T)))
 
+/* Concatenate two slices into a freshly arena-allocated slice.  This is the
+ * shared 2-arg form of cc_slice_concat_many (std/string.cch); it lives here in
+ * cc_arena.cch — the lowest header that has both CCSlice and cc_arena_alloc —
+ * so the UFCS name composers and `.ufcs` rewrite hooks can build
+ * `<prefix><method>` callee names without pulling in the heavier string header.
+ * Arena is the LAST argument by convention: read it as "concat(left, right)
+ * into arena". */
+static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArena *arena) {
+    size_t total = left.len + right.len;
+    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
+    if (!buf) return cc_slice_empty();
+    if (left.len > 0 && left.ptr) memcpy(buf, left.ptr, left.len);
+    if (right.len > 0 && right.ptr) memcpy(buf + left.len, right.ptr, right.len);
+    return cc_slice_from_buffer(buf, total);
+}
+
 /* Generic UFCS name composer for any CamelCase-named receiver whose C
  * API follows the corresponding `<snake_type>_<method>(Type* self, ...)`
  * convention.  Emits the callee name only; the ufcs.c dispatcher handles

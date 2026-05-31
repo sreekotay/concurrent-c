@@ -48,14 +48,10 @@ static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee
     return cc_ufcs_emit_value(arena, callee_slice);
 }
 
-static inline CCSlice cc_ufcs_concat2(CCArena *arena, CCSlice left, CCSlice right) {
-    size_t total = left.len + right.len;
-    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
-    if (!buf) return cc_slice_empty();
-    if (left.len > 0 && left.ptr) memcpy(buf, left.ptr, left.len);
-    if (right.len > 0 && right.ptr) memcpy(buf + left.len, right.ptr, right.len);
-    return cc_slice_from_buffer(buf, total);
-}
+/* `.ufcs` rewrite hooks compose their callee name (`<prefix><method>`) with
+ * `cc_slice_concat2(prefix, method, arena)` from cc_arena.cch — the shared
+ * slice concatenator (arena last).  There is no UFCS-specific concat helper:
+ * name composition is just slice concatenation. */
 
 /* The generic UFCS name composers live in cc_arena.cch — their bodies need
  * `cc_arena_alloc`, and cc_ufcs.cch is the one that includes that header, so

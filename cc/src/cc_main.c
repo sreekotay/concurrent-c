@@ -1171,6 +1171,94 @@ static int cc__is_raw_c(const char* path) {
     return path && cc__ends_with(path, ".c");
 }
 
+/* Fold a file's *content* into an FNV-1a hash.  Missing/unreadable files fold a
+ * stable sentinel so that creating the file later changes the hash. */
+static uint64_t cc__fold_file_content(uint64_t h, const char* path) {
+    FILE* f = path && path[0] ? fopen(path, "rb") : NULL;
+    if (!f) return cc__fnv1a64_str(h, "\x01" "<cc_depends:absent>");
+    unsigned char buf[64 * 1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) h = cc__fnv1a64_update(h, buf, n);
+    fclose(f);
+    return h;
+}
+
+/* Match an identifier token `kw` at `src[p..]` not followed by an ident char. */
+static int cc__pp_kw_at(const char* src, size_t n, size_t p, const char* kw) {
+    size_t kl = strlen(kw);
+    if (p + kl > n || memcmp(src + p, kw, kl) != 0) return 0;
+    char after = (p + kl < n) ? src[p + kl] : '\0';
+    if (after == '_' ||
+        (after >= 'a' && after <= 'z') ||
+        (after >= 'A' && after <= 'Z') ||
+        (after >= '0' && after <= '9'))
+        return 0;
+    return 1;
+}
+
+/* `#pragma cc_depends("path")` — declared comptime build dependency
+ * (COMPTIME_CAPABILITY_MODEL.md §2).  Scans the source for line-anchored
+ * directives, resolves each path relative to the source file's directory, and
+ * folds the dependency's *content* into the emit cache key so that editing a
+ * comptime-read input file forces a re-emit.  This is the only build-graph
+ * effect of a comptime file read; plain file calls carry no build semantics, so
+ * the dependency must be declared explicitly. */
+static uint64_t cc__fold_cc_depends(uint64_t h, const char* in_path) {
+    if (!in_path || !in_path[0]) return h;
+    FILE* f = fopen(in_path, "rb");
+    if (!f) return h;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 64 * 1024 * 1024) { fclose(f); return h; }
+    char* src = (char*)malloc((size_t)sz + 1);
+    if (!src) { fclose(f); return h; }
+    size_t rd = fread(src, 1, (size_t)sz, f);
+    fclose(f);
+    src[rd] = '\0';
+
+    char dir[PATH_MAX];
+    cc__dir_of_path(in_path, dir, sizeof(dir));
+
+    size_t i = 0;
+    while (i < rd) {
+        size_t p = i;
+        while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < rd && src[p] == '#') {
+            p++;
+            while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (cc__pp_kw_at(src, rd, p, "pragma")) {
+                p += 6;
+                while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (cc__pp_kw_at(src, rd, p, "cc_depends")) {
+                    p += 10;
+                    while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+                    if (p < rd && src[p] == '(') {
+                        p++;
+                        while (p < rd && (src[p] == ' ' || src[p] == '\t')) p++;
+                        if (p < rd && src[p] == '"') {
+                            char rel[PATH_MAX];
+                            size_t o = 0;
+                            p++;
+                            while (p < rd && src[p] != '"' && o + 1 < sizeof(rel)) rel[o++] = src[p++];
+                            rel[o] = '\0';
+                            char abs[PATH_MAX];
+                            cc__join_path(dir, rel, abs, sizeof(abs));
+                            h = cc__fnv1a64_str(h, "\x02" "cc_depends:");
+                            h = cc__fnv1a64_str(h, rel);
+                            h = cc__fold_file_content(h, abs);
+                        }
+                    }
+                }
+            }
+        }
+        while (i < rd && src[i] != '\n') i++;
+        if (i < rd) i++;
+    }
+    free(src);
+    return h;
+}
+
 static int cc__copy_file(const char* src, const char* dst) {
     if (!src || !dst || !src[0] || !dst[0]) return -1;
     FILE* in = fopen(src, "rb");
@@ -1633,6 +1721,7 @@ static int cc__build_target_objs_rec(int idx,
                         h = cc__fnv1a64_i64(h, cfg->consts[bi].value);
                     }
                 }
+                h = cc__fold_cc_depends(h, src_abs);
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
@@ -1826,6 +1915,9 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             h = cc__fnv1a64_str(h, opt->cli_names[i]);
             h = cc__fnv1a64_i64(h, opt->cli_values[i]);
         }
+        /* Declared comptime build deps (`#pragma cc_depends("...")`): fold each
+         * dependency's content so editing a comptime-read file re-triggers emit. */
+        h = cc__fold_cc_depends(h, opt->in_path);
         emit_key = h;
 
         uint64_t prev = 0;

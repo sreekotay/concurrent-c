@@ -347,8 +347,33 @@ untouched; the new entry-point is deliberately named
 collision.  Unification will happen in a later milestone once
 3c's parser builtin lands.
 
-**4b. Stable closure-IDs + delete `pass_closure_literal_ast.c`'s
-recovery path.**  Today closure literals are matched between passes
+**4b. Stable closure-IDs — LANDED 2026-05-30.**
+
+The closure-ID markers are now injected into the **codegen buffer**
+(`canonical` in `cc_build_parse_input`, → `root->codegen_buffer`,
+the text `pass_closure_literal_ast.c` actually walks) rather than the
+parse buffer, and the closure-literal pass consumes them:
+`cc__rewrite_closure_literals_with_nodes` wraps the resolver, recording
+each `/*CC_CLO:N*/` head offset and neutralizing the markers to spaces
+in a private working copy (spaces preserve every byte offset, so stub-AST
+spans still line up, and the `@unsafe` back-scan / span parse / emitted C
+never see a marker).  When the marker count equals the in-TU closure-node
+count, each closure's start offset is taken verbatim from its marker —
+exact and comment-safe — so the `(line,col)`+forward-`=>`-scan recovery
+path is **not reached** for direct closures (killing the comment-bait
+class of bugs, e.g. `syscall_kidnap.ccs`).  Validated: full suite 489/489
+across 3 stress runs.  `CC_NO_CLOSURE_MARKERS` disables the marker path.
+
+The heuristic + recovery branch is intentionally **retained** as the
+fallback for *macro-origin* closures: their `=>` appears only after CPP
+expansion (in the parse buffer), never in the never-expanded codegen
+buffer, so no marker can be placed for them and the count-mismatch path
+falls back to the text heuristic.  Fully deleting the heuristic would
+regress macro-generated closures, so it stays.
+
+---
+
+**(historical design note)**  Today closure literals are matched between passes
 by `(file, line_start, line_end, col_start)`.  That breaks whenever
 a reparse pulls in a header whose `#line` directives drift the
 TCC line counter relative to the working source buffer.  When it

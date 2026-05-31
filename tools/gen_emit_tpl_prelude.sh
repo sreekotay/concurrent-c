@@ -22,11 +22,25 @@ fi
     "#include <stdarg.h>\n" \
     "#include <string.h>\n" \
     "#include <stdint.h>\n" \
-    "typedef struct { void* ptr; size_t len; uint64_t id; size_t alen; } CCSlice;\n" \
-    "#define CC_SLICE_ID_UNTRACKED 0ULL\n" \
-    "static inline CCSlice cc_slice_empty(void) { CCSlice s={0}; return s; }\n" \
-    "static inline CCSlice cc_slice_from_parts(char* p,size_t n,uint64_t id,size_t cap){\n" \
-    "  CCSlice s={p,n,id,cap}; return s; }\n" \
+    "#include <stdlib.h>\n" \
+    "#include <stdbool.h>\n" \
+    "#include <ctype.h>\n" \
+    "#include <ccc/cc_slice.cch>\n" \
+    "#include <ccc/cc_arena.cch>\n" \
+    "/* cc_arena.cch declares this extern (defined in the compiled runtime). The\n" \
+    "   comptime TU is standalone (never linked against the runtime), so define a\n" \
+    "   per-TU instance here — provenance ids only need uniqueness within one run. */\n" \
+    "cc_atomic_u64 cc_arena_prov_counter = 0;\n" \
+    "#define CC_COMPTIME 1\n" \
+    "#include <ccc/std/string.cch>\n" \
+    "#include <ccc/std/vec.cch>\n" \
+    "#include <ccc/std/hash.cch>\n" \
+    "#include <ccc/std/map.cch>\n" \
+    "/* Typed maps are file-scope (CC_MAP_DECL_ARENA -> static-inline defs), so a\n" \
+    "   comptime block can't declare its own; pre-declare common key types. */\n" \
+    "CC_MAP_DECL_INT(int, CCMapII)\n" \
+    "CC_MAP_DECL_U64(int, CCMapU64I)\n" \
+    "CC_MAP_DECL_SLICE(int, CCMapSI)\n" \
 HDR
 
   while IFS= read -r line || [ -n "$line" ]; do
@@ -49,6 +63,39 @@ HDR
     "extern int cc_reflect_field_count(const char* type_name);\n" \
     "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_enum_count(const char* enum_name);\n" \
+    "extern int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_enum_value(const char* enum_name, int idx, long long* out);\n" \
+    "extern int cc_reflect_kind(const char* type_name);\n" \
+    "extern int cc_canonical_name(const char* base, const char** args, int nargs, char* out, int out_sz);\n" \
+    "extern int cc_reflect_tagged_count(const char* tag);\n" \
+    "extern int cc_reflect_tagged_name(const char* tag, int idx, char* buf, int buf_sz);\n" \
+    "enum { CC_REFLECT_KIND_UNKNOWN=0, CC_REFLECT_KIND_PRIMITIVE=1," \
+    " CC_REFLECT_KIND_POINTER=2, CC_REFLECT_KIND_STRUCT=3, CC_REFLECT_KIND_ENUM=4 };\n" \
+    "typedef struct CCReflectField { char name[128]; char type[128]; int index; } CCReflectField;\n" \
+    "static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {\n" \
+    "  if (!out || idx < 0) return -1;\n" \
+    "  out->index = idx;\n" \
+    "  if (cc_reflect_field_name(type_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;\n" \
+    "  if (cc_reflect_field_type(type_name, idx, out->type, (int)sizeof(out->type)) < 0) return -1;\n" \
+    "  return 0;\n" \
+    "}\n" \
+    "typedef struct CCReflectEnumMember { char name[128]; long long value; int index; } CCReflectEnumMember;\n" \
+    "static inline int cc_reflect_enum_at(const char* enum_name, int idx, CCReflectEnumMember* out) {\n" \
+    "  if (!out || idx < 0) return -1;\n" \
+    "  out->index = idx;\n" \
+    "  if (cc_reflect_enum_name(enum_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;\n" \
+    "  if (cc_reflect_enum_value(enum_name, idx, &out->value) < 0) return -1;\n" \
+    "  return 0;\n" \
+    "}\n" \
+    "static inline void cc_instantiate_result(const char* ok_mangled, const char* err_mangled) {\n" \
+    "  (void)ok_mangled; (void)err_mangled;\n" \
+    "}\n" \
+    "extern void cc_emit_raw_at(int anchor, const char* file, int line, const char* ptr, size_t len);\n" \
+    "extern void cc_emit_error(const char* msg);\n" \
+    "extern void cc_emit_warning(const char* msg);\n" \
+    "extern void cc_emit_error_at(const char* file, int line, const char* msg);\n" \
+    "extern void cc_emit_warning_at(const char* file, int line, const char* msg);\n" \
     "static void cc_emit_tpl_splice(int anchor, CCSlice fragment) {\n" \
     "  if (!fragment.ptr || !fragment.len) return;\n" \
     "  cc_emit_raw(anchor, (const char*)fragment.ptr, fragment.len); }\n" \
@@ -66,7 +113,12 @@ HDR
     "  if (n < 0 || (size_t)n >= sizeof(buf)) return -1;\n" \
     "  cc_emit_raw(anchor, buf, (size_t)n);\n" \
     "  return 0;\n" \
-    "}\n"
+    "}\n" \
+    "#ifdef CC_COMPTIME_EXEC\n" \
+    "/* Factory-body sugar: arg(i) == type_args.items[(i)].  Defined only in\n" \
+    "   compiled-factory TUs (CC_COMPTIME_EXEC), never in @comptime block TUs. */\n" \
+    "#define arg(i) (type_args.items[(i)])\n" \
+    "#endif\n"
 
 #endif /* CC_COMPTIME_EMIT_TPL_PRELUDE_INC_H */
 TAIL

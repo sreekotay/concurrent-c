@@ -1,0 +1,46 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* CC_GENERIC_FACTORY defines the type; CC_GENERIC_FACTORY_EXTEND adds operations
+ * elsewhere without editing the base.  At a use site the base runs first (so
+ * extensions can reference ${mangled}), then every extension in registration
+ * order — all concatenated into one definition per mangled name. */
+
+CC_GENERIC_FACTORY(Box, 1) {
+    return @emit(`typedef struct { ${arg(0)} value; } ${mangled};`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    return @emit(`
+        static inline ${mangled} ${mangled}_make(${arg(0)} v) {
+            ${mangled} b; b.value = v; return b;
+        }`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    return @emit(`
+        static inline ${arg(0)} ${mangled}_get(${mangled} b) { return b.value; }`, arena);
+}
+
+/* Conditional extension: emit `_is_int` only for Box::[int]; returning an empty
+ * fragment for every other element type opts out (no symbol emitted). */
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    if (arg(0).len == 3 && memcmp(arg(0).ptr, "int", 3) == 0)
+        return @emit(`static inline int ${mangled}_is_int(void) { return 1; }`, arena);
+    return cc_slice_empty();
+}
+
+int main(void) {
+    Box::[int]    a = Box_int_make(42);
+    Box::[double] d = Box_double_make(2.5);
+
+    if (Box_int_get(a) != 42) return 1;
+    if (Box_double_get(d) != 2.5) return 2;
+    if (Box_int_is_int() != 1) return 3;   /* emitted only for the int monomorph */
+
+    printf("comptime_generic_factory_extend_smoke ok a=%d d=%g int=%d\n",
+           Box_int_get(a), Box_double_get(d), Box_int_is_int());
+    return 0;
+}

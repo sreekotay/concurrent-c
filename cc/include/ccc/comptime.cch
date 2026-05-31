@@ -1,0 +1,28 @@
+/*
+ * comptime.cch — the whole compile-time API in one include.
+ *
+ * `#include <ccc/comptime.cch>` to write `@comptime` code: type reflection,
+ * generic instantiation, fragment/template emission, and user generic-factory
+ * registration.  This is an umbrella that re-exports the individual comptime
+ * headers so the API is discoverable and learned in one place; the sub-headers
+ * remain valid includes for back-compat.
+ *
+ * Surface it collects:
+ *   - cc_type.cch        : type_of(T) / cc_type_of + struct-field reflection
+ *   - cc_instantiate.cch : cc_instantiate_{vec,map,chan,result},
+ *                          cc_reflect_field_{count,name,type,at} + CCReflectField,
+ *                          cc_generic_register (+ CC_GENERIC_FACTORY sugar)
+ *   - cc_emit_tpl.cch    : @emit(`...`) backtick templates / cc_emit_{raw,cstr,format}
+ *
+ * Instantiation surface (built-ins and user factories alike) is the bracket
+ * form `Name::[Args]` — e.g. `CCVec::[int]`, `Map::[K, V]`, `Pair::[A, B]`.
+ * The angle-bracket spellings (`Vec<T>`, `Map<K, V>`, ...) are retired.
+ */
+#ifndef CC_COMPTIME_CCH
+#define CC_COMPTIME_CCH
+
+#include <ccc/cc_type.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_emit_tpl.cch>
+
+#endif /* CC_COMPTIME_CCH */

@@ -84,11 +84,13 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/type_graph.c \
 	src/preprocess/emit_plan.c \
 	src/result_spec.c \
+	runtime/arena_state.c \
 	src/comptime/const_eval.c \
 	src/comptime/executor.c \
 	src/comptime/hook_compile.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
+	src/visitor/pass_channel_syntax.c \
 	src/visitor/pass_err_syntax.c \
 	src/visitor/pass_result_unwrap.c \
 	src/visitor/pass_unwrap_destroy.c \

@@ -1,0 +1,18 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Naming/composition (negative): two @comptime blocks emit the same top-level
+ * function symbol.  The dup-emit-name detector surfaces the collision loudly
+ * (naming both origins) instead of letting it slip silently into the link —
+ * C's one genuinely-silent footgun.  The build fails (the C compiler also
+ * rejects the redefinition); .compile_err asserts the detector's diagnostic. */
+
+@comptime {
+    cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, "int collide_fn(void) { return 1; }\n");
+}
+
+@comptime {
+    cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, "int collide_fn(void) { return 2; }\n");
+}
+
+int main(void) { return collide_fn(); }

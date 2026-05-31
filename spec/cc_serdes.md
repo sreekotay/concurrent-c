@@ -74,10 +74,10 @@ repeat, and emit). **Codecs are not `@grammar` blocks** — they remain leaf hoo
 | ------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **fragments** | `@grammar(fragments) Name { … }` | Replacement-only snippets (CSS-custom-property spirit). Expanded before semantic analysis. No parse entry points, no match/rollback by themselves. |
 | **rules**     | `@grammar(rules) Name { … }`     | Recognition and collection. Parse-first; `cc_match` / `cc_collect` (or equivalent) over named entries.                                             |
-| **schema**    | `@grammar(schema) Name { … }`    | Typed wire model: named fields, directionality, `**cc_parse`** / `**cc_format**`, provenance-aware output.                                         |
+| **schema**    | `@grammar(schema) Name { … }`    | Typed wire model: named fields, directionality, `**cc_parse`** / `**cc_format`**, provenance-aware output.                                         |
 
 
-**Rule:** `**@grammar` is for declarations.** `**cc_*` is for operations** over
+**Rule:** `**@grammar` is for declarations.** `**cc_`* is for operations** over
 the types and entry points those declarations introduce.
 
 ---
@@ -382,7 +382,7 @@ control general grammar flow instead of leaf behavior.
 ## Directionality
 
 Only `**@grammar(schema)`** participates in generated formatting.
-`**@grammar(rules)**` is parse-only unless a future extension states otherwise.
+`**@grammar(rules)`** is parse-only unless a future extension states otherwise.
 
 Schema elements participate in one or both directions:
 
@@ -601,7 +601,7 @@ Out of scope or explicitly deferred for an early `@grammar(schema)` /
 
 - **Unknown field preservation** and full round-trip compatibility bags
 - **Extensions**, `**Any`**, and descriptor-driven dynamic messages as first-class
-- `**map**` as a dedicated schema feature (wire shape is repeated pairs; sugar
+- `**map`** as a dedicated schema feature (wire shape is repeated pairs; sugar
 can wait)
 - **Packed vs unpacked** compatibility matrix for all scalar repeats (policy
 can be "generated code picks one encoding" until specified)
@@ -637,7 +637,7 @@ v1 should avoid:
 
 - `**@grammar(fragments)`** — replacement-only reuse (CSS-variable spirit), no
 standalone grammar semantics.
-- `**@grammar(rules)**` — lightweight recognition and collection (parse-first).
+- `**@grammar(rules)`** — lightweight recognition and collection (parse-first).
 - `**@grammar(schema)**` — typed wire structure with `**cc_parse**` and
 `**cc_format**`.
 - `**@grammar` vs codecs** — pattern and structure live in `@grammar`; codecs are
@@ -652,7 +652,7 @@ Earlier drafts used `@rules`, `@schema`, `@parse`, `@format`, and `@string`.
 Conceptually: `@rules` maps to `@grammar(rules)`; `@schema` maps to
 `@grammar(schema)`; `@parse` maps to `cc_parse`; `@format` maps to `cc_format`.
 Fragment reuse was partially conflated with `@schema` referencing `@rules`; that
-split is now explicit via `**@grammar(fragments)`** vs `**@grammar(rules)**`.
+split is now explicit via `**@grammar(fragments)`** vs `**@grammar(rules)`**.
 
 The intermediate spellings `CCFragments`, `CCRules`, and `CCSchema` in design
 notes map to the same three `@grammar` modes.

@@ -22,7 +22,7 @@ static CCSlice !>(CCError) clone_key(CCArena* arena, char[:] src) {
 }
 
 static bool !>(CCError) insert_one(CCArena* arena,
-                                   Map<char[:], Entry*> entries,
+                                   Map::[char[:], Entry*] entries,
                                    char[:] key,
                                    Entry* e) {
     CCSlice !>(CCError) key_res = clone_key(arena, key);
@@ -35,7 +35,7 @@ static bool !>(CCError) insert_one(CCArena* arena,
 
 int main(void) {
     CCArena arena = cc_arena_heap(1024);
-    Map<char[:], Entry*> entries = map_new<char[:], Entry*>(&arena);
+    Map::[char[:], Entry*] entries = map_new::[char[:], Entry*](&arena);
     Entry e = { .id = 1 };
     char[:] key = { .ptr = (char*)"hello", .len = 5 };
 

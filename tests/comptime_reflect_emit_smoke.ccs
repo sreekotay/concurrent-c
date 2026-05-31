@@ -8,9 +8,7 @@ typedef struct { int id; double weight; } Widget;
 
 @comptime CCSlice reflect_emit_factory(CCSlice generic_name, CCSlice mangled,
                                         CCSliceArray type_args, CCArena* arena) {
-    static char buf[4096];
     (void)generic_name;
-    (void)arena;
     if (type_args.len < 1 || !mangled.ptr) return cc_slice_empty();
 
     char tname[128];
@@ -22,31 +20,24 @@ typedef struct { int id; double weight; } Widget;
     int nf = cc_reflect_field_count(tname);
     if (nf < 0) nf = 0;
 
-    CCSlice header = @emit(`
+    /* Arena-backed @emit + CCString: compose fragments with no fixed buffer,
+       no memcpy, no length cap.  The arena owns every fragment. */
+    CCString out = cc_string_new();
+    cc_string_push(&out, @emit(`
         typedef struct { int nfields; } ${mangled};
         static inline int ${mangled}_nfields(void) { return ${nf}; }
-    `);
+    `, arena), arena);
 
-    size_t pos = 0;
-    if (header.ptr && header.len < sizeof(buf)) {
-        memcpy(buf, header.ptr, header.len);
-        pos = header.len;
-    }
-
-    for (int i = 0; i < nf && pos + 256 < sizeof(buf); i++) {
+    for (int i = 0; i < nf; i++) {
         char fn[64], ft[64];
         cc_reflect_field_name(tname, i, fn, (int)sizeof(fn));
         cc_reflect_field_type(tname, i, ft, (int)sizeof(ft));
-        CCSlice part = @emit(`
+        cc_string_push(&out, @emit(`
             static inline const char* ${mangled}_field${i}_name(void) { return "${fn}"; }
             static inline const char* ${mangled}_field${i}_type(void) { return "${ft}"; }
-        `);
-        if (part.ptr && pos + part.len < sizeof(buf)) {
-            memcpy(buf + pos, part.ptr, part.len);
-            pos += part.len;
-        }
+        `, arena), arena);
     }
-    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED, sizeof(buf));
+    return cc__string_persist_slice(arena, &out);
 }
 
 @comptime {

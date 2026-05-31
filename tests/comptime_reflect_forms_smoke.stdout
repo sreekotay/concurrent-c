@@ -1,0 +1,1 @@
+comptime_reflect_forms_smoke ok nf=8 id:int a:int b:int name:char[16] grid:int[2][3] ptr:double* cb:int (*)(int, int) flags:unsigned

@@ -1672,6 +1672,29 @@ static int emit_desugared_call(char* out,
         }
         return snprintf(out, cap, "cc_nursery_add_closing_tx(&%s, %s)", recv, args_rewritten);
     }
+    if (ctx.recv_type_name &&
+        (strcmp(ctx.recv_type_name, "CCNursery") == 0 || strcmp(ctx.recv_type_name, "CCNursery*") == 0) &&
+        strcmp(method, "spawn_async") == 0) {
+        if (!has_args || !args_rewritten) {
+            return snprintf(out, cap, "cc_nursery_spawn_async_named(%s, ", recv);
+        }
+        {
+            char callee_name[96];
+            size_t ci = 0;
+            size_t cj = 0;
+            while (args_rewritten[ci] && isspace((unsigned char)args_rewritten[ci])) ci++;
+            while (args_rewritten[ci] && cj + 1 < sizeof(callee_name) &&
+                   (cc_is_ident_char(args_rewritten[ci]) || args_rewritten[ci] == ':')) {
+                callee_name[cj++] = args_rewritten[ci++];
+            }
+            callee_name[cj] = '\0';
+            if (cj == 0 || args_rewritten[ci] != '(') {
+                snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
+            }
+            return snprintf(out, cap, "cc_nursery_spawn_async_named(%s, %s, \"%s\", __FILE__, __LINE__)",
+                            recv, args_rewritten, callee_name);
+        }
+    }
     /* Special cases for stdlib convenience (String methods).
        
        IMPORTANT: These String-specific handlers run BEFORE the type-qualified

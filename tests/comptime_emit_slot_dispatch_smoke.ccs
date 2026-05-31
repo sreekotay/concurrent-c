@@ -8,7 +8,6 @@
 @comptime CCSlice slot_dispatch_factory(CCSlice gname, CCSlice sym,
                                         CCSliceArray type_args, CCArena *arena) {
     (void)gname;
-    (void)arena;
     if (type_args.len < 2 || !sym.ptr) return cc_slice_empty();
     CCSlice elem0 = type_args.items[0];
     CCSlice elem1 = type_args.items[1];
@@ -16,7 +15,7 @@
     return @emit(`
         typedef struct { ${elem0} a; ${elem1} b; } ${sym};
         enum { ${sym}_marker = ${slot_n} };
-    `);
+    `, arena);
 }
 
 @comptime {

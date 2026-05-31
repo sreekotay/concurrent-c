@@ -1,0 +1,25 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Edge-push #5: emit provenance.  cc_emit_raw_at stamps an explicit origin on
+ * the emitted fragment, so the splice carries a #line back to the author's
+ * template source (here a synthetic "registry.tpl":1000).  We then exercise the
+ * default-origin path via cc_emit_format (attributed to this @comptime block).
+ * The build+run proves the #line wrapping does not break compilation; the
+ * generated C carries the directives (verified out-of-band). */
+
+@comptime {
+    const char* gen = "enum { PROVENANCE_TAG = 1234 };\n";
+    cc_emit_raw_at(CC_EMIT_AFTER_PRELUDE, "registry.tpl", 1000, gen, strlen(gen));
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+        "static const int provenance_block_line = %d;\n", 1);
+}
+
+int main(void) {
+    if (PROVENANCE_TAG != 1234) return 1;
+    if (provenance_block_line != 1) return 2;
+    printf("comptime_emit_provenance_smoke ok tag=%d\n", PROVENANCE_TAG);
+    return 0;
+}

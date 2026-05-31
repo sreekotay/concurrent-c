@@ -5,7 +5,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    Map<CCSlice, int*> m = map_new<CCSlice, int*>(&arena);
+    Map::[CCSlice, int*] m = map_new::[CCSlice, int*](&arena);
 
     CCSlice k1 = cc_slice_from_cstr("alpha");
     CCSlice k2 = cc_slice_from_cstr("beta");

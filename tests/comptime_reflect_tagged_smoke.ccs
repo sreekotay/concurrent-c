@@ -1,0 +1,51 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Edge-push #3: tag-filtered reflection.  An opt-in, advertent comment marker
+ * (the @tag:NAME token, block or line form) before a function tags it; a
+ * @comptime block reflects all functions carrying a tag and bakes a dispatch
+ * table.  No new syntax — just a source-scan.  Untagged fns are not collected.
+ * (This comment mentions @comptime in prose — the enumerator must skip it.) */
+
+/*@tag:command*/
+int cmd_help(void) { return 1; }
+
+/*@tag:command*/
+int cmd_version(void) { return 2; }
+
+int not_a_command(void) { return 99; }
+
+//@tag:command
+int cmd_quit(void) { return 3; }
+
+@comptime {
+    int n = cc_reflect_tagged_count("command");
+    /* forward-declare each tagged function so the table compiles regardless of
+     * definition order (the realistic registry-generator pattern) */
+    for (int i = 0; i < n; i++) {
+        char nm[128];
+        cc_reflect_tagged_name("command", i, nm, sizeof(nm));
+        @emit(CC_EMIT_AFTER_PRELUDE, `int ${nm}(void);`);
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { COMMAND_COUNT = ${n} };
+        static int (*command_table[])(void) = {
+    `);
+    for (int i = 0; i < n; i++) {
+        char nm[128];
+        cc_reflect_tagged_name("command", i, nm, sizeof(nm));
+        @emit(CC_EMIT_AFTER_PRELUDE, `  ${nm},`);
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `};`);
+}
+
+int main(void) {
+    if (COMMAND_COUNT != 3) return 1;
+    int sum = 0;
+    for (int i = 0; i < COMMAND_COUNT; i++) sum += command_table[i]();
+    if (sum != 6) return 2;  /* 1 + 2 + 3, in source order */
+    printf("comptime_reflect_tagged_smoke ok count=%d sum=%d\n", COMMAND_COUNT, sum);
+    return 0;
+}

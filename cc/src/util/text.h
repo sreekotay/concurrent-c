@@ -535,7 +535,17 @@ static inline size_t cc_rfind_char_top_level(const char* src, size_t start, size
             break;
         }
         if (c == ']') { brack_depth++; continue; }
-        if (c == '[') { if (brack_depth > 0) brack_depth--; continue; }
+        if (c == '[') {
+            if (brack_depth > 0) { brack_depth--; continue; }
+            /* Unmatched opening `[` to the left: we've reached the enclosing
+             * bracket context (e.g. a `Name::[T[:], U]` generic-arg list, where
+             * the element type is `T[:]`).  Stop here — the type/declarator
+             * starts just after it.  Mirrors the `(` case above; without this
+             * a backward type scan crosses the `::[` and swallows the container
+             * head (`Map::[char` -> `CCSlice`). */
+            hit = i + 1;
+            break;
+        }
         if (c == '}') { brace_depth++; continue; }
         if (c == '{') {
             if (brace_depth > 0) { brace_depth--; continue; }

@@ -4,6 +4,21 @@
 #include <ccc/cc_arena.cch>
 #include <stdint.h>
 
+/* The comptime executor's TCC backend (a) does not declare max_align_t in its
+ * sysinclude and (b) rejects _Alignas/alignas with a *type* operand (it wants a
+ * constant). Under CC_COMPTIME we therefore supply a concrete max-aligned type
+ * and use a constant (16) for the alignas sites. Normal builds (flag undefined)
+ * keep the portable max_align_t forms and are byte-for-byte unchanged.
+ * See cc/docs/COMPTIME_CAPABILITY_MODEL.md §7b. */
+#if defined(CC_COMPTIME)
+typedef union { long long ccj__ll; long double ccj__ld; } ccj_comptime_max_align_ty;
+#define CCJ_MAX_ALIGN  _Alignof(ccj_comptime_max_align_ty)
+#define CCJ_ALIGNAS    _Alignas(16)
+#else
+#define CCJ_MAX_ALIGN  _Alignof(max_align_t)
+#define CCJ_ALIGNAS    alignas(ccj_max_align_ty)
+#endif
+
 typedef struct CCContainersAllocHeader {
     size_t size_bytes;
     void *raw_alloc;
@@ -20,7 +35,7 @@ static inline void *cc__containers_alloc_payload(CCArena *arena, size_t size_byt
 
     {
         size_t total = cc__containers_alloc_total(size_bytes, align);
-        uint8_t *raw = (uint8_t *)cc_arena_alloc(arena, total, _Alignof(max_align_t));
+        uint8_t *raw = (uint8_t *)cc_arena_alloc(arena, total, CCJ_MAX_ALIGN);
         uintptr_t start;
         uintptr_t aligned;
         CCContainersAllocHeader *header;
@@ -79,20 +94,20 @@ static inline void *cc__containers_realloc(void *ctx, void *ptr, size_t size_byt
         size_t new_total;
         size_t copy_bytes;
         size_t old_payload_offset;
-        if (!ptr) return cc__containers_alloc_payload(arena, size_bytes, _Alignof(max_align_t));
+        if (!ptr) return cc__containers_alloc_payload(arena, size_bytes, CCJ_MAX_ALIGN);
 
         old_header = cc__containers_payload_header(ptr);
         old_raw = (uint8_t *)old_header->raw_alloc;
-        old_total = cc__containers_alloc_total(old_header->size_bytes, _Alignof(max_align_t));
-        new_total = cc__containers_alloc_total(size_bytes, _Alignof(max_align_t));
+        old_total = cc__containers_alloc_total(old_header->size_bytes, CCJ_MAX_ALIGN);
+        new_total = cc__containers_alloc_total(size_bytes, CCJ_MAX_ALIGN);
         copy_bytes = old_header->size_bytes < size_bytes ? old_header->size_bytes : size_bytes;
         old_payload_offset = (size_t)((uint8_t *)ptr - old_raw);
 
-        raw = (uint8_t *)cc_arena_realloc(arena, arena, old_raw, old_total, new_total, _Alignof(max_align_t));
+        raw = (uint8_t *)cc_arena_realloc(arena, arena, old_raw, old_total, new_total, CCJ_MAX_ALIGN);
         if (!raw) return NULL;
 
         start = (uintptr_t)(raw + sizeof(CCContainersAllocHeader));
-        aligned = (start + _Alignof(max_align_t) - 1) & ~(uintptr_t)(_Alignof(max_align_t) - 1);
+        aligned = (start + CCJ_MAX_ALIGN - 1) & ~(uintptr_t)(CCJ_MAX_ALIGN - 1);
         if ((uint8_t *)aligned != raw + old_payload_offset) {
             memmove((void *)aligned, raw + old_payload_offset, copy_bytes);
         }
@@ -1489,7 +1504,9 @@ CC_CAST_MAYBE_UNUSED(                                               \
 // Moreover, even in C++, the alignment of std::max_align_t under MSVC is only 8, not 16, even though
 // __STDCPP_DEFAULT_NEW_ALIGNMENT__ is 16 on x64.
 // Hence, we define our own version of the type.
-#if defined( _MSC_VER ) && !defined( __clang__ )
+#if defined( CC_COMPTIME )
+typedef ccj_comptime_max_align_ty ccj_max_align_ty;
+#elif defined( _MSC_VER ) && !defined( __clang__ )
 typedef struct { alignas( 16 ) char nothing[ 16 ]; } ccj_max_align_ty;
 #else
 typedef max_align_t ccj_max_align_ty;
@@ -1871,7 +1888,7 @@ static inline CC_ALWAYS_INLINE uint64_t ccj_layout(
 // CC_POINT_HNDL_TO_ALLOCING_FN_RESULT below).
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   void *new_cntr;
   void *other_ptr;
 } ccj_allocing_fn_result_ty;
@@ -1943,7 +1960,7 @@ ccj_memcpy_and_return_ptr(                                                      
 
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   ccj_allocing_fn_result_ty result;
   void *converted_el;
   void *converted_key;
@@ -1961,7 +1978,7 @@ cntr = (CC_TYPEOF_XP( cntr ))&CC_COMPOUND_LITERAL(                              
 
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   ccj_allocing_fn_result_ty result;
   void *converted_el;
 } ccj_heterinsert_helper_el_only_ty;
@@ -1973,7 +1990,7 @@ cntr = (CC_TYPEOF_XP( cntr ))&CC_COMPOUND_LITERAL(                              
 
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   ccj_allocing_fn_result_ty result;
   void *converted_el;
   size_t cntr_size;
@@ -1991,7 +2008,7 @@ cntr = (CC_TYPEOF_XP( cntr ))&CC_COMPOUND_LITERAL(                              
 
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   ccj_allocing_fn_result_ty result;
   void *converted_el;
   void *converted_key;
@@ -2122,7 +2139,7 @@ static inline unsigned int ccj_last_nonzero_uint16( uint64_t a )
 // Vector header.
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   size_t size;
   size_t cap;
 } ccj_vec_hdr_ty;
@@ -2547,7 +2564,7 @@ static inline void *ccj_vec_last(
 // Node header.
 typedef struct ccj_listnode_hdr_ty
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   struct ccj_listnode_hdr_ty *prev;
   struct ccj_listnode_hdr_ty *next;
 } ccj_listnode_hdr_ty;
@@ -3057,7 +3074,7 @@ static inline size_t ccj_quadratic( uint16_t displacement )
 // Map header.
 typedef struct
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   size_t size;
   size_t cap_mask; // Rather than storing the capacity (i.e. bucket count) directly, we store the bit mask used to
                    // reduce a hash code or displacement-derived bucket index to the buckets array, i.e. the capacity
@@ -4358,7 +4375,7 @@ static inline void *ccj_set_next(
 // Node header.
 typedef struct ccj_omapnode_hdr_ty
 {
-  alignas( ccj_max_align_ty )
+  CCJ_ALIGNAS
   bool is_red;
   struct ccj_omapnode_hdr_ty *parent;
   struct ccj_omapnode_hdr_ty *children[ 2 ];
@@ -5332,8 +5349,16 @@ static const ccj_str_hdr_ty ccj_str_placeholder_char8 = { 0, 0, (void *)u8"" };
 #else
 static const ccj_str_hdr_ty ccj_str_placeholder_char8 = { 0, 0, (void *)"" };
 #endif
+#if defined( CC_COMPTIME )
+/* TCC (comptime backend) lacks char16_t/char32_t string literals; comptime never
+ * instantiates wide-char string containers, so an empty narrow placeholder is
+ * functionally identical (size/cap 0, contents never read). */
+static const ccj_str_hdr_ty ccj_str_placeholder_char16 = { 0, 0, (void *)"" };
+static const ccj_str_hdr_ty ccj_str_placeholder_char32 = { 0, 0, (void *)"" };
+#else
 static const ccj_str_hdr_ty ccj_str_placeholder_char16 = { 0, 0, (void *)u"" };
 static const ccj_str_hdr_ty ccj_str_placeholder_char32 = { 0, 0, (void *)U"" };
+#endif
 
 // CC_STR_PLACEHOLDER macro for obtaining the correct placeholder.
 

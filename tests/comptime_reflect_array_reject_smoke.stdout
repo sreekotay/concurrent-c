@@ -1,1 +1,0 @@
-comptime_reflect_array_reject_smoke ok hasarray=-1 clean=2 x,y

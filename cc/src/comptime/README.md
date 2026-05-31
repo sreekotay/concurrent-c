@@ -21,11 +21,11 @@ Do not reorder or skip one pass without updating the other call site.
 | `CC_COMPTIME_EXEC_TIMEOUT_MS` | `5000` | Wall-clock limit for libtcc comptime TUs. |
 | `CC_DEBUG_COMPTIME_EXEC` | off | Log libtcc errors from comptime execution. |
 | `CC_DEBUG_COMPTIME_EXEC_DUMP` | — | Write the compiled comptime TU to a file path. |
-| `CC_COMPTIME_NO_CACHE` | off | Disable dylib cache for compiled type hooks / factories. |
+| `CC_COMPTIME_NO_CACHE` | off | Disable the on-disk dylib cache for the host-cc hook path (UFCS / type-register hooks, and the generic-factory fallback). Generic factories compile in-process on libtcc and don't use this cache. |
 
 ## Shared modules
 
-- `preprocess/template_scan.c` — backtick `${...}` scanner shared by `@string`, `@emit`, and `cc_generic_template` expansion
+- `preprocess/template_scan.c` — backtick `${...}` scanner shared by `@string` and `@emit`
 - `preprocess/comptime_prepare.c` — ordered `@comptime if/for` + template prepare pass
 - `preprocess/emit_limits.h` — shared buffer caps (hard errors on overflow)
 - `include/ccc/cc_emit_tpl_core.inc.cch` — single source for `@emit` append helpers + `_Generic` slot dispatch
@@ -40,7 +40,7 @@ tools/gen_emit_tpl_prelude.sh
 
 ## User-facing `@emit` projection
 
-- **`@emit(\`...\`)`** — returns `CCSlice`; use in generic factories.
-- **`@emit(CCEmitAnchor, \`...\`)`** — splices at an anchor from `@comptime {}` / `@comptime for`.
+- **`@emit(\`...\`, arena)`** — returns `CCSlice` built into the caller's `CCArena*`; use in generic factories (the return form requires the arena).
+- **`@emit(CCEmitAnchor, \`...\`)`** — splices at an anchor from `@comptime {}` / `@comptime for` (no arena: builds into a private stack arena, splices, frees).
 - `${expr}` slots dispatch by **expression type** (`_Generic`), not variable names.
 - `@comptime for` + backtick `@emit`: each unrolled iteration is wrapped in `@comptime { }` when the body contains `@emit(` with a backtick template (detected structurally, not by substring).

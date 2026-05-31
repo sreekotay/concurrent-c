@@ -187,17 +187,28 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
 
 int cc_comptime_fn_registry_scan(const char* src, size_t len) {
     size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     if (!src || len == 0) return 0;
     cc_comptime_fn_registry_clear();
+    /* Skip comments and string/char literals: `@comptime` in prose (e.g. a
+     * comment that says "a @comptime function") or inside a string is not a
+     * real definition and must not be scanned as one. */
     while (i < len) {
-        size_t end = 0;
-        int sr = 0;
-        if (src[i] == '@')
-            sr = cc__try_scan_comptime_fn(src, len, i, &end);
-        if (sr < 0) return -1;
-        if (sr) {
-            i = end;
-            continue;
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\') { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\') { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '@') {
+            size_t end = 0;
+            int sr = cc__try_scan_comptime_fn(src, len, i, &end);
+            if (sr < 0) return -1;
+            if (sr) { i = end; continue; }
         }
         i++;
     }
@@ -223,8 +234,14 @@ int cc_comptime_fn_registry_scan(const char* src, size_t len) {
 static jmp_buf cc__exec_jb;
 static clock_t cc__exec_start;
 static int cc__exec_timeout_ms = 5000;
+/* The timeout longjmp target (cc__exec_jb) is only valid while a @comptime
+ * block/eval is running under its setjmp.  Compiled factories are invoked later
+ * at use sites (outside any setjmp), so host verbs they call must not longjmp on
+ * a stale buffer — gate the check on actually being inside a block run. */
+static int cc__exec_in_block = 0;
 
 static void cc__exec_check_timeout(void) {
+    if (!cc__exec_in_block) return;
     if (cc__exec_timeout_ms <= 0) return;
     clock_t now = clock();
     if ((int)((now - cc__exec_start) * 1000 / CLOCKS_PER_SEC) > cc__exec_timeout_ms)
@@ -234,6 +251,12 @@ static void cc__exec_check_timeout(void) {
 static void cc__host_emit_raw(int anchor, const char* ptr, size_t len) {
     cc__exec_check_timeout();
     cc_emit_plan_host_emit_raw(anchor, ptr, len);
+}
+
+static void cc__host_emit_raw_at(int anchor, const char* file, int line,
+                                 const char* ptr, size_t len) {
+    cc__exec_check_timeout();
+    cc_emit_plan_host_emit_raw_at(anchor, file, line, ptr, len);
 }
 
 static void cc__host_instantiate_vec(const char* elem) {
@@ -332,11 +355,15 @@ static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
     return cc__exec_run_tu_ex(tu, err_buf, err_sz, NULL);
 }
 
-static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int64_t* out_int) {
+/* Create a TCC_OUTPUT_MEMORY state configured exactly like the comptime block
+ * executor: libtcc lib path, the compiler's CC_INCLUDE_PATH, and the full host
+ * verb symbol table.  Shared by @comptime block execution and the in-process
+ * compiled-factory path so both run in an identical environment. */
+static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz) {
     TCCState* s = tcc_new();
     if (!s) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "tcc_new failed");
-        return -1;
+        return NULL;
     }
     tcc_set_error_func(s, NULL, cc__exec_err_silent);
     {
@@ -347,10 +374,25 @@ static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int6
             tcc_add_library_path(s, libdir);
         }
     }
+    /* Curated Axis-1: let the comptime TU `#include <ccc/...>` the inline stdlib
+     * (slices/arena/string) so `@comptime` code can use CC library functions,
+     * not just libc + host verbs (COMPTIME_CAPABILITY_MODEL.md §7a, Axis 1).
+     * CC_INCLUDE_PATH is the compiler's own header search path (lowered .h dir
+     * then raw .cch dir), colon-separated; mirror it into the executor. */
+    {
+        const char* inc = getenv("CC_INCLUDE_PATH");
+        if (inc && inc[0]) {
+            char tmp[2048];
+            snprintf(tmp, sizeof(tmp), "%s", inc);
+            char* save = NULL;
+            for (char* tok = strtok_r(tmp, ":", &save); tok; tok = strtok_r(NULL, ":", &save))
+                if (tok[0]) tcc_add_include_path(s, tok);
+        }
+    }
     if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "tcc_set_output_type failed");
         tcc_delete(s);
-        return -1;
+        return NULL;
     }
     tcc_add_symbol(s, "cc_emit_raw", (void*)cc__host_emit_raw);
     tcc_add_symbol(s, "cc_instantiate_vec", (void*)cc__host_instantiate_vec);
@@ -359,6 +401,24 @@ static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int6
     tcc_add_symbol(s, "cc_reflect_field_count", (void*)cc_reflect_field_count);
     tcc_add_symbol(s, "cc_reflect_field_name", (void*)cc_reflect_field_name);
     tcc_add_symbol(s, "cc_reflect_field_type", (void*)cc_reflect_field_type);
+    tcc_add_symbol(s, "cc_reflect_enum_count", (void*)cc_reflect_enum_count);
+    tcc_add_symbol(s, "cc_reflect_enum_name", (void*)cc_reflect_enum_name);
+    tcc_add_symbol(s, "cc_reflect_enum_value", (void*)cc_reflect_enum_value);
+    tcc_add_symbol(s, "cc_reflect_kind", (void*)cc_reflect_kind);
+    tcc_add_symbol(s, "cc_canonical_name", (void*)cc_canonical_name);
+    tcc_add_symbol(s, "cc_reflect_tagged_count", (void*)cc_reflect_tagged_count);
+    tcc_add_symbol(s, "cc_reflect_tagged_name", (void*)cc_reflect_tagged_name);
+    tcc_add_symbol(s, "cc_emit_raw_at", (void*)cc__host_emit_raw_at);
+    tcc_add_symbol(s, "cc_emit_error", (void*)cc_emit_error);
+    tcc_add_symbol(s, "cc_emit_warning", (void*)cc_emit_warning);
+    tcc_add_symbol(s, "cc_emit_error_at", (void*)cc_emit_error_at);
+    tcc_add_symbol(s, "cc_emit_warning_at", (void*)cc_emit_warning_at);
+    return s;
+}
+
+static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int64_t* out_int) {
+    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    if (!s) return -1;
 
     if (tcc_compile_string(s, tu) < 0) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime TU compile failed");
@@ -394,6 +454,70 @@ static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int6
     tcc_delete(s);
     return 0;
 }
+
+/* In-process compiled-factory path: compile a full TU (prelude + factory def +
+ * wrapper) with libtcc, relocate, and return the live state as an opaque owner.
+ * Callers resolve entry points with cc_comptime_exec_lookup_symbol and free the
+ * state with cc_comptime_exec_release once no resolved pointer is needed.  This
+ * replaces the host-cc spawn + dylib + dlopen for generic factories: first-use
+ * compile is in-process (ms) and shares the executor's exact environment. */
+int cc_comptime_exec_compile_tu(const char* tu_src, void** out_state,
+                                char* err_buf, size_t err_sz) {
+    if (err_buf && err_sz) err_buf[0] = '\0';
+    if (!tu_src || !out_state) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "invalid compile_tu args");
+        return -1;
+    }
+    *out_state = NULL;
+    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    if (!s) return -1;
+    if (tcc_compile_string(s, tu_src) < 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "factory TU compile failed");
+        tcc_delete(s);
+        return -1;
+    }
+    if (tcc_relocate(s) < 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "factory TU relocate failed");
+        tcc_delete(s);
+        return -1;
+    }
+    *out_state = s;
+    return 0;
+}
+
+const void* cc_comptime_exec_lookup_symbol(void* state, const char* name) {
+    if (!state || !name) return NULL;
+    void* sym = tcc_get_symbol((TCCState*)state, name);
+    if (!sym) {
+        /* Mach-O underscore-prefixes C symbols; tcc_get_symbol may need it. */
+        char alt[160];
+        if (snprintf(alt, sizeof(alt), "_%s", name) < (int)sizeof(alt))
+            sym = tcc_get_symbol((TCCState*)state, alt);
+    }
+    return sym;
+}
+
+void cc_comptime_exec_release(void* state) {
+    if (state) tcc_delete((TCCState*)state);
+}
+#else  /* !CC_TCC_EXT_AVAILABLE */
+
+int cc_comptime_exec_compile_tu(const char* tu_src, void** out_state,
+                                char* err_buf, size_t err_sz) {
+    (void)tu_src;
+    if (out_state) *out_state = NULL;
+    if (err_buf && err_sz) snprintf(err_buf, err_sz, "libtcc not available");
+    return -1;
+}
+
+const void* cc_comptime_exec_lookup_symbol(void* state, const char* name) {
+    (void)state; (void)name;
+    return NULL;
+}
+
+void cc_comptime_exec_release(void* state) {
+    (void)state;
+}
 #endif /* CC_TCC_EXT_AVAILABLE */
 
 int cc_comptime_exec_eval_int(const char* expr,
@@ -421,11 +545,14 @@ int cc_comptime_exec_eval_int(const char* expr,
     }
     int rc = 0;
     if (setjmp(cc__exec_jb) != 0) {
+        cc__exec_in_block = 0;
         if (err_buf && err_sz)
             snprintf(err_buf, err_sz, "comptime eval timed out (%dms)", cc__exec_timeout_ms);
         rc = -1;
     } else {
+        cc__exec_in_block = 1;
         rc = cc__exec_run_tu_ex(tu, err_buf, err_sz, out);
+        cc__exec_in_block = 0;
     }
     free(tu);
     (void)opts;
@@ -465,12 +592,15 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
 
     int rc = 0;
     if (setjmp(cc__exec_jb) != 0) {
+        cc__exec_in_block = 0;
         if (err_buf && err_sz)
             snprintf(err_buf, err_sz, "comptime execution timed out (%dms)",
                      cc__exec_timeout_ms);
         rc = -1;
     } else {
+        cc__exec_in_block = 1;
         rc = cc__exec_run_tu(tu, err_buf, err_sz);
+        cc__exec_in_block = 0;
     }
     free(tu);
     cc_emit_plan_host_ctx_end();

@@ -29,8 +29,17 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
     while (i < in_len) {
         size_t before = i;
         if (cc_inert_scan_step(&scan, in, in_len, &i)) {
-            /* Inert region: copy through verbatim. */
             size_t take = i - before;
+            /* milestone 4b: drop closure-ID marker comments (/\*CC_CLO:N*\/)
+             * so they never reach the emitted C.  The closure-literal pass
+             * normally neutralizes them to spaces in its own working copy,
+             * but strip them here too as a belt-and-suspenders net for any
+             * code path that leaves a marker behind in `src_ufcs`. */
+            if (take >= 11 && in[before] == '/' && in[before + 1] == '*' &&
+                memcmp(in + before + 2, "CC_CLO:", 7) == 0) {
+                continue;
+            }
+            /* Inert region: copy through verbatim. */
             memcpy(buf + w, in + before, take);
             w += take;
             continue;

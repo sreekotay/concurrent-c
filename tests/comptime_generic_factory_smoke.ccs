@@ -1,14 +1,18 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
 #include <stdio.h>
 
-/* cc_generic_template with backtick ${...} grammar (canonical sugar). */
+/* CC_GENERIC_FACTORY: single canonical factory style, @emit ${...} grammar. */
 
-@comptime {
-    cc_generic_template("Pair", 2,
-        `typedef struct { ${0} first; ${1} second; } ${name};
-static inline ${name} ${name}_make(${0} a, ${1} b) { ${name} r; r.first = a; r.second = b; return r; }
-`);
+CC_GENERIC_FACTORY(Pair) {
+    (void)generic_name;
+    if (type_args.len < 2 || !mangled.ptr) return cc_slice_empty();
+    return @emit(`
+        typedef struct { ${type_args.items[0]} first; ${type_args.items[1]} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${type_args.items[0]} a, ${type_args.items[1]} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }`, arena);
 }
 
 int main(void) {

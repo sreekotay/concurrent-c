@@ -29,9 +29,9 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("named_toy_", sizeof("named_toy_") - 1),
-        method);
+        method, arena);
 }
 
 @comptime {
@@ -44,9 +44,9 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
             (void)mode;
             (void)argv;
             (void)arg_types;
-            return cc_ufcs_concat2(arena,
+            return cc_slice_concat2(
                 cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1),
-                method);
+                method, arena);
         },
     });
 }

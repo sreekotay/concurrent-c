@@ -149,7 +149,7 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
     if (cc_ufcs_slice_eq_cstr(method, "close_on")) {
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_add_closing_tx");
     }
-    return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_nursery_", sizeof("cc_nursery_") - 1), method);
+    return cc_slice_concat2(cc_slice_from_buffer((void*)"cc_nursery_", sizeof("cc_nursery_") - 1), method, arena);
 }
 
 #ifdef CC_COMPTIME_SCAN

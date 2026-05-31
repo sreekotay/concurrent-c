@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Edge-push #4 (negative): a @comptime constraint violation raised via
+ * cc_emit_error must fail the build with the library-authored message,
+ * attributed to the @comptime block's source line. */
+
+typedef struct {
+    int a;
+    int b;
+    int c;
+} Triple;
+
+@comptime {
+    int nf = cc_reflect_field_count("Triple");
+    if (nf >= 2) {
+        cc_emit_error("Triple exceeds the allowed field budget");
+    }
+}
+
+int main(void) { return 0; }

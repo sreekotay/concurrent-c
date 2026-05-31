@@ -21,7 +21,12 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+/* cc_runtime.cch transitively pulls the channel/future runtime, whose symbols
+ * the standalone comptime TU can't link; vec uses nothing from it, so skip it
+ * under CC_COMPTIME (see cc/docs/COMPTIME_CAPABILITY_MODEL.md §7b). */
+#ifndef CC_COMPTIME
 #include <ccc/cc_runtime.cch>
+#endif
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_vec.cch>
 

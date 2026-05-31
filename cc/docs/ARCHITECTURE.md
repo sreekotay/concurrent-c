@@ -136,7 +136,7 @@ The pipeline is best understood as three layers, not nine phases. (The Phase 1�
 
 - 16 preprocess passes (`cc/src/preprocess/preprocess.c`, ~8.8k lines) — see ADR-002 for the rationale.
 - L2 prelude rewriter (`cc/src/preprocess/cc_l2_rewriter.c`) — fixes standard-C idioms TCC rejects (`offsetof`, `__attribute__((constructor(N)))`).
-- Closure ID markers (`cc/src/preprocess/cc_closure_markers.c`) — injects `/*CC_CLO:N*/` comments for stable closure identity (foundation for future M4 work).
+- Closure ID markers (`cc/src/preprocess/cc_closure_markers.c`) — injects `/*CC_CLO:N*/` comments into the **codegen buffer** for stable closure identity. **Consumed (milestone 4b, 2026-05-30):** `pass_closure_literal_ast.c` derives each closure's exact start offset from its marker (comment-safe) instead of the `(line,col)`+forward-`=>`-scan heuristic. The heuristic + recovery branch remains only as the fallback for macro-origin closures (whose `=>` exists only post-CPP-expand, so no marker can be placed in the never-expanded codegen buffer). `CC_NO_CLOSURE_MARKERS` disables the marker path.
 - CPP pre-expand (`cc/src/preprocess/cpp_expand.c`, M7.A) — runs TCC's CPP after text passes so `#include` and macro expansion happens before TCC's second-pass parse. Default-on.
 - Initial parse: `cc_tcc_bridge_parse_string_to_ast` → root stub-AST.
 - Checker: `cc/src/visitor/checker.c` — semantic checks (slice move, provenance, deadlock-by-construction).

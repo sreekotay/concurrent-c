@@ -2421,10 +2421,103 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
     return b;
 }
 
+/* milestone 4b: marker offsets (closure-head positions derived from
+ * /*CC_CLO:N*\/ anchors) passed down from the public wrapper.  When
+ * `marker_n` equals the in-TU closure-node count, each closure's start
+ * offset is taken verbatim from `marker_offs[k]` (exact, comment-safe)
+ * rather than the (line,col)+arrow-scan heuristic + recovery fallback. */
+static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
+                                            const CCVisitorCtx* ctx,
+                                            const char* in_src,
+                                            size_t in_len,
+                                            const size_t* marker_offs,
+                                            int marker_n,
+                                            char** out_src,
+                                            size_t* out_len,
+                                            char** out_protos,
+                                            size_t* out_protos_len,
+                                            char** out_defs,
+                                            size_t* out_defs_len);
+
+/* Public entry point.  Milestone 4b: scan the codegen buffer for the
+ * /*CC_CLO:N*\/ closure-ID markers injected at parse-build time, record each
+ * closure-head offset (the byte just past its marker), then neutralize the
+ * marker comments to spaces in a private working copy.  Spaces preserve every
+ * byte offset (so the stub-AST line/col spans still line up) while removing the
+ * markers from the text the resolver, the @unsafe back-scan, span parsing and
+ * the emitted C all see.  The exact offsets are handed to the impl, which uses
+ * them in place of the legacy heuristic when the marker count matches the
+ * closure-node count.  `CC_NO_CLOSURE_MARKERS` disables the marker path (the
+ * impl then falls back to the heuristic). */
 int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                             const CCVisitorCtx* ctx,
                                             const char* in_src,
                                             size_t in_len,
+                                            char** out_src,
+                                            size_t* out_len,
+                                            char** out_protos,
+                                            size_t* out_protos_len,
+                                            char** out_defs,
+                                            size_t* out_defs_len) {
+    if (getenv("CC_NO_CLOSURE_MARKERS") || !in_src || in_len == 0) {
+        return cc__rewrite_closure_literals_with_nodes_impl(
+            root, ctx, in_src, in_len, NULL, 0,
+            out_src, out_len, out_protos, out_protos_len, out_defs, out_defs_len);
+    }
+
+    char* work = (char*)malloc(in_len + 1);
+    if (!work) {
+        return cc__rewrite_closure_literals_with_nodes_impl(
+            root, ctx, in_src, in_len, NULL, 0,
+            out_src, out_len, out_protos, out_protos_len, out_defs, out_defs_len);
+    }
+    memcpy(work, in_src, in_len);
+    work[in_len] = '\0';
+
+    size_t* offs = NULL;
+    int offs_n = 0, offs_cap = 0;
+    size_t p = 0;
+    while (p + 10 < in_len) {
+        if (work[p] == '/' && work[p + 1] == '*' &&
+            work[p + 2] == 'C' && work[p + 3] == 'C' && work[p + 4] == '_' &&
+            work[p + 5] == 'C' && work[p + 6] == 'L' && work[p + 7] == 'O' &&
+            work[p + 8] == ':') {
+            size_t q = p + 9;
+            while (q < in_len && work[q] >= '0' && work[q] <= '9') q++;
+            if (q + 1 < in_len && work[q] == '*' && work[q + 1] == '/') {
+                size_t after = q + 2;
+                if (offs_n == offs_cap) {
+                    int nc = offs_cap ? offs_cap * 2 : 32;
+                    size_t* g = (size_t*)realloc(offs, (size_t)nc * sizeof(size_t));
+                    if (!g) { break; }
+                    offs = g;
+                    offs_cap = nc;
+                }
+                offs[offs_n++] = after;
+                /* Neutralize the marker comment bytes to spaces. */
+                for (size_t b = p; b < after; b++) work[b] = ' ';
+                p = after;
+                continue;
+            }
+        }
+        p++;
+    }
+
+    int rc = cc__rewrite_closure_literals_with_nodes_impl(
+        root, ctx, work, in_len, offs, offs_n,
+        out_src, out_len, out_protos, out_protos_len, out_defs, out_defs_len);
+
+    free(offs);
+    free(work);
+    return rc;
+}
+
+static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
+                                            const CCVisitorCtx* ctx,
+                                            const char* in_src,
+                                            size_t in_len,
+                                            const size_t* marker_offs,
+                                            int marker_n,
                                             char** out_src,
                                             size_t* out_len,
                                             char** out_protos,
@@ -2554,6 +2647,16 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
     }
 
+    /* milestone 4b: use marker offsets when their count matches the closure
+     * node count.  Both lists are in source order (the marker producer scans
+     * the buffer linearly; idxs is sorted by source position above), so the
+     * k-th marker is the k-th closure's exact, comment-safe start offset. */
+    int use_markers = (marker_offs && marker_n == idx_n);
+    if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
+        fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: markers=%d closures=%d use_markers=%d\n",
+                marker_n, idx_n, use_markers);
+    }
+
     CCClosureDesc* descs = (CCClosureDesc*)calloc((size_t)idx_n, sizeof(CCClosureDesc));
     if (!descs) { free(idxs); return 0; }
 
@@ -2565,6 +2668,22 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         d->end_line = n[i].line_end;
         size_t start_off = 0;
         int start_col1 = 1;
+        if (use_markers) {
+            /* Exact, comment-safe start offset from the closure-ID marker.
+             * The marker comment has already been neutralized to spaces in
+             * `in_src` by the wrapper, so the @unsafe back-scan and span
+             * parsing below behave exactly as for an unmarked closure. */
+            start_off = marker_offs[k];
+            if (start_off >= in_len) { cc__free_closure_desc(d); continue; }
+            size_t ln_lo = start_off;
+            while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
+            start_col1 = 1 + (int)(start_off - ln_lo);
+            if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
+                fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d MARKER off=%zu col=%d\n",
+                        d->id, start_off, start_col1);
+            }
+            goto have_start_off;
+        }
         int be_ok = cc__closure_start_off_best_effort(in_src, in_len, n[i].line_start, n[i].line_end, n[i].col_start, &start_off, &start_col1);
         /* Validate: start_off must actually lead to `=>` within a short
          * window (accounting for `(params)` and whitespace).  When the AST
@@ -2666,6 +2785,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                         d->id, n[i].line_start, start_off, start_col1);
             }
         }
+have_start_off:
         d->start_col = start_col1 - 1;
         d->end_col = (n[i].col_end > 0) ? (n[i].col_end - 1) : -1;
         d->start_off = start_off;

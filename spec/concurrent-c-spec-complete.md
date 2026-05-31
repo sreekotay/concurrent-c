@@ -5363,9 +5363,9 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
             (void)mode;
             (void)argv;
             (void)arg_types;
-            return cc_ufcs_concat2(arena,
+            return cc_slice_concat2(
                 cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
-                method);
+                method, arena);
         },
     });
 
@@ -6128,6 +6128,8 @@ m.remove(key);
 
 This section defines compile-time computation as a restricted evaluation mode used for constants, specialization, and generic metaprogramming.
 
+**Rule:** Compile-time evaluation uses the standard Concurrent-C language without a separate meta-dialect. The reflection interface is strictly bytes-only, exposing no compiler-internal structures to guarantee a stable compile-time ABI.
+
 - **§14.1 Constant expressions** — what counts as compile-time
 - **§14.2 `@comptime` declarations** — compile-time storage
 - **§14.3 `@comptime` parameters** — compile-time arguments
@@ -6380,51 +6382,100 @@ typedef enum CCEmitAnchor {
 
 | Form | Returns | Use when |
 |------|---------|----------|
-| `@emit(\`...\`)` | `CCSlice` | Generic factories and any `@comptime` function that builds definition text and returns it |
+| `@emit(\`...\`, arena)` | `CCSlice` | Generic factories and any `@comptime` function that builds definition text and returns it; the fragment is built into the caller-supplied `CCArena*` |
 | `@emit(CCEmitAnchor, \`...\`)` | `void` (lowers to splice side effect) | `@comptime {}` blocks and `@comptime for` bodies that emit declarations at a named anchor |
 
 Both forms share the same backtick `${...}` grammar as `@string`. Each `${expr}` slot uses type-driven dispatch (`cc_emit_tpl_append_slot` / C11 `_Generic`); supported types are `CCSlice`, C strings (`char*` / `const char*` / char arrays), integers, and floating-point.
 
+**Rule:** The return form takes an explicit `arena` argument and **must** supply one; the anchored form takes no arena (it builds into a private stack arena, splices, and frees). Mixing the two — an arena on the anchored form, or a missing arena on the return form — is a compile error.
+
 **Rule:** `@comptime for` bodies that contain a backtick `@emit` are wrapped in `@comptime { }` per unrolled iteration so template lowering runs through the comptime executor.
 
-**Buffer limits (hard errors):** `@emit` template buffers, generic definition expansion, and comptime splice blocks have fixed caps (8192 bytes for template/definition text unless documented otherwise). Overflow is a compile error, not silent truncation.
+**Memory model:** `@emit` builds through a `CCString` over a `CCArena` (stack-first, heap-spill), so a single fragment has no fixed byte cap — large templates grow into arena heap rather than erroring. The arena owns the fragment bytes for the return form (the caller persists or copies them before freeing the arena); the anchored form's arena is local and freed after the splice. The factory's final returned definition is still bounded by the splice buffer (`CC_EMIT_TPL_BUF_SIZE`, 8192 bytes) and overflow there is a compile error, not silent truncation.
 
 ---
 
 ### 14.10 User-Defined Generic Lowering
 
-A library defines how its generic lowers to C by registering it in `@comptime {}`. Two forms:
+A library defines how its generic lowers to C with a single mechanism: a compiled
+`@comptime` factory bound to a name. The canonical form is the `CC_GENERIC_FACTORY`
+sugar, which lowers to a `cc_generic_register` call plus the factory function:
 
 ```c
-int cc_generic_template(const char* name, int arity, const char* template_src);
-int cc_generic_register(const char* name, void* factory);
-```
-
-**Template form.** `template_src` is C text with substitution markers using the same backtick grammar as `@string` / `@emit`:
-
-```c
-cc_generic_template("Pair", 2,
-    `typedef struct { ${0} first; ${1} second; } ${name};
-static inline ${name} ${name}_make(${0} a, ${1} b) { ... }`);
-```
-
-- `${name}` — the mangled instantiation name at the use site
-- `${0}`..`${N}` — the type-argument spellings (arity + 1 slots total including `${name}`)
-
-**Legacy (deprecated):** quoted strings with `$0` (mangled name) and `$1`..`$N` (type args) are normalized to `${name}` / `${0}`.. at registration. Prefer backtick templates for new code.
-
-**Factory form.** `factory` is a compiled `@comptime` function returning the definition text via `@emit(\`...\`)`:
-
-```c
-@comptime CCSlice factory(CCSlice generic_name, CCSlice mangled,
-                          CCSliceArray type_args, CCArena* arena) {
-    return @emit(`typedef struct { ${type_args.items[0]} x; } ${mangled};`);
+CC_GENERIC_FACTORY(Pair, 2) {
+    return @emit(`
+        typedef struct { ${arg(0)} first; ${arg(1)} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} a, ${arg(1)} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }`, arena);
 }
 ```
 
-**Rule:** At a `Name::[args]` use site the compiler computes a unique mangled name, expands the template or invokes the factory once per distinct instantiation, splices the result, and rewrites the use site to the mangled name. Returning the empty slice is a lowering failure.
+The factory body has implicit parameters and returns the definition text via
+`@emit(\`...\`, arena)`:
 
-**Rule:** Each `${expr}` slot in `@emit(\`...\`)` lowers to `cc_emit_tpl_append_slot(...)`, which uses C11 `_Generic` on the expression type to pick the append helper (`CCSlice`, integers, floating-point, or C string). Slot dispatch does not depend on variable names.
+- `generic_name` (`CCSlice`) — the registered name, e.g. `Pair`
+- `mangled` (`CCSlice`) — the mangled instantiation name at the use site
+- `type_args` (`CCSliceArray`) — the type-argument spellings
+- `arena` (`CCArena*`) — scratch arena for building the fragment
+
+**Sugar ergonomics.** The implicit parameters are auto-voided, so a body that
+ignores one needn't write `(void)…`. `arg(i)` is shorthand for
+`type_args.items[i]` (available inside factory bodies). The optional integer
+arity in `CC_GENERIC_FACTORY(Name, N)` injects the standard guard
+`if (type_args.len < N || !mangled.ptr) return cc_slice_empty();` so the body
+needn't repeat it; omit it (`CC_GENERIC_FACTORY(Name)`) to do your own argument
+checking.
+
+`cc_generic_register("Name", handler)` is the underlying primitive; the sugar is
+the preferred form:
+
+```c
+int cc_generic_register(const char* name, void* factory);
+```
+
+**Guidance:** `CC_GENERIC_FACTORY` and `cc_generic_register` produce identical lowering (the sugar expands to a `@comptime` factory function plus a `cc_generic_register` call), so use the sugar by default; reach for `cc_generic_register` directly only to decouple the factory from its registration — registering one factory under multiple names, reusing the factory function elsewhere, or registering programmatically.
+
+**Rule:** At a `Name::[args]` use site the compiler computes a unique mangled name, invokes the factory once per distinct instantiation, splices the result, and rewrites the use site to the mangled name. Returning the empty slice is a lowering failure.
+
+**Extending a generic.** A generic name has exactly one *base* factory
+(`CC_GENERIC_FACTORY` / `cc_generic_register`) plus any number of *extension*
+factories declared with `CC_GENERIC_FACTORY_EXTEND(Name[, arity]) { … }` (sugar
+for the `cc_generic_register_extend("Name", handler)` primitive). Extensions let
+operations on a generic type be defined separately from — and without editing —
+the factory that defines the type, e.g. core methods in one header and optional
+ones in another:
+
+```c
+// core: defines the type
+CC_GENERIC_FACTORY(Box, 1) {
+    return @emit(`typedef struct { ${arg(0)} value; } ${mangled};`, arena);
+}
+
+// elsewhere: adds an operation, no edit to the base
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    return @emit(`static inline ${arg(0)} ${mangled}_get(${mangled} b)
+                  { return b.value; }`, arena);
+}
+```
+
+**Rule (extension lowering):** At a use site the base factory runs first (it must
+define the type), then every extension in registration order; the fragments are
+concatenated into the single definition emitted once per mangled name. Because
+the base runs first, extension fragments may reference the base's symbols
+(`${mangled}`, its fields). Registration order across files is irrelevant — the
+base may register before or after its extensions.
+
+**Rule (base required):** A base factory must return a non-empty fragment.
+Instantiating a name that has only extension factories and no base is a
+compile-time error at the use site (*"generic 'X' is extended but never
+defined"*). An *extension* may return the empty slice to emit nothing, which is
+the supported way to specialize conditionally (e.g. emit `_inverse` only when
+`R == C`).
+
+**Rule:** Each `${expr}` slot in `@emit(\`...\`, arena)` lowers to `cc_emit_tpl_append_slot(...)`, which uses C11 `_Generic` on the expression type to pick the append helper (`CCSlice`, integers, floating-point, or C string). Slot dispatch does not depend on variable names.
+
+**Implementation note:** A factory compiles in-process on the libtcc comptime evaluator on first use (the same evaluator that runs `@comptime` blocks), not by spawning the host C compiler — first-use lowering is in the millisecond range. The relocated factory code stays resident for the remainder of the compile; if libtcc is unavailable the compiler falls back to a host-compiled shared object.
 
 **Rule:** This is the same registration machinery as UFCS custom lowering (§9.0): the library owns the C lowering, the compiler owns the splice.
 
@@ -6464,11 +6515,23 @@ int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz)
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
 ```
 
-**Rule:** `@comptime for` loop variables (`f.name`, `f.type`, `f.typestr`, `f.index`) and `${...}` slots inside `@emit(\`...\`)` share the same field metadata.
+**Rule:** `@comptime for` loop variables (`f.name`, `f.type`, `f.typestr`, `f.index`) and `${...}` slots inside `@emit` share the same field metadata.
 
 **Rule:** Field name and type accessors write at most `buf_sz - 1` bytes plus a NUL and return the byte count, or `-1` when `idx` is out of range. A returned type spelling may be passed back into `cc_reflect_field_count` to descend into nested struct fields.
 
-**Rule:** Field reflection is all-or-nothing. `type_of(T).fields`, `@comptime for`, and `cc_reflect_field_*` share one field parser. If `T` is not found, or any member uses a form not modeled (array, bitfield, function pointer, nested or anonymous aggregate, multi-declarator), reflection yields no fields: `cc_reflect_field_count` returns `-1` and `@comptime for` is a compile-time error. A partial or guessed field set is never produced.
+**Rule:** The field parser models these member-declarator forms exactly, one `CCReflectField` per declared name:
+
+| Member form | Example | Reflected name / `type` |
+|---|---|---|
+| Scalar / pointer | `double *p;` | `p` / `double*` |
+| Multi-declarator | `int a, *b;` | `a` / `int`, then `b` / `int*` |
+| Array (incl. multi-dim) | `char buf[16];` · `int g[2][3];` | `buf` / `char[16]` · `g` / `int[2][3]` |
+| Function pointer | `int (*cb)(int, int);` | `cb` / `int (*)(int, int)` |
+| Named bitfield | `unsigned f : 4;` | `f` / `unsigned` (width is validated, not exposed) |
+
+For the array and function-pointer forms the `type` spelling carries the extent / signature, so it is exact for `sizeof` and `t.f` access but is **not** usable as a declaration prefix (`${f.type} x;`).
+
+**Rule:** Field reflection is otherwise all-or-nothing. `type_of(T).fields`, `@comptime for`, and `cc_reflect_field_*` share one field parser, which never produces a partial or guessed field set. If `T` is not found, or any member uses a form the parser cannot spell exactly as a usable `type` — an inline anonymous or nested aggregate definition (`struct { ... } m;`), an anonymous member, an unnamed (padding) bitfield, or a pointer-to-array — reflection yields no fields: `cc_reflect_field_count` returns `-1` and `@comptime for` is a compile-time error. (A member that names an already-defined aggregate, e.g. `struct Foo m;`, is an ordinary scalar field and reflects normally.)
 
 **Implementation note:** By default the compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor (`CC_COMPTIME_UNIFIED_EXEC=1`). Set `CC_COMPTIME_UNIFIED_EXEC=0` to use the legacy structural text resolver only. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
 

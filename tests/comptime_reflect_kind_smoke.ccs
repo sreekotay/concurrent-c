@@ -1,0 +1,42 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Edge-push #2: type-kind classifier — a @comptime block reflects a struct's
+ * field types and classifies each (cc_reflect_kind) so a recursive serializer
+ * could decide: recurse aggregates, table-map enums, handle pointers, emit
+ * scalar leaves.  Only the kind code crosses the bind point. */
+
+typedef enum { RED, GREEN, BLUE } Color;
+typedef struct { int x; int y; } Point;
+
+typedef struct {
+    int    id;       /* PRIMITIVE */
+    double weight;   /* PRIMITIVE */
+    Color  color;    /* ENUM      */
+    Point  origin;   /* STRUCT    */
+    char*  name;     /* POINTER   */
+} Node;
+
+@comptime {
+    int nf = cc_reflect_field_count("Node");
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { NODE_NFIELDS = ${nf} };`);
+    for (int i = 0; i < nf; i++) {
+        char ty[64];
+        cc_reflect_field_type("Node", i, ty, sizeof(ty));
+        int k = cc_reflect_kind(ty);
+        @emit(CC_EMIT_AFTER_PRELUDE, `static const int node_f${i}_kind = ${k};`);
+    }
+}
+
+int main(void) {
+    if (NODE_NFIELDS != 5) return 1;
+    if (node_f0_kind != CC_REFLECT_KIND_PRIMITIVE) return 2;
+    if (node_f1_kind != CC_REFLECT_KIND_PRIMITIVE) return 3;
+    if (node_f2_kind != CC_REFLECT_KIND_ENUM)      return 4;
+    if (node_f3_kind != CC_REFLECT_KIND_STRUCT)    return 5;
+    if (node_f4_kind != CC_REFLECT_KIND_POINTER)   return 6;
+    printf("comptime_reflect_kind_smoke ok %d %d %d %d %d\n",
+           node_f0_kind, node_f1_kind, node_f2_kind, node_f3_kind, node_f4_kind);
+    return 0;
+}
