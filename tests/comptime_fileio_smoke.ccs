@@ -1,0 +1,49 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Comptime can use "as much CC as possible": the executor TU links libc and the
+ * prelude pulls in <stdio.h>/<stdlib.h>/<ctype.h>/<stdbool.h>.  This block writes
+ * a scratch file, reads it back, transforms each line with ctype + stdlib, and
+ * bakes the results into the program — proving file I/O and general libc work at
+ * comptime, not just the cc_emit_/cc_reflect_ host verbs. */
+@comptime {
+    const char* path = "/tmp/cc_comptime_fileio_smoke.txt";
+    FILE* w = fopen(path, "w");
+    if (w) {
+        fputs("RED 3\nGREEN 5\nBLUE 4\n", w);
+        fclose(w);
+    }
+    FILE* r = fopen(path, "r");
+    int idx = 0;
+    if (r) {
+        char line[128];
+        while (fgets(line, sizeof(line), r)) {
+            char name[64];
+            int n = 0;
+            if (sscanf(line, "%63s %d", name, &n) != 2) continue;
+            char low[64];
+            size_t k = 0;
+            for (; name[k] && k + 1 < sizeof(low); k++)
+                low[k] = (char)tolower((unsigned char)name[k]);
+            low[k] = 0;
+            /* atoi round-trips the parsed count to exercise <stdlib.h> too. */
+            char ns[16];
+            snprintf(ns, sizeof(ns), "%d", n);
+            @emit(CC_EMIT_AFTER_PRELUDE, `
+                static const char* color_${idx}(void) { return "${low}"; }
+                enum { color_${idx}_len = ${atoi(ns)} };
+            `);
+            idx++;
+        }
+        fclose(r);
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { COLOR_COUNT = ${idx} };`);
+}
+
+int main(void) {
+    if (COLOR_COUNT != 3) return 1;
+    if (color_0_len != 3 || color_1_len != 5 || color_2_len != 4) return 2;
+    printf("%d %s %s %s\n", COLOR_COUNT, color_0(), color_1(), color_2());
+    return 0;
+}

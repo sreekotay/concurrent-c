@@ -117,11 +117,16 @@ static char* cc__normalize_line_markers(const char* buf, size_t len, size_t* out
 
 char* cc_cpp_expand(const char* src, size_t src_len,
                     const char* input_path, size_t* out_len) {
+    return cc_cpp_expand_ex(src, src_len, input_path, out_len, 0);
+}
+
+char* cc_cpp_expand_ex(const char* src, size_t src_len,
+                       const char* input_path, size_t* out_len, int keep_defines) {
     if (out_len) *out_len = 0;
     if (!src) return NULL;
 
 #ifndef CC_TCC_EXT_AVAILABLE
-    (void)src_len; (void)input_path;
+    (void)src_len; (void)input_path; (void)keep_defines;
     return NULL;
 #else
     TCCState* s = tcc_new();
@@ -138,6 +143,11 @@ char* cc_cpp_expand(const char* src, size_t src_len,
         tcc_delete(s);
         return NULL;
     }
+    /* keep_defines mirrors `-dD`: emit retained `#define` directives alongside
+     * the expanded output.  Used to flatten the constant reparse prelude once
+     * while preserving the macros AND include guards the user body relies on
+     * (so the body's own #includes self-skip on the cached re-parse). */
+    if (keep_defines) s->dflag = 3;
 
     /* Match the include path setup used by cc_init_parser_state in TCC. */
     const char* env_inc = getenv("CC_INCLUDE_PATH");

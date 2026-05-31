@@ -1,8 +1,11 @@
 /*
  * cc_emit_tpl.cch — backtick emit-template builder for @comptime factories.
  *
- * `@emit(`...${expr}...`)` lowers to these helpers (same ${...} grammar as
- * `@string`).  Used by compiled generic factories and the libtcc comptime executor.
+ * `@emit(`...${expr}...`, arena)` (return form -> CCSlice) and
+ * `@emit(anchor, `...`)` (anchored splice) lower to CCString builders over an
+ * arena (same ${...} grammar as `@string`).  Used by compiled generic factories
+ * and the libtcc comptime executor.  These helpers remain for cc_emit_format and
+ * any direct cc_emit_tpl_* callers.
  */
 #ifndef CC_EMIT_TPL_CCH
 #define CC_EMIT_TPL_CCH

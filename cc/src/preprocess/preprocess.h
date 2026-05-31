@@ -10,15 +10,75 @@ typedef struct CCSymbolTable CCSymbolTable;
  * callback.  Parses the declared members of the struct/typedef `type_name`
  * (a typedef name, or a `struct Tag`/`union Tag` spelling) from `src`.
  *
+ * Models scalars/pointers, multi-declarators, arrays (incl. multi-dim),
+ * function pointers, and named bitfields; the `type` spelling carries pointer
+ * stars, array extents (`int[2][3]`), and function-pointer signatures
+ * (`int (*)(int)`).
+ *
  * Returns 1 and sets *out (free with cc_ct_free_fields) and *out_n on success.
  * Returns 0 if the type is not found OR any member uses a form not modeled
- * (array, bitfield, function pointer, nested/anonymous aggregate, or multi-
- * declarator): callers must treat 0 as "no reflection" — every field or none,
- * never a partial or guessed result. */
+ * (inline anonymous/nested aggregate def, anonymous member, unnamed bitfield,
+ * pointer-to-array): callers must treat 0 as "no reflection" — every field or
+ * none, never a partial or guessed result. */
 typedef struct CCCtField { char* name; char* type; } CCCtField;
 int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_name,
                                 CCCtField** out, size_t* out_n);
 void cc_ct_free_fields(CCCtField* fields, size_t n);
+
+/* Enum reflection (edge-push #1).  Parses the enumerators of the enum `type_name`
+ * (a typedef name, or an `enum Tag` spelling) from `src`, with C auto-increment
+ * semantics (first = 0, each subsequent = prev + 1 unless an explicit value is
+ * given).  Explicit values must be *integer literals* (decimal/hex/octal, with
+ * an optional sign and integer suffix); a non-literal initializer
+ * (`A | B`, `1 << 2`, `'c'`, …) makes the whole enum unreflectable — like the
+ * struct reflector, the contract is every member or none, never a guess.
+ *
+ * Returns 1 and sets *out (free with cc_ct_free_enum_members) and *out_n on
+ * success; 0 if the enum is not found or a member is not modeled. */
+typedef struct CCCtEnumMember { char* name; long long value; } CCCtEnumMember;
+int cc_ct_reflect_enum_members(const char* src, size_t len, const char* type_name,
+                               CCCtEnumMember** out, size_t* out_n);
+void cc_ct_free_enum_members(CCCtEnumMember* members, size_t n);
+
+/* Type-kind classifier (edge-push #2).  Classifies a type spelling so a
+ * recursive serializer/serde generator can decide whether to recurse
+ * (aggregate), table-map (enum), pointer-handle, or emit a scalar leaf.  Uses
+ * the body-finders (not the field parser), so a struct with an unmodeled
+ * member still classifies as STRUCT.  Leading const/volatile are tolerated;
+ * cv-qualified aggregate spellings and typedef-to-primitive aliases are not
+ * resolved (report UNKNOWN) — kept deliberately small for v1.  Keep these
+ * values in sync with the CC_REFLECT_KIND_* constants in cc_instantiate.cch. */
+typedef enum CCReflectKind {
+    CC_REFLECT_KIND_UNKNOWN   = 0,
+    CC_REFLECT_KIND_PRIMITIVE = 1,
+    CC_REFLECT_KIND_POINTER   = 2,
+    CC_REFLECT_KIND_STRUCT    = 3,  /* struct/union/typedef-aggregate */
+    CC_REFLECT_KIND_ENUM      = 4,
+} CCReflectKind;
+int cc_ct_reflect_type_kind(const char* src, size_t len, const char* type_name);
+
+/* Canonical generic name mangling (naming/composition).  Produces the exact
+ * mangled name the compiler uses for `base::[args...]`, so libraries that mangle
+ * privately can compose with each other (and with the built-ins) instead of
+ * each inventing an incompatible scheme.  Recipe: join `base` and each
+ * type arg with '_'; per arg, canonicalize the spelling then sanitize
+ * (`*`->`ptr`, `[:]`->`slice`, `[ ] , < >`->`_`, drop interior whitespace,
+ * trim trailing `_`).  See cc/docs/GENERIC_MANGLING.md.  Returns the written
+ * length, or -1 on truncation/bad args. */
+int cc_ct_canonical_name(const char* base, const char* const* args, int nargs,
+                         char* out, size_t out_sz);
+
+/* Tag-filtered declaration reflection (edge-push #3).  Opt-in, advertent
+ * marker: a single-line comment carrying the token `@tag:NAME` (in either a
+ * block or line comment) immediately preceding a top-level function definition
+ * tags that function.  This scan
+ * collects the names of all functions carrying `tag`, in source order, so a
+ * @comptime block can build a registry / dispatch table from them.  No new
+ * syntax or parser surface — purely a source-scan (surface ≡ lowering).
+ * Returns 1 on success (out_names = strdup'd array, possibly empty), 0 on OOM. */
+int cc_ct_reflect_tagged_fns(const char* src, size_t len, const char* tag,
+                             char*** out_names, size_t* out_n);
+void cc_ct_free_tagged_fns(char** names, size_t n);
 
 // Preprocess a CC source file, rewriting CC syntax (e.g., UFCS) into
 // plain C that TCC can parse. Writes to a temporary file path (returned via
@@ -34,12 +94,21 @@ char* cc_preprocess_to_string(const char* input, size_t input_len, const char* i
 // Use skip_checks=1 for reparse passes where checks already ran on original source.
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks);
 
-/* M3: explicit initial vs reparse entry points */
+#include "source_pipeline.h"
+
+/* M3 / pipeline stages: canonicalize (phase-1+3) then emit-plan splice. */
 char* cc_preprocess_for_initial_parse(const char* input, size_t input_len, const char* input_path);
-/* Reparse with checks skipped (same as legacy cc_preprocess_to_string_ex(..., 1)). */
+/* Initial parse after cc_comptime_prepare_source(): skips @comptime if/for and
+ * @emit/@string template rewrites already applied by that seam. */
+char* cc_preprocess_for_initial_parse_prepared(const char* input, size_t input_len, const char* input_path);
+/* Full canonicalize + splice for buffers not yet emit-ready (skip_checks=1). */
 char* cc_preprocess_for_reparse(const char* input, size_t input_len, const char* input_path);
-/* Reparse after phase-1 already applied: skip checks and phase-1 type-syntax bucket. */
-char* cc_preprocess_for_light_reparse(const char* input, size_t input_len, const char* input_path);
+/* Phase-1+3 only (no emit-plan splice). */
+char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char* input_path,
+                                 int skip_checks, int skip_comptime_surface);
+/* Emit-plan splice only; input must already be canonical. */
+char* cc_preprocess_emit_splice(const char* input, size_t input_len, const char* input_path,
+                               int skip_checks);
 
 // Expand a source file through the host C preprocessor so local and stdlib
 // headers appear in one include-expanded stream with line markers preserved.
@@ -80,6 +149,11 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 // Rewrite `@slice(...)`, `@string(...)`, and backtick template literals in a
 // source fragment used by later text-based lowering/codegen passes.
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
+
+// Lower `CC_GENERIC_FACTORY(Name) { ... }` sugar into a `cc_generic_register`
+// registration plus a `@comptime` factory function. Returns NULL when the
+// source has no occurrence, or (char*)-1 on a malformed header.
+char* cc_rewrite_generic_factory_text(const char* src, size_t n, const char* input_path);
 
 /* Scan a backtick template literal starting at tick_pos (which must point at '`').
  * On success sets *tick_end_out to the closing backtick index and returns 0. */

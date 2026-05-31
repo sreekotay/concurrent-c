@@ -12,11 +12,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "executor.h"
 #include "header/lower_header.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "visitor/visitor_fileutil.h"
+#include "../comptime/emit_tpl_prelude.inc.h"
 
 extern char** environ;
 
@@ -36,6 +38,7 @@ typedef struct {
     char dylib_path[1024];
     int  refcount;
     int  is_cached;
+    void* tcc_state;   /* non-NULL when compiled in-process via libtcc (no dylib) */
 } CCComptimeDlModule;
 
 void cc_comptime_type_hook_owner_retain(void* owner) {
@@ -48,6 +51,7 @@ void cc_comptime_type_hook_owner_free(void* owner) {
     CCComptimeDlModule* m = (CCComptimeDlModule*)owner;
     if (!m) return;
     if (--m->refcount > 0) return;
+    if (m->tcc_state) cc_comptime_exec_release(m->tcc_state);
     if (m->dl_handle) dlclose(m->dl_handle);
     if (m->obj_path[0]) unlink(m->obj_path);
     if (m->dylib_path[0] && !m->is_cached) unlink(m->dylib_path);
@@ -837,11 +841,19 @@ static int cc__build_compile_and_load(const char* input_path,
 
     cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n#define __CC__ 1\n#endif\n");
     if (isolated_body) {
-        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_slice.h>\n");
-        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_arena.h>\n");
-        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <stdio.h>\n");
+        /* Compiled factories run in the SAME comptime environment as @comptime
+           blocks: share the libtcc executor's prelude verbatim instead of a
+           bespoke minimal header set.  This gives the factory body CC_COMPTIME,
+           the inline slice/arena/string/vec/hash/map vocabulary, emit-template
+           helpers, and the reflection/emit host externs, so arena-backed @emit
+           works identically here and in blocks.  The prelude is a superset of the
+           old cc_slice.h, cc_arena.h, and cc_instantiate.cch set, so those are
+           dropped here. */
+        /* Define CC_COMPTIME_EXEC BEFORE the prelude so its factory-only sugar
+           (e.g. the `arg(i)` accessor macro) is gated in. */
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#define CC_COMPTIME_EXEC 1\n");
-        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_instantiate.cch>\n");
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, CC_COMPTIME_EMIT_TPL_PRELUDE);
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
     } else if (needs_cc_preprocess && !source_is_header) {
@@ -890,6 +902,33 @@ static int cc__build_compile_and_load(const char* input_path,
     module = (CCComptimeDlModule*)calloc(1, sizeof(*module));
     if (!module) { snprintf(err_buf, sizeof(err_buf), "failed to allocate hook module"); goto done; }
     module->refcount = 1;
+
+    /* Isolated factory bodies (CC_GENERIC_FACTORY / generic-factory hooks) run in
+       the same environment as @comptime blocks, so compile them in-process with
+       libtcc instead of spawning the host cc and dlopen'ing a dylib: first-use
+       compile drops from a process spawn to milliseconds.  The relocated TCC
+       state stays live in the module and is freed (tcc_delete) on owner_free.
+       Any failure falls through to the host-cc path below (err_buf cleared). */
+    if (isolated_body) {
+        void* state = NULL;
+        if (cc_comptime_exec_compile_tu(tu_src, &state, err_buf, sizeof(err_buf)) == 0) {
+            int ok = 1;
+            for (size_t i = 0; i < n_specs; ++i) {
+                out_fn_ptrs[i] = cc_comptime_exec_lookup_symbol(state, specs[i].entry_name);
+                if (!out_fn_ptrs[i]) { ok = 0; break; }
+            }
+            if (ok) {
+                module->tcc_state = state;
+                *out_module = module;
+                module = NULL;
+                rc = 0;
+                goto done;
+            }
+            cc_comptime_exec_release(state);
+        }
+        err_buf[0] = '\0';
+        for (size_t i = 0; i < n_specs; ++i) out_fn_ptrs[i] = NULL;
+    }
 
     /* Build a "probe" argv (with a placeholder dylib path) used purely to
        compute the cache key.  -o + dylib_path are excluded from the hash

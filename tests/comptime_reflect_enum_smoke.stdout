@@ -1,0 +1,1 @@
+comptime_reflect_enum_smoke ok count=5 0:LOG_TRACE 10:LOG_INFO 20:LOG_ERROR

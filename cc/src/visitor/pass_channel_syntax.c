@@ -1282,6 +1282,10 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
     if (last_emit < len) {
         cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, len - last_emit);
     }
+    if (!out) {
+        *out_len = 0;
+        return NULL;
+    }
     *out_len = o_len;
     return out;
 }

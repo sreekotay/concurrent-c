@@ -179,6 +179,11 @@ void cc_tcc_bridge_free_ast(CCASTRoot* root) {
         root->parse_buffer_pre_relower = NULL;
         root->parse_buffer_pre_relower_len = 0;
     }
+    if (root->codegen_buffer) {
+        free(root->codegen_buffer);
+        root->codegen_buffer = NULL;
+        root->codegen_buffer_len = 0;
+    }
     free(root);
 }
 #else

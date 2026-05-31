@@ -3,17 +3,16 @@
 #include <ccc/cc_slice.cch>
 #include <stdio.h>
 
-/* ${...} slots must use types supported by cc_emit_tpl_append_slot (_Generic). */
+/* ${...} slots must use a type supported by the @emit/@string slot _Generic. */
 
 @comptime CCSlice bad_slot_factory(CCSlice generic_name, CCSlice mangled,
                                    CCSliceArray type_args, CCArena *arena) {
     (void)generic_name;
     (void)type_args;
-    (void)arena;
     (void)mangled;
     typedef struct { int x; } BadSlotFoo;
     BadSlotFoo foo = { .x = 1 };
-    return @emit(`static int bad_slot_val = ${foo};`);
+    return @emit(`static int bad_slot_val = ${foo};`, arena);
 }
 
 @comptime {

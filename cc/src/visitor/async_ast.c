@@ -535,6 +535,141 @@ static void cc__collect_decl_names_from_stmt_list(const Stmt* st, int n, char** 
     }
 }
 
+static char* cc__dup_typeof_prefix_from_text(const char* text) {
+    const char* p = NULL;
+    size_t plen = 0;
+    size_t lpo = 0;
+    size_t rpo = 0;
+    if (!text) return NULL;
+    p = strstr(text, "__typeof__");
+    if (!p) return NULL;
+    plen = strlen(p);
+    lpo = cc_find_char_top_level(p, 0, plen, '(');
+    if (lpo >= plen || !cc__find_matching_paren(p, plen, lpo, &rpo)) return NULL;
+    return cc__strndup_trim_ws(p, rpo + 1);
+}
+
+/* Given a `__typeof__(CALL_EXPR)` type spelling (as produced by the @err /
+ * result-unwrap lowering for `__cc_er_*` temporaries) and the full
+ * async-lowering source, recover the concrete `CCResult_T_E` return type of
+ * the consumed call.  A hoisted `__cc_er_*` temp needs that complete type for
+ * its frame field — the raw `__typeof__` spelling references locals/params
+ * that are out of scope at struct-definition position.  Returns a freshly
+ * allocated type string, or NULL when the callee or its result type cannot be
+ * recovered (the caller then leaves the temp as a state-local). */
+static char* cc__resolve_er_typeof_concrete_type(const char* in_src, size_t in_len,
+                                                  const char* typeof_text) {
+    if (!in_src || !typeof_text) return NULL;
+    const char* p = strstr(typeof_text, "__typeof__");
+    if (!p) return NULL;
+    size_t tlen = strlen(p);
+    size_t lpo = cc_find_char_top_level(p, 0, tlen, '(');
+    size_t rpo = 0;
+    if (lpo >= tlen || !cc__find_matching_paren(p, tlen, lpo, &rpo)) return NULL;
+    const char* inner = p + lpo + 1;
+    size_t inner_len = (rpo > lpo + 1) ? (rpo - lpo - 1) : 0;
+    /* Outermost call: first identifier immediately followed by '('. */
+    char callee[160];
+    size_t cn = 0;
+    {
+        size_t i = 0;
+        int found = 0;
+        while (i < inner_len) {
+            if (cc__is_ident_start(inner[i])) {
+                size_t s = i;
+                while (i < inner_len && cc__is_ident_char(inner[i])) i++;
+                size_t j = i;
+                while (j < inner_len && (inner[j] == ' ' || inner[j] == '\t')) j++;
+                if (j < inner_len && inner[j] == '(') {
+                    cn = i - s;
+                    if (cn >= sizeof(callee)) cn = sizeof(callee) - 1;
+                    memcpy(callee, inner + s, cn);
+                    callee[cn] = 0;
+                    found = 1;
+                    break;
+                }
+            } else {
+                i++;
+            }
+        }
+        if (!found || cn == 0) return NULL;
+    }
+    /* Find the `!>`-lowered declaration/definition of the callee; its
+     * concrete result type is a single `CCResult_*` token preceding the name. */
+    for (size_t i = 0; i + cn <= in_len; i++) {
+        if (memcmp(in_src + i, callee, cn) != 0) continue;
+        if (i > 0 && cc__is_ident_char(in_src[i - 1])) continue;
+        size_t a = i + cn;
+        while (a < in_len && (in_src[a] == ' ' || in_src[a] == '\t')) a++;
+        if (a >= in_len || in_src[a] != '(') continue;
+        size_t b = i;
+        while (b > 0 && (in_src[b - 1] == ' ' || in_src[b - 1] == '\t')) b--;
+        size_t e2 = b;
+        while (b > 0 && cc__is_ident_char(in_src[b - 1])) b--;
+        if (e2 <= b) continue;
+        if ((size_t)(e2 - b) >= 9 && memcmp(in_src + b, "CCResult_", 9) == 0) {
+            return cc__strndup_trim_ws(in_src + b, e2 - b);
+        }
+    }
+    return NULL;
+}
+
+static void cc__collect_er_temps_from_stmt_list(const Stmt* st, int n,
+                                                char** out_names,
+                                                char** out_tys,
+                                                int* io_n,
+                                                int cap,
+                                                const char* in_src,
+                                                size_t in_len) {
+    if (!st || !out_names || !out_tys || !io_n) return;
+    for (int i = 0; i < n; i++) {
+        const Stmt* s = &st[i];
+        if (s->kind == ST_BLOCK || s->kind == ST_IF || s->kind == ST_WHILE || s->kind == ST_FOR) {
+            cc__collect_er_temps_from_stmt_list(s->then_st, s->then_n, out_names, out_tys, io_n, cap, in_src, in_len);
+            cc__collect_er_temps_from_stmt_list(s->else_st, s->else_n, out_names, out_tys, io_n, cap, in_src, in_len);
+            continue;
+        }
+        if (s->kind != ST_SEMI || !s->text) continue;
+        if (!strstr(s->text, "__typeof__")) continue;
+        const char* er = strstr(s->text, "__cc_er_r_");
+        if (!er) er = strstr(s->text, "__cc_er_d_");
+        if (!er) continue;
+        size_t nn = 0;
+        while (cc__is_ident_char(er[nn])) nn++;
+        if (nn == 0 || nn >= 128) continue;
+        char nm[128];
+        memcpy(nm, er, nn);
+        nm[nn] = 0;
+        int dup = 0;
+        for (int k = 0; k < *io_n; k++) {
+            if (out_names[k] && strcmp(out_names[k], nm) == 0) { dup = 1; break; }
+        }
+        if (dup || *io_n >= cap) continue;
+        char* tyof = cc__dup_typeof_prefix_from_text(s->text);
+        if (!tyof || !tyof[0]) {
+            free(tyof);
+            continue;
+        }
+        /* Resolve the `__typeof__(call)` spelling to the concrete CCResult type
+         * so the frame field is a complete type.  If it cannot be resolved,
+         * leave the temp as a state-local (current behavior) to avoid emitting
+         * an ill-formed frame field. */
+        char* ty = cc__resolve_er_typeof_concrete_type(in_src, in_len, tyof);
+        free(tyof);
+        if (!ty) continue;
+        out_names[*io_n] = strdup(nm);
+        out_tys[*io_n] = ty;
+        if (out_names[*io_n] && out_tys[*io_n]) {
+            (*io_n)++;
+        } else {
+            free(out_names[*io_n]);
+            free(out_tys[*io_n]);
+            out_names[*io_n] = NULL;
+            out_tys[*io_n] = NULL;
+        }
+    }
+}
+
 static void cc__collect_channel_pu_temps_from_stmt_list(const Stmt* st, int n,
                                                         char** out_names,
                                                         char** out_tys,
@@ -3235,6 +3370,11 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
            that are not present in the stub-AST DECL_ITEM stream but must live in the frame across awaits. */
         cc__collect_decl_names_from_stmt_list(st, st_n, locals, &local_n, 256);
         cc__collect_channel_pu_temps_from_stmt_list(st, st_n, locals, local_tys, local_sufs, &local_n, 256);
+        /* `__cc_er_*` temps from the @err / result-unwrap lowering must be
+         * frame-lifted when the consuming `if` is split across coroutine
+         * states; otherwise the declaration (parent state) and the handler /
+         * value arms (child states) reference an out-of-scope local. */
+        cc__collect_er_temps_from_stmt_list(st, st_n, locals, local_tys, &local_n, 256, in_src, in_len);
 
         /* Count awaits in subtree; add __cc_awN temps (also bounds task slots). */
         int aw_total = 0;

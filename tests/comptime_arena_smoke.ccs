@@ -1,0 +1,35 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Axis-1 umbrella, second header: @comptime can now use the real arena
+ * allocator (cc_arena.cch) — including arena-allocating slice ops like
+ * cc_slice_concat2 — not just the non-allocating slice vocabulary
+ * (COMPTIME_CAPABILITY_MODEL.md §7b). */
+@comptime {
+    CCArena a = cc_arena_create(4096);
+    CCSlice l = cc_slice_from_cstr("foo");
+    CCSlice r = cc_slice_from_cstr("bar");
+    CCSlice cat = cc_slice_concat2(l, r, &a);
+
+    int ok = cc_slice_eq_cstr(&cat, "foobar") ? 1 : 0;
+    int len = (int)cat.len;
+
+    char* z = (char*)cc_arena_alloc(&a, (size_t)len + 1, 1);
+    memcpy(z, cat.ptr, (size_t)len);
+    z[len] = 0;
+
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { CAT_OK = ${ok} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { CAT_LEN = ${len} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `static const char* cat_str(void) { return "${z}"; }`);
+
+    cc_arena_free(&a);
+}
+
+int main(void) {
+    if (CAT_OK != 1) return 1;
+    if (CAT_LEN != 6) return 2;
+    printf("comptime_arena_smoke ok cat=%s len=%d\n", cat_str(), CAT_LEN);
+    return 0;
+}

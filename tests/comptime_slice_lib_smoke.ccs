@@ -1,0 +1,31 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Axis-1 umbrella: @comptime can call the real header-only CC slice library
+ * (cc_slice.cch), not just libc + host verbs (COMPTIME_CAPABILITY_MODEL.md §7a).
+ * Here we trim/compare/hash CCSlices at compile time and drive emission off the
+ * results. */
+@comptime {
+    CCSlice s = cc_slice_from_cstr("  hello  ");
+    CCSlice t = cc_slice_trim(&s);
+    int ok = cc_slice_eq_cstr(&t, "hello") ? 1 : 0;
+    int n = (int)t.len;
+
+    CCSlice csv = cc_slice_from_cstr("red,green,blue");
+    CCSlice comma = cc_slice_from_cstr(",");
+    int parts = (int)cc_slice_count(csv, comma) + 1;
+
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { SLICE_TRIM_OK = ${ok} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { SLICE_TRIM_LEN = ${n} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { SLICE_CSV_PARTS = ${parts} };`);
+}
+
+int main(void) {
+    if (SLICE_TRIM_OK != 1) return 1;
+    if (SLICE_TRIM_LEN != 5) return 2;
+    if (SLICE_CSV_PARTS != 3) return 3;
+    printf("comptime_slice_lib_smoke ok trim=%d len=%d parts=%d\n",
+           SLICE_TRIM_OK, SLICE_TRIM_LEN, SLICE_CSV_PARTS);
+    return 0;
+}

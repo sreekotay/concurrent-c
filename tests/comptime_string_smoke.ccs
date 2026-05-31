@@ -1,0 +1,38 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Axis-1: the full CCString builder (cc/runtime/string.c) now runs at comptime.
+ * Under CC_COMPTIME_STRING the otherwise runtime-backed cc_string_* functions are
+ * compiled as static inline, and string.cch's heavy transitive includes (which
+ * pull channel/future symbols the comptime TU can't link) are gated out.
+ * See cc/docs/COMPTIME_CAPABILITY_MODEL.md §7b. */
+@comptime {
+    CCArena a = cc_arena_create(4096);
+
+    CCString s = cc_string_new();
+    cc_string_push_cstr(&s, "n=", &a);
+    cc_string_push_int(&s, 42, &a);
+    cc_string_push_cstr(&s, " ok", &a);
+
+    const char* z = cc_string_cstr(&s, &a);
+    int n = (int)cc_string_len(&s);
+
+    /* Exercise as_slice + the slice vocabulary on the built string. */
+    CCSlice view = cc_string_as_slice(&s);
+    int matches = cc_slice_eq_cstr(&view, "n=42 ok") ? 1 : 0;
+
+    @emit(CC_EMIT_AFTER_PRELUDE, `static const char* built(void) { return "${z}"; }`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { BUILT_LEN = ${n} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { BUILT_MATCHES = ${matches} };`);
+
+    cc_arena_free(&a);
+}
+
+int main(void) {
+    if (BUILT_LEN != 7) return 1;
+    if (BUILT_MATCHES != 1) return 2;
+    printf("comptime_string_smoke ok built=%s len=%d\n", built(), BUILT_LEN);
+    return 0;
+}

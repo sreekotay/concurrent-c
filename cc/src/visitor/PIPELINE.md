@@ -52,6 +52,41 @@ The legacy `cc__apply_coarse_codegen_pass()` per-collector path and the `CC_BATC
 
 **Why not fold Phase 5 into Phase 3 Stage 2?** Closure-literal lift is a *producer* for closure_calls (closure literals inside closure-typed call arg lists must be lowered to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text). That's the same producer/consumer pattern UFCS has — folding would require a 3rd Phase-3 stage with its own reparse barrier, net zero reparse savings. See [`ARCHITECTURE.md` §6 "Targets that aren't worth it"](../../docs/ARCHITECTURE.md).
 
+## Cached flattened reparse prelude (2026-05-30)
+
+Every reparse prepends a fixed prelude (`cc__prepend_reparse_prelude` in
+`visitor_fileutil.c`) that `#include`s the standard + CC system headers so the
+intermediate, partially-lowered source parses. Profiling (`CC_PROFILE_REPARSE`)
+showed the prelude's CPP work (`cc_preprocess_emit_splice`) is negligible
+(~0.04 ms) but the **TCC parse is the fixed cost (~10 ms/reparse)** — almost
+entirely re-reading and re-preprocessing those headers (≈8.5k lines) on *every*
+reparse, independent of user-code size.
+
+**Optimization:** flatten the prelude **once** with `-dD` semantics
+(`cc_cpp_expand_ex(..., keep_defines=1)` → `s->dflag = 3`), which expands all
+`#include`s while *retaining* macro definitions and include guards, and persist
+the result to a disk cache keyed on a hash of the prelude text. Subsequent
+reparses prepend the already-expanded text; the retained include guards make
+the user body's own `#include`s **self-skip**, so TCC never re-reads the
+headers. The `#line 1 "<input>"` directive emitted after the prelude resets
+coordinates for the user body, so the (much larger) flattened prelude does not
+perturb AST→source mapping.
+
+- **Per-reparse cost:** ~10 ms → ~6 ms (≈41% faster). Cold (first process)
+  pays the ~12 ms flatten once; every later process/file runs warm.
+- **Invalidation:** the cache filename embeds the prelude-text hash (prelude
+  edits miss); the cache is rejected if any header it was built from (recovered
+  from the flatten's own `#line` markers, stored in a `.deps` sidecar) is newer
+  than the cache file (header edits invalidate).
+- **`-dD` variadic fixup:** TCC serializes a variadic macro's parameter list as
+  `(__VA_ARGS__)` instead of `(...)`. `cc__fixup_flat_va_args` repairs the
+  parameter list of each `#define` (body untouched) so e.g. `__API_AVAILABLE`
+  round-trips. Without this, SDK headers like `math.h` fail with "macro used
+  with too many args".
+- **Escape hatch:** `CC_NO_PRELUDE_CACHE=1` disables caching (uses the raw
+  prelude); `CC_PRELUDE_CACHE_DIR` overrides the cache directory (default
+  `$TMPDIR`).
+
 ## Preprocess entry points (M3)
 
 | API | Use |

@@ -6,7 +6,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    Map<int, int> m = map_new<int, int>(&arena);
+    Map::[int, int] m = map_new::[int, int](&arena);
     m.insert(1, 111);
     m.insert(2, 222);
 

@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+
+/* CC_GENERIC_FACTORY_EXTEND with no base CC_GENERIC_FACTORY (or
+ * cc_generic_register) for the same name: nothing defines the type itself, so
+ * the instantiation must be rejected at the use site. */
+
+CC_GENERIC_FACTORY_EXTEND(Widget, 1) {
+    return @emit(`static inline int ${mangled}_x(void) { return 0; }`, arena);
+}
+
+int main(void) {
+    Widget::[int] w;
+    (void)w;
+    return 0;
+}

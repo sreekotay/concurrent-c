@@ -80,6 +80,19 @@ void cc_emit_plan_fprint_container_prelude(FILE* out, int use_cch,
 void cc_emit_plan_fprint_container_epilogue(FILE* out);
 void cc_emit_plan_fprint_vec_decl(FILE* out, const CCTypeInstantiation* inst);
 void cc_emit_plan_fprint_map_decl(FILE* out, const CCTypeInstantiation* inst);
+
+/* D6.4: container declaration factories.  A factory emits the C declaration
+ * text for one container instantiation (Vec/Map/...).  The built-in Vec/Map
+ * emitters are registered by default, so the historic hardcoded
+ * CC_VEC_DECL_ARENA(...) / CC_MAP_DECL_ARENA(...) emission is just the first
+ * registered factory — `cc_emit_plan_fprint_vec_decl` / `_map_decl` dispatch
+ * through this registry.  Libraries can register an additional container kind
+ * (or override a built-in) through the same seam rather than the compiler
+ * special-casing each one.  `kind` must outlive the registry (a literal or
+ * a long-lived string); the last registration for a kind wins. */
+typedef void (*CCContainerDeclFactory)(FILE* out, const CCTypeInstantiation* inst);
+void cc_emit_plan_register_container_factory(const char* kind, CCContainerDeclFactory fn);
+CCContainerDeclFactory cc_emit_plan_lookup_container_factory(const char* kind);
 void cc_emit_plan_fprint_line_directive(FILE* out, const char* src, size_t offset,
                                         const char* input_path);
 
@@ -118,22 +131,24 @@ size_t cc_emit_plan_comptime_instantiation_count(void);
 void cc_emit_plan_collect_comptime_instantiations(const char* src, size_t len);
 void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph);
 
-/* --- user generic factories (D6.0: declarative templates) ---
+/* --- user generic factories (compiled handlers) ---
  *
- * `@comptime { cc_generic_template("Pair", 2, "...$0...$1...$2..."); }` lets a
- * library register how its generic lowers to C, keyed by name + arity.  At a
- * `Pair::[int,double]` use site the compiler computes a mangled name, expands
- * the template ($0 = mangled name, $1..$N = the type args), emits it once via
- * the comptime-fragment channel, and rewrites the use site to the mangled name.
+ * `cc_generic_register("Pair", handler)` — or the `CC_GENERIC_FACTORY(Pair){...}`
+ * sugar that lowers to it — binds a library generic to a compiled @comptime
+ * factory.  At a `Pair::[int,double]` use site the compiler computes a mangled
+ * name, invokes the factory to produce the C definition, emits it once via the
+ * comptime-fragment channel, and rewrites the use site to the mangled name.
  * Modeled on UFCS (library owns the C lowering; compiler owns the splice). */
-#define CC_EMIT_PLAN_MAX_GENERIC_TEMPLATES 64
-void cc_emit_plan_register_generic_template(const char* name, int arity,
-                                            const char* template_src);
-const char* cc_emit_plan_lookup_generic_template(const char* name, int* out_arity);
-/* D6.1 compiled factory registration + dylib invoke. */
 void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name);
+/* Append an extension factory (CC_GENERIC_FACTORY_EXTEND); the base may register
+ * before or after — the base requirement is enforced at the use site. */
+void cc_emit_plan_register_generic_factory_extend(const char* name, const char* handler_name);
 const void* cc_emit_plan_lookup_generic_factory(const char* name);
 const char* cc_emit_plan_lookup_generic_factory_handler(const char* name);
+/* True when `name` has any COMPILED registration (base or extension); the
+ * use-site gate uses this so extend-only names still reach the base-required
+ * diagnostic. */
+int cc_emit_plan_has_generic_factory(const char* name);
 int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
                                            const char* input_path);
 /* Compile a registered factory dylib on first use (errors attributed at call site). */
@@ -142,6 +157,21 @@ int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* in
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
                                         char* def_out, size_t def_cap);
+
+/* Use-site production: ensure the registered factory dylib is compiled, then
+ * invoke it to produce the C definition text for `mangled`.  On failure the
+ * status names the failing stage and `err` holds the dynamic detail (e.g. the
+ * factory compile error); the caller owns the use-site-attributed diagnostic. */
+typedef enum CCGenProduceStatus {
+    CC_GEN_PRODUCE_OK              = 0,
+    CC_GEN_PRODUCE_ENSURE_FAILED   = 1, /* compiled factory failed to compile (err set) */
+    CC_GEN_PRODUCE_INVOKE_FAILED   = 2, /* compiled factory returned empty / overflowed  */
+} CCGenProduceStatus;
+
+CCGenProduceStatus cc_emit_plan_produce_generic_def(
+    const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
+    const char* reflect_src, size_t reflect_len, const char* input_path,
+    char* def_out, size_t def_cap, char* err, size_t err_cap);
 /* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);
@@ -161,11 +191,18 @@ void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
 void cc_emit_plan_fprint_comptime_fragment(FILE* out, size_t frag_index);
 int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* input_path);
 
+/* Dup-emit-name detector (naming/composition): warn on duplicate top-level
+ * function symbols across collected comptime fragments, naming both origins. */
+void cc_emit_plan_warn_duplicate_symbols(const char* src, size_t len,
+                                         const char* input_path);
+
 /* --- comptime executor host API (Stage 0) ---
  * Injected into libtcc-compiled @comptime blocks via tcc_add_symbol. */
 void cc_emit_plan_host_ctx_begin(size_t site_pos);
 void cc_emit_plan_host_ctx_end(void);
 void cc_emit_plan_host_emit_raw(int anchor, const char* ptr, size_t len);
+void cc_emit_plan_host_emit_raw_at(int anchor, const char* file, int line,
+                                   const char* ptr, size_t len);
 void cc_emit_plan_host_instantiate_vec(const char* elem);
 void cc_emit_plan_host_instantiate_map(const char* key, const char* val);
 void cc_emit_plan_host_instantiate_result(const char* ok, const char* err);
@@ -196,6 +233,38 @@ void cc_emit_plan_set_reflect_source(const char* src, size_t len);
 int cc_reflect_field_count(const char* type_name);
 int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+
+/* Enum reflection (edge-push #1): enumerator count, name (bytes), and value
+ * (scalar out-param).  Same bytes-only contract and source-scan backing as the
+ * field reflection above; injected into the executor and resolved by dylib
+ * factories.  Returns -1 for an unknown/unreflectable enum or out-of-range idx. */
+int cc_reflect_enum_count(const char* enum_name);
+int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz);
+int cc_reflect_enum_value(const char* enum_name, int idx, long long* out);
+
+/* Type-kind classifier (edge-push #2): CC_REFLECT_KIND_* code for a type
+ * spelling (recursive serde: recurse aggregates, table-map enums, leaf scalars). */
+int cc_reflect_kind(const char* type_name);
+
+/* Canonical generic mangling (naming/composition): the mangled name the
+ * compiler uses for base::[args...] so library generics compose interoperably. */
+int cc_canonical_name(const char* base, const char** args, int nargs,
+                      char* out, int out_sz);
+
+/* Tag-filtered reflection (edge-push #3): count / name functions carrying a
+ * `@tag:NAME` marker, for building registries and dispatch tables. */
+int cc_reflect_tagged_count(const char* tag);
+int cc_reflect_tagged_name(const char* tag, int idx, char* buf, int buf_sz);
+
+/* Custom domain diagnostics (edge-push #4): the dual of cc_emit_raw.  A
+ * @comptime block or compiled factory raises a compiler diagnostic for a
+ * constraint it checks itself; cc_emit_error fails the build, cc_emit_warning
+ * does not.  Attributed to the enclosing @comptime block's source line. */
+void cc_emit_error(const char* msg);
+void cc_emit_warning(const char* msg);
+/* Explicit-origin variants (edge-push #5): author supplies file:line. */
+void cc_emit_error_at(const char* file, int line, const char* msg);
+void cc_emit_warning_at(const char* file, int line, const char* msg);
 
 /* Execute @comptime {} blocks that need the libtcc executor (control flow or
  * calls to registered @comptime functions). */

@@ -18,6 +18,39 @@
 /* Declared in parse.c */
 extern char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n);
 
+/* `#pragma cc_depends("...")` is a build-graph directive consumed by the driver
+ * (it folds the named file's content into the emit cache key; see
+ * COMPTIME_CAPABILITY_MODEL.md §2).  It carries no codegen meaning, so blank it
+ * in place here — before lowering — so it never reaches the emitted C and never
+ * trips the host compiler's unknown-pragma warning.  Length-preserving (spaces),
+ * so source offsets/line numbers are unaffected. */
+static void cc__blank_pragma_cc_depends(char* buf, size_t len) {
+    size_t i = 0;
+    if (!buf) return;
+    while (i < len) {
+        size_t ls = i;
+        size_t p = i;
+        while (p < len && (buf[p] == ' ' || buf[p] == '\t')) p++;
+        if (p < len && buf[p] == '#') {
+            size_t q = p + 1;
+            while (q < len && (buf[q] == ' ' || buf[q] == '\t')) q++;
+            if (q + 6 <= len && memcmp(buf + q, "pragma", 6) == 0) {
+                size_t r = q + 6;
+                while (r < len && (buf[r] == ' ' || buf[r] == '\t')) r++;
+                if (r + 10 <= len && memcmp(buf + r, "cc_depends", 10) == 0) {
+                    size_t e = ls;
+                    while (e < len && buf[e] != '\n') e++;
+                    for (size_t k = ls; k < e; k++) buf[k] = ' ';
+                    i = e;
+                    continue;
+                }
+            }
+        }
+        while (i < len && buf[i] != '\n') i++;
+        if (i < len) i++;
+    }
+}
+
 int cc_build_parse_input(const char* file_buf,
                          size_t file_len,
                          const char* input_path,
@@ -34,6 +67,8 @@ int cc_build_parse_input(const char* file_buf,
     char* buf = strdup(file_buf);
     if (!buf) goto fail;
     size_t got = file_len ? file_len : strlen(buf);
+
+    cc__blank_pragma_cc_depends(buf, got);
 
     {
         char* lowered = cc_rewrite_local_cch_includes_to_lowered_headers(buf, got, input_path);
@@ -69,11 +104,44 @@ int cc_build_parse_input(const char* file_buf,
     }
 
     cc_unwrap_destroy_set_symbols(symbols);
-    char* pp = for_reparse
-        ? cc_preprocess_for_reparse(buf, got, input_path)
-        : cc_preprocess_for_initial_parse(buf, got, input_path);
+    char* canonical = for_reparse
+        ? cc_preprocess_canonicalize(buf, got, input_path, 1, 0)
+        : cc_preprocess_canonicalize(buf, got, input_path, 0, 1);
     cc_unwrap_destroy_set_symbols(NULL);
-    if (!pp) { free(buf); goto fail; }
+    if (!canonical) { free(buf); goto fail; }
+
+    /* Closure-ID marker injection (milestone 4b).  Insert /\*CC_CLO:N*\/
+     * block comments immediately before every closure literal, in source
+     * order, into the *canonical* (codegen) buffer.  This buffer becomes
+     * `out->buffer_codegen` (the text the visitor's closure-literal pass
+     * later walks), so the markers give that pass an exact, comment-safe
+     * anchor for each closure — replacing the brittle `(line,col)` +
+     * forward-`=>`-scan recovery heuristic.  Markers are inert C comments:
+     * TCC strips them from the parse, and `cc__strip_cc_decl_markers`
+     * strips them from the emitted C.  Initial parse only (reparses reuse
+     * the already-marked `src_ufcs`).  `CC_NO_CLOSURE_MARKERS` disables the
+     * whole feature (consumer falls back to the heuristic when no markers
+     * are present). */
+    if (!for_reparse && !getenv("CC_NO_CLOSURE_MARKERS")) {
+        size_t can_len = strlen(canonical);
+        size_t cm_len = 0;
+        char* cm = cc_inject_closure_markers(canonical, can_len, &cm_len);
+        if (cm) {
+            free(canonical);
+            canonical = cm;
+            if (getenv("CC_DEBUG_CLOSURE_MARKERS")) {
+                fprintf(stderr, "[cc:clo-markers] %s: %zu -> %zu bytes (codegen buffer)\n",
+                        input_path ? input_path : "<input>", can_len, cm_len);
+            }
+        }
+    }
+
+    char* pp = cc_preprocess_emit_splice(canonical, strlen(canonical), input_path, for_reparse);
+    if (!pp) {
+        free(buf);
+        free(canonical);
+        goto fail;
+    }
 
     /* Compile-time check: every `type_of(T)` / `cc_type_of("T")` call
      * in this TU should reference a type whose `cc_type_info` will be
@@ -106,10 +174,20 @@ int cc_build_parse_input(const char* file_buf,
         if ((size_t)cc_diag_error_count() > before) {
             free(buf);
             free(pp);
+            free(canonical);
             goto fail;
         }
     }
     free(buf);
+
+    /* Stash canonical buffer for visit_codegen; emit-ready splice is parse-only. */
+    if (!for_reparse) {
+        out->buffer_codegen = canonical;
+        out->buffer_codegen_len = strlen(canonical);
+        canonical = NULL;
+    } else {
+        free(canonical);
+    }
 
     /* M7: opt-in pre-expand via CPP, applied after all CC text passes
      * have run. Resolves the prepended `#include` directives that
@@ -208,33 +286,10 @@ int cc_build_parse_input(const char* file_buf,
         }
     }
 
-    /* Closure-ID marker injection (2026-05-27, foundation pass):
-     * insert /\*CC_CLO:N*\/ block comments immediately before
-     * every closure literal in source order.  Markers are
-     * inert (block comments stripped by TCC), but provide a
-     * stable in-text anchor that downstream closure-walking
-     * code can use to recover from AST `(line, col)` drift
-     * across pipeline stages without resorting to the brittle
-     * "find next `=>` skipping inert regions" heuristic.  See
-     * cc/src/preprocess/cc_closure_markers.h for the design
-     * and the planned consumer migration.  This commit only
-     * injects; consumers (pass_closure_literal_ast.c) still
-     * use the heuristic stack — the markers ride along as
-     * harmless comments until a follow-up commit switches the
-     * recovery path. */
-    {
-        size_t pp_len = strlen(pp);
-        size_t cm_len = 0;
-        char* cm = cc_inject_closure_markers(pp, pp_len, &cm_len);
-        if (cm) {
-            free(pp);
-            pp = cm;
-            if (getenv("CC_DEBUG_CLOSURE_MARKERS")) {
-                fprintf(stderr, "[cc:clo-markers] %s: %zu -> %zu bytes\n",
-                        input_path ? input_path : "<input>", pp_len, cm_len);
-            }
-        }
-    }
+    /* (Closure-ID markers are injected into `canonical`/`buffer_codegen`
+     * above, not into the parse buffer `pp`: TCC strips the comment markers
+     * during parse, and the visitor's closure pass walks the codegen buffer,
+     * not this one.) */
 
     out->buffer = pp;
     out->len = strlen(pp);
@@ -255,6 +310,9 @@ void cc_build_parse_input_free(CCBuildParseInput* in) {
     free(in->buffer_pre_relower);
     in->buffer_pre_relower = NULL;
     in->buffer_pre_relower_len = 0;
+    free(in->buffer_codegen);
+    in->buffer_codegen = NULL;
+    in->buffer_codegen_len = 0;
     cc_source_map_free(in->source_map);
     in->source_map = NULL;
 }

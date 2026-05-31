@@ -1,0 +1,45 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Axis-1 umbrella, third+fourth headers: @comptime can now use the base
+ * arena-backed vector vocabulary (cc_vec.cch via std/vec.cch) and the FNV-1a
+ * hash helpers (std/hash.cch). The typed CCVec_T wrappers expand to file-scope
+ * static-inline definitions, so a comptime block drives the generic CCVec API
+ * directly (COMPTIME_CAPABILITY_MODEL.md §7b). */
+@comptime {
+    CCArena a = cc_arena_create(4096);
+
+    CCVec v = {0};
+    cc_vec_init(&v, &a, sizeof(int), _Alignof(int), 4);
+    int sum = 0;
+    for (int i = 1; i <= 5; i++) {
+        int* slot = (int*)cc_vec_push_slot(&v, sizeof(int), _Alignof(int));
+        *slot = i * i;
+        sum += *slot;
+    }
+    int count = (int)v.len;
+    int third = ((int*)v.data)[2];
+
+    /* hash.cch: hash a stable string, fold to a small tag for the test. */
+    CCSlice key = cc_slice_from_cstr("comptime");
+    uint64_t h = cc_hash_slice(key);
+    int tag = (int)(h % 1000);
+
+    cc_arena_free(&a);
+
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { VEC_COUNT = ${count} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { VEC_SUM = ${sum} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { VEC_THIRD = ${third} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { KEY_TAG = ${tag} };`);
+}
+
+int main(void) {
+    if (VEC_COUNT != 5) return 1;
+    if (VEC_SUM != 55) return 2;   /* 1+4+9+16+25 */
+    if (VEC_THIRD != 9) return 3;  /* 3*3 */
+    printf("comptime_vec_smoke ok count=%d sum=%d third=%d tag=%d\n",
+           VEC_COUNT, VEC_SUM, VEC_THIRD, KEY_TAG);
+    return 0;
+}

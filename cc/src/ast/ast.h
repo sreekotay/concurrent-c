@@ -90,6 +90,9 @@ typedef struct CCASTRoot {
     size_t parse_buffer_len;
     char*  parse_buffer_pre_relower;
     size_t parse_buffer_pre_relower_len;
+    /* Canonical CC buffer for visit_codegen (pre-cpp-expand). */
+    char*  codegen_buffer;
+    size_t codegen_buffer_len;
 } CCASTRoot;
 
 #endif // CC_AST_AST_H

@@ -96,7 +96,16 @@ static int cc__ufcs_pattern_matches(const char* pattern, const char* type_name) 
     if (!pattern || !type_name) return 0;
     plen = strlen(pattern);
     if (plen > 0 && pattern[plen - 1] == '*') {
-        return strncmp(type_name, pattern, plen - 1) == 0;
+        size_t prefix_len = plen - 1;
+        /* `CCChanTx_*` must match bare `CCChanTx` as well as `CCChanTx_int`. */
+        if (prefix_len > 0 && pattern[prefix_len - 1] == '_') {
+            size_t base_len = prefix_len - 1;
+            if (strncmp(type_name, pattern, base_len) == 0 &&
+                (type_name[base_len] == '\0' || type_name[base_len] == '_')) {
+                return 1;
+            }
+        }
+        return strncmp(type_name, pattern, prefix_len) == 0;
     }
     return strcmp(pattern, type_name) == 0;
 }

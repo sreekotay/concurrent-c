@@ -25,18 +25,6 @@ int cc_template_next_piece(const char* src, size_t n,
                            size_t body_s, size_t body_e,
                            size_t* pos, CCTemplatePiece* out);
 
-/* Expand a registered generic backtick template at a use site (${name}, ${0}..).
- * Returns 1 on success, 0 on truncation or error. */
-int cc_template_expand_generic(const char* tmpl,
-                                  const char* mangled,
-                                  const char* const* args, int nargs,
-                                  char* out, size_t out_cap);
-
-/* Rewrite legacy $0/$1 positional markers to ${name}/${0}.. form in-place into out.
- * Returns 1 on success, 0 on truncation. */
-int cc_template_normalize_legacy_positional(const char* tmpl,
-                                               char* out, size_t out_cap);
-
 /* True when [body_s, body_e) contains `@emit(` with a backtick template (needs
  * comptime exec after `@comptime for` unrolling). */
 int cc_template_body_needs_emit_exec(const char* src, size_t n,

@@ -19,9 +19,9 @@ static CCSlice defined_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSli
     (void)mode;
     (void)argv;
     (void)arg_types;
-    return cc_ufcs_concat2(arena,
+    return cc_slice_concat2(
         cc_slice_from_buffer("defined_toy_", sizeof("defined_toy_") - 1),
-        method);
+        method, arena);
 }
 
 static void defined_toy_ping(DefinedToy* toy) {
@@ -42,9 +42,9 @@ static void defined_lambda_toy_ping(DefinedLambdaToy* toy) {
             (void)mode;
             (void)argv;
             (void)arg_types;
-            return cc_ufcs_concat2(arena,
+            return cc_slice_concat2(
                 cc_slice_from_buffer("defined_lambda_toy_", sizeof("defined_lambda_toy_") - 1),
-                method);
+                method, arena);
         },
     });
 }

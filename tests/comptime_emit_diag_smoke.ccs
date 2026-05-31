@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Edge-push #4: custom domain diagnostics — the dual of cc_emit_raw.  A
+ * @comptime block validates a constraint it cares about (here: a soft field
+ * budget) and raises cc_emit_warning/cc_emit_error itself.  Constraint holds,
+ * so only an (informational, stderr-only) warning fires and the build proceeds. */
+
+typedef struct {
+    int a;
+    int b;
+} Pair2;
+
+@comptime {
+    int nf = cc_reflect_field_count("Pair2");
+    if (nf > 8) {
+        cc_emit_error("Pair2 exceeds the registry field budget");
+    } else {
+        cc_emit_warning("Pair2 reflected within budget (informational)");
+    }
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { PAIR2_NFIELDS = %d };\n", nf);
+}
+
+int main(void) {
+    if (PAIR2_NFIELDS != 2) return 1;
+    printf("comptime_emit_diag_smoke ok nfields=%d\n", PAIR2_NFIELDS);
+    return 0;
+}

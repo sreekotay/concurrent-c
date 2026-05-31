@@ -109,6 +109,9 @@ void cc_result_spec_mangle_type(const char* src, size_t len, char* out, size_t o
     }
     while (j > 0 && out[j - 1] == '_') j--;
     out[j] = '\0';
+    if (strcmp(out, "_Bool") == 0) {
+        snprintf(out, out_sz, "bool");
+    }
     cc__normalize_type_name(out);
 }
 

@@ -396,7 +396,7 @@ Each commit: 462/462 default + `CC_PRE_EXPAND=0`.
 |---|--------|------|
 | D1 | `type_of(T)` constexpr view (3c.3) | Comptime + runtime share `cc_type_info` — **D1.0 done** (numeric/layout) + **D1.1 done** (structural members) |
 | D2 | `@comptime if` + constexpr eval (C4) | Spec §14 — **D2.0 done** (predicate evaluator + branch selection) + **D2.1 done** (`else @comptime if` chains + `&&`/`||` short-circuit); D3 next |
-| D3 | TCC constexpr hooks (C5) | Replace dylib for simple hooks — **D3.0 done** (in-process `cc_tcc_eval_const_expr` seam) + **D3.1 done** (layout-aware `@comptime if`: (A) primitive/C-expr layout, (b) user-struct layout via in-scope type-def prelude); next: constant-hook fast path replacing dylib (D3.2) |
+| D3 | TCC constexpr hooks (C5) | Replace dylib for simple hooks — **D3.0 done** (in-process `cc_tcc_eval_const_expr` seam) + **D3.1 done** (layout-aware `@comptime if`: (A) primitive/C-expr layout, (b) user-struct layout via in-scope type-def prelude) + **D3.2 done** (generic factories compile in-process on libtcc, no host-cc dylib; see 2026-05-31 log) |
 | D4 | `type_of(T).fields` iteration (3c.3) | Reflection-driven codegen — **D4.0 done** (`@comptime for (F in type_of(T).fields) { ... }` unrolls per declared field with `F`/`F.name`/`F.type`/`F.typestr`/`F.index` substitution) |
 | D5 | Instantiation seam (comptime-driven monomorphization) | **D5.0 done** (`cc_emit_format` parameterized emission + reflection *drives* `cc_instantiate_*`/`cc_emit_*`: `@comptime for` over a type's fields, expanded before collection, generates monomorphs and code); next: graduate user generic factories |
 
@@ -448,10 +448,12 @@ emitted once with the loop variable substituted: `F` → the field identifier (s
 `t.F` → `t.a`), `F.name` → `"field"` (string literal), `F.type` → the field's type
 spelling, `F.index` → the 0-based index. `T`'s definition is read from the same
 source buffer (`cc__ct_find_struct_body` + `cc__ct_parse_fields_from_body`, reusing
-the D3.1b top-level scanner). Unsupported field forms (arrays, bitfields,
-function-pointers, multi-declarator members, nested/anon aggregates) and unknown
-types are a **hard error** — reflection sees every field or none, never silently
-zero. Tests: `comptime_for_fields_smoke` (bare/`.name`/`.index`/`.type` over a
+the D3.1b top-level scanner). Field forms that cannot be spelled as a usable
+`type` (inline anonymous/nested aggregate defs, anonymous members, unnamed
+bitfields, pointer-to-array) and unknown types are a **hard error** — reflection
+sees every field or none, never silently zero. (Arrays, function pointers,
+multi-declarators, and named bitfields *are* modeled — see the 2026-05-31
+member-declarator parser entry.) Tests: `comptime_for_fields_smoke` (bare/`.name`/`.index`/`.type` over a
 3-field struct; runtime-checked sums) + `comptime_for_unknown_fail` (unknown type →
 diagnostic). Suite **473/473** both default and `CC_PRE_EXPAND=0`. *Boundary:*
 header-defined structs aren't visible (same pre-expand seam as D3.1b); line numbers
@@ -579,12 +581,301 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
     `tests/comptime_reflect_factory_smoke` (compiled `Describe::[Widget]` factory
     introspects its struct type arg and emits one accessor per field).
   - **Known v1 limits:** offsets are not provided (emitted C names fields
-    directly, so the host C compiler computes layout); nested-aggregate field
-    declarations (those containing `{`) are skipped; one declarator per field.
+    directly, so the host C compiler computes layout).  (The original "skip
+    nested aggregates / one declarator per field" limit was lifted — see the
+    member-declarator parser entry dated 2026-05-31; inline anonymous/nested
+    aggregate defs still reflect `-1`.)
 
-- **D6.4 (collapse the builtins).** Re-express `CCVec`/`Map`/`Chan` as
-  default-registered factories so `cc_emit_plan_fprint_vec_decl`'s hardcoded
-  `CC_VEC_DECL_ARENA(...)` is just the first library factory, unifying the path.
+- **D6.4 (collapse the builtins) — emission seam LANDED 2026-05-30.**
+  Container monomorph declarations now emit through a **default-registered
+  container-factory registry** (`cc_emit_plan_register_container_factory` /
+  `cc_emit_plan_lookup_container_factory` in `emit_plan.c`).  The built-in
+  Vec/Map emitters (`cc__builtin_vec_decl` / `cc__builtin_map_decl`, holding
+  the historic `CC_VEC_DECL_ARENA(...)` / `CC_MAP_DECL_ARENA(...)` bodies) are
+  registered by default under the kinds `"Vec"` / `"Map"`, and
+  `cc_emit_plan_fprint_vec_decl` / `_map_decl` are thin dispatchers that look
+  the kind up and call the registered factory.  So the hardcoded path is now
+  literally "just the first registered factory," and a library can register an
+  additional container kind (or override a built-in) through the same seam
+  rather than the compiler special-casing each one.  Output is byte-identical
+  (full suite 489/489).  `Chan` has no decl factory yet (the chan branch in
+  `cc_preprocess_emit_splice` emits nothing today).
+- **Option A (unified generic registry) — LANDED 2026-05-30.**  The three
+  historic registries (container-decl factories, declarative generic templates,
+  compiled generic factories) are now **one tagged registry** (`cc__generics[]`
+  in `emit_plan.c`), keyed by `(name, kind)` where `kind` is:
+  - `CC_GENERIC_NATIVE_DECL` — a compiler-native C emitter for a container
+    monomorph's declaration (built-in **Vec/Map**, consumed by the type-graph
+    emission loop via `cc_emit_plan_lookup_container_factory`);
+  - `CC_GENERIC_COMPILED` — a `cc_generic_register` `@comptime` factory compiled
+    in-process on the libtcc evaluator (host-cc dylib fallback) and invoked at the
+    use site.
+
+  (A third kind, `CC_GENERIC_TEMPLATE` — a declarative `cc_generic_template`
+  `$0..$N` / `${...}` string tier — also existed here; it was **removed
+  2026-05-31**, see the dated entry below.)
+
+  So built-in containers stop being a *separate* mechanism: they are
+  `NATIVE_DECL` entries that share the registry, the lookup, and the per-TU
+  lifecycle plumbing with user `Name::[args]` factories (NATIVE_DECL built-ins
+  persist; COMPILED is cleared per-TU via `cc__generic_remove_kind`).
+  The **use-site invocation contract is a single entry point**,
+  `cc_emit_plan_produce_generic_def(...)`, which ensures the factory dylib is
+  compiled then invokes it, returning a `CCGenProduceStatus`; the use-site
+  rewrite in `cc_rewrite_generic_containers` calls it and owns only the
+  use-site-attributed diagnostic.
+  - *Map hash/eq as data — done 2026-05-30.* The built-in `cc__builtin_map_decl`
+    no longer chooses the hash/eq pair via a hardcoded `if/else` chain; it
+    consults a priority-ordered data table (`cc__map_key_hasheq`) with an i32
+    fallback. The closed built-in key set is now explicit, and the table is the
+    natural place a future *registrable* seam would prepend library-supplied key
+    hashers (that step needs a comptime host verb to be user-callable, so it is
+    deferred until there is a concrete consumer — building it now would be
+    speculative generality with no caller).
+  - *Use-site lowering for new container kinds — resolved as a non-goal.* A
+    library can already add a brand-new container *kind* end to end through the
+    factory seam: `CC_GENERIC_FACTORY(Pair){...}` (or the underlying
+    `cc_generic_register`) plus a `Pair::[args]` use site lowers to a
+    library-owned typedef and the mangled name
+    (`tests/comptime_generic_factory_smoke`). Generalizing the *built-in*
+    graph-backed macro/deferred-emission path (the dual-parse `__CC_VEC`/`__CC_MAP`
+    placeholder + type-graph machinery) to arbitrary library kinds would re-open
+    the blessed closed core; per the closed-core / open-edge split the open edge
+    is correctly served by comptime factories, so this is intentionally **not**
+    pursued.
+
+- **D6.5 (single instantiation surface) — LANDED 2026-05-30.**  The
+  angle-bracket generic spellings are fully retired.  `Vec<T>` / `CCVec<T>` /
+  `vec_new<T>` already errored; `Map<K, V>` / `map_new<K, V>` now error too
+  (`cc_rewrite_generic_containers` flags them with a migration diagnostic).
+  The **single instantiation surface** for both built-in containers and user
+  generic factories is the bracket form `Name::[args]` — `CCVec::[int]`,
+  `Map::[K, V]`, `Pair::[A, B]`.  Negative tests `vec_legacy_spelling_retired`
+  and `map_legacy_spelling_retired` lock the retirement in; the 9 Map smoke
+  tests migrated to `::[...]`.  Fixing the migration surfaced a latent bug in
+  the shared backward type-scan (`cc_rfind_char_top_level`): an unmatched
+  opening `[` to the left now bounds the scan (mirroring the existing `(`
+  case), so a slice element type inside a generic-arg list
+  (`Map::[char[:], int]`) no longer swallows the container head into `CCSlice`.
+  A `comptime.cch` umbrella header now re-exports the whole compile-time API
+  (`cc_type` / `cc_instantiate` / `cc_emit_tpl`) so `@comptime` authors learn
+  it from one include.  Full suite 490/490.
+
+- **Single factory style — `CC_GENERIC_FACTORY` + template tier removed —
+  LANDED 2026-05-31.**  The declarative `cc_generic_template("Name", arity,
+  \`...\`)` tier was **deleted** in favor of one generic-lowering mechanism:
+  compiled `@comptime` factories.  Rationale (the DX/perf analysis that drove
+  it): a declarative template re-parses its `${...}` slot grammar at *every*
+  use site (`cc_template_expand_generic` per instantiation), and the moment the
+  template stops being a bare string literal (e.g. a computed `CCString`) it can
+  no longer be lifted by the static text scanner — it would need the executor to
+  produce the string, paying the *same* initial compile as a factory **plus** the
+  per-use re-parse.  A compiled factory compiles once (cached `r->fn_ptr`) and is
+  a bare function-pointer call per use.  So the template was strictly worse once
+  generalized, with no perf argument left.
+  - The canonical authoring form is now the **`CC_GENERIC_FACTORY(Name) { ... }`**
+    sugar (a seam rewrite in `comptime_prepare.c` → `preprocess.c`'s
+    `cc__rewrite_generic_factory`), which lowers to a `@comptime` factory function
+    (implicit `generic_name` / `mangled` / `type_args` / `arena` params) plus a
+    `cc_generic_register("Name", __cc_gfac_Name)` registration.  Only the
+    `CC_GENERIC_FACTORY(Name)` token is replaced; the `{ ... }` body stays put so
+    line numbers are preserved.
+  - Removed: `CC_GENERIC_TEMPLATE` kind, `cc_emit_plan_{register,lookup}_generic_template`,
+    the `cc_generic_template` collector + intrinsic-table entry + inline stub,
+    `cc_template_expand_generic` / `cc_template_normalize_legacy_positional`
+    (template_scan.c), the `$0/$1` legacy + adjacent-C-string-literal grammar,
+    `CC_GENERIC_TEMPLATE_MAX`, and the `tmpl`/`use_factory` params of
+    `cc_emit_plan_produce_generic_def`.  Migrated test sites:
+    `comptime_generic_factory_smoke`, `comptime_canonical_name_smoke`.  Full suite
+    506/506.
+
+- **Arena-backed `@emit` + factory ergonomics + in-process factory compile —
+  LANDED 2026-05-31.**  Three changes that finish the single-factory DX and close
+  out the dylib path for generic factories:
+  - **Arena-backed `@emit`.**  `@emit` lowering moved off a fixed static buffer
+    onto a `CCString` over a `CCArena` (stack-first, heap-spill).  The two forms
+    are now grammatically distinct: the return form `@emit(\`...\`, arena)` **must**
+    take the caller's arena (the returned `CCSlice` points into it; the caller
+    persists/copies before freeing), and the anchored form `@emit(anchor, \`...\`)`
+    takes **no** arena (it declares a private `CC_ARENA_STACK`, builds, splices via
+    `cc_emit_raw`, frees).  Supplying the wrong arity is a hard error.  The host
+    passes a `CC_ARENA_STACK(…, CC_EMIT_TPL_BUF_SIZE)` to each factory invoke
+    (`cc_emit_plan_invoke_generic_factory`); the returned definition is still
+    bounded by the splice buffer (8192).  Retired the static-buffer
+    `cc_emit_tpl_*` push/rewrite helpers.
+  - **`CC_GENERIC_FACTORY` sugar ergonomics.**  The seam rewrite
+    (`cc__rewrite_generic_factory`) now auto-voids the implicit params (bodies
+    needn't `(void)…`), accepts an optional integer arity
+    `CC_GENERIC_FACTORY(Name, N)` that injects the standard
+    `if (type_args.len < N || !mangled.ptr) return cc_slice_empty();` guard, and
+    the prelude defines `#define arg(i) (type_args.items[(i)])` (gated on
+    `CC_COMPTIME_EXEC`) as shorthand for the type-arg slots.  Body line numbers are
+    still preserved (the `)`..`{` span is copied verbatim).
+  - **In-process factory compile (dylib path retired for factories).**  Isolated
+    factory bodies now compile on the libtcc comptime evaluator
+    (`cc_comptime_exec_compile_tu` / `_lookup_symbol` / `_release` in
+    `executor.c`, sharing `cc__exec_new_state` with `@comptime` block execution)
+    instead of a `posix_spawn` of the host cc + `dlopen` of a `.dylib`.  First-use
+    lowering drops from a process spawn to milliseconds, and the factory runs in
+    the *exact* environment as blocks (this is the C5 / D3.2 "no dylib for hooks"
+    milestone, for generic factories).  The relocated `TCCState` stays resident in
+    the hook module and is `tcc_delete`'d on `owner_free`.  `hook_compile.c` tries
+    this for any `isolated_body` and falls back to the host-cc dylib on any failure
+  (or when libtcc is unavailable).  A `cc__exec_in_block` flag gates the
+  executor's timeout `longjmp` so a factory invoked later at a use site (outside
+  any `setjmp`) can call host verbs safely.  The on-disk dylib content cache no
+  longer applies on this path (in-process compile is already ms-fast).  Full
+  suite 506/506.
+
+- **Extension factories (`CC_GENERIC_FACTORY_EXTEND`) — LANDED 2026-05-31.**
+  Operations on a generic type can now be defined separately from — and without
+  editing — the base factory that defines the type.  A generic name has one
+  *base* (`CC_GENERIC_FACTORY` / `cc_generic_register`) plus any number of
+  *extensions* (`CC_GENERIC_FACTORY_EXTEND` / `cc_generic_register_extend`).
+  - **Lowering.**  The seam rewrite (`cc__rewrite_generic_factory`) handles both
+    keywords: the base lowers to the stable handler symbol `__cc_gfac_<Name>`
+    (last-wins registration), each extension to a process-unique
+    `__cc_gfac_ext_<Name>_<seq>` so many extensions coexist in the factory TU.
+  - **Registry.**  `CCGenericReg` gained an ordered extension list
+    (`ext_handlers` / `ext_fns` / `ext_owners`).
+    `cc_emit_plan_register_generic_factory_extend` appends, creating the entry if
+    the base hasn't registered yet (order across files is irrelevant), and
+    `cc_emit_plan_has_generic_factory` is the new use-site gate so an extend-only
+    name still reaches the base-required diagnostic.
+  - **Dispatch.**  `cc_emit_plan_invoke_generic_factory` runs the base first
+    (must emit a non-empty fragment that defines the type), then every extension
+    in registration order, concatenating fragments (newline-separated) into the
+    single definition emitted once per mangled name — so extensions may reference
+    the base's `${mangled}`/fields.  An extension may return `cc_slice_empty()`
+    to emit nothing (conditional specialization).
+    `cc_emit_plan_ensure_generic_factory` errors at the use site when a name has
+    extensions but no base (*"generic 'X' is extended but never defined"*).
+  - **Proofs:** `tests/comptime_generic_factory_extend_smoke` (base type + two
+    method extensions + a conditional extension that emits only for the `int`
+    monomorph) and `tests/comptime_generic_factory_extend_no_base_fail` (extend
+    with no base is rejected at the use site).
+
+- **Field reflection: member-declarator parser (partial-reflection fix) —
+  LANDED 2026-05-31.**  `cc__ct_parse_fields_from_body` was a char-reject scan
+  that bailed the *whole* struct on the first member containing `[ : ( , {`
+  (array, bitfield, function pointer, multi-declarator, or inline aggregate).
+  It is now a real member-declarator mini-parser (`cc__ct_member_normalize` →
+  `cc__ct_parse_member` → `cc__ct_parse_declarator` / `cc__ct_parse_fnptr`),
+  shared verbatim by `type_of(T).fields`, `@comptime for`, and
+  `cc_reflect_field_*`.  Modeled exactly, one `CCCtField` per declared name:
+  - **Multi-declarator** `int a, *b;` → splits, distributing `*` per declarator.
+  - **Arrays** (incl. multi-dim / array-of-pointer) → the extent rides in the
+    `type` spelling (`char[16]`, `int[2][3]`, `char*[8]`).
+  - **Function pointers** `int (*cb)(int,int)` → `int (*)(int, int)` (the name is
+    extracted from the `(*name)` group).
+  - **Named bitfields** `unsigned f : 4` → base type `unsigned` (width is
+    validated as an integer literal, then dropped — not exposed).
+  Array / fn-ptr `type` spellings are exact for `sizeof` and `t.f` access but are
+  not declaration-prefix-usable.  The contract is unchanged where it matters:
+  the parser **never** produces a partial or guessed set — forms it cannot spell
+  as a usable `type` (inline anonymous/nested aggregate def, anonymous member,
+  unnamed/padding bitfield, pointer-to-array) and unknown types still make the
+  whole struct reflect as `-1`.  A 120-byte spelling cap keeps the fixed
+  `CCReflectField` 128-byte buffers safe.  Proofs: `comptime_reflect_forms_smoke`
+  (multi-decl + array + multi-dim + fn-ptr + bitfield, name+type checked) and
+  `comptime_reflect_anon_reject_smoke` (inline-anon + unnamed-bitfield reflect
+  `-1`; a clean struct alongside reflects normally), replacing the retired
+  `comptime_reflect_array_reject_smoke` (arrays are now modeled).  Note: as
+  before, reflection host verbs only run when a `@comptime {}` block routes
+  through the executor (e.g. it contains a `for` loop); a no-loop block that only
+  calls `cc_reflect_field_*` is a separate, pre-existing limitation.
+
+- **Edge-push #1 — enum reflection — LANDED 2026-05-30.**  `cc_reflect_enum_count`
+  / `cc_reflect_enum_name` / `cc_reflect_enum_value` (plus the `cc_reflect_enum_at`
+  value sugar) mirror the struct-field reflection: a source-scan
+  (`cc_ct_reflect_enum_members`) parses `enum`/`typedef enum` members with C
+  auto-increment semantics, and the bytes-only/scalar verbs are injected into the
+  libtcc executor and exported as real globals for dynamic_lookup dylibs.
+  Explicit initializers must be integer literals; a non-literal initializer
+  (`A | B`, `1 << 2`, `'c'`) makes the whole enum unreflectable — every member or
+  none, never a guess (same contract as the struct reflector).  This is the
+  enum↔string "first-week pattern".  Proof: `comptime_reflect_enum_smoke`.
+
+- **Edge-push #4 — custom domain diagnostics — LANDED 2026-05-30.**
+  `cc_emit_error` / `cc_emit_warning` are the dual of `cc_emit_raw`: a `@comptime`
+  block (or compiled factory) raises a compiler diagnostic for a constraint it
+  checks itself.  `cc_emit_error` marks the exec pass failed so the build stops
+  exactly like a built-in diagnostic; `cc_emit_warning` is advisory.  Both are
+  real globals (executor + dylib), attributed to the enclosing `@comptime`
+  block's source line via the existing `cc__host_site_pos` seam (block-level for
+  now; finer call-site attribution is the emit-provenance milestone, edge-push
+  #5).  Diagnostic-raising blocks are routed through the executor (they are
+  runtime side effects, not statically collectible emit text).  Proof:
+  `comptime_emit_diag_smoke` (warning path) and `comptime_emit_error_fail`
+  (error fails the build with the library-authored message).  Full suite 493/493.
+
+- **Edge-push #2 — type-kind classifier — LANDED 2026-05-30.**  `cc_reflect_kind`
+  returns a `CC_REFLECT_KIND_*` code (UNKNOWN/PRIMITIVE/POINTER/STRUCT/ENUM) for a
+  type spelling, so a recursive serializer can decide per field whether to recurse
+  (aggregate), table-map (enum), pointer-handle, or emit a scalar leaf.  Backed by
+  `cc_ct_reflect_type_kind`, which classifies via the *body-finders* (not the field
+  parser), so a struct with an unmodeled member still classifies as STRUCT; pointer
+  is any spelling ending in `*`; primitive is every word a C scalar keyword; leading
+  `const`/`volatile` are tolerated.  Deliberately small v1: cv-qualified aggregates
+  and typedef-to-primitive aliases report UNKNOWN.  This work also fixed a
+  pre-existing limitation — the struct field parser now skips a block comment
+  trailing a member's `;` (same fix the enum reflector got).  Proof:
+  `comptime_reflect_kind_smoke`.  Full suite 494/494.
+
+- **Edge-push #5 — emit provenance — LANDED 2026-05-30.**  Every spliced comptime
+  fragment is now wrapped with `#line` directives: an **origin** directive before
+  the text so a downstream C-compiler error in generated code maps to the
+  template/emit source, and a **restore** directive after so following user code
+  keeps correct attribution.  Line numbers are computed up front against the
+  line-aligned body buffer (insertions don't perturb them).  `cc_emit_raw_at`
+  stamps an explicit origin (e.g. a template-literal's file:line) on a fragment;
+  `cc_emit_error_at` / `cc_emit_warning_at` are the explicit-origin diagnostic
+  variants (the plain forms stay block-level).  Raw/at-origin emits route through
+  the executor (runtime side effects).  Applied in both emission paths — the
+  preprocess fprint path and the codegen splice path.  Proof:
+  `comptime_emit_provenance_smoke` (origin `#line` verified in generated C).
+  Full suite 495/495.
+
+- **Naming / composition — cc_canonical_name + dup detector — LANDED 2026-05-30.**
+  `cc_canonical_name(base, args, nargs, …)` exposes the *exact* mangled name the
+  rewriter uses for `base::[args]` (backed by `cc_ct_canonical_name`, the same
+  routine, so it can't drift).  Blessing one recipe (see `GENERIC_MANGLING.md`)
+  lets independent libraries' private generics name the same C symbol and compose,
+  instead of each inventing an incompatible scheme.  Riding on emit provenance, a
+  **dup-emit-name detector** (`cc_emit_plan_warn_duplicate_symbols`) warns — loud,
+  never silent — when two fragments define the same top-level **function** symbol
+  (C's one genuinely-silent link footgun), naming both origins.  It scans all
+  collected fragments and is called from both emission paths.  Proof:
+  `comptime_canonical_name_smoke` (helper matches the compiler's `Pair_int_double`)
+  and `comptime_dup_emit_name_fail` (collision surfaced with both origins).
+  Full suite 497/497.
+
+- **Edge-push #3 — tag-filtered reflection — LANDED 2026-05-30.**
+  *Surface decision (surface ≡ lowering):* the tag is an **opt-in, advertent
+  comment marker** — the token `@tag:NAME` inside a single-line block or line
+  comment immediately preceding a top-level function definition.  No new syntax,
+  no parser/pass surface, purely a source-scan — exactly like the `/*CC_CLO:N*/`
+  closure marker.  Comments survive into the reflect buffer (the same buffer the
+  struct/enum reflectors read), and `@` never appears in C outside comments/
+  strings, so the marker is unambiguous and zero-cost.  `cc_reflect_tagged_count`
+  / `cc_reflect_tagged_name` (backed by `cc_ct_reflect_tagged_fns`) collect, in
+  source order, the names of all functions carrying a tag, so a comptime block
+  builds a registry / dispatch table with no central list to maintain.  v1 scope
+  is functions (the registry pattern); the function name is the identifier before
+  the first top-level `(` after the marker.  Proof: `comptime_reflect_tagged_smoke`
+  (three `@tag:command` functions → a dispatch table; an untagged function is
+  excluded; forward-decls + table emitted together — the realistic generator
+  pattern).  Full suite 498/498.
+
+  *Scanner comment-hardening (done):* both raw-text `@comptime` scanners — the
+  block enumerator `cc__emit_for_each_comptime_block` (emit_plan.c) and the
+  `@comptime` *function* registry scanner `cc_comptime_fn_registry_scan`
+  (executor.c) — now track comment/string state and only attempt a match at an
+  `@` in real code.  Previously prose containing the literal `@comptime` (e.g. a
+  doc comment) was mis-read: the function scanner in particular would grab the
+  next `name(...) { ... }` after the comment as a bogus comptime function and
+  poison the executor TU.  Regression guard: `comptime_reflect_tagged_smoke` now
+  carries `@comptime` in its header comment on purpose.
 
 ---
 
@@ -599,6 +890,18 @@ foundation for spec §14.2/§14.5 (`@comptime` functions, `@comptime {}` loops).
 `__cc_ct_entry()`, register host symbols via `tcc_add_symbol`, relocate, run.
 Watchdog via `longjmp` + `CC_COMPTIME_EXEC_TIMEOUT_MS` (default 5000ms), checked
 on each host callback.
+
+**Comptime C surface (libc + file I/O).** The executor TU is a real libtcc
+translation unit linked against the system libc, so `@comptime` blocks may use
+"as much C as possible," not only the host verbs.  The generated prelude
+(`emit_tpl_prelude.inc.h`, from `tools/gen_emit_tpl_prelude.sh`) `#include`s
+`<stddef.h> <stdio.h> <stdarg.h> <string.h> <stdint.h> <stdlib.h> <stdbool.h>
+<ctype.h>`, so `fopen`/`fgets`/`fwrite`/`sscanf`, `malloc`/`getenv`/`atoi`,
+`tolower`/`isalpha`, etc. all resolve and run at compile time.  This lets a block
+read a data file (codegen tables, schemas) and bake the result into the program.
+Proof: `tests/comptime_fileio_smoke` (write→read a scratch file, transform lines
+with ctype+stdlib, emit functions).  Adding a header is a one-line edit to the
+generator's `HDR` block followed by `gen_emit_tpl_prelude.sh`.
 
 **Host API (`cc_emit_plan_host_*` in `emit_plan.c`).** Injected into the running
 TU:

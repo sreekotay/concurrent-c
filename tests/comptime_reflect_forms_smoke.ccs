@@ -1,0 +1,65 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Field reflection models real member-declarator shapes, not just plain scalar
+ * fields: multi-declarators split into one field each, arrays carry their extent
+ * in the type spelling, function pointers reflect as an abstract declarator, and
+ * a named bitfield reflects its base type.  Reflection is still all-or-nothing —
+ * see comptime_reflect_anon_reject_smoke for a form that stays unreflectable. */
+
+typedef struct {
+    int id;
+    int a, b;
+    char name[16];
+    int grid[2][3];
+    double *ptr;
+    int (*cb)(int, int);
+    unsigned flags : 4;
+} Mixed;
+
+@comptime {
+    int nf = cc_reflect_field_count("Mixed");
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "enum { MIXED_NF = %d };\n", nf);
+    for (int i = 0; i < nf; i++) {
+        char nm[64];
+        char ty[64];
+        cc_reflect_field_name("Mixed", i, nm, sizeof(nm));
+        cc_reflect_field_type("Mixed", i, ty, sizeof(ty));
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+            "static const char* mixed_n%d = \"%s\";\n", i, nm);
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+            "static const char* mixed_t%d = \"%s\";\n", i, ty);
+    }
+}
+
+int main(void) {
+    if (MIXED_NF != 8) return 1;
+    struct { const char* n; const char* t; } exp[8] = {
+        { "id",    "int" },
+        { "a",     "int" },
+        { "b",     "int" },
+        { "name",  "char[16]" },
+        { "grid",  "int[2][3]" },
+        { "ptr",   "double*" },
+        { "cb",    "int (*)(int, int)" },
+        { "flags", "unsigned" },
+    };
+    const char* gotn[8] = {
+        mixed_n0, mixed_n1, mixed_n2, mixed_n3,
+        mixed_n4, mixed_n5, mixed_n6, mixed_n7,
+    };
+    const char* gott[8] = {
+        mixed_t0, mixed_t1, mixed_t2, mixed_t3,
+        mixed_t4, mixed_t5, mixed_t6, mixed_t7,
+    };
+    for (int i = 0; i < 8; i++) {
+        if (strcmp(gotn[i], exp[i].n) != 0) return 10 + i;
+        if (strcmp(gott[i], exp[i].t) != 0) return 30 + i;
+    }
+    printf("comptime_reflect_forms_smoke ok nf=%d", MIXED_NF);
+    for (int i = 0; i < 8; i++) printf(" %s:%s", gotn[i], gott[i]);
+    printf("\n");
+    return 0;
+}

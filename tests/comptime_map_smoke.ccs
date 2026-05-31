@@ -1,0 +1,41 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Axis-1 umbrella, fifth header: @comptime can now use the vendored
+ * convenient-containers map (std/map.cch -> cc_containers.cch) after the
+ * TCC-hardening of cc_containers under CC_COMPTIME (max_align_t / _Alignas
+ * type-operand / wide-char literals). The typed CCMap_K_V wrappers are
+ * file-scope (static-inline), so the comptime prelude pre-declares common key
+ * types (CCMapII = int->int) for a comptime block to drive directly
+ * (COMPTIME_CAPABILITY_MODEL.md §7b). */
+@comptime {
+    CCArena a = cc_arena_create(4096);
+    CCMapII *m = CCMapII_init(&a);
+    for (int i = 1; i <= 6; i++)
+        CCMapII_insert(m, i, i * i);
+
+    int count = (int)CCMapII_len(m);
+    int *p9 = CCMapII_get(m, 3);
+    int *p36 = CCMapII_get(m, 6);
+    int v9 = p9 ? *p9 : -1;
+    int v36 = p36 ? *p36 : -1;
+    int has_miss = CCMapII_get(m, 99) ? 1 : 0;
+    cc_arena_free(&a);
+
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { MAP_COUNT = ${count} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { MAP_V9 = ${v9} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { MAP_V36 = ${v36} };`);
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { MAP_HAS_MISS = ${has_miss} };`);
+}
+
+int main(void) {
+    if (MAP_COUNT != 6) return 1;
+    if (MAP_V9 != 9) return 2;
+    if (MAP_V36 != 36) return 3;
+    if (MAP_HAS_MISS != 0) return 4;
+    printf("comptime_map_smoke ok count=%d v9=%d v36=%d miss=%d\n",
+           MAP_COUNT, MAP_V9, MAP_V36, MAP_HAS_MISS);
+    return 0;
+}

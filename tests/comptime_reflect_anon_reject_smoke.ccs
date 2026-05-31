@@ -1,0 +1,50 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Reflection is still all-or-nothing: forms the field parser cannot spell as a
+ * usable `type` reflect as -1 — never a partial or guessed field set.  Here an
+ * inline anonymous aggregate and an unnamed (padding) bitfield each defeat the
+ * whole struct, while a struct of modeled members reflects cleanly. */
+
+typedef struct {
+    int id;
+    struct { int x; int y; } pt;
+} HasAnon;
+
+typedef struct {
+    int id;
+    unsigned : 3;
+    int z;
+} HasPad;
+
+typedef struct {
+    int x;
+    int y;
+} Clean;
+
+@comptime {
+    int anon  = cc_reflect_field_count("HasAnon");
+    int pad   = cc_reflect_field_count("HasPad");
+    int clean = cc_reflect_field_count("Clean");
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+        "enum { ANON_NF = %d, PAD_NF = %d, CLEAN_NF = %d };\n", anon, pad, clean);
+    for (int i = 0; i < clean; i++) {
+        char nm[64];
+        cc_reflect_field_name("Clean", i, nm, sizeof(nm));
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+            "static const char* clean_f%d = \"%s\";\n", i, nm);
+    }
+}
+
+int main(void) {
+    if (ANON_NF != -1) return 1;
+    if (PAD_NF != -1) return 2;
+    if (CLEAN_NF != 2) return 3;
+    if (strcmp(clean_f0, "x") != 0) return 4;
+    if (strcmp(clean_f1, "y") != 0) return 5;
+    printf("comptime_reflect_anon_reject_smoke ok anon=%d pad=%d clean=%d %s,%s\n",
+           ANON_NF, PAD_NF, CLEAN_NF, clean_f0, clean_f1);
+    return 0;
+}

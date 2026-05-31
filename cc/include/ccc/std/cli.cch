@@ -98,9 +98,9 @@ static inline CCSlice cc_parsed_args_ufcs_rewrite(CCSlice recv_type,
         || cc_ufcs_slice_eq_cstr(method, "last_value")
         || cc_ufcs_slice_eq_cstr(method, "find_value_at")
         || cc_ufcs_slice_eq_cstr(method, "find_last_value")) {
-        return cc_ufcs_concat2(arena,
+        return cc_slice_concat2(
             cc_slice_from_buffer("cc_parsed_args_", sizeof("cc_parsed_args_") - 1),
-            method);
+            method, arena);
     }
     return cc_slice_empty();
 }
