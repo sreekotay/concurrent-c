@@ -9,8 +9,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 #include <ccc/cc_slice.cch>
+#include <ccc/cc_arena.cch>
 
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
@@ -3256,9 +3258,6 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
             }
         }
     }
-    /* (retired) The `T?` -> `CCOptional_T` receiver-type inference was once
-     * handled here. Optionals are gone; the T? detector in the main
-     * preprocess pass emits a diagnostic before we reach this path. */
     {
         size_t base_len = (size_t)(base_end - start);
         CCTypeRegistry* reg = cc_type_registry_get_global();
@@ -4766,7 +4765,7 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     return p;
 }
 
-/* Mangle a type name for use in CCOptional_T or CCResult_T_E.
+/* Mangle a type name for use in CCResult_T_E.
    - Strips leading/trailing whitespace
    - Replaces spaces with underscores
    - Replaces '*' with 'ptr'
@@ -6466,12 +6465,8 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
 /* Rewrite `*res` -> `cc_unwrap(res)` for variables declared with CCResult_*
  * type. Two-pass approach:
  *   1. Scan for CCResult_<T>_<E> or `__CC_RESULT(T, E)` variable declarations.
- *   2. Rewrite `*varname` to `cc_unwrap(varname)`.
- *
- * (retired) The optional arm of this pass, which recognized CCOptional_<T>
- * declarations and rewrote `*opt` -> `cc_unwrap_opt(opt)`, has been removed
- * along with the optional surface. */
-static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
+ *   2. Rewrite `*varname` to `cc_unwrap(varname)`. */
+static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
 
     /* Pass 1: Collect Result variable names. */
@@ -10618,6 +10613,235 @@ char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path)
     return cur;
 }
 
+/* Resolve the source origin (file + 1-based line) of byte offset `at`, honoring
+ * any `#line N "file"` / `# N "file"` directives that precede it.  Without
+ * directives this is a plain newline count (file_out left empty). */
+static void cc__comptime_value_origin(const char* src, size_t at,
+                                      char* file_out, size_t file_cap, int* line_out) {
+    int line = 1;
+    if (file_out && file_cap) file_out[0] = '\0';
+    if (!src) { if (line_out) *line_out = 1; return; }
+    size_t ls = 0;
+    for (;;) {
+        size_t le = ls;
+        while (src[le] && src[le] != '\n') le++;
+        if (at <= le) break;
+        size_t p = ls;
+        while (p < le && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < le && src[p] == '#') {
+            size_t q = p + 1;
+            while (q < le && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q + 4 <= le && memcmp(src + q, "line", 4) == 0) {
+                q += 4;
+                while (q < le && (src[q] == ' ' || src[q] == '\t')) q++;
+            }
+            if (q < le && src[q] >= '0' && src[q] <= '9') {
+                long nn = 0;
+                while (q < le && src[q] >= '0' && src[q] <= '9') nn = nn * 10 + (src[q++] - '0');
+                line = (int)nn;
+                while (q < le && (src[q] == ' ' || src[q] == '\t')) q++;
+                if (q < le && src[q] == '"' && file_out && file_cap) {
+                    q++;
+                    size_t fl = 0;
+                    while (q < le && src[q] != '"') {
+                        if (fl + 1 < file_cap) file_out[fl++] = src[q];
+                        q++;
+                    }
+                    file_out[fl] = '\0';
+                }
+                if (!src[le]) break;
+                ls = le + 1;
+                continue;
+            }
+        }
+        line++;
+        if (!src[le]) break;
+        ls = le + 1;
+    }
+    if (line_out) *line_out = line;
+}
+
+typedef struct CCValueHoistEntry {
+    struct CCValueHoistEntry* next;
+    uint64_t                hash;
+    char*                   expr;
+    char*                   lit;
+    size_t                  litlen;
+} CCValueHoistEntry;
+
+static CCValueHoistEntry* cc__value_hoist_cache;
+
+static uint64_t cc__value_hoist_hash(const char* s) {
+    uint64_t h = 14695981039346656037ULL;
+    if (!s) return h;
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void cc__value_hoist_cache_free(void) {
+    CCValueHoistEntry* e = cc__value_hoist_cache;
+    while (e) {
+        CCValueHoistEntry* n = e->next;
+        free(e->expr);
+        free(e);
+        e = n;
+    }
+    cc__value_hoist_cache = NULL;
+}
+
+static CCValueHoistEntry* cc__value_hoist_lookup(const char* expr) {
+    uint64_t h = cc__value_hoist_hash(expr);
+    for (CCValueHoistEntry* e = cc__value_hoist_cache; e; e = e->next)
+        if (e->hash == h && strcmp(e->expr, expr) == 0) return e;
+    return NULL;
+}
+
+/* Evaluate expr or return a cached literal for this TU pass.  *out_lit points
+ * into `arena`; owned until cc_arena_free(arena).  Returns rc from eval_literal. */
+static int cc__value_hoist_eval(const char* expr,
+                                char** out_lit, size_t* out_len,
+                                char* err, size_t err_sz,
+                                CCArena* arena) {
+    CCValueHoistEntry* hit = cc__value_hoist_lookup(expr);
+    if (hit) {
+        *out_lit = hit->lit;
+        *out_len = hit->litlen;
+        return 0;
+    }
+    char* lit = NULL;
+    size_t litlen = 0;
+    int rc = cc_comptime_exec_eval_literal(expr, NULL, &lit, &litlen, err, err_sz, arena);
+    if (rc != 0) return rc;
+    CCValueHoistEntry* ent = (CCValueHoistEntry*)malloc(sizeof(*ent));
+    if (!ent) {
+        if (err && err_sz) snprintf(err, err_sz, "OOM caching comptime value");
+        return -1;
+    }
+    ent->expr = strdup(expr);
+    if (!ent->expr) {
+        free(ent);
+        if (err && err_sz) snprintf(err, err_sz, "OOM caching comptime value expr");
+        return -1;
+    }
+    ent->hash = cc__value_hoist_hash(expr);
+    ent->lit = lit;
+    ent->litlen = litlen;
+    ent->next = cc__value_hoist_cache;
+    cc__value_hoist_cache = ent;
+    *out_lit = lit;
+    *out_len = litlen;
+    return 0;
+}
+
+/* Value-position `@comptime(expr)`: evaluate `expr` at compile time and splice
+ * its value as a C constant-expression literal in place.  Distinguished from
+ * `@comptime { ... }` (block), `@comptime if/for` (control flow) and
+ * `@comptime T name(...)` (fn definition) by the token immediately following
+ * `@comptime` being `(`.  Consumed newlines are re-padded so downstream line
+ * numbers stay stable.  Returns a malloc'd string on change, NULL if no value
+ * form is present, or (char*)-1 on a hard error (after printing a diagnostic). */
+char* cc__resolve_comptime_value(const char* src, size_t n, const char* input_path) {
+    static const char KW[] = "@comptime";
+    const size_t KWN = sizeof(KW) - 1;
+    if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "@comptime")) return NULL;
+    cc__value_hoist_cache_free();
+    CC_ARENA_STACK(hoist_arena, CC_EMIT_TPL_BUF_SIZE);
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last = 0;
+    int changed = 0, scanned = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + KWN > n || memcmp(src + i, KW, KWN) != 0 ||
+            (i > 0 && cc_is_ident_char(src[i - 1])) ||
+            (i + KWN < n && cc_is_ident_char(src[i + KWN]))) {
+            i++;
+            continue;
+        }
+        size_t p = cc_skip_ws_and_comments(src, n, i + KWN);
+        if (p >= n || src[p] != '(') { i++; continue; }  /* block / if / for / fn def */
+        size_t close;
+        if (!cc_find_matching_paren(src, n, p, &close)) { i++; continue; }
+        size_t es = p + 1, ee = close;
+        while (es < ee && (src[es] == ' ' || src[es] == '\t' || src[es] == '\n' || src[es] == '\r')) es++;
+        while (ee > es && (src[ee - 1] == ' ' || src[ee - 1] == '\t' || src[ee - 1] == '\n' || src[ee - 1] == '\r')) ee--;
+        if (es == ee) { i++; continue; }  /* empty @comptime() — not a value hoist */
+
+        char* expr = (char*)malloc(ee - es + 1);
+        if (!expr) {
+            free(out);
+            cc__value_hoist_cache_free();
+            cc_arena_free(&hoist_arena);
+            return (char*)-1;
+        }
+        memcpy(expr, src + es, ee - es);
+        expr[ee - es] = '\0';
+
+        if (!scanned) { cc_comptime_fn_registry_scan(src, n); scanned = 1; }
+
+        char* lit = NULL;
+        size_t litlen = 0;
+        char err[512];
+        err[0] = '\0';
+        int rc = cc__value_hoist_eval(expr, &lit, &litlen, err, sizeof(err), &hoist_arena);
+        if (rc != 0) {
+            char rel[1024], ofile[1024];
+            int oline = 1;
+            cc__comptime_value_origin(src, i, ofile, sizeof(ofile), &oline);
+            const char* relp = ofile[0]
+                ? cc_path_rel_to_repo(ofile, rel, sizeof(rel))
+                : cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel));
+            if (rc == -2) {
+                fprintf(stderr,
+                        "%s:%d: error: @comptime(%s) value is not projectable to a C literal\n"
+                        "  note: value-position @comptime supports integers, floating point, bool, and strings\n",
+                        relp, oline, expr);
+            } else {
+                fprintf(stderr,
+                        "%s:%d: error: @comptime(%s) could not be evaluated at compile time%s%s\n",
+                        relp, oline, expr, err[0] ? ": " : "", err);
+            }
+            free(expr);
+            free(out);
+            cc__value_hoist_cache_free();
+            cc_arena_free(&hoist_arena);
+            return (char*)-1;
+        }
+        free(expr);
+
+        size_t nl = 0;
+        for (size_t k = i; k <= close && k < n; k++)
+            if (src[k] == '\n') nl++;
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last, i - last);
+        cc_sb_append(&out, &out_len, &out_cap, lit, litlen);
+        while (nl--) cc_sb_append(&out, &out_len, &out_cap, "\n", 1);
+        i = close + 1;
+        last = i;
+        changed = 1;
+    }
+    if (!changed) {
+        cc__value_hoist_cache_free();
+        cc_arena_free(&hoist_arena);
+        free(out);
+        return NULL;
+    }
+    cc_sb_append(&out, &out_len, &out_cap, src + last, n - last);
+    if (!out) {  /* whole input collapsed to empty (shouldn't happen) */
+        out = (char*)malloc(1);
+        if (out) out[0] = '\0';
+    }
+    cc__value_hoist_cache_free();
+    cc_arena_free(&hoist_arena);
+    return out;
+}
+
 static char* cc__rewrite_channel_pair_pass(const char* src,
                                            size_t len,
                                            const char* input_path) {
@@ -10746,7 +10970,6 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     }
     if (cc_pass_chain_apply(chain, cc__lower_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_match_syntax(chain->src, chain->len, input_path)) < 0) return -1;
-    /* (retired) cc__rewrite_optional_constructors used to run here. */
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
     /* (retired) cc__rewrite_result_constructors used to rewrite typed
        cc_ok_CCResult_T_E(v) calls to the generic __CC_RESULT_OK(0, 0, v)
@@ -10755,7 +10978,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
        type-check as-is, so the rewrite is both redundant and harmful
        (it forced a __CCResultGeneric return into a typed Result slot). */
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_optional_unwrap(chain->src, chain->len)) < 0) return -1;
+    if (cc_pass_chain_apply(chain, cc__rewrite_result_star_unwrap(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_cc_concurrent(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_link_directives(chain->src, chain->len)) < 0) return -1;
     return 0;

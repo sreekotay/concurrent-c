@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Value-position `@comptime(expr)` is value-only: a pointer into comptime memory
+ * cannot be projected to a constant-expression literal, so this must fail with a
+ * clear use-site diagnostic rather than emit dangling C. */
+
+@comptime int* get_ptr(void) { return (int*)0; }
+
+int main(void) {
+    int* p = @comptime(get_ptr());
+    (void)p;
+    return 0;
+}

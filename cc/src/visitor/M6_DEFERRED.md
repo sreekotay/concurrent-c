@@ -2,6 +2,10 @@
 
 **Status:** Superseded by **M7**.
 
+> **Note (historical):** Mentions of `CC_PRE_EXPAND=1` below are the milestone-era
+> opt-in form. Pre-expand is now **unconditional** — the `CC_PRE_EXPAND` opt-out was
+> collapsed (2026-05-29) and the env var is inert. The dated notes are kept for context.
+
 - **M7.A** (opt-in pre-expand): shipped. 429/429 smoke, examples/stress
   baseline unchanged.
 - **M7.B** (text-pass `#define`-awareness): shipped. `CCScannerState`

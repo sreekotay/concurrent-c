@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Value-position `@comptime(expr)`: evaluate the expression at compile time and
+ * splice its value as a C constant-expression literal in place.  The literal is
+ * visible in the lowered C (e.g. `int i = 60;`), so the hoist is debuggable. */
+
+@comptime int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+int main(void) {
+    int         i = @comptime(fib(10) + 5);          /* 55 + 5  -> 60   */
+    double      d = @comptime(1.0 / 4.0);            /* 0.25            */
+    const char* s = @comptime("hello, " "world");    /* "hello, world"  */
+    int         b = @comptime((int)(fib(7) > 10));   /* fib(7)=13 -> 1  */
+    printf("i=%d d=%g s=%s b=%d\n", i, d, s, b);
+    return 0;
+}

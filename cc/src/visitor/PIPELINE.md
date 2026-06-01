@@ -1,6 +1,6 @@
 # Concurrent-C Codegen Pipeline (authoritative)
 
-**Last updated:** 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
+**Last updated:** 2026-06-01 (drift audit vs code: phantom `cc_preprocess_for_light_reparse` / `cc_preprocess_simple`, orphan passes) — prior: 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
 
 Authoritative call-site map for `visit_codegen.c` and `parse.c`.
 
@@ -93,9 +93,9 @@ perturb AST→source mapping.
 |-----|-----|
 | `cc_preprocess_for_initial_parse` | First parse of a TU |
 | `cc_preprocess_for_reparse` | Reparse; skips validation checks (legacy `skip_checks=1`) |
-| `cc_preprocess_for_light_reparse` | Reparse when phase-1 type-syntax bucket already applied |
+| ~~`cc_preprocess_for_light_reparse`~~ | **Phantom (2026-06-01 audit):** never implemented — no such symbol in `preprocess.c`. Only `cc_preprocess_for_initial_parse` and `cc_preprocess_for_reparse` exist (both thin wrappers). |
 
-`cc__reparse_source_to_ast` uses `cc_preprocess_for_reparse` (not light) unless stage is explicitly batched.
+In practice, `cc__reparse_source_to_ast_ex` calls `cc_preprocess_emit_splice(..., /*for_reparse=*/1)` directly rather than the `cc_preprocess_for_reparse` wrapper (2026-06-01 audit).
 
 ## Canonical prep (M1)
 
@@ -107,7 +107,9 @@ perturb AST→source mapping.
 
 | Component | Status |
 |-----------|--------|
-| `cc_preprocess_simple()` | Declared; never invoked — experimental AST path only |
+| ~~`cc_preprocess_simple()`~~ | **Deleted (2026-06-01 audit):** no longer in the tree (was an unused experimental AST path). |
+| ~~`cc/src/visitor/pass_with_deadline_syntax.c`~~ | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed; `with_deadline` is lowered in `preprocess.c` (`cc__canonicalize_with_deadline_syntax` + `cc__lower_with_deadline_syntax`). |
+| ~~`cc/src/visitor/pass_match_syntax.c`~~ | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed; `@match` is lowered by the static `cc__rewrite_match_syntax` in `preprocess.c`. |
 
 ## Diagnostics (M0.5)
 

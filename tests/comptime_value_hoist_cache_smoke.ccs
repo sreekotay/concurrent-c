@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+int main(void) {
+    /* Same expr twice — per-TU cache should evaluate once. */
+    int a = @comptime(fib(10) + 5);
+    int b = @comptime(fib(10) + 5);
+    if (a != 60 || b != 60) return 1;
+    printf("comptime_value_hoist_cache_smoke ok a=%d b=%d\n", a, b);
+    return 0;
+}

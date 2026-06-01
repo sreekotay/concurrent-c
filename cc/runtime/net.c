@@ -590,7 +590,7 @@ CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err
 }
 
 /* ============================================================================
- * UDP (stubs for now)
+ * UDP — synchronous bind / send_to / recv_from over SOCK_DGRAM sockets.
  * ============================================================================ */
 
 CCUdpSocket cc_udp_bind(const char* addr, size_t addr_len, CCNetError* out_err) {

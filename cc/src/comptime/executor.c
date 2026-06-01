@@ -8,8 +8,11 @@
 #include <unistd.h>
 
 #include "../comptime/emit_tpl_prelude.inc.h"
+#include "preprocess/emit_limits.h"
 #include "preprocess/emit_plan.h"
 #include "util/text.h"
+
+#include <ccc/cc_arena.cch>
 
 #define CC_COMPTIME_FN_MAX 32
 #define CC_COMPTIME_FN_NAME_MAX 64
@@ -426,6 +429,219 @@ static char* cc__exec_build_eval_tu(const char* expr) {
     return s;
 }
 
+/* Value-position @comptime(expr) projector.  Uses the same stack-first growable
+ * CCArena + CCString pattern as @emit (CC_COMPTIME prelude).  Readback exports
+ * a char* into arena-owned storage (__cc_ce_text/__cc_ce_len); the host copies
+ * out after the litproj TU runs. */
+static const char* cc__litproj_helpers(void) {
+    static char* cached = NULL;
+    if (cached) return cached;
+    {
+        size_t cap = 8192;
+        char* buf = (char*)malloc(cap);
+        if (!buf) return "";
+        int n = snprintf(buf, cap,
+            "#include <math.h>\n"
+            "static CCArena __cc_lit_arena;\n"
+            "static uint8_t __cc_lit_stack[%u];\n"
+            "static CCString __cc_lit_str;\n"
+            "char *__cc_ce_text = 0;\n"
+            "unsigned long __cc_ce_len = 0;\n"
+            "enum { CC_LIT_OK = 0, CC_LIT_NOT_PROJECTABLE = 1, CC_LIT_OOM = 2 };\n"
+            "int __cc_ce_status = CC_LIT_OK;\n"
+            "static int __cc_lit_fail(int status) {\n"
+            "  if (__cc_ce_status == CC_LIT_OK) __cc_ce_status = status;\n"
+            "  return 0;\n"
+            "}\n"
+            "static int __cc_lit_push_char(char c) {\n"
+            "  if (__cc_ce_status != CC_LIT_OK) return 0;\n"
+            "  return cc_string_push_char(&__cc_lit_str, c, &__cc_lit_arena) ? 1 : __cc_lit_fail(CC_LIT_OOM);\n"
+            "}\n"
+            "static int __cc_lit_push_buf(const char* p, uint32_t n) {\n"
+            "  if (__cc_ce_status != CC_LIT_OK) return 0;\n"
+            "  return cc_string_push_buffer(&__cc_lit_str, p, n, &__cc_lit_arena) ? 1 : __cc_lit_fail(CC_LIT_OOM);\n"
+            "}\n"
+            "static int __cc_lit_push_cstr(const char* p) {\n"
+            "  if (__cc_ce_status != CC_LIT_OK) return 0;\n"
+            "  return cc_string_push_cstr(&__cc_lit_str, p, &__cc_lit_arena) ? 1 : __cc_lit_fail(CC_LIT_OOM);\n"
+            "}\n"
+            "static void __cc_lit_begin(void) {\n"
+            "  cc_arena_buffer(&__cc_lit_arena, __cc_lit_stack, sizeof(__cc_lit_stack));\n"
+            "  __cc_lit_arena.block_max = 0;\n"
+            "  __cc_lit_str = cc_string_new();\n"
+            "  __cc_ce_text = 0; __cc_ce_len = 0; __cc_ce_status = CC_LIT_OK;\n"
+            "}\n"
+            "static void __cc_lit_finish(void) {\n"
+            "  if (__cc_ce_status != CC_LIT_OK) return;\n"
+            "  __cc_ce_text = (char*)cc_string_cstr(&__cc_lit_str, &__cc_lit_arena);\n"
+            "  if (!__cc_ce_text) { __cc_lit_fail(CC_LIT_OOM); return; }\n"
+            "  __cc_ce_len = __cc_ce_text ? (unsigned long)strlen(__cc_ce_text) : 0;\n"
+            "}\n"
+            "void __cc_lit_cleanup(void) { cc_arena_free(&__cc_lit_arena); }\n"
+            "static void __cc_lit_push_escaped(const char* s, long n) {\n"
+            "  if (n < 0 || !s) { __cc_lit_fail(CC_LIT_NOT_PROJECTABLE); return; }\n"
+            "  if (!__cc_lit_push_char(34)) return;\n"
+            "  for (long i = 0; i < n; i++) {\n"
+            "    unsigned char c = (unsigned char)s[i];\n"
+            "    if (c == 92 || c == 34) {\n"
+            "      if (!__cc_lit_push_char(92)) return;\n"
+            "      if (!__cc_lit_push_char((char)c)) return;\n"
+            "    } else if (c == 10) {\n"
+            "      if (!__cc_lit_push_char(92)) return;\n"
+            "      if (!__cc_lit_push_char(110)) return;\n"
+            "    } else if (c == 9) {\n"
+            "      if (!__cc_lit_push_char(92)) return;\n"
+            "      if (!__cc_lit_push_char(116)) return;\n"
+            "    } else if (c == 13) {\n"
+            "      if (!__cc_lit_push_char(92)) return;\n"
+            "      if (!__cc_lit_push_char(114)) return;\n"
+            "    } else if (c >= 32 && c < 127) {\n"
+            "      if (!__cc_lit_push_char((char)c)) return;\n"
+            "    } else {\n"
+            "      char tmp[8]; int rl = snprintf(tmp, sizeof(tmp), \"%%03o\", c);\n"
+            "      if (!__cc_lit_push_char(92)) return;\n"
+            "      for (int k = 0; k < rl; k++) if (!__cc_lit_push_char(tmp[k])) return;\n"
+            "    }\n"
+            "  }\n"
+            "  (void)__cc_lit_push_char(34);\n"
+            "}\n"
+            "static void cc__lit_i(long long v){ if (__cc_ce_status == CC_LIT_OK && !cc_string_push_int(&__cc_lit_str, v, &__cc_lit_arena)) __cc_lit_fail(CC_LIT_OOM); }\n"
+            "static void cc__lit_u(unsigned long long v){ if (__cc_ce_status == CC_LIT_OK && !cc_string_push_uint(&__cc_lit_str, v, &__cc_lit_arena)) __cc_lit_fail(CC_LIT_OOM); }\n"
+            "static void cc__lit_d(double v){\n"
+            "  if (!isfinite(v)) { __cc_lit_fail(CC_LIT_NOT_PROJECTABLE); return; }\n"
+            "  char tmp[64]; int n = snprintf(tmp, sizeof(tmp), \"%%.17g\", v);\n"
+            "  int dot = 0; for (int i = 0; i < n; i++) { char c = tmp[i]; if (c=='.'||c=='e'||c=='E') { dot = 1; break; } }\n"
+            "  if (!dot && n + 2 < (int)sizeof(tmp)) { tmp[n++]='.'; tmp[n++]='0'; tmp[n]=0; }\n"
+            "  (void)__cc_lit_push_buf(tmp, (uint32_t)n);\n"
+            "}\n"
+            "static void cc__lit_b(int v){ (void)__cc_lit_push_cstr(v ? \"1\" : \"0\"); }\n"
+            "static void cc__lit_s(const char* s){ if (!s){ (void)__cc_lit_push_cstr(\"0\"); return; } __cc_lit_push_escaped(s,(long)strlen(s)); }\n"
+            "static void cc__lit_sl(CCSlice s){ __cc_lit_push_escaped((const char*)s.ptr,(long)s.len); }\n"
+            "static void cc__lit_bad(){ __cc_lit_fail(CC_LIT_NOT_PROJECTABLE); }\n"
+            "#define cc_lit_project(d) _Generic((d), _Bool: cc__lit_b, char: cc__lit_i, signed char: cc__lit_i, short: cc__lit_i, int: cc__lit_i, long: cc__lit_i, long long: cc__lit_i, unsigned char: cc__lit_u, unsigned short: cc__lit_u, unsigned int: cc__lit_u, unsigned long: cc__lit_u, unsigned long long: cc__lit_u, float: cc__lit_d, double: cc__lit_d, char*: cc__lit_s, const char*: cc__lit_s, CCSlice: cc__lit_sl, default: cc__lit_bad)(d)\n",
+            (unsigned)CC_EMIT_TPL_BUF_SIZE);
+        if (n < 0 || (size_t)n >= cap) { free(buf); return ""; }
+        cached = buf;
+    }
+    return cached;
+}
+
+static char* cc__exec_build_litproj_tu(const char* expr) {
+    static const char hdr[] =
+        "\nvoid __cc_ct_entry(void) {\n  __cc_lit_begin();\n  cc_lit_project((";
+    static const char tail[] = "));\n  __cc_lit_finish();\n}\n";
+    const char* fndefs = cc_comptime_fn_registry_defs();
+    const char* helpers = cc__litproj_helpers();
+    size_t fndef_len = fndefs ? strlen(fndefs) : 0;
+    size_t ex = expr ? strlen(expr) : 0;
+    size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
+    size_t hp = helpers ? strlen(helpers) : 0;
+    size_t hl = sizeof(hdr) - 1;
+    size_t tl = sizeof(tail) - 1;
+    char* s = (char*)malloc(pre + fndef_len + hp + hl + ex + tl + 1);
+    if (!s) return NULL;
+    size_t o = 0;
+    memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
+    if (hp) { memcpy(s + o, helpers, hp); o += hp; }
+    memcpy(s + o, hdr, hl); o += hl;
+    memcpy(s + o, expr, ex); o += ex;
+    memcpy(s + o, tail, tl); o += tl;
+    s[o] = '\0';
+    return s;
+}
+
+static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz);
+
+/* Compile + relocate + run the litproj TU, then read back the projected text
+ * (__cc_ce_text/__cc_ce_len) and the projectability flag (__cc_ce_ok).
+ * Copies the literal into `arena`.  Returns 0 with *out_lit set, -2 if the
+ * value ran but is not projectable, -1 on failure. */
+static int cc__exec_run_litproj_tu(const char* tu,
+                                   char** out_lit, size_t* out_len,
+                                   char* err_buf, size_t err_sz,
+                                   CCArena* arena) {
+    if (out_lit) *out_lit = NULL;
+    if (out_len) *out_len = 0;
+    if (!arena) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value eval requires an arena");
+        return -1;
+    }
+    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    if (!s) return -1;
+    if (tcc_compile_string(s, tu) < 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value TU compile failed");
+        tcc_delete(s);
+        return -1;
+    }
+    if (tcc_relocate(s) < 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value TU relocate failed");
+        tcc_delete(s);
+        return -1;
+    }
+    void* sym = tcc_get_symbol(s, "__cc_ct_entry");
+    if (!sym) sym = tcc_get_symbol(s, "___cc_ct_entry");
+    if (!sym) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "__cc_ct_entry not found");
+        tcc_delete(s);
+        return -1;
+    }
+    typedef void (*CCCtEntryFn)(void);
+    ((CCCtEntryFn)sym)();
+    void* cleanup_sym = tcc_get_symbol(s, "__cc_lit_cleanup");
+    if (!cleanup_sym) cleanup_sym = tcc_get_symbol(s, "___cc_lit_cleanup");
+    void* sym_text = tcc_get_symbol(s, "__cc_ce_text");
+    if (!sym_text) sym_text = tcc_get_symbol(s, "___cc_ce_text");
+    void* plen = tcc_get_symbol(s, "__cc_ce_len");
+    if (!plen) plen = tcc_get_symbol(s, "___cc_ce_len");
+    void* pstatus = tcc_get_symbol(s, "__cc_ce_status");
+    if (!pstatus) pstatus = tcc_get_symbol(s, "___cc_ce_status");
+    if (!cleanup_sym || !sym_text || !plen || !pstatus) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value symbols not found");
+        tcc_delete(s);
+        return -1;
+    }
+    typedef void (*CCLitCleanupFn)(void);
+    CCLitCleanupFn cleanup = (CCLitCleanupFn)cleanup_sym;
+    int status = 0;
+    memcpy(&status, pstatus, sizeof(int));
+    unsigned long ln = 0;
+    memcpy(&ln, plen, sizeof(unsigned long));
+    char* text = NULL;
+    memcpy(&text, sym_text, sizeof(char*));
+    if (status == 1) {
+        cleanup();
+        tcc_delete(s);
+        return -2;
+    }
+    if (status != 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM projecting comptime literal");
+        cleanup();
+        tcc_delete(s);
+        return -1;
+    }
+    if (!text || ln == 0) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "projected literal is empty");
+        cleanup();
+        tcc_delete(s);
+        return -1;
+    }
+    char* dest = (char*)cc_arena_alloc(arena, (size_t)ln + 1, 1);
+    if (!dest) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM allocating projected literal in arena");
+        cleanup();
+        tcc_delete(s);
+        return -1;
+    }
+    memcpy(dest, text, (size_t)ln);
+    dest[ln] = '\0';
+    cleanup();
+    tcc_delete(s);
+    if (out_lit) *out_lit = dest;
+    if (out_len) *out_len = (size_t)ln;
+    return 0;
+}
+
 static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int64_t* out_int);
 
 static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
@@ -629,6 +845,49 @@ int cc_comptime_exec_eval_int(const char* expr,
     } else {
         cc__exec_in_block = 1;
         rc = cc__exec_run_tu_ex(tu, err_buf, err_sz, out);
+        cc__exec_in_block = 0;
+    }
+    free(tu);
+    (void)opts;
+    return rc;
+#endif
+}
+
+int cc_comptime_exec_eval_literal(const char* expr,
+                                  const CCComptimeExecOpts* opts,
+                                  char** out_lit, size_t* out_len,
+                                  char* err_buf, size_t err_sz,
+                                  CCArena* arena) {
+    if (out_len) *out_len = 0;
+    if (out_lit) *out_lit = NULL;
+    if (!expr || !out_lit || !arena) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "invalid eval_literal args");
+        return -1;
+    }
+#ifndef CC_TCC_EXT_AVAILABLE
+    (void)opts;
+    if (err_buf && err_sz) snprintf(err_buf, err_sz, "libtcc not available");
+    return -1;
+#else
+    {
+        const char* tenv = getenv("CC_COMPTIME_EXEC_TIMEOUT_MS");
+        if (tenv && tenv[0]) cc__exec_timeout_ms = atoi(tenv);
+    }
+    cc__exec_start = clock();
+    char* tu = cc__exec_build_litproj_tu(expr);
+    if (!tu) {
+        if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM building value TU");
+        return -1;
+    }
+    int rc = 0;
+    if (setjmp(cc__exec_jb) != 0) {
+        cc__exec_in_block = 0;
+        if (err_buf && err_sz)
+            snprintf(err_buf, err_sz, "comptime value eval timed out (%dms)", cc__exec_timeout_ms);
+        rc = -1;
+    } else {
+        cc__exec_in_block = 1;
+        rc = cc__exec_run_litproj_tu(tu, out_lit, out_len, err_buf, err_sz, arena);
         cc__exec_in_block = 0;
     }
     free(tu);

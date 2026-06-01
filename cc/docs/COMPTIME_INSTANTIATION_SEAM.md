@@ -620,8 +620,9 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
   lifecycle plumbing with user `Name::[args]` factories (NATIVE_DECL built-ins
   persist; COMPILED is cleared per-TU via `cc__generic_remove_kind`).
   The **use-site invocation contract is a single entry point**,
-  `cc_emit_plan_produce_generic_def(...)`, which ensures the factory dylib is
-  compiled then invokes it, returning a `CCGenProduceStatus`; the use-site
+  `cc_emit_plan_produce_generic_def(...)`, which ensures the factory is compiled
+  (in-process on the libtcc evaluator, host-cc dylib only as fallback — see the
+  2026-05-31 log below) then invokes it, returning a `CCGenProduceStatus`; the use-site
   rewrite in `cc_rewrite_generic_containers` calls it and owns only the
   use-site-attributed diagnostic.
   - *Map hash/eq as data — done 2026-05-30.* The built-in `cc__builtin_map_decl`
@@ -876,6 +877,41 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
   next `name(...) { ... }` after the comment as a bogus comptime function and
   poison the executor TU.  Regression guard: `comptime_reflect_tagged_smoke` now
   carries `@comptime` in its header comment on purpose.
+
+- **Invalid-emit diagnostic contract + `--emit-c-inspect` — LANDED 2026-06-01.**
+  When a compiled factory emits C, the generated definition is validated at the
+  *emit site* before it is spliced — `cc_comptime_validate_c_fragment`
+  (executor.c) compiles the fragment in a minimal prelude and reports **only
+  syntax errors** (`cc__frag_msg_is_syntax`; missing-context errors like unknown
+  types are deliberately swallowed, since the fragment is judged out of its real
+  TU context).  A reported error is attributed to the **use site** (`Name::[…]`
+  file:line:col) and carries:
+  - the full generated definition, line-numbered, with the offending line flagged
+    by `>` (windowed to ±3 lines when the def exceeds 40 lines);
+  - a `note: in @comptime factory '<handler>' at <file>:<line>` whose origin is
+    resolved through `#line` directives (so header-harvested factories blame the
+    `.cch` the user wrote, and `.ccs` factories fall back to the use-site file).
+
+  *Coverage caveat (honest):* this is a **syntax-only** gate.  Semantically wrong
+  but syntactically valid emits still surface downstream from the host compiler.
+  Closing that needs the span-map work (pass emitted defs through to codegen so
+  the host compiler validates the whole TU, with error spans remapped) — tracked,
+  not yet done.
+
+  *`--emit-c-inspect[=PATH]`* dumps the merged translation unit for inspection
+  (default `out/<stem>.inspect.c`).  On a clean lowering it is the full pre-parse
+  merged TU (dumped in `cc_build_parse_input` after canonicalization); when the
+  build fails in a generic factory it is the TU **reconstructed in source context
+  up to the first blocking error** (at the `cc_rewrite_generic_containers` failure
+  site — the merged TU is never flushed otherwise, because unparseable C never
+  reaches codegen).  The build still runs and fails as usual; the flag only adds
+  the artifact.  Plumbed via the `CC_EMIT_C_INSPECT` env (set per input in
+  `cc__compile_with_env`), so no pass signatures widen.  Default builds no longer
+  write any temp sidecar — they print `note: re-run with --emit-c-inspect …`.
+  Proofs: `comptime_factory_invalid_emit_fail`, `comptime_emit_bad_slot_fail`,
+  `comptime_factory_line_provenance_fail`, `comptime_factory_in_header_bad_fail`
+  (all assert the use-site error, the `>`-flagged def echo, and the file:line
+  factory note).  Full suite 513/513.
 
 ---
 

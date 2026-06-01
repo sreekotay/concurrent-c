@@ -42,8 +42,8 @@ CC provides arena-backed generic containers with UFCS method syntax:
 int main(void) {
     CCArena arena = cc_heap_arena(kilobytes(4));
     
-    // Vec<T> - dynamic array
-    Vec<int> numbers = vec_new<int>(&arena);
+    // CCVec::[T] - dynamic array
+    CCVec::[int] numbers = cc_vec_new::[int](&arena);
     numbers.push(10);
     numbers.push(20);
     numbers.push(30);
@@ -51,8 +51,8 @@ int main(void) {
     int* val = numbers.get(1);   // Nullable pointer: &20
     int* oob = numbers.get(100); // Nullable pointer: NULL
 
-    // Map<K, V> - hash table
-    Map<int, char*> names = map_new<int, char*>(&arena);
+    // Map::[K, V] - hash table
+    Map::[int, char*] names = map_new::[int, char*](&arena);
     names.insert(1, "Alice");
     names.insert(2, "Bob");
 
@@ -63,10 +63,13 @@ int main(void) {
 }
 ```
 
-The `Vec<T>` and `v.method(...)` syntax is lowered by the compiler:
-- `Vec<int>` → `Vec_int`
-- `vec_new<int>(&arena)` → `Vec_int_init(&arena, CC_VEC_INITIAL_CAP)`
-- `v.push(x)` → `Vec_int_push(&v, x)`
+The `Name::[args]` instantiation and `v.method(...)` UFCS syntax is lowered by the compiler:
+- `CCVec::[int]` → `CCVec_int`
+- `cc_vec_new::[int](&arena)` → `CCVec_int_init(&arena, CC_VEC_INITIAL_CAP)`
+- `v.push(x)` → `CCVec_int_push(&v, x)`
+
+The angle-bracket spellings (`Vec<T>`, `vec_new<T>`) are retired; `Name::[args]` is the
+single instantiation surface for both built-in containers and user generic factories.
 
 See the [stdlib spec](spec/concurrent-c-stdlib-spec.md) for full API documentation.
 
@@ -257,16 +260,21 @@ Concurrent-C detects deadlocks at **compile time** (for guaranteed patterns) and
 #### Compile-time: 100% guaranteed deadlocks → ERROR
 
 ```c
-CCNursery* producer = @create(NULL) @destroy {
-    chan_close(ch);
-};
-producer->spawn([rx]() => {
-        while (chan_recv(rx, &v) == 0) { ... }  // ❌ ERROR: deadlock
+int[~4 >] tx;
+int[~4 <] rx;
+CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+
+CCNursery* producer = cc_nursery_create(NULL) !> @destroy;
+(void)producer->close_on(tx);          // tx closes once producer's tasks finish
+
+producer->spawn(() => [rx] {
+    int v;
+    while (cc_io_avail(rx.recv(&v))) { /* ... */ }  // ❌ ERROR: deadlock
 });
-// Consumer waits for close, but close happens AFTER owned tasks exit
+// Consumer waits for close, but close happens AFTER the owning nursery's tasks exit
 ```
 
-Fix: Move consumer **outside** the owning nursery scope.
+Fix: Move the consumer **outside** the owning nursery scope (see `examples/recipe_channel_pipeline.ccs`).
 
 #### Runtime: Real deadlock detection
 
@@ -280,8 +288,8 @@ Configure via environment variables:
 - `CC_DEADLOCK_ABORT=0` — warn but don't exit (continues hanging)
 - `CC_WORKERS=n` — set number of worker threads (default: CPU count)
 
-Escape hatch for compile-time check:
-- `CC_ALLOW_NURSERY_CLOSING_DRAIN=1`
+Opt-in runtime guard for the closing-nursery drain pattern:
+- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` — enable the runtime check for the nursery-closing deadlock pattern
 
 ---
 

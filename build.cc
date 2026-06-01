@@ -28,7 +28,6 @@ CC_TARGET recipe_defer exe examples/recipe_defer_cleanup.ccs
 CC_TARGET recipe_capture exe examples/recipe_explicit_capture.ccs
 CC_TARGET recipe_fanout exe examples/recipe_fanout_capture.ccs
 CC_TARGET recipe_http exe examples/recipe_http_get.ccs
-CC_TARGET recipe_optional exe examples/recipe_optional_values.ccs
 CC_TARGET recipe_result exe examples/recipe_result_error_handling.ccs
 CC_TARGET recipe_tcp exe examples/recipe_tcp_echo.ccs
 CC_TARGET recipe_timeout exe examples/recipe_timeout.ccs

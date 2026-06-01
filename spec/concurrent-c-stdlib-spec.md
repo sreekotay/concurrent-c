@@ -4,6 +4,12 @@
 **Date:** 2026-03-24  
 **Status:** Normative standard-library and lowering specification
 
+> **Implementation status:** This document specifies the *intended* stdlib surface and
+> its normative lowering contracts. Not every API below is shipped yet — some families
+> are aspirational or only partially implemented. For what is currently available and
+> exercised, the `tests/` suite and `examples/` are the source of truth; where this spec
+> and a working example disagree, the example reflects the implemented behavior.
+
 ---
 
 ## Goals and Scope
@@ -76,8 +82,6 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 - `T !>(E)` — "operation may fail; success is a `T`" (e.g., file read: error or data; empty slice means EOF)
 - `T* !>(E)` — "operation may fail; if it succeeds, returns a pointer" (common for allocation / fallible lookup)
 - `bool !>(E) op(T* out)` — iterators, `recv`, pop-style APIs; on `ok(true)` the out-param has been written
-
-> **Retired.** The legacy optional-type constructor `T?` has been removed from this document. See the main spec §2.1 migration appendix for the mapping from `T?` to `T !>(E)`, `T*`, empty-slice, `bool` + out-param, or `-1` sentinels.
 
 ### Name Aliases (short vs prefixed)
 
@@ -452,7 +456,8 @@ bool has_hello = trimmed.contains("hello");  // true
 // Parse with error handling
 char[:] num_str = "42";
 i64 !>(CCI64ParseError) result = num_str.parse_i64();
-if (try i64 val = result) {
+if (result.is_ok()) {
+    i64 val = result.value();
     printf("Parsed: %ld\n", val);
 } else {
     printf("Parse error\n");
@@ -614,17 +619,21 @@ CCArena arena = arena(megabytes(10));
 
 // Read entire file (error handling)
 CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
-if (try CCFile file = f) {
-    char[:] content = try file.read_all(&arena);
-    printf("Read %zu bytes\n", content.len);
+if (f.is_ok()) {
+    CCFile file = f.value();
+    char[:] !>(CCIoError) content_r = file.read_all(&arena);
+    if (content_r.is_ok()) {
+        printf("Read %zu bytes\n", content_r.value().len);
+    }
     file.close();
-} catch (CCIoError err) {
-    printf("Error: %d\n", err);
+} else {
+    printf("Error: %d\n", f.error());
 }
 
 // Read lines (empty slice = EOF)
 CCFile !>(CCIoError) f = cc_file_open(&arena, "input.txt", "r");
-if (try CCFile file = f) {
+if (f.is_ok()) {
+    CCFile file = f.value();
     while (true) {
         char[:] !>(CCIoError) line_result = file.read_line(&arena);
         if (cc_is_err(line_result)) {
@@ -640,8 +649,9 @@ if (try CCFile file = f) {
 
 // Write file
 CCFile !>(CCIoError) out = cc_file_open(&arena, "output.txt", "w");
-if (try CCFile file = out) {
-    try file.write("Hello, world!\n");
+if (out.is_ok()) {
+    CCFile file = out.value();
+    file.write("Hello, world!\n");
     file.close();
 }
 
@@ -649,8 +659,9 @@ if (try CCFile file = out) {
 @async void process_file() {
     // Sync open is allowed; runtime may offload it to blocking pool if needed
     CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
-    if (try CCFile file = f) {
-        char[:] data = try await file.read_all_async(&arena);
+    if (f.is_ok()) {
+        CCFile file = f.value();
+        char[:] data = await file.read_all_async(&arena) !>(e) return;
         process(data);
         file.close();
     }
@@ -761,7 +772,7 @@ LogEvent evt = {
 log_drop(evt);
 
 // Audit log (fail request if timeout)
-try log_block(evt, milliseconds(100));
+log_block(evt, milliseconds(100)) !>(e) return cc_err(e);
 
 // Trace log (keep 5% of events)
 log_sample(evt, 0.05);
@@ -787,7 +798,7 @@ log_sample(evt, 0.05);
     char[:] response = process(path);
     
     // Send response (stalling I/O, separate dispatch)
-    try await send_response(req.fd, response);
+    await send_response(req.fd, response);
 }
 ```
 
@@ -1006,7 +1017,7 @@ void cc_dir_close(CCDirIter* iter);
 
 ```c
 CCArena arena = cc_heap_arena(megabytes(1));
-CCDirIter* iter = try cc_dir_open(&arena, "src");
+CCDirIter* iter = cc_dir_open(&arena, "src") !>(e) return cc_err(e);
 
 while (true) {
     CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, &arena);
@@ -1169,7 +1180,7 @@ CCProcessOutput !>(CCIoError) cc_process_run_shell(CCArena* arena, char[:] comma
 Arena arena = cc_heap_arena(megabytes(1));
 
 // Run and capture output
-CCProcessOutput out = try cc_process_run_shell(&arena, "ls -la");
+CCProcessOutput out = cc_process_run_shell(&arena, "ls -la") !>(e) return cc_err(e);
 printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
 printf("exit: %d\n", out.status.exit_code);
 
@@ -1180,13 +1191,13 @@ CCProcessConfig cfg = {
     .pipe_stdin = true,
     .pipe_stdout = true
 };
-CCProcess proc = try cc_process_spawn(&cfg);
+CCProcess proc = cc_process_spawn(&cfg) !>(e) return cc_err(e);
 
-try cc_process_write(&proc, "hello\n");
+cc_process_write(&proc, "hello\n") !>(e) return cc_err(e);
 cc_process_close_stdin(&proc);
 
-char[:] output = try cc_process_read_all(&proc, &arena);
-CCProcessStatus status = try cc_process_wait(&proc);
+char[:] output = cc_process_read_all(&proc, &arena) !>(e) return cc_err(e);
+CCProcessStatus status = cc_process_wait(&proc) !>(e) return cc_err(e);
 ```
 
 #### 5.7 Environment
@@ -1257,8 +1268,9 @@ bool !>(CCIoError) cc_env_unset(char[:] name);
 
     // File I/O (UFCS)
     File !>(IoError) f = file_open(&arena, "data.txt", "r");
-    if (try File file = f) {
-        char[:] data = try file.read_all(&arena);
+    if (f.is_ok()) {
+        File file = f.value();
+        char[:] data = file.read_all(&arena) !>(e) return cc_err(e);
 
         // String processing (UFCS)
         char[:] trimmed = data.trim();
@@ -1351,7 +1363,8 @@ Runtime.set_blocking_pool(
 ```c
 @async void process_with_backoff() {
     CCFile !>(CCIoError) f = cc_file_open(&arena, path, "r");
-    if (try CCFile file = f) {
+    if (f.is_ok()) {
+        CCFile file = f.value();
         int retry_count = 0;
         while (true) {
             char[:] !>(CCIoError) line_result = file.read_line(&arena);
@@ -1473,7 +1486,7 @@ All functions are covered by **Spec Tests**—normative, executable tests in `.c
 
     // Test parse
     i64 !>(I64ParseError) val = "42".parse_i64();
-    assert(try i64 v = val && v == 42);
+    assert(val.is_ok() && val.value() == 42);
 }
 
 @test "vec and map methods" {
@@ -1675,7 +1688,7 @@ struct ServerConfig {
 
 ```c
 @async void !>(CCIoError) server_loop(ServerConfig cfg) {
-    int listener = try listen(cfg.port);
+    int listener = listen(cfg.port) !>(e) return cc_err(e);
 
     CCNursery* n = cc_nursery_create(NULL)
         !>(e) { return cc_err(CCIoError::OutOfMemory); }
@@ -1690,11 +1703,11 @@ struct ServerConfig {
 @async void !>(CCIoError) server_worker(ServerConfig* cfg, int listener) {
     while (true) {
         // Accept connection (raw socket)
-        int raw_fd = try await accept(listener);
+        int raw_fd = await accept(listener) !>(e) return cc_err(e);
 
         // Perform TLS handshake if configured
         CCDuplex conn = if (cfg.tls) {
-            try tls_handshake(raw_fd, cfg.tls)
+            tls_handshake(raw_fd, cfg.tls) !>(e) return cc_err(e)
         } else {
             CCDuplex.from_fd(raw_fd)
         };
@@ -1725,31 +1738,31 @@ struct ServerConfig {
         }
 
         // Close connection (CCDuplex.close or raw_fd)
-        try conn.close();
+        conn.close() !>(e) return cc_err(e);
         arena_reset(&conn_arena);
     }
 }
 
 @async ServerAction !>(CCIoError) handle_request(CCDuplex* conn, CCArena* req_arena, CCArena* conn_arena, ServerConfig* cfg) {
     // Read request
-    Request req = try await read_request_from_duplex(conn, req_arena);
+    Request req = await read_request_from_duplex(conn, req_arena) !>(e) return cc_err(e);
 
     if (cfg.on_request_start) cfg.on_request_start(&req);
 
     // Call handler with deadline (unary only)
     with_deadline(deadline_after(cfg.request_timeout)) {
-        ServerAction !>(CCIoError) action = try cfg.handler(&req, req_arena);
+        ServerAction !>(CCIoError) action = cfg.handler(&req, req_arena);
 
         // Branch on response type
         @match {
             case Response resp = action (Reply):
                 if (cfg.on_request_end) cfg.on_request_end(&req, &resp, deadline_remaining());
-                try await send_response_to_duplex(conn, &resp);
+                await send_response_to_duplex(conn, &resp) !>(e) return cc_err(e);
                 return cc_ok(resp);  // Return response for keep-alive check
 
             case ConnHandlerFn takeover_fn = action (Takeover):
                 // Handler is taking over the connection
-                try await takeover_fn(conn, conn_arena);
+                await takeover_fn(conn, conn_arena) !>(e) return cc_err(e);
                 // Takeover handler called close(); connection finished
                 return cc_err(CCIoError::ConnectionClosed);  // Signal to break keep-alive loop
         }
@@ -1765,7 +1778,7 @@ struct ServerConfig {
 
 @async @latency_sensitive ServerAction !>(CCIoError) api_handler(Request* req, CCArena* req_arena) {
     if (req.path == "/api/users") {
-        User[] users = try await db_get_users(req_arena);
+        User[] users = await db_get_users(req_arena) !>(e) return cc_err(e);
         char[:] json = encode_json(users, req_arena);
         Response resp = {
             .status = 200,
@@ -1791,7 +1804,7 @@ struct ServerConfig {
         // .tls = TlsConfig { .cert_path = "cert.pem", .key_path = "key.pem" }
     };
     
-    try await server_loop(cfg);
+    await server_loop(cfg);
 }
 ```
 
@@ -1809,19 +1822,19 @@ struct ServerConfig {
 
 @async void !>(CCIoError) websocket_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Perform WebSocket handshake
-    try await ws_handshake(conn);
+    await ws_handshake(conn) !>(e) return cc_err(e);
 
     // Handle messages on connection (lives as long as connection lives)
     while (true) {
-        char[:] frame = try await ws_read_frame(conn, conn_arena);
+        char[:] frame = await ws_read_frame(conn, conn_arena) !>(e) return cc_err(e);
         if (frame.len == 0) break;  // Connection closed (empty frame = EOF sentinel)
 
         // Process frame; allocations live in conn_arena
-        try await process_ws_message(conn, frame, conn_arena);
+        await process_ws_message(conn, frame, conn_arena) !>(e) return cc_err(e);
     }
 
     // Close connection
-    try await conn.close();
+    await conn.close() !>(e) return cc_err(e);
 }
 ```
 
@@ -1839,19 +1852,19 @@ struct ServerConfig {
 
 @async void !>(CCIoError) sse_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Send SSE headers
-    try await conn.write("HTTP/1.1 200 OK\r\n");
-    try await conn.write("Content-Type: text/event-stream\r\n");
-    try await conn.write("Connection: keep-alive\r\n\r\n");
+    await conn.write("HTTP/1.1 200 OK\r\n") !>(e) return cc_err(e);
+    await conn.write("Content-Type: text/event-stream\r\n") !>(e) return cc_err(e);
+    await conn.write("Connection: keep-alive\r\n\r\n") !>(e) return cc_err(e);
     
     // Stream events
     for (size_t i = 0; i < 100; i++) {
         char[:] event = format_event(i, conn_arena);
-        try await conn.write(event);
+        await conn.write(event) !>(e) return cc_err(e);
         await sleep(milliseconds(1000));
     }
     
     // Signal end by closing write side
-    try await conn.shutdown(Write);
+    await conn.shutdown(Write) !>(e) return cc_err(e);
 }
 ```
 
@@ -1871,7 +1884,7 @@ struct ServerConfig {
         }
     };
     
-    try await server_loop(cfg);  // Handlers receive decrypted requests
+    await server_loop(cfg);  // Handlers receive decrypted requests
 }
 ```
 
@@ -1887,14 +1900,14 @@ struct ServerConfig {
 @async void !>(CCIoError) raw_protocol_loop(CCDuplex* conn, CCArena* conn_arena) {
     // Speak custom protocol directly via conn.read() / conn.write()
     while (true) {
-        char[:] msg = try await conn.read(conn_arena);
+        char[:] msg = await conn.read(conn_arena) !>(e) return cc_err(e);
         if (msg.len == 0) break;  // EOF (empty slice)
 
         char[:] response = process_protocol_message(msg, conn_arena);
-        try await conn.write(response);
+        await conn.write(response) !>(e) return cc_err(e);
     }
 
-    try await conn.close();
+    await conn.close() !>(e) return cc_err(e);
 }
 
 @async void main() {
@@ -1905,7 +1918,7 @@ struct ServerConfig {
         .mode = RawTcp,  // No HTTP parsing; handler speaks protocol directly
     };
     
-    try await server_loop(cfg);
+    await server_loop(cfg);
 }
 ```
 
@@ -1927,7 +1940,7 @@ struct ServerConfig {
         size_t message_count = 0;
         CCArenaCheckpoint cp = arena_checkpoint(conn_arena);
         while (true) {
-            char[:] msg = try await conn.read(conn_arena);
+            char[:] msg = await conn.read(conn_arena) !>(e) return cc_err(e);
             if (msg.len == 0) break;  // EOF
             process(msg);
             message_count++;
@@ -1938,7 +1951,7 @@ struct ServerConfig {
                 message_count = 0;
             }
         }
-        try await conn.close();
+        await conn.close() !>(e) return cc_err(e);
     }
     ```
 - **Deadline and Cancellation:** For deadline semantics and how cancellation is checked at suspension points, see language spec **§ 7.5 (Cancellation & Deadline)** and **§ 3.2 (Suspension Points)**. This server shell applies `request_timeout` deadline to unary handlers; takeover handlers control their own deadline semantics (or use no deadline for long-lived connections like WebSocket).
@@ -2009,7 +2022,8 @@ void process_csv(char* filename) {
     Arena arena = arena(megabytes(1));
     
     CCFile !>(CCIoError) f = cc_file_open(&arena, filename, "r");
-    if (try CCFile file = f) {
+    if (f.is_ok()) {
+        CCFile file = f.value();
         while (true) {
             char[:] !>(CCIoError) line_result = file.read_line(&arena);
             if (cc_is_err(line_result)) break;  // Error
@@ -2042,9 +2056,9 @@ void process_csv(char* filename) {
     
     // Read file
     CCFile !>(CCIoError) f = cc_file_open(&arena, "logs.txt", "r");
-    if (!try f) return;
+    if (f.is_err()) return;
 
-    CCFile file = f.unwrap();
+    CCFile file = f.value();
     CCMap::[int, int] status_counts = cc_map_new::[int, int](&arena);
 
     // Process line by line (UFCS throughout)
@@ -2062,7 +2076,8 @@ void process_csv(char* filename) {
         char[:] status_str;
         if (fields.next(&status_str)) {
             i64 !>(CCI64ParseError) status = status_str.parse_i64();
-            if (try i64 code = status) {
+            if (status.is_ok()) {
+                i64 code = status.value();
                 // Update count (nullable pointer lookup; 0 if absent)
                 int* count = status_counts.get((int)code);
                 int new_count = (count ? *count : 0) + 1;
@@ -2154,14 +2169,14 @@ enum CCNetError {
 @async void !>(CCNetError) fetch_data() {
     CCArena arena = arena(megabytes(1));
 
-    CCSocket conn = try await cc_tcp_connect("example.com:80");
+    CCSocket conn = await cc_tcp_connect("example.com:80") !>(e) return cc_err(e);
     @defer conn.close();
 
-    try await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
+    await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n") !>(e) return cc_err(e);
 
     // Read response into arena (empty slice = EOF)
     while (true) {
-        char[:] chunk = try await conn.read(&arena, 4096);
+        char[:] chunk = await conn.read(&arena, 4096) !>(e) return cc_err(e);
         if (chunk.len == 0) break;  // EOF
         process(chunk);
     }
@@ -2169,7 +2184,7 @@ enum CCNetError {
 
 // TCP server (low-level; prefer server_loop for HTTP)
 @async void !>(CCNetError) echo_server() {
-    CCListener ln = try cc_tcp_listen("0.0.0.0:9000");
+    CCListener ln = cc_tcp_listen("0.0.0.0:9000") !>(e) return cc_err(e);
     @defer ln.close();
 
     CCNursery* n = cc_nursery_create(NULL)
@@ -2177,7 +2192,7 @@ enum CCNetError {
         @destroy;
     {
         while (true) {
-            CCSocket conn = try await ln.accept();
+            CCSocket conn = await ln.accept() !>(e) return cc_err(e);
             n->spawn(() => handle_echo(conn));
         }
     }
@@ -2188,9 +2203,9 @@ enum CCNetError {
     @defer conn.close();
 
     while (true) {
-        char[:] data = try await conn.read(&arena, 1024);
+        char[:] data = await conn.read(&arena, 1024) !>(e) return;
         if (data.len == 0) break;  // EOF
-        try await conn.write(data);
+        await conn.write(data) !>(e) return;
         arena_reset(&arena);  // Reuse buffer space
     }
 }
@@ -2316,16 +2331,16 @@ static int tls_sock_read(void* ctx, unsigned char* buf, size_t len) {
     CCArena arena = arena(megabytes(1));
 
     // Connect with TLS (uses system CA roots by default)
-    CCDuplex conn = try await cc_tls_connect_addr("api.example.com:443", {
+    CCDuplex conn = await cc_tls_connect_addr("api.example.com:443", {
         .verify_hostname = true,
-    });
+    }) !>(e) return cc_err(e);
     @defer conn.close();
 
     // CCDuplex interface is identical to plain CCSocket
-    try await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n");
+    await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n") !>(e) return cc_err(e);
 
     while (true) {
-        char[:] chunk = try await conn.read(&arena, 4096);
+        char[:] chunk = await conn.read(&arena, 4096) !>(e) return cc_err(e);
         if (chunk.len == 0) break;  // EOF
         process(chunk);
     }
@@ -2409,7 +2424,7 @@ enum CCHttpError {
 @async void !>(CCHttpError) fetch_json() {
     CCArena arena = arena(megabytes(1));
 
-    CCHttpResponse resp = try await cc_http_get(&arena, "https://api.example.com/users");
+    CCHttpResponse resp = await cc_http_get(&arena, "https://api.example.com/users") !>(e) return cc_err(e);
     if (resp.status == 200) {
         // resp.body is valid until arena reset
         User[] users = parse_json_users(resp.body, &arena);
@@ -2426,7 +2441,7 @@ enum CCHttpError {
         .user_agent("MyApp/1.0")
         .no_redirects();
 
-    CCHttpResponse resp = try await client.get(&arena, "https://api.example.com/data");
+    CCHttpResponse resp = await client.get(&arena, "https://api.example.com/data") !>(e) return cc_err(e);
     process(resp);
 }
 
@@ -2442,7 +2457,7 @@ enum CCHttpError {
     };
 
     CCHttpClient client = cc_http_client_new();
-    CCHttpResponse resp = try await client.request(&arena, req);
+    CCHttpResponse resp = await client.request(&arena, req) !>(e) return cc_err(e);
 }
 ```
 
@@ -2481,7 +2496,7 @@ CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
 @async void !>(CCNetError) connect_by_name() {
     CCArena arena = arena(kilobytes(4));
 
-    CCIpAddr[] addrs = try await cc_dns_lookup(&arena, "example.com");
+    CCIpAddr[] addrs = await cc_dns_lookup(&arena, "example.com") !>(e) return cc_err(e);
     if (addrs.len == 0) {
         return cc_err(CCNetError::DnsFailure);
     }
@@ -2494,8 +2509,9 @@ CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
             .append(":443")
             .as_slice();
 
-        if (try CCSocket sock = await cc_tcp_connect(full_addr)) {
-            return handle_connection(sock);
+        CCSocket !>(CCNetError) sock_r = await cc_tcp_connect(full_addr);
+        if (sock_r.is_ok()) {
+            return handle_connection(sock_r.value());
         }
     }
 
@@ -2556,7 +2572,7 @@ static int socket_read_callback(void* ctx, unsigned char* buf, size_t len) {
     size_t count = 0;
 
     while (true) {
-        char[:] msg = try await conn.read(arena, 4096);
+        char[:] msg = await conn.read(arena, 4096) !>(e) return cc_err(e);
         if (msg.len == 0) break;  // EOF
         process(msg);
         count++;

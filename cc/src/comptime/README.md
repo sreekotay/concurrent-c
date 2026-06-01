@@ -5,13 +5,18 @@ execution (libtcc), compiled generic factories, and the emit-plan splice layer.
 
 ## Pipeline order
 
-Both initial parse (`build_parse_input.c`) and emit (`visit_codegen.c`) call
-`cc_comptime_prepare_source()` before comptime execution:
+The initial parse (`build_parse_input.c`) calls `cc_comptime_prepare_source()`
+before comptime execution:
 
 1. `cc__resolve_comptime_if` — expand `@comptime if/for`, prune dead branches
-2. `cc_rewrite_string_templates_text` — lower `@emit` / `@string` backtick templates
+2. `cc__resolve_comptime_value` — hoist `@comptime(expr)` to C literals (after if/for prune)
+3. `cc_rewrite_string_templates_text` — lower `@emit` / `@string` backtick templates
 
-Do not reorder or skip one pass without updating the other call site.
+The emit side (`visit_codegen.c`) does not re-run `cc_comptime_prepare_source()`;
+it drives comptime instantiation/splicing through the emit-plan layer
+(`cc_emit_plan_splice_comptime_fragments`, `cc_emit_plan_apply_comptime_instantiations`
+in `preprocess/emit_plan.{c,h}`). Keep the prepare pass order and the emit-plan layer
+consistent when changing comptime ordering.
 
 ## Environment flags
 

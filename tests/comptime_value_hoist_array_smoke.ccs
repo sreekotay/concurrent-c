@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime int table_len(void) { return 4; }
+
+int main(void) {
+    int a[@comptime(table_len())];
+    if (sizeof(a) != 4 * sizeof(int)) return 1;
+    printf("comptime_value_hoist_array_smoke ok sizeof=%zu\n", sizeof(a));
+    return 0;
+}

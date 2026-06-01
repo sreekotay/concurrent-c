@@ -7,8 +7,8 @@ This directory contains the runnable throughput benchmarks, scheduler diagnostic
 From the repo root:
 
 ```bash
-./cc/bin/ccc run tools/run_all.ccs -- perf
-./cc/bin/ccc run tools/run_all.ccs -- all
+./cc/bin/ccc run tools/run_all.ccs -- --perf
+./cc/bin/ccc run tools/run_all.ccs -- --all
 ```
 
 Run an individual benchmark directly:

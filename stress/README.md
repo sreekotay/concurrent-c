@@ -18,7 +18,6 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `worker_pool_heavy` | 8 workers processing 500 jobs | Worker pool pattern, job throughput |
 | `fanout_fanin` | Scatter-gather with 16 workers | Fan-out/fan-in, parallel processing |
 | `closure_capture_storm` | 100 closures capturing different vars | Closure allocation, capture semantics |
-| `defer_cleanup_storm` | 100 tasks with nested defers | Defer cleanup under concurrency |
 | `unbuffered_rendezvous` | 50 producer/consumer pairs (sync) | Unbuffered channel rendezvous |
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
 | `join_handoff_storm` | Deep join chains on one worker | Join handshake ordering |
@@ -53,10 +52,12 @@ done
 
 ## Deadlock Detection
 
-Concurrent-C includes runtime deadlock detection (enabled by default). Disable it with:
+Concurrent-C includes runtime deadlock detection (enabled by default). On detection it
+aborts with exit code 124. To keep running (print the banner but do **not** exit), set
+`CC_DEADLOCK_ABORT=0`:
 
 ```bash
-CC_DEADLOCK_DETECT=0 ./cc/bin/ccc run stress/deadlock_detect_demo.ccs
+CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run stress/deadlock_detect_demo.ccs
 ```
 
 When enabled, the runtime:
@@ -77,7 +78,7 @@ Example output:
   Thread 1: blocked on chan_recv (channel empty, waiting for sender)
 
 Common causes:
-  • cc_block_on() inside spawn() or @nursery
+  • cc_block_on() inside spawn() or a nursery task
   • Producer/consumer mismatch (sends without receivers)
   • Missing channel close (receiver waiting forever)
 ```

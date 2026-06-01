@@ -1,0 +1,2 @@
+tests/comptime_value_hoist_bad_fail.ccs:11: error: @comptime(get_ptr()) value is not projectable to a C literal
+  note: value-position @comptime supports integers, floating point, bool, and strings

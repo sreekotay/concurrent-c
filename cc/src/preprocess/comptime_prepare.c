@@ -42,6 +42,21 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         *inout_len = strlen(resolved);
     }
 
+    /* Value-position `@comptime(expr)`: evaluate and splice the projected C
+     * literal in place.  Runs after `@comptime if/for` pruning (so only live
+     * sites are evaluated) and before template lowering.  The splice lands in
+     * the buffer that feeds both the parse buffer and `buffer_codegen`, so the
+     * hoisted literal is visible in the lowered C — no anchor plumbing needed. */
+    {
+        char* valued = cc__resolve_comptime_value(*inout_buf, *inout_len, input_path);
+        if (valued == (char*)-1) return -1;
+        if (valued) {
+            free(*inout_buf);
+            *inout_buf = valued;
+            *inout_len = strlen(valued);
+        }
+    }
+
     templ = cc_rewrite_string_templates_text(*inout_buf, *inout_len, input_path);
     if (templ == (char*)-1) return -1;
     if (templ) {
