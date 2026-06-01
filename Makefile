@@ -4,7 +4,7 @@ BEARSSL_DIR := third_party/bearssl
 CURL_DIR := third_party/curl
 CURL_BUILD := $(CURL_DIR)/build
 
-.PHONY: all cc clean fmt lint example example-c smoke test tools
+.PHONY: all cc clean distclean fmt lint example example-c smoke test tools
 .PHONY: install uninstall
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
@@ -17,6 +17,12 @@ cc:
 
 clean:
 	$(MAKE) -C $(CC_DIR) clean
+
+# Nuke ALL regenerable build clutter, including the multi-GB bin/, out/, and
+# tmp/ trees plus any stray misfired-compile artifacts. Forces a full rebuild.
+distclean: clean
+	rm -rf bin out tmp
+	rm -f -- ./-- cc/-E cc/src/cc/-E
 
 # ---- Installation -----------------------------------------------------------
 #

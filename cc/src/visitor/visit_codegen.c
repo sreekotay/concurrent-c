@@ -36,8 +36,6 @@ static double cc__now_ms(void) {
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_type_syntax.h"
-#include "visitor/pass_match_syntax.h"
-#include "visitor/pass_with_deadline_syntax.h"
 #include "visitor/edit_buffer.h"
 #include "visitor/visitor_fileutil.h"
 #include "visitor/text_span.h"

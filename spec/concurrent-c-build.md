@@ -273,7 +273,10 @@ Per-target properties (optional):
   - Used by `ccc build install <target>` to copy the produced binary to `<DEST>`.
   - `<DEST>` is resolved relative to repo root unless it is an absolute path.
 
-#### Target grouping
+#### Target grouping (planned — not yet implemented)
+> **Status:** This directive is on the roadmap (see "Future directions") and is **not yet
+> implemented**. The description below is the intended design.
+
 `CC_TARGET_GROUP <GROUP_NAME>` collects multiple declarative directives into a logical block that shares configuration. Inside a group you can omit repeated `CC_TARGET` names and the group name prefixes generated targets. Group-level directives that set include paths, defines, libs, or deps are applied to every target declared within the block, reducing boilerplate for legacy suites that define many similar binaries. The group desugars to per-target calls such as:
 
 ```c
@@ -295,16 +298,23 @@ where `server-foo` is the concatenation of `CC_TARGET_GROUP` plus the nested `CC
 - `--dry-run` resolves consts / prints commands, and skips compile/link.
 
 ### Legacy build integration
-`ccc` can emit self-describing fragments so existing Make/CMake graphs can keep driving compilation while `ccc` owns C emission. The `ccc build export-make <target>` (alias: `ccc build export-ninja <target>`) subcommand writes a build-system fragment listing:
+`ccc` can emit self-describing fragments so existing Make/CMake graphs can keep driving compilation while `ccc` owns C emission. The `ccc build export-make <target>` subcommand writes a Makefile fragment. Per-target variables are keyed by the target name; a fragment for target `main` looks like:
 
 ```
-CCC_TARGET_<TARGET>_SRCS := main.ccs utils.c
-CCC_TARGET_<TARGET>_CFLAGS := $(CCC_FLAGS) -Ilegacy/include
-CCC_TARGET_<TARGET>_LDFLAGS := -lm
-CCC_TARGET_<TARGET>_OUT := bin/legacy
+CC_TARGETS := main
+CC_OUT_DIR := out
+CC_INCLUDE := -I<lowered-include> -I<cc-include>
+CC_RUNTIME_C := <runtime>.c
+
+CC_KIND_main := exe
+CC_SRCS_main := <abs>/main.ccs <abs>/utils.c
+CC_GEN_C_main := $(CC_OUT_DIR)/c/main/main.c
+CC_CFLAGS_main := $(CC_INCLUDE) -Ilegacy/include
+CC_LDFLAGS_main := -lm
+CC_DEPS_main := <deps...>
 ```
 
-These fragments include dependencies, per-target outputs, computed libs, and the `CCC_TARGET_<TARGET>_COMPTIME` bool that signals whether the target came from a `@comptime` block or declarative syntax. Legacy Makefiles can `include` the fragment and then run `$(CCC_TARGET_<TARGET>_SRCS)` through their existing rules, while still calling `ccc build` for C emission and caching. This keeps the declarative metadata in sync with `build.cc` without duplicating logic.
+The fragment also defines a `cc-emit-c` helper that runs `ccc build --emit-c-only` for each target. Legacy Makefiles can `include` the fragment and feed `$(CC_SRCS_main)` / `$(CC_GEN_C_main)` through their existing rules while still calling `ccc build` for C emission and caching. (A Ninja exporter is not currently implemented; only `export-make` is available.)
 
 ## Testing Infrastructure
 
@@ -370,27 +380,26 @@ The following environment variables aid debugging compiler internals:
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `CC_DEBUG_PP_SOURCE=1` | Dump preprocessed source before TCC parsing | See what TCC receives |
+| `CC_DUMP_LOWERED=<path>` | Dump the lowered source written to TCC to `<path>` | See what TCC receives |
 | `CC_DEBUG_STUB_NODES=1` | Dump stub AST nodes (arenas, nurseries) | Debug AST pass issues |
 | `CC_KEEP_PP=1` | Keep temporary preprocessed files | Inspect lowered C |
 
 **Example: Debugging a compilation error**
 
 ```bash
-# See preprocessed output to diagnose "lvalue expected" or similar TCC errors
-CC_DEBUG_PP_SOURCE=1 ccc build myfile.ccs 2>&1 | less
+# Dump lowered output to diagnose "lvalue expected" or similar TCC errors
+CC_DUMP_LOWERED=out/lowered.c ccc build myfile.ccs && less out/lowered.c
 
 # Inspect arena/nursery AST nodes
 CC_DEBUG_STUB_NODES=1 ccc build myfile.ccs
 
 # Keep preprocessed temp files for inspection
 CC_KEEP_PP=1 ccc build myfile.ccs
-ls /tmp/cc_pp_*.c
 ```
 
 **Common debugging scenarios:**
 
-1. **"lvalue expected" error:** Use `CC_DEBUG_PP_SOURCE=1` to see what TCC is parsing. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
+1. **"lvalue expected" error:** Use `CC_DUMP_LOWERED=<path>` to see what TCC is parsing. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
 
 2. **Arena/nursery span issues:** Use `CC_DEBUG_STUB_NODES=1` to dump AST node spans. Check that `line_start`/`line_end` and `col_start`/`col_end` match your source.
 

@@ -61,9 +61,10 @@ Run any recipe:
 | `recipe_tcp_echo.ccs` | TCP sockets, listen/accept/read/write |
 | `recipe_http_get.ccs` | Parallel HTTP requests with explicit nursery handles |
 
-HTTP examples require libcurl (system curl on macOS):
+HTTP examples require libcurl (system curl on macOS) and `-DCC_ENABLE_HTTP=1`. The
+source already declares `@link("curl")`, so linking is automatic:
 ```bash
-./cc/bin/ccc build run --build-file examples/recipe_http_get.build.cc
+./cc/bin/ccc build run examples/recipe_http_get.ccs -DCC_ENABLE_HTTP=1
 ```
 
 ### Build System Examples
@@ -74,7 +75,6 @@ HTTP examples require libcurl (system curl on macOS):
 | `build_graph/` | Multi-target builds with `CC_TARGET` |
 | `mixed_c/` | CC + plain C interop |
 | `multi/` | Multi-file CC builds |
-| `recipe_http_get.build.cc` | External library linking (`CC_TARGET_LIBS`) |
 
 Run build system examples:
 ```bash

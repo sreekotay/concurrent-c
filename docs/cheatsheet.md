@@ -164,7 +164,7 @@ int out;
 if (v.pop(&out)) { use(out); }
 
 // In-band sentinel — best for stream reads (empty slice = EOF).
-CCSlice chunk = try buf.next();
+CCSlice chunk = buf.next();
 if (chunk.len == 0) { /* EOF */ }
 
 // Result — best for fallible operations with a real error channel.
@@ -193,9 +193,9 @@ if (cc_is_ok(result)) {
     printf("error: %d\n", cc_unwrap_err(result).code);
 }
 
-// Propagate errors with try
+// Propagate errors with !>
 int!>(MyError) caller(void) {
-    int val = try divide(10, 0);  // returns early on error
+    int val = divide(10, 0) !>(e) return cc_err(e);  // returns early on error
     return cc_ok(val * 2);
 }
 ```

@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime int ok_val(void) { return 42; }
+
+int main(void) {
+    int acc = 0;
+
+    @comptime if (1) {
+        acc += @comptime(ok_val());
+    } else {
+        acc += @comptime(undefined_symbol_in_dead_branch);
+    }
+
+    @comptime if (0) {
+        acc += @comptime(also_never_evaluated_xyz);
+    } else {
+        acc += 100;
+    }
+
+    printf("comptime_value_hoist_if_smoke acc=%d\n", acc);
+    return acc == 142 ? 0 : 1;
+}

@@ -89,7 +89,7 @@ Survey of CC tokens that TCC's lexer rejects or misreads:
 
 There is no fix for this that doesn't involve a custom lexer. Custom lexer + TCC parser is incoherent (the lexer would have to either re-tokenize TCC's output or pre-tokenize TCC's input — both require a parallel C lexer).
 
-**Therefore:** a text-preprocess layer that rewrites CC surface syntax to C-shaped tokens is unavoidable. Today: 16 passes in [`cc/src/preprocess/preprocess.c`](../src/preprocess/preprocess.c) (~8.8k lines). The set will shrink as M7's CPP-expand work matures, but cannot go to zero.
+**Therefore:** a text-preprocess layer that rewrites CC surface syntax to C-shaped tokens is unavoidable. Today: 16 passes in [`cc/src/preprocess/preprocess.c`](../src/preprocess/preprocess.c) (~10.8k lines). The set will shrink as M7's CPP-expand work matures, but cannot go to zero.
 
 ### C3. Two of four AST-driven passes need type information
 
@@ -134,7 +134,7 @@ The pipeline is best understood as three layers, not nine phases. (The Phase 1�
 
 **Components:**
 
-- 16 preprocess passes (`cc/src/preprocess/preprocess.c`, ~8.8k lines) — see ADR-002 for the rationale.
+- 16 preprocess passes (`cc/src/preprocess/preprocess.c`, ~10.8k lines) — see ADR-002 for the rationale.
 - L2 prelude rewriter (`cc/src/preprocess/cc_l2_rewriter.c`) — fixes standard-C idioms TCC rejects (`offsetof`, `__attribute__((constructor(N)))`).
 - Closure ID markers (`cc/src/preprocess/cc_closure_markers.c`) — injects `/*CC_CLO:N*/` comments into the **codegen buffer** for stable closure identity. **Consumed (milestone 4b, 2026-05-30):** `pass_closure_literal_ast.c` derives each closure's exact start offset from its marker (comment-safe) instead of the `(line,col)`+forward-`=>`-scan heuristic. The heuristic + recovery branch remains only as the fallback for macro-origin closures (whose `=>` exists only post-CPP-expand, so no marker can be placed in the never-expanded codegen buffer). `CC_NO_CLOSURE_MARKERS` disables the marker path.
 - CPP pre-expand (`cc/src/preprocess/cpp_expand.c`, M7.A) — runs TCC's CPP after text passes so `#include` and macro expansion happens before TCC's second-pass parse. Default-on.
@@ -411,7 +411,7 @@ To be clear: this doc is not "don't ever change anything." It's "don't undertake
 
 3. **M4 follow-ups (deferred — see §6 "Targets that aren't worth it" below):** the original ARCHITECTURE.md claim that M4 would save 1 reparse for ALL TUs by folding Phase 5 into Phase 3 Stage 2 was **wrong**. Closure-literal lift is a *producer* for closure_calls (when a closure literal sits inside a closure-typed call's arg list, the literal must be lowered to `__cc_closure_make_N()` before closure_calls extracts arg text). That's the same producer/consumer ordering UFCS has, so folding closure_literals into Stage 2 would need a *new* third stage — net same reparse count. The real M4 win was M4.a (above).
 
-4. **M1 step (c): `#line`-aware text scanners (finish).** 102/102 forward sites done; 3 backward + 1 special remaining (one fewer than pre-audit — the deleted nursery pass took 3 sites off the list). Unblocks the src_buffer swap (step a) which in turn unblocks dropping the `CC_PRE_EXPAND=0` opt-out and retiring redundant `_cch → _h` text passes.
+4. **M1 step (c): `#line`-aware text scanners (finish).** 102/102 forward sites done; 3 backward + 1 special remaining (one fewer than pre-audit — the deleted nursery pass took 3 sites off the list). Unblocks the src_buffer swap (step a) and retiring redundant `_cch → _h` text passes. (The `CC_PRE_EXPAND=0` opt-out it was once gated behind has since been collapsed — pre-expand is now unconditional — so that part is already done.)
 
    **Effort:** documented in M1_MIGRATION.md. **Win:** macro CC-syntax end-to-end, simpler reparse plumbing, source-map drift fixed.
 

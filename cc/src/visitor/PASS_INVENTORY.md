@@ -2,7 +2,7 @@
 
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
-**Last updated**: 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
+**Last updated**: 2026-06-01 (drift audit vs code: line counts, phantom/retired passes, omitted passes) — prior: 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
 
 > **WHY this many passes? WHY this split between text and AST?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §2 (the four constraints) and §3 (the three architectural layers). The Phase 1–9 numbering below is an artifact of how the code grew; the three layers in ARCHITECTURE.md are the right mental model.
 
@@ -126,58 +126,57 @@ so it CAN, not to work around them in a single pass.
 
 - **Total lines**: ~21k across pass files
 - **TCC reparses**: ≤6 call sites in `visit_codegen.c` + 1 initial parse (down from ~9 pre-2026-05-28). Both Phase-3 stage reparses skip when their edit buffer is empty.
-- **Text-based passes in preprocess.c**: 19 functions
+- **Text-based passes in preprocess.c**: ~24 transforms (2026-06-01 audit — the numbered table below is the historical subset; the actual phase-1 canonical + phase-3 host-lowering buckets in `cc__apply_phase1_canonical_passes` / `cc__apply_phase3_host_lowering_passes` run more, e.g. `cc__resolve_comptime_if`, `cc__rewrite_string_templates`, `cc__rewrite_channel_pair_pass`, `cc__lower_type_of_constexpr`, `cc__rewrite_result_field_sugar_pass`, `cc__rewrite_async_void_ret`, `cc__rewrite_at_call_site_mode`, `cc__rewrite_at_await`)
 - **AST-based passes**: 8
 
-## Preprocessing (preprocess.c) — ~4,800 lines
+## Preprocessing (preprocess.c) — ~10,803 lines
 
 Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 | # | Function | Transform | Lines | Notes |
 |---|----------|-----------|-------|-------|
-| P1 | cc__rewrite_with_deadline_syntax | `with_deadline(ms)` → CCDeadline scope | ~240 | Control flow |
+| P1 | cc__canonicalize_with_deadline_syntax (phase-1) + cc__lower_with_deadline_syntax (phase-3) | `with_deadline(ms)` → CCDeadline scope | ~240 | Control flow. **Corrected 2026-06-01:** lowering lives in `preprocess.c`; the visitor `pass_with_deadline_syntax.c` was a confirmed-orphan and has been deleted (2026-06-01). |
 | P2 | cc__rewrite_match_syntax | `@match` → switch + cc_chan_match_select | ~310 | Channel select |
 | P3 | cc__rewrite_slice_types | `T[:]` → CCSlice_T | ~110 | Type syntax |
 | P4 | cc__rewrite_chan_handle_types | `int[~4 >]` → CCChanTx_int | ~510 | Channel types |
 | P5 | cc_rewrite_generic_containers | `CCVec::[T]` → CCVec_T | ~250 | Generic types |
-| P6 | cc__rewrite_optional_types | `T?` → diagnostic (retired) | ~60 | Type syntax (emits error) |
+| P6 | cc__rewrite_optional_types | `T?` → hard-error (optionals retired); diagnostic-only guardrail | ~60 | Type syntax (emits error) |
 | P7 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~260 | Constructor inference ⚠️ BEFORE P10 |
 | P8 | cc__rewrite_result_types | `T!>(E)` → CCResult_T_E | ~155 | Type syntax |
-| P9 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → macro | ~70 | Parse stub |
-| P10 | cc__rewrite_optional_unwrap | `*res` → `cc_unwrap(res)` for CCResult (optional arm retired) | ~180 | Result unwrap |
-| P11 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
+| ~~P9~~ | ~~cc__rewrite_result_constructors~~ | ~~`cc_ok_CCResult_T_E(v)` → macro~~ | — | **Retired (2026-06-01 audit):** typed Result ctors now parse/type-check as-is; removed from the phase-3 chain (see `// (retired) cc__rewrite_result_constructors` in preprocess.c). |
+| P10 | cc__rewrite_result_star_unwrap | `*res` → `cc_unwrap(res)` for CCResult | ~180 | Result unwrap |
+| ~~P11~~ | ~~cc__rewrite_closing_annotation~~ | ~~`@closing(ch)` → sub-nursery~~ | — | **Phantom/retired (2026-06-01 audit):** no such function exists; `@closing(...)` is retired and now hard-errors in `cc/src/parser/cc_ext_parser.c` ("use `@create(...) @destroy { chan.close(); }`"). |
 | P12 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
 | P13 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
 
 **Note**: P8 must run before P10 (needs to see `T!>(E)` syntax for type inference).
 
 **Consolidation candidates:**
-- P8+P9+P13 → single "optional pass" (3 scans → 1)
 - P3+P4+P5 → single "type syntax pass" (potential, needs analysis)
 
-## visit_codegen.c Pipeline — 1,214 lines
+## visit_codegen.c Pipeline — ~4,886 lines
 
 ### Phase 1: Early Text (before TCC parse)
 
 | # | Pass File | Function | Transform |
 |---|-----------|----------|-----------|
-| 1 | visit_codegen.c | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery |
+| 1 | — | ~~cc__rewrite_closing_annotation~~ | **Phantom (2026-06-01 audit):** function does not exist; `@closing(...)` is retired and hard-errors in `cc_ext_parser.c`. |
 
 ### Phase 2: Text Passes (batched)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 3 | pass_with_deadline_syntax.c | 430 | `with_deadline(ms)` → CCDeadline + @defer |
-| 4 | pass_match_syntax.c | 600 | `@match` → switch + cc_chan_match_select |
+| 3 | ~~pass_with_deadline_syntax.c~~ | — | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed (zero callers); `with_deadline` is lowered in `preprocess.c` (P1). |
+| 4 | ~~pass_match_syntax.c~~ | — | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed (zero callers); `@match` is lowered by the static `cc__rewrite_match_syntax` in `preprocess.c` (P2). |
 
 ### Phase 3: Initial AST Passes (EditBuffer; two-stage batched, 2 reparses max)
 
 | # | Pass File | Lines | Transform | Stage |
 |---|-----------|-------|-----------|-------|
-| 5 | pass_ufcs.c | 432 | `x.method(y)` → `method(&x, y)` | 1 |
-| 6 | pass_closure_calls.c | 748 | `c(x)` → `c.fn(c.env, x)` | 2 |
-| 7 | pass_autoblock.c | 1,260 | Insert cc_block() wrappers | 2 |
-| 8 | pass_await_normalize.c | 529 | `await expr` → temp binding | 2 |
+| 5 | pass_ufcs.c | 1,110 | `x.method(y)` → `method(&x, y)` | 1 |
+| 6 | pass_closure_calls.c | 750 | `c(x)` → `c.fn(c.env, x)` | 2 |
+| 7 | pass_autoblock.c | 2,102 | Insert cc_block() wrappers | 2 |
+| 8 | pass_await_normalize.c | 505 | `await expr` → temp binding | 2 |
 
 **Pipeline status (2026-05-28):**
 - **Default and only path:** `cc__apply_batched_phase3_passes()` runs in two stages — Stage 1 (UFCS only) and Stage 2 (closure_calls + autoblock + await_normalize batched into a single edit buffer). 461/461 smoke tests pass.
@@ -190,14 +189,16 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 9 | pass_channel_syntax.c | 894 | channel_pair + `int[~4 >]` → CCChanTx |
-| 10 | pass_type_syntax.c | 1,319 | slice/optional/result type text rewrites |
+| 9 | pass_channel_syntax.c | 2,167 | channel_pair + `int[~4 >]` → CCChanTx |
+| 10 | pass_type_syntax.c | 1,024 | slice/optional/result type text rewrites |
+
+**Attribution note (2026-06-01 audit):** these are *not* called from `visit_codegen.c`. `cc__rewrite_channel_pair_calls_text` runs in `preprocess.c`; `cc__rewrite_chan_send_task_text` runs in `visit_codegen.c`; `cc__rewrite_result_types_text` runs from `pass_closure_literal_ast.c`. The bulk of slice/result/chan-handle type lowering is the static preprocess passes (P3/P4/P8).
 
 ### Phase 5: Closure Literals (REPARSE #3)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 11 | pass_closure_literal_ast.c | 3,523 | `() => {...}` → `<base>_make()` (location-tagged: `cc_closure__N<id>__line<L>_col<C>` from `cc_diag_mangle_symbol`, 2026-05-28). |
+| 11 | pass_closure_literal_ast.c | 3,643 | `() => {...}` → `<base>_make()` (location-tagged: `cc_closure__N<id>__line<L>_col<C>` from `cc_diag_mangle_symbol`, 2026-05-28). |
 
 ### Phase 6: Structured Concurrency (batched, REPARSE #4)
 
@@ -209,20 +210,30 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 14 | pass_defer_syntax.c | 494 | `@defer stmt;` → inject before } and return |
+| 14 | pass_defer_syntax.c | 1,341 | `@defer stmt;` → inject before } and return |
 
 ### Phase 8: Async State Machine (REPARSE #5)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 15 | async_ast.c | 2,524 | @async fn → state machine |
+| 15 | async_ast.c | 3,713 | @async fn → state machine |
 
 ### Other
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
-| 16 | pass_strip_markers.c | 104 | Strip @async/@noblock/@latency_sensitive |
-| 17 | checker.c | 1,657 | Semantic checks (slice move, provenance) |
+| 16 | pass_strip_markers.c | 71 | Strip @async/@noblock/@blocking/@latency_sensitive (`cc__strip_cc_decl_markers`, called from visit_codegen.c) |
+| 17 | checker.c | 1,286 | Semantic checks (slice move, provenance) |
+
+### Passes added by 2026-06-01 audit (existed in code, previously omitted)
+
+| # | Pass File | Lines | Transform |
+|---|-----------|-------|-----------|
+| 18 | pass_result_unwrap.c | 2,869 | `!>` / `?>` result-unwrap operators → inline expansion (`cc__rewrite_result_unwrap`; preprocess.c phase-3 + visit_codegen.c late text passes) |
+| 19 | pass_unwrap_destroy.c | 732 | lift `@destroy { body }` suffix off `!>`/`?>` stmts → standalone `@defer` (`cc__rewrite_unwrap_destroy_suffix`; preprocess.c phase-3 + visit_codegen.c) |
+| 20 | pass_err_syntax.c | 1,357 | `@err` / `@errhandler` / `=<!` / `<?` error-handling sugar (`cc__rewrite_err_syntax`; preprocess.c phase-3 + visit_codegen.c) |
+| 21 | pass_create.c | 543 | registered-type `@create(...)` / `@destroy` lowering (`cc_rewrite_registered_type_create_destroy`; build_parse_input.c, pre-parse) |
+| 22 | pass_check_type_of.c | 409 | compile-time diagnostic for unregistered `type_of(T)` / `cc_type_of("T")` (`cc__check_type_of_calls`; build_parse_input.c, pre-parse) |
 
 ## Consolidation Opportunities
 
@@ -403,18 +414,13 @@ The major consolidation wins have been achieved:
 All suitable passes have been converted to use the shared `CCScannerState` helper:
 
 **Converted (12 passes):**
-- `cc__rewrite_optional_types` (P8)
-- `cc__rewrite_result_types` (P11)
+- `cc__rewrite_optional_types` (P6, diagnostic-only guardrail)
+- `cc__rewrite_result_types` (P8)
 - `cc__rewrite_slice_types` (P3)
-- `cc__rewrite_optional_unwrap` (P10)
+- `cc__rewrite_result_star_unwrap` (P10)
 - `cc__rewrite_match_syntax` (P2)
-- `cc__rewrite_optional_constructors` (P9)
-- `cc__rewrite_result_constructors` (P12)
 - `cc__rewrite_chan_handle_types` (P4) ✅ 2026-02-01
 - `cc_rewrite_generic_containers` (P5) ✅ 2026-02-01
 - Legacy preprocess UFCS passes removed; UFCS now lowers through the parser/TCC tolerance plus AST-aware UFCS path.
-
-**Not suitable (1 instance):**
-- `cc__rewrite_with_deadline_syntax` - streaming output architecture incompatible
 
 Remaining opportunities are either blocked (reparse reduction) or low-value (pass merging).

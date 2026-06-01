@@ -71,7 +71,7 @@ CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
  * Example:
  *   const char* args[] = {"ls", "-la", NULL};
  *   CCProcessConfig cfg = {.program = "ls", .args = args, .pipe_stdout = true};
- *   CCProcess proc = try cc_process_spawn(&cfg);
+ *   CCProcess proc = cc_process_spawn(&cfg) !>(e) return cc_err(e);
  */
 CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config);
 
@@ -80,7 +80,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config);
  * Convenience wrapper around cc_process_spawn.
  *
  * Example:
- *   CCProcess proc = try cc_process_spawn_simple("ls", (const char*[]){"ls", "-la", NULL});
+ *   CCProcess proc = cc_process_spawn_simple("ls", (const char*[]){"ls", "-la", NULL}) !>(e) return cc_err(e);
  */
 CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char* program, const char** args);
 
@@ -89,7 +89,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char* program, const 
  * Useful for running commands with shell features (pipes, redirects, etc).
  *
  * Example:
- *   CCProcess proc = try cc_process_spawn_shell("ls -la | grep foo");
+ *   CCProcess proc = cc_process_spawn_shell("ls -la | grep foo") !>(e) return cc_err(e);
  */
 CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command);
 
@@ -240,7 +240,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
  * Spawns process, captures stdout/stderr, waits for exit.
  *
  * Example:
- *   CCProcessOutput out = try cc_process_run(arena, "ls", (const char*[]){"ls", "-la", NULL});
+ *   CCProcessOutput out = cc_process_run(arena, "ls", (const char*[]){"ls", "-la", NULL}) !>(e) return cc_err(e);
  *   printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
  *   printf("exit: %d\n", out.status.exit_code);
  */
@@ -250,7 +250,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* pr
  * Run shell command and capture output.
  *
  * Example:
- *   CCProcessOutput out = try cc_process_run_shell(arena, "ls -la | wc -l");
+ *   CCProcessOutput out = cc_process_run_shell(arena, "ls -la | wc -l") !>(e) return cc_err(e);
  */
 CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const char* command);
 

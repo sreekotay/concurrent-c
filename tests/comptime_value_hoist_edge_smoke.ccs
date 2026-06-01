@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int         neg = @comptime(-42);
+    long long   big = @comptime(10000000000LL);
+    double      z   = @comptime(0.0);
+    int         t   = @comptime((int)(1 == 1));
+    int         c   = @comptime('A');
+
+    if (neg != -42) return 1;
+    if (big != 10000000000LL) return 2;
+    if (z != 0.0) return 3;
+    if (t != 1) return 4;
+    if (c != 65) return 5;
+
+    printf("comptime_value_hoist_edge_smoke ok neg=%d big=%lld z=%g t=%d c=%d\n",
+           neg, big, z, t, c);
+    return 0;
+}

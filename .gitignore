@@ -5,6 +5,11 @@
 *.log
 *.swp
 *~
+
+# Stray artifacts from misfired compiler invocations
+# (e.g. `cc -o --` leaving a `--` binary, or `gcc -E` writing an `-E` file)
+/--
+-E
 /build/
 /dist/
 /out/

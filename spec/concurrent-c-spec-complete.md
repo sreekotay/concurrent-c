@@ -17,7 +17,7 @@ This specification defines:
 - Runtime contract (scheduler, channels, arenas)
 - Lowering to C
 
-The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c`.
+The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
 ---
 
@@ -491,12 +491,12 @@ char[:] y = cc_move(x);                       // OK: x is invalid, y owns buffer
 
 **Move semantics for different types:**
 
-**Results (`T!>(E)`):** Movable as whole values. To extract the success payload, use `try`, statement-level `@err` / `@errhandler`, or explicit checks (`cc_is_ok` / `cc_value`, UFCS, etc.).
+**Results (`T!>(E)`):** Movable as whole values. To extract the success payload, use the `!>` / `?>` operators, statement-level `@err` / `@errhandler`, or explicit checks (`cc_is_ok` / `cc_value`, UFCS, etc.).
 
 ```c
 int!>(Error) r = cc_ok(42);
 int!>(Error) s = r;        // copies (int and Error are copyable)
-int v = try r;          // extracts value, propagates error
+int v = r !>(e) return cc_err(e);   // extracts value, propagates error
 ```
 
 **Bare unique slices:** Moving invalidates source; subsequent use is a compile-time error.
@@ -763,7 +763,7 @@ if (read_res.ok) {
 
 - If `ok == true` and `T` has a destructor, drop `u.value`
 - If `ok == false` and `E` has a destructor, drop `u.error`
-- If the value was moved out via `try` or pattern match, no destructor runs for that arm
+- If the value was moved out via `!>` propagation or pattern match, no destructor runs for that arm
 
 **Result methods (UFCS):**
 
@@ -1027,9 +1027,8 @@ For any other declared type, no hooks are injected and the suffix is simply `@de
 Type modifiers bind with the following precedence (tightest first):
 
 1. `*` (pointer)
-2. `?` (optional)
-3. `!E` (result)
-4. `[n]` `[:]` `[~n]` (array / slice / channel)
+2. `!E` (result)
+3. `[n]` `[:]` `[~n]` (array / slice / channel)
 
 **Rationale:** Pointer binds tightest because "result of pointer" (`T*!E` → `(T*)!E`) is far more common than "pointer to result" (`(T!>(E))`*). Functions returning pointer-or-error are ubiquitous in systems code.
 
@@ -1227,7 +1226,7 @@ use(borrow);                                  // ERROR: borrow invalidated by mo
 **Rule (unique destruction):**
 
 - Unique slices have an implicit destructor at scope exit
-- Destructor runs on all exits: return, early return, `try` propagation
+- Destructor runs on all exits: return, early return, `!>` propagation
 - Destructor is suppressed if ownership is moved (`return`, `send_take`, `move()`)
 - For `adopt()` slices: destructor calls the registered deleter
 - For `recv()` slices: destructor frees the channel's buffer
@@ -1764,7 +1763,7 @@ cc_arena_free(&a);  // BUG: thread may still be using s
 
 `@defer stmt;` schedules `stmt` to run on scope exit.
 
-- Runs on all returns, including `try` propagation.
+- Runs on all returns, including `!>` propagation.
 - LIFO order.
 - No exceptions or unwinding.
 
@@ -1861,14 +1860,14 @@ __cleanup_active = false;  // @cancel cleanup;
 ```c
 // Transaction commit/rollback
 void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
-    try db.begin();
+    db.begin() !>(e) return cc_err(e);
     @defer rollback: db.rollback();
     
-    try db.debit(from, amount);
-    try db.credit(to, amount);
+    db.debit(from, amount) !>(e) return cc_err(e);
+    db.credit(to, amount) !>(e) return cc_err(e);
     
     @cancel rollback;  // success: don't rollback
-    try db.commit();
+    db.commit() !>(e) return cc_err(e);
 }
 
 // Conditional cleanup
@@ -1876,7 +1875,7 @@ void!>(IoError) process(char[:] path, CCArena* out) {
     CCArena scratch = cc_arena_heap(kilobytes(64));
     @defer cleanup: cc_arena_free(&scratch);
     
-    char[:] data = try read_file(&scratch, path);
+    char[:] data = read_file(&scratch, path) !>(e) return cc_err(e);
     
     if (should_keep(data)) {
         // Transfer to output arena
@@ -4331,9 +4330,9 @@ Duration deadline_remaining(Deadline d);
     // Wrap deadline-sensitive operations
     @with_deadline(deadline) {
         char[:] parsed = parse(req.body);
-        DbResult result = try @await db_query(parsed);
+        DbResult result = @await db_query(parsed) !>(e) return cc_err(e);
         Response resp = build_response(result, req_arena);
-        try @await send_response(req.fd, &resp);
+        @await send_response(req.fd, &resp) !>(e) return cc_err(e);
     }
     // On deadline exceeded: @with_deadline propagates cancellation
 }
@@ -4459,9 +4458,9 @@ Streaming uses explicit channel parameters:
 // Fail-fast: function can fail, channel carries plain values
 @async void!>(IoError) read_lines(char[:] path, char[:][~]* out) {
     defer out.close();
-    File f = try open(path);
+    File f = open(path) !>(e) return cc_err(e);
     while (true) {
-        char[:] line = try f.readline();
+        char[:] line = f.readline() !>(e) return cc_err(e);
         if (line.len == 0) break;        // EOF: readline returns an empty slice
         @await out.send(line);
     }
@@ -4643,12 +4642,16 @@ block_on(producer(tx, 5));     // ⚠ WARNING: producer is not @nonblocking
 
 #### Runtime Deadlock Detection
 
-For deadlocks that escape compile-time analysis (e.g., complex patterns, dynamic channel creation), Concurrent-C provides optional runtime deadlock detection.
+For deadlocks that escape compile-time analysis (e.g., complex patterns, dynamic channel creation), Concurrent-C provides runtime deadlock detection. It is **enabled by default**; on detection the runtime prints a diagnostic banner and `_exit(124)`.
 
-**Enabling:**
+**Configuring:**
 
 ```bash
-CC_DEADLOCK_DETECT=0 ./my_program
+# Default: detect, print banner, and exit 124.
+./my_program
+
+# Warn-only: print the banner but keep running (do not exit 124).
+CC_DEADLOCK_ABORT=0 ./my_program
 ```
 
 **How it works:**
@@ -4688,8 +4691,8 @@ Suggested fixes:
 **Key features:**
 
 - **No false positives on temporary saturation:** Only triggers if blocked with zero progress for multiple seconds
-- **Minimal overhead when disabled:** All tracking is no-op when `CC_DEADLOCK_DETECT=0`
-- **Non-intrusive:** Warns but doesn't abort (deadlocked programs can still be killed normally)
+- **Fail-fast by default:** On detection the runtime prints the banner and `_exit(124)` (like `timeout`), so stuck programs surface in CI instead of hanging
+- **Opt-out of abort:** `CC_DEADLOCK_ABORT=0` downgrades the abort to a warning so the (deadlocked) program keeps running
 
 **Limitations:**
 
@@ -5053,7 +5056,7 @@ void process_logs(int count);           // Must be awaited or marked @noblock
 @async @latency_sensitive void handler(Request req) {
     int count = parse_count(req.body);  // ✅ OK (@noblock, guaranteed fast)
     
-    try @await db_query(count);          // ✅ OK (awaited)
+    @await db_query(count);              // ✅ OK (awaited)
     
     process_logs(count);                // ❌ ERROR: blocking call in @latency_sensitive
     
@@ -5172,7 +5175,7 @@ The blocking model is intentionally conservative:
 
 **Rule (deadlock trap):** If there are tasks blocked on channel operations and no runnable tasks, the runtime triggers a deadlock trap with a diagnostic report.
 
-**Rule:** Deadlock detection is debug-only. Release builds do not include this overhead.
+**Rule:** Runtime deadlock detection runs in the scheduler's sysmon tick and is **on by default** in all builds. On detection the runtime prints a banner and `_exit(124)`; set `CC_DEADLOCK_ABORT=0` to downgrade the abort to a warning. (The static, compile-time deadlock checks are separate and always run at compile time.)
 
 ---
 
@@ -5383,7 +5386,7 @@ UFCS registration and typed lifecycle hooks (`create`, `destroy`) use the same t
 
 `cc_ufcs_register(...)` is the direct UFCS-only helper. `cc_type_register(...)` is the general registration form and may define UFCS together with lifecycle hooks.
 
-This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
+This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
 ---
 
@@ -5727,7 +5730,7 @@ for (size_t __i = 0; __i < slice.len; __i++) {
 // lowers to:
 while (true) {
     T x;
-    bool !>(CCIoError) __got = try @await expr.next(&x);
+    bool !>(CCIoError) __got = @await expr.next(&x);
     if (!cc_value(__got)) break;   // ok(false) indicates end-of-stream (EOF)
     BODY
 }
@@ -6134,6 +6137,7 @@ This section defines compile-time computation as a restricted evaluation mode us
 - **§14.2 `@comptime` declarations** — compile-time storage
 - **§14.3 `@comptime` parameters** — compile-time arguments
 - **§14.4 `@comptime if`** — compile-time branching
+- **§14.4a `@comptime(expr)`** — value-position literal hoisting
 - **§14.5 `@comptime {}` blocks** — compile-time execution for initialization
 - **§14.6 Built-ins** — minimal type/ABI queries
 - **§14.7 Static assertions** — compile-time invariants
@@ -6262,6 +6266,42 @@ void serialize::[T](T value, char[~]* out) {
 
 ---
 
+### 14.4a Value-position `@comptime(expr)` (Normative)
+
+**Form:** `@comptime(` *expr* `)` — distinguished from `@comptime { ... }` (block), `@comptime if/for` (control flow), and `@comptime` function definitions by the token immediately following `@comptime` being `(`.
+
+**Semantics:** The implementation evaluates *expr* at compile time (with registered `@comptime` functions in scope) and **splices the result in place** as a C constant-expression literal. The hoisted literal is visible in the lowered translation unit (e.g. `int i = 60;`), so the transformation is auditable without replaying the comptime evaluator.
+
+```c
+@comptime int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+
+int main(void) {
+    int         i = @comptime(fib(10) + 5);       /* lowers to: int i = 60; */
+    double      d = @comptime(1.0 / 4.0);         /* 0.25 */
+    const char* s = @comptime("hello, " "world"); /* "hello, world" */
+    int         a[@comptime(4)];                  /* array bound */
+}
+```
+
+**Rule (pipeline order):** Value hoisting runs **after** `@comptime if/for` pruning and **before** `@emit` / `@string` template lowering. Only live (non-pruned) sites are evaluated.
+
+**Rule (projectable types):** The value must be projectable to a C literal: integers, floating point, `_Bool`, and strings (`char*`, `const char*`, string literals, and `CCSlice` with string contents). Pointers to comptime memory, aggregates, and other non-scalar values are a compile-time error at the use site.
+
+**Rule (caching):** Identical *expr* text within one translation unit may be evaluated once and reused (implementation-defined memoization).
+
+**Rule (memory):** Literal projection uses stack-first growable `CCArena` storage (same pattern as `@emit`). The hoist pass owns one arena per translation unit; `cc_comptime_exec_eval_literal` copies the projected text into the caller-supplied arena. There is no fixed byte cap beyond available memory.
+
+**Rule (API):** `cc_comptime_exec_eval_literal(expr, opts, &lit, &len, …, arena)` requires a non-NULL `arena` as the final argument; returned `lit` points into arena storage until `cc_arena_free(arena)`.
+
+**Rule (diagnostics):** Errors are reported at the `@comptime(` use site with source location; the user need not inspect generated C to locate the failure.
+
+**Distinction from `@comptime` declarations:** `@comptime T name = expr;` introduces compile-time **storage**; `@comptime(expr)` is an **expression-position** splice with no persistent symbol.
+
+---
+
 ### 14.5 `@comptime {}` Blocks
 
 A `@comptime { ... }` block runs during compilation and may be used to initialize `@comptime` variables and static data.
@@ -6309,7 +6349,6 @@ The following are available in constant expressions:
 
 @comptime bool is_pointer(type T);
 @comptime bool is_slice(type T);
-@comptime bool is_optional(type T);
 @comptime bool is_result(type T);
 
 // Helpful for specialization:
@@ -6478,6 +6517,10 @@ the supported way to specialize conditionally (e.g. emit `_inverse` only when
 **Implementation note:** A factory compiles in-process on the libtcc comptime evaluator on first use (the same evaluator that runs `@comptime` blocks), not by spawning the host C compiler — first-use lowering is in the millisecond range. The relocated factory code stays resident for the remainder of the compile; if libtcc is unavailable the compiler falls back to a host-compiled shared object.
 
 **Rule:** This is the same registration machinery as UFCS custom lowering (§9.0): the library owns the C lowering, the compiler owns the splice.
+
+**Rule (invalid emit is attributed to the use site):** Before a factory's returned definition is spliced, the compiler validates it for **syntactic** well-formedness. A syntactically invalid emit is reported at the **use site** (`Name::[args]` file:line:col), not as an error buried in the merged translation unit. The diagnostic includes the full generated definition (line-numbered, with the offending line flagged) and a note locating the originating factory by `file:line` — resolved through `#line` directives, so a factory harvested from a header blames the header source the author wrote. Validation is syntax-only: a syntactically valid emit that is *semantically* wrong (e.g. references an unknown type) is still surfaced by the host C compiler against the merged unit.
+
+**Tooling:** `--emit-c-inspect[=PATH]` writes the merged translation unit to a file (default `out/<stem>.inspect.c`) for inspection. On a successful lowering it is the full pre-parse merged unit; when lowering fails inside a generic factory it is the unit reconstructed in source context up to the first blocking error (the closest inspectable artifact to the final lowered C, which is not produced for input that cannot be parsed). The flag does not change whether the build succeeds or fails; it only writes the artifact. This is implementation tooling, not part of the conformance surface.
 
 ---
 
@@ -6758,7 +6801,7 @@ The following must be diagnosed at compile time:
 
 | Category                                                      | Examples                                                                                                             | Spec Section |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------ |
-| Type errors                                                   | Optional/result field access on wrong branch                                                                         | §3.1   |
+| Type errors                                                   | Result field access on wrong branch                                                                                  | §3.1   |
 | Provenance errors                                             | Slice outlives arena (statically provable)                                                                           | §3.3–2.6    |
 | Sendability errors                                            | Non-sendable capture in spawn closure                                                                                | §2.2, §8.3 |
 | Ownership errors                                              | Copy of unique slice, use after move                                                                                 | §2.1, §3.5 |
@@ -6768,7 +6811,6 @@ The following must be diagnosed at compile time:
 | @latency_sensitive violations                                 | Blocking call in @latency_sensitive function                                                                         | §8.8.3.1    |
 | Comptime errors                                               | Non-constant in `@comptime` context                                                                                  | §14         |
 | Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | §11         |
-| Optional unwrap                                               | `*x` without proven Some branch                                                                                      | §3.1        |
 | Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | §3.1        |
 | Use after move                                                | Accessing move-only value after transfer                                                                             | §2.1        |
 | Guard across suspension                                       | Guard held across `@await` or `run_blocking`                                                                          | §8.8        |
@@ -6815,7 +6857,7 @@ The following are undefined behavior in release builds (no diagnostic required):
 | Use after move      | Read garbage, crash, double-free       | Move-only violation, compile-time error when caught |
 | Double free         | Memory corruption, crash               | Manually calling deleter twice on adopt() slice     |
 | Data races          | Corruption, crashes, non-determinism   | Shared mutable state without synchronization        |
-| Inactive union read | Read garbage from wrong arm            | Optional/Result with wrong branch                   |
+| Inactive union read | Read garbage from wrong arm            | Result with wrong branch                            |
 | Stack slice escape  | Use invalidated stack memory           | Stack-backed slice used after frame exit            |
 | Bounds violation    | Read/write out of bounds               | Bypassing bounds checks in unsafe                   |
 | Overflow            | Integer wrapping (as per C spec)       | Unchecked arithmetic                                |
@@ -7043,7 +7085,7 @@ Use a condition variable + mutex for synchronization. Simpler than async channel
 2. Expand macros into inline operations
 3. Use meaningful generated identifiers (e.g., `__batch_1`, `__task_42`)
 4. Add comments explaining non-obvious lowerings
-5. Provide `--emit-c` flag for debugging
+5. Provide `--emit-c-only` / `--emit-c-inspect` flags for debugging
 
 **Example:**
 
@@ -7069,30 +7111,29 @@ Task__process__0 process__init() {
 The CC compiler supports environment variables for debugging compilation issues:
 
 
-| Variable                | Purpose                                          |
-| ----------------------- | ------------------------------------------------ |
-| `CC_DEBUG_PP_SOURCE=1`  | Dump preprocessed source before TCC parsing      |
-| `CC_DEBUG_STUB_NODES=1` | Dump stub AST nodes (arenas, nurseries, etc.)    |
-| `CC_KEEP_PP=1`          | Keep temporary preprocessed files for inspection |
+| Variable                  | Purpose                                          |
+| ------------------------- | ------------------------------------------------ |
+| `CC_DUMP_LOWERED=<path>`  | Dump the lowered source written to TCC to `<path>` |
+| `CC_DEBUG_STUB_NODES=1`   | Dump stub AST nodes (arenas, nurseries, etc.)    |
+| `CC_KEEP_PP=1`            | Keep temporary preprocessed files for inspection |
 
 
 **Usage example:**
 
 ```bash
 # See exactly what TCC receives (useful for "lvalue expected" errors)
-CC_DEBUG_PP_SOURCE=1 ccc build myfile.ccs 2>&1 | less
+CC_DUMP_LOWERED=out/lowered.c ccc build myfile.ccs && less out/lowered.c
 
 # Inspect arena/nursery AST node spans
 CC_DEBUG_STUB_NODES=1 ccc build myfile.ccs
 
 # Keep preprocessed temp files
 CC_KEEP_PP=1 ccc build myfile.ccs
-ls /tmp/cc_pp_*.c
 ```
 
 **Common debugging scenarios:**
 
-1. **"lvalue expected" errors:** Use `CC_DEBUG_PP_SOURCE=1` to inspect the preprocessed source. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
+1. **"lvalue expected" errors:** Use `CC_DUMP_LOWERED=<path>` to inspect the lowered source. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
 2. **Arena/nursery issues:** Use `CC_DEBUG_STUB_NODES=1` to verify AST node spans match your source.
 3. **Result type redefinition errors:** Ensure your `.cch` headers use `#ifndef CCResult_T_E_DEFINED` guards around `CC_DECL_RESULT_SPEC` calls.
 
@@ -7248,7 +7289,7 @@ A function marked `@noblock` asserts it will never block:
 
 @async @latency_sensitive void handler(Request req) {
     int count = parse_count(req.body);  // ✅ OK (@noblock)
-    try @await db_query(count);          // ✅ OK (awaited)
+    @await db_query(count);              // ✅ OK (awaited)
 }
 ```
 
@@ -7270,7 +7311,7 @@ void process_logs(int count);  // Unknown: might block
 
 @async @latency_sensitive void handler(Request req) {
     int count = parse(req.body);  // ✅ OK (CPU)
-    try @await db_get(count);      // ✅ OK (awaited)
+    @await db_get(count);          // ✅ OK (awaited)
     process_logs(count);          // ❌ ERROR: might block
 }
 ```
@@ -7342,7 +7383,7 @@ enum BoundsError {
     Parsed p = parse(req.body);
     
     // Stalling I/O: separate dispatch (visible latency)
-    DbResult res = try @await db_get(p.id, a);
+    DbResult res = @await db_get(p.id, a) !>(e) return cc_err(e);
     
     // CPU work: encode (inline)
     Response resp = {
@@ -7371,7 +7412,7 @@ LogEvent[~100000, Sample(0.05)] traces;  // Very high-volume, 5% kept
 
 // In handler:
 log_drop(access_event);              // Never blocks request
-try log_block(audit, ms(100));       // Fail if timeout
+log_block(audit, ms(100)) !>(e) return cc_err(e);   // Fail if timeout
 log_sample(trace, 0.05);             // Deterministic 5% kept
 ```
 
@@ -7393,7 +7434,7 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
         .handler = my_handler,
     };
     
-    try @await server_loop(cfg);
+    @await server_loop(cfg);
 }
 ```
 
@@ -7423,7 +7464,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 @async void!>(IoError) handle_conn(Duplex* conn, Arena* conn_arena) {
     // 1) Handshake (short deadline)
     @with_deadline(deadline_after(seconds(3))) {
-        try @await protocol_handshake(conn, conn_arena);
+        @await protocol_handshake(conn, conn_arena) !>(e) return cc_err(e);
     }
 
     // 2) Serve (long-lived). Any child failure/close cancels siblings;
@@ -7434,8 +7475,8 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 
     // 3) Teardown (bounded, shielded)
     @with_shield {
-        try @await protocol_close(conn);              // best-effort protocol close
-        try @await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
+        @await protocol_close(conn) !>(e) return cc_err(e);              // best-effort protocol close
+        @await drain_with_timeout(conn, ms(200)) !>(e) return cc_err(e); // bounded drain/flush if applicable
     }
 
     return cc_ok(void);
@@ -7514,13 +7555,13 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 // Handler: Mark @latency_sensitive to ensure predictable latency
 @async @latency_sensitive Response!>(IoError) api_handler(Request* req, Arena* a) {
     // CPU work: parse (inlined, no latency)
-    UserId user_id = try parse_user_id(req.path);
+    UserId user_id = parse_user_id(req.path) !>(e) return cc_err(e);
     
     // Stalling I/O: fetch from database (separate dispatch, observable)
-    User user = try @await db_get_user(user_id, a);
+    User user = @await db_get_user(user_id, a) !>(e) return cc_err(e);
     
     // CPU work: encode (inlined)
-    char[:] json = try encode_user_json(&user, a);
+    char[:] json = encode_user_json(&user, a) !>(e) return cc_err(e);
     
     // Return response
     return Response {
@@ -7540,7 +7581,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
         .handler = api_handler,
     };
     
-    try @await server_loop(cfg);
+    @await server_loop(cfg);
 }
 ```
 
@@ -7568,7 +7609,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 @async void!>(IoError) connection_handler(Duplex* conn, Arena* conn_arena) {
     @with_deadline(deadline_after(seconds(30))) {
         while (true) {
-            char[:] msg = try @await conn.read(conn_arena);
+            char[:] msg = @await conn.read(conn_arena) !>(e) return cc_err(e);
             if (msg.len == 0) break;       // EOF
             process(msg);
         }
@@ -7578,7 +7619,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 
 **Current behavior (§8.5, §4.2):** Inside an active `@with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
 
-**Possible direction:** Inside an active `@with_deadline()` scope, all @await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
+**Possible direction:** Inside an active `@with_deadline()` scope, all @await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `!>` propagation without explicit `@match` scaffolding.
 
 **Motivation:**
 
@@ -7600,7 +7641,7 @@ Many operations produce sequences of items asynchronously: request body chunks, 
 ```c
 // Request body
 while (true) {
-    char[:] chunk = try @await req.body.read_chunk(arena);
+    char[:] chunk = @await req.body.read_chunk(arena) !>(e) return cc_err(e);
     if (chunk.len == 0) break;        // EOF
     process(chunk);
 }
@@ -7608,14 +7649,14 @@ while (true) {
 // Response body
 while (true) {
     char[:] chunk;
-    bool got = try @await resp_iter.next(arena, &chunk);
+    bool got = @await resp_iter.next(arena, &chunk) !>(e) return cc_err(e);
     if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
 
 // WebSocket frames
 while (true) {
-    char[:] frame = try @await ws.read_frame(arena);
+    char[:] frame = @await ws.read_frame(arena) !>(e) return cc_err(e);
     if (frame.len == 0) break;        // EOF
     process(frame);
 }
@@ -7636,7 +7677,7 @@ for @await (char[:] chunk in req.body) {
 // Desugars to:
 while (true) {
     char[:] chunk;
-    bool got = try @await req.body.next(arena, &chunk);
+    bool got = @await req.body.next(arena, &chunk) !>(e) return cc_err(e);
     if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
@@ -7940,7 +7981,7 @@ For full deadline semantics and cancellation behavior, see **language spec §8.5
 @with_deadline(deadline_after(seconds(5))) {
     // Token is now active; compiler pushes pointer to token into frame context
     
-    while (try @await conn.read(...)) {
+    while (@await conn.read(...) !>(e) return cc_err(e)) {
         // Before @await: check cancellation
         if (unlikely(token->cancelled)) {
             return cc_err(Cancelled);
@@ -8122,9 +8163,9 @@ Task_CharSliceIoErr result = vt->read(duplex.self, arena);
    }
   ```
 4. **Explicit cancellation checks:** Visible `if (token->cancelled)` in source.
-5. **Optional -emit-lowered-c mode:** For debugging and spec validation:
+5. **Lowered-C inspection:** For debugging and spec validation:
   ```bash
-   cc compiler -emit-lowered-c -o output.c input.ccs
+   ccc --emit-c-only -o output.c input.ccs
   ```
    Generates the lowered C with:
   - Comments mapping each line back to source location
@@ -8200,7 +8241,7 @@ Exceptions currently conforming:
 See **The CC Principle of Orthogonal Concerns** in the introduction for the shape/flow framing. Normative consequences:
 
 - Values transferred across channels carry provenance metadata identifying their origin arena (§3.4, §3.5). Channel transfer is the mechanism by which a value legitimately crosses a shape boundary.
-- The compiler enforces shape invariants statically. Flow invariants not provable at compile time are enforced at runtime in debug builds (provenance checks, deadlock detection) and are undefined in release builds unless otherwise specified.
+- The compiler enforces shape invariants statically. Flow invariants not provable at compile time are enforced at runtime: provenance checks are debug-only, while runtime deadlock detection runs in the scheduler sysmon and is on by default in all builds (see §Runtime Deadlock Detection). Behavior of debug-only checks in release builds is undefined unless otherwise specified.
 
 ### K.3 Lowering as specification
 
@@ -8211,7 +8252,7 @@ Consequences (normative):
 - A CC feature is in scope for this specification only if it has a direct lowering to C. Features that cannot be lowered cleanly are out of scope.
 - Specification sections that define a construct must define its lowering.
 - The runtime (prelude headers, scheduler, channel implementation) is part of the lowered form and is specified with it.
-- `--emit-c` output is an authoritative form of the source. Two conforming implementations must produce lowerings with identical observable behavior.
+- `--emit-c-only` output is an authoritative form of the source. Two conforming implementations must produce lowerings with identical observable behavior.
 
 ---
 
@@ -8226,7 +8267,7 @@ Consequences (normative):
 | @for @await          | One @await per iteration                          | ✅ Normative      |
 | Interface ABI       | Two-pointer layout {void*, vtable*}              | ✅ Normative      |
 | Readable C          | Named structs, labeled states, explicit cleanups | ✅ Principle      |
-| -emit-lowered-c     | Optional debug mode with source mapping          | ✅ Recommendation |
+| --emit-c-only       | Lowered-C output with source mapping             | ✅ Implemented    |
 
 
 These rules prevent ABI surprises and ensure the implementation can generate boring, understandable C code.

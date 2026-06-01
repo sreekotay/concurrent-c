@@ -1,0 +1,1 @@
+comptime_value_hoist_cache_smoke ok a=60 b=60

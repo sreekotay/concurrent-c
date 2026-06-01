@@ -61,8 +61,8 @@ All concurrent tasks are scoped to an owned `CCNursery*`. Its `@destroy` waits f
 {
     CCNursery* n = @create(NULL) @destroy;
     if (!n) return 1;
-    n->spawn(task1());
-    n->spawn(task2());
+    n->spawn(() => task1());   // spawn takes a closure, not a call result
+    n->spawn(() => task2());
 }
 // Both tasks complete before this line
 ```
@@ -74,26 +74,32 @@ Send messages between tasks:
 ```c
 int[~10 >] tx;  // sender, capacity 10
 int[~10 <] rx;  // receiver
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;  // @destroy frees the channel
 
 {
-    CCNursery* producer = @create(NULL) @destroy {
-        chan_close(tx);
-    };
-    if (!producer) return 1;
-    producer->spawn(() => {
-        for (int i = 0; i < 5; i++) {
-            (void)chan_send(tx, i);
-        }
+    CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+
+    outer->spawn(() => [rx] {           // consumer: drains until tx closes
+        int v;
+        while (cc_io_avail(rx.recv(&v)))
+            printf("got %d\n", v);
     });
 
-    int v = 0;
-    while (cc_io_avail(chan_recv(rx, &v))) {
-        printf("got %d\n", v);
+    {
+        CCNursery* inner = cc_nursery_create(outer) !> @destroy;
+        (void)inner->close_on(tx);      // tx auto-closes when the producer finishes
+
+        inner->spawn(() => [tx] {       // producer
+            for (int i = 0; i < 5; i++)
+                (void)tx.send(i);
+        });
     }
 }
-cc_chan_free(ch);
 ```
+
+This nested-nursery shape (consumer outside, producer + `close_on` inside) is the
+deadlock-free close protocol — see `examples/recipe_channel_pipeline.ccs`. Putting the
+consumer in the *same* nursery that closes `tx` is the compile-time deadlock pattern.
 
 ### Cleanup with `@defer`
 

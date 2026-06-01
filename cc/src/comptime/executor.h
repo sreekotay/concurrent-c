@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <ccc/cc_arena.cch>
+
 #define CC_COMPTIME_FN_NAME_MAX 64
 
 /* Stage 0 comptime executor: compile a C-subset @comptime block body with
@@ -38,6 +40,21 @@ int cc_comptime_exec_eval_int(const char* expr,
                               const CCComptimeExecOpts* opts,
                               int64_t* out,
                               char* err_buf, size_t err_sz);
+
+/* Evaluate `expr` with registered @comptime fn defs in scope and project its
+ * value to the text of a C constant expression (the literal spliced in place
+ * of a value-position `@comptime(expr)`).  v1 supports integers, floating
+ * point, bool and strings (char pointers and CCSlice); strings are emitted
+ * quoted and escaped.  On success copies the projected literal into `arena`
+ * (NUL-terminated) and sets *out_lit / *out_len to that allocation; storage
+ * lives until cc_arena_free(arena).  Returns 0 on success, -2 if the value
+ * ran but is not projectable to a literal (e.g. an aggregate or pointer),
+ * -1 on evaluation failure (compile/run/timeout/OOM). */
+int cc_comptime_exec_eval_literal(const char* expr,
+                                  const CCComptimeExecOpts* opts,
+                                  char** out_lit, size_t* out_len,
+                                  char* err_buf, size_t err_sz,
+                                  CCArena* arena);
 
 /* Validate a generated C fragment (a generic factory/template definition) in
  * isolation, before it is spliced into the merged translation unit.  Compiles

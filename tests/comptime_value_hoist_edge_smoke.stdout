@@ -1,0 +1,1 @@
+comptime_value_hoist_edge_smoke ok neg=-42 big=10000000000 z=0 t=1 c=65

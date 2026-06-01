@@ -1,9 +1,12 @@
 # Compiler cleanup status (M0–M5.5)
 
-**Last updated:** 2026-05-29
-**Smoke suite:** 476 tests passing. Pre-expand is now the **only** initial-parse
-path — the `CC_PRE_EXPAND` opt-out (and the legacy non-expanded path) were
-collapsed 2026-05-29 (see "Pre-expand collapse" note below).
+**Last updated:** 2026-05-31
+**Smoke suite:** ~506 tests passing as of 2026-05-31. The live count is whatever
+`tools/cc_test` reports; the perf regression guard pins the exact `suite_tests`
+number in [`perf/compiler_baseline.txt`](../../perf/compiler_baseline.txt). Pre-expand
+is now the **only** initial-parse path — the `CC_PRE_EXPAND` opt-out (and the legacy
+non-expanded path) were collapsed 2026-05-29 and the env var is now inert (see
+"Pre-expand collapse" note below).
 
 > **Pre-expand collapse (2026-05-29).** The `CC_PRE_EXPAND=0` / `""` opt-out is
 > gone; the env var is now inert. Initial parse always runs `cc_cpp_expand` +
@@ -642,11 +645,11 @@ Then in priority order (independent of M1):
 | `CC_DEBUG_REPARSE_DUMP_DIR=...` | Write intermediate buffers per reparse |
 | `--show-lowered=<phase>` | Dump post-phase buffer (e.g. `phase3`) |
 | ~~`CC_BATCH_PHASE3=1`~~ | **Removed 2026-05-28.** Two-stage batched Phase 3 is now the only path (UFCS in stage 1; closure_calls + autoblock + await_normalize in stage 2). |
-| `CC_PRE_EXPAND` | M7.A: run TCC `-E` (CPP) after text passes so all `#include` directives resolve before TCC's second-pass parse.  **Default-on (2026-05-26).**  Opt out with `CC_PRE_EXPAND=0` or `CC_PRE_EXPAND=` (empty) |
+| ~~`CC_PRE_EXPAND`~~ | **Inert (collapsed 2026-05-29).** Pre-expand (run TCC `-E`/CPP after text passes so all `#include` directives resolve) is now the only initial-parse path; the opt-out env var no longer has any effect. |
 | ~~`CC_PRE_EXPAND_REPARSE=1`~~ | **Removed 2026-05-26.**  Was an opt-in CPP-expand of the FINAL reparse buffer; broke AST coord alignment with the visitor's working buffer.  Real fix requires the M1 visitor swap |
 | `CC_DEBUG_PRE_EXPAND=1` | Log pre-expand attempts and TCC errors during CPP |
 | `CC_DEBUG_PRE_EXPAND_DUMP=/path` | Dump the post-expand buffer to a file (M7.A debugging) |
 
 Full list: [DEBUG_VARS.md](../src/diag/DEBUG_VARS.md).
 
-Baseline capture: `scripts/capture_baseline.sh` → `perf/baseline_M0.txt`.
+Baseline capture: `scripts/capture_baseline.sh` → `perf/compiler_baseline.txt` (the old `perf/baseline_M0.txt` placeholder was deleted 2026-05-28).

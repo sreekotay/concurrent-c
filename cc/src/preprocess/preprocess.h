@@ -263,6 +263,12 @@ char* cc__lower_type_of_constexpr(const char* src, size_t n);
 // printing a diagnostic to stderr.
 char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path);
 
+// Value-position `@comptime(expr)`: evaluate `expr` at compile time and splice
+// its value as a C constant-expression literal in place (integers, floating
+// point, bool, strings).  Returns a malloc'd string on change, NULL if no value
+// form is present, or (char*)-1 on a hard error (after printing a diagnostic).
+char* cc__resolve_comptime_value(const char* src, size_t n, const char* input_path);
+
 #include "preprocess/comptime_prepare.h"
 
 #endif // CC_PREPROCESS_H

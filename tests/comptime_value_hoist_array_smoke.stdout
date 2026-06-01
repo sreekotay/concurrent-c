@@ -1,0 +1,1 @@
+comptime_value_hoist_array_smoke ok sizeof=16
