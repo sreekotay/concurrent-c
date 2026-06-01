@@ -2,5 +2,8 @@
 # that points at the factory's line in the .cch the user wrote (line 7), proving
 # header-harvested factories carry full provenance.
 compiled generic factory 'BadBox' produced invalid C for 'BadBox_int'
+note: in generated definition, line 1
+>    1 | typedef struct { int a int b; } BadBox_int;
+note: re-run with --emit-c-inspect to dump the full translation unit
 note: in @comptime factory '__cc_gfac_BadBox'
 tests/comptime_factory_in_header_badbox.cch:7
