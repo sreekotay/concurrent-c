@@ -5187,19 +5187,76 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
                                 use_line, use_col, "type",
                                 "compiled generic factory '%s' produced invalid C for '%s': %s",
                                 gname, mangled, verr);
-                if (frag_line > 0) {
-                    fprintf(stderr, "  note: in generated definition, line %d\n", frag_line);
-                    /* Echo the offending generated line for context. */
-                    {
-                        int cur = 1;
-                        const char* ls = def;
-                        const char* p = def;
-                        while (*p && cur < frag_line) { if (*p == '\n') { cur++; ls = p + 1; } p++; }
-                        if (cur == frag_line) {
-                            const char* le = ls;
-                            while (*le && *le != '\n') le++;
-                            fprintf(stderr, "  %.*s\n", (int)(le - ls), ls);
+                /* Echo the full generated definition with line numbers, flagging
+                 * the offending line (">"), so the factory author sees the C they
+                 * actually produced — not just one isolated line. */
+                {
+                    if (frag_line > 0)
+                        fprintf(stderr, "  note: in generated definition, line %d:\n", frag_line);
+                    else
+                        fprintf(stderr, "  note: in generated definition:\n");
+                    size_t dl = strlen(def);
+                    while (dl && (def[dl - 1] == '\n' || def[dl - 1] == '\r')) dl--;
+                    const char* end = def + dl;
+                    int total = (dl == 0) ? 0 : 1;
+                    for (const char* p = def; p < end; p++) if (*p == '\n') total++;
+                    int lo = 1, hi = total;
+                    if (total > 40 && frag_line > 0) {
+                        lo = frag_line - 3; if (lo < 1) lo = 1;
+                        hi = frag_line + 3; if (hi > total) hi = total;
+                    }
+                    int cur = 1;
+                    const char* ls = def;
+                    while (ls < end && cur <= hi) {
+                        const char* le = ls;
+                        while (le < end && *le != '\n') le++;
+                        if (cur >= lo)
+                            fprintf(stderr, "  %c %4d | %.*s\n",
+                                    cur == frag_line ? '>' : ' ', cur,
+                                    (int)(le - ls), ls);
+                        ls = le + 1;
+                        cur++;
+                    }
+                    if (hi < total)
+                        fprintf(stderr, "  … (%d more line%s)\n",
+                                total - hi, (total - hi) == 1 ? "" : "s");
+                }
+                /* Inspect artifact (--emit-c-inspect): reconstruct the merged
+                 * translation unit with the bad definition spliced in at the
+                 * prelude and this use site lowered to the mangled name, then
+                 * write it to the requested path.  The merged TU is never flushed
+                 * when the front-end aborts, so this is the closest inspectable
+                 * artifact to the real lowered C — the factory output shown
+                 * exactly where it lands.  (It is invalid by construction; the
+                 * host compiler is not run on it.  Any *other* generic use sites
+                 * after this one stay un-lowered, since the rewrite aborts here —
+                 * the dump is faithful up to this first blocking error.)  Without
+                 * the flag we just point the user at it. */
+                {
+                    const char* insp = getenv("CC_EMIT_C_INSPECT");
+                    if (insp && insp[0]) {
+                        FILE* gf = fopen(insp, "w");
+                        if (gf) {
+                            fprintf(gf,
+                                "/* CC: reconstructed translation unit for '%s' (INVALID).\n"
+                                "   The generated definition below failed to parse; it is\n"
+                                "   shown in source context up to the first blocking error.\n"
+                                "   The factory that produced it is '%s'. */\n",
+                                mangled, gname);
+                            size_t dl = strlen(def);
+                            fwrite(def, 1, dl, gf);
+                            if (dl == 0 || def[dl - 1] != '\n') fputc('\n', gf);
+                            /* Source with this use site (src[i..br_close]) lowered
+                             * to the mangled type name. */
+                            fwrite(src, 1, i, gf);
+                            fwrite(mangled, 1, strlen(mangled), gf);
+                            if (br_close + 1 < n)
+                                fwrite(src + br_close + 1, 1, n - (br_close + 1), gf);
+                            fclose(gf);
+                            fprintf(stderr, "  note: translation unit written to %s\n", insp);
                         }
+                    } else {
+                        fprintf(stderr, "  note: re-run with --emit-c-inspect to dump the full translation unit\n");
                     }
                 }
                 {

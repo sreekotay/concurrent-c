@@ -22,6 +22,15 @@
 static int file_exists(const char* path);
 static int ensure_out_dir(void);
 static int cc__selftest_const_eval(int argc, char** argv);
+static void cc__stem_from_path(const char* path, char* out, size_t cap);
+
+// `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
+// On a clean build it is the full pre-parse merged TU; on a build that fails in
+// a generic factory it is the reconstructed TU up to the first blocking error.
+// Communicated to the lowering layer via the CC_EMIT_C_INSPECT env (set per
+// input in cc__compile_with_env), so no signatures need widening.
+static int g_emit_c_inspect = 0;
+static const char* g_emit_c_inspect_path = NULL;
 
 // Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
@@ -489,6 +498,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
+    fprintf(stderr, "  --emit-c-inspect[=PATH]  Dump the merged translation unit for inspection\n");
+    fprintf(stderr, "                      (out/<stem>.inspect.c by default); best-effort even when\n");
+    fprintf(stderr, "                      the build fails in a generic factory. Build still runs.\n");
     fprintf(stderr, "  --compile           Emit C and compile to object (output defaults to out/<stem>.o)\n");
     fprintf(stderr, "  --link              Emit C, compile, and link (default; binary defaults to out/<stem>)\n");
     fprintf(stderr, "  --print-cflags      Print compiler flags for Concurrent-C headers\n");
@@ -960,6 +972,19 @@ static void cc__apply_user_include_env(const char* cc_flags) {
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_deadlock_env(opt);
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
+    if (g_emit_c_inspect) {
+        if (g_emit_c_inspect_path && g_emit_c_inspect_path[0]) {
+            setenv("CC_EMIT_C_INSPECT", g_emit_c_inspect_path, 1);
+        } else {
+            char stem[128];
+            cc__stem_from_path(in_path, stem, sizeof(stem));
+            char p[PATH_MAX];
+            snprintf(p, sizeof(p), "%s/%s.inspect.c", g_out_root, stem);
+            setenv("CC_EMIT_C_INSPECT", p, 1);
+        }
+    } else {
+        unsetenv("CC_EMIT_C_INSPECT");
+    }
     return cc_compile_with_config(in_path, out_path, cfg);
 }
 
@@ -2655,6 +2680,8 @@ static int run_build_mode(int argc, char** argv) {
             continue;
         }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
+        if (strcmp(argv[i], "--emit-c-inspect") == 0) { g_emit_c_inspect = 1; continue; }
+        if (strncmp(argv[i], "--emit-c-inspect=", 17) == 0) { g_emit_c_inspect = 1; g_emit_c_inspect_path = argv[i] + 17; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
         if (strcmp(argv[i], "-D") == 0) {
@@ -4033,6 +4060,8 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
+        if (strcmp(argv[i], "--emit-c-inspect") == 0) { g_emit_c_inspect = 1; continue; }
+        if (strncmp(argv[i], "--emit-c-inspect=", 17) == 0) { g_emit_c_inspect = 1; g_emit_c_inspect_path = argv[i] + 17; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
         if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-O") == 0) { opt_release = 1; continue; }

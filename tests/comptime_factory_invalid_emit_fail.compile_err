@@ -6,6 +6,7 @@
 # use-site input file and the buffer line where `bad_factory` is defined (10).
 comptime_factory_invalid_emit_fail.ccs:31:5: error: type: compiled generic factory 'Bad' produced invalid C for 'Bad_int'
 note: in generated definition, line 1
-typedef struct { int first int second; } Bad_int;
+>    1 | typedef struct { int first int second; } Bad_int;
+note: re-run with --emit-c-inspect to dump the full translation unit
 note: in @comptime factory 'bad_factory' at
 comptime_factory_invalid_emit_fail.ccs:10

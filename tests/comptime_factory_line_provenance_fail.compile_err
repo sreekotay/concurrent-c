@@ -6,5 +6,6 @@
 # resolving the factory origin through the #line directive to virtual_factory.cch:42.
 comptime_factory_line_provenance_fail.ccs:20:5: error: type: compiled generic factory 'Bad' produced invalid C for 'Bad_int'
 note: in generated definition, line 1
-typedef struct { int a int b; } Bad_int;
+>    1 | typedef struct { int a int b; } Bad_int;
+note: re-run with --emit-c-inspect to dump the full translation unit
 note: in @comptime factory '__cc_gfac_Bad' at virtual_factory.cch:42

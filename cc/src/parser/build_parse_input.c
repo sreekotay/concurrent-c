@@ -132,6 +132,24 @@ int cc_build_parse_input(const char* file_buf,
     cc_unwrap_destroy_set_symbols(NULL);
     if (!canonical) { free(buf); goto fail; }
 
+    /* --emit-c-inspect: on a clean lowering, dump the full merged translation
+     * unit (post-comptime, post-generic-instantiation, blanked @comptime) to the
+     * requested path.  The failure case (generic factory emits invalid C) is
+     * handled deeper in the rewrite, where it reconstructs the TU up to the first
+     * blocking error.  Initial parse only — reparses reuse this buffer. */
+    if (!for_reparse) {
+        const char* insp = getenv("CC_EMIT_C_INSPECT");
+        if (insp && insp[0]) {
+            FILE* f = fopen(insp, "w");
+            if (f) {
+                fputs("/* CC: merged translation unit (--emit-c-inspect). */\n", f);
+                fwrite(canonical, 1, strlen(canonical), f);
+                fclose(f);
+                fprintf(stderr, "note: merged translation unit written to %s\n", insp);
+            }
+        }
+    }
+
     /* Closure-ID marker injection (milestone 4b).  Insert /\*CC_CLO:N*\/
      * block comments immediately before every closure literal, in source
      * order, into the *canonical* (codegen) buffer.  This buffer becomes
