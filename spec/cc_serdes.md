@@ -1,8 +1,17 @@
 # Concurrent-C Grammar and SERDES Specification
 
-**Version:** 0.2-draft  
-**Date:** 2026-04-21  
+**Version:** 0.3-draft  
+**Date:** 2026-05-31  
 **Status:** Concept-phase draft (inclusion-oriented language and lowering intent)
+
+> **Delivery model (harmonized 0.3):** SERDES is a **stdlib `@grammar` engine**,
+> not a set of compiler-blessed modes. The compiler blesses only the
+> capture-and-route seam — `@grammar(engine) Name { …raw body… }` packages a
+> fenced block and hands `(name, bytes, origin)` to a named `@comptime` **engine**
+> (a library function). `fragments` / `rules` / `schema` are engines the SERDES
+> stdlib ships, sitting in the same parens as any user engine. See
+> [`cc/docs/GRAMMAR_DSL_PROPOSAL.md`](../cc/docs/GRAMMAR_DSL_PROPOSAL.md) for the
+> seam; this document specifies the **SERDES engine's** semantics.
 
 ---
 
@@ -12,15 +21,18 @@ Concurrent-C grammar and SERDES provides lightweight recognition grammars and
 schema-driven parsing and formatting for structured text and binary formats. It
 centers on:
 
-1. **One unified declaration family:** `@grammar(fragments)`, `@grammar(rules)`,
-  and `@grammar(schema)` (see [Surface: `@grammar(…)](#surface-grammar)`).
+1. **One stdlib engine family in the `@grammar` seam:** `@grammar(fragments)`,
+  `@grammar(rules)`, and `@grammar(schema)` select SERDES-provided engines — not
+   compiler builtins (see [Surface: `@grammar(…)](#surface-grammar)`).
 2. **Runtime operations:** `cc_parse` / `cc_format` for schema-driven I/O, plus
   companions such as `cc_match` / `cc_collect` for rule entry points when the
    language contract exposes them.
 
-Conceptual names in prose — **fragments**, **rules**, **schema** — map to those
-three `@grammar` modes. Older drafts used type-like spellings (`CCFragments`,
-`CCRules`, `CCSchema`); this document treats them as the same three layers.
+Conceptual names in prose — **fragments**, **rules**, **schema** — name those
+three SERDES engines. Older drafts used type-like spellings (`CCFragments`,
+`CCRules`, `CCSchema`) and treated the paren argument as a compiler **mode**; as
+of 0.3 the paren argument is an **engine** (a `@comptime` function), and these
+three are the engines SERDES ships.
 
 **Design intent:** keep the grammar declarative, keep ownership truthful, keep
 lowering transparent, and keep the generated hot path competitive with (or
@@ -39,6 +51,9 @@ not a `@grammar` kind.
 
 ## Design Principles
 
+0. **Engine, not blessed mode.** SERDES is a stdlib `@grammar` engine; the
+  compiler owns only the capture-and-route seam, never grammar semantics. Adding
+   a format family is shipping an engine, not extending the compiler.
 1. **One grammar family, two weights.** Under `@grammar`, **rules** are
   lightweight recognition and collection; **schema** is typed structural SERDES
    on the same conceptual foundation. **Fragments** are substitution-only and sit
@@ -63,14 +78,16 @@ not a `@grammar` kind.
 
 ## Surface: `@grammar(…)` {#surface-grammar}
 
-Declarations use a single keyword `**@grammar`** with a **mode** that selects
-semantics. `**@grammar` owns pattern and structure** (what to match, bind,
-repeat, and emit). **Codecs are not `@grammar` blocks** — they remain leaf hooks
-(primitive or domain behavior attached at fields or call sites), not a fourth
-`@grammar` kind.
+Declarations use a single keyword `**@grammar`** whose paren argument names an
+**engine** — a `@comptime` function the stdlib (here, SERDES) provides.
+`@grammar(rules)` / `@grammar(schema)` / `@grammar(fragments)` are therefore
+three SERDES engines, not compiler-blessed modes. `**@grammar` owns pattern and
+structure** (what to match, bind, repeat, and emit). **Codecs are not `@grammar`
+blocks** — they remain leaf hooks (primitive or domain behavior attached at
+fields or call sites), not a fourth engine.
 
 
-| Mode          | Surface                          | Role                                                                                                                                               |
+| Engine        | Surface                          | Role                                                                                                                                               |
 | ------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **fragments** | `@grammar(fragments) Name { … }` | Replacement-only snippets (CSS-custom-property spirit). Expanded before semantic analysis. No parse entry points, no match/rollback by themselves. |
 | **rules**     | `@grammar(rules) Name { … }`     | Recognition and collection. Parse-first; `cc_match` / `cc_collect` (or equivalent) over named entries.                                             |
@@ -79,6 +96,19 @@ repeat, and emit). **Codecs are not `@grammar` blocks** — they remain leaf hoo
 
 **Rule:** `**@grammar` is for declarations.** `**cc_`* is for operations** over
 the types and entry points those declarations introduce.
+
+**Rule (body is a raw fenced block):** A `@grammar` body is **not** C, so it is
+captured verbatim by a heredoc-style fence — `{sentinel … sentinel}` — and never
+tokenized by the host lexer (so `charset [#'0'-#'9']`, `'\\'`, `"\r\n"` etc. pass
+through untouched). The `{ … }` shown in this document's examples is shorthand
+for that fenced body. See
+[`GRAMMAR_DSL_PROPOSAL.md`](../cc/docs/GRAMMAR_DSL_PROPOSAL.md) for the fence and
+lowering rules.
+
+**Rule (engine, not mode):** The compiler does not know `fragments`/`rules`/
+`schema`; it routes the fenced bytes plus `{file,line,col}` origin to the named
+SERDES engine, which emits the `Name` type and its operations. A library may add
+engines in the same parens; the compiler stays engine-agnostic.
 
 ---
 
@@ -516,6 +546,11 @@ and error model.
 Grammar and SERDES lower to specialized ordinary C: direct helpers, specialized
 generated functions, no parser VM in the hot path.
 
+A `@grammar(engine) Name {…}` declaration first lowers through the shared seam:
+the compiler packages the fenced body and calls the engine at comptime —
+`engine("Name", <raw bytes>, {file,line,col})` — which then emits the C below via
+`@emit`. SERDES's three engines emit:
+
 1. `@grammar(fragments)` → compile-time expansion only (no standalone runtime
   entry point; no parser VM).
 2. `@grammar(rules)` → recognition/collection helpers per named entry.
@@ -641,7 +676,10 @@ standalone grammar semantics.
 - `**@grammar(schema)**` — typed wire structure with `**cc_parse**` and
 `**cc_format**`.
 - `**@grammar` vs codecs** — pattern and structure live in `@grammar`; codecs are
-leaf hooks only, not a `@grammar` mode.
+leaf hooks only, not a `@grammar` engine.
+- **Engine model** — `fragments`/`rules`/`schema` are stdlib engines in the
+`@grammar(engine)` seam, not compiler modes; the compiler captures the fenced
+body and routes it to the named engine.
 - **Provenance** — truthful; **errors** — structured; **lowering** — direct C.
 
 ---
@@ -655,4 +693,4 @@ Fragment reuse was partially conflated with `@schema` referencing `@rules`; that
 split is now explicit via `**@grammar(fragments)`** vs `**@grammar(rules)`**.
 
 The intermediate spellings `CCFragments`, `CCRules`, and `CCSchema` in design
-notes map to the same three `@grammar` modes.
+notes map to the same three SERDES engines (`@grammar(fragments|rules|schema)`).

@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* Prong 2: the @comptime fn registry resolves a factory's origin through #line
+ * directives.  We place an explicit `#line` before the factory (exactly the
+ * shape header-harvested factories will carry) and make the factory emit
+ * invalid C.  The "in @comptime factory" note must therefore read
+ * `virtual_factory.cch:42`, not a buffer-relative line in THIS file. */
+
+#line 42 "virtual_factory.cch"
+CC_GENERIC_FACTORY(Bad, 1) {
+    /* Missing ';' between members → invalid C, rejected at the use site. */
+    return @emit(`typedef struct { ${arg(0)} a ${arg(0)} b; } ${mangled};`, arena);
+}
+#line 18 "comptime_factory_line_provenance_fail.ccs"
+
+int main(void) {
+    Bad::[int] b;
+    (void)b;
+    return 0;
+}

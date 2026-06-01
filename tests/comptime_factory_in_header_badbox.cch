@@ -1,0 +1,13 @@
+#ifndef COMPTIME_FACTORY_IN_HEADER_BADBOX_CCH
+#define COMPTIME_FACTORY_IN_HEADER_BADBOX_CCH
+
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+
+CC_GENERIC_FACTORY(BadBox, 1) {
+    /* Missing ';' between the two members → invalid C.  The diagnostic must
+       point HERE (this .cch, line 7), not at the generated TU. */
+    return @emit(`typedef struct { ${arg(0)} a ${arg(0)} b; } ${mangled};`, arena);
+}
+
+#endif /* COMPTIME_FACTORY_IN_HEADER_BADBOX_CCH */

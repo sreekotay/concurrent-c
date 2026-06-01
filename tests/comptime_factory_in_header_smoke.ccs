@@ -1,0 +1,19 @@
+#include <ccc/std/prelude.cch>
+#include "comptime_factory_in_header_box.cch"
+#include <stdio.h>
+
+/* The Box generic factory (base + two extensions) is defined entirely in
+ * comptime_factory_in_header_box.cch.  This proves a header-defined factory is
+ * harvested into the including TU and behaves identically to one written here. */
+
+int main(void) {
+    Box::[int]    a = Box_int_make(42);
+    Box::[double] d = Box_double_make(2.5);
+
+    if (Box_int_get(a) != 42) return 1;
+    if (Box_double_get(d) != 2.5) return 2;
+
+    printf("comptime_factory_in_header_smoke ok a=%d d=%g\n",
+           Box_int_get(a), Box_double_get(d));
+    return 0;
+}

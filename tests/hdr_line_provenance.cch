@@ -1,0 +1,13 @@
+#ifndef HDR_LINE_PROVENANCE_CCH
+#define HDR_LINE_PROVENANCE_CCH
+
+static inline int hdr_ok(int a, int b) {
+    return a + b;
+}
+
+static inline int hdr_bad(void) {
+    int x = ;   /* line 9: deliberate syntax error (expression expected) */
+    return x;
+}
+
+#endif /* HDR_LINE_PROVENANCE_CCH */

@@ -24,6 +24,9 @@ int  cc_comptime_fn_is_registered(const char* name);
 const char* cc_comptime_fn_registry_defs(void);
 const char* cc_comptime_fn_registry_lookup_def(const char* name);
 int cc_comptime_fn_registry_lookup_line(const char* name);
+/* #line-resolved source file of a registered @comptime fn, or NULL if no
+ * `#line` directive preceded it (then lookup_line is a buffer-relative line). */
+const char* cc_comptime_fn_registry_lookup_file(const char* name);
 
 int cc_comptime_exec_block_body(const char* body, size_t body_len,
                                 const CCComptimeExecOpts* opts,

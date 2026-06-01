@@ -78,6 +78,28 @@ int cc_build_parse_input(const char* file_buf,
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, got);
         if (lowered) { free(buf); buf = lowered; got = strlen(buf); }
     }
+    /* Header-defined generic factories: harvest CC_GENERIC_FACTORY/_EXTEND blocks
+     * from the included local .cch files into this TU's comptime scope so they
+     * register and run alongside .ccs-defined factories.  Appended AFTER the
+     * user body (so the body's own physical line numbers — used by use-site
+     * diagnostics — are unperturbed); each block carries a `#line` back to its
+     * .cch for provenance.  No-op when no included header defines a factory. */
+    {
+        char* harvested = cc_harvest_local_header_factories();
+        if (harvested) {
+            size_t hlen = strlen(harvested);
+            char* nb = (char*)malloc(got + 1 + hlen + 1);
+            if (nb) {
+                memcpy(nb, buf, got);
+                nb[got] = '\n';
+                memcpy(nb + got + 1, harvested, hlen + 1);
+                free(buf);
+                buf = nb;
+                got = got + 1 + hlen;
+            }
+            free(harvested);
+        }
+    }
     /* Seam: expand `@comptime for`/`if`, then lower `@emit`/`@string` templates
      * before comptime execution (see cc_comptime_prepare_source). */
     if (cc_comptime_prepare_source(&buf, &got, input_path) != 0) goto fail_buf;

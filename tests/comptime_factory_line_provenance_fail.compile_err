@@ -1,0 +1,10 @@
+# Prong 2: the factory-origin note must honor the #line directive preceding the
+# factory (virtual_factory.cch:42), not report a buffer-relative line in the .ccs.
+# This is the resolver header-harvested factories will rely on for provenance.
+# We assert the full chain: the use-site file:line:col, the failing
+# generated-fragment line, the echoed offending generated source, and the note
+# resolving the factory origin through the #line directive to virtual_factory.cch:42.
+comptime_factory_line_provenance_fail.ccs:20:5: error: type: compiled generic factory 'Bad' produced invalid C for 'Bad_int'
+note: in generated definition, line 1
+typedef struct { int a int b; } Bad_int;
+note: in @comptime factory '__cc_gfac_Bad' at virtual_factory.cch:42

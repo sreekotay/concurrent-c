@@ -139,6 +139,21 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
 
+// Map an emitted lowered-header path (out/include/.../X.h) back to the .cch
+// source the user actually wrote, using the local-header lowering registry.
+// Returns a borrowed pointer (owned by the registry) or NULL if `lowered_path`
+// is not a known lowered local header. Used to restore source provenance in
+// `#line`/`# N "file"` markers so diagnostics in header content blame the .cch.
+const char* cc_lowered_header_source_for(const char* lowered_path);
+
+// Harvest CC_GENERIC_FACTORY / _EXTEND blocks from every local .cch included by
+// the current TU (transitive set from the lowered-header registry), each wrapped
+// in a `#line` directive back to its .cch. Returns malloc'd text to append to
+// the TU buffer before comptime preparation, or NULL if none. Caller frees.
+// Must be called after cc_rewrite_local_cch_includes_to_lowered_headers has
+// populated the registry for this TU.
+char* cc_harvest_local_header_factories(void);
+
 // Shared header-safe type-syntax lowering used by both preprocessing and
 // `.cch -> .h` lowering. Rewrites syntax that must not leak into plain C
 // headers, such as slice, typed channel handles, and generic container types.

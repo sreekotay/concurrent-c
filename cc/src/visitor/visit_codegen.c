@@ -2090,6 +2090,32 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
     return out;
 }
 
+/* Cosmetic: drop spaces/tabs that sit immediately before each '\n' (and at
+ * EOF).  Blanking `@comptime` constructs to spaces (to keep byte offsets and
+ * line numbers stable for earlier passes) leaves long all-blank runs in the
+ * emitted C.  Stripping trailing whitespace removes that noise.  Crucially it
+ * preserves the line *count* (only intra-line trailing blanks are removed), so
+ * `#line` directives in the output stay exact.  Must run only on the final
+ * source, after all span-sensitive reparses.  Compacts in place (w <= r). */
+static void cc__strip_trailing_ws_in_place(char* s, size_t* io_len) {
+    size_t n, w = 0, dst_line_start = 0;
+    if (!s || !io_len) return;
+    n = *io_len;
+    for (size_t r = 0; r < n; r++) {
+        char c = s[r];
+        if (c == '\n') {
+            while (w > dst_line_start && (s[w - 1] == ' ' || s[w - 1] == '\t')) w--;
+            s[w++] = '\n';
+            dst_line_start = w;
+        } else {
+            s[w++] = c;
+        }
+    }
+    while (w > dst_line_start && (s[w - 1] == ' ' || s[w - 1] == '\t')) w--;
+    s[w] = '\0';
+    *io_len = w;
+}
+
 static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                                                      const char* type_name,
                                                      const char* src,
@@ -4773,7 +4799,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(closure_defs);
             return EINVAL;
         }
-        
+
+        /* Final cosmetic pass: src_ufcs is now fully lowered + spliced and is
+           only consumed by the write below, so trimming trailing whitespace
+           (line-count preserving) is safe and removes the blank runs left by
+           @comptime blanking. */
+        cc__strip_trailing_ws_in_place(src_ufcs, &src_ufcs_len);
+
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 
