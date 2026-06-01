@@ -11,6 +11,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* Map a lowered-header path (out/include/.../X.h) back to the .cch source the
+ * user wrote.  Declared here (rather than pulling in preprocess.h) to keep this
+ * module's include surface minimal; defined in preprocess.c. */
+extern const char* cc_lowered_header_source_for(const char* lowered_path);
+
+/* Minimal growable byte buffer.  Returns 0 on success, -1 on OOM. */
+static int cc__sb_put(char** d, size_t* dl, size_t* dc, const char* s, size_t n) {
+    if (*dl + n + 1 > *dc) {
+        size_t nc = *dc ? *dc : 256;
+        while (nc < *dl + n + 1) nc *= 2;
+        char* nv = (char*)realloc(*d, nc);
+        if (!nv) return -1;
+        *d = nv;
+        *dc = nc;
+    }
+    if (n) memcpy(*d + *dl, s, n);
+    *dl += n;
+    (*d)[*dl] = '\0';
+    return 0;
+}
 
 #ifdef CC_TCC_EXT_AVAILABLE
 #include <tcc.h>
@@ -51,11 +77,8 @@ static void cc__cpp_err_silent(void* opaque, const char* msg) {
  * unterminated line) as a safe upper bound. */
 static char* cc__normalize_line_markers(const char* buf, size_t len, size_t* out_len) {
     if (!buf) { if (out_len) *out_len = 0; return NULL; }
-    size_t line_count = 1;
-    for (size_t i = 0; i < len; i++) if (buf[i] == '\n') line_count++;
-    char* dst = (char*)malloc(len + 4 * line_count + 1);
-    if (!dst) return NULL;
-    char* out = dst;
+    char* dst = NULL;
+    size_t dl = 0, dc = 0;
     const char* in = buf;
     const char* end = buf + len;
     while (in < end) {
@@ -88,30 +111,43 @@ static char* cc__normalize_line_markers(const char* buf, size_t len, size_t* out
             }
         }
 
+        int oom = 0;
         if (is_gcc_marker) {
             const char* digit_start = line_start + 2;
             while (digit_start < digit_end && *digit_start == ' ') digit_start++;
-            memcpy(out, "#line ", 6); out += 6;
-            size_t dlen = (size_t)(digit_end - digit_start);
-            memcpy(out, digit_start, dlen); out += dlen;
-            *out++ = ' ';
-            size_t qlen = (size_t)(quote_close - quote_open + 1);
-            memcpy(out, quote_open, qlen); out += qlen;
+            /* Remap a lowered-header filename back to its .cch source so
+               diagnostics blame the file the user wrote, not the generated
+               out/include/.../X.h.  Line numbers are kept as-is (lowering of
+               plain header content is line-preserving). */
+            size_t fn_len = (size_t)(quote_close - (quote_open + 1));
+            const char* fname = quote_open + 1;
+            const char* mapped = NULL;
+            if (fn_len < PATH_MAX) {
+                char fnbuf[PATH_MAX];
+                memcpy(fnbuf, fname, fn_len);
+                fnbuf[fn_len] = '\0';
+                mapped = cc_lowered_header_source_for(fnbuf);
+            }
+            oom |= cc__sb_put(&dst, &dl, &dc, "#line ", 6);
+            oom |= cc__sb_put(&dst, &dl, &dc, digit_start, (size_t)(digit_end - digit_start));
+            oom |= cc__sb_put(&dst, &dl, &dc, " \"", 2);
+            if (mapped) oom |= cc__sb_put(&dst, &dl, &dc, mapped, strlen(mapped));
+            else        oom |= cc__sb_put(&dst, &dl, &dc, fname, fn_len);
+            oom |= cc__sb_put(&dst, &dl, &dc, "\"", 1);
         } else {
-            size_t n = (size_t)(line_end - line_start);
-            if (n > 0) memcpy(out, line_start, n);
-            out += n;
+            oom |= cc__sb_put(&dst, &dl, &dc, line_start, (size_t)(line_end - line_start));
         }
+        if (oom) { free(dst); return NULL; }
 
         if (line_end < end) {
-            *out++ = '\n';
+            if (cc__sb_put(&dst, &dl, &dc, "\n", 1)) { free(dst); return NULL; }
             in = line_end + 1;
         } else {
             in = line_end;
         }
     }
-    *out = '\0';
-    if (out_len) *out_len = (size_t)(out - dst);
+    if (!dst) { dst = (char*)malloc(1); if (dst) dst[0] = '\0'; }
+    if (out_len) *out_len = dl;
     return dst;
 }
 

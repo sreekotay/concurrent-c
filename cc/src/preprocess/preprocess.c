@@ -5153,10 +5153,16 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
                 {
                     const char* handler = cc_emit_plan_lookup_generic_factory_handler(gname);
                     int hline = handler ? cc_comptime_fn_registry_lookup_line(handler) : 0;
-                    if (handler && hline > 0)
+                    const char* hfile = handler ? cc_comptime_fn_registry_lookup_file(handler) : NULL;
+                    if (handler && hline > 0) {
+                        char hrel[1024];
+                        const char* hf = cc_path_rel_to_repo(
+                            hfile ? hfile : (input_path ? input_path : "<input>"),
+                            hrel, sizeof(hrel));
                         fprintf(stderr,
-                                "  note: in @comptime factory '%s' at line %d\n",
-                                handler, hline);
+                                "  note: in @comptime factory '%s' at %s:%d\n",
+                                handler, hf, hline);
+                    }
                 }
                 return -1;
             }
@@ -5199,10 +5205,16 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
                 {
                     const char* handler = cc_emit_plan_lookup_generic_factory_handler(gname);
                     int hline = handler ? cc_comptime_fn_registry_lookup_line(handler) : 0;
-                    if (handler && hline > 0)
+                    const char* hfile = handler ? cc_comptime_fn_registry_lookup_file(handler) : NULL;
+                    if (handler && hline > 0) {
+                        char hrel[1024];
+                        const char* hf = cc_path_rel_to_repo(
+                            hfile ? hfile : (input_path ? input_path : "<input>"),
+                            hrel, sizeof(hrel));
                         fprintf(stderr,
-                                "  note: in @comptime factory '%s' at line %d\n",
-                                handler, hline);
+                                "  note: in @comptime factory '%s' at %s:%d\n",
+                                handler, hf, hline);
+                    }
                 }
                 return -1;
             }
@@ -8364,6 +8376,122 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        const char* input_path) {
     if (!src || input_len == 0 || !input_path || !input_path[0]) return NULL;
     return cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
+}
+
+/* Harvest CC_GENERIC_FACTORY / _EXTEND blocks from every local .cch included by
+ * the current TU (the lowered-header registry holds the transitive set, deduped
+ * by realpath), so factories defined in headers register and run in the
+ * including TU's comptime scope.  Each block is emitted verbatim, preceded by a
+ * `#line <kwline> "<abs.cch>"` directive, so the comptime fn registry's
+ * #line-aware resolver attributes the factory — and any diagnostic about its
+ * emitted C — back to the .cch the user wrote.  The factory text is left in raw
+ * `CC_GENERIC_FACTORY(...)` form; the caller appends it to the TU buffer where
+ * the normal factory-rewrite + @emit lowering + comptime collection process it
+ * uniformly with .ccs-defined factories.  Returns malloc'd text, or NULL when
+ * no included header defines a factory. */
+char* cc_harvest_local_header_factories(void) {
+    static const char kw[] = "CC_GENERIC_FACTORY";
+    static const char kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
+    const size_t kwlen = sizeof(kw) - 1;
+    const size_t kwlen_ext = sizeof(kw_ext) - 1;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int any = 0;
+    for (size_t h = 0; h < g_lowered_local_header_count; h++) {
+        const char* path = g_lowered_local_headers[h].source_path;
+        char* src = NULL;
+        size_t n = 0;
+        if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
+        size_t i = 0;
+        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = (i + 1 < n) ? src[i + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+            size_t mlen = 0;
+            if (c == 'C') {
+                if (i + kwlen_ext <= n && memcmp(src + i, kw_ext, kwlen_ext) == 0 &&
+                    (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                    (i + kwlen_ext >= n || !cc_is_ident_char(src[i + kwlen_ext])))
+                    mlen = kwlen_ext;
+                else if (i + kwlen <= n && memcmp(src + i, kw, kwlen) == 0 &&
+                         (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                         (i + kwlen >= n || !cc_is_ident_char(src[i + kwlen])))
+                    mlen = kwlen;
+            }
+            if (mlen) {
+                size_t start = i;
+                size_t p = cc_skip_ws_and_comments(src, n, i + mlen);
+                if (p >= n || src[p] != '(') { i++; continue; }
+                int pdepth = 0;
+                for (; p < n; ++p) {
+                    if (src[p] == '(') pdepth++;
+                    else if (src[p] == ')') { pdepth--; if (pdepth == 0) { p++; break; } }
+                }
+                p = cc_skip_ws_and_comments(src, n, p);
+                if (p >= n || src[p] != '{') { i++; continue; }
+                size_t body_l = p, body_r = 0;
+                int depth = 0, ls = 0, lcb = 0, st = 0, ch = 0;
+                for (p = body_l; p < n; ++p) {
+                    char d = src[p];
+                    char d2 = (p + 1 < n) ? src[p + 1] : 0;
+                    if (lcb) { if (d == '\n') lcb = 0; continue; }
+                    if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
+                    if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
+                    if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
+                    if (d == '/' && d2 == '/') { lcb = 1; p++; continue; }
+                    if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
+                    if (d == '"') { st = 1; continue; }
+                    if (d == '\'') { ch = 1; continue; }
+                    if (d == '{') { depth++; continue; }
+                    if (d == '}') { depth--; if (depth == 0) { body_r = p; break; } }
+                }
+                if (body_r <= body_l) { i++; continue; }
+                int kwline = 1;
+                for (size_t k = 0; k < start; k++) if (src[k] == '\n') kwline++;
+                {
+                    char ld[PATH_MAX + 64];
+                    snprintf(ld, sizeof(ld), "\n#line %d \"%s\"\n", kwline, path);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                any = 1;
+                i = body_r + 1;
+                continue;
+            }
+            i++;
+        }
+        free(src);
+    }
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
+const char* cc_lowered_header_source_for(const char* lowered_path) {
+    if (!lowered_path || !lowered_path[0]) return NULL;
+    for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
+        if (strcmp(g_lowered_local_headers[i].lowered_path, lowered_path) == 0)
+            return g_lowered_local_headers[i].source_path;
+    }
+    /* TCC may hand back a realpath-normalized spelling of the include it was
+       given; fall back to comparing canonicalized paths. */
+    char want[PATH_MAX];
+    if (!realpath(lowered_path, want)) return NULL;
+    for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
+        char have[PATH_MAX];
+        if (realpath(g_lowered_local_headers[i].lowered_path, have) &&
+            strcmp(have, want) == 0)
+            return g_lowered_local_headers[i].source_path;
+    }
+    return NULL;
 }
 
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t n) {

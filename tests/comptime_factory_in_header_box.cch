@@ -1,0 +1,27 @@
+#ifndef COMPTIME_FACTORY_IN_HEADER_BOX_CCH
+#define COMPTIME_FACTORY_IN_HEADER_BOX_CCH
+
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+
+/* A generic factory shipped in a header.  The including TU harvests these
+ * blocks into its comptime scope; the lowered .h carries none of this — only
+ * the use-site monomorphs are spliced in. */
+
+CC_GENERIC_FACTORY(Box, 1) {
+    return @emit(`typedef struct { ${arg(0)} value; } ${mangled};`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    return @emit(`
+        static inline ${mangled} ${mangled}_make(${arg(0)} v) {
+            ${mangled} b; b.value = v; return b;
+        }`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(Box, 1) {
+    return @emit(`
+        static inline ${arg(0)} ${mangled}_get(${mangled} b) { return b.value; }`, arena);
+}
+
+#endif /* COMPTIME_FACTORY_IN_HEADER_BOX_CCH */

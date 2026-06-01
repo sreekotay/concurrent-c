@@ -1,2 +1,11 @@
-compiled generic factory 'Bad' produced invalid C for 'Bad_int'
+# A compiled factory that emits invalid C is rejected at the USE SITE, with full
+# provenance: the use-site file:line:col, the failing generated-fragment line,
+# the echoed offending generated source, and a note pointing at the factory
+# definition with file:line.  The factory note uses the #line-aware origin
+# resolver; this .ccs factory has no #line directive, so it falls back to the
+# use-site input file and the buffer line where `bad_factory` is defined (10).
+comptime_factory_invalid_emit_fail.ccs:31:5: error: type: compiled generic factory 'Bad' produced invalid C for 'Bad_int'
 note: in generated definition, line 1
+typedef struct { int first int second; } Bad_int;
+note: in @comptime factory 'bad_factory' at
+comptime_factory_invalid_emit_fail.ccs:10

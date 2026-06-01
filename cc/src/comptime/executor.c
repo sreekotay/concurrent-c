@@ -19,7 +19,8 @@ typedef struct CCComptimeFnEntry {
     char  name[CC_COMPTIME_FN_NAME_MAX];
     char* def;
     size_t def_len;
-    int   def_line;
+    int   def_line;       /* #line-resolved source line of the definition */
+    char* def_file;       /* #line-resolved source file, or NULL if none seen */
 } CCComptimeFnEntry;
 
 static CCComptimeFnEntry cc__comptime_fns[CC_COMPTIME_FN_MAX];
@@ -30,8 +31,11 @@ static char cc__comptime_fn_scan_err[512];
 
 void cc_comptime_fn_registry_clear(void) {
     cc__comptime_fn_scan_err[0] = '\0';
-    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+    for (size_t i = 0; i < cc__comptime_fn_count; i++) {
         free(cc__comptime_fns[i].def);
+        free(cc__comptime_fns[i].def_file);
+        cc__comptime_fns[i].def_file = NULL;
+    }
     cc__comptime_fn_count = 0;
     free(cc__comptime_fn_defs_blob);
     cc__comptime_fn_defs_blob = NULL;
@@ -56,16 +60,72 @@ static void cc__comptime_fn_rebuild_blob(void) {
         cc__comptime_fn_defs_blob[cc__comptime_fn_defs_len] = '\0';
 }
 
-static int cc__line_at(const char* src, size_t at) {
+/* Parse a `#line N "file"` (C99) or `# N "file"` (GCC) directive line.  On a
+ * match, writes N to *out_n and the optional filename (sans quotes) into fbuf,
+ * returning 1.  Returns 0 for any non-directive line. */
+static int cc__parse_line_directive(const char* s, size_t len,
+                                    long* out_n, char* fbuf, size_t fcap) {
+    size_t p = 0;
+    while (p < len && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p >= len || s[p] != '#') return 0;
+    p++;
+    while (p < len && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p + 4 <= len && memcmp(s + p, "line", 4) == 0) {
+        p += 4;
+        while (p < len && (s[p] == ' ' || s[p] == '\t')) p++;
+    }
+    if (p >= len || s[p] < '0' || s[p] > '9') return 0;
+    long n = 0;
+    while (p < len && s[p] >= '0' && s[p] <= '9') n = n * 10 + (s[p++] - '0');
+    if (out_n) *out_n = n;
+    if (fbuf && fcap) fbuf[0] = '\0';
+    while (p < len && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p < len && s[p] == '"') {
+        p++;
+        size_t fl = 0;
+        while (p < len && s[p] != '"') {
+            if (fbuf && fl + 1 < fcap) fbuf[fl++] = s[p];
+            p++;
+        }
+        if (fbuf && fcap) fbuf[fl] = '\0';
+    }
+    return 1;
+}
+
+/* Resolve the source origin (file + line) of byte offset `at` in `src`,
+ * honoring any `#line`/`# N "file"` directives in between.  Without directives
+ * this degrades to a plain newline count (line N of the buffer, file unknown). */
+static int cc__resolve_origin(const char* src, size_t at,
+                              char* file_out, size_t file_cap, int* line_out) {
     int line = 1;
-    if (!src) return 1;
-    for (size_t k = 0; k < at && src[k]; k++)
-        if (src[k] == '\n') line++;
-    return line;
+    char file[1024]; file[0] = '\0';
+    if (file_out && file_cap) file_out[0] = '\0';
+    if (!src) { if (line_out) *line_out = 1; return 0; }
+    size_t line_start = 0;
+    size_t len = at + 1; /* only need to scan up to and including `at`'s line */
+    for (;;) {
+        size_t line_end = line_start;
+        while (src[line_end] && src[line_end] != '\n') line_end++;
+        if (at <= line_end) break;  /* `at` lies on this physical line */
+        long n = 0;
+        char fbuf[1024];
+        if (cc__parse_line_directive(src + line_start, line_end - line_start, &n, fbuf, sizeof(fbuf))) {
+            line = (int)n;                 /* next physical line is source line N */
+            if (fbuf[0]) snprintf(file, sizeof(file), "%s", fbuf);
+        } else {
+            line++;
+        }
+        if (!src[line_end]) break;
+        line_start = line_end + 1;
+    }
+    (void)len;
+    if (line_out) *line_out = line;
+    if (file_out && file_cap && file[0]) snprintf(file_out, file_cap, "%s", file);
+    return file[0] ? 1 : 0;
 }
 
 static int cc__comptime_fn_register(const char* name, const char* def, size_t def_len,
-                                    int def_line) {
+                                    int def_line, const char* def_file) {
     if (!name || !name[0] || !def || def_len == 0) return 0;
     if (cc__comptime_fn_count >= CC_COMPTIME_FN_MAX) {
         snprintf(cc__comptime_fn_scan_err, sizeof(cc__comptime_fn_scan_err),
@@ -82,6 +142,8 @@ static int cc__comptime_fn_register(const char* name, const char* def, size_t de
             cc__comptime_fns[i].def = nd;
             cc__comptime_fns[i].def_len = def_len;
             cc__comptime_fns[i].def_line = def_line;
+            free(cc__comptime_fns[i].def_file);
+            cc__comptime_fns[i].def_file = (def_file && def_file[0]) ? strdup(def_file) : NULL;
             cc__comptime_fn_rebuild_blob();
             return 1;
         }
@@ -95,6 +157,7 @@ static int cc__comptime_fn_register(const char* name, const char* def, size_t de
         e->def[def_len] = '\0';
         e->def_len = def_len;
         e->def_line = def_line;
+        e->def_file = (def_file && def_file[0]) ? strdup(def_file) : NULL;
         cc__comptime_fn_rebuild_blob();
     }
     return 1;
@@ -125,6 +188,14 @@ int cc_comptime_fn_registry_lookup_line(const char* name) {
         if (strcmp(cc__comptime_fns[i].name, name) == 0)
             return cc__comptime_fns[i].def_line;
     return 0;
+}
+
+const char* cc_comptime_fn_registry_lookup_file(const char* name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < cc__comptime_fn_count; i++)
+        if (strcmp(cc__comptime_fns[i].name, name) == 0)
+            return cc__comptime_fns[i].def_file;
+    return NULL;
 }
 
 const char* cc_comptime_fn_registry_scan_error(void) {
@@ -179,8 +250,14 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
     }
     memcpy(def, src + def_start, dlen);
     def[dlen] = '\0';
-    if (cc__comptime_fn_register(name, def, dlen, cc__line_at(src, def_start)) < 0)
-        return -1;
+    {
+        char ofile[1024];
+        int oline = 1;
+        cc__resolve_origin(src, def_start, ofile, sizeof(ofile), &oline);
+        if (cc__comptime_fn_register(name, def, dlen, oline,
+                                     ofile[0] ? ofile : NULL) < 0)
+            return -1;
+    }
     if (out_end) *out_end = body_r + 1;
     return 1;
 }

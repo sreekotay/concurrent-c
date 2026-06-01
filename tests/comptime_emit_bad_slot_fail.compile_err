@@ -1,3 +1,9 @@
-compiled generic factory 'BadSlot' failed to compile
+# A compiled factory whose generated body fails to compile is rejected at the
+# use site, with the failing compiler diagnostic and a note pointing at the
+# factory definition with file:line.  This .ccs factory has no #line directive,
+# so the note falls back to the use-site input file and the buffer line where
+# `bad_slot_factory` is defined (line 8).
+comptime_emit_bad_slot_fail.ccs:23:5: error: type: compiled generic factory 'BadSlot' failed to compile
 not compatible
-note: in @comptime factory 'bad_slot_factory'
+note: in @comptime factory 'bad_slot_factory' at
+comptime_emit_bad_slot_fail.ccs:8

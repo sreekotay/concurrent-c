@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include "hdr_line_provenance.cch"
+#include <stdio.h>
+
+/* The syntax error lives in hdr_line_provenance.cch at line 9.  This build must
+ * fail with a diagnostic that names that .cch and line — proving lowered-header
+ * content keeps provenance back to the source the user wrote, not the generated
+ * out/include/.../*.h. */
+
+int main(void) {
+    printf("%d\n", hdr_ok(1, 2) + hdr_bad());
+    return 0;
+}

@@ -365,4 +365,5 @@ io/net/dns/http/dir/process/cli, the type-erased `cc_dyn_vec`, real atomics, the
 - **spec §14.8** — to be rewritten per §1.
 - The **comptime-grammar** idea (`@grammar(E) Name {…}` = a comptime generic
   whose argument is source) is *orthogonal*: this capability model governs what
-  any comptime — including a grammar engine — is allowed to do.
+  any comptime — including a grammar engine — is allowed to do. See
+  [`GRAMMAR_DSL_PROPOSAL.md`](GRAMMAR_DSL_PROPOSAL.md) for the proposed surface.

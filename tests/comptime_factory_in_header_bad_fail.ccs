@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include "comptime_factory_in_header_badbox.cch"
+#include <stdio.h>
+
+/* The BadBox factory in comptime_factory_in_header_badbox.cch emits invalid C.
+ * Using it must fail with a diagnostic whose "in @comptime factory" note points
+ * at the factory's line in that .cch (line 7) — header-harvested provenance. */
+
+int main(void) {
+    BadBox::[int] b;
+    (void)b;
+    return 0;
+}

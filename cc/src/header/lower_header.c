@@ -237,6 +237,90 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
     return out;
 }
 
+/* Blank CC_GENERIC_FACTORY / CC_GENERIC_FACTORY_EXTEND blocks in place (replace
+ * every non-newline byte with a space, preserving line count) so the lowered
+ * .h is clean host-C.  The factory bodies are harvested separately into the
+ * including TU's comptime scope (see build_parse_input), where they register
+ * and run; the .h only needs the *generated* monomorphs, which the use-site
+ * splice supplies.  Newline preservation keeps the .h line-identical to the
+ * .cch so cpp_expand's lowered->source #line remap stays exact. */
+static char* cc__strip_generic_factory_blocks_header(const char* src, size_t n) {
+    static const char kw[] = "CC_GENERIC_FACTORY";
+    static const char kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
+    const size_t kwlen = sizeof(kw) - 1;
+    const size_t kwlen_ext = sizeof(kw_ext) - 1;
+    char* out = NULL;
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int found = 0;
+    if (!src || n == 0) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        size_t mlen = 0;
+        if (c == 'C') {
+            if (i + kwlen_ext <= n && memcmp(src + i, kw_ext, kwlen_ext) == 0 &&
+                (i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_')) &&
+                (i + kwlen_ext >= n || !(isalnum((unsigned char)src[i + kwlen_ext]) || src[i + kwlen_ext] == '_')))
+                mlen = kwlen_ext;
+            else if (i + kwlen <= n && memcmp(src + i, kw, kwlen) == 0 &&
+                     (i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_')) &&
+                     (i + kwlen >= n || !(isalnum((unsigned char)src[i + kwlen]) || src[i + kwlen] == '_')))
+                mlen = kwlen;
+        }
+        if (mlen) {
+            size_t p = i + mlen;
+            while (p < n && isspace((unsigned char)src[p])) p++;
+            if (p >= n || src[p] != '(') { i++; continue; }
+            /* skip the (Name[, K]) parameter list */
+            int pdepth = 0;
+            for (; p < n; ++p) {
+                if (src[p] == '(') pdepth++;
+                else if (src[p] == ')') { pdepth--; if (pdepth == 0) { p++; break; } }
+            }
+            while (p < n && isspace((unsigned char)src[p])) p++;
+            if (p >= n || src[p] != '{') { i++; continue; }
+            size_t body_l = p, body_r = 0;
+            int depth = 0, ls = 0, lcb = 0, st = 0, ch = 0;
+            for (p = body_l; p < n; ++p) {
+                char d = src[p];
+                char d2 = (p + 1 < n) ? src[p + 1] : 0;
+                if (lcb) { if (d == '\n') lcb = 0; continue; }
+                if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
+                if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
+                if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
+                if (d == '/' && d2 == '/') { lcb = 1; p++; continue; }
+                if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
+                if (d == '"') { st = 1; continue; }
+                if (d == '\'') { ch = 1; continue; }
+                if (d == '{') { depth++; continue; }
+                if (d == '}') { depth--; if (depth == 0) { body_r = p; break; } }
+            }
+            if (body_r <= body_l) { free(out); return NULL; }
+            for (size_t k = i; k <= body_r; ++k)
+                if (out[k] != '\n') out[k] = ' ';
+            found = 1;
+            i = body_r + 1;
+            continue;
+        }
+        i++;
+    }
+    if (!found) { free(out); return NULL; }
+    return out;
+}
+
 static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
     char* out = NULL;
     size_t i = 0;
@@ -336,6 +420,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     const char* cur = input;
     size_t cur_len = input_len;
     char* buf0 = NULL;
+    char* buf_fac = NULL;
     char* buf_inc = NULL;
     char* buf_types = NULL;
     char* buf_result_ctors = NULL;
@@ -347,6 +432,15 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     if (buf0) {
         cur = buf0;
         cur_len = strlen(buf0);
+    }
+
+    /* Pass 0a: Blank CC_GENERIC_FACTORY / _EXTEND blocks.  They are harvested
+       into the including TU's comptime scope (build_parse_input); the lowered
+       .h must stay clean host-C, the use-site splice provides the monomorphs. */
+    buf_fac = cc__strip_generic_factory_blocks_header(cur, cur_len);
+    if (buf_fac) {
+        cur = buf_fac;
+        cur_len = strlen(buf_fac);
     }
 
     /* Pass 0b: Rewrite .cch includes to .h so lowered headers are self-contained C headers. */
@@ -430,6 +524,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     
     /* Cleanup */
     free(buf0);
+    free(buf_fac);
     free(buf_inc);
     free(buf_types);
     free(buf_result_ctors);
