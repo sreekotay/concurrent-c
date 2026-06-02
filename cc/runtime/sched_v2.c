@@ -669,6 +669,33 @@ static int g_v2_park_extras_at_startup = 0;
 static int g_v2_target_active = 0;
 static _Atomic int g_v2_running_workers = 0;
 
+/* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
+ *
+ * fiber_v2_free retains each completed fiber's minicoro allocation (~2 MB
+ * stack) on the lock-free free list so the next spawn can mco_init in place
+ * instead of paying a fresh ~2 MB mmap. That reuse is a big win at steady
+ * state, but the free list was previously UNBOUNDED: under a spawn burst
+ * where the producer outruns the (capped) worker pool — e.g. a nursery
+ * spawning 100k non-parking tasks — the free list's high-water mark climbs
+ * to ~= the number of tasks. At 2 MB each that is ~200 GB of simultaneously
+ * mapped stacks for 100k tasks, which exhausts the process VM map and hard-
+ * crashes the machine.
+ *
+ * The cap bounds the number of coro-bearing fibers PARKED ON THE FREE LIST.
+ * It does NOT touch live or parked-in-flight fibers (those legitimately own
+ * their coro); it only decides whether a *completed* fiber keeps its stack
+ * for reuse or releases it. When the pool is already at capacity the surplus
+ * coro is mco_destroy'd (the 2 MB is actually unmapped) so total mapped coro
+ * memory is bounded by  (live fibers) + g_v2_coro_pool_max.
+ *
+ * g_v2_pooled_coros is an approximate count (a free observing the cap and the
+ * subsequent increment are not one atomic step), so the pool may overshoot by
+ * up to ~num_threads under heavy concurrent completion — a bounded, harmless
+ * slop. Default 512 -> <=1 GB of pooled stacks; set 0 to disable the cap and
+ * restore the old unbounded behaviour. */
+static int g_v2_coro_pool_max = 512;
+static _Atomic int g_v2_pooled_coros = 0;
+
 /* Try to become an "active running" worker. Returns 1 on success (caller
  * is counted toward g_v2_running_workers and must call deadmit_running
  * before parking) or 0 if target is already saturated. */
@@ -841,6 +868,12 @@ static fiber_v2* fiber_v2_alloc(void) {
              * (coro struct + ~2 MB stack) alive so spawn can mco_init in
              * place. Setting it NULL here would force a fresh alloc every
              * time and defeat the pool. */
+            if (f->coro) {
+                /* This pooled fiber carried a retained coro; it is leaving
+                 * the pool, so drop the pooled-coro count by one. */
+                atomic_fetch_sub_explicit(&g_v2_pooled_coros, 1,
+                                          memory_order_relaxed);
+            }
             f->result = NULL;
             f->entry_fn = NULL;
             f->entry_arg = NULL;
@@ -910,9 +943,23 @@ static void fiber_v2_free(fiber_v2* f) {
     /* Pool the coroutine memory (including its stack): mco_uninit just marks
      * the coro DEAD and runs platform teardown (a no-op on ucontext), while
      * preserving the allocation so the next spawn can re-init in place
-     * instead of paying another ~2 MB alloc/free. */
+     * instead of paying another ~2 MB alloc/free.
+     *
+     * BUT only up to g_v2_coro_pool_max retained coros: beyond that we
+     * actually release the ~2 MB stack (mco_destroy) instead of retaining it,
+     * so a spawn burst that outruns the worker pool can't grow the free list —
+     * and thus mapped stack memory — without bound. See the cap rationale at
+     * g_v2_coro_pool_max. */
     if (f->coro) {
-        (void)mco_uninit(f->coro);
+        int cap = g_v2_coro_pool_max;
+        if (cap > 0 &&
+            atomic_load_explicit(&g_v2_pooled_coros, memory_order_relaxed) >= cap) {
+            (void)mco_destroy(f->coro);
+            f->coro = NULL;
+        } else {
+            (void)mco_uninit(f->coro);
+            atomic_fetch_add_explicit(&g_v2_pooled_coros, 1, memory_order_relaxed);
+        }
     }
     fiber_v2* head;
     do {
@@ -2072,11 +2119,13 @@ static void* sched_v2_sysmon_main(void* arg) {
 
 static void sched_v2_atexit_dump_stats(void) {
     fprintf(stderr, "[sched_v2 stats] coro_pool: reuse=%llu fresh=%llu  "
-                    "spawns: parks=%llu dead=%llu\n",
+                    "spawns: parks=%llu dead=%llu  pool=%d/%d\n",
             (unsigned long long)atomic_load_explicit(&g_v2_coro_reuse, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_coro_fresh, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_parks, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed));
+            (unsigned long long)atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed),
+            atomic_load_explicit(&g_v2_pooled_coros, memory_order_relaxed),
+            g_v2_coro_pool_max);
     fprintf(stderr, "[sched_v2 stats] join (spin=%d): fast=%llu spin_hit=%llu "
                     "park_fiber=%llu park_thread=%llu\n",
             g_v2_join_spin,
@@ -2175,6 +2224,15 @@ static void sched_v2_init_impl(void) {
         long v = strtol(tgt_env, &end, 10);
         if (end != tgt_env && v >= 0 && v <= 1024) {
             g_v2_target_active = (int)v;
+        }
+    }
+    /* Coro-pool high-water cap. 0 disables the cap (legacy unbounded pool). */
+    const char* pool_env = getenv("CC_V2_CORO_POOL_MAX");
+    if (pool_env) {
+        char* end = NULL;
+        long v = strtol(pool_env, &end, 10);
+        if (end != pool_env && v >= 0 && v <= (1L << 20)) {
+            g_v2_coro_pool_max = (int)v;
         }
     }
 

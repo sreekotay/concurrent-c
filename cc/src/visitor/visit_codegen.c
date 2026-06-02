@@ -707,24 +707,65 @@ static int cc__cg_chan_recv_expr_char(char c) {
     return cc_is_ident_char(c) || c == '.' || c == '-' || c == '>' || c == ']' || c == ')';
 }
 
+static int cc__cg_late_channel_ufcs_callee(const char* src,
+                                           size_t recv_a,
+                                           size_t recv_b,
+                                           const char* method,
+                                           const char** out_fn) {
+    char recv_expr[256];
+    int recv_is_ptr = 0;
+    CCUfcsChannelKind kind = CC_UFCS_CHANNEL_KIND_NONE;
+    int recv_by_value = 0;
+    const char* type_name = NULL;
+    const char* fn = NULL;
+    CCTypeRegistry* reg = cc_type_graph_active_registry(cc_type_graph_get_global());
+    if (out_fn) *out_fn = NULL;
+    if (!src || !method || !out_fn || !reg || recv_b <= recv_a) return 0;
+    while (recv_a < recv_b && isspace((unsigned char)src[recv_a])) recv_a++;
+    while (recv_b > recv_a && isspace((unsigned char)src[recv_b - 1])) recv_b--;
+    if (recv_b <= recv_a || recv_b - recv_a >= sizeof(recv_expr)) return 0;
+    memcpy(recv_expr, src + recv_a, recv_b - recv_a);
+    recv_expr[recv_b - recv_a] = '\0';
+
+    type_name = cc_type_registry_resolve_receiver_expr_at(
+        reg, recv_expr, src, recv_a, &recv_is_ptr);
+    if (!type_name || !type_name[0]) return 0;
+
+    fn = cc_ufcs_channel_callee(type_name, method, 0, &kind, &recv_by_value);
+    if (!fn || !fn[0]) return 0;
+
+    /* Raw CCChan* send/recv need an element-size argument, which this late
+     * textual cleanup cannot infer safely. Leave those for the AST UFCS path
+     * (or for the C compiler to reject) instead of guessing. */
+    if (kind == CC_UFCS_CHANNEL_KIND_RAW &&
+        (strcmp(method, "send") == 0 || strcmp(method, "recv") == 0)) {
+        return 0;
+    }
+    (void)recv_is_ptr;
+    (void)recv_by_value;
+    *out_fn = fn;
+    return 1;
+}
+
 static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t ol = 0, oc = 0, last = 0;
     for (size_t i = 0; i + 6 < n; i++) {
         const char* fn = NULL;
+        const char* method = NULL;
         size_t method_len = 0;
         if (memcmp(src + i, ".send(", 6) == 0) {
-            fn = "cc_channel_send";
+            method = "send";
             method_len = 5;
         } else if (memcmp(src + i, ".recv(", 6) == 0) {
-            fn = "cc_channel_recv";
+            method = "recv";
             method_len = 5;
         } else if (i + 7 < n && memcmp(src + i, ".close(", 7) == 0) {
-            fn = "cc_channel_close";
+            method = "close";
             method_len = 6;
         } else if (i + 6 < n && memcmp(src + i, ".free(", 6) == 0) {
-            fn = "cc_chan_free";
+            method = "free";
             method_len = 5;
         } else {
             continue;
@@ -735,6 +776,7 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
         size_t open = i + method_len;
         size_t close = 0;
         if (open >= n || src[open] != '(' || !cc_find_matching_paren(src, n, open, &close)) continue;
+        if (!cc__cg_late_channel_ufcs_callee(src, recv_a, i, method, &fn)) continue;
         cc_sb_append(&out, &ol, &oc, src + last, recv_a - last);
         cc_sb_append_cstr(&out, &ol, &oc, fn);
         cc_sb_append_cstr(&out, &ol, &oc, "(");
@@ -4618,6 +4660,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     "#undef __cc_uw_is_err\n#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n");
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[256];
                     cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
@@ -4631,6 +4674,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     "#undef __cc_uw_value\n#define __cc_uw_value(__x__) _Generic((__x__), \\\n");
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[256];
                     cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
@@ -4650,6 +4694,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     "#undef __cc_uw_err_at\n#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n");
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
                     char line[320];
                     cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,

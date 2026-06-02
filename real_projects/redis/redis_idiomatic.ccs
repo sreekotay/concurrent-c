@@ -460,7 +460,7 @@ static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
     req->arena = cc_arena_create_buffer(req->argv_buf,
                                         sizeof(req->argv_buf),
                                         CC_ARENA_GROWABLE);
-    if (!req->arena.valid()) {
+    if (!cc_arena_valid(&req->arena)) {
         cc_arena_pool_free(&conn->req_pool, req);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
@@ -982,7 +982,7 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
 static void db_free_all(RedisDb* db) {
     if (!db) return;
     if (db->entries) {
-        db->entries->destroy();
+        RedisDbMap_destroy(db->entries);
         db->entries = NULL;
     }
     db_free_arenas_only(db);
@@ -1256,7 +1256,7 @@ static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
  * refcounts. */
 static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req) {
     if (!req || !conn) return;
-    req->arena.free();
+    cc_arena_free(&req->arena);
     cc_arena_pool_free(&conn->req_pool, req);
 }
 
@@ -1451,12 +1451,13 @@ static inline bool reply_send(Reply* rep) {
             bool has = rr_req_iter_next(&req_iter, &req) !>;
             if (!has) break;
             conn->next_request_id++;
-            req_tx.send(req) !> {
+            CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
+            if (cc_is_err(send_res)) {
                 redis_conn_release_request(req);
                 (void)write_reply_now(&client, conn,
                     reply_error("ERR owner channel unavailable"));
                 return 0;
-            };
+            }
             reply_slots_pending++;
             submitted++;
         }
@@ -1465,7 +1466,8 @@ static inline bool reply_send(Reply* rep) {
          * reply_arena back to quiescence before reply_release_batch. */
         while (reply_slots_pending > 0) {
             ReplySlot* slot = NULL;
-            conn->reply_rx.recv(&slot) !> { return 0; };
+            CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &slot);
+            if (cc_is_err(recv_res)) return 0;
             reply_slots_pending--;
             RedisReply* reply = slot ? (RedisReply*)slot->payload : NULL;
             if (!reply || !write_reply(&client, conn, reply)) return 0;
