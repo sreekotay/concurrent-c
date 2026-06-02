@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+
+static int !>(CCError) early_int(void) {
+    return cc_ok(41);
+}
+
+static int !>(CCError) use_early(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int value = early_int() !>;
+    return cc_ok(value + 1);
+}
+
+typedef struct LaterBox {
+    int value;
+} LaterBox;
+
+static LaterBox !>(CCError) make_later(void) {
+    return cc_ok((LaterBox){ .value = 7 });
+}
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
+    int value = use_early() !> { return 1; };
+    LaterBox box = make_later() !> { return 1; };
+    printf("result_delayed_spec_generic_smoke: %d %d\n", value, box.value);
+    return 0;
+}
