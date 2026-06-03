@@ -1,9 +1,8 @@
 /* M1 smoke: shared preprocess pipeline regression guard.
  *
  * Exercises a wide cross-section of CC features in a single TU so the
- * shared `cc_preprocess_for_initial_parse` / `cc_preprocess_for_reparse`
- * paths (M1 + M3) are forced through every text-pass bucket they
- * cover:
+ * shared canonicalize + emit-splice preprocess path is forced through every
+ * text-pass bucket it covers:
  *   - channel handle decls and `cc_channel_pair`
  *   - closure literal with explicit captures + `cc_nursery_spawn_async`
  *   - generic container declarations (CCVec::[int])

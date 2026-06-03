@@ -22,5 +22,5 @@ ccc build foo.ccs --show-lowered=phase3
 
 Phase 3 lowering runs in two batched stages (UFCS, then closure_calls + autoblock + await_normalize); see [PIPELINE.md](PIPELINE.md).
 
-Baseline metrics: `scripts/capture_baseline.sh` → `perf/baseline_M0.txt`.
+Baseline metrics: `scripts/capture_baseline.sh` → `perf/compiler_baseline.txt`.
 

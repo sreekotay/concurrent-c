@@ -96,13 +96,6 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
 
 #include "source_pipeline.h"
 
-/* M3 / pipeline stages: canonicalize (phase-1+3) then emit-plan splice. */
-char* cc_preprocess_for_initial_parse(const char* input, size_t input_len, const char* input_path);
-/* Initial parse after cc_comptime_prepare_source(): skips @comptime if/for and
- * @emit/@string template rewrites already applied by that seam. */
-char* cc_preprocess_for_initial_parse_prepared(const char* input, size_t input_len, const char* input_path);
-/* Full canonicalize + splice for buffers not yet emit-ready (skip_checks=1). */
-char* cc_preprocess_for_reparse(const char* input, size_t input_len, const char* input_path);
 /* Phase-1+3 only (no emit-plan splice). */
 char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char* input_path,
                                  int skip_checks, int skip_comptime_surface);

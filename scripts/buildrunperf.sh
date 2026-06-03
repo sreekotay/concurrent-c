@@ -276,7 +276,7 @@ if files:
 print()
 print("Likely wins:")
 print("  - cut reparse count in visit_codegen.c (cc__reparse_source_to_ast_ctx)")
-print("  - skip cc_preprocess_for_reparse on already-expanded reparsed text")
+print("  - skip cc_preprocess_emit_splice on already-expanded reparsed text")
 print("  - cache comptime UFCS hook dylibs across builds")
 PY
     echo

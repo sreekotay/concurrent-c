@@ -386,8 +386,7 @@ static const char* cc__known_autoblock_param_type(const char* callee, int arg_in
     }
     if (arg_index == 1 &&
         (strcmp(callee, "cc_nursery_spawn_closure0") == 0 ||
-         strcmp(callee, "cc_nursery_spawn_child_closure0") == 0 ||
-         strcmp(callee, "cc_thread_spawn_closure0_legacy") == 0)) {
+         strcmp(callee, "cc_nursery_spawn_child_closure0") == 0)) {
         return "CCClosure0";
     }
     return NULL;

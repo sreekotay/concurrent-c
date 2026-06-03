@@ -137,7 +137,6 @@ void* cc_task_result_ptr(size_t size);
 
 // Legacy spawn returning task via out-pointer (deprecated, use cc_thread_spawn() instead)
 int cc_thread_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg);
-int cc_thread_spawn_closure0_legacy(struct CCSpawnTask** out_task, CCClosure0 c);
 
 // Join a legacy thread task; returns 0 on success.
 int cc_thread_task_join(struct CCSpawnTask* task);

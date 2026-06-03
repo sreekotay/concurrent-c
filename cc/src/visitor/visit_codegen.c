@@ -4041,9 +4041,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             continue;
                         }
                         
-                        /* Optionals (T?) are retired; pointer-return / bool-out forms replace them.
-                         * Always emit the 2-arg convenience macro — vec.cch treats the old
-                         * 3-arg CC_VEC_DECL_ARENA_FULL form as ignoring its OptT slot. */
+                        /* Emit the 2-arg convenience macro; vec.cch owns any
+                         * compatibility details for older declaration forms. */
                         char line[512];
                         snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
                         cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
@@ -4061,7 +4060,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     }
                 }
 
-                /* Emit Map declarations (optionals retired — use the 5-arg convenience macro). */
+                /* Emit Map declarations through the 5-arg convenience macro. */
                 for (size_t i = 0; i < n_map; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                     if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
