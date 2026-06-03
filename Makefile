@@ -51,7 +51,9 @@ install: cc
 	install -m 755 out/cc/bin/ccc $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
-	install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/
+	@if [ -n "$$(ls cc/include/ccc/vendor/*.h 2>/dev/null)" ]; then \
+		install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/; \
+	fi
 	install -m 644 cc/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
 	@if [ -n "$$(ls cc/runtime/*.cpp 2>/dev/null)" ]; then \
 		install -m 644 cc/runtime/*.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
