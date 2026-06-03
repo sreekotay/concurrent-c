@@ -2,7 +2,7 @@
  * pre-expand pipeline end-to-end on the initial parse (containers,
  * channels, closures, result types, UFCS).  Pre-expand is now the
  * DEFAULT (2026-05-26 flip): `cc_cpp_expand` runs after
- * `cc_preprocess_for_initial_parse` and the prepended `#include`
+ * the initial canonicalize/splice path and the prepended `#include`
  * lines for `CCResult_int`, `CCVec_int_init`, etc. must all resolve
  * cleanly in a single CPP pass.  Any regression where pre-expand
  * re-triggers system-header inclusion (e.g. `__mbstate_t`

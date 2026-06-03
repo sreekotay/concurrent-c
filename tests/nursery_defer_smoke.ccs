@@ -1,5 +1,5 @@
 #include <ccc/cc_nursery.cch>
-// Smoke test: ensure patched TCC parser can consume @nursery and @defer constructs.
+// Smoke test: ensure @create/@destroy nursery setup and @defer coexist.
 
 void worker(int n) {
     (void)n;

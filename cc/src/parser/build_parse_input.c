@@ -229,9 +229,9 @@ int cc_build_parse_input(const char* file_buf,
         free(canonical);
     }
 
-    /* M7: opt-in pre-expand via CPP, applied after all CC text passes
-     * have run. Resolves the prepended `#include` directives that
-     * `cc_preprocess_for_initial_parse` adds (containers, result types) so
+    /* M7: pre-expand via CPP, applied after all CC text passes have run.
+     * Resolves the prepended `#include` directives added by preprocessing
+     * (containers, result types) so
      * TCC's second-pass parser sees a fully-expanded translation unit.
      *
      * Combined with the scanner's `in_pp` tracking (which makes phase-1
@@ -270,7 +270,7 @@ int cc_build_parse_input(const char* file_buf,
              * appeared via macro expansion (e.g. `int[~4 >]` from
              * `#define CHAN(T) T[~4 >]` invoked as `CHAN(int)`). Uses a
              * registry-preserving variant so existing Result/Vec/Map type
-             * registrations from cc_preprocess_for_initial_parse survive.
+             * registrations from initial canonicalization survive.
              *
              * Stash the pre-relower buffer (still has `[~ ... >]` brackets)
              * for downstream visitor passes that need to introspect chan

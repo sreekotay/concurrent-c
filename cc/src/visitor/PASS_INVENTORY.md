@@ -190,7 +190,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
 | 9 | pass_channel_syntax.c | 2,167 | channel_pair + `int[~4 >]` → CCChanTx |
-| 10 | pass_type_syntax.c | 1,024 | slice/optional/result type text rewrites |
+| 10 | pass_type_syntax.c | 1,024 | slice/result type text rewrites plus retired-optional diagnostics |
 
 **Attribution note (2026-06-01 audit):** these are *not* called from `visit_codegen.c`. `cc__rewrite_channel_pair_calls_text` runs in `preprocess.c`; `cc__rewrite_chan_send_task_text` runs in `visit_codegen.c`; `cc__rewrite_result_types_text` runs from `pass_closure_literal_ast.c`. The bulk of slice/result/chan-handle type lowering is the static preprocess passes (P3/P4/P8).
 
@@ -274,9 +274,10 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 2. ✅ Update this inventory to match reality (2026-02-01)
 3. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
 4. ✅ Phase 3 EditBuffer infrastructure (2026-02-01); batched apply optional via `CC_BATCH_PHASE3` (2026-05-26); **two-stage batched is now the only path** (2026-05-28) — all four collectors emit per-span edits; UFCS in stage 1, closure_calls+autoblock+await_normalize in stage 2; reparses 4 → 2.
-5. ✅ Dynamic type registries - `cc__cg_result_types` and `cc__cg_optional_types` are
-   now heap-allocated dynamic arrays (previously fixed [64]). No limit on Result/Optional
-   type count per compilation unit. (2026-03-09)
+5. ✅ Dynamic result-spec registry - `cc__cg_result_specs` is backed by
+   `CCResultSpecTable` rather than fixed-size arrays, so there is no Result
+   type count limit per compilation unit. (2026-03-09; updated after
+   optional-type retirement)
 6. ✅ Explicit registry reset - `cc__cg_reset_type_registries()` called once per
    compilation unit in visit_codegen.c. Scan functions now ACCUMULATE rather than
    implicitly resetting on each call. Previously the second call to any scan function
@@ -285,16 +286,17 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 7. ✅ `spawn into` correctness - fixed `__spawn_into_thunk` to detect when the called
    function stores its result directly via cc_task_result_ptr (evidenced by returning
    the same buffer pointer). The thunk no longer overwrites the caller's structured
-   result. The `spawn into(ch)?` form now uses discard-on-backpressure semantics
+   result. The `spawn into(ch)` form now uses discard-on-backpressure semantics
    (cc_task_free) instead of incorrect result propagation. (2026-03-09)
 
 ## AST Migration Investigation (2026-03-09)
 
 ### Why text-based rewrites are necessary for type syntax
 
-The type passes (P3, P8, P11) rewrit `T[:]`, `T?`, and `T!>(E)` at the token level.
-TCC's stub-AST does NOT emit AST nodes for these annotations — they exist only as
-surface syntax tokens before TCC sees them. As a result:
+The type passes rewrite `T[:]` and `T!>(E)` at the token level; the retired
+`T?` surface is handled by a diagnostic-only text guardrail. TCC's stub-AST
+does NOT emit AST nodes for these annotations — they exist only as surface
+syntax tokens before TCC sees them. As a result:
 
 - **Fully text-based is correct and necessary** for P3/P8/P11. No AST nodes to visit.
 - The `CCScannerState` refactoring (all 12 passes) already extracted the common

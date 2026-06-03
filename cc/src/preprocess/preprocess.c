@@ -6821,21 +6821,6 @@ typedef struct {
 static CCAsyncFnInfo cc__async_fns[CC_MAX_ASYNC_FNS];
 static int cc__async_fn_count = 0;
 
-/* Check if an @async function is nonblocking (either explicit or inferred).
-   Note: Reserved for future cross-file analysis. */
-__attribute__((unused))
-static int cc__fn_is_nonblocking(const char* name) {
-    for (int i = 0; i < cc__async_fn_count; i++) {
-        if (strcmp(cc__async_fns[i].name, name) == 0) {
-            if (cc__async_fns[i].is_explicit_nonblocking) return 1;
-            if (!cc__async_fns[i].has_loop_with_chan_op) return 1;
-            return 0;
-        }
-    }
-    /* Unknown function - assume nonblocking (could be from another file) */
-    return 1;
-}
-
 /* Collect @async function info and check cc_block_on calls.
    Warns if cc_block_on is called with a function that has loops with channel ops.
    Returns number of warnings. */
@@ -7035,7 +7020,7 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                         cc_path_rel_to_repo(input_path, rel, sizeof(rel));
                         fprintf(stderr, "%s:%d:%d: warning: cc_block_on with '%s' may deadlock\n",
                                 rel, call_line, call_col, fn_name);
-                        fprintf(stderr, "%s:%d:%d: note: '%s' has channel ops in a loop; consider @nursery for concurrency or larger buffer\n",
+                        fprintf(stderr, "%s:%d:%d: note: '%s' has channel ops in a loop; consider explicit nursery concurrency or a larger buffer\n",
                                 rel, call_line, call_col, fn_name);
                         warnings++;
                     }
@@ -8182,18 +8167,6 @@ chain_cleanup:
 // Wrapper that runs all checks (default behavior for initial parse).
 char* cc_preprocess_to_string(const char* input, size_t input_len, const char* input_path) {
     return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
-}
-
-char* cc_preprocess_for_initial_parse(const char* input, size_t input_len, const char* input_path) {
-    return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
-}
-
-char* cc_preprocess_for_initial_parse_prepared(const char* input, size_t input_len, const char* input_path) {
-    return cc_preprocess_pipeline_ex(input, input_len, input_path, 0, 1, CC_PP_MODE_FULL);
-}
-
-char* cc_preprocess_for_reparse(const char* input, size_t input_len, const char* input_path) {
-    return cc_preprocess_pipeline_ex(input, input_len, input_path, 1, 0, CC_PP_MODE_FULL);
 }
 
 typedef struct {

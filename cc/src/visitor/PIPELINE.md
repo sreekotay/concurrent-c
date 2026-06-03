@@ -91,11 +91,13 @@ perturb AST→source mapping.
 
 | API | Use |
 |-----|-----|
-| `cc_preprocess_for_initial_parse` | First parse of a TU |
-| `cc_preprocess_for_reparse` | Reparse; skips validation checks (legacy `skip_checks=1`) |
-| ~~`cc_preprocess_for_light_reparse`~~ | **Phantom (2026-06-01 audit):** never implemented — no such symbol in `preprocess.c`. Only `cc_preprocess_for_initial_parse` and `cc_preprocess_for_reparse` exist (both thin wrappers). |
+| `cc_preprocess_canonicalize` | Phase-1/3 canonicalization without emit-plan splice |
+| `cc_preprocess_emit_splice` | Emit-plan splice for canonical buffers |
+| `cc_preprocess_to_string_ex` | Full canonicalize + splice compatibility entry point |
+| ~~`cc_preprocess_for_initial_parse` / `cc_preprocess_for_reparse`~~ | **Deleted (2026-06-01):** dead thin wrappers after `cc_build_parse_input` and reparses moved to the explicit canonicalize/splice APIs. |
+| ~~`cc_preprocess_for_light_reparse`~~ | **Phantom (2026-06-01 audit):** never implemented. |
 
-In practice, `cc__reparse_source_to_ast_ex` calls `cc_preprocess_emit_splice(..., /*for_reparse=*/1)` directly rather than the `cc_preprocess_for_reparse` wrapper (2026-06-01 audit).
+`cc_build_parse_input()` owns initial canonicalization. `cc__reparse_source_to_ast_ex` calls `cc_preprocess_emit_splice(..., /*skip_checks=*/1)` directly on already-canonical buffers.
 
 ## Canonical prep (M1)
 
