@@ -6,7 +6,7 @@ CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean distclean fmt lint example example-c smoke test tools
 .PHONY: install uninstall
-.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
+.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
 
@@ -74,6 +74,9 @@ fmt:
 
 lint:
 	@./scripts/lint.sh
+
+check-submodules:
+	@./scripts/check_submodule_reachability.sh
 
 # Build and run the UFCS hello example through our compiler.
 example: cc

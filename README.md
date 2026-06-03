@@ -147,6 +147,10 @@ CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./cc-install.sh
 
 The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, runs `make install`, creates a repo-local `./ccc` launcher for that checkout, installs the local Concurrent-C syntax package for VS Code and Cursor, and attempts to install the CodeLLDB debugger extension when the `code` / `cursor` CLIs are available. Pass `--no-editor-tools` to skip the editor setup.
 
+Before pushing a commit that changes submodule pointers, run `make check-submodules`
+or `npm run check:submodules`. This catches unreachable local-only submodule
+commits, especially `third_party/tcc`, before they break fresh clones.
+
 **Homebrew tap:** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
 ```bash
 brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git

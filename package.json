@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "check:submodules": "./scripts/check_submodule_reachability.sh"
+  }
+}
