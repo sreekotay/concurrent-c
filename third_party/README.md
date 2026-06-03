@@ -26,6 +26,35 @@ Upstream TinyCC with minimal CC integration hooks.
 - **Apply patches**: `make tcc-patch-apply`
 - **Regenerate patches**: `make tcc-patch-regen`
 
+### Submodule reachability guard
+
+Before pushing a superproject commit that changes any submodule pointer, run:
+
+```bash
+make check-submodules
+# or
+npm run check:submodules
+```
+
+This verifies every gitlink recorded by the superproject is fetchable from the
+submodule URL in `.gitmodules`. It catches the common failure mode where a local
+submodule commit exists on your machine, gets recorded in `origin/main`, but was
+never pushed to the submodule remote. Fresh clones then fail during
+`git submodule update --init`.
+
+For `third_party/tcc`, `.gitmodules` tracks the `mob` branch of
+`https://github.com/sreekotay/tinycc.git`. If the check reports that the local
+TCC commit exists but is not reachable, publish it before pushing the
+superproject:
+
+```bash
+git -C third_party/tcc push origin HEAD:mob
+make check-submodules
+```
+
+If the submodule pointer is wrong instead, move `third_party/tcc` back to a
+reachable commit, then `git add third_party/tcc` in the superproject.
+
 ## BearSSL
 
 Lightweight TLS library ideal for CC's arena-based memory model:
