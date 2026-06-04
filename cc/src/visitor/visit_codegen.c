@@ -3634,8 +3634,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
         /* Phase 3 lowering — two-stage batched pipeline.
          *
-         * Stage 0 (text): if any `@blocking` / `@noblock` call-site markers
-         * are present, rewrite them in-buffer first so the stage-1 AST is
+         * Stage 0 (text): if any `@blocking` / `@noblock` / `@nonblocking`
+         * call-site or block markers are present, rewrite them in-buffer first so the stage-1 AST is
          * parsed against the marker-resolved form.  This is a pure text
          * transform and does not perturb byte offsets at the granularity
          * the AST passes care about.
@@ -3660,8 +3660,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          */
         if (src_ufcs &&
             (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
-             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock"))) {
-            /* @blocking/@noblock are lowered in canonicalize; phase-3 AST
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock") ||
+             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@nonblocking"))) {
+            /* @blocking/@noblock/@nonblocking are lowered in canonicalize; phase-3 AST
              * passes may still see markers if a prior edit reintroduced them. */
             char* cs = cc__rewrite_at_call_site_mode(src_ufcs, src_ufcs_len);
             if (cs) {

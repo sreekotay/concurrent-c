@@ -134,7 +134,7 @@ function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
 (`@async`, `@await`, `@match`, `@defer`, `@cancel`, `@errhandler`,
 `@destroy`, `@with_deadline`, `@comptime`, `@blocking`,
-`@noblock`, `@lock`, `@for`). Bare forms are
+`@nonblocking`, `@lock`, `@for`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
 etc. are legal variable / field / function names and never keywords
 without the `@`. This eliminates identifier-collision and
@@ -183,10 +183,10 @@ Normative rules in §14.
 Everything else in this specification is one of:
 
 - **Sugar** over these primitives (e.g., `CALL() !> @destroy { D };` schedules `D` on scope exit — it is `@defer` at a declaration with error-checked construction; `@lock (m) as g` is `@defer`-shaped).
-- **Attributes** (e.g., `@blocking`, `@noblock`, `@latency_sensitive`).
-  `@blocking` / `@noblock` are *dual*: both the function declaration
-  and the individual call site accept them, and they together define
-  the execution-mode contract at every call edge (§8.2).
+- **Attributes** (e.g., `@blocking`, `@nonblocking`, `@latency_sensitive`).
+  `@blocking` / `@nonblocking` are *dual*: function declarations,
+  lexical blocks, and individual call sites accept them, and they
+  together define the execution-mode contract at every call edge (§8.2).
 - **Library types** (e.g., `CCNursery`, `CCChan`, `CCMutex`, `CCVec`, `CCString`, `CCMap`), defined in terms of the primitives plus the runtime contract.
 
 ---
@@ -198,7 +198,7 @@ Syntax inventory, grouped by purpose. See §1 for the primitive taxonomy and ind
 ### Core Keywords
 
 All CC-introduced keywords carry a leading `@` sigil. Bare identifiers
-(`match`, `await`, `async`, `defer`, `noblock`, `blocking`, `comptime`,
+(`match`, `await`, `async`, `defer`, `nonblocking`, `blocking`, `comptime`,
 …) are legal C names and never keywords on their own. This gives the
 lexer an unambiguous sentinel for every CC construct and removes an
 entire class of keyword-in-comment / keyword-in-identifier scanner
@@ -221,7 +221,8 @@ bugs.
 | `@lock`        | Acquire mutex, bind guard                                               | `@lock (m) as g { g.data++; }`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
 | `@blocking`    | Mark a call edge as going through `run_blocking` (function or site)     | `@blocking f();` — see §8.2            |
-| `@noblock`     | Mark a call edge as non-blocking, bypass `run_blocking` (function or site) | `@noblock f();` — see §8.2          |
+| `@nonblocking` | Mark a non-blocking execution-mode contract (function, block, or site) | `@nonblocking f();` — see §8.2      |
+| `@noblock`     | Compatibility spelling for `@nonblocking`                              | `@noblock f();` — see §8.2          |
 | `@latency_sensitive` | Disable dispatch coalescing for this `@async` fn                  | `@async @latency_sensitive void h() {}`|
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
 | `@for`         | Async iteration over a channel                                          | `@for @await (int x : ch) { … }`       |
@@ -237,7 +238,7 @@ bugs.
 | ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
 | `@async fn() { }`               | Define asynchronous function                             | `@async void handler() { }`                              |
 | `@blocking fn() { }`            | Mark declaration — async callers route through `run_blocking` at call edges (§8.2) | `@blocking FILE* open_config() { … }`                    |
-| `@noblock fn() { }`             | Mark declaration — async callers skip `run_blocking` at call edges (§8.2)          | `@noblock size_t strlen_nb(const char* s) { … }`         |
+| `@nonblocking fn() { }`         | Mark declaration — async callers skip `run_blocking` at call edges (§8.2)          | `@nonblocking size_t strlen_nb(const char* s) { … }`     |
 | `@latency_sensitive`            | Mark as latency-critical (no dispatch coalescing)        | `@async @latency_sensitive void handle() { }`            |
 | `@scoped type T`                | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                               |
 | `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
@@ -254,7 +255,8 @@ bugs.
 | Form                | Purpose                                                  | Example                    |
 | ------------------- | -------------------------------------------------------- | -------------------------- |
 | `@blocking expr;`   | Force this call edge to route through `run_blocking`     | `@blocking helper();`      |
-| `@noblock expr;`    | Force this call edge to skip `run_blocking`              | `@noblock helper();`       |
+| `@nonblocking expr;`| Force this call edge to skip `run_blocking`              | `@nonblocking helper();`   |
+| `@nonblocking { }`  | Set lexical ambient mode for direct call edges in block  | `@nonblocking { parse(); }`|
 
 
 ### Result unwrap operators (2)
@@ -3340,44 +3342,49 @@ may yield cooperatively at every `@await`. When it calls a function
 that may block an OS thread, the compiler wraps the call in
 `run_blocking` (dispatches it to the thread pool and yields until the
 worker returns). The question "does this call edge get wrapped?" is
-answered by two annotations, **`@blocking`** and **`@noblock`**, which
-are *dual*: each one can appear on a function declaration (ambient
-default) **and** on an individual call site (local override).
+answered by two annotations, **`@blocking`** and **`@nonblocking`**,
+which are *dual*: each one can appear on a function declaration
+(function ambient default), on a lexical block (block ambient default),
+and on an individual call site (local override). `@noblock` is a
+compatibility spelling for `@nonblocking`.
 
 #### 8.2.1 State-machine gating
 
 **Rule (state machines are gated on `@async`):** Only `@async`
 functions are lowered to a state machine. A sync function labeled
-`@blocking` or `@noblock` is still plain C — no frame lifting, no
-suspension points, no yield mechanics. Its `@blocking` / `@noblock`
+`@blocking` or `@nonblocking` is still plain C — no frame lifting, no
+suspension points, no yield mechanics. Its `@blocking` / `@nonblocking`
 label is a *contract to async callers* describing how their call
 edges should be lowered; it does not change how the function's own
 body is compiled.
 
 ```c
-@noblock  void fast_helper(void);  // plain C; contract: async callers skip run_blocking
-@blocking FILE* slow_helper(void); // plain C; contract: async callers wrap in run_blocking
-           void plain_helper(void); // plain C; contract: inherits caller ambient
+@nonblocking void fast_helper(void); // plain C; async callers skip run_blocking
+@blocking    FILE* slow_helper(void); // plain C; async callers wrap in run_blocking
+             void plain_helper(void); // plain C; inherits caller/block ambient
 ```
 
 #### 8.2.2 Call-edge mode resolution (normative)
 
 At every call site inside an `@async` body, the compiler picks a mode
-— **`@blocking`** (wrap in `run_blocking`, yield) or **`@noblock`**
+— **`@blocking`** (wrap in `run_blocking`, yield) or **`@nonblocking`**
 (direct call, no yield) — using the following precedence:
 
 1. **Call-site annotation** (highest precedence)
    - `@blocking f(...)` — force this edge through `run_blocking`.
-   - `@noblock  f(...)` — force this edge to skip `run_blocking`.
+   - `@nonblocking f(...)` — force this edge to skip `run_blocking`.
 2. **Callee's declaration-level annotation**
    - `@blocking fn f(...) { … }` → edge mode is `@blocking`.
-   - `@noblock  fn f(...) { … }` → edge mode is `@noblock`.
-3. **Caller's ambient mode** (one-hop only; see §8.2.4)
+   - `@nonblocking fn f(...) { … }` → edge mode is `@nonblocking`.
+3. **Lexical block ambient mode** (innermost annotated block)
+   - `@blocking { ... }` → undecorated known-CC call edges default to `@blocking`.
+   - `@nonblocking { ... }` → undecorated known-CC call edges default to `@nonblocking`.
+4. **Caller's ambient mode** (one-hop only; see §8.2.4)
    - If the enclosing `@async` function was declared
      `@async @blocking` → edges default to `@blocking`.
    - If the enclosing `@async` function was declared
-     `@async @noblock`  → edges default to `@noblock`.
-4. **Callee category fallback** (lowest)
+     `@async @nonblocking`  → edges default to `@nonblocking`.
+5. **Callee category fallback** (lowest)
    - Other `@async` function → no wrapping (the two state machines
      compose directly via `@await`).
    - Extern / FFI / unknown indirect (function pointer) call →
@@ -3387,7 +3394,7 @@ At every call site inside an `@async` body, the compiler picks a mode
 
 #### 8.2.3 Default ambient for `@async`
 
-**Rule:** A plain `@async fn` with neither `@blocking` nor `@noblock`
+**Rule:** A plain `@async fn` with neither `@blocking` nor `@nonblocking`
 at the declaration resolves ambient to `@blocking` (rule 3 above is
 effectively equivalent to rule 4's FFI/fallback default). This keeps
 async code conservative by default — blocking-looking call sites in
@@ -3401,8 +3408,8 @@ opted out.
     helper(fd, buf);          // sync CC fn w/o annotation → @blocking edge
 }
 
-@async @noblock void hot_path(int fd) {
-    // Ambient is @noblock: every call below is a direct call
+@async @nonblocking void hot_path(int fd) {
+    // Ambient is @nonblocking: every call below is a direct call
     // unless the callee or site opts back in.
     some_pure_helper();             // direct call
     @blocking sys_read(fd, …);      // call-site override: run_blocking + yield
@@ -3417,19 +3424,19 @@ call graph.
 
 ```c
            fn inner(void);           // no annotation
-@noblock   fn middle(void) {         // ambient @noblock
-    inner();                         // edge at `middle` uses @noblock → direct call
+@nonblocking fn middle(void) {       // ambient @nonblocking
+    inner();                         // edge at `middle` uses @nonblocking → direct call
 }
-@async @noblock fn outer(void) {     // ambient @noblock
-    middle();                        // edge at `outer` uses @noblock → direct call
+@async @nonblocking fn outer(void) { // ambient @nonblocking
+    middle();                        // edge at `outer` uses @nonblocking → direct call
 }
 ```
 
 Inside `middle`, the call `inner()` is lowered once using `middle`'s
 own ambient. We do **not** re-lower `middle`'s body under `outer`'s
 ambient — `middle` is compiled independently, and the edge into it
-from `outer` is the only edge `outer`'s `@noblock` affects. This is
-what makes `@blocking` / `@noblock` compatible with separate
+from `outer` is the only edge `outer`'s `@nonblocking` affects. This is
+what makes `@blocking` / `@nonblocking` compatible with separate
 compilation.
 
 #### 8.2.5 Call-site overrides
@@ -3437,14 +3444,16 @@ compilation.
 A call-site annotation is the local exception to the ambient policy:
 
 ```c
-@async @noblock void serve(CCChanRx rx) {
-    // Hot path: ambient @noblock.  Most calls are direct.
+@async @nonblocking void serve(CCChanRx rx) {
+    // Hot path: ambient @nonblocking.  Most calls are direct.
     while (true) {
         RedisRequest req;
         if (@await rx.recv(&req) != 0) break;
 
-        fast_decode(&req);          // direct call (ambient @noblock)
-        fast_dispatch(&req);        // direct call
+        @nonblocking {
+            fast_decode(&req);      // direct call (block ambient)
+            fast_dispatch(&req);    // direct call
+        }
 
         if (req.needs_disk) {
             @blocking write_log(&req);  // one-edge exception: bounce to pool
@@ -3461,9 +3470,9 @@ thread-pool dispatch without restructuring the surrounding code.
 
 ```c
 extern int           read (int fd, void* buf, int n);   // FFI → default @blocking
-extern @noblock size_t strlen(const char* s);           // FFI + explicit @noblock
+extern @nonblocking size_t strlen(const char* s);       // FFI + explicit @nonblocking
 @blocking FILE* open_config(const char* path);          // sync CC fn, @blocking
-@noblock  size_t strlen_nb(const char* s);              // sync CC fn, @noblock
+@nonblocking size_t strlen_nb(const char* s);           // sync CC fn, @nonblocking
 
 @async void example(int fd, const char* p) {
     char buf[128];
@@ -3471,14 +3480,14 @@ extern @noblock size_t strlen(const char* s);           // FFI + explicit @noblo
     //  edge mode     | reason
     // ---------------+-------------------------------------------------
     read(fd, buf, 128);       // @blocking | callee is FFI → fallback
-    strlen("abc");            // @noblock  | callee annotated @noblock
+    strlen("abc");            // @nonblocking | callee annotated @nonblocking
     open_config(p);           // @blocking | callee annotated @blocking
-    strlen_nb("abc");         // @noblock  | callee annotated @noblock
+    strlen_nb("abc");         // @nonblocking | callee annotated @nonblocking
     other_async();            // (async)   | callee is @async; uses @await directly
 
     // Call-site overrides:
-    @noblock  read(fd, buf, 128);    // @noblock  | site beats callee-FFI default
-    @blocking strlen("abc");         // @blocking | site beats callee @noblock
+    @nonblocking read(fd, buf, 128); // @nonblocking | site beats callee-FFI default
+    @blocking strlen("abc");         // @blocking    | site beats callee @nonblocking
 }
 ```
 
@@ -3489,16 +3498,16 @@ normative and specified in **Appendix J.1.1**.
 #### 8.2.7 FFI default and soundness
 
 **Rule:** All `extern` functions (C FFI) default to `@blocking` at
-call edges from `@async` bodies. Mark them `@noblock` to skip
+call edges from `@async` bodies. Mark them `@nonblocking` to skip
 wrapping:
 
 ```c
-extern @noblock int    memcmp(const void* a, const void* b, size_t n);
-extern @noblock void   memcpy(void* dst, const void* src, size_t n);
-extern @noblock size_t strlen(const char* s);
+extern @nonblocking int    memcmp(const void* a, const void* b, size_t n);
+extern @nonblocking void   memcpy(void* dst, const void* src, size_t n);
+extern @nonblocking size_t strlen(const char* s);
 ```
 
-**Rule:** Declaring `@noblock` on a function that may actually block
+**Rule:** Declaring `@nonblocking` on a function that may actually block
 an OS thread is **undefined behavior**. The compiler may assume the
 annotation is correct and elide wrapping safeguards. In debug builds,
 implementations may add runtime checks; in release builds, violations
@@ -3507,7 +3516,7 @@ are not recovered.
 **Rule:** Declaring `@blocking` on a function that never blocks is
 always safe — it just imposes an unnecessary thread-pool dispatch
 cost at async call edges. `@blocking` is the always-safe direction;
-`@noblock` is the contract obligation.
+`@nonblocking` is the contract obligation.
 
 #### 8.2.8 Indirect / function-pointer calls
 
@@ -3519,7 +3528,7 @@ indirect dispatch:
 
 ```c
 @async void run(Handler* h) {
-    @noblock h->fast(ctx);      // trust the indirect callee; no bounce
+    @nonblocking h->fast(ctx);  // trust the indirect callee; no bounce
     @blocking h->io(ctx);       // indirect callee; force the bounce
 }
 ```
@@ -3529,11 +3538,15 @@ indirect dispatch:
 | Surface                               | Meaning                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
 | `@blocking fn f() { … }`              | Declaration: at `@async` call edges to `f`, wrap in `run_blocking`.     |
-| `@noblock  fn f() { … }`              | Declaration: at `@async` call edges to `f`, skip `run_blocking`.        |
+| `@nonblocking fn f() { … }`           | Declaration: at `@async` call edges to `f`, skip `run_blocking`.        |
 | `@async @blocking fn g() { … }`       | `g`'s body has ambient `@blocking`; edges default to wrapping.          |
-| `@async @noblock  fn g() { … }`       | `g`'s body has ambient `@noblock`; edges default to direct calls.       |
+| `@async @nonblocking fn g() { … }`    | `g`'s body has ambient `@nonblocking`; edges default to direct calls.   |
+| `@nonblocking { … }`                  | Lexical block ambient: direct known-CC calls default to direct calls.   |
 | `@blocking expr;`                     | Call-site: force this one edge to wrap (beats callee + ambient).        |
-| `@noblock  expr;`                     | Call-site: force this one edge to direct-call (beats callee + ambient). |
+| `@nonblocking expr;`                  | Call-site: force this one edge to direct-call (beats callee + ambient). |
+
+`@noblock` is accepted as a compatibility spelling for `@nonblocking`
+in declaration, function-ambient, and call-site positions.
 
 The composition rule is the "one-hop" principle: **ambient applies
 only at the direct call edges of the function where it was declared,

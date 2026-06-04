@@ -96,6 +96,105 @@ static CCCallEdgeMode cc_resolve_call_edge_mode(unsigned int owner_attrs,
     return CC_CALL_MODE_BLOCKING;
 }
 
+/* Return the lexical ambient mode marker active at `offset`, if any.
+ *
+ * `cc__rewrite_at_call_site_mode` lowers
+ *
+ *   @nonblocking { ... } -> block marker comment, then `{ ... }`
+ *   @blocking    { ... } -> block marker comment, then `{ ... }`
+ *
+ * before parsing.  Comments survive in the source buffer used by this pass,
+ * so a small lexical scan can recover the current block ambient without
+ * teaching TCC a new statement form.  Nested ordinary blocks inherit their
+ * parent ambient; nested annotated blocks override it until their closing
+ * brace. */
+static unsigned int cc__block_mode_attrs_at_offset(const char* src, size_t len, size_t offset) {
+    if (!src || len == 0) return 0;
+    if (offset > len) offset = len;
+
+    unsigned int stack[256];
+    int depth = 0;
+    unsigned int pending = 0;
+
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    for (size_t i = 0; i < offset; ) {
+        char c = src[i];
+        char c2 = (i + 1 < offset) ? src[i + 1] : 0;
+
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < offset) { i += 2; continue; }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < offset) { i += 2; continue; }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                in_bc = 0;
+                i += 2;
+            } else {
+                i++;
+            }
+            continue;
+        }
+
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') {
+            size_t body_start = i + 2;
+            size_t j = body_start;
+            while (j + 1 < offset && !(src[j] == '*' && src[j + 1] == '/')) j++;
+            size_t body_len = (j + 1 < offset) ? (j - body_start) : 0;
+            if (body_len == 17 && memcmp(src + body_start, "@CC_BLOCK=noblock", 17) == 0) {
+                pending = CC_FN_ATTR_NOBLOCK;
+            } else if (body_len == 18 && memcmp(src + body_start, "@CC_BLOCK=blocking", 18) == 0) {
+                pending = CC_FN_ATTR_BLOCKING;
+            }
+            if (j + 1 < offset) {
+                i = j + 2;
+            } else {
+                in_bc = 1;
+                i += 2;
+            }
+            continue;
+        }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        if (c == '{') {
+            unsigned int inherited = (depth > 0) ? stack[depth - 1] : 0;
+            unsigned int mode = pending ? pending : inherited;
+            if (depth < (int)(sizeof(stack) / sizeof(stack[0]))) {
+                stack[depth++] = mode;
+            }
+            pending = 0;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            if (depth > 0) depth--;
+            pending = 0;
+            i++;
+            continue;
+        }
+        if (pending && !(c == ' ' || c == '\t' || c == '\r' || c == '\n')) {
+            pending = 0;
+        }
+        i++;
+    }
+
+    return (depth > 0) ? stack[depth - 1] : 0;
+}
+
 /* Alias shared types for local use */
 typedef CCNodeView NodeView;
 
@@ -691,10 +790,12 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
          * only — any other token terminates the scan so the marker
          * only applies to the call it directly prefixes. */
         unsigned int site_attrs = 0;
+        unsigned int block_attrs = 0;
         if (n[i].line_start > 0 && n[i].col_start > 0) {
             size_t call_name_pos = cc__offset_of_line_col_1based(
                 in_src, in_len, n[i].line_start, n[i].col_start);
             if (call_name_pos > 0 && call_name_pos <= in_len) {
+                block_attrs = cc__block_mode_attrs_at_offset(in_src, in_len, call_name_pos);
                 size_t p = call_name_pos;
                 /* Skip through identifier chars to land before the callee name. */
                 while (p > 0 && (isalnum((unsigned char)in_src[p - 1]) || in_src[p - 1] == '_')) p--;
@@ -727,14 +828,19 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
 
         /* Spec §8.2.2: resolve the call-edge mode via the one precedence
          * chain.  Anything non-blocking skips the autoblock wrap. */
+        unsigned int ambient_attrs = owner_attrs;
+        if (block_attrs & (CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK)) {
+            ambient_attrs &= ~(unsigned int)(CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK);
+            ambient_attrs |= block_attrs & (CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK);
+        }
         CCCallEdgeMode edge_mode = cc_resolve_call_edge_mode(
-            owner_attrs, callee_attrs, callee_known, site_attrs);
+            ambient_attrs, callee_attrs, callee_known, site_attrs);
         if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
             const char* mode_name =
                 (edge_mode == CC_CALL_MODE_ASYNC) ? "async" :
                 (edge_mode == CC_CALL_MODE_NOBLOCK) ? "noblock" : "blocking";
-            fprintf(stderr, "  edge_mode=%s site_attrs=0x%x callee_attrs=0x%x owner_attrs=0x%x callee_known=%d under_await=%d chan=%d\n",
-                    mode_name, site_attrs, callee_attrs, owner_attrs, callee_known,
+            fprintf(stderr, "  edge_mode=%s site_attrs=0x%x block_attrs=0x%x callee_attrs=0x%x owner_attrs=0x%x ambient_attrs=0x%x callee_known=%d under_await=%d chan=%d\n",
+                    mode_name, site_attrs, block_attrs, callee_attrs, owner_attrs, ambient_attrs, callee_known,
                     is_under_await, is_chan_op);
         }
         if (edge_mode != CC_CALL_MODE_BLOCKING) continue;
@@ -1147,7 +1253,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
 
         if (kind == CC_AB_REWRITE_STMT_CALL) {
             /* plain statement call: require call begins statement token.
-             * Allow whitespace and block comments (e.g. `/*@CC_SITE=...*\/`
+             * Allow whitespace and block comments (including CC_SITE markers
              * call-site markers dropped by cc__rewrite_at_call_site_mode). */
             if (is_stmt_form) {
                 int ok = 1;

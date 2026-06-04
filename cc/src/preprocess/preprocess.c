@@ -6251,27 +6251,33 @@ static void cc__collect_async_ret_types(const char* src, size_t n) {
     }
 }
 
-/* Rewrite call-site `@blocking callee(args)` / `@noblock callee(args)`.
+/* Rewrite call-site `@blocking callee(args)` / `@noblock callee(args)`,
+ * canonicalize preferred `@nonblocking` spelling, and mark lexical
+ * `@nonblocking { ... }` / `@blocking { ... }` ambient blocks.
  *
  * Leaves a comment-marker form that survives TCC parsing as whitespace
  * but can be recovered by pass_autoblock by scanning source text
  * immediately before each CALL node:
  *
- *   @blocking foo(x)  ->  /*@CC_SITE=blocking*\/ foo(x)
- *   @noblock  foo(x)  ->  /*@CC_SITE=noblock*\/ foo(x)
+ *   @blocking foo(x)  ->  CC_SITE marker comment, then foo(x)
+ *   @noblock  foo(x)  ->  CC_SITE marker comment, then foo(x)
+ *   @nonblocking {    ->  CC_BLOCK marker comment, then {
  *
  * Decl-level attrs (`@blocking int foo(...)`) are *not* rewritten: the
  * decl-form has a type token between `@blocking` and the name, so the
- * pattern `@blocking IDENT (` does not match.  Function definitions
- * (where the closing `)` is followed by `{`) are also skipped — the
- * TCC cc-ext hook handles those.  Spec §8.2.2 precedence rule 1. */
+ * pattern `@blocking IDENT (` does not match.  `@nonblocking` decl
+ * attributes are rewritten to the existing `@noblock` spelling so the
+ * TCC cc-ext hook records the same attr bit.  Function definitions
+ * (where the closing `)` is followed by `{`) are otherwise skipped.
+ * Spec §8.2.2 precedence rule 1. */
 char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
-    /* Early exit if neither `@blocking` nor `@noblock` appears outside
+    /* Early exit if no mode marker appears outside
      * comments/strings.  The cheap pre-check avoids building the output
      * buffer in the common case. */
     if (!cc_contains_token_top_level(src, n, "@blocking") &&
-        !cc_contains_token_top_level(src, n, "@noblock")) {
+        !cc_contains_token_top_level(src, n, "@noblock") &&
+        !cc_contains_token_top_level(src, n, "@nonblocking")) {
         return NULL;
     }
 
@@ -6296,26 +6302,69 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
 
         const char* mode = NULL;
         size_t kw_len = 0;
+        int canonicalize_to_noblock = 0;
         if (i + 9 <= n && memcmp(src + i + 1, "blocking", 8) == 0 &&
             (i + 9 == n || !cc_is_ident_char(src[i + 9]))) {
             mode = "blocking"; kw_len = 8;
         } else if (i + 8 <= n && memcmp(src + i + 1, "noblock", 7) == 0 &&
                    (i + 8 == n || !cc_is_ident_char(src[i + 8]))) {
             mode = "noblock"; kw_len = 7;
+        } else if (i + 12 <= n && memcmp(src + i + 1, "nonblocking", 11) == 0 &&
+                   (i + 12 == n || !cc_is_ident_char(src[i + 12]))) {
+            mode = "noblock"; kw_len = 11;
+            canonicalize_to_noblock = 1;
         }
         if (!mode) { i++; continue; }
 
-        /* Need: `@<mode> IDENT (<balanced>) <not-'{'>` to call this a call-site.
-         * Probe ahead without committing. */
+        /* Block ambient form: `@nonblocking { ... }` or `@blocking { ... }`.
+         * The marker comment attaches to the immediately following block and
+         * is interpreted by pass_autoblock as lexical ambient mode. */
         size_t p = i + 1 + kw_len;
         while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
-        if (p >= n || !cc_is_ident_start(src[p])) { i++; continue; }
+        if (p < n && src[p] == '{') {
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            if (strcmp(mode, "blocking") == 0) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "/*@CC_BLOCK=blocking*/ ");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "/*@CC_BLOCK=noblock*/ ");
+            }
+            last_emit = p;
+            i = p;
+            changed = 1;
+            continue;
+        }
+
+        /* Need: `@<mode> IDENT (<balanced>) <not-'{'>` to call this a call-site.
+         * Probe ahead without committing. */
+        if (p >= n || !cc_is_ident_start(src[p])) {
+            if (canonicalize_to_noblock) {
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@noblock");
+                last_emit = i + 1 + kw_len;
+                i = last_emit;
+                changed = 1;
+                continue;
+            }
+            i++;
+            continue;
+        }
         size_t id_s = p;
         while (p < n && cc_is_ident_char(src[p])) p++;
         size_t id_e = p;
         size_t after_id = p;
         while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
-        if (p >= n || src[p] != '(') { i++; continue; }
+        if (p >= n || src[p] != '(') {
+            if (canonicalize_to_noblock) {
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@noblock");
+                last_emit = i + 1 + kw_len;
+                i = last_emit;
+                changed = 1;
+                continue;
+            }
+            i++;
+            continue;
+        }
 
         /* Find matching ')' respecting strings/chars. */
         size_t m = p;
@@ -6338,7 +6387,18 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
          * definition — leave the marker intact for TCC cc-ext. */
         size_t q = rparen_end;
         while (q < n && (src[q] == ' ' || src[q] == '\t' || src[q] == '\r' || src[q] == '\n')) q++;
-        if (q < n && src[q] == '{') { i++; continue; }
+        if (q < n && src[q] == '{') {
+            if (canonicalize_to_noblock) {
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@noblock");
+                last_emit = i + 1 + kw_len;
+                i = last_emit;
+                changed = 1;
+                continue;
+            }
+            i++;
+            continue;
+        }
 
         /* Emit everything before `@<mode>`, then our marker + original
          * call expression text verbatim.  Using a block comment keeps
@@ -6355,6 +6415,8 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
         i = rparen_end;
         changed = 1;
         (void)id_e; (void)after_id;
+        continue;
+
     }
 
     if (!changed) { free(out); return NULL; }
