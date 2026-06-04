@@ -1318,19 +1318,26 @@ static void* reply_value_builder(void* env, intptr_t slot, intptr_t arena) {
 
 /* Queue a finished reply into channel-owned storage. Large/borrowed payload
  * bytes are already stabilized in conn->reply_arena by the caller. */
-static inline bool reply_send(ReplyTx tx, RedisReply* reply, CCArena* arena) {
+@noblock static inline bool reply_send(ReplyTx tx, RedisReply* reply, CCArena* arena) {
     if (!reply) return false;
-    @errhandler(CCError e) { cc_channel_close(tx, cc_io_error(e)); return false; }
     CCClosure2 build_reply = cc_closure2_make(reply_value_builder, reply, NULL);
-    return cc_chan_result_with(tx.raw,
-                               cc_channel_raw_send_into(tx.raw,
-                                                        build_reply,
-                                                        sizeof(RedisReply),
-                                                        arena),
-                               false) !>(e) {
+    CCResult_bool_CCIoError send_res =
+        cc_chan_result_with(tx.raw,
+                            cc_channel_raw_try_send_into(tx.raw,
+                                                         build_reply,
+                                                         sizeof(RedisReply),
+                                                         arena),
+                            false);
+    if (send_res.ok && send_res.u.value) return true;
+
+    if (!send_res.ok) {
+        CCIoError e = send_res.u.error;
         cc_channel_close(tx, e);
         return false;
-    };
+    }
+
+    cc_channel_close(tx, cc_io_error(CC_IO_CONNECTION_CLOSED));
+    return false;
 }
 
 @noblock static inline void reply_release_batch(RedisConn* conn) {

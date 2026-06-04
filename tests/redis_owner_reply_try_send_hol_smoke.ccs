@@ -9,7 +9,7 @@
  *    owner blocks on that reply send.  A fast client's request is queued behind
  *    the blocked owner and cannot complete until the slow side drains a slot.
  *
- * 2) try_send: owner uses cc_channel_try_send + close-on-full (EAGAIN).
+ * 2) try_send_into: owner uses cc_channel_raw_try_send_into + close-on-full (EAGAIN).
  *    After the slow channel is full, overflow does not park the owner; the fast
  *    client's request is still answered before the slow overflow is attempted.
  *
@@ -251,6 +251,13 @@ static int run_blocking_hol_demo(void) {
 static cc_atomic_int g_slow_prefill_sent = 0;
 static cc_atomic_int g_fast_reply_received = 0;
 
+static void* int_reply_builder(void* env, intptr_t slot, intptr_t arena) {
+    (void)arena;
+    int* value = (int*)env;
+    *(int*)slot = value ? *value : 0;
+    return NULL;
+}
+
 static void hol_owner_try_send_policy(HolReqRx req_rx) {
     QueueReq* req = NULL;
     while (cc_io_avail(cc_channel_recv(req_rx, &req))) {
@@ -260,7 +267,11 @@ static void hol_owner_try_send_policy(HolReqRx req_rx) {
         (void)req->reply_ch;
         free(req);
 
-        CCResult_bool_CCIoError ts = cc_channel_try_send(tx, v);
+        CCClosure2 build_reply = cc_closure2_make(int_reply_builder, &v, NULL);
+        CCResult_bool_CCIoError ts =
+            cc_chan_result_with(tx.raw,
+                                cc_channel_raw_try_send_into(tx.raw, build_reply, sizeof(int), NULL),
+                                false);
         if (ts.ok && ts.u.value) {
             continue;
         }
