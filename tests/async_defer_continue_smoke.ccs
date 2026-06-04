@@ -1,0 +1,39 @@
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+static int g_cleanup_count = 0;
+static int g_body_count = 0;
+
+static void cleanup_one(void) {
+    g_cleanup_count++;
+}
+
+@async int worker(void) {
+    for (int i = 0; i < 4; i++) {
+        @defer cleanup_one();
+        if ((i & 1) == 0) continue;
+        g_body_count++;
+    }
+    return 0;
+}
+
+int main(void) {
+    g_cleanup_count = 0;
+    g_body_count = 0;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 10;
+        if (n->spawn_async(worker()) != 0) return 11;
+    }
+
+    if (g_body_count != 2 || g_cleanup_count != 4) {
+        printf("async_defer_continue_smoke: FAIL body=%d cleanup=%d\n",
+               g_body_count, g_cleanup_count);
+        return 1;
+    }
+
+    printf("async_defer_continue_smoke: OK\n");
+    return 0;
+}
