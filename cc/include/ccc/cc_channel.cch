@@ -270,6 +270,7 @@ void cc_chan_free(CCChan* ch);
 
 // Blocking send/recv. Returns 0 on success or an errno-style error.
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size);
+int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena);
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
 
 // Batched send/recv: sends or receives `count` elements from/to contiguous buffers.
@@ -277,6 +278,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
 
 // Non-blocking: return EAGAIN if would block.
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
+int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena);
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);
 void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig);
 
@@ -431,11 +433,17 @@ static inline void cc_channel_raw_free(CCChan* ch) { cc_chan_free(ch); }
 static inline int cc_channel_raw_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_send(ch, value, value_size);
 }
+static inline int cc_channel_raw_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    return cc_chan_send_into(ch, builder, value_size, arena);
+}
 static inline int cc_channel_raw_recv(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_recv(ch, out_value, value_size);
 }
 static inline int cc_channel_raw_try_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_try_send(ch, value, value_size);
+}
+static inline int cc_channel_raw_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    return cc_chan_try_send_into(ch, builder, value_size, arena);
 }
 static inline int cc_channel_raw_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_try_recv(ch, out_value, value_size);

@@ -1,0 +1,53 @@
+#include <ccc/cc_channel.cch>
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef struct BigMsg {
+    uintptr_t builder_slot;
+    int value;
+    char pad[96];
+} BigMsg;
+
+int main(void) {
+    CCChan* ch = cc_chan_create(2);
+    assert(ch != NULL);
+    assert(cc_chan_init_elem(ch, sizeof(BigMsg)) == 0);
+
+    int base = 40;
+    CCClosure2 build_a = (slot, arena) => [base] {
+        (void)arena;
+        BigMsg* out = (BigMsg*)slot;
+        memset(out, 0, sizeof(*out));
+        out->builder_slot = (uintptr_t)out;
+        out->value = base + 1;
+        return NULL;
+    };
+    CCClosure2 build_b = (slot, arena) => [base] {
+        (void)arena;
+        BigMsg* out = (BigMsg*)slot;
+        memset(out, 0, sizeof(*out));
+        out->builder_slot = (uintptr_t)out;
+        out->value = base + 2;
+        return NULL;
+    };
+
+    assert(cc_chan_try_send_into(ch, build_a, sizeof(BigMsg), NULL) == 0);
+    assert(cc_chan_try_send_into(ch, build_b, sizeof(BigMsg), NULL) == 0);
+
+    BigMsg a = {0};
+    BigMsg b = {0};
+    assert(cc_chan_recv(ch, &a, sizeof(a)) == 0);
+    assert(cc_chan_recv(ch, &b, sizeof(b)) == 0);
+
+    assert(a.value == 41);
+    assert(b.value == 42);
+    assert(a.builder_slot != 0);
+    assert(b.builder_slot != 0);
+    assert(a.builder_slot != b.builder_slot);
+    assert(a.builder_slot != (uintptr_t)&a);
+    assert(b.builder_slot != (uintptr_t)&b);
+
+    cc_chan_free(ch);
+    return 0;
+}

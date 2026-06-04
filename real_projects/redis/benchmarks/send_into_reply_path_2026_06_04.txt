@@ -1,0 +1,12 @@
+# Reply Path Benchmark
+
+- iterations: `500000`
+- depth: `16`
+- reply_size: `264`
+
+| Path | ns/item | M items/sec | vs local |
+|---|---:|---:|---:|
+| `local_ready_queue<RedisReply>` | 52.99 | 18.87 | 1.000x |
+| `cc_chan<RedisReply>` | 58.32 | 17.15 | 1.101x |
+| `cc_chan<RedisReply>.send_into` | 57.89 | 17.28 | 1.092x |
+| `cc_chan<RedisReply*>` | 45.14 | 22.15 | 0.852x |

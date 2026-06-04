@@ -1,0 +1,59 @@
+tmp dir: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_robust.XXXXXX.iACRf2sYAR
+[warmup]
+   upstream  set   rps=1694915.25
+   idiomatic set   rps=1190476.25
+   idiomatic get   rps=1785714.25
+   upstream  get   rps=2439024.25
+   upstream  incr  rps=2083333.38
+   idiomatic incr  rps=2083333.38
+[round 1/3]
+   idiomatic set   rps=2173913.00
+   upstream  set   rps=1666666.75
+   upstream  get   rps=2040816.38
+   idiomatic get   rps=2083333.38
+   idiomatic incr  rps=2439024.25
+   upstream  incr  rps=1886792.50
+[round 2/3]
+   idiomatic set   rps=1666666.75
+   upstream  set   rps=1666666.75
+   idiomatic get   rps=2040816.38
+   upstream  get   rps=2222222.25
+   idiomatic incr  rps=2222222.25
+   upstream  incr  rps=2000000.00
+[round 3/3]
+   upstream  set   rps=1724138.00
+   idiomatic set   rps=2272727.25
+   idiomatic get   rps=2222222.25
+   upstream  get   rps=2040816.38
+   idiomatic incr  rps=2272727.25
+   upstream  incr  rps=2127659.75
+
+== bench_robust summary ==
+rounds=3 requests_per_round=100000 clients=50 pipeline=16 cc_workers=default
+sample_interval=0.05s  samples_taken: upstream=28  idiomatic=28
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.686M   1.667M   1.667M   1.724M   0.033M   2.0%
+  idiomatic    2.038M   2.174M   1.667M   2.273M   0.325M  16.0%
+  idiomatic/upstream median: 1.304x  (OVERLAP)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.101M   2.041M   2.041M   2.222M   0.105M   5.0%
+  idiomatic    2.115M   2.083M   2.041M   2.222M   0.095M   4.5%
+  idiomatic/upstream median: 1.021x  (OVERLAP)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.005M   2.000M   1.887M   2.128M   0.121M   6.0%
+  idiomatic    2.311M   2.273M   2.222M   2.439M   0.113M   4.9%
+  idiomatic/upstream median: 1.136x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.7MB              3
+  idiomatic      19.8MB             13
+
+[IDIOMATIC DB ARENAS] final CC.MEMLOG unavailable; see idiomatic.log
+
