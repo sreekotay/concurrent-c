@@ -303,32 +303,36 @@ static inline CCSlice cc_path_join(CCArena *arena, CCSlice a, CCSlice b) {
     if (!arena) return cc_slice_empty();
     size_t need_sep = (a.len > 0 && ((char*)a.ptr)[a.len - 1] != cc_path_sep()) ? 1 : 0;
     size_t total = a.len + need_sep + b.len;
-    char *buf = (char *)cc_arena_alloc(arena, total + 1, sizeof(char));
+    CCSlice out = cc_arena_alloc_slice_bytes(arena, total + 1);
+    char *buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     size_t off = 0;
     if (a.len) { memcpy(buf + off, a.ptr, a.len); off += a.len; }
     if (need_sep) { buf[off++] = cc_path_sep(); }
     if (b.len) { memcpy(buf + off, b.ptr, b.len); off += b.len; }
     buf[off] = '\0';
-    return cc_slice_from_parts(buf, off, CC_SLICE_ID_UNTRACKED, off + 1);
+    out.len = off;
+    return out;
 }
 
 // Dirname: returns parent directory (or "." if none). Allocates in arena.
 static inline CCSlice cc_path_dirname(CCArena *arena, CCSlice path) {
-    if (!arena || !path.ptr || path.len == 0) return cc_slice_from_buffer(".", 1);
+    if (!arena || !path.ptr || path.len == 0) return cc_slice_from_static(".", 1);
     const char *p = (const char *)path.ptr;
     size_t len = path.len;
     while (len > 0 && p[len - 1] == cc_path_sep()) len--;
-    if (len == 0) return cc_slice_from_buffer("/", 1);
+    if (len == 0) return cc_slice_from_static("/", 1);
     size_t i = len;
     while (i > 0 && p[i - 1] != cc_path_sep()) i--;
-    if (i == 0) return cc_slice_from_buffer(".", 1);
+    if (i == 0) return cc_slice_from_static(".", 1);
     while (i > 1 && p[i - 1] == cc_path_sep()) i--;
-    char *buf = (char *)cc_arena_alloc(arena, i + 1, sizeof(char));
+    CCSlice out = cc_arena_alloc_slice_bytes(arena, i + 1);
+    char *buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     memcpy(buf, p, i);
     buf[i] = '\0';
-    return cc_slice_from_parts(buf, i, CC_SLICE_ID_UNTRACKED, i + 1);
+    out.len = i;
+    return out;
 }
 
 // Basename: returns last path component (empty if path ends with separator). Allocates in arena.
@@ -343,11 +347,13 @@ static inline CCSlice cc_path_basename(CCArena *arena, CCSlice path) {
         if (p[i - 1] == cc_path_sep()) { start = i; break; }
     }
     size_t out_len = (end > start) ? (end - start) : 0;
-    char *buf = (char *)cc_arena_alloc(arena, out_len + 1, sizeof(char));
+    CCSlice out = cc_arena_alloc_slice_bytes(arena, out_len + 1);
+    char *buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     if (out_len) memcpy(buf, p + start, out_len);
     buf[out_len] = '\0';
-    return cc_slice_from_parts(buf, out_len, CC_SLICE_ID_UNTRACKED, out_len + 1);
+    out.len = out_len;
+    return out;
 }
 
 // ------------------------- Buffered reader/writer --------------------------

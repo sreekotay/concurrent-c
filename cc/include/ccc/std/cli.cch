@@ -99,7 +99,7 @@ static inline CCSlice cc_parsed_args_ufcs_rewrite(CCSlice recv_type,
         || cc_ufcs_slice_eq_cstr(method, "find_value_at")
         || cc_ufcs_slice_eq_cstr(method, "find_last_value")) {
         return cc_slice_concat2(
-            cc_slice_from_buffer("cc_parsed_args_", sizeof("cc_parsed_args_") - 1),
+            cc_slice_from_static("cc_parsed_args_", sizeof("cc_parsed_args_") - 1),
             method, arena);
     }
     return cc_slice_empty();
@@ -116,7 +116,7 @@ static inline CCSlice cc_cli_parse_ufcs_rewrite(CCSlice recv_type,
     (void)argv;
     (void)arg_types;
     if (cc_ufcs_slice_eq_cstr(method, "print")) {
-        return cc_slice_from_buffer("cc_cli_parse_print", sizeof("cc_cli_parse_print") - 1);
+        return cc_slice_from_static("cc_cli_parse_print", sizeof("cc_cli_parse_print") - 1);
     }
     return cc_slice_empty();
 }

@@ -93,10 +93,10 @@ CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
 
 static inline CCSlice cc_slice_clone(CCArena *arena, CCSlice s) {
     if (!arena || s.len == 0) return s.len == 0 ? cc_slice_empty() : s;
-    void *buf = cc_arena_alloc(arena, s.len, sizeof(char));
-    if (!buf) return cc_slice_empty();
-    if (s.ptr && s.len) memcpy(buf, s.ptr, s.len);
-    return cc_slice_from_parts(buf, s.len, CC_SLICE_ID_UNTRACKED, s.len);
+    CCSlice stable = cc_arena_alloc_slice_bytes(arena, s.len);
+    if (!stable.ptr) return cc_slice_empty();
+    if (s.ptr && s.len) memcpy(stable.ptr, s.ptr, s.len);
+    return stable;
 }
 
 static inline char *cc_slice_c_str(CCArena *arena, CCSlice s) {

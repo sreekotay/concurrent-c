@@ -372,13 +372,16 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
  * `<prefix><method>` callee names without pulling in the heavier string header.
  * Arena is the LAST argument by convention: read it as "concat(left, right)
  * into arena". */
+static inline CCSlice cc_arena_alloc_slice_bytes(CCArena *arena, size_t len);
+
 static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArena *arena) {
     size_t total = left.len + right.len;
-    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
-    if (!buf) return cc_slice_empty();
+    CCSlice out = arena ? cc_arena_alloc_slice_bytes(arena, total) : cc_slice_empty();
+    char *buf = (char *)out.ptr;
+    if (total > 0 && !buf) return cc_slice_empty();
     if (left.len > 0 && left.ptr) memcpy(buf, left.ptr, left.len);
     if (right.len > 0 && right.ptr) memcpy(buf + left.len, right.ptr, right.len);
-    return cc_slice_from_buffer(buf, total);
+    return out;
 }
 
 /* Generic UFCS name composer for any CamelCase-named receiver whose C
@@ -440,6 +443,7 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     size_t body_start;
     int has_cc_prefix;
     char *buf;
+    CCSlice out;
     (void)mode;
     (void)argv;
     (void)arg_types;
@@ -490,12 +494,13 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
            the macro + helper) includes this header, so we can't reference
            cc_ufcs_pass() here without a circular include. */
         static const char pass_tag[] = "__cc_ufcs_pass__";
-        return cc_slice_from_buffer((void*)pass_tag, sizeof(pass_tag) - 1);
+        return cc_slice_from_static((void*)pass_tag, sizeof(pass_tag) - 1);
     }
     /* Worst case: every char is uppercase and gains a `_`, so plan for
        2x + optional `cc_` prefix + `_` separator + method. */
     max_total = 3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
-    buf = (char *)cc_arena_alloc(arena, max_total, sizeof(char));
+    out = cc_arena_alloc_slice_bytes(arena, max_total);
+    buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     wi = 0;
     if (has_cc_prefix) {
@@ -522,7 +527,8 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         wi += method.len;
     }
     total = wi;
-    return cc_slice_from_buffer(buf, total);
+    out.len = total;
+    return out;
 }
 
 /* Slice marker types (`CCSliceUnique`, `CCSliceShared`) are ABI-compatible
@@ -539,17 +545,19 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
     size_t prefix_len = sizeof(prefix) - 1;
     size_t total;
     char *buf;
+    CCSlice out;
     (void)recv_type;
     (void)mode;
     (void)argv;
     (void)arg_types;
     if (!arena) return cc_slice_empty();
     total = prefix_len + method.len;
-    buf = (char *)cc_arena_alloc(arena, total, sizeof(char));
+    out = cc_arena_alloc_slice_bytes(arena, total);
+    buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     memcpy(buf, prefix, prefix_len);
     if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
-    return cc_slice_from_buffer(buf, total);
+    return out;
 }
 
 /* ------------------------------------------------------------
@@ -963,6 +971,12 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     uint64_t id = cc_slice_make_id(arena->provenance, false, false, false);
     // len/alen expressed in element count, per slice ABI convention.
     return cc_slice_from_parts(ptr, count, id, count);
+}
+
+static inline bool cc_slice_is_from_arena_epoch(CCSlice slice, const CCArena *arena) {
+    return arena &&
+           !cc_slice_is_untracked(slice) &&
+           cc_slice_alloc_id(slice.id) == arena->provenance;
 }
 
 /* CCArena's UFCS dispatch is covered by the global `*` registration
