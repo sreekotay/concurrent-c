@@ -127,6 +127,19 @@ static inline RedisPipelineBatch redis_pipeline_batch_start(void) {
     };
 }
 
+static inline bool redis_pipeline_batch_has_room(const RedisPipelineBatch* batch) {
+    return batch && batch->submitted < batch->cap;
+}
+
+static inline bool redis_pipeline_batch_is_full(const RedisPipelineBatch* batch) {
+    return batch && batch->submitted == batch->cap;
+}
+
+static inline void redis_pipeline_batch_accept(RedisPipelineBatch* batch) {
+    batch->submitted++;
+    batch->replies_pending++;
+}
+
 typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
 typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
@@ -319,12 +332,9 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     return (RedisCommandKind)-1;
 }
 
-/* RedisReply is ~200 bytes (mostly the 128-byte inline_buf scratch).
- * These constructors deliberately leave inline_buf/arena/data_inline
- * uninitialized: the only fields the normal path reads are kind + data
- * + int_value. Stable-storage fallback uses reply_materialize() only
- * for the rare request-owned reply case, so skipping per-reply `= {0}`
- * still saves ~200 B of zero-init on the GET/SET/INCR hot path. */
+/* RedisReply still carries shared benchmark scratch fields, but the idiomatic
+ * server only reads kind/data/int_value. Leave the unused tail uninitialized
+ * so hot reply constructors avoid zeroing the whole by-value channel payload. */
 static RedisReply reply_simple(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_SIMPLE_STRING;
@@ -1192,7 +1202,6 @@ static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply
     char* dst = reply_alloc_bytes(arena, reply->data.len) !>;
     if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
     reply->data = (CCSlice){ .ptr = dst, .len = reply->data.len };
-    reply->data_inline = 0;
     return cc_ok(true);
 }
 
@@ -1415,7 +1424,7 @@ static bool !>(CCError) submit_pipeline_batch(RedisConn* conn,
 
     batch->submitted = 0;
     batch->replies_pending = 0;
-    for (size_t s = 0; s < batch->cap; s++) {
+    while (redis_pipeline_batch_has_room(batch)) {
         RedisRequest* req = NULL;
         bool has = rr_req_iter_next(req_iter, &req) !>;
         if (!has) break;
@@ -1425,8 +1434,7 @@ static bool !>(CCError) submit_pipeline_batch(RedisConn* conn,
             redis_conn_release_request(req);
             return cc_ok(false);
         }
-        batch->replies_pending++;
-        batch->submitted++;
+        redis_pipeline_batch_accept(batch);
     }
 
     return cc_ok(true);
@@ -1491,7 +1499,7 @@ static bool drain_pipeline_batch(CCSocket* client, RedisConn* conn, RedisPipelin
          * before parking on another read.  Otherwise -P larger than the server
          * batch cap can leave commands stranded in read_buf while the fiber
          * waits for new socket readiness that may never arrive. */
-        if (batch.submitted == batch.cap && reader.start < reader.end) continue;
+        if (redis_pipeline_batch_is_full(&batch) && reader.start < reader.end) continue;
 
         /* rr_fill: park until more bytes arrive or EOF. */
         bool more = rr_fill(&reader, &client) !>(e) { write_reply_now(&client, conn, io_err_reply(e)); return 0; };
