@@ -1370,6 +1370,15 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
     return false;
 }
 
+@noblock static inline bool !>(CCError) redis_conn_send_reply_for_request(RedisConn* conn,
+                                                                         const RedisRequest* req,
+                                                                         RedisReply* reply) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!conn || !reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply send null arg"));
+    redis_reply_prepare_for_channel_send(req, reply, &conn->reply_arena) !>;
+    return cc_ok(redis_conn_send_reply(conn, reply));
+}
+
 @noblock static inline void reply_release_batch(RedisConn* conn) {
     if (conn) cc_arena_reset_nb(&conn->reply_arena);
 }
@@ -1414,8 +1423,7 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
         }
 
         RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
-        redis_reply_prepare_for_channel_send(req, &reply, &conn->reply_arena) !>;
-        bool reply_queued = redis_conn_send_reply(conn, &reply);
+        bool reply_queued = redis_conn_send_reply_for_request(conn, req, &reply) !>;
         if (!reply_queued) continue;
     }
     return 0;
