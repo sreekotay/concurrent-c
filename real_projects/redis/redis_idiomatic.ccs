@@ -203,10 +203,10 @@ static CCIoError net_to_io_error(CCNetError err) {
     }
 }
 
-/* Line-oriented stderr: build with @string on a short-lived scratch arena (stack
- * buffer + @create), then fprintf the NUL-terminated C string from cc_string_cstr
- * (tests/string_template_smoke.ccs). Prefer plain fprintf inside @async bodies:
- * @create/@string in owner_loop error arms confused the async autoblock pass. */
+/* Line-oriented stderr via @string scratch arena (see string_template_smoke).
+ * In @async bodies, wrap @create/@string in @nonblocking — default autoblock
+ * would dispatch arena init/diag to the blocking pool (see
+ * tests/async_create_string_nonblocking_smoke.ccs). */
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
@@ -318,14 +318,6 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 }
 
 #include "redis_resp.cch"
-
-@noblock static RespReader rr_init_nb(char* data, size_t cap) {
-    return rr_init(data, cap);
-}
-
-@noblock static void cc_arena_reset_nb(CCArena* arena) {
-    cc_arena_reset(arena);
-}
 
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
@@ -976,9 +968,8 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
     return cc_ok(true);
 }
 
-/* Owner-private dispatch.  Called only from owner_loop, so db access
- * here needs no lock.  `@noblock` forces pass_autoblock to inline
- * each call site rather than bouncing through the threadpool. */
+/* Owner-private dispatch.  `@noblock`: owner runs on the scheduler poll
+ * thread and must not dispatch DB work to the blocking pool. */
 @noblock static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
@@ -1372,7 +1363,9 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
 }
 
 @noblock static inline void reply_release_batch(RedisConn* conn) {
-    if (conn) cc_arena_reset_nb(&conn->reply_arena);
+    if (!conn) return;
+    /* @nonblocking: cc_arena_reset is synchronous arena bookkeeping. */
+    @nonblocking { cc_arena_reset(&conn->reply_arena); }
 }
 
 /* Owner loop: drain requests, execute, reply.  `db` is stack-local so
@@ -1380,17 +1373,25 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 1024)) {
-        fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
+        char scratch_buf[256];
+        @nonblocking {
+            CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
+            CCString line = @string("redis_idiomatic: db_init failed (out of memory?)", &scratch);
+            redis_diag_fprintln(&line, &scratch);
+        }
         return 1;
     }
     int preload_keys = db_preload_key_count();
     if (preload_keys > 0) {
         db_preload_keys(&db, preload_keys) !> {
+            /* !> handler: @create/@string breaks even inside @nonblocking. */
             fprintf(stderr, "redis_idiomatic: preload failed\n");
             return 1;
         };
         size_t preload_key_count = (size_t)preload_keys;
         {
+            /* Interpolated @string in this @async body still breaks reparse;
+             * literal @string under @nonblocking works (see db_init arm above). */
             char preload_msg[96];
             int preload_msg_len =
                 snprintf(preload_msg, sizeof(preload_msg), "redis_idiomatic: preloaded %zu keys\n", preload_key_count);
@@ -1475,7 +1476,10 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
 
     /* Large enough for pipelined redis-benchmark without constant compact moves. */
     char read_buf[64 * 1024];
-    RespReader reader = rr_init_nb(read_buf, sizeof(read_buf));
+    RespReader reader;
+    /* @nonblocking: rr_init is pure struct init; default autoblock would
+     * needlessly wrap it when called from this @async body. */
+    @nonblocking { reader = rr_init(read_buf, sizeof(read_buf)); }
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
     while (true) {
