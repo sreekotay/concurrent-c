@@ -113,6 +113,12 @@ typedef enum ReplyProvenance {
     REPLY_PROVENANCE_VALUE,
 } ReplyProvenance;
 
+typedef struct RedisPipelineBatch {
+    size_t cap;
+    size_t submitted;
+    size_t replies_pending;
+} RedisPipelineBatch;
+
 typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
 typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
@@ -1308,7 +1314,7 @@ static void redis_conn_release_request(RedisRequest* req) {
     return cc_ok(true);
 }
 
-static void* reply_value_builder(void* env, intptr_t slot, intptr_t arena) {
+static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr_t arena) {
     (void)arena;
     RedisReply* src = (RedisReply*)env;
     RedisReply* dst = (RedisReply*)slot;
@@ -1316,11 +1322,11 @@ static void* reply_value_builder(void* env, intptr_t slot, intptr_t arena) {
     return NULL;
 }
 
-/* Queue a finished reply into channel-owned storage. Large/borrowed payload
- * bytes are already stabilized in conn->reply_arena by the caller. */
+/* Queue a finished reply into channel-owned value storage. Payload bytes remain
+ * owned by the caller's batch arena and are released after the batch drains. */
 @noblock static inline bool reply_send(ReplyTx tx, RedisReply* reply, CCArena* arena) {
     if (!reply) return false;
-    CCClosure2 build_reply = cc_closure2_make(reply_value_builder, reply, NULL);
+    CCClosure2 build_reply = cc_closure2_make(redis_reply_copy_into_channel_slot, reply, NULL);
     CCResult_bool_CCIoError send_res =
         cc_chan_result_with(tx.raw,
                             cc_channel_raw_try_send_into(tx.raw,
@@ -1390,6 +1396,51 @@ static void* reply_value_builder(void* env, intptr_t slot, intptr_t arena) {
     return 0;
 }
 
+static bool !>(CCError) submit_request_batch(CCSocket* client,
+                                             RedisConn* conn,
+                                             ReqTx req_tx,
+                                             ReqIter* req_iter,
+                                             RedisPipelineBatch* batch) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!batch) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "submit batch null"));
+
+    batch->submitted = 0;
+    batch->replies_pending = 0;
+    for (size_t s = 0; s < batch->cap; s++) {
+        RedisRequest* req = NULL;
+        bool has = rr_req_iter_next(req_iter, &req) !>;
+        if (!has) break;
+        conn->next_request_id++;
+        CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
+        if (cc_is_err(send_res)) {
+            redis_conn_release_request(req);
+            (void)write_reply_now(client, conn,
+                reply_error("ERR owner channel unavailable"));
+            return cc_ok(false);
+        }
+        batch->replies_pending++;
+        batch->submitted++;
+    }
+
+    return cc_ok(true);
+}
+
+static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
+    if (!batch) return false;
+    while (batch->replies_pending > 0) {
+        RedisReply reply = {0};
+        CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
+        if (cc_is_err(recv_res)) return false;
+        batch->replies_pending--;
+        if (!write_reply(client, conn, &reply)) return false;
+    }
+    reply_release_batch(conn);
+
+    /* One socket write for the whole submitted request batch. */
+    if (conn->out_len > 0 && !flush_output_buffer(client, conn)) return false;
+    return true;
+}
+
 /* Per-connection driver.  One outer iteration = one
  * submit / drain / flush / rr_fill batch (phases labeled inline). */
 @async int handle_client(CCSocket client, ReqTx req_tx, uint64_t conn_id) {
@@ -1416,45 +1467,24 @@ static void* reply_value_builder(void* env, intptr_t slot, intptr_t arena) {
 
         /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
          * accepted request owes exactly one RedisReply back on reply_rx. */
-        size_t batch_cap = (size_t)k_pipeline_reply_cap;
-        size_t replies_pending = 0;
-        size_t submitted = 0;
-        for (size_t s = 0; s < batch_cap; s++) {
-            RedisRequest* req = NULL;
-            bool has = rr_req_iter_next(&req_iter, &req) !>;
-            if (!has) break;
-            conn->next_request_id++;
-            CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
-            if (cc_is_err(send_res)) {
-                redis_conn_release_request(req);
-                (void)write_reply_now(&client, conn,
-                    reply_error("ERR owner channel unavailable"));
-                return 0;
-            }
-            replies_pending++;
-            submitted++;
-        }
+        RedisPipelineBatch batch = {
+            .cap = (size_t)k_pipeline_reply_cap,
+            .submitted = 0,
+            .replies_pending = 0,
+        };
+        bool submit_ok =
+            submit_request_batch(&client, conn, req_tx, &req_iter, &batch) !>;
+        if (!submit_ok) return 0;
 
-        /* Drain: exactly one RedisReply per submitted request. This also drives
-         * reply_arena back to quiescence before reply_release_batch. */
-        while (replies_pending > 0) {
-            RedisReply reply = {0};
-            CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
-            if (cc_is_err(recv_res)) return 0;
-            replies_pending--;
-            if (!write_reply(&client, conn, &reply)) return 0;
-        }
-        reply_release_batch(conn);
-
-        /* Flush: one socket write for the whole batch. */
-        if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
+        /* Drain/flush: exactly one RedisReply per submitted request. */
+        if (!drain_reply_batch(&client, conn, &batch)) return 0;
 
         /* If the socket read already buffered more complete/partial commands
          * and this batch stopped only because of k_pipeline_reply_cap, keep parsing
          * before parking on another read.  Otherwise -P larger than the server
          * batch cap can leave commands stranded in read_buf while the fiber
          * waits for new socket readiness that may never arrive. */
-        if (submitted == batch_cap && reader.start < reader.end) continue;
+        if (batch.submitted == batch.cap && reader.start < reader.end) continue;
 
         /* rr_fill: park until more bytes arrive or EOF. */
         bool more = rr_fill(&reader, &client) !>(e) { write_reply_now(&client, conn, io_err_reply(e)); return 0; };
