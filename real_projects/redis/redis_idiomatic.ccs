@@ -332,9 +332,8 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     return (RedisCommandKind)-1;
 }
 
-/* RedisReply still carries shared benchmark scratch fields, but the idiomatic
- * server only reads kind/data/int_value. Leave the unused tail uninitialized
- * so hot reply constructors avoid zeroing the whole by-value channel payload. */
+/* Initialize only the fields read for each reply kind; avoid whole-struct
+ * zeroing on the GET/SET/INCR hot path. */
 static RedisReply reply_simple(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_SIMPLE_STRING;

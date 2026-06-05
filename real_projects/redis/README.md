@@ -12,7 +12,6 @@ The supported Concurrent-C Redis variants are:
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the single-file idiomatic implementation
 - `redis_cc/redis_cc.ccs` is the multi-file production port (scaffold)
-- `reply_path_bench.ccs` and `reply_path_threaded_bench.ccs` are explicit reply-path microbench experiments, not server variants
 - `bench_robust.sh` runs an order-randomized, warmup-discarded variant with per-round statistics
 - `bench_conn_sweep.sh` sweeps `redis-benchmark -c` and prints `redis_idiomatic` RSS during/after load (per-connection vs fixed baseline)
 - `bench_then_memlog.sh`, `mem_account.sh`, and `profile_compare.sh` are focused memory/profile helpers
