@@ -119,6 +119,14 @@ typedef struct RedisPipelineBatch {
     size_t replies_pending;
 } RedisPipelineBatch;
 
+static inline RedisPipelineBatch redis_pipeline_batch_start(void) {
+    return (RedisPipelineBatch){
+        .cap = (size_t)k_pipeline_reply_cap,
+        .submitted = 0,
+        .replies_pending = 0,
+    };
+}
+
 typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
 typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
@@ -1398,12 +1406,12 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
     return 0;
 }
 
-static bool !>(CCError) submit_request_batch(RedisConn* conn,
-                                             ReqTx req_tx,
-                                             ReqIter* req_iter,
-                                             RedisPipelineBatch* batch) {
+static bool !>(CCError) submit_pipeline_batch(RedisConn* conn,
+                                              ReqTx req_tx,
+                                              ReqIter* req_iter,
+                                              RedisPipelineBatch* batch) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (!batch) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "submit batch null"));
+    if (!batch) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "pipeline batch null"));
 
     batch->submitted = 0;
     batch->replies_pending = 0;
@@ -1424,7 +1432,7 @@ static bool !>(CCError) submit_request_batch(RedisConn* conn,
     return cc_ok(true);
 }
 
-static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
+static bool drain_pipeline_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
     if (!batch) return false;
     @defer reply_release_batch(conn);
     while (batch->replies_pending > 0) {
@@ -1466,13 +1474,9 @@ static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBa
 
         /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
          * accepted request owes exactly one RedisReply back on reply_rx. */
-        RedisPipelineBatch batch = {
-            .cap = (size_t)k_pipeline_reply_cap,
-            .submitted = 0,
-            .replies_pending = 0,
-        };
+        RedisPipelineBatch batch = redis_pipeline_batch_start();
         bool submit_ok =
-            submit_request_batch(conn, req_tx, &req_iter, &batch) !>;
+            submit_pipeline_batch(conn, req_tx, &req_iter, &batch) !>;
         if (!submit_ok) {
             (void)write_reply_now(&client, conn,
                 reply_error("ERR owner channel unavailable"));
@@ -1480,7 +1484,7 @@ static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBa
         }
 
         /* Drain/flush: exactly one RedisReply per submitted request. */
-        if (!drain_reply_batch(&client, conn, &batch)) return 0;
+        if (!drain_pipeline_batch(&client, conn, &batch)) return 0;
 
         /* If the socket read already buffered more complete/partial commands
          * and this batch stopped only because of k_pipeline_reply_cap, keep parsing
