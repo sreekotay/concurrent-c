@@ -1396,8 +1396,7 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
     return 0;
 }
 
-static bool !>(CCError) submit_request_batch(CCSocket* client,
-                                             RedisConn* conn,
+static bool !>(CCError) submit_request_batch(RedisConn* conn,
                                              ReqTx req_tx,
                                              ReqIter* req_iter,
                                              RedisPipelineBatch* batch) {
@@ -1412,10 +1411,8 @@ static bool !>(CCError) submit_request_batch(CCSocket* client,
         if (!has) break;
         conn->next_request_id++;
         CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
-        if (cc_is_err(send_res)) {
+        if (cc_is_err(send_res) || !send_res.u.value) {
             redis_conn_release_request(req);
-            (void)write_reply_now(client, conn,
-                reply_error("ERR owner channel unavailable"));
             return cc_ok(false);
         }
         batch->replies_pending++;
@@ -1427,14 +1424,14 @@ static bool !>(CCError) submit_request_batch(CCSocket* client,
 
 static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
     if (!batch) return false;
+    @defer reply_release_batch(conn);
     while (batch->replies_pending > 0) {
         RedisReply reply = {0};
         CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
-        if (cc_is_err(recv_res)) return false;
+        if (cc_is_err(recv_res) || !recv_res.u.value) return false;
         batch->replies_pending--;
         if (!write_reply(client, conn, &reply)) return false;
     }
-    reply_release_batch(conn);
 
     /* One socket write for the whole submitted request batch. */
     if (conn->out_len > 0 && !flush_output_buffer(client, conn)) return false;
@@ -1473,8 +1470,12 @@ static bool drain_reply_batch(CCSocket* client, RedisConn* conn, RedisPipelineBa
             .replies_pending = 0,
         };
         bool submit_ok =
-            submit_request_batch(&client, conn, req_tx, &req_iter, &batch) !>;
-        if (!submit_ok) return 0;
+            submit_request_batch(conn, req_tx, &req_iter, &batch) !>;
+        if (!submit_ok) {
+            (void)write_reply_now(&client, conn,
+                reply_error("ERR owner channel unavailable"));
+            return 0;
+        }
 
         /* Drain/flush: exactly one RedisReply per submitted request. */
         if (!drain_reply_batch(&client, conn, &batch)) return 0;
