@@ -1323,7 +1323,8 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
 }
 
 /* Queue a finished reply into channel-owned value storage. Payload bytes remain
- * owned by the caller's batch arena and are released after the batch drains. */
+ * owned by the connection's reply batch arena, which the client resets after it
+ * drains or tears down the in-flight batch. */
 @noblock static inline bool reply_send(ReplyTx tx, RedisReply* reply, CCArena* arena) {
     if (!reply) return false;
     CCClosure2 build_reply = cc_closure2_make(redis_reply_copy_into_channel_slot, reply, NULL);
@@ -1391,7 +1392,8 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
 
         RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
         redis_reply_prepare_for_send(req, &reply, &conn->reply_arena) !>;
-        (void)reply_send(conn->reply_tx, &reply, &conn->reply_arena);
+        bool reply_queued = reply_send(conn->reply_tx, &reply, &conn->reply_arena);
+        if (!reply_queued) continue;
     }
     return 0;
 }
