@@ -371,6 +371,7 @@ static RedisReply reply_bulk(CCSlice s) {
 static RedisReply reply_null(void) {
     RedisReply r;
     r.kind = REDIS_REPLY_NULL_BULK;
+    r.data = cc_slice_empty();
     return r;
 }
 
@@ -378,6 +379,7 @@ static RedisReply reply_integer(int64_t v) {
     RedisReply r;
     r.kind = REDIS_REPLY_INTEGER;
     r.int_value = v;
+    r.data = cc_slice_empty();
     return r;
 }
 
@@ -1313,6 +1315,10 @@ static void redis_conn_release_request(RedisRequest* req) {
                                                                           CCArena* reply_batch_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply stabilize null"));
+    /* Scalar/null replies never borrow external payload bytes. */
+    if (reply->kind == REDIS_REPLY_INTEGER || reply->kind == REDIS_REPLY_NULL_BULK) {
+        return cc_ok(true);
+    }
     if (redis_slice_is_stable_for_reply_batch(reply->data, reply_batch_arena)) {
         return cc_ok(true);
     }
@@ -1321,14 +1327,6 @@ static void redis_conn_release_request(RedisRequest* req) {
     } else {
         reply_encode_into_batch_arena(reply, reply_batch_arena) !>;
     }
-    return cc_ok(true);
-}
-
-@noblock static inline bool !>(CCError) redis_reply_prepare_for_channel_send(RedisReply* reply,
-                                                                            CCArena* reply_batch_arena) {
-    @errhandler(CCError e) { return cc_err(e); }
-    if (!reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply prepare null"));
-    redis_reply_stabilize_for_channel(reply, reply_batch_arena) !>;
     return cc_ok(true);
 }
 
@@ -1369,7 +1367,7 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
                                                                               RedisReply* reply) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!conn || !reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply send null arg"));
-    redis_reply_prepare_for_channel_send(reply, &conn->reply_arena) !>;
+    redis_reply_stabilize_for_channel(reply, &conn->reply_arena) !>;
     return cc_ok(redis_conn_queue_reply(conn, reply));
 }
 
