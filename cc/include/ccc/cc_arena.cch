@@ -1130,4 +1130,38 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
 }
 #endif
 
+/* TODO (arena model hardening — none urgent, all one-liners or docs):
+ *
+ * 1. detach() of a stack-rooted arena is a latent use-after-return: `taken.base`
+ *    points into the caller's frame, and provenance epochs can't catch frame
+ *    death. Add a debug check — warn (or fail) when detaching an arena whose
+ *    root slab is not CC_ARENA_FLAG_HEAP_OWNED. Rule of thumb to document:
+ *    "detach requires a heap-rooted arena."
+ *
+ * 2. The rewind-vs-release mode flip is half-loud. cc_arena_release() reports
+ *    double-release / foreign pointers, but after the first release (or heap-
+ *    overflow alloc) sets CC_ARENA_FLAG_NON_REWINDABLE, checkpoint() silently
+ *    returns a null checkpoint and restore() silently no-ops — the symptom is
+ *    creeping RSS, not a message. Emit a debug fprintf-once at the first nulled
+ *    checkpoint ("arena is release-mode; checkpoints disabled").
+ *
+ * 3. Document the modal lifecycle explicitly: an arena is EITHER epoch/rewind
+ *    (checkpoint/restore/reset) OR count/release (cc_arena_release, auto-rewind
+ *    on last release) — chosen implicitly by first use, mutually exclusive.
+ *
+ * 4. cc_arena_alloc_local still does an atomic FETCH_ADD on live_allocs — the
+ *    single-owner tier pays half the sync tax it exists to avoid. Consider a
+ *    non-atomic count in the local tier, and revisit which tier the typed
+ *    alloc macros (and therefore the examples) should default to: fiber-owned
+ *    request arenas are the dominant pattern, but they default to the CAS path.
+ *
+ * 5. Overflow accounting uses malloc_usable_size / malloc_size and silently
+ *    reports 0 on non-Linux/macOS platforms; overflow allocs also flip
+ *    NON_REWINDABLE (see 2/3). One spec paragraph for the escape valve.
+ *
+ * 6. Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
+ *    init-time check that pool addresses fit the mask (LA57 / tagged-pointer
+ *    insurance).
+ */
+
 #endif // CC_ARENA_H
