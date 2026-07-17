@@ -40,7 +40,7 @@ CC provides arena-backed generic containers with UFCS method syntax:
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     
     // CCVec::[T] - dynamic array
     CCVec::[int] numbers = cc_vec_new::[int](&arena);
@@ -58,7 +58,7 @@ int main(void) {
 
     char** name = names.get(1);  // Nullable pointer: &"Alice"
     
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return 0;
 }
 ```

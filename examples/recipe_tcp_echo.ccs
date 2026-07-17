@@ -110,8 +110,7 @@ int main(int argc, char** argv) {
         /* Accept loop on main's fiber. Each accepted socket is handed to a
          * freshly spawned handler; the nursery's @destroy joins them all. */
         do {
-            //bug: should work: CCSocket sock = ln.accept(&err);
-            CCSocket sock = cc_listener_accept(&ln, &err);
+            CCSocket sock = ln.accept(&err);
             if (err != CC_NET_OK) {
                 /* Real-server shutdown path: listener closed, fd gone,
                  * peer unreachable, etc. */

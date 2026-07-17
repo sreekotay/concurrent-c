@@ -95,7 +95,7 @@ Blocks flow through typed channels - no shared mutable state:
 ```c
 Block[~4 >] blocks_tx;    // Send handle
 Block[~4 <] blocks_rx;    // Receive handle
-CCChan* ch = channel_pair(&blocks_tx, &blocks_rx);
+CCChan* ch = cc_channel_pair(&blocks_tx, &blocks_rx);
 ```
 
 ### 2. Nested Ownership with Explicit Close
@@ -112,11 +112,11 @@ CCNursery* producer = @create(consumer) @destroy {
 No thread management - structured lifetime:
 ```c
 for (int w = 0; w < num_workers; w++) {
-    spawn(() => [level] {
+    workers->spawn(() => [level, blocks_rx, results_tx] {
         Block blk;
-        while (chan_recv(blocks_rx, &blk) == 0) {
+        while (cc_io_avail(blocks_rx.recv(&blk))) {
             Result res = compress_block(&blk, level);
-            chan_send(results_tx, res);
+            (void)results_tx.send(res);
         }
     });
 }
@@ -127,13 +127,22 @@ for (int w = 0; w < num_workers; w++) {
 | File | Description |
 |------|-------------|
 | `setup.sh` | Downloads original pigz source |
-| `Makefile` | Builds both versions |
+| `Makefile` | Builds all versions |
 | `benchmark.sh` | Main benchmark (auto-downloads corpus + prints summary table) |
-| `pigz_cc.ccs` | Legacy prototype (not built by the Makefile) |
-| `pigz_cc/pigz_cc.ccs` | **CC implementation used by the Makefile** |
-| `pigz.c` | Original (downloaded) |
-| `yarn.c/h` | Original thread layer |
-| `try.c/h` | Original error handling |
+| `bench_go_vs_cc.sh` | Cross-language comparison: CC vs Go vs Zig vs original |
+| `bench_compress_only.sh` | Compression-only timing |
+| `pigz_idiomatic.ccs` | **Idiomatic CC pipeline — read this first** (ordered channel + send_task) |
+| `pigz_cc/pigz_cc.ccs` | Feature-complete CC port (parity binary) |
+| `pigz_hybrid.ccs` | Idiomatic pipeline on the V2 hybrid scheduler |
+| `pigz_pthread.ccs` | Same pipeline on OS threads (`cc_thread_spawn`) |
+| `pigz_fiber_directjoin.ccs` / `pigz_thread_directjoin.ccs` | Ladder variants: direct FIFO joins, no channel |
+| `pigz_unordered.ccs` | Benchmark-only control: no ordered delivery (output corrupt by design) |
+| `pigz_profile.ccs` / `pigz_pthread_profile.ccs` | Profiling variants |
+| `pigz_go.go` | Go port (CGO + zlib) for comparison |
+| `pigz_zig.zig` | Zig port for comparison |
+| `pigz_c/pigz.c` | Original (downloaded by `setup.sh`) |
+| `pigz_c/yarn.c/h` | Original thread layer |
+| `pigz_c/try.c/h` | Original error handling |
 
 ## Usage
 

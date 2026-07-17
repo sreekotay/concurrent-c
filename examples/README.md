@@ -48,6 +48,8 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
 | `recipe_result_error_handling.ccs` | Results | `T!>(E)`, `@errhandler`, `!>;`, `?>` |
+| `recipe_ordered_parallel.ccs` | Ordered fan-out | Task handles over channels, FIFO await |
+| `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Every `!>` / `?>` / `@destroy` combination (regression sentinel) |
 
 Run any recipe:
 ```bash

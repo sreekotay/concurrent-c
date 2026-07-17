@@ -4,7 +4,7 @@ BEARSSL_DIR := third_party/bearssl
 CURL_DIR := third_party/curl
 CURL_BUILD := $(CURL_DIR)/build
 
-.PHONY: all cc clean distclean fmt lint example example-c smoke test tools
+.PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install uninstall
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
@@ -83,10 +83,6 @@ check-submodules:
 # Build and run the UFCS hello example through our compiler.
 example: cc
 	@$(CC_DIR)/bin/ccc build run --out-dir out examples/hello.ccs
-
-example-c:
-	@mkdir -p out
-	@cc examples/hello_c.c -o out/hello_c && ./out/hello_c
 
 smoke: cc
 	@$(CC_DIR)/bin/ccc build test --out-dir out

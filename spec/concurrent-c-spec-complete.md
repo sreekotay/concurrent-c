@@ -2637,9 +2637,9 @@ cc_channel_send_task(results_tx, () => {
     return res;  // Error preserved!
 });
 
-// Consumer can propagate errors with ?
+// Consumer drains until closed-and-drained (see cc_io_avail idiom above)
 CompressedResult* r;
-while (results_rx.recv(&r)?) {
+while (cc_io_avail(results_rx.recv(&r))) {
     use(r);
 }
 ```

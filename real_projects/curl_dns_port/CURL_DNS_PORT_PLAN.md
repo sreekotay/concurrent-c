@@ -8,7 +8,7 @@ The `asyn-thrdd.c` file in `curl` implements an asynchronous DNS resolver using 
 
 ### Why this is a great target:
 
-1.  **Surgical Interop:** It's a self-contained file (approx 500-800 lines). We can replace the thread-spawning logic with Concurrent-C fibers and a `@nursery` without rewriting the rest of `curl`.
+1.  **Surgical Interop:** It's a self-contained file (approx 500-800 lines). We can replace the thread-spawning logic with Concurrent-C fibers and a nursery (`CCNursery`) without rewriting the rest of `curl`.
 2.  **Build System Test:** `curl` uses a complex Autotools/CMake build system. Integrating `ccc` to compile this one file and link it into `libcurl.so` is the ultimate test of Concurrent-C's "brownfield" integration capabilities.
 3.  **Structural Safety:** DNS resolution is a common source of memory leaks and use-after-free bugs during cancellation. Using an owned `CCArena` for the lifetime of a DNS request and structured task ownership for the resolver fiber ensures deterministic cleanup.
 4.  **Fiber Efficiency:** Moving from OS threads to fibers reduces the overhead of concurrent DNS lookups, especially when many transfers are initiated simultaneously.
@@ -16,7 +16,7 @@ The `asyn-thrdd.c` file in `curl` implements an asynchronous DNS resolver using 
 ## Implementation Strategy:
 
 1.  **Build Integration:** Modify the `curl` build process to use `ccc` for `asyn-thrdd.c`.
-2.  **Fiber Replacement:** Replace `Curl_thread_create` and thread-joining logic with `spawn` and `@nursery`.
+2.  **Fiber Replacement:** Replace `Curl_thread_create` and thread-joining logic with `n->spawn` and a scoped `CCNursery`.
 3.  **Arena Management:** Use a `CCArena` to hold the `addrinfo` results and other per-request metadata, ensuring they are freed exactly when the resolver fiber completes or is cancelled.
 4.  **Event Loop Integration:** Ensure the fiber-based resolver correctly signals the main `curl` event loop upon completion (likely via the existing socket-pair or pipe signaling mechanism).
 
