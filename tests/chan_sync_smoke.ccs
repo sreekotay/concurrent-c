@@ -7,7 +7,7 @@
 #include <assert.h>
 #include <errno.h>
 
-// Sync channel pair - blocks OS thread, no await needed
+// Sync channel pair - blocks OS thread, no @await needed
 int[~2 sync >] tx;
 int[~2 sync <] rx;
 CCChan* g_ch;
@@ -27,7 +27,7 @@ int main(void) {
     pthread_t tid;
     pthread_create(&tid, NULL, sender_thread, NULL);
     
-    // Receive values (blocks OS thread, no await)
+    // Receive values (blocks OS thread, no @await)
     int v1 = 0, v2 = 0;
     CCResult_bool_CCIoError res1 = chan_recv(rx, &v1);
     CCResult_bool_CCIoError res2 = chan_recv(rx, &v2);

@@ -1,5 +1,5 @@
-/* Test that UFCS channel ops with await in @async functions work correctly.
-   This uses the ergonomic form: `await tx.send(val)` instead of the explicit
+/* Test that UFCS channel ops with @await in @async functions work correctly.
+   This uses the ergonomic form: `@await tx.send(val)` instead of the explicit
    cc_chan_send_task() call. */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task.cch>
@@ -8,16 +8,16 @@
 
 @async int sender(CCChanTx tx) {
     int val = 42;
-    /* Ergonomic form: tx.send(val) under await emits cc_chan_send_task() */
-    intptr_t rc = await tx.send(val);
+    /* Ergonomic form: tx.send(val) under @await emits cc_chan_send_task() */
+    intptr_t rc = @await tx.send(val);
     printf("sender: sent %d, rc=%ld\n", val, (long)rc);
     return (int)rc;
 }
 
 @async int receiver(CCChanRx rx) {
     int val = 0;
-    /* Ergonomic form: rx.recv(&val) under await emits cc_chan_recv_task() */
-    intptr_t rc = await rx.recv(&val);
+    /* Ergonomic form: rx.recv(&val) under @await emits cc_chan_recv_task() */
+    intptr_t rc = @await rx.recv(&val);
     printf("receiver: received %d, rc=%ld\n", val, (long)rc);
     return val;
 }

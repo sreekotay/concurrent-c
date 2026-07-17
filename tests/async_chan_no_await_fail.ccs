@@ -1,4 +1,4 @@
-/* Test that channel ops without await in @async functions produce error. */
+/* Test that channel ops without @await in @async functions produce error. */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task.cch>
 

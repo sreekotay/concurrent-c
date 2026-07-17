@@ -1,5 +1,15 @@
 /* Extracted from the working implementation in `cc/src/visitor/visitor.c`.
-   Goal: keep semantics identical while shrinking visitor.c over time. */
+   Goal: keep semantics identical while shrinking visitor.c over time.
+
+   NOTE (ruling 2026-07-17): `@await` is the only *surface* spelling; bare
+   `await` in user source is a legacy leftover (spec §2.3 reserves bare
+   keywords as ordinary identifiers). The corpus (examples/tests) now writes
+   `@await`; cc__rewrite_at_await degrades it to the bare `await` marker
+   inside @async bodies, which is what this pass consumes — so bare `await`
+   here is the INTERNAL form, not an endorsed surface. TODO: migrate the
+   internal marker to a reserved spelling (e.g. __cc_await) across the async
+   passes so user code may once again use `await` as a plain identifier, and
+   reject bare `await` as an operator in user source at that point. */
 
 #include "pass_await_normalize.h"
 

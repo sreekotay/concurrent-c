@@ -12,11 +12,11 @@
 #include <stdio.h>
 
 @async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    if (await tx.send(value) != 0)
+    if (@await tx.send(value) != 0)
         return -1;
 
     int received = 0;
-    if (await rx.recv(&received) != 0)
+    if (@await rx.recv(&received) != 0)
         return -2;
 
     return received;

@@ -5,7 +5,7 @@
 @async int noop(int v) { return v; }
 
 @async int f(void) {
-    int x = await noop(3);
+    int x = @await noop(3);
     char buf[256];
     int out = 0;
     CCArena arena_storage = {0};

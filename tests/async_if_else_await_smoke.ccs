@@ -6,7 +6,7 @@ static int add1(int x) { return x + 1; }
 @async int f(int x) {
     int y = 0;
     if (x) {
-        /* sync call auto-blocks -> `y = await ...;` */
+        /* sync call auto-blocks -> `y = @await ...;` */
         y = add1(40);
     } else {
         y = add1(0);

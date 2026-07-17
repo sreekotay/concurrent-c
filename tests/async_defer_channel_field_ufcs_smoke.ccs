@@ -15,7 +15,7 @@
 
     @defer ch.free();
 
-    int waited = await noop(7);
+    int waited = @await noop(7);
     if (waited != 7) return 20;
 
     tx.close();

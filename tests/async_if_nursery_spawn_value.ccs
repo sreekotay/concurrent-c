@@ -16,7 +16,7 @@ int g = 0;
             __cc_nursery3->spawn(() => { g = 9; });
         
         }
-    int x = await noop(g);
+    int x = @await noop(g);
     return x;
 }
 

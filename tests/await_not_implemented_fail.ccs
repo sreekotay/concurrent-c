@@ -1,7 +1,7 @@
 #include <ccc/cc_runtime.cch>
 
 int main(void) {
-    int x = await 1;
+    int x = @await 1;
     return x;
 }
 

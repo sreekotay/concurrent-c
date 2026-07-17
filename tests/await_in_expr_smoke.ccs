@@ -7,7 +7,7 @@
 
 @async int f(void) {
     /* Await used inside larger expressions (should be normalized + lowered). */
-    return 1 + (int)(await add1((int)(await add1(40))));
+    return 1 + (int)(@await add1((int)(@await add1(40))));
 }
 
 int main(void) {

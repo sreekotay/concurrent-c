@@ -1,5 +1,5 @@
 /* Regression: the autoblock CC_AB_REWRITE_ASSIGN_CALL path used to emit
- *     req = await cc_run_blocking_task_intptr(...);
+ *     req = @await cc_run_blocking_task_intptr(...);
  * without a cast. After async lowering that became
  *     __f->req = __f->__cc_aw0;
  * where __f->req is a pointer and __cc_aw0 is intptr_t, so clang rejected
