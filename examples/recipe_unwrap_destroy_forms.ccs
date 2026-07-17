@@ -5,6 +5,12 @@
  * catch regressions in any of them.  Expected stdout lives in the
  * matching .stdout (see tests/ version).
  *
+ * Note the combinations below are NOT eleven things to learn: they are
+ * two operators — ?> (error becomes a value) and !> (error becomes
+ * code) — composed with orthogonal modifiers: (e) binds the error,
+ * bare `;` targets the enclosing @errhandler, and @destroy attaches
+ * lifecycle. This file enumerates the products; the grammar is 2 + 3.
+ *
  * Sections:
  *    1. @errhandler default (top of scope)
  *    2. Inline single-line `!> { ... }`
