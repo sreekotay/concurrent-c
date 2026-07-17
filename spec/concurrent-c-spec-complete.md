@@ -2914,23 +2914,34 @@ T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
 **Operations Comparison:**
 
 
-| Operation                 | Async `T[~ ... >]` / `T[~ ... <]` | Sync `T[~ ... sync ... >]` / `T[~ ... sync ... <]` |
-| ------------------------- | --------------------------------- | -------------------------------------------------- |
-| `send(ch, v)`             | `@await send(...)` ✅               | `send(...)` ✅                                      |
-| `recv(ch)`                | `@await recv(...)` ✅               | `recv(...)` ✅                                      |
-| `send_take(ch, s)`        | `@await send_take(...)` ✅          | `send_take(...)` ✅                                 |
-| `send_cancellable(ch, v)` | `@await send_cancellable(...)` ✅   | N/A ❌                                              |
-| `recv_cancellable(ch)`    | `@await recv_cancellable(...)` ✅   | N/A ❌                                              |
-| `try_send(ch, v)`         | `try_send(...)` ✅                 | `try_send(...)` ✅                                  |
-| `try_recv(ch)`            | `try_recv(...)` ✅                 | `try_recv(...)` ✅                                  |
-| `recv_timeout(ch, d)`     | `@await recv_timeout(...)` ✅       | `recv_timeout(...)` ✅                              |
-| `close(ch)`               | `close(...)` ✅                    | `close(...)` ✅                                     |
-| `subscribe(ch)`           | `subscribe(...)` ✅                | `subscribe(...)` ✅                                 |
+| Operation                 | Async `T[~ ... >]` / `T[~ ... <]`, inside `@async` | Async, fiber/sync context | Sync `T[~ ... sync ... >]` / `T[~ ... sync ... <]` |
+| ------------------------- | --------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| `send(ch, v)`             | `@await send(...)` ✅                                 | `send(...)` ✅ (blocks)    | `send(...)` ✅                                      |
+| `recv(ch)`                | `@await recv(...)` ✅                                 | `recv(...)` ✅ (blocks)    | `recv(...)` ✅                                      |
+| `send_take(ch, s)`        | `@await send_take(...)` ✅                            | `send_take(...)` ✅        | `send_take(...)` ✅                                 |
+| `send_cancellable(ch, v)` | `@await send_cancellable(...)` ✅                     | `send_cancellable(...)` ✅ | N/A ❌                                              |
+| `recv_cancellable(ch)`    | `@await recv_cancellable(...)` ✅                     | `recv_cancellable(...)` ✅ | N/A ❌                                              |
+| `try_send(ch, v)`         | `try_send(...)` ✅                                   | `try_send(...)` ✅         | `try_send(...)` ✅                                  |
+| `try_recv(ch)`            | `try_recv(...)` ✅                                   | `try_recv(...)` ✅         | `try_recv(...)` ✅                                  |
+| `recv_timeout(ch, d)`     | `@await recv_timeout(...)` ✅                         | `recv_timeout(...)` ✅     | `recv_timeout(...)` ✅                              |
+| `close(ch)`               | `close(...)` ✅                                      | `close(...)` ✅            | `close(...)` ✅                                     |
+| `subscribe(ch)`           | `subscribe(...)` ✅                                  | `subscribe(...)` ✅        | `subscribe(...)` ✅                                 |
 
 
-**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `@await`. These include `send()`, `recv(&out)`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `@await` is a compile error.
+**Rule (`@await` marks suspension points, not channel flavor):** `@await` is
+required on suspending channel operations (`send()`, `recv(&out)`,
+`send_take()`, `recv_cancellable()`, `send_cancellable()`, `recv_timeout()`)
+**inside `@async` function bodies** — the state-machine lowering must know its
+suspension points explicitly. Omitting `@await` there is a compile error
+(diagnosed as "channel operation must be awaited in @async function").
 
-**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `@await`. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `@await` is a compile error.
+**Rule (fiber / synchronous context):** Outside `@async` bodies — `main`,
+spawned closures, ordinary functions running on fibers or OS threads — the
+same operations are called **without** `@await` and block the caller: a fiber
+parks and the scheduler proceeds; a plain thread blocks, as a C programmer
+expects. This is the form used throughout `examples/` and `real_projects/`.
+
+**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `@await` in any context. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `@await` is a compile error.
 
 **Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `@await`. They return immediately or have no return value.
 
@@ -3688,7 +3699,10 @@ cc_channel_free(ch);
 
 #### 8.4.2 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
 
-Async channels **suspend cooperatively** and require `@await`. They are used in `@async` functions and with `CCNursery`.
+Async channels **suspend cooperatively**. Inside `@async` functions their
+suspending operations are marked with `@await`; in fiber or synchronous
+context the same operations are called bare and block the caller (a fiber
+parks; a thread blocks). See the context rules in §7 (Operations Comparison).
 
 **Operations:**
 
@@ -3697,7 +3711,7 @@ int[~ >] tx;
 int[~ <] rx;
 CCChan* ch = cc_channel_pair(&tx, &rx);
 
-// Must use @await
+// Inside an @async function: @await marks the suspension point
 int x;
 bool !>(CCIoError) got = @await recv(rx, &x);          // suspends until received
 bool !>(CCIoError) ok = @await send(tx, 42);           // suspends until sent
@@ -3705,14 +3719,20 @@ int y;
 bool !>(Cancelled) got2 = @await recv_cancellable(rx, &y);
 bool !>(Cancelled) ok2 = @await send_cancellable(tx, 42);
 
-// Cannot use @await
-recv(rx, &x);                             // ❌ ERROR: missing @await
-send(tx, 42);                             // ❌ ERROR: missing @await
+// Inside an @async function, bare ops are an error
+recv(rx, &x);                             // ❌ ERROR: must be awaited in @async function
+send(tx, 42);                             // ❌ ERROR: must be awaited in @async function
+
+// In fiber/sync context (main, spawned closures), bare ops block the caller
+while (cc_io_avail(rx.recv(&x))) { use(x); }   // ✅ parks the fiber, no @await
 
 cc_channel_free(ch);                      // free the channel when done
 ```
 
-**Rule:** All operations on async channels require `@await`. Omitting `@await` is a compile error (regardless of context).
+**Rule:** Inside `@async` function bodies, suspending operations on async
+channels require `@await`; omitting it is a compile error. Outside `@async`
+bodies, the same operations take no `@await` and block the calling fiber or
+thread.
 
 **Cancellation integration:**
 
