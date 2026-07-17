@@ -7,29 +7,23 @@
 CCString cc_string_with_capacity(CCArena *arena, size_t cap) {
     CCString s = cc_string_new();
     if (cap > CC_STRING_INLINE_CAP) {
-        if (!cc_string_reserve(&s, cap, arena)) {
-            CCString empty = {0};
-            return empty;
-        }
+        (void)cc_string_reserve(&s, cap, arena); /* failure poisons s */
     }
     return s;
 }
 
 CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
     CCString s = cc_string_new();
-    if (!cc_string_push(&s, slice, arena)) {
-        CCString empty = {0};
-        return empty;
-    }
+    (void)cc_string_push(&s, slice, arena); /* failure poisons s */
     return s;
 }
 
 CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena *arena) {
     char *dst;
     size_t new_len;
-    if (!str) return NULL;
+    if (!str || cc_string_failed(str)) return NULL;
     new_len = (size_t)str->len + (size_t)len;
-    if (new_len > UINT32_MAX) return NULL;
+    if (new_len > UINT32_MAX) { cc__string_poison(str); return NULL; }
     dst = cc_string_reserve(str, new_len + 1, arena);
     if (!dst) return NULL;
     if (buffer && len) {
@@ -56,7 +50,7 @@ CCString* cc_string_clear(CCString *str) {
 
 CCSlice cc_string_as_slice(const CCString *str) {
     const char *data;
-    if (!str) return cc_slice_empty();
+    if (!str || cc_string_failed(str)) return cc_slice_empty();
     data = cc_string_data_const(str);
     if (!data) return cc_slice_empty();
     return cc_slice_from_parts(
@@ -69,7 +63,7 @@ CCSlice cc_string_as_slice(const CCString *str) {
 
 const char *cc_string_cstr(CCString *str, CCArena *arena) {
     char *data;
-    if (!str) return NULL;
+    if (!str || cc_string_failed(str)) return NULL;
     if (str->len + 1 > str->cap) {
         data = cc_string_reserve(str, str->len + 1, arena);
         if (!data) return NULL;
