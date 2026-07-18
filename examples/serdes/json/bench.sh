@@ -2,13 +2,21 @@
 # Build and run the json.h benchmark.
 #   ./bench.sh            ours, default corpora (twitter.json + numbers.json)
 #   ./bench.sh -y         also run yyjson (vendored yyjson.c/.h)
+#   ./bench.sh -c         also print a correctness checksum (verified untimed)
 #   ./bench.sh [K] [corpus...]
 set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
 CC="${CC:-gcc} -O2 -I $INC"
-YY=0; [ "$1" = "-y" ] && { YY=1; shift; }
+YY=0; CHK=""
+while :; do
+  case "$1" in
+    -y) YY=1; shift;;
+    -c) CHK="-c"; shift;;
+    *) break;;
+  esac
+done
 K=${1:-200}; shift || true
 if [ $# -eq 0 ]; then CORPORA=(twitter.json numbers.json); else CORPORA=("$@"); fi
 
@@ -31,6 +39,6 @@ fi
 
 for c in "${CORPORA[@]}"; do
   echo "== $c  (K=$K) =="
-  printf 'ours   '; "$here/bench" "$here/$c" "$K" 3
+  printf 'ours   '; "$here/bench" $CHK "$here/$c" "$K" 3
   if [ "$YY" = 1 ]; then "$here/yy" "$here/$c" "$K"; fi
 done
