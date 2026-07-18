@@ -674,11 +674,17 @@ static int rg_inline_size(const RG* g, int nd, int depth) {
     if (depth > 8) return 1000;
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
-    case RN_KEEP: case RN_COLLECT: return 1000;
+    case RN_COLLECT: return 1000;               /* containers stay functions */
+    case RN_KEEP:
+        if (x->b > 0) return 1000;              /* codec keeps pull in decode: stay calls */
+        return 2 + rg_inline_size(g, x->a, depth + 1);
     case RN_REF: {
         int eff = rg_effective(g, nd);
-        if (eff == nd) return 1000;      /* non-alias ref: don't inline through */
-        return 1;
+        if (eff != nd) return 1;                /* charset/lit alias */
+        {   /* recurse through refs whose own body is inline-sized */
+            int t = rg_inline_size(g, g->rules[x->nkids].node, depth + 1);
+            return t >= 1000 ? 1000 : t;
+        }
     }
     case RN_SEQ: case RN_ALT: {
         int t = 1;
@@ -748,8 +754,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         if (eff != nd) { rg_emit_node(g, e, eff, fail, lbl, rid); break; }
         {
             int body = g->rules[x->nkids].node;
-            if (rg_inline_size(g, body, 0) <= 12) {   /* ws/esc/int-sized pure rules: inline */
-                rg_emit_node(g, e, body, fail, lbl, rid);
+            if (rg_inline_size(g, body, 0) <= 24) {   /* small keep-free-or-raw-keep rules: inline per mode */
+                /* the inlined subtree keeps the TARGET rule's identity: keep
+                 * ids are "enclosing rule", which inlining must not rewrite */
+                rg_emit_node(g, e, body, fail, lbl, x->nkids);
                 break;
             }
         }
@@ -769,8 +777,17 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int k = (*lbl)++;
         eb_fmt(e, "    { size_t ka%d = p;\n", k);
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        eb_fmt(e, "    if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
-               g->name, rid, x->b, k, fail);
+        if (x->b == 0) {
+            /* raw borrow: write the 16-byte node inline — no call, no codec */
+            eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
+                      "    { %sNode* nd%d = &c->tape[c->total++];\n"
+                      "      nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n"
+                      "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n",
+                   g->name, fail, g->name, k, k, rid, k, k, k);
+        } else {
+            eb_fmt(e, "    if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
+                   g->name, rid, x->b, k, fail);
+        }
         break;
     }
     case RN_COLLECT: {
@@ -1022,7 +1039,7 @@ static char* rg_emit(const RG* g, int origin_line) {
         for (int r = 0; r < g->nrules; r++) {
             int body = g->rules[r].node;
             int aliasable = g->nodes[body].kind == RN_CHARSET || g->nodes[body].kind == RN_LIT;
-            skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 12));
+            skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 24));
             pure[r] = (unsigned char)!rk_rule(g, e.K, r);
         }
         for (int r = 0; r < g->nrules; r++) {
