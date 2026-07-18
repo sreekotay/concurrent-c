@@ -33,10 +33,14 @@ whole-buffer version here gets resumption for free from the state-machine loweri
 ./bench.sh              # ours, on twitter.json + numbers.json
 ./bench.sh 400          # more iterations
 ./bench.sh -y           # also run yyjson (see below)
+./bench.sh -c           # also print a correctness checksum
 ```
 
 `bench` reports MB/s, µs/parse, zero-copy rate, and node size (parse only —
-no post-walk in the timed loop).
+no post-walk in the timed loop). `-c` adds a deterministic DOM digest computed
+by one extra parse+walk *after* the clock stops, so it verifies correctness
+without skewing the timing (expected: twitter.json `chk=406072`, numbers.json
+`chk=356701`).
 
 ## Corpora
 
