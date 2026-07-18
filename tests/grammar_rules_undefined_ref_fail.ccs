@@ -1,0 +1,10 @@
+// NEGATIVE: a reference to an undeclared rule must fail at grammar compile
+// time with the rule named — never surface as broken generated C.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Bad {~~~~
+    top: [ws value]
+    ws:  any charset [#' ']
+~~~~}
+
+int main(void) { (void)Bad_match("x", 1); return 0; }

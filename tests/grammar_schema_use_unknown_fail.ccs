@@ -1,0 +1,10 @@
+// NEGATIVE: `use` of a rules grammar that is not declared earlier in the
+// file — the error teaches both fixes (declare it, or use a file factory).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    use Missing
+    v: Missing.number
+~~~~}
+
+int main(void) { return 0; }

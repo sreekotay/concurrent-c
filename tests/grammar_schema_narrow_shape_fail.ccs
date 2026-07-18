@@ -1,0 +1,13 @@
+// NEGATIVE: narrowing a rule that is not a delimited member list — the
+// shape mismatch is a compile error naming the expected structure.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   keep [some digit]
+    ]
+    num [ "k" v: num ]
+~~~~}
+
+int main(void) { return 0; }

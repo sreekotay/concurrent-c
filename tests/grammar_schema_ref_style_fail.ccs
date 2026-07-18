@@ -1,0 +1,16 @@
+// NEGATIVE: a schema composed with `use` must qualify rule references —
+// the error explains the copy (inline) vs share (use) model.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) G {~~~~
+    top: num
+    digit: charset [#'0' - #'9']
+    num:   keep [some digit]
+~~~~}
+
+@grammar(schema) Bad {~~~~
+    use G
+    v: num
+~~~~}
+
+int main(void) { (void)G_match("1", 1); return 0; }

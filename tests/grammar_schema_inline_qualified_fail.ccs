@@ -1,0 +1,13 @@
+// NEGATIVE: a self-contained schema (inline rules) uses BARE references —
+// qualified refs are for `use` composition; the error teaches the model.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   keep [some digit]
+    ]
+    G.num
+~~~~}
+
+int main(void) { return 0; }
