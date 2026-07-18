@@ -1,0 +1,18 @@
+// The `rules` builtin engine is NATIVE (grammar_rules.c), dispatched by the seam
+// as a source-to-source splice — no @comptime fn, no libtcc. v0 skeleton: it
+// parses the fenced Rebol/PARSE-style body enough to count named rules and emit
+// a real type + operation. (The full dialect compiler grows in that file; its
+// target is examples/serdes/json/json.h.)
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Toy {~~~~
+    ws:     any charset [#' ' #'\t']
+    digit:  charset [#'0' - #'9']
+    number: [some digit]
+~~~~}
+
+int main(void) {
+    if (Toy_rule_count() != 3) { printf("FAIL: rule_count=%d\n", Toy_rule_count()); return 1; }
+    printf("grammar rules native engine: 3 rules OK\n");
+    return 0;
+}

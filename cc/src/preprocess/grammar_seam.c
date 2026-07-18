@@ -27,6 +27,7 @@
  * depend on stable line numbers).
  */
 #include "preprocess/preprocess.h"
+#include "preprocess/grammar_engine.h"
 #include "util/text.h"
 
 #include <stdio.h>
@@ -240,19 +241,53 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
             if (r == 1) {
                 char file[512]; int line = 0;
                 char head[1024];
+                const char* ofile;
                 cc__grammar_origin(src, i, input_path, file, sizeof(file), &line);
+                ofile = file[0] ? file : (input_path ? input_path : "<input>");
                 /* Copy everything before the declaration. */
                 cc_sb_append(&out, &out_len, &out_cap, src + copied, i - copied);
-                /* One-line synthesized engine call. */
+
+                /* Builtin engine? Emit generated C natively and splice in place. */
+                {
+                    char gerr[512] = {0};
+                    char* gen = cc_grammar_builtin_emit(engine, name, src + body_start,
+                                                        body_len, ofile, line,
+                                                        gerr, sizeof(gerr));
+                    if (gen) {
+                        /* #line before/after so DSL body and following source
+                         * keep faithful positions across the size change. */
+                        int nl = 0;
+                        for (size_t k = i; k < decl_end && k < n; k++)
+                            if (src[k] == '\n') nl++;
+                        snprintf(head, sizeof(head), "#line %d \"%s\"\n", line, ofile);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, head);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, gen);
+                        if (out_len && out[out_len - 1] != '\n')
+                            cc_sb_append(&out, &out_len, &out_cap, "\n", 1);
+                        snprintf(head, sizeof(head), "#line %d \"%s\"\n", line + nl, ofile);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, head);
+                        free(gen);
+                        copied = decl_end;
+                        i = decl_end;
+                        found = 1;
+                        continue;
+                    }
+                    if (gerr[0]) {   /* builtin engine parsed and rejected */
+                        fprintf(stderr, "%s:%d: error: %s\n", ofile, line, gerr);
+                        free(out);
+                        return (char*)-1;
+                    }
+                    /* else: not a builtin — fall through to the comptime path */
+                }
+
+                /* User engine: synthesized @comptime call (one physical line). */
                 snprintf(head, sizeof(head),
                          "@comptime { %s(cc_slice_from_cstr(\"%s\"), "
                          "cc_slice_from_buffer((void*)\"",
                          engine, name);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, head);
                 cc__append_c_escaped(&out, &out_len, &out_cap, src + body_start, body_len);
-                snprintf(head, sizeof(head), "\", %zu), \"%s\", %d); }",
-                         body_len, file[0] ? file : (input_path ? input_path : "<input>"),
-                         line);
+                snprintf(head, sizeof(head), "\", %zu), \"%s\", %d); }", body_len, ofile, line);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, head);
                 /* Preserve the physical line count of the replaced span. */
                 for (size_t k = i; k < decl_end && k < n; k++)
