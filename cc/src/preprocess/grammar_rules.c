@@ -70,6 +70,7 @@
 #include "preprocess/grammar_engine.h"
 #include "util/text.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -912,7 +913,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
             eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
                    g->name, g->rules[x->nkids].name, fail);
-        else if (e->mode)
+        else if (e->mode == 1)
             eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
                    g->name, g->rules[x->nkids].name, fail);
         else
@@ -932,6 +933,16 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         rg_emit_node(g, e, x->a, fail, lbl, rid);
         e->dk = saved_dk;
+        if (e->mode == 2) {
+            /* extract mode (schema tier): the keep captures into out-params —
+             * no tape, no ctx. Backtracking is free: a retried branch simply
+             * overwrites the locals; a failed rule reports nothing. */
+            if (x->b > 0)
+                eb_fmt(e, "    *xa = ka%d; *xb = p; *xdr = dr%d;\n    }\n", k, k);
+            else
+                eb_fmt(e, "    *xa = ka%d; *xb = p;\n    }\n", k);
+            break;
+        }
         /* every keep writes its node inline with the RAW source span; codec
          * keeps add the dirty bit when a transform-triggering branch ran.
          * Decode is deferred to the materialize pass (lazy strings, like lazy
@@ -948,7 +959,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         break;
     }
     case RN_COLLECT: {
-        if (!e->mode) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
+        if (e->mode != 1) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         /* BEGIN/END markers bracket the child's span. A failing child unwinds
          * through tape truncation, removing the BEGIN — no special casing. */
         eb_fmt(e, "    { if (c->bdepth >= 512) goto %s;\n"
@@ -1028,7 +1039,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         /* fallback: PEG trial cascade */
         {
-        int kp = e->mode ? rk_node(g, e->K, nd) : 0;
+        int kp = e->mode == 1 ? rk_node(g, e->K, nd) : 0;
         int rk = kp ? e->risk : 0;
         if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
         else          eb_fmt(e, "    { size_t sv%d = p;\n", k);
@@ -1051,7 +1062,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     }
     case RN_OPT: {
         int k = (*lbl)++;
-        int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
+        int kp = e->mode == 1 ? rk_node(g, e->K, x->a) : 0;
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
@@ -1103,7 +1114,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         {
         int k = (*lbl)++;
-        int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
+        int kp = e->mode == 1 ? rk_node(g, e->K, x->a) : 0;
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
@@ -1401,6 +1412,763 @@ static char* rg_emit(const RG* g, int origin_line) {
 /* Emitted matchers take const unsigned char*; LIT bytes compare via pool
  * (unsigned) so charset/memcmp semantics are byte-exact for non-ASCII. */
 
+/* ==================================================================== */
+/* @grammar(schema) — the typed tier: parse direct-to-struct.            */
+/*                                                                       */
+/* A schema block `use`s a rules grammar declared earlier in the file    */
+/* and describes a product shape over it:                                */
+/*                                                                       */
+/*   use Json                                                            */
+/*   fields: open #'{' close #'}' sep #',' kv #':'                       */
+/*           key Json.string pad Json.ws else Json.value                 */
+/*   items:  open #'[' close #']' sep #',' pad Json.ws                   */
+/*   Json.ws                                                             */
+/*   fields [ "id"   id:   int Json.number                               */
+/*            "text" text: Json.string                                   */
+/*            "user" fields [ "screen_name" name: Json.string ] ]        */
+/*   Json.ws                                                             */
+/*                                                                       */
+/* Emits `typedef struct Name {...} Name` + `Name_parse(s,n,arena,out)`. */
+/* Bound leaves reuse the rules engine in EXTRACT mode (the keep's span  */
+/* captured into locals — no tape); unknown members dispatch through a   */
+/* key-length switch to the `else` rule's MATCH-tier skip. Nested        */
+/* `fields` bind into the same struct (fields live at event sites);     */
+/* `items Schema` produces an arena array of a previously declared      */
+/* schema. Matchers for a used rules grammar are emitted once per file   */
+/* under the `<Rules>__s` prefix and shared by every schema.             */
+/* ==================================================================== */
+
+enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_FIELDS };
+enum { S_MAX_TERMS = 96, S_MAX_KEYS = 64, S_NAME = 64, S_MAX_BODY = 32 };
+
+typedef struct {
+    int kind;
+    unsigned char lit[24]; int litlen;   /* SK_LIT */
+    char rname[S_NAME]; int rule;        /* SK_RULE / SK_BIND_SLICE / SK_BIND_INT */
+    char field[S_NAME];                  /* SK_BIND_* */
+    char etype[S_NAME];                  /* SK_BIND_ITEMS: element schema type */
+    int kidx[24]; int k_cnt;             /* SK_FIELDS: entries (indices into keys[];
+                                            nested fields interleave the pool, so an
+                                            explicit list, not a contiguous range) */
+} STerm;
+
+typedef struct { char key[S_NAME]; int term; } SKey;
+
+typedef struct {
+    const char* b; size_t n, p;
+    int line0;
+    char err[160]; size_t err_at;
+
+    char usename[S_NAME];
+    STerm terms[S_MAX_TERMS]; int nterms;
+    SKey keys[S_MAX_KEYS]; int nkeys;
+    int body[S_MAX_BODY]; int nbody;
+
+    int fo, fc, fs, fkv;                          /* fields: open/close/sep/kv */
+    char fkey[S_NAME], fpad[S_NAME], felse[S_NAME];
+    int io_, ic_, is_;                            /* items: open/close/sep */
+    char ipad[S_NAME];
+    int rfkey, rfpad, rfelse, ripad;              /* resolved rule idx, -1 unset */
+} SS;
+
+static int ss_fail(SS* s, size_t at, const char* msg) {
+    if (!s->err[0]) { snprintf(s->err, sizeof(s->err), "%s", msg); s->err_at = at; }
+    return -1;
+}
+
+static int ss_line_at(const SS* s, size_t at) {
+    int line = s->line0;
+    for (size_t i = 0; i < at && i < s->n; i++) if (s->b[i] == '\n') line++;
+    return line;
+}
+
+static void ss_ws(SS* s) {
+    for (;;) {
+        while (s->p < s->n && (s->b[s->p] == ' ' || s->b[s->p] == '\t' ||
+                               s->b[s->p] == '\r' || s->b[s->p] == '\n')) s->p++;
+        if (s->p < s->n && s->b[s->p] == ';') {
+            while (s->p < s->n && s->b[s->p] != '\n') s->p++;
+            continue;
+        }
+        break;
+    }
+}
+
+static int ss_ident(SS* s, char* out, size_t sz) {
+    ss_ws(s);
+    size_t q = s->p, o = 0;
+    if (!(q < s->n && (isalpha((unsigned char)s->b[q]) || s->b[q] == '_'))) return 0;
+    while (q < s->n && (isalnum((unsigned char)s->b[q]) || s->b[q] == '_')) {
+        if (o + 1 < sz) out[o++] = s->b[q];
+        q++;
+    }
+    out[o] = '\0'; s->p = q;
+    return 1;
+}
+
+static int ss_peek(SS* s) { ss_ws(s); return s->p < s->n ? (unsigned char)s->b[s->p] : -1; }
+
+static int ss_escbyte(SS* s, unsigned char* out) {
+    if (s->p >= s->n) return 0;
+    char c = s->b[s->p++];
+    if (c != '\\') { *out = (unsigned char)c; return 1; }
+    if (s->p >= s->n) return 0;
+    char e = s->b[s->p++];
+    switch (e) {
+    case 'n': *out = '\n'; return 1;  case 't': *out = '\t'; return 1;
+    case 'r': *out = '\r'; return 1;  case '0': *out = '\0'; return 1;
+    case '\\': case '\'': case '"': *out = (unsigned char)e; return 1;
+    default: return 0;
+    }
+}
+
+static int ss_charlit(SS* s, unsigned char* out) {   /* at "#'" */
+    if (!(s->p + 1 < s->n && s->b[s->p] == '#' && s->b[s->p + 1] == '\'')) return 0;
+    s->p += 2;
+    if (!ss_escbyte(s, out)) return 0;
+    if (!(s->p < s->n && s->b[s->p] == '\'')) return 0;
+    s->p++;
+    return 1;
+}
+
+static int ss_string(SS* s, unsigned char* out, int cap, int* outlen) {   /* at '"' */
+    if (!(s->p < s->n && s->b[s->p] == '"')) return 0;
+    s->p++;
+    int o = 0;
+    while (s->p < s->n && s->b[s->p] != '"') {
+        unsigned char c;
+        if (!ss_escbyte(s, &c)) return 0;
+        if (o >= cap) return 0;
+        out[o++] = c;
+    }
+    if (s->p >= s->n) return 0;
+    s->p++;
+    *outlen = o;
+    return 1;
+}
+
+static int ss_ruleref_tail(SS* s, char* rname) {   /* after Usename, at '.' */
+    if (!(s->p < s->n && s->b[s->p] == '.')) return ss_fail(s, s->p, "expected '.' in rules reference");
+    s->p++;
+    char rn[S_NAME];
+    if (!ss_ident(s, rn, sizeof rn)) return ss_fail(s, s->p, "expected rule name after '.'");
+    memcpy(rname, rn, sizeof rn);
+    return 0;
+}
+
+static int ss_ruleref(SS* s, char* rname, const char* what) {
+    char un[S_NAME];
+    if (!ss_ident(s, un, sizeof un)) return ss_fail(s, s->p, what);
+    if (strcmp(un, s->usename) != 0) return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
+    return ss_ruleref_tail(s, rname);
+}
+
+static int ss_term(SS* s, int* out_term);
+
+static int ss_fields_body(SS* s, int self) {
+    ss_ws(s);
+    if (!(s->p < s->n && s->b[s->p] == '[')) return ss_fail(s, s->p, "expected '[' after fields");
+    s->p++;
+    for (;;) {
+        int c = ss_peek(s);
+        if (c == ']') { s->p++; break; }
+        if (c != '"') return ss_fail(s, s->p, "expected \"key\" or ']' in fields [...]");
+        if (s->nkeys >= S_MAX_KEYS) return ss_fail(s, s->p, "too many keys in fields [...]");
+        if (s->terms[self].k_cnt >= (int)(sizeof(s->terms[self].kidx) / sizeof(int)))
+            return ss_fail(s, s->p, "too many entries in one fields [...]");
+        unsigned char kb[S_NAME]; int kl = 0;
+        if (!ss_string(s, kb, S_NAME - 1, &kl)) return ss_fail(s, s->p, "bad key string");
+        int ki = s->nkeys++;
+        memcpy(s->keys[ki].key, kb, (size_t)kl); s->keys[ki].key[kl] = '\0';
+        int ti;
+        if (ss_term(s, &ti)) return -1;   /* may append nested keys in between */
+        s->keys[ki].term = ti;
+        s->terms[self].kidx[s->terms[self].k_cnt++] = ki;
+    }
+    return 0;
+}
+
+static int ss_term(SS* s, int* out_term) {
+    if (s->nterms >= S_MAX_TERMS) return ss_fail(s, s->p, "schema too large (term limit)");
+    int c = ss_peek(s);
+    STerm* t = &s->terms[s->nterms];
+    memset(t, 0, sizeof *t);
+    t->rule = -1;
+    if (c == '"') {
+        int ll = 0;
+        if (!ss_string(s, t->lit, (int)sizeof(t->lit), &ll)) return ss_fail(s, s->p, "bad string literal");
+        if (ll == 0) return ss_fail(s, s->p, "empty literal");
+        t->litlen = ll; t->kind = SK_LIT;
+        *out_term = s->nterms++;
+        return 0;
+    }
+    if (c == '#') {
+        unsigned char b;
+        if (!ss_charlit(s, &b)) return ss_fail(s, s->p, "bad #'c' literal");
+        t->lit[0] = b; t->litlen = 1; t->kind = SK_LIT;
+        *out_term = s->nterms++;
+        return 0;
+    }
+    char id[S_NAME];
+    if (!ss_ident(s, id, sizeof id)) return ss_fail(s, s->p, "expected term");
+    if (strcmp(id, "fields") == 0) {
+        t->kind = SK_FIELDS;
+        int self = s->nterms++;          /* reserve BEFORE recursing */
+        if (ss_fields_body(s, self)) return -1;
+        *out_term = self;
+        return 0;
+    }
+    if (s->p < s->n && s->b[s->p] == '.') {
+        if (strcmp(id, s->usename) != 0) return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
+        if (ss_ruleref_tail(s, t->rname)) return -1;
+        t->kind = SK_RULE;
+        *out_term = s->nterms++;
+        return 0;
+    }
+    ss_ws(s);
+    if (!(s->p < s->n && s->b[s->p] == ':'))
+        return ss_fail(s, s->p, "expected '.', ':' or fields [...] after identifier");
+    s->p++;
+    snprintf(t->field, sizeof(t->field), "%s", id);
+    char v[S_NAME];
+    if (!ss_ident(s, v, sizeof v)) return ss_fail(s, s->p, "expected binding after ':'");
+    if (strcmp(v, "int") == 0) {
+        if (ss_ruleref(s, t->rname, "expected rules reference after int")) return -1;
+        t->kind = SK_BIND_INT;
+    } else if (strcmp(v, "items") == 0) {
+        char en[S_NAME];
+        if (!ss_ident(s, en, sizeof en)) return ss_fail(s, s->p, "expected schema name after items");
+        snprintf(t->etype, sizeof(t->etype), "%s", en);
+        t->kind = SK_BIND_ITEMS;
+    } else if (strcmp(v, s->usename) == 0) {
+        if (ss_ruleref_tail(s, t->rname)) return -1;
+        t->kind = SK_BIND_SLICE;
+    } else {
+        return ss_fail(s, s->p, "binding must be `int Use.rule`, `Use.rule`, or `items Schema`");
+    }
+    *out_term = s->nterms++;
+    return 0;
+}
+
+static int ss_is_param(const char* id) {
+    return !strcmp(id, "open") || !strcmp(id, "close") || !strcmp(id, "sep") ||
+           !strcmp(id, "kv") || !strcmp(id, "key") || !strcmp(id, "pad") ||
+           !strcmp(id, "else");
+}
+
+static int ss_params(SS* s, int items) {
+    for (;;) {
+        size_t save = s->p;
+        char id[S_NAME];
+        if (!ss_ident(s, id, sizeof id)) return 0;
+        if (!ss_is_param(id)) { s->p = save; return 0; }
+        if (!strcmp(id, "open") || !strcmp(id, "close") || !strcmp(id, "sep") || !strcmp(id, "kv")) {
+            ss_ws(s);
+            unsigned char b;
+            if (!ss_charlit(s, &b)) return ss_fail(s, s->p, "directive expects a #'c' literal");
+            int* dst = items
+                ? (!strcmp(id, "open") ? &s->io_ : !strcmp(id, "close") ? &s->ic_ :
+                   !strcmp(id, "sep") ? &s->is_ : NULL)
+                : (!strcmp(id, "open") ? &s->fo : !strcmp(id, "close") ? &s->fc :
+                   !strcmp(id, "sep") ? &s->fs : &s->fkv);
+            if (!dst) return ss_fail(s, s->p, "kv is not a valid items parameter");
+            *dst = (int)b;
+        } else {
+            char* dst = items
+                ? (!strcmp(id, "pad") ? s->ipad : NULL)
+                : (!strcmp(id, "key") ? s->fkey : !strcmp(id, "pad") ? s->fpad :
+                   !strcmp(id, "else") ? s->felse : NULL);
+            if (!dst) return ss_fail(s, s->p, "key/else are not valid items parameters");
+            if (ss_ruleref(s, dst, "directive expects Use.rule")) return -1;
+        }
+    }
+}
+
+static int ss_parse(SS* s) {
+    s->fo = s->fc = s->fs = s->fkv = -1;
+    s->io_ = s->ic_ = s->is_ = -1;
+    s->rfkey = s->rfpad = s->rfelse = s->ripad = -1;
+    char id[S_NAME];
+    if (!ss_ident(s, id, sizeof id) || strcmp(id, "use") != 0)
+        return ss_fail(s, s->p, "schema must start with `use <RulesGrammar>`");
+    if (!ss_ident(s, s->usename, sizeof s->usename))
+        return ss_fail(s, s->p, "expected rules grammar name after use");
+    for (;;) {
+        ss_ws(s);
+        if (s->p >= s->n) break;
+        size_t save = s->p;
+        char kw[S_NAME];
+        if (ss_ident(s, kw, sizeof kw)) {
+            ss_ws(s);
+            int isdir = (s->p < s->n && s->b[s->p] == ':' &&
+                         (!strcmp(kw, "fields") || !strcmp(kw, "items")));
+            if (isdir) {
+                s->p++;
+                if (ss_params(s, kw[0] == 'i')) return -1;
+                continue;
+            }
+        }
+        s->p = save;
+        if (s->nbody >= S_MAX_BODY) return ss_fail(s, s->p, "schema body too large");
+        int ti;
+        if (ss_term(s, &ti)) return -1;
+        s->body[s->nbody++] = ti;
+    }
+    if (s->nbody == 0) return ss_fail(s, 0, "schema has no body");
+    return 0;
+}
+
+/* ---- registry: rules bodies + schema names, per input file ---- */
+
+typedef struct {
+    char name[S_NAME]; char pfx[S_NAME + 8];
+    char* body; size_t blen;
+    int matchers_done;
+    unsigned char x_done[R_MAX_RULES];
+} SRulesReg;
+
+static SRulesReg cc__rules_reg[8]; static int cc__rules_nreg;
+static char cc__schema_reg[32][S_NAME]; static int cc__schema_nreg;
+
+void cc__grammar_registry_reset(void) {
+    for (int i = 0; i < cc__rules_nreg; i++) free(cc__rules_reg[i].body);
+    memset(cc__rules_reg, 0, sizeof cc__rules_reg);
+    cc__rules_nreg = 0; cc__schema_nreg = 0;
+}
+
+static void cc__register_rules(const char* name, const char* body, size_t blen) {
+    if (cc__rules_nreg >= (int)(sizeof(cc__rules_reg) / sizeof(cc__rules_reg[0]))) return;
+    SRulesReg* r = &cc__rules_reg[cc__rules_nreg];
+    char* copy = (char*)malloc(blen + 1);
+    if (!copy) return;
+    memcpy(copy, body, blen); copy[blen] = '\0';
+    snprintf(r->name, sizeof(r->name), "%s", name);
+    snprintf(r->pfx, sizeof(r->pfx), "%s__s", name);
+    r->body = copy; r->blen = blen; r->matchers_done = 0;
+    memset(r->x_done, 0, sizeof(r->x_done));
+    cc__rules_nreg++;
+}
+
+static SRulesReg* cc__find_rules(const char* name) {
+    for (int i = 0; i < cc__rules_nreg; i++)
+        if (strcmp(cc__rules_reg[i].name, name) == 0) return &cc__rules_reg[i];
+    return NULL;
+}
+
+static int cc__schema_known(const char* name) {
+    for (int i = 0; i < cc__schema_nreg; i++)
+        if (strcmp(cc__schema_reg[i], name) == 0) return 1;
+    return 0;
+}
+
+/* ---- schema emission ---- */
+
+static int rs_rule_by_name(const RG* g, const char* name) {
+    for (int r = 0; r < g->nrules; r++)
+        if (strcmp(g->rules[r].name, name) == 0) return r;
+    return -1;
+}
+
+static int rs_rule_codec(const RG* g, int r) {   /* 0 = none, else codec idx */
+    int stack[R_MAX_NODES]; int sp = 0, cd = 0;
+    stack[sp++] = g->rules[r].node;
+    while (sp > 0) {
+        const RNode* x = &g->nodes[stack[--sp]];
+        if (x->kind == RN_KEEP) { if (x->b > 0) cd = x->b; stack[sp++] = x->a; }
+        else if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+            stack[sp++] = x->a;
+        else if (x->kind == RN_SEQ || x->kind == RN_ALT)
+            for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
+    }
+    return cd;
+}
+
+static int rs_rule_has_keep(const RG* g, int r) {
+    int stack[R_MAX_NODES]; int sp = 0;
+    stack[sp++] = g->rules[r].node;
+    while (sp > 0) {
+        const RNode* x = &g->nodes[stack[--sp]];
+        if (x->kind == RN_KEEP) return 1;
+        if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+            stack[sp++] = x->a;
+        else if (x->kind == RN_SEQ || x->kind == RN_ALT)
+            for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
+    }
+    return 0;
+}
+
+static const char* rs_class(const RG* g, RKeeps* K, int r) {
+    return rk_rule(g, (RKeeps*)K, r) ? "m" : "r";
+}
+
+static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len) {
+    size_t o = 0;
+    for (int i = 0; i < len && o + 5 < dstsz; i++) {
+        unsigned char c = src[i];
+        if (isalnum(c) || c == '_' || c == ' ' || c == '-')
+            dst[o++] = (char)c;
+        else
+            o += (size_t)snprintf(dst + o, dstsz - o, "\\%03o", c);
+    }
+    dst[o] = '\0';
+}
+
+static void rs_emit_matchers(RG* g, EB* e, int* lbl) {
+    if (g->npool > 0) {
+        eb_fmt(e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
+        for (int i = 0; i < g->npool; i++) eb_fmt(e, "%d,", (int)(unsigned char)g->pool[i]);
+        eb_fmt(e, "};\n");
+    }
+    if (g->nsets > 0) {
+        eb_fmt(e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
+        for (int s = 0; s < g->nsets; s++) {
+            eb_fmt(e, "  {");
+            for (int i = 0; i < 32; i++) eb_fmt(e, "%u,", (unsigned)g->sets[s][i]);
+            eb_fmt(e, "},\n");
+        }
+        eb_fmt(e, "};\n");
+    }
+    for (int r = 0; r < g->nrules; r++)
+        eb_fmt(e, "static int %s__%s_%s(const unsigned char* s, size_t n, size_t* io);\n",
+               g->name, rs_class(g, e->K, r), g->rules[r].name);
+    e->mode = 0;
+    for (int r = 0; r < g->nrules; r++) {
+        eb_fmt(e, "static int %s__%s_%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                  "    size_t p = *io;\n    (void)s; (void)n;\n",
+               g->name, rs_class(g, e->K, r), g->rules[r].name);
+        char fail[16];
+        snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
+        rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
+        eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+    }
+}
+
+static void rs_emit_x(RG* g, EB* e, int* lbl, int r) {
+    e->mode = 2;
+    eb_fmt(e, "static int %s__x_%s(const unsigned char* s, size_t n, size_t* io,\n"
+              "        size_t* xa, size_t* xb, int* xdr) {\n"
+              "    size_t p = *io;\n    (void)s; (void)n;\n    *xdr = 0;\n",
+           g->name, g->rules[r].name);
+    char fail[16];
+    snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
+    rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
+    eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+    e->mode = 0;
+}
+
+static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
+    if (prule < 0) return;
+    eb_fmt(e, "    if (!%s__%s_%s(s, n, &p)) goto %s;\n",
+           g->name, rs_class(g, e->K, prule), g->rules[prule].name, fail);
+}
+
+static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
+    (void)ss;
+    int k = (*lbl)++;
+    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
+              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n",
+           k, k, k, g->name, g->rules[t->rule].name, k, k, k, fail);
+    if (t->kind == SK_BIND_INT) {
+        eb_fmt(e, "      (void)xd%d;\n"
+                  "      { char nb%d[32]; size_t nl%d = xb%d - xa%d;\n"
+                  "        if (nl%d > 31) nl%d = 31;\n"
+                  "        memcpy(nb%d, s + xa%d, nl%d); nb%d[nl%d] = 0;\n"
+                  "        out->%s = strtoll(nb%d, 0, 10); } }\n",
+               k, k, k, k, k, k, k, k, k, k, k, k, t->field, k);
+        return;
+    }
+    int cd = rs_rule_codec(g, t->rule);
+    if (cd > 0) {
+        /* clean spans borrow raw; dirty spans decode through the rule's codec
+         * (same provenance contract as the collect/DOM tiers) */
+        eb_fmt(e, "      if (!xd%d) out->%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n"
+                  "      else if (!%s((const char*)(s + xa%d), xb%d - xa%d, &out->%s, arena)) goto %s;\n"
+                  "    }\n",
+               k, t->field, k, k, k, g->codecs[cd - 1], k, k, k, t->field, fail);
+    } else {
+        eb_fmt(e, "      (void)xd%d;\n"
+                  "      out->%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n    }\n",
+               k, t->field, k, k, k);
+    }
+}
+
+static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail);
+
+static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
+    int k = (*lbl)++;
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->fo, fail);
+    rs_emit_pad(g, e, ss->rfpad, fail);
+    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", ss->fc);
+    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
+              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n"
+              "      (void)xd%d;\n",
+           k, k, k, g->name, g->rules[ss->rfkey].name, k, k, k, fail, k);
+    rs_emit_pad(g, e, ss->rfpad, fail);
+    eb_fmt(e, "      if (!(p < n && s[p] == %d)) goto %s;\n      p++;\n", ss->fkv, fail);
+    rs_emit_pad(g, e, ss->rfpad, fail);
+    /* key dispatch: switch on length, memcmp chain within a length class */
+    eb_fmt(e, "      switch (xb%d - xa%d) {\n", k, k);
+    {
+        unsigned char done[S_MAX_KEYS] = {0};
+        for (int i = 0; i < t->k_cnt; i++) {
+            if (done[i]) continue;
+            const SKey* ki = &ss->keys[t->kidx[i]];
+            size_t L = strlen(ki->key);
+            eb_fmt(e, "      case %d:\n", (int)L);
+            for (int j = i; j < t->k_cnt; j++) {
+                const SKey* kj = &ss->keys[t->kidx[j]];
+                if (done[j] || strlen(kj->key) != L) continue;
+                done[j] = 1;
+                char esc[4 * S_NAME];
+                rs_esc(esc, sizeof esc, (const unsigned char*)kj->key, (int)L);
+                eb_fmt(e, "        if (memcmp(s + xa%d, \"%s\", %d) == 0) {\n", k, esc, (int)L);
+                rs_emit_term(ss, g, e, lbl, kj->term, fail);
+                eb_fmt(e, "          break; }\n");
+            }
+            eb_fmt(e, "        goto Ld%d;\n", k);
+        }
+    }
+    eb_fmt(e, "      default: goto Ld%d;\n      }\n      goto Ln%d;\n", k, k);
+    eb_fmt(e, "Ld%d:\n", k);
+    if (ss->rfelse >= 0)
+        eb_fmt(e, "      if (!%s__%s_%s(s, n, &p)) goto %s;\n",
+               g->name, rs_class(g, e->K, ss->rfelse), g->rules[ss->rfelse].name, fail);
+    else
+        eb_fmt(e, "      goto %s;   /* unknown member and no else rule */\n", fail);
+    eb_fmt(e, "Ln%d: ;\n    }\n", k);
+    rs_emit_pad(g, e, ss->rfpad, fail);
+    eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->fs);
+    rs_emit_pad(g, e, ss->rfpad, fail);
+    eb_fmt(e, "    continue; }\n    break;\n    }\n    }\n");
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->fc, fail);
+}
+
+static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
+    int k = (*lbl)++;
+    const char* T = t->etype;
+    eb_fmt(e, "    { size_t cap%d = 8, cnt%d = 0;\n"
+              "    %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
+              "    if (!v%d) goto %s;\n",
+           k, k, T, k, T, k, T, T, k, fail);
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->io_, fail);
+    rs_emit_pad(g, e, ss->ripad, fail);
+    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", ss->ic_);
+    eb_fmt(e, "    if (cnt%d == cap%d) {\n"
+              "        %s* nv%d = (%s*)cc_arena_realloc(arena, arena, v%d,\n"
+              "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
+              "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
+           k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d])) goto %s;\n    cnt%d++;\n",
+           T, k, k, fail, k);
+    rs_emit_pad(g, e, ss->ripad, fail);
+    eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->is_);
+    rs_emit_pad(g, e, ss->ripad, fail);
+    eb_fmt(e, "    continue; }\n    break;\n    }\n    }\n");
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->ic_, fail);
+    eb_fmt(e, "    out->%s = v%d; out->%s_n = cnt%d; }\n", t->field, k, t->field, k);
+}
+
+static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail) {
+    const STerm* t = &ss->terms[ti];
+    switch (t->kind) {
+    case SK_LIT:
+        if (t->litlen == 1) {
+            eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n",
+                   (int)t->lit[0], fail);
+        } else {
+            char esc[128];
+            rs_esc(esc, sizeof esc, t->lit, t->litlen);
+            eb_fmt(e, "    if (!(p + %d <= n && memcmp(s + p, \"%s\", %d) == 0)) goto %s;\n"
+                      "    p += %d;\n",
+                   t->litlen, esc, t->litlen, fail, t->litlen);
+        }
+        break;
+    case SK_RULE:
+        eb_fmt(e, "    if (!%s__%s_%s(s, n, &p)) goto %s;\n",
+               g->name, rs_class(g, e->K, t->rule), g->rules[t->rule].name, fail);
+        break;
+    case SK_BIND_SLICE:
+    case SK_BIND_INT:
+        rs_emit_bind_value(ss, g, e, lbl, t, fail);
+        break;
+    case SK_BIND_ITEMS:
+        rs_emit_items(ss, g, e, lbl, t, fail);
+        break;
+    case SK_FIELDS:
+        rs_emit_fields(ss, g, e, lbl, t, fail);
+        break;
+    }
+}
+
+static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
+    const STerm* t = &ss->terms[ti];
+    if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_ITEMS) {
+        order[(*cnt)++] = ti;
+    } else if (t->kind == SK_FIELDS) {
+        for (int i = 0; i < t->k_cnt; i++)
+            rs_collect_binds(ss, ss->keys[t->kidx[i]].term, order, cnt);
+    }
+}
+
+static char* cc__schema_emit(const char* name, const char* body, size_t body_len,
+                             const char* file, int line, char* err, size_t err_sz) {
+    (void)file;
+    SS* ss = (SS*)calloc(1, sizeof(SS));
+    RG* g = NULL; RFirst* F = NULL; RKeeps* K = NULL;
+    char* out = NULL; size_t len = 0, cap = 0;
+    if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
+    ss->b = body; ss->n = body_len; ss->line0 = line;
+
+    if (ss_parse(ss)) {
+        snprintf(err, err_sz, "@grammar(schema) %s: %s (at line %d)",
+                 name, ss->err, ss_line_at(ss, ss->err_at));
+        goto done;
+    }
+    SRulesReg* reg = cc__find_rules(ss->usename);
+    if (!reg) {
+        snprintf(err, err_sz, "@grammar(schema) %s: unknown rules grammar '%s' "
+                 "(a @grammar(rules) %s block must appear earlier in this file)",
+                 name, ss->usename, ss->usename);
+        goto done;
+    }
+    g = (RG*)calloc(1, sizeof(RG));
+    F = (RFirst*)calloc(1, sizeof(RFirst));
+    K = (RKeeps*)calloc(1, sizeof(RKeeps));
+    if (!g || !F || !K) { snprintf(err, err_sz, "@grammar(schema): out of memory"); goto done; }
+    g->body = reg->body; g->n = reg->blen; g->name = reg->pfx; g->file = file; g->line0 = line;
+    if (rg_parse(g) != 0) {
+        snprintf(err, err_sz, "@grammar(schema) %s: rules grammar '%s' failed to reparse: %s",
+                 name, ss->usename, g->err);
+        goto done;
+    }
+    /* resolve rule references */
+    {
+        struct { char* nm; int* dst; } dir[4] = {
+            { ss->fkey, &ss->rfkey }, { ss->fpad, &ss->rfpad },
+            { ss->felse, &ss->rfelse }, { ss->ipad, &ss->ripad },
+        };
+        for (int i = 0; i < 4; i++) {
+            if (!dir[i].nm[0]) continue;
+            int r = rs_rule_by_name(g, dir[i].nm);
+            if (r < 0) {
+                snprintf(err, err_sz, "@grammar(schema) %s: unknown rule '%s.%s'",
+                         name, ss->usename, dir[i].nm);
+                goto done;
+            }
+            *dir[i].dst = r;
+        }
+        for (int ti = 0; ti < ss->nterms; ti++) {
+            STerm* t = &ss->terms[ti];
+            if (t->kind != SK_RULE && t->kind != SK_BIND_SLICE && t->kind != SK_BIND_INT) continue;
+            t->rule = rs_rule_by_name(g, t->rname);
+            if (t->rule < 0) {
+                snprintf(err, err_sz, "@grammar(schema) %s: unknown rule '%s.%s'",
+                         name, ss->usename, t->rname);
+                goto done;
+            }
+            if ((t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT) &&
+                !rs_rule_has_keep(g, t->rule)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: rule '%s.%s' has no keep to extract",
+                         name, ss->usename, t->rname);
+                goto done;
+            }
+            if (t->kind == SK_BIND_ITEMS && !cc__schema_known(t->etype)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
+                         "(must be declared earlier in this file)", name, t->etype);
+                goto done;
+            }
+        }
+        for (int ti = 0; ti < ss->nterms; ti++) {
+            STerm* t = &ss->terms[ti];
+            if (t->kind == SK_BIND_ITEMS && !cc__schema_known(t->etype)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
+                         "(must be declared earlier in this file)", name, t->etype);
+                goto done;
+            }
+            if (t->kind == SK_FIELDS &&
+                (ss->fo < 0 || ss->fc < 0 || ss->fs < 0 || ss->fkv < 0 || ss->rfkey < 0)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: fields [...] requires a "
+                         "`fields:` directive with open/close/sep/kv/key", name);
+                goto done;
+            }
+            if (t->kind == SK_BIND_ITEMS && (ss->io_ < 0 || ss->ic_ < 0 || ss->is_ < 0)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: items requires an "
+                         "`items:` directive with open/close/sep", name);
+                goto done;
+            }
+        }
+        if (ss->rfkey >= 0 && !rs_rule_has_keep(g, ss->rfkey)) {
+            snprintf(err, err_sz, "@grammar(schema) %s: key rule '%s.%s' has no keep",
+                     name, ss->usename, ss->fkey);
+            goto done;
+        }
+    }
+
+    {
+        EB e = { &out, &len, &cap, F, K, 0, -1, 0 };
+        int lbl = 0;
+        eb_fmt(&e, "/* generated by @grammar(schema) %s (line %d): use %s */\n",
+               name, line, ss->usename);
+        if (!reg->matchers_done) {
+            rs_emit_matchers(g, &e, &lbl);
+            reg->matchers_done = 1;
+        }
+        /* extract variants needed by this schema (shared across schemas) */
+        {
+            for (int ti = -1; ti < ss->nterms; ti++) {
+                int r = -1;
+                if (ti < 0) r = ss->rfkey;
+                else if (ss->terms[ti].kind == SK_BIND_SLICE || ss->terms[ti].kind == SK_BIND_INT)
+                    r = ss->terms[ti].rule;
+                if (r < 0 || reg->x_done[r]) continue;
+                rs_emit_x(g, &e, &lbl, r);
+                reg->x_done[r] = 1;
+            }
+        }
+        /* the struct: fields in declaration order, at their event sites */
+        {
+            int order[S_MAX_TERMS]; int cnt = 0;
+            for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
+            eb_fmt(&e, "typedef struct %s {\n", name);
+            for (int i = 0; i < cnt; i++) {
+                const STerm* t = &ss->terms[order[i]];
+                if (t->kind == SK_BIND_INT)
+                    eb_fmt(&e, "    long long %s;\n", t->field);
+                else if (t->kind == SK_BIND_SLICE)
+                    eb_fmt(&e, "    CCSlice %s;\n", t->field);
+                else
+                    eb_fmt(&e, "    %s* %s; size_t %s_n;\n", t->etype, t->field, t->field);
+            }
+            if (cnt == 0) eb_fmt(&e, "    char cc__empty;\n");
+            eb_fmt(&e, "} %s;\n", name);
+        }
+        eb_fmt(&e, "static int %s__fill(const unsigned char* s, size_t n, size_t* io,\n"
+                   "        CCArena* arena, %s* out) {\n"
+                   "    size_t p = *io;\n    (void)arena;\n"
+                   "    memset(out, 0, sizeof *out);\n", name, name);
+        {
+            char fail[16];
+            snprintf(fail, sizeof(fail), "Lz%d", lbl++);
+            for (int i = 0; i < ss->nbody; i++)
+                rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
+            eb_fmt(&e, "    *io = p;\n    return 1;\n%s:\n    return 0;\n}\n", fail);
+        }
+        eb_fmt(&e, "static int %s_parse(const char* s0, size_t n, CCArena* arena, %s* out) {\n"
+                   "    const unsigned char* s = (const unsigned char*)s0;\n"
+                   "    size_t p = 0;\n"
+                   "    if (!%s__fill(s, n, &p, arena, out)) return 0;\n"
+                   "    return p == n;\n}\n", name, name, name);
+        cc_sb_append(e.buf, e.len, e.cap, "", 1);
+        if (out) out[len - 1] = '\0';
+    }
+    if (cc__schema_nreg < (int)(sizeof(cc__schema_reg) / sizeof(cc__schema_reg[0])))
+        snprintf(cc__schema_reg[cc__schema_nreg++], S_NAME, "%s", name);
+
+done:
+    free(ss); free(g); free(F); free(K);
+    return out;
+}
+
 static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
                             const char* file, int line, char* err, size_t err_sz) {
     RG* g = (RG*)calloc(1, sizeof(RG));
@@ -1410,6 +2178,7 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
     char* out = NULL;
     if (rg_parse(g) == 0) {
         out = rg_emit(g, line);
+        if (out) cc__register_rules(name, body, body_len);   /* schemas may `use` it */
     } else {
         snprintf(err, err_sz, "%s (at line %d)", g->err, rg_line_at(g, g->err_at));
     }
@@ -1426,6 +2195,8 @@ char* cc_grammar_builtin_emit(const char* engine,
     if (err && err_sz) err[0] = '\0';
     if (engine && strcmp(engine, "rules") == 0)
         return cc__rules_emit(name, body, body_len, file, line, err, err_sz);
+    if (engine && strcmp(engine, "schema") == 0)
+        return cc__schema_emit(name, body, body_len, file, line, err, err_sz);
     /* not a builtin: signal fall-through to the comptime-fn path */
     return NULL;
 }

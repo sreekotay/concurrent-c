@@ -24,4 +24,8 @@ char* cc_grammar_builtin_emit(const char* engine,
                               const char* file, int line,
                               char* err, size_t err_sz);
 
+/* Cross-block state (rules bodies that @grammar(schema) blocks `use`, schema
+ * type names) is scoped to one input file; the seam resets it per rewrite. */
+void cc__grammar_registry_reset(void);
+
 #endif /* CC_GRAMMAR_ENGINE_H */
