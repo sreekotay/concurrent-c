@@ -1,0 +1,23 @@
+// NEGATIVE: requesting the write projection of a schema that is not
+// formatable yet (member-list combinators need codec inversion).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Obj {~~~~
+    rules [
+        ws:      any charset [#' ']
+        strchar: complement charset [#'"' #'\\']
+        str:     [#'"' keep any strchar #'"']
+        val:     [ws str ws]
+        mem:     [ws str ws #':' val]
+        obj:     [#'{' ws opt [mem any [#',' mem]] #'}']
+    ]
+    obj [ "k" v: str ]
+~~~~}
+
+int main(void) {
+    char buf[64];
+    Obj o;
+    (void)o;
+    (void)Obj_write(&o, buf, sizeof buf);
+    return 0;
+}
