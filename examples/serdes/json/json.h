@@ -73,6 +73,8 @@ typedef enum { JSON_OK = 1, JSON_BAD = -1 } JsonStatus;
 typedef struct {
     const char* src; size_t len, pos;
     CCArena* arena;                             /* nodes + materialized strings */
+    JsonNode* node_batch;                       /* carved from arena in slabs */
+    size_t node_batch_left;
     long borrowed_strs, materialized_strs;      /* the copy-rate story */
 } JsonParser;
 
@@ -81,16 +83,44 @@ static inline JsonParser json_parser(const char* src, size_t len, CCArena* arena
     JsonParser p = {0}; p.src=src; p.len=len; p.arena=arena; return p;
 }
 
-static inline JsonNode* json__node(JsonParser* p) {
-    return (JsonNode*)cc_arena_alloc_local(p->arena, sizeof(JsonNode), _Alignof(JsonNode));
+/* Slab bump: one arena hit per ~64 nodes (cuts atomic live_allocs on big arrays). */
+static inline JsonNode* json__nodes(JsonParser* p, size_t n) {
+    if (p->node_batch_left < n) {
+        size_t got = n > 64 ? n : 64;
+        JsonNode* b = (JsonNode*)cc_arena_alloc_local(p->arena, sizeof(JsonNode) * got,
+                                                       _Alignof(JsonNode));
+        if (!b) return NULL;
+        p->node_batch = b;
+        p->node_batch_left = got;
+    }
+    JsonNode* out = p->node_batch;
+    p->node_batch += n;
+    p->node_batch_left -= n;
+    return out;
+}
+static inline JsonNode* json__node(JsonParser* p) { return json__nodes(p, 1); }
+
+/* Advance past a number literal (corpus tokens are ~10 B — table scan wins). */
+static inline size_t json__scan_num(const char* s, size_t i, size_t n) {
+    const unsigned char* u = (const unsigned char*)s;
+    while (i < n && (json_cls[u[i]] & CLS_NUM)) i++;
+    return i;
 }
 
-static void json__skip_ws(JsonParser* p) {
-    while (p->pos < p->len && (CLS(p->src[p->pos]) & CLS_WS)) p->pos++;   // @await here
+/* On minified input this is almost always a one-byte reject; cost is call
+ * density at structural boundaries, not bytes skipped. */
+static inline void json__skip_ws(JsonParser* p) {
+    const char* s = p->src; size_t i = p->pos, n = p->len;
+    while (i < n && (CLS(s[i]) & CLS_WS)) i++;          // @await here
+    p->pos = i;
 }
 
 /* Scan to closing '"'. No backslash -> BORROW source bytes (cow=0); any escape ->
- * MATERIALIZE decoded bytes into the arena (cow=1). Returns bytes/len/cow. */
+ * MATERIALIZE decoded bytes into the arena (cow=1). Returns bytes/len/cow.
+ *
+ * Note: memchr('"')+memchr('\\') and short scalar probes were tried; both lost
+ * ~20–35% on twitter_min vs this SWAR — libc call tax / scalar setup dominate
+ * when the median string is ~11 bytes. */
 static JsonStatus json__string(JsonParser* p, const char** bytes, uint64_t* len, int* cow) {
     size_t i = p->pos + 1; int has_escape = 0;
     { const uint64_t L=0x0101010101010101ULL,H=0x8080808080808080ULL;   /* SWAR to '"'/'\\' */
@@ -130,11 +160,12 @@ static JsonStatus json__string(JsonParser* p, const char** bytes, uint64_t* len,
     p->pos=i+1; return JSON_OK;
 }
 
-/* fill node `nd` with the value at p->pos; build children as a sibling list. */
-static JsonStatus JsonParser_parse(JsonParser* p, JsonNode* nd) {
-    json__skip_ws(p); if(p->pos>=p->len) return JSON_BAD;   // @await: would suspend here
+/* Value at p->pos — caller has already skipped ws (avoids double skip_ws on
+ * every recursive edge: after ':', after '[', after ','). */
+static JsonStatus json__parse_value(JsonParser* p, JsonNode* nd) {
+    if(p->pos>=p->len) return JSON_BAD;                 // @await: would suspend here
     char c=p->src[p->pos];
-    switch(c){                                              /* first-set dispatch */
+    switch(c){                                          /* first-set dispatch */
     case '"': { const char* b; uint64_t l; int cow;
         if(json__string(p,&b,&l,&cow)!=JSON_OK) return JSON_BAD;
         nd->meta=JSON_META(JSON_STR,cow,l); nd->u.bytes=b; return JSON_OK; }
@@ -144,10 +175,11 @@ static JsonStatus JsonParser_parse(JsonParser* p, JsonNode* nd) {
         if(p->pos<p->len && p->src[p->pos]==']'){ p->pos++; nd->meta=JSON_META(JSON_ARR,0,0); nd->u.head=NULL; return JSON_OK; }
         for(;;){
             JsonNode* ch=json__node(p); if(!ch) return JSON_BAD;
-            if(JsonParser_parse(p,ch)!=JSON_OK) return JSON_BAD;
+            if(json__parse_value(p,ch)!=JSON_OK) return JSON_BAD;
             ch->next=NULL; *tail=ch; tail=&ch->next; cnt++;
             json__skip_ws(p); if(p->pos>=p->len) return JSON_BAD;
-            char d=p->src[p->pos++]; if(d==']') break; if(d!=',') return JSON_BAD; json__skip_ws(p);
+            char d=p->src[p->pos++]; if(d==']') break; if(d!=',') return JSON_BAD;
+            json__skip_ws(p);                           /* one skip before next elt */
         }
         nd->meta=JSON_META(JSON_ARR,0,cnt); nd->u.head=head; return JSON_OK; }
     case '{': {
@@ -155,28 +187,45 @@ static JsonStatus JsonParser_parse(JsonParser* p, JsonNode* nd) {
         JsonNode* head=NULL; JsonNode** tail=&head; uint64_t cnt=0;
         if(p->pos<p->len && p->src[p->pos]=='}'){ p->pos++; nd->meta=JSON_META(JSON_OBJ,0,0); nd->u.head=NULL; return JSON_OK; }
         for(;;){
-            /* key node (its own list entry), then the value node */
-            JsonNode* kn=json__node(p); if(!kn) return JSON_BAD;
+            /* key+value in one bump; list is kn -> vn -> ... */
+            JsonNode* pair=json__nodes(p,2); if(!pair) return JSON_BAD;
+            JsonNode* kn=pair; JsonNode* vn=pair+1;
             json__skip_ws(p); if(p->pos>=p->len||p->src[p->pos]!='"') return JSON_BAD;
             { const char* b; uint64_t l; int cow;
               if(json__string(p,&b,&l,&cow)!=JSON_OK) return JSON_BAD;
               kn->meta=JSON_META(JSON_STR,cow,l); kn->u.bytes=b; }
-            kn->next=NULL; *tail=kn; tail=&kn->next;
-            json__skip_ws(p); if(p->pos>=p->len||p->src[p->pos++]!=':') return JSON_BAD; json__skip_ws(p);
-            JsonNode* vn=json__node(p); if(!vn) return JSON_BAD;
-            if(JsonParser_parse(p,vn)!=JSON_OK) return JSON_BAD;
-            vn->next=NULL; *tail=vn; tail=&vn->next; cnt++;
+            json__skip_ws(p); if(p->pos>=p->len||p->src[p->pos++]!=':') return JSON_BAD;
+            json__skip_ws(p);
+            if(json__parse_value(p,vn)!=JSON_OK) return JSON_BAD;
+            kn->next=vn; vn->next=NULL; *tail=kn; tail=&vn->next; cnt++;
             json__skip_ws(p); if(p->pos>=p->len) return JSON_BAD;
             char d=p->src[p->pos++]; if(d=='}') break; if(d!=',') return JSON_BAD;
         }
         nd->meta=JSON_META(JSON_OBJ,0,cnt); nd->u.head=head; return JSON_OK; }
-    case 't': if(p->pos+4<=p->len&&!memcmp(p->src+p->pos,"true",4)){nd->meta=JSON_META(JSON_BOOL,0,1);p->pos+=4;return JSON_OK;} return JSON_BAD;
-    case 'f': if(p->pos+5<=p->len&&!memcmp(p->src+p->pos,"false",5)){nd->meta=JSON_META(JSON_BOOL,0,0);p->pos+=5;return JSON_OK;} return JSON_BAD;
-    case 'n': if(p->pos+4<=p->len&&!memcmp(p->src+p->pos,"null",4)){nd->meta=JSON_META(JSON_NULL,0,0);p->pos+=4;return JSON_OK;} return JSON_BAD;
-    default:{ size_t s=p->pos; while(p->pos<p->len&&(CLS(p->src[p->pos])&CLS_NUM))p->pos++;   /* NUM: borrow text */
-        if(p->pos==s) return JSON_BAD;
-        nd->meta=JSON_META(JSON_NUM,0,p->pos-s); nd->u.bytes=p->src+s; return JSON_OK; }
+    case 't': {
+        if(p->pos+4<=p->len){ uint32_t w; memcpy(&w,p->src+p->pos,4);
+          if(w==0x65757274u){ nd->meta=JSON_META(JSON_BOOL,0,1); p->pos+=4; return JSON_OK; } }
+        return JSON_BAD; }
+    case 'f': {
+        if(p->pos+5<=p->len){ uint32_t w; memcpy(&w,p->src+p->pos,4);
+          if(w==0x736C6166u && p->src[p->pos+4]=='e'){ nd->meta=JSON_META(JSON_BOOL,0,0); p->pos+=5; return JSON_OK; } }
+        return JSON_BAD; }
+    case 'n': {
+        if(p->pos+4<=p->len){ uint32_t w; memcpy(&w,p->src+p->pos,4);
+          if(w==0x6C6C756Eu){ nd->meta=JSON_META(JSON_NULL,0,0); p->pos+=4; return JSON_OK; } }
+        return JSON_BAD; }
+    default: {                                        /* NUM: borrow text */
+        size_t s=p->pos, e=json__scan_num(p->src, s, p->len);
+        if(e==s) return JSON_BAD;
+        nd->meta=JSON_META(JSON_NUM,0,e-s); nd->u.bytes=p->src+s; p->pos=e; return JSON_OK; }
     }
+}
+
+/* Public entry: skip once, then parse. Nested values use json__parse_value. */
+static inline JsonStatus JsonParser_parse(JsonParser* p, JsonNode* nd) {
+    p->node_batch = NULL; p->node_batch_left = 0;       /* invalidate across arena reset */
+    json__skip_ws(p);
+    return json__parse_value(p, nd);
 }
 
 
