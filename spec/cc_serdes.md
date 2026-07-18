@@ -496,6 +496,64 @@ When `cc_parse` produces slices or nested values, the implementation must preser
 
 ---
 
+## Streaming Consumption (contract)
+
+The generated parser is a whole-buffer function first; under `@async` lowering
+its "need more bytes" points become await points, and streaming falls out
+without changing the grammar. The client-side contract is **one generated
+parser frame consumed at three altitudes** — pay only for the altitude used:
+
+1. **Record loop** (record-framed streams: NDJSON, RESP commands,
+  length-prefixed records) — call `cc_parse` per record, reset the request
+   arena between records. No channel, no extra task, no buffering.
+
+   ```c
+   while (@await cc_parse(reader, arena, Tweet, &t)) { handle(&t); arena.reset(); }
+   ```
+2. **Iterator** (sub-document elements, same fiber) — step the parser frame
+  inline: pull-based, zero buffering, lockstep, fusable by the compiler. The
+   right default when producer and consumer share a fiber.
+3. **Channel** (concurrency wanted) — the parser runs as a nursery-owned
+  producer task sending completed subtrees into a bounded typed channel; the
+   yield granularity is whichever rule `cc_collect` is pointed at. Buys
+   parse-ahead, fan-out, pipeline stages, backpressure isolation.
+
+**Rule:** callbacks (SAX) are not a SERDES surface. Control inversion is
+strictly dominated by the iterator form.
+
+### Chaining
+
+Channels compose stages **across** fibers; iterators compose **within** one.
+Guidance: channels at concurrency boundaries, iterators inside them — fuse
+until a scheduler property (parallelism, backpressure isolation, fan-in/out)
+is actually needed.
+
+Pipelines inherit, with no additional SERDES machinery:
+
+- **End-to-end backpressure** — bounded channels; the slowest stage governs;
+  memory is bounded by the sum of channel capacities.
+- **Structured teardown** — the nursery owns all stages; cancellation and
+  deadlines kill the pipeline without orphaned half-parses. Errors propagate
+  by owned-close (failing producer closes its tx; consumers drain and exit).
+- **Symmetry** — `cc_format` is the mirror stage (values from a channel →
+  canonical bytes to a writer), so parse → transform → format pipelines are
+  the ordinary channel-pipeline idiom.
+
+### Streaming flips the borrow default
+
+Borrowed spans point into input. In whole-buffer mode the buffer outlives the
+output; under streaming, chunks are transient, so:
+
+1. Default: **materialize-on-keep** — scanning stays zero-copy; any value the
+  parse *keeps* is decoded/copied into the arena (`is_unique` set). Truthful
+   provenance already models this; clients observe it only through the Cow bit.
+2. Opt-in: **retain-the-window** — keep input chunks alive while borrows into
+  them exist (mostly-skip workloads).
+3. Expert-only: borrows valid until the next await; violations are witnessable
+  via slice provenance ids but not prevented.
+
+---
+
 ## Speculative Parsing and Rollback
 
 Ordered choice and repetition require explicit speculative semantics.
@@ -513,6 +571,11 @@ Ordered choice and repetition require explicit speculative semantics.
 7. **Fatal failure** propagates when no alternative remains.
 
 Implementations may lower differently if observable behavior matches the above.
+**Sanctioned lowering (v1):** cursor-only rollback with no arena rewind — under
+request-arena discipline (wholesale reset between parses) a failed branch's
+allocations are unlinked bounded waste, satisfying rules 2 and 4 without
+checkpoints; checkpoint/rewind remains an optimization for alternation-heavy
+grammars, not a semantic requirement.
 
 ---
 
