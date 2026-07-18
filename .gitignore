@@ -21,3 +21,4 @@ out/
 # Generated from third_party/jackson-allan-cc/cc.h (see scripts/cc_vendor_jackson_namespace.py)
 third_party/jackson-allan-cc/cc_for_ccc.h
 
+tools/cc_test

@@ -2568,7 +2568,7 @@ static int run_build_mode(int argc, char** argv) {
     long long cli_values[max_cli];
     size_t cli_count = 0;
 
-    const int max_pos = 64;
+    enum { max_pos = 64 };
     const char* pos_args[max_pos];
     int pos_count = 0;
     const char* user_out = NULL; // from -o (preferred)
@@ -4027,7 +4027,7 @@ int main(int argc, char **argv) {
     }
 
     // Default mode: cc [options] <inputs...> [-o out/bin/<stem>] [--obj-out ...]
-    const int max_pos = 64;
+    enum { max_pos = 64 };
     const char* pos_args[max_pos];
     int pos_count = 0;
     const char* user_out = NULL;

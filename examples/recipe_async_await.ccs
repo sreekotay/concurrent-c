@@ -1,7 +1,7 @@
 /*
  * Recipe: Async/Await with Channels
  *
- *   @async functions can suspend with await.
+ *   @async functions can suspend with @await.
  *   @await can drive an async function even from synchronous code (like main).
  *   Channel operations (send/recv) are suspension points inside @async.
  */
@@ -11,11 +11,11 @@
 
 /* Simple async function that sends a value and waits for it back */
 @async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    if (await tx.send(value) != 0)
+    if (@await tx.send(value) != 0)
         return -1;
 
     int received = 0;
-    if (await rx.recv(&received) != 0)
+    if (@await rx.recv(&received) != 0)
         return -2;
 
     return received;

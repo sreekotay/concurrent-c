@@ -6,7 +6,7 @@
 }
 
 @async int f(void) {
-    return await g();
+    return @await g();
 }
 
 int main(void) {

@@ -10,6 +10,13 @@ CC_RUNTIME_V3 ?= 1
 CC_V3_DIAGNOSTICS ?= 0
 BEARSSL_DIR ?= ../third_party/bearssl
 CFLAGS_COMMON := -Wall -Wextra -I../out/include -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS)
+# Comptime hook dylibs are built with unresolved references into the ccc
+# binary's embedded runtime (macOS: -undefined dynamic_lookup). On ELF
+# platforms those symbols only resolve at dlopen time if the executable
+# exports them, so link with --export-dynamic there.
+ifneq ($(shell uname -s),Darwin)
+  LDFLAGS += -Wl,--export-dynamic
+endif
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC
 endif

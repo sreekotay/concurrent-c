@@ -28,10 +28,14 @@ CC_TARGET recipe_defer exe examples/recipe_defer_cleanup.ccs
 CC_TARGET recipe_capture exe examples/recipe_explicit_capture.ccs
 CC_TARGET recipe_fanout exe examples/recipe_fanout_capture.ccs
 CC_TARGET recipe_http exe examples/recipe_http_get.ccs
+CC_TARGET recipe_ordered exe examples/recipe_ordered_parallel.ccs
 CC_TARGET recipe_result exe examples/recipe_result_error_handling.ccs
 CC_TARGET recipe_tcp exe examples/recipe_tcp_echo.ccs
 CC_TARGET recipe_timeout exe examples/recipe_timeout.ccs
+CC_TARGET recipe_unwrap exe examples/recipe_unwrap_destroy_forms.ccs
 CC_TARGET recipe_worker exe examples/recipe_worker_pool.ccs
+// recipe_long_lived_store.ccs: no target yet — currently fails to compile
+// ("missing ok type before '!>'"); tracked as XFAIL in scripts/smoke.sh.
 
 // Multi-file examples (use their own build.cc for full control)
 // CC_TARGET multi exe examples/multi/main.ccs examples/multi/add.ccs

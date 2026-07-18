@@ -1,16 +1,22 @@
 /*
  * Recipe: Result Types and Error Unwrapping
  *
- * Functions that can fail return T!>(E). Three unwrap forms cover the
- * full space:
+ * Functions that can fail return T!>(E). There are exactly TWO error
+ * operators, split by what the error becomes:
  *
- *   expr ?> default      — substitute a default value on error
- *   expr !>(e) { ... }   — handle inline (body must diverge)
- *   expr !>;             — forward to the enclosing @errhandler
+ *   ?>   the error becomes a VALUE — expr ?> default
+ *   !>   the error becomes CODE   — expr !> { ... }   (body must diverge)
  *
- * hello.ccs shows the single-call inline form. This recipe shows the
- * hoisted @errhandler pattern: declare one fatal policy at the top of
- * a scope, then use bare !>; at every call site.
+ * Everything else is a modifier on those two:
+ *
+ *   (e)  binds the error:  expr ?>(e) fallback(e.kind)
+ *                          expr !>(e) { log(e); return 1; }
+ *   ;    the code is the handler declared at the top of the scope:
+ *        expr !>;          (requires an enclosing @errhandler)
+ *
+ * hello.ccs shows the inline code form. This recipe shows the hoisted
+ * @errhandler pattern: declare one fatal policy at the top of a scope,
+ * then use bare !>; at every call site.
  */
 #include <ccc/std/prelude.cch>
 

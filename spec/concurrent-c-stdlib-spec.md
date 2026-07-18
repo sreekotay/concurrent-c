@@ -661,7 +661,7 @@ if (out.is_ok()) {
     CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
     if (f.is_ok()) {
         CCFile file = f.value();
-        char[:] data = await file.read_all_async(&arena) !>(e) return;
+        char[:] data = @await file.read_all_async(&arena) !>(e) return;
         process(data);
         file.close();
     }
@@ -798,7 +798,7 @@ log_sample(evt, 0.05);
     char[:] response = process(path);
     
     // Send response (stalling I/O, separate dispatch)
-    await send_response(req.fd, response);
+    @await send_response(req.fd, response);
 }
 ```
 
@@ -890,7 +890,7 @@ tasks.push(async_work3());
 CCVecIter::[Task::[void]] it = tasks.iter();
 Task::[void] task;
 while (it.next(&task)) {
-    await task;
+    @await task;
 }
 
 // Buffer for accumulation
@@ -1263,7 +1263,7 @@ bool !>(CCIoError) cc_env_unset(char[:] name);
     CCVecIter::[Task::[void]] it = tasks.iter();
     Task<void> t;
     while (it.next(&t)) {
-        await t;
+        @await t;
     }
 
     // File I/O (UFCS)
@@ -1374,7 +1374,7 @@ Runtime.set_blocking_pool(
                     if (retry_count++ > 3) {
                         return cc_err(IoError::Busy);
                     }
-                    await sleep(milliseconds(10 * retry_count));
+                    @await sleep(milliseconds(10 * retry_count));
                     continue;
                 }
                 // Other error, propagate
@@ -1703,7 +1703,7 @@ struct ServerConfig {
 @async void !>(CCIoError) server_worker(ServerConfig* cfg, int listener) {
     while (true) {
         // Accept connection (raw socket)
-        int raw_fd = await accept(listener) !>(e) return cc_err(e);
+        int raw_fd = @await accept(listener) !>(e) return cc_err(e);
 
         // Perform TLS handshake if configured
         CCDuplex conn = if (cfg.tls) {
@@ -1745,7 +1745,7 @@ struct ServerConfig {
 
 @async ServerAction !>(CCIoError) handle_request(CCDuplex* conn, CCArena* req_arena, CCArena* conn_arena, ServerConfig* cfg) {
     // Read request
-    Request req = await read_request_from_duplex(conn, req_arena) !>(e) return cc_err(e);
+    Request req = @await read_request_from_duplex(conn, req_arena) !>(e) return cc_err(e);
 
     if (cfg.on_request_start) cfg.on_request_start(&req);
 
@@ -1757,12 +1757,12 @@ struct ServerConfig {
         @match {
             case Response resp = action (Reply):
                 if (cfg.on_request_end) cfg.on_request_end(&req, &resp, deadline_remaining());
-                await send_response_to_duplex(conn, &resp) !>(e) return cc_err(e);
+                @await send_response_to_duplex(conn, &resp) !>(e) return cc_err(e);
                 return cc_ok(resp);  // Return response for keep-alive check
 
             case ConnHandlerFn takeover_fn = action (Takeover):
                 // Handler is taking over the connection
-                await takeover_fn(conn, conn_arena) !>(e) return cc_err(e);
+                @await takeover_fn(conn, conn_arena) !>(e) return cc_err(e);
                 // Takeover handler called close(); connection finished
                 return cc_err(CCIoError::ConnectionClosed);  // Signal to break keep-alive loop
         }
@@ -1778,7 +1778,7 @@ struct ServerConfig {
 
 @async @latency_sensitive ServerAction !>(CCIoError) api_handler(Request* req, CCArena* req_arena) {
     if (req.path == "/api/users") {
-        User[] users = await db_get_users(req_arena) !>(e) return cc_err(e);
+        User[] users = @await db_get_users(req_arena) !>(e) return cc_err(e);
         char[:] json = encode_json(users, req_arena);
         Response resp = {
             .status = 200,
@@ -1804,7 +1804,7 @@ struct ServerConfig {
         // .tls = TlsConfig { .cert_path = "cert.pem", .key_path = "key.pem" }
     };
     
-    await server_loop(cfg);
+    @await server_loop(cfg);
 }
 ```
 
@@ -1822,19 +1822,19 @@ struct ServerConfig {
 
 @async void !>(CCIoError) websocket_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Perform WebSocket handshake
-    await ws_handshake(conn) !>(e) return cc_err(e);
+    @await ws_handshake(conn) !>(e) return cc_err(e);
 
     // Handle messages on connection (lives as long as connection lives)
     while (true) {
-        char[:] frame = await ws_read_frame(conn, conn_arena) !>(e) return cc_err(e);
+        char[:] frame = @await ws_read_frame(conn, conn_arena) !>(e) return cc_err(e);
         if (frame.len == 0) break;  // Connection closed (empty frame = EOF sentinel)
 
         // Process frame; allocations live in conn_arena
-        await process_ws_message(conn, frame, conn_arena) !>(e) return cc_err(e);
+        @await process_ws_message(conn, frame, conn_arena) !>(e) return cc_err(e);
     }
 
     // Close connection
-    await conn.close() !>(e) return cc_err(e);
+    @await conn.close() !>(e) return cc_err(e);
 }
 ```
 
@@ -1852,19 +1852,19 @@ struct ServerConfig {
 
 @async void !>(CCIoError) sse_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Send SSE headers
-    await conn.write("HTTP/1.1 200 OK\r\n") !>(e) return cc_err(e);
-    await conn.write("Content-Type: text/event-stream\r\n") !>(e) return cc_err(e);
-    await conn.write("Connection: keep-alive\r\n\r\n") !>(e) return cc_err(e);
+    @await conn.write("HTTP/1.1 200 OK\r\n") !>(e) return cc_err(e);
+    @await conn.write("Content-Type: text/event-stream\r\n") !>(e) return cc_err(e);
+    @await conn.write("Connection: keep-alive\r\n\r\n") !>(e) return cc_err(e);
     
     // Stream events
     for (size_t i = 0; i < 100; i++) {
         char[:] event = format_event(i, conn_arena);
-        await conn.write(event) !>(e) return cc_err(e);
-        await sleep(milliseconds(1000));
+        @await conn.write(event) !>(e) return cc_err(e);
+        @await sleep(milliseconds(1000));
     }
     
     // Signal end by closing write side
-    await conn.shutdown(Write) !>(e) return cc_err(e);
+    @await conn.shutdown(Write) !>(e) return cc_err(e);
 }
 ```
 
@@ -1884,7 +1884,7 @@ struct ServerConfig {
         }
     };
     
-    await server_loop(cfg);  // Handlers receive decrypted requests
+    @await server_loop(cfg);  // Handlers receive decrypted requests
 }
 ```
 
@@ -1900,14 +1900,14 @@ struct ServerConfig {
 @async void !>(CCIoError) raw_protocol_loop(CCDuplex* conn, CCArena* conn_arena) {
     // Speak custom protocol directly via conn.read() / conn.write()
     while (true) {
-        char[:] msg = await conn.read(conn_arena) !>(e) return cc_err(e);
+        char[:] msg = @await conn.read(conn_arena) !>(e) return cc_err(e);
         if (msg.len == 0) break;  // EOF (empty slice)
 
         char[:] response = process_protocol_message(msg, conn_arena);
-        await conn.write(response) !>(e) return cc_err(e);
+        @await conn.write(response) !>(e) return cc_err(e);
     }
 
-    await conn.close() !>(e) return cc_err(e);
+    @await conn.close() !>(e) return cc_err(e);
 }
 
 @async void main() {
@@ -1918,7 +1918,7 @@ struct ServerConfig {
         .mode = RawTcp,  // No HTTP parsing; handler speaks protocol directly
     };
     
-    await server_loop(cfg);
+    @await server_loop(cfg);
 }
 ```
 
@@ -1940,7 +1940,7 @@ struct ServerConfig {
         size_t message_count = 0;
         CCArenaCheckpoint cp = arena_checkpoint(conn_arena);
         while (true) {
-            char[:] msg = await conn.read(conn_arena) !>(e) return cc_err(e);
+            char[:] msg = @await conn.read(conn_arena) !>(e) return cc_err(e);
             if (msg.len == 0) break;  // EOF
             process(msg);
             message_count++;
@@ -1951,7 +1951,7 @@ struct ServerConfig {
                 message_count = 0;
             }
         }
-        await conn.close() !>(e) return cc_err(e);
+        @await conn.close() !>(e) return cc_err(e);
     }
     ```
 - **Deadline and Cancellation:** For deadline semantics and how cancellation is checked at suspension points, see language spec **§ 7.5 (Cancellation & Deadline)** and **§ 3.2 (Suspension Points)**. This server shell applies `request_timeout` deadline to unary handlers; takeover handlers control their own deadline semantics (or use no deadline for long-lived connections like WebSocket).
@@ -2169,14 +2169,14 @@ enum CCNetError {
 @async void !>(CCNetError) fetch_data() {
     CCArena arena = arena(megabytes(1));
 
-    CCSocket conn = await cc_tcp_connect("example.com:80") !>(e) return cc_err(e);
+    CCSocket conn = @await cc_tcp_connect("example.com:80") !>(e) return cc_err(e);
     @defer conn.close();
 
-    await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n") !>(e) return cc_err(e);
+    @await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n") !>(e) return cc_err(e);
 
     // Read response into arena (empty slice = EOF)
     while (true) {
-        char[:] chunk = await conn.read(&arena, 4096) !>(e) return cc_err(e);
+        char[:] chunk = @await conn.read(&arena, 4096) !>(e) return cc_err(e);
         if (chunk.len == 0) break;  // EOF
         process(chunk);
     }
@@ -2192,7 +2192,7 @@ enum CCNetError {
         @destroy;
     {
         while (true) {
-            CCSocket conn = await ln.accept() !>(e) return cc_err(e);
+            CCSocket conn = @await ln.accept() !>(e) return cc_err(e);
             n->spawn(() => handle_echo(conn));
         }
     }
@@ -2203,9 +2203,9 @@ enum CCNetError {
     @defer conn.close();
 
     while (true) {
-        char[:] data = await conn.read(&arena, 1024) !>(e) return;
+        char[:] data = @await conn.read(&arena, 1024) !>(e) return;
         if (data.len == 0) break;  // EOF
-        await conn.write(data) !>(e) return;
+        @await conn.write(data) !>(e) return;
         arena_reset(&arena);  // Reuse buffer space
     }
 }
@@ -2331,16 +2331,16 @@ static int tls_sock_read(void* ctx, unsigned char* buf, size_t len) {
     CCArena arena = arena(megabytes(1));
 
     // Connect with TLS (uses system CA roots by default)
-    CCDuplex conn = await cc_tls_connect_addr("api.example.com:443", {
+    CCDuplex conn = @await cc_tls_connect_addr("api.example.com:443", {
         .verify_hostname = true,
     }) !>(e) return cc_err(e);
     @defer conn.close();
 
     // CCDuplex interface is identical to plain CCSocket
-    await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n") !>(e) return cc_err(e);
+    @await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n") !>(e) return cc_err(e);
 
     while (true) {
-        char[:] chunk = await conn.read(&arena, 4096) !>(e) return cc_err(e);
+        char[:] chunk = @await conn.read(&arena, 4096) !>(e) return cc_err(e);
         if (chunk.len == 0) break;  // EOF
         process(chunk);
     }
@@ -2424,7 +2424,7 @@ enum CCHttpError {
 @async void !>(CCHttpError) fetch_json() {
     CCArena arena = arena(megabytes(1));
 
-    CCHttpResponse resp = await cc_http_get(&arena, "https://api.example.com/users") !>(e) return cc_err(e);
+    CCHttpResponse resp = @await cc_http_get(&arena, "https://api.example.com/users") !>(e) return cc_err(e);
     if (resp.status == 200) {
         // resp.body is valid until arena reset
         User[] users = parse_json_users(resp.body, &arena);
@@ -2441,7 +2441,7 @@ enum CCHttpError {
         .user_agent("MyApp/1.0")
         .no_redirects();
 
-    CCHttpResponse resp = await client.get(&arena, "https://api.example.com/data") !>(e) return cc_err(e);
+    CCHttpResponse resp = @await client.get(&arena, "https://api.example.com/data") !>(e) return cc_err(e);
     process(resp);
 }
 
@@ -2457,7 +2457,7 @@ enum CCHttpError {
     };
 
     CCHttpClient client = cc_http_client_new();
-    CCHttpResponse resp = await client.request(&arena, req) !>(e) return cc_err(e);
+    CCHttpResponse resp = @await client.request(&arena, req) !>(e) return cc_err(e);
 }
 ```
 
@@ -2496,7 +2496,7 @@ CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
 @async void !>(CCNetError) connect_by_name() {
     CCArena arena = arena(kilobytes(4));
 
-    CCIpAddr[] addrs = await cc_dns_lookup(&arena, "example.com") !>(e) return cc_err(e);
+    CCIpAddr[] addrs = @await cc_dns_lookup(&arena, "example.com") !>(e) return cc_err(e);
     if (addrs.len == 0) {
         return cc_err(CCNetError::DnsFailure);
     }
@@ -2509,7 +2509,7 @@ CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
             .append(":443")
             .as_slice();
 
-        CCSocket !>(CCNetError) sock_r = await cc_tcp_connect(full_addr);
+        CCSocket !>(CCNetError) sock_r = @await cc_tcp_connect(full_addr);
         if (sock_r.is_ok()) {
             return handle_connection(sock_r.value());
         }
@@ -2572,7 +2572,7 @@ static int socket_read_callback(void* ctx, unsigned char* buf, size_t len) {
     size_t count = 0;
 
     while (true) {
-        char[:] msg = await conn.read(arena, 4096) !>(e) return cc_err(e);
+        char[:] msg = @await conn.read(arena, 4096) !>(e) return cc_err(e);
         if (msg.len == 0) break;  // EOF
         process(msg);
         count++;

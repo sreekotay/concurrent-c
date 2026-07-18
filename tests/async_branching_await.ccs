@@ -11,9 +11,9 @@
 
 @async int branch_await(int v) {
     if (v > 0) {
-        return await inc(v);
+        return @await inc(v);
     } else {
-        return await dec(v);
+        return @await dec(v);
     }
 }
 

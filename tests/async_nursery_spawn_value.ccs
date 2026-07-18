@@ -15,7 +15,7 @@ int g = 0;
         __cc_nursery4->spawn(() => { g = 7; });
     
     }
-    int dummy = await noop(g);
+    int dummy = @await noop(g);
     (void)dummy;
     return g;
 }

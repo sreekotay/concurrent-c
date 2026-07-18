@@ -1,6 +1,6 @@
-/* Test that channel ops with await in @async functions work correctly.
+/* Test that channel ops with @await in @async functions work correctly.
    Uses cc_chan_*_task() directly since chan_send/recv are macros that
-   don't interact well with await in the current implementation. */
+   don't interact well with @await in the current implementation. */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task.cch>
 #include <stdio.h>
@@ -9,7 +9,7 @@
 @async int sender(CCChanTx tx) {
     int val = 42;
     /* Use task-returning API directly */
-    intptr_t rc = await cc_chan_send_task(tx.raw, &val, sizeof(val));
+    intptr_t rc = @await cc_chan_send_task(tx.raw, &val, sizeof(val));
     printf("sender: sent %d, rc=%ld\n", val, (long)rc);
     return (int)rc;
 }
@@ -17,7 +17,7 @@
 @async int receiver(CCChanRx rx) {
     int val = 0;
     /* Use task-returning API directly */
-    intptr_t rc = await cc_chan_recv_task(rx.raw, &val, sizeof(val));
+    intptr_t rc = @await cc_chan_recv_task(rx.raw, &val, sizeof(val));
     printf("receiver: received %d, rc=%ld\n", val, (long)rc);
     return val;
 }

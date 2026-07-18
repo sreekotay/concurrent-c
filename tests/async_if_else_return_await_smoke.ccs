@@ -4,15 +4,15 @@
 static int add1(int x) { return x + 1; }
 
 @async int add1_async(int x) {
-    /* sync call -> auto-blocked into an await point */
+    /* sync call -> auto-blocked into an @await point */
     return add1(x);
 }
 
 @async int f(int x) {
     if (x) {
-        return await add1_async(40);
+        return @await add1_async(40);
     } else {
-        return await add1_async(0);
+        return @await add1_async(0);
     }
 }
 

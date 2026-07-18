@@ -4,7 +4,7 @@
  *   while (cc_io_avail(cc_channel_recv(tasks_rx, &task))) { ... }
  *
  * Existing task/channel smokes covered ordered_recv(), raw cc_chan_recv_task(),
- * and await rx.recv(&val), but not direct typed cc_channel_recv() on a
+ * and @await rx.recv(&val), but not direct typed cc_channel_recv() on a
  * CCTask[~N <] handle captured into a spawn closure.
  */
 #include <ccc/cc_runtime.cch>

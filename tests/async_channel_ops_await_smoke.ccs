@@ -2,15 +2,15 @@
 #include <ccc/std/task.cch>
 
 /* Channel ops in @async functions use cc_chan_send_task/cc_chan_recv_task
-   which return task handles compatible with await. */
+   which return task handles compatible with @await. */
 @async int f(CCChanTx tx, CCChanRx rx) {
     int out = 0;
     int v = 7;
 
-    /* Use task-returning API for await compatibility */
-    if (await cc_chan_send_task(tx.raw, &v, sizeof(v)) != 0) return 100;
+    /* Use task-returning API for @await compatibility */
+    if (@await cc_chan_send_task(tx.raw, &v, sizeof(v)) != 0) return 100;
 
-    if (await cc_chan_recv_task(rx.raw, &out, sizeof(out)) != 0) return 200;
+    if (@await cc_chan_recv_task(rx.raw, &out, sizeof(out)) != 0) return 200;
 
     return out;
 }

@@ -46,7 +46,7 @@ static void handoff_client(CCChanTx req_tx, CCChanRx reply_rx) {
      *
      * 1) Direct `@async` body used to fail at lowering because
      *    autoblock's ASSIGN_CALL rewrite emitted
-     *        req = await cc_run_blocking_task_intptr(...);
+     *        req = @await cc_run_blocking_task_intptr(...);
      *    with no cast, so `__f->req = __f->__cc_aw0` assigned intptr_t
      *    to a pointer. Fixed; guarded by
      *    tests/async_ptr_assign_autoblock_smoke.ccs.

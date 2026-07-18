@@ -10,7 +10,7 @@
         CCArena __cc_arena5 = @create(kilobytes(8)) @destroy;
         if (!__cc_arena5.base) abort();
         CCArena* a = &__cc_arena5;
-        int x = await noop(3);
+        int x = @await noop(3);
         r = x;
         /* Use arena to ensure name binding is correct. */
         (void)a;

@@ -27,7 +27,7 @@ void cc_fiber_dump_state(const char* reason);
         int val = id * 100 + i;
         printf("S%d: sending %d...\n", id, val);
         fflush(stdout);
-        intptr_t rc = await g_tx.send(val);
+        intptr_t rc = @await g_tx.send(val);
         printf("S%d: send returned rc=%ld\n", id, (long)rc);
         fflush(stdout);
         if (rc != 0) {
@@ -49,7 +49,7 @@ void cc_fiber_dump_state(const char* reason);
         int val = 0;
         printf("R%d: receiving...\n", id);
         fflush(stdout);
-        intptr_t rc = await g_rx.recv(&val);
+        intptr_t rc = @await g_rx.recv(&val);
         printf("R%d: recv returned rc=%ld val=%d\n", id, (long)rc, val);
         fflush(stdout);
         if (rc != 0) {
