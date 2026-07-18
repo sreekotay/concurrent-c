@@ -1,0 +1,11 @@
+// NEGATIVE: two block-level definitions of one rule name are an error
+// (shadowing is reserved for include + override).
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Bad {~~~~
+    top: digit
+    digit: charset [#'0' - #'9']
+    digit: charset [#'a' - #'f']
+~~~~}
+
+int main(void) { (void)Bad_match("1", 1); return 0; }

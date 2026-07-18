@@ -1,0 +1,103 @@
+// Edge and failure-path smoke for the @grammar engines — the paths no other
+// test exercises:
+//   - CODEC FAILURE during the materialize pass: a codec returning 0 must
+//     abort parse (NULL) and collect (0, callbacks never fired) cleanly.
+//   - purity fusion contract: clean spans BORROW and never invoke the codec;
+//     only a transform-triggering branch (here '%') routes through it.
+//   - `int` binds on negative values.
+//   - Reader cursor on empty input: clean EOF, not an error.
+//   - multi-byte literal at end-of-input: bounds-checked, no overread.
+#include <ccc/std/prelude.cch>
+
+/* decode: strip '%' markers; REJECT any span containing 'x' (validation).
+ * Only invoked when the dirty flag saw a '%' branch — clean spans borrow. */
+static int g_codec_calls = 0;
+static int vc(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    g_codec_calls++;
+    if (memchr(p, 'x', n)) return 0;
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] != '%') dst[o++] = p[i];
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) V {~~~~
+    top:   [#'(' keep/decode(vc) any [some plain | esc] #')']
+    plain: charset [#'a' - #'w' #'y' #'z']
+    esc:   [#'%' charset [#'a' - #'z']]
+~~~~}
+
+@grammar(rules) T {~~~~
+    top: "true"
+~~~~}
+
+@grammar(schema) Neg {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   keep [opt #'-' some digit]
+    ]
+    v: int num
+~~~~}
+
+typedef struct { int calls; CCSlice last; } Env;
+static int cb(void* env, int id, CCSlice v) {
+    (void)id;
+    Env* e = (Env*)env;
+    e->calls++;
+    e->last = v;
+    return 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+
+    /* clean span: borrowed, codec NOT invoked (purity fusion) */
+    {
+        Env e = {0};
+        g_codec_calls = 0;
+        if (!V_collect("(abc)", 5, &arena, cb, &e)) { printf("FAIL: clean collect\n"); return 1; }
+        if (g_codec_calls != 0) { printf("FAIL: codec ran on clean span\n"); return 1; }
+        if (e.calls != 1 || cc_slice_is_unique(e.last)) { printf("FAIL: clean should borrow\n"); return 1; }
+        if (e.last.len != 3 || memcmp(e.last.ptr, "abc", 3) != 0) { printf("FAIL: clean bytes\n"); return 1; }
+    }
+    /* dirty span: codec invoked once, decoded ('%' stripped), materialized */
+    {
+        Env e = {0};
+        g_codec_calls = 0;
+        if (!V_collect("(a%bc)", 6, &arena, cb, &e)) { printf("FAIL: dirty collect\n"); return 1; }
+        if (g_codec_calls != 1) { printf("FAIL: codec calls=%d\n", g_codec_calls); return 1; }
+        if (!cc_slice_is_unique(e.last) || e.last.len != 3 ||
+            memcmp(e.last.ptr, "abc", 3) != 0) { printf("FAIL: decoded bytes\n"); return 1; }
+    }
+    /* CODEC FAILURE: parse -> NULL, collect -> 0, callbacks never fired */
+    {
+        Env e = {0};
+        if (V_parse("(a%xb)", 6, &arena) != 0) { printf("FAIL: codec-fail parse accepted\n"); return 1; }
+        if (V_collect("(a%xb)", 6, &arena, cb, &e)) { printf("FAIL: codec-fail collect accepted\n"); return 1; }
+        if (e.calls != 0) { printf("FAIL: callbacks fired on failed parse\n"); return 1; }
+    }
+    /* multi-byte literal truncated at end of input: rejected, no overread */
+    if (T_match("tru", 3)) { printf("FAIL: truncated literal accepted\n"); return 1; }
+    if (!T_match("true", 4)) { printf("FAIL: literal rejected\n"); return 1; }
+
+    /* int bind: negative values */
+    {
+        Neg n;
+        if (!Neg_parse("-42", 3, &arena, &n) || n.v != -42) { printf("FAIL: negative int\n"); return 1; }
+        if (!Neg_parse("7", 1, &arena, &n) || n.v != 7) { printf("FAIL: positive int\n"); return 1; }
+    }
+    /* Reader on empty input: clean EOF, not an error */
+    {
+        NegReader r = cc_reader(Neg, "", 0, &arena);
+        Neg n;
+        if (cc_next(Neg, &r, &n)) { printf("FAIL: next on empty\n"); return 1; }
+        if (!cc_at_end(Neg, &r)) { printf("FAIL: empty not at_end\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar edge cases OK\n");
+    return 0;
+}

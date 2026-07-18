@@ -1964,7 +1964,10 @@ static int ss_term(SS* s, int* out_term) {
             }
         }
     } else {
-        return ss_fail(s, s->p, "binding must be `int Use.rule`, `Use.rule`, or `items Schema`");
+        return ss_fail(s, s->p, s->usename[0]
+            ? "binding must be `int Use.rule`, `Use.rule`, or `items Schema` — this "
+              "schema composes with `use` (shared): qualify rule references with the use name"
+            : "binding must be `int rule`, `rule`, `bytes lenfield`, or `items Schema`");
     }
     *out_term = s->nterms++;
     return 0;

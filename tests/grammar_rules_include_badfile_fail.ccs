@@ -1,0 +1,9 @@
+// NEGATIVE: including a grammar file that does not exist on disk.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Bad {~~~~
+    top: digit
+    include "no_such_factory.rules"
+~~~~}
+
+int main(void) { (void)Bad_match("1", 1); return 0; }

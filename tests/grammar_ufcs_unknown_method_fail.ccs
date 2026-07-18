@@ -1,0 +1,21 @@
+// NEGATIVE: an unknown method on a generated Reader must fail LOUDLY at
+// compile time (the engine-registered hook lowers it to PairReader_nope,
+// which does not exist) — never silently pass through as C member access.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Pair {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   keep [some digit]
+    ]
+    k: num
+~~~~}
+
+int main(void) {
+    CCArena a = cc_arena_create(1 << 16);
+    PairReader r = Pair.reader("1", 1, &a);
+    Pair p;
+    (void)r.nope(&p);
+    cc_arena_free(&a);
+    return 0;
+}

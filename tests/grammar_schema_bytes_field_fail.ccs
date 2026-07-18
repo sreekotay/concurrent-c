@@ -1,0 +1,12 @@
+// NEGATIVE: `bytes` must name an EARLIER `int` field of the same schema.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   keep [some digit]
+    ]
+    data: bytes missing
+~~~~}
+
+int main(void) { return 0; }

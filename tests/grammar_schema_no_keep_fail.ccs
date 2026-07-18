@@ -1,0 +1,13 @@
+// NEGATIVE: binding a field to a rule with no keep — there is nothing to
+// extract, and the error must say so at compile time.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    rules [
+        digit: charset [#'0' - #'9']
+        num:   [some digit]
+    ]
+    v: num
+~~~~}
+
+int main(void) { return 0; }
