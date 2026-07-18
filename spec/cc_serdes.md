@@ -533,6 +533,19 @@ cc_collect(src_or_reader, arena, Name.rule, closure)
 receives values, not events; grammar structure is never re-exposed as an event
 stream for the caller to reassemble.
 
+**Ownership through the closure (send_take).** Values land once, then MOVE:
+
+- A borrowed slice is a 32-byte view; forwarding it copies the header, never
+  the data.
+- A materialized (unique) slice is move-only — the checker enforces it — so
+  forwarding into a channel is `tx.send(cc_move(v))`: the header transfers,
+  the arena-backed bytes never copy. `send_take` names this pattern; the
+  `is_transferable` provenance bit marks slices that may legally cross a
+  channel.
+- Lifetime comes from structure, not refcounts: the nursery joins consumers
+  before the request arena resets, so transferred slices outlive their
+  consumers by construction.
+
 **Chaining guidance:** channels at concurrency boundaries, closures within
 them. Pipelines inherit end-to-end backpressure (bounded channels; the slowest
 stage suspends the parser's fiber), structured teardown (the nursery owns all
