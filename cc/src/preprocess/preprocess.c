@@ -8806,24 +8806,68 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     char* buf = NULL;
     size_t len = 0;
     size_t cap = 64 * 1024;
+    char tmp_grammar_path[128];
+    const char* expand_path;
     if (!input_path || !input_path[0]) return NULL;
     if (cc__incexp_cache_buf && cc__incexp_cache_path &&
         strcmp(cc__incexp_cache_path, input_path) == 0) {
         return strdup(cc__incexp_cache_buf);
     }
+    /* @grammar bodies are raw non-C bytes behind a fence; the system cpp
+     * would eat any `#`-leading line inside them as a (bad) directive —
+     * silently, since stderr is dropped.  Splice grammar decls FIRST so the
+     * preprocessor only ever sees the generated C, and this expanded view
+     * carries the generated types like every other stream. */
+    tmp_grammar_path[0] = '\0';
+    expand_path = input_path;
+    {
+        char* raw = NULL;
+        size_t raw_len = 0;
+        if (cc__read_file_text(input_path, &raw, &raw_len) == 0 && raw) {
+            char* spliced = cc_rewrite_grammar_decls_text(raw, raw_len, input_path);
+            if (spliced && spliced != (char*)-1) {
+                snprintf(tmp_grammar_path, sizeof(tmp_grammar_path), "/tmp/cc_pp_gram_XXXXXX");
+                int fd = mkstemp(tmp_grammar_path);
+                if (fd >= 0) {
+                    size_t sl = strlen(spliced);
+                    FILE* tf = fdopen(fd, "wb");
+                    if (tf) {
+                        if (fwrite(spliced, 1, sl, tf) == sl) expand_path = tmp_grammar_path;
+                        fclose(tf);
+                    } else {
+                        close(fd);
+                    }
+                    if (expand_path != tmp_grammar_path) {
+                        unlink(tmp_grammar_path);
+                        tmp_grammar_path[0] = '\0';
+                    }
+                } else {
+                    tmp_grammar_path[0] = '\0';
+                }
+            }
+            /* (char*)-1 = malformed decl: fall through and expand the raw
+             * file; the primary parse path reports the diagnostic. */
+            if (spliced && spliced != (char*)-1) free(spliced);
+            free(raw);
+        }
+    }
     repo_root[0] = '\0';
     if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
         snprintf(cmd, sizeof(cmd),
                  "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
-                 repo_root, repo_root, input_path);
+                 repo_root, repo_root, expand_path);
     } else {
-        snprintf(cmd, sizeof(cmd), "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c \"%s\" 2>/dev/null", input_path);
+        snprintf(cmd, sizeof(cmd), "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c \"%s\" 2>/dev/null", expand_path);
     }
     pp = popen(cmd, "r");
-    if (!pp) return NULL;
+    if (!pp) {
+        if (tmp_grammar_path[0]) unlink(tmp_grammar_path);
+        return NULL;
+    }
     buf = (char*)malloc(cap);
     if (!buf) {
         pclose(pp);
+        if (tmp_grammar_path[0]) unlink(tmp_grammar_path);
         return NULL;
     }
     while (!feof(pp)) {
@@ -8835,6 +8879,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
             if (!new_buf) {
                 free(buf);
                 pclose(pp);
+                if (tmp_grammar_path[0]) unlink(tmp_grammar_path);
                 return NULL;
             }
             buf = new_buf;
@@ -8846,11 +8891,38 @@ char* cc_preprocess_include_expanded(const char* input_path) {
         if (ferror(pp)) {
             free(buf);
             pclose(pp);
+            if (tmp_grammar_path[0]) unlink(tmp_grammar_path);
             return NULL;
         }
     }
     buf[len] = '\0';
     pclose(pp);
+    if (tmp_grammar_path[0]) {
+        unlink(tmp_grammar_path);
+        /* Point cpp linemarkers for the spliced temp back at the real file so
+         * downstream #line-aware diagnostics keep their provenance. */
+        {
+            char* fixed = NULL; size_t flen = 0, fcap = 0;
+            size_t tl = strlen(tmp_grammar_path), il = strlen(input_path);
+            const char* s = buf; int any = 0;
+            for (;;) {
+                const char* hit = strstr(s, tmp_grammar_path);
+                if (!hit) break;
+                cc_sb_append(&fixed, &flen, &fcap, s, (size_t)(hit - s));
+                cc_sb_append(&fixed, &flen, &fcap, input_path, il);
+                s = hit + tl;
+                any = 1;
+            }
+            if (any) {
+                cc_sb_append(&fixed, &flen, &fcap, s, strlen(s) + 1);
+                free(buf);
+                buf = fixed;
+                len = flen - 1;
+            } else {
+                free(fixed);
+            }
+        }
+    }
     /* Cache as the master copy; hand the caller an independent copy so its
      * free() never touches the cache. */
     {

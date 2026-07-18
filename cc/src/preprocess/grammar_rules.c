@@ -112,6 +112,12 @@ typedef struct {
     struct { char name[R_NAME_MAX]; int node; size_t at; } rules[R_MAX_RULES];
     int nrules;
     char codecs[16][R_NAME_MAX]; int ncodecs;   /* keep/decode(fn) codec names */
+    char codenc[16][R_NAME_MAX];                /* optional /encode(fn) inverses
+                                                 * contract: size_t enc(p, n, dst, cap);
+                                                 * returns exact encoded size ALWAYS;
+                                                 * dst == NULL -> measure only;
+                                                 * dst != NULL -> write at most cap
+                                                 * bytes (need > cap = didn't fit) */
 } RG;
 
 static int rg_line_at(const RG* g, size_t at) {
@@ -341,6 +347,24 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
             if (p >= g->n || g->body[p] != ')')
                 return rg_fail(g, p, "expected ')' closing keep/decode(codec)");
             p++;
+            /* optional inverse: keep/decode(dec)/encode(enc) — the write side */
+            if (p < g->n && g->body[p] == '/') {
+                p++;
+                if (!rg_kw(g, p, "encode", &after))
+                    return rg_fail(g, p, "expected /encode(fn) after keep/decode(...)");
+                p = rg_ws(g, after);
+                if (p >= g->n || g->body[p] != '(')
+                    return rg_fail(g, p, "expected '(' after /encode");
+                p = rg_ws(g, p + 1);
+                if (!rg_ident(g, p, &ce) || ce - p >= R_NAME_MAX)
+                    return rg_fail(g, p, "expected encoder function name");
+                memcpy(g->codenc[codec - 1], g->body + p, ce - p);
+                g->codenc[codec - 1][ce - p] = '\0';
+                p = rg_ws(g, ce);
+                if (p >= g->n || g->body[p] != ')')
+                    return rg_fail(g, p, "expected ')' closing /encode(fn)");
+                p++;
+            }
         }
         int child = rg_parse_term(g, &p, depth);
         if (child < 0) return -1;
@@ -2575,49 +2599,362 @@ static int rs_derived_from(const SS* ss, int ti) {
     return -1;
 }
 
-static int rs_formatable(const SS* ss) {
-    for (int i = 0; i < ss->nterms; i++) {
-        int k = ss->terms[i].kind;
-        if (k == SK_FIELDS || k == SK_NARROW_MEMBERS || k == SK_NARROW_LIST) return 0;
-        if (k == SK_BIND_ITEMS && !ss->terms[i].cfield[0]) return 0;   /* delimited: later */
+/* writable leaf shape: a bound rule whose body is (a seq of) literal prefix,
+ * ONE keep, literal suffix — pads skipped (canonical). The quotes around a
+ * JSON string are the rule's OWN literals; the write side derives them. */
+typedef struct { int pre[4]; int npre; int post[4]; int npost; int codec; int ok; } RWLeaf;
+
+static void rw_leaf_shape(const RG* g, int rule, RWLeaf* o) {
+    memset(o, 0, sizeof *o);
+    int body = g->rules[rule].node;
+    while (g->nodes[body].kind == RN_COLLECT) body = g->nodes[body].a;
+    if (g->nodes[body].kind == RN_KEEP) {
+        o->codec = g->nodes[body].b;
+        o->ok = 1;
+        return;
     }
+    if (g->nodes[body].kind != RN_SEQ) return;
+    const RNode* x = &g->nodes[body];
+    int seen_keep = 0;
+    for (int i = 0; i < x->nkids; i++) {
+        int kid = g->kids[x->b + i];
+        const RNode* kn = &g->nodes[kid];
+        if (kn->kind == RN_KEEP) {
+            if (seen_keep) return;
+            seen_keep = 1;
+            o->codec = kn->b;
+            continue;
+        }
+        if (kn->kind == RN_LIT) {
+            if (!seen_keep) { if (o->npre < 4) o->pre[o->npre++] = kid; else return; }
+            else            { if (o->npost < 4) o->post[o->npost++] = kid; else return; }
+            continue;
+        }
+        if (kn->kind == RN_REF) {   /* pad refs skip on write (canonical) */
+            const RNode* rn2 = kn;
+            (void)rn2;
+            continue;
+        }
+        return;
+    }
+    o->ok = seen_keep;
+}
+
+static int rs_formatable_term(const SS* ss, const RG* g, int ti);
+
+static int rs_formatable_entries(const SS* ss, const RG* g, const STerm* t) {
+    for (int i = 0; i < t->k_cnt; i++)
+        if (!rs_formatable_term(ss, g, ss->keys[t->kidx[i]].term)) return 0;
     return 1;
 }
 
-/* UNCHECKED int emission — the enclosing fixed-size run already reserved
- * space (21 bytes covers sign + 20 digits). Derived lengths/counts are
- * size_t-shaped: the unsigned variant drops the sign branch entirely. */
-static void rs_emit_write_int(EB* e, int* lbl, const char* expr, int is_unsigned) {
+static int rs_formatable_term(const SS* ss, const RG* g, int ti) {
+    const STerm* t = &ss->terms[ti];
+    switch (t->kind) {
+    case SK_LIT: case SK_RULE: case SK_BIND_INT: case SK_BIND_BYTES:
+        return 1;
+    case SK_BIND_SLICE: {
+        RWLeaf lf;
+        rw_leaf_shape(g, t->rule, &lf);
+        /* a decode codec means wire form != memory form: writing raw bytes
+         * would be wrong the moment a payload needs escaping — formatable
+         * only when the codec declares its /encode inverse */
+        return lf.ok && (lf.codec == 0 || g->codenc[lf.codec - 1][0]);
+    }
+    case SK_BIND_ITEMS:
+        return t->cfield[0] != 0;
+    case SK_NARROW_MEMBERS:
+        return rs_formatable_entries(ss, g, t);
+    case SK_NARROW_LIST:
+        return 1;
+    default:
+        return 0;   /* SK_FIELDS: directive combinators need their own emit rules */
+    }
+}
+
+static int rs_formatable(const SS* ss, const RG* g) {
+    for (int i = 0; i < ss->nbody; i++)
+        if (!rs_formatable_term(ss, g, ss->body[i])) return 0;
+    return 1;
+}
+
+/* ---- the write side: three projections of one template walk ----
+ *   __wmeasure (md 0): exact output size, no stores — literals (including
+ *       the whole structural skeleton of narrowed schemas) fold to ONE
+ *       compile-time constant; ints count digits by compare chain (no
+ *       divisions); encoders are asked with dst == NULL.
+ *   __wput     (md 1): unchecked writer, space already proven — the to_str
+ *       back end: measure once, allocate exactly, put.
+ *   __wchk     (md 2): SINGLE-PASS checked writer — Name_write. Constant
+ *       runs check once per batch, encoders get the real remaining cap and
+ *       report exact need (snprintf-style), so encoder-heavy formats pay
+ *       one encoding pass, not measure+put's two. */
+enum { RW_MEASURE, RW_PUT, RW_CHK };
+
+typedef struct {
+    long cfix;                    /* measure: compile-time constant bytes */
+    unsigned char lit[224];       /* put/chk: pending constant byte run */
+    int nlit;
+} WAcc;
+
+static void rw_wacc_flush_put(EB* e, WAcc* w, int md) {
+    if (w->nlit == 0) return;
+    if (md == RW_CHK) eb_fmt(e, "    if (cap - o < %d) return 0;\n", w->nlit);
+    if (w->nlit <= 4) {
+        for (int i = 0; i < w->nlit; i++) {
+            char cb[16];
+            eb_fmt(e, "    dst[o++] = (char)%d; /*%s*/\n",
+                   (int)w->lit[i], rw_chr((int)w->lit[i], cb));
+        }
+    } else {
+        char esc[4 * 224 + 8];
+        rs_esc(esc, sizeof esc, w->lit, w->nlit);
+        eb_fmt(e, "    memcpy(dst + o, \"%s\", %d); o += %d;\n", esc, w->nlit, w->nlit);
+    }
+    w->nlit = 0;
+}
+
+static void rw_wacc_bytes(EB* e, WAcc* w, int md, const unsigned char* p, int n) {
+    if (md == RW_MEASURE) { w->cfix += n; return; }
+    for (int i = 0; i < n; i++) {
+        if (w->nlit == (int)sizeof(w->lit)) rw_wacc_flush_put(e, w, md);
+        w->lit[w->nlit++] = p[i];
+    }
+}
+
+static void rw_wacc_lit_node(const RG* g, EB* e, WAcc* w, int md, int nd) {
+    rw_wacc_bytes(e, w, md, (const unsigned char*)g->pool + g->nodes[nd].a, g->nodes[nd].b);
+}
+
+/* compare-chain digit count into `dest` — no divisions on the 1-6 digit
+ * values wire formats actually carry; full 20-digit chain so it's total */
+static void rw_emit_digits_expr(EB* e, int k, const char* dest) {
+    unsigned long long p = 10;
+    eb_fmt(e, "      %s ", dest);
+    for (int d = 1; d <= 19; d++) {
+        eb_fmt(e, "u%d < %lluULL ? %d\n         : ", k, p, d);
+        if (d < 19) p *= 10;
+    }
+    eb_fmt(e, "20;\n");
+}
+
+static void rw_emit_wint(EB* e, WAcc* w, int* lbl, int md, const char* expr, int is_unsigned) {
     int k = (*lbl)++;
-    if (is_unsigned) {
+    char dest[32];
+    if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+    if (md == RW_PUT && is_unsigned) {
         eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n"
                   "      char nb%d[21]; int nl%d = 0;\n"
                   "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
                   "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
                k, expr, k, k, k, k, k, k, k, k, k, k);
-        return;
+    } else if (md == RW_PUT) {
+        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
+                  "      char nb%d[21]; int nl%d = 0;\n"
+                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
+                  "      if (x%d < 0) dst[o++] = '-';\n"
+                  "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
+                  "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
+               k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
+    } else if (md == RW_CHK && is_unsigned) {
+        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n"
+                  "      size_t nd%d;\n", k, expr, k);
+        snprintf(dest, sizeof dest, "nd%d =", k);
+        rw_emit_digits_expr(e, k, dest);
+        eb_fmt(e, "      if (cap - o < nd%d) return 0;\n"
+                  "      o += nd%d;\n"
+                  "      { size_t q%d = o;\n"
+                  "        do { dst[--q%d] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d); } }\n",
+               k, k, k, k, k, k, k);
+    } else if (md == RW_CHK) {
+        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
+                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
+                  "      size_t nd%d;\n", k, expr, k, k, k, k, k);
+        snprintf(dest, sizeof dest, "nd%d =", k);
+        rw_emit_digits_expr(e, k, dest);
+        eb_fmt(e, "      if (x%d < 0) nd%d++;\n"
+                  "      if (cap - o < nd%d) return 0;\n"
+                  "      o += nd%d;\n"
+                  "      { size_t q%d = o;\n"
+                  "        do { dst[--q%d] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
+                  "        if (x%d < 0) dst[--q%d] = '-'; } }\n",
+               k, k, k, k, k, k, k, k, k, k, k);
+    } else if (is_unsigned) {
+        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n", k, expr);
+        rw_emit_digits_expr(e, k, "o +=");
+        eb_fmt(e, "    }\n");
+    } else {
+        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
+                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
+                  "      if (x%d < 0) o++;\n",
+               k, expr, k, k, k, k, k);
+        rw_emit_digits_expr(e, k, "o +=");
+        eb_fmt(e, "    }\n");
     }
-    eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
-              "      char nb%d[21]; int nl%d = 0;\n"
-              "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
-              "      if (x%d < 0) dst[o++] = '-';\n"
-              "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
-              "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
-           k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
 }
 
-/* unchecked literal: short ones as direct byte stores, no memcpy call */
-static void rs_emit_write_lit(EB* e, const STerm* t) {
-    if (t->litlen <= 4) {
-        for (int i = 0; i < t->litlen; i++) {
-            char cb[16];
-            eb_fmt(e, "    dst[o++] = (char)%d; /*%s*/\n",
-                   (int)t->lit[i], rw_chr((int)t->lit[i], cb));
-        }
+/* slice-shaped payload through a leaf rule: pre-lits, bytes (encoded when the
+ * rule's codec has an /encode inverse), post-lits */
+static void rw_emit_wleaf(const RG* g, EB* e, WAcc* w, int* lbl, int md,
+                          const RWLeaf* lf, const char* pexpr, const char* lexpr) {
+    for (int i = 0; i < lf->npre; i++) rw_wacc_lit_node(g, e, w, md, lf->pre[i]);
+    const char* enc = (lf->codec > 0 && g->codenc[lf->codec - 1][0])
+                          ? g->codenc[lf->codec - 1] : NULL;
+    if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+    if (enc && md == RW_PUT) {
+        eb_fmt(e, "    o += %s((const char*)%s, %s, dst + o, (size_t)-1);\n", enc, pexpr, lexpr);
+    } else if (enc && md == RW_CHK) {
+        int k = (*lbl)++;
+        eb_fmt(e, "    { size_t en%d = %s((const char*)%s, %s, dst + o, cap - o);\n"
+                  "      if (en%d > cap - o) return 0;\n"
+                  "      o += en%d; }\n",
+               k, enc, pexpr, lexpr, k, k);
+    } else if (enc) {
+        eb_fmt(e, "    o += %s((const char*)%s, %s, 0, 0);\n", enc, pexpr, lexpr);
+    } else if (md == RW_PUT) {
+        eb_fmt(e, "    memcpy(dst + o, %s, %s); o += %s;\n", pexpr, lexpr, lexpr);
+    } else if (md == RW_CHK) {
+        eb_fmt(e, "    if (cap - o < %s) return 0;\n"
+                  "    memcpy(dst + o, %s, %s); o += %s;\n", lexpr, pexpr, lexpr, lexpr);
     } else {
-        char esc[128];
-        rs_esc(esc, sizeof esc, t->lit, t->litlen);
-        eb_fmt(e, "    memcpy(dst + o, \"%s\", %d); o += %d;\n", esc, t->litlen, t->litlen);
+        eb_fmt(e, "    o += %s;\n", lexpr);
+    }
+    for (int i = 0; i < lf->npost; i++) rw_wacc_lit_node(g, e, w, md, lf->post[i]);
+}
+
+static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md, int ti);
+
+static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md, int ti) {
+    const STerm* t = &ss->terms[ti];
+    char pe[192], le[192];
+    switch (t->kind) {
+    case SK_BIND_INT: {
+        RWLeaf lf;
+        rw_leaf_shape(g, t->rule, &lf);
+        for (int i = 0; i < lf.npre; i++) rw_wacc_lit_node(g, e, w, md, lf.pre[i]);
+        snprintf(pe, sizeof pe, "v->%s", t->field);
+        rw_emit_wint(e, w, lbl, md, pe, 0);
+        for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
+        break;
+    }
+    case SK_BIND_SLICE: {
+        RWLeaf lf;
+        rw_leaf_shape(g, t->rule, &lf);
+        snprintf(pe, sizeof pe, "v->%s.ptr", t->field);
+        snprintf(le, sizeof le, "v->%s.len", t->field);
+        rw_emit_wleaf(g, e, w, lbl, md, &lf, pe, le);
+        break;
+    }
+    default:
+        rw_emit_wterm(ss, g, e, w, lbl, md, ti);
+        break;
+    }
+}
+
+static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md, int ti) {
+    const STerm* t = &ss->terms[ti];
+    char pe[192], le[192];
+    switch (t->kind) {
+    case SK_LIT:
+        rw_wacc_bytes(e, w, md, t->lit, t->litlen);
+        break;
+    case SK_RULE:
+        break;   /* pads/matchers: canonical output emits nothing */
+    case SK_BIND_INT: {
+        int dj = rs_derived_from(ss, ti);
+        if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
+            snprintf(pe, sizeof pe, "v->%s.len", ss->terms[dj].field);
+        else if (dj >= 0)
+            snprintf(pe, sizeof pe, "v->%s_n", ss->terms[dj].field);
+        else
+            snprintf(pe, sizeof pe, "v->%s", t->field);
+        rw_emit_wint(e, w, lbl, md, pe, dj >= 0);
+        break;
+    }
+    case SK_BIND_SLICE: {
+        RWLeaf lf;
+        rw_leaf_shape(g, t->rule, &lf);
+        snprintf(pe, sizeof pe, "v->%s.ptr", t->field);
+        snprintf(le, sizeof le, "v->%s.len", t->field);
+        rw_emit_wleaf(g, e, w, lbl, md, &lf, pe, le);
+        break;
+    }
+    case SK_BIND_BYTES:
+        if (md == RW_MEASURE) {
+            eb_fmt(e, "    o += v->%s.len;\n", t->field);
+        } else {
+            rw_wacc_flush_put(e, w, md);
+            if (md == RW_CHK)
+                eb_fmt(e, "    if (cap - o < v->%s.len) return 0;\n", t->field);
+            eb_fmt(e, "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
+                   t->field, t->field, t->field);
+        }
+        break;
+    case SK_BIND_ITEMS: {   /* count-driven */
+        int k = (*lbl)++;
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        eb_fmt(e, "    { size_t i%d;\n    for (i%d = 0; i%d < v->%s_n; i%d++)\n",
+               k, k, k, t->field, k);
+        if (md == RW_PUT)
+            eb_fmt(e, "        o += %s__wput(&v->%s[i%d], dst + o);\n", t->etype, t->field, k);
+        else if (md == RW_CHK)
+            eb_fmt(e, "        if (!%s__wchk(&v->%s[i%d], dst, cap, &o)) return 0;\n",
+                   t->etype, t->field, k);
+        else
+            eb_fmt(e, "        o += %s__wmeasure(&v->%s[i%d]);\n", t->etype, t->field, k);
+        eb_fmt(e, "    }\n");
+        break;
+    }
+    case SK_NARROW_MEMBERS: {
+        const RNarrow* nw = &t->nw;
+        unsigned char b;
+        b = (unsigned char)nw->open_b;
+        rw_wacc_bytes(e, w, md, &b, 1);
+        for (int i = 0; i < t->k_cnt; i++) {
+            const SKey* ke = &ss->keys[t->kidx[i]];
+            if (i > 0) { b = (unsigned char)nw->sep_b; rw_wacc_bytes(e, w, md, &b, 1); }
+            {   /* the key through its own leaf shape (quotes from the rule) */
+                RWLeaf kl;
+                rw_leaf_shape(g, nw->key_rule, &kl);
+                for (int j = 0; j < kl.npre; j++) rw_wacc_lit_node(g, e, w, md, kl.pre[j]);
+                rw_wacc_bytes(e, w, md, (const unsigned char*)ke->key, (int)strlen(ke->key));
+                for (int j = 0; j < kl.npost; j++) rw_wacc_lit_node(g, e, w, md, kl.post[j]);
+            }
+            b = (unsigned char)nw->kv_b;
+            rw_wacc_bytes(e, w, md, &b, 1);
+            rw_emit_wvalue(ss, g, e, w, lbl, md, ke->term);
+        }
+        b = (unsigned char)nw->close_b;
+        rw_wacc_bytes(e, w, md, &b, 1);
+        break;
+    }
+    case SK_NARROW_LIST: {
+        const RNarrow* nw = &t->nw;
+        int k = (*lbl)++;
+        unsigned char b = (unsigned char)nw->open_b;
+        rw_wacc_bytes(e, w, md, &b, 1);
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        eb_fmt(e, "    { size_t i%d;\n    for (i%d = 0; i%d < v->%s_n; i%d++) {\n",
+               k, k, k, t->field, k);
+        if (md == RW_PUT)
+            eb_fmt(e, "        if (i%d) dst[o++] = (char)%d;\n"
+                      "        o += %s__wput(&v->%s[i%d], dst + o);\n",
+                   k, nw->sep_b, t->etype, t->field, k);
+        else if (md == RW_CHK)
+            eb_fmt(e, "        if (i%d) { if (cap - o < 1) return 0; dst[o++] = (char)%d; }\n"
+                      "        if (!%s__wchk(&v->%s[i%d], dst, cap, &o)) return 0;\n",
+                   k, nw->sep_b, t->etype, t->field, k);
+        else
+            eb_fmt(e, "        if (i%d) o++;\n"
+                      "        o += %s__wmeasure(&v->%s[i%d]);\n",
+                   k, t->etype, t->field, k);
+        eb_fmt(e, "    }\n    }\n");
+        b = (unsigned char)nw->close_b;
+        rw_wacc_bytes(e, w, md, &b, 1);
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -2637,67 +2974,31 @@ static int rs_any_method_demand(const char* src, size_t n, const char* m) {
     return 0;
 }
 
-static void rs_emit_write(SS* ss, EB* e, int* lbl, const char* name) {
-    eb_fmt(e, "static __attribute__((unused)) size_t %s_write(const %s* v, char* dst, size_t cap) {\n"
-              "    size_t o = 0;\n    (void)v;\n", name, name);
-    /* consecutive fixed-max-size terms (literals, ints) share ONE bounds
-     * check for their combined worst case; only variable-size data keeps a
-     * per-term check. Halves-or-better the branch count on wire formats. */
-    int bi = 0;
-    while (bi < ss->nbody) {
-        /* measure the fixed run starting here */
-        int run_end = bi, run_max = 0;
-        while (run_end < ss->nbody) {
-            const STerm* t = &ss->terms[ss->body[run_end]];
-            if (t->kind == SK_LIT) run_max += t->litlen;
-            else if (t->kind == SK_BIND_INT) run_max += 21;
-            else if (t->kind == SK_RULE) { /* emits nothing */ }
-            else break;
-            run_end++;
-        }
-        if (run_max > 0)
-            eb_fmt(e, "    if (cap - o < %d) return 0;\n", run_max);
-        for (; bi < run_end; bi++) {
-            const STerm* t = &ss->terms[ss->body[bi]];
-            if (t->kind == SK_LIT) {
-                rs_emit_write_lit(e, t);
-            } else if (t->kind == SK_BIND_INT) {
-                int dj = rs_derived_from(ss, ss->body[bi]);
-                char expr[160];
-                if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
-                    snprintf(expr, sizeof expr, "v->%s.len", ss->terms[dj].field);
-                else if (dj >= 0)
-                    snprintf(expr, sizeof expr, "v->%s_n", ss->terms[dj].field);
-                else
-                    snprintf(expr, sizeof expr, "v->%s", t->field);
-                rs_emit_write_int(e, lbl, expr, dj >= 0);
-            }
-        }
-        if (bi >= ss->nbody) break;
-        {
-            const STerm* t = &ss->terms[ss->body[bi]];
-            switch (t->kind) {
-            case SK_BIND_SLICE:
-            case SK_BIND_BYTES:
-                eb_fmt(e, "    if (cap - o < v->%s.len) return 0;\n"
-                          "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
-                       t->field, t->field, t->field, t->field);
-                break;
-            case SK_BIND_ITEMS:   /* count-driven (rs_formatable guaranteed) */
-                eb_fmt(e, "    { size_t i;\n"
-                          "    for (i = 0; i < v->%s_n; i++) {\n"
-                          "        size_t k = %s_write(&v->%s[i], dst + o, cap - o);\n"
-                          "        if (k == 0) return 0;\n"
-                          "        o += k;\n    } }\n",
-                       t->field, t->etype, t->field);
-                break;
-            default:
-                break;
-            }
-            bi++;
-        }
+static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
+    for (int md = RW_MEASURE; md <= RW_CHK; md++) {
+        WAcc w;
+        memset(&w, 0, sizeof w);
+        if (md == RW_PUT)
+            eb_fmt(e, "static __attribute__((unused)) size_t %s__wput(const %s* v, char* dst) {\n"
+                      "    size_t o = 0;\n    (void)v;\n", name, name);
+        else if (md == RW_CHK)
+            eb_fmt(e, "static __attribute__((unused)) int %s__wchk(const %s* v, char* dst, size_t cap, size_t* io) {\n"
+                      "    size_t o = *io;\n    (void)v;\n", name, name);
+        else
+            eb_fmt(e, "static __attribute__((unused)) size_t %s__wmeasure(const %s* v) {\n"
+                      "    size_t o = 0;\n    (void)v;\n", name, name);
+        for (int i = 0; i < ss->nbody; i++)
+            rw_emit_wterm(ss, g, e, &w, lbl, md, ss->body[i]);
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, &w, md);
+        else if (w.cfix) eb_fmt(e, "    o += %ld;   /* structural skeleton */\n", w.cfix);
+        if (md == RW_CHK) eb_fmt(e, "    *io = o;\n    return 1;\n}\n");
+        else eb_fmt(e, "    return o;\n}\n");
     }
-    eb_fmt(e, "    return o;\n}\n");
+    eb_fmt(e, "static __attribute__((unused)) size_t %s_write(const %s* v, char* dst, size_t cap) {\n"
+              "    size_t o = 0;\n"
+              "    if (!%s__wchk(v, dst, cap, &o)) return 0;\n"
+              "    return o;\n}\n",
+           name, name, name);
 }
 
 static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* fail) {
@@ -3106,7 +3407,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    "%s */\n",
                name, line, reg ? "use " : "inline rules", reg ? ss->usename : "",
                name, name, name, name, name, name, name, name, name, name, name, name,
-               rs_formatable(ss)
+               rs_formatable(ss, g)
                    ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
                    : "");
         if (!reg || !reg->matchers_done) {
@@ -3243,7 +3544,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         /* the WRITE projection (schema inverted), on demand like every tier */
         {
-            int fmtable = rs_formatable(ss);
+            int fmtable = rs_formatable(ss, g);
             int want_write = rs_has_token(src, src_len, name, "_write") ||
                              rs_has_op(src, src_len, "cc_write", name) ||
                              rs_has_dot(src, src_len, name, "write");
@@ -3256,31 +3557,29 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 want_write = 1;   /* element writers / to_str substrate */
             if ((want_write || want_tostr) && !fmtable) {
                 snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
-                         "but the schema is not formatable yet (member-list combinators need "
-                         "codec inversion; delimited items need emit rules)", name, name);
+                         "but the schema is not formatable yet (directive `fields [...]` has "
+                         "no grammar rule to invert — narrow a rule instead: `G.rule [...]`)",
+                         name, name);
                 free(out);
                 out = NULL;
                 goto done;
             }
             if (want_write)
-                rs_emit_write(ss, &e, &lbl, name);
+                rs_emit_write(ss, g, &e, &lbl, name);
             if (want_tostr) {
                 /* CCString face: composes with @string templates (a CCString
                  * slot arm exists in the _Generic) and the language's
-                 * `x.to_str(arena)` idiom. Retry-doubling over _write; the
-                 * transient arena waste is bounded by the final size. */
+                 * `x.to_str(arena)` idiom. Measure once, allocate exactly,
+                 * write unchecked — no retry loop, no transient waste. */
                 eb_fmt(&e, "static __attribute__((unused)) CCString %s_to_str(const %s* v, CCArena* arena) {\n"
                            "    CCString s = cc_string_new();\n"
-                           "    size_t cap = 64;\n"
-                           "    while (cap <= (size_t)1 << 30) {\n"
-                           "        char* buf = (char*)cc_arena_alloc_local(arena, cap, 1);\n"
-                           "        size_t w = buf ? %s_write(v, buf, cap) : 0;\n"
-                           "        if (w) { cc_string_push_buffer(&s, buf, (uint32_t)w, arena); return s; }\n"
-                           "        if (!buf) break;\n"
-                           "        cap *= 2;\n"
-                           "    }\n"
-                           "    return s;   /* empty: allocation failed or value unencodable */\n"
-                           "}\n", name, name, name);
+                           "    size_t need = %s__wmeasure(v);\n"
+                           "    char* buf = (char*)cc_arena_alloc_local(arena, need ? need : 1, 1);\n"
+                           "    if (!buf) return s;\n"
+                           "    %s__wput(v, buf);\n"
+                           "    cc_string_push_buffer(&s, buf, (uint32_t)need, arena);\n"
+                           "    return s;\n"
+                           "}\n", name, name, name, name);
             }
         }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);

@@ -44,6 +44,34 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     return 1;
 }
 
+/* the codec's /encode inverse: canonical JSON escaping. The contract:
+ * ALWAYS return the exact encoded size; dst == NULL measures only; with a
+ * dst, write at most cap bytes (the caller treats need > cap as overflow,
+ * so partial output within cap is fine). */
+static size_t jstr_enc(const char* p, size_t n, char* dst, size_t cap) {
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        const char* two = 0;
+        switch (c) {
+        case '"':  two = "\\\""; break; case '\\': two = "\\\\"; break;
+        case '\n': two = "\\n";  break; case '\r': two = "\\r";  break;
+        case '\t': two = "\\t";  break; case '\b': two = "\\b";  break;
+        case '\f': two = "\\f";  break;
+        }
+        if (two) { if (dst && o + 2 <= cap) { dst[o] = two[0]; dst[o + 1] = two[1]; } o += 2; }
+        else if (c < 0x20) {
+            if (dst && o + 6 <= cap) {
+                memcpy(dst + o, "\\u00", 4);
+                dst[o + 4] = "0123456789abcdef"[c >> 4];
+                dst[o + 5] = "0123456789abcdef"[c & 15];
+            }
+            o += 6;
+        } else { if (dst && o < cap) dst[o] = (char)c; o++; }
+    }
+    return o;
+}
+
 @grammar(rules) Json {~~~~
     top:     value
     ws:      any charset [#' ' #'\t' #'\r' #'\n']
@@ -53,7 +81,7 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
     esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
                     | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
-    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    string:  [#'"' keep/decode(jstr)/encode(jstr_enc) any [some strchar | esc] #'"']
     int:     [opt #'-' [#'0' | [onenine any digit]]]
     number:  keep [int opt [#'.' some digit]
                        opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
@@ -173,6 +201,34 @@ int main(void) {
         }
     }
 
+    /* FORMAT: the narrowed schema inverted. The structural skeleton (braces,
+     * quoted keys, colons, commas — all derived from Json.object/Json.member,
+     * never restated) folds to one constant in the measure pass; text routes
+     * through the codec's /encode inverse. */
+    {
+        Tweet t;
+        t.id = -7;
+        t.text = cc_slice_from_buffer((void*)"a\nb\"c\\", 6);
+        t.user_name = cc_slice_from_buffer((void*)"z\xc3\xa9", 3);
+        char buf[256];
+        size_t w = cc_write(Tweet, &t, buf, sizeof buf);
+        const char* want =
+            "{\"id\":-7,\"text\":\"a\\nb\\\"c\\\\\",\"user\":{\"screen_name\":\"z\xc3\xa9\"}}";
+        if (w != strlen(want) || memcmp(buf, want, w) != 0) {
+            printf("FAIL: tweet write [%.*s]\n", (int)w, buf); return 1;
+        }
+        /* measure is exact: cap == w fits, cap == w-1 reports 0 untouched */
+        if (Tweet_write(&t, buf, w) != w) { printf("FAIL: exact cap\n"); return 1; }
+        if (Tweet_write(&t, buf, w - 1) != 0) { printf("FAIL: overflow accepted\n"); return 1; }
+        /* round-trip: escapes decode back to the original bytes */
+        Tweet rt;
+        if (!Tweet_parse(want, strlen(want), &arena, &rt) ||
+            rt.id != -7 || rt.text.len != 6 || memcmp(rt.text.ptr, "a\nb\"c\\", 6) != 0 ||
+            rt.user_name.len != 3 || memcmp(rt.user_name.ptr, "z\xc3\xa9", 3) != 0) {
+            printf("FAIL: write round-trip\n"); return 1;
+        }
+    }
+
     /* corpus: schema extraction vs DOM navigation must agree exactly */
     {
         FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
@@ -224,6 +280,34 @@ int main(void) {
             printf("FAIL: schema/dom disagree: cnt %ld/%ld idsum %llu/%llu tlen %llu/%llu ulen %llu/%llu mat %ld/%ld\n",
                    sa.cnt, da.cnt, sa.idsum, da.idsum, sa.tlen, da.tlen, sa.ulen, da.ulen, sa.mat, da.mat);
             return 1;
+        }
+
+        /* corpus round-trip: Feed -> format -> reparse preserves the extracted
+         * semantics. (mat is excluded: \uXXXX escapes decode to UTF-8, which
+         * the canonical encoder emits raw, so fewer reparsed strings need to
+         * materialize — that's a property of canonical form, not data loss.) */
+        {
+            CCString fs = cc_format(Feed, &feed, &arena);
+            CCSlice fv = cc_string_as_slice(&fs);
+            if (fv.len == 0) { printf("FAIL: feed format\n"); return 1; }
+            Feed rt;
+            if (!Feed_parse((const char*)fv.ptr, fv.len, &arena, &rt)) {
+                printf("FAIL: feed reparse\n"); return 1;
+            }
+            Agg ra = {0};
+            for (size_t i = 0; i < rt.statuses_n; i++) {
+                Tweet* t = &rt.statuses[i];
+                ra.idsum += (unsigned long long)t->id;
+                ra.tlen += t->text.len;
+                ra.ulen += t->user_name.len;
+                ra.cnt++;
+            }
+            if (ra.idsum != sa.idsum || ra.tlen != sa.tlen ||
+                ra.ulen != sa.ulen || ra.cnt != sa.cnt) {
+                printf("FAIL: write/reparse disagree: cnt %ld/%ld tlen %llu/%llu\n",
+                       ra.cnt, sa.cnt, ra.tlen, sa.tlen);
+                return 1;
+            }
         }
         free(buf);
     }
