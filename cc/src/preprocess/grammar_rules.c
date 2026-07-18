@@ -723,9 +723,130 @@ static int rg_pure_run(const RG* g, int nd, int depth) {
     }
 }
 
+/* Boundary-risk: derived restore (__unwind pops nodes with anchor >= resume
+ * position) misattributes a node only when a push ANCHOR can COINCIDE with a
+ * later resume boundary — i.e. zero required consumption between the anchor
+ * and a subsequent kp restore site. Nodes pushed by the failed attempt itself
+ * always anchor at/after the resume position and are meant to pop; the hazard
+ * is exclusively a committed EARLIER node sitting exactly on the boundary.
+ *
+ * Grammar-level test, three ways an anchor reaches a boundary untouched:
+ *   (a) a rule body is "open" — a push anchor can equal the rule's end
+ *       position (zero consumption from anchor to exit); caller context is
+ *       unknown, so an open rule is conservatively hazardous;
+ *   (b) a collect BEGIN (anchor at open) can reach a kp restore site inside
+ *       its own child with zero consumption ("zr": the site's sv would equal
+ *       the still-open BEGIN's anchor, and the unwind would pop it);
+ *   (c) within a SEQ, an open element is followed — across a nullable gap —
+ *       by an element with a zero-consumption-reachable kp site.
+ * Hazard anywhere => every kp site keeps the explicit 3-word snapshot.
+ * No hazard => the cursor is the state, everywhere. (JSON: no hazard — every
+ * anchor is followed by required consumption before any kp boundary.) */
+typedef struct {
+    unsigned char open_[R_MAX_RULES];   /* open() per rule, least fixpoint */
+    unsigned char zr_[R_MAX_RULES];     /* zr() per rule, least fixpoint */
+} RRisk;
+
+static int rn_nullable(const RG* g, RFirst* F, int nd) {
+    unsigned char set[32]; int nul = 0;
+    memset(set, 0, 32);
+    rf_node(g, F, nd, set, &nul);
+    return nul;
+}
+
+/* open(n): can a push anchor inside n coincide with n's END position?
+ * Existential over finite derivations => LEAST fixpoint: rule refs read the
+ * current table (all 0 initially) and the driver iterates to convergence.
+ * In-progress-conservative memoization would poison the table: member ends
+ * with value, value is mid-computation, and a bogus 1 sticks forever. */
+static int rg_open_node(const RG* g, RFirst* F, RRisk* R, int nd) {
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_KEEP: case RN_COLLECT:
+        /* anchor at entry; coincides with exit iff the body can match empty */
+        return rn_nullable(g, F, x->a) || rg_open_node(g, F, R, x->a);
+    case RN_REF: return R->open_[x->nkids];
+    case RN_SOME: case RN_ANY: case RN_OPT: return rg_open_node(g, F, R, x->a);
+    case RN_SEQ:
+        for (int i = 0; i < x->nkids; i++) {
+            if (!rg_open_node(g, F, R, g->kids[x->b + i])) continue;
+            int tail_nul = 1;
+            for (int j = i + 1; j < x->nkids; j++)
+                if (!rn_nullable(g, F, g->kids[x->b + j])) { tail_nul = 0; break; }
+            if (tail_nul) return 1;
+        }
+        return 0;
+    case RN_ALT:
+        for (int i = 0; i < x->nkids; i++)
+            if (rg_open_node(g, F, R, g->kids[x->b + i])) return 1;
+        return 0;
+    default: return 0;   /* charset/lit/skip: no pushes */
+    }
+}
+
+/* zr(n): is a kp restore site reachable at ZERO consumption from n's start?
+ * Same least-fixpoint discipline as open(). */
+static int rg_zr_node(const RG* g, RFirst* F, RKeeps* K, RRisk* R, int nd) {
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_KEEP: case RN_COLLECT: return rg_zr_node(g, F, K, R, x->a);
+    case RN_REF: return R->zr_[x->nkids];
+    case RN_SOME: case RN_ANY: case RN_OPT:
+        /* the construct takes sv at entry: a kp site AT this position */
+        if (rk_node(g, K, x->a)) return 1;
+        return rg_zr_node(g, F, K, R, x->a);
+    case RN_ALT:
+        /* cascades take sv at entry (dispatch ALTs don't, but conservative) */
+        if (rk_node(g, K, nd)) return 1;
+        for (int i = 0; i < x->nkids; i++)
+            if (rg_zr_node(g, F, K, R, g->kids[x->b + i])) return 1;
+        return 0;
+    case RN_SEQ:
+        for (int i = 0; i < x->nkids; i++) {
+            if (rg_zr_node(g, F, K, R, g->kids[x->b + i])) return 1;
+            if (!rn_nullable(g, F, g->kids[x->b + i])) return 0;  /* must consume */
+        }
+        return 0;
+    default: return 0;
+    }
+}
+
+static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
+    RRisk* R = (RRisk*)calloc(1, sizeof(RRisk));
+    if (!R) return 1;
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (int r = 0; r < g->nrules; r++) {
+            int o = rg_open_node(g, F, R, g->rules[r].node);
+            int z = rg_zr_node(g, F, K, R, g->rules[r].node);
+            if (o && !R->open_[r]) { R->open_[r] = 1; changed = 1; }
+            if (z && !R->zr_[r])   { R->zr_[r] = 1;   changed = 1; }
+        }
+    }
+    int haz = 0;
+    for (int r = 0; !haz && r < g->nrules; r++)                        /* (a) */
+        if (R->open_[r]) haz = 1;
+    for (int i = 0; !haz && i < g->nnodes; i++) {
+        const RNode* x = &g->nodes[i];
+        if (x->kind == RN_COLLECT) {                                    /* (b) */
+            if (rg_zr_node(g, F, K, R, x->a)) haz = 1;
+        } else if (x->kind == RN_SEQ) {                                 /* (c) */
+            int pending = 0;
+            for (int j = 0; j < x->nkids; j++) {
+                int kid = g->kids[x->b + j];
+                if (pending && rg_zr_node(g, F, K, R, kid)) { haz = 1; break; }
+                if (rg_open_node(g, F, R, kid)) pending = 1;
+                else if (!rn_nullable(g, F, kid)) pending = 0;
+            }
+        }
+    }
+    free(R);
+    return haz;
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; int risk; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -811,30 +932,19 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         rg_emit_node(g, e, x->a, fail, lbl, rid);
         e->dk = saved_dk;
-        if (x->b == 0) {
-            /* raw borrow: write the 16-byte node inline — no call, no codec */
-            eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
-                      "    { %sNode* nd%d = &c->tape[c->total++];\n"
-                      "      nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n"
-                      "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n",
-                   g->name, fail, g->name, k, k, rid, k, k, k);
-        } else {
-            /* codec keep: the child's branch structure tells us whether any
-             * transform-triggering branch ran. Clean -> borrow inline. */
-            int old_dk = e->dk;
-            /* re-emit child under a dirty scope: rewind is not possible in a
-             * single pass, so the dirty declaration was emitted before the
-             * child (see below) */
-            (void)old_dk;
-            eb_fmt(e, "    if (!dr%d) {\n"
-                      "        if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
-                      "        { %sNode* nd%d = &c->tape[c->total++];\n"
-                      "          nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n"
-                      "          nd%d->u.bytes = (const char*)(s + ka%d); }\n"
-                      "    } else if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
-                   k, g->name, fail, g->name, k, k, rid, k, k, k,
-                   g->name, rid, x->b, k, fail);
-        }
+        /* every keep writes its node inline with the RAW source span; codec
+         * keeps add the dirty bit when a transform-triggering branch ran.
+         * Decode is deferred to the materialize pass (lazy strings, like lazy
+         * numbers) — which is what keeps u a source anchor for __unwind. */
+        eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
+                  "    { %sNode* nd%d = &c->tape[c->total++];\n",
+               g->name, fail, g->name, k);
+        if (x->b == 0)
+            eb_fmt(e, "      nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n", k, rid, k);
+        else
+            eb_fmt(e, "      nd%d->meta = %du | (dr%d ? 0x200u : 0u) | (((unsigned long long)(p - ka%d)) << 10);\n",
+                   k, rid, k, k);
+        eb_fmt(e, "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n", k, k);
         break;
     }
     case RN_COLLECT: {
@@ -843,11 +953,12 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
          * through tape truncation, removing the BEGIN — no special casing. */
         eb_fmt(e, "    { if (c->bdepth >= 512) goto %s;\n"
                   "        if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
-                  "        c->tape[c->total].meta = 0x100u | %du; c->tape[c->total].u.span = 0;\n"
+                  "        c->tape[c->total].meta = 0x100u | %du;\n"
+                  "        c->tape[c->total].u.bytes = (const char*)(s + p);   /* source anchor */\n"
                   "        c->bstack[c->bdepth++] = c->total++; }\n", fail, g->name, fail, rid);
         rg_emit_node(g, e, x->a, fail, lbl, rid);
         eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
-                  "        c->tape[bi].u.span = c->total - bi; }\n");
+                  "        c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10; }\n");
         break;
     }
     case RN_SEQ:
@@ -918,8 +1029,9 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         /* fallback: PEG trial cascade */
         {
         int kp = e->mode ? rk_node(g, e->K, nd) : 0;
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
-        else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
+        int rk = kp ? e->risk : 0;
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
+        else          eb_fmt(e, "    { size_t sv%d = p;\n", k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
             int last = (i == x->nkids - 1);
@@ -928,8 +1040,9 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 eb_fmt(e, "    dr%d = 1;\n", e->dk);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            if (kp) eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
-            else    eb_fmt(e, "%s: p = sv%d;\n", br, k);
+            if (kp && rk)      eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
+            else if (kp)       eb_fmt(e, "%s: p = sv%d; %s__unwind(c, s + p);\n", br, k, g->name);
+            else               eb_fmt(e, "%s: p = sv%d;\n", br, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
         }
         eb_fmt(e, "Lok%d: ; }\n", k);
@@ -939,14 +1052,17 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     case RN_OPT: {
         int k = (*lbl)++;
         int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
+        int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
-        else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
+        else          eb_fmt(e, "    { size_t sv%d = p;\n", k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
-                       k, br, k, k, k, k);
-        else    eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
+        if (kp && rk) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
+                             k, br, k, k, k, k);
+        else if (kp)  eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; %s__unwind(c, s + p);\nLok%d: ; }\n",
+                             k, br, k, g->name, k);
+        else          eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
         break;
     }
     case RN_ANY:
@@ -988,17 +1104,20 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         {
         int k = (*lbl)++;
         int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
+        int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        if (kp) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0, ld%d = 0;\n"
-                          "    for (;;) { sv%d = p; lt%d = c->total; ld%d = c->bdepth;\n",
-                       k, k, k, k, k, k);
-        else    eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0, ld%d = 0;\n"
+                                "    for (;;) { sv%d = p; lt%d = c->total; ld%d = c->bdepth;\n",
+                             k, k, k, k, k, k);
+        else          eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
-                       k, k, br, k, k, k, k);
-        else    eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
-                       k, k, br, k, k);
+        if (kp && rk) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
+                             k, k, br, k, k, k, k);
+        else if (kp)  eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; %s__unwind(c, s + p);\nLok%d: ; }\n",
+                             k, k, br, k, g->name, k);
+        else          eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
+                             k, k, br, k, k);
         break;
         }
     }
@@ -1009,9 +1128,10 @@ static char* rg_emit(const RG* g, int origin_line) {
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    EB e = { &out, &len, &cap, F, K, 0, -1 };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0 };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
+    e.risk = rg_grammar_risk(g, F, K);
 
     eb_fmt(&e, "/* generated by @grammar(rules) %s (line %d): %d rule(s), match + collect (v2) */\n",
            g->name, origin_line, g->nrules);
@@ -1029,11 +1149,14 @@ static char* rg_emit(const RG* g, int origin_line) {
      * from the request arena at <= 16 bytes per input byte (a node consumes
      * at least one source byte), so the tape never grows, never copies.
      *   meta = ruleid(8) | is_list(1<<8) | cow(1<<9) | byte_len(<<10)
-     *   u    = leaf: source-or-arena byte pointer; interior: subtree span
+     *   meta bits 10+ = leaf: byte length; interior: subtree span (nodes)
+     *   u    = byte pointer, ALWAYS: during the parse it is the node's source
+     *          anchor (which is what makes derived restore possible); after
+     *          the materialize pass, dirty leaves point at decoded arena bytes
      * match = tape suppressed (NULL ctx); collect = tape folded; parse = tape
      * returned; schema will specialize it away; format will invert it. */
     eb_fmt(&e, "typedef struct { unsigned long long meta;\n"
-               "    union { const char* bytes; unsigned long long span; } u; } %sNode;\n",
+               "    union { const char* bytes; } u; } %sNode;\n",
            g->name);
     eb_fmt(&e, "typedef struct { %sNode* tape; size_t total, cap;\n"
                "    size_t bstack[512]; size_t bdepth; CCArena* arena; } %s__ctx;\n",
@@ -1045,8 +1168,41 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (!nt) return 0;\n"
                "    c->tape = nt; c->cap = nc; return 1;\n}\n",
            g->name, g->name, g->name, g->name, g->name, g->name, g->name);
-    eb_fmt(&e, "static int %s__leaf(%s__ctx* c, int id, int codec, size_t a, size_t b,\n"
-               "                    const unsigned char* s);\n", g->name, g->name);
+    /* codec table: rule id -> codec index (0 = none). Lazy decode reads it.
+     * Keep ids are the enclosing rule's index (inlining preserves this), so a
+     * per-rule subtree scan resolves each rule's codec. Two DIFFERENT codecs
+     * in one rule would collide — engine limitation, detectable, none here. */
+    if (g->ncodecs > 0) {
+        eb_fmt(&e, "static const short %s__codec_of[%d] = {", g->name, g->nrules);
+        for (int r = 0; r < g->nrules; r++) {
+            int cd = 0;
+            int stack[R_MAX_NODES]; int sp = 0;
+            stack[sp++] = g->rules[r].node;
+            while (sp > 0) {
+                const RNode* x = &g->nodes[stack[--sp]];
+                if (x->kind == RN_KEEP) {
+                    if (x->b > 0) cd = x->b;
+                    stack[sp++] = x->a;
+                } else if (x->kind == RN_COLLECT || x->kind == RN_SOME ||
+                           x->kind == RN_ANY || x->kind == RN_OPT) {
+                    stack[sp++] = x->a;
+                } else if (x->kind == RN_SEQ || x->kind == RN_ALT) {
+                    for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
+                }
+            }
+            eb_fmt(&e, "%d,", cd);
+        }
+        eb_fmt(&e, "};\n");
+    }
+    /* Derived restore: the cursor is the ONLY live parse state. Every node's
+     * u is its source anchor during the parse (leaves: raw span pointer;
+     * BEGINs: position at open; spans live in meta), so failure recovery is
+     * a cold backward pop of nodes born at/after the resume position. */
+    eb_fmt(&e, "static __attribute__((noinline)) void %s__unwind(%s__ctx* c, const unsigned char* sv) {\n"
+               "    while (c->total > 1 && (const unsigned char*)c->tape[c->total - 1].u.bytes >= sv)\n"
+               "        c->total--;\n"
+               "    while (c->bdepth > 0 && c->bstack[c->bdepth - 1] >= c->total) c->bdepth--;\n"
+               "}\n", g->name, g->name);
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
         /* reachable-keep scan (iterative stack over the rule's subtree) */
@@ -1144,26 +1300,8 @@ static char* rg_emit(const RG* g, int origin_line) {
         }
     }
 
-    /* __leaf: codec at push — decode fuses into the parse pass; the node is
-     * written once, in its final form. Cow bit from the codec's provenance. */
-    eb_fmt(&e, "static int %s__leaf(%s__ctx* c, int id, int codec, size_t a, size_t b,\n"
-               "                    const unsigned char* s) {\n"
-               "    CCSlice v;\n"
-               "    switch (codec) {\n", g->name, g->name);
-    for (int ci = 0; ci < g->ncodecs; ci++)
-        eb_fmt(&e, "    case %d: if (!%s((const char*)s + a, b - a, &v, c->arena)) return 0; break;\n",
-               ci + 1, g->codecs[ci]);
-    eb_fmt(&e, "    default: v = cc_slice_from_buffer((void*)(s + a), b - a); break;\n"
-               "    }\n"
-               "    if (c->total == c->cap && !%s__tgrow(c)) return 0;\n"
-               "    c->tape[c->total].meta = (unsigned long long)id\n"
-               "        | (cc_slice_is_unique(v) ? 0x200u : 0u)\n"
-               "        | (((unsigned long long)v.len) << 10);\n"
-               "    c->tape[c->total].u.bytes = (const char*)v.ptr;\n"
-               "    c->total++;\n"
-               "    return 1;\n}\n", g->name);
-
-    /* tape accessors: adjacency and span ARE the tree. */
+    /* tape accessors: adjacency and span ARE the tree. Spans live in meta
+     * (bits 10+) for interior nodes; u stays a byte pointer everywhere. */
     eb_fmt(&e, "static int %sNode_id(const %sNode* nd) { return (int)(nd->meta & 0xFFu); }\n",
            g->name, g->name);
     eb_fmt(&e, "static int %sNode_is_list(const %sNode* nd) { return (int)((nd->meta >> 8) & 1u); }\n",
@@ -1171,11 +1309,11 @@ static char* rg_emit(const RG* g, int origin_line) {
     eb_fmt(&e, "static size_t %sNode_len(const %sNode* nd) { return (size_t)(nd->meta >> 10); }\n",
            g->name, g->name);
     eb_fmt(&e, "static %sNode* %sNode_first(%sNode* nd) {\n"
-               "    return %sNode_is_list(nd) && nd->u.span > 1 ? nd + 1 : 0; }\n",
+               "    return %sNode_is_list(nd) && (nd->meta >> 10) > 1 ? nd + 1 : 0; }\n",
            g->name, g->name, g->name, g->name);
     eb_fmt(&e, "static %sNode* %sNode_next(%sNode* nd, %sNode* parent) {\n"
-               "    %sNode* nx = nd + (%sNode_is_list(nd) ? nd->u.span : 1);\n"
-               "    return nx < parent + parent->u.span ? nx : 0; }\n",
+               "    %sNode* nx = nd + (%sNode_is_list(nd) ? (size_t)(nd->meta >> 10) : 1);\n"
+               "    return nx < parent + (size_t)(parent->meta >> 10) ? nx : 0; }\n",
            g->name, g->name, g->name, g->name, g->name, g->name);
     eb_fmt(&e, "static size_t %sNode_count(%sNode* nd) {\n"
                "    size_t k = 0;\n"
@@ -1208,19 +1346,44 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
                "    c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */\n"
+               "    c0.tape[0].u.bytes = s;             /* source anchor */\n"
                "#if %s__ENTRY_PURE\n"
                "    if (!%s__ENTRY_B((const unsigned char*)s, n, &p) || p != n) return 0;\n"
                "#else\n"
                "    if (!%s__ENTRY_B(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
                "#endif\n"
-               "    c0.tape[0].u.span = c0.total;\n"
-               "    return c0.tape;\n}\n",
+               "    c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;\n",
            g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name);
+    if (g->ncodecs > 0) {
+        /* Materialize pass: dirty leaves (0x200 set during the parse when a
+         * transform-triggering branch ran) decode HERE, once, on the
+         * committed tape — failed branches were unwound and never decode.
+         * The cow bit is rewritten from the codec's actual provenance. */
+        eb_fmt(&e, "    { size_t t;\n"
+                   "    for (t = 1; t < c0.total; t++) {\n"
+                   "        unsigned long long m = c0.tape[t].meta;\n"
+                   "        if ((m & 0x300u) != 0x200u) continue;   /* dirty leaves only */\n"
+                   "        { CCSlice v; int id = (int)(m & 0xFFu);\n"
+                   "          const char* kp = c0.tape[t].u.bytes;\n"
+                   "          size_t kl = (size_t)(m >> 10);\n"
+                   "          switch (%s__codec_of[id]) {\n", g->name);
+        for (int ci = 0; ci < g->ncodecs; ci++)
+            eb_fmt(&e, "          case %d: if (!%s(kp, kl, &v, arena)) return 0; break;\n",
+                   ci + 1, g->codecs[ci]);
+        eb_fmt(&e, "          default: continue;\n"
+                   "          }\n"
+                   "          c0.tape[t].meta = (unsigned long long)id\n"
+                   "              | (cc_slice_is_unique(v) ? 0x200u : 0u)\n"
+                   "              | (((unsigned long long)v.len) << 10);\n"
+                   "          c0.tape[t].u.bytes = (const char*)v.ptr; }\n"
+                   "    } }\n");
+    }
+    eb_fmt(&e, "    return c0.tape;\n}\n");
     eb_fmt(&e, "static int %s_collect(const char* s, size_t n, CCArena* arena,\n"
                "        int (*cb)(void* env, int id, CCSlice v), void* env) {\n"
                "    %sNode* tape = %s_parse(s, n, arena);\n"
                "    if (!tape) return 0;\n"
-               "    { size_t total = (size_t)tape[0].u.span;\n"
+               "    { size_t total = (size_t)(tape[0].meta >> 10);\n"
                "    for (size_t t = 1; t < total; t++) {\n"
                "        if ((tape[t].meta >> 8) & 1u) continue;   /* interior */\n"
                "        { CCSlice v; %sNode_slice(&tape[t], &v);\n"

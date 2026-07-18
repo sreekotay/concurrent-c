@@ -1,0 +1,77 @@
+// Derived restore (v14): the tape carries source anchors during the parse,
+// so PEG backtracking recovers by POPPING nodes whose anchor is at/after the
+// resume position (__unwind) instead of saving tape snapshots on the hot path.
+// JSON never backtracks over a committed push on a successful parse, so this
+// grammar forces exactly that: `pair` pushes a keep, fails on the missing
+// comma, the cascade unwinds the push, and `single` re-parses the same span.
+// A leaked node would double the callback count; a lost one would zero it.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Duo {~~~~
+    top:    [pair | single]
+    digit:  charset [#'0' - #'9']
+    pair:   [keep some digit #',' keep some digit]
+    single: keep some digit
+~~~~}
+
+/* The other side of the gate: `item`'s keep body is nullable AND sits at the
+ * rule's tail, so a zero-length push can anchor exactly on a later resume
+ * boundary — the boundary-risk analysis must reject derived restore here and
+ * keep explicit snapshots (which make empty keeps unambiguous). */
+@grammar(rules) Loose {~~~~
+    top:   [item any [#',' item]]
+    digit: charset [#'0' - #'9']
+    item:  keep any digit
+~~~~}
+
+typedef struct { int keeps; CCSlice last; } Env;
+
+static int cb(void* env, int id, CCSlice v) {
+    (void)id;
+    Env* e = (Env*)env;
+    e->keeps++;
+    e->last = v;
+    return 0;
+}
+
+static int run(const char* src, int want_ok, int want_keeps, const char* want_last) {
+    CCArena a = cc_arena_create(1 << 20);
+    Env e = {0};
+    int ok = Duo_collect(src, strlen(src), &a, cb, &e);
+    if (ok != want_ok) { printf("FAIL: %s ok=%d want %d\n", src, ok, want_ok); return 0; }
+    if (ok && e.keeps != want_keeps) {
+        printf("FAIL: %s keeps=%d want %d (unwind leaked or lost a node)\n", src, e.keeps, want_keeps);
+        return 0;
+    }
+    if (ok && want_last &&
+        (e.last.len != strlen(want_last) || memcmp(e.last.ptr, want_last, e.last.len) != 0)) {
+        printf("FAIL: %s last span wrong\n", src);
+        return 0;
+    }
+    cc_arena_free(&a);
+    return 1;
+}
+
+int main(void) {
+    int pass = 1;
+    /* pair pushes keep("12"), ',' fails, unwind pops it, single re-keeps it */
+    pass &= run("12", 1, 1, "12");
+    /* pair succeeds: both keeps survive */
+    pass &= run("3,456", 1, 2, "456");
+    /* pair pushes keep("7"), fails at missing second number; single matches
+     * "7" but trailing ',' rejects the parse — no callbacks may fire */
+    pass &= run("7,", 0, 0, 0);
+    /* snapshot-fallback grammar: empty keeps at resume boundaries stay exact */
+    {
+        CCArena a = cc_arena_create(1 << 20);
+        Env e = {0};
+        if (!Loose_collect("1,,2", 4, &a, cb, &e) || e.keeps != 3) {
+            printf("FAIL: loose keeps=%d want 3\n", e.keeps);
+            pass = 0;
+        }
+        cc_arena_free(&a);
+    }
+    if (!pass) return 1;
+    printf("grammar rules derived unwind OK\n");
+    return 0;
+}
