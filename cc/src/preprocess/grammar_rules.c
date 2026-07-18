@@ -2584,27 +2584,54 @@ static int rs_formatable(const SS* ss) {
     return 1;
 }
 
-static void rs_emit_write_int(EB* e, int* lbl, const char* expr) {
+/* UNCHECKED int emission — the enclosing fixed-size run already reserved
+ * space (21 bytes covers sign + 20 digits). Derived lengths/counts are
+ * size_t-shaped: the unsigned variant drops the sign branch entirely. */
+static void rs_emit_write_int(EB* e, int* lbl, const char* expr, int is_unsigned) {
     int k = (*lbl)++;
+    if (is_unsigned) {
+        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n"
+                  "      char nb%d[21]; int nl%d = 0;\n"
+                  "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
+                  "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
+               k, expr, k, k, k, k, k, k, k, k, k, k);
+        return;
+    }
     eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
               "      char nb%d[21]; int nl%d = 0;\n"
               "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
-              "      if (x%d < 0) { if (o >= cap) return 0; dst[o++] = '-'; }\n"
+              "      if (x%d < 0) dst[o++] = '-';\n"
               "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
-              "      if (o + (size_t)nl%d > cap) return 0;\n"
               "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
-           k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
+           k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
 }
 
-/* any write-shaped reference at all (`X_write`, `r.write`, `cc_write(`)?
- * An element schema's writer is demanded by a LATER schema's generated code,
- * which the per-name scan cannot see — so a formatable schema also emits its
- * writer under this loose file-level demand, tagged unused-ok. */
-static int rs_any_write_demand(const char* src, size_t n) {
-    for (size_t i = 1; i + 5 <= n; i++) {
-        if (src[i] != 'w' || memcmp(src + i, "write", 5) != 0) continue;
+/* unchecked literal: short ones as direct byte stores, no memcpy call */
+static void rs_emit_write_lit(EB* e, const STerm* t) {
+    if (t->litlen <= 4) {
+        for (int i = 0; i < t->litlen; i++) {
+            char cb[16];
+            eb_fmt(e, "    dst[o++] = (char)%d; /*%s*/\n",
+                   (int)t->lit[i], rw_chr((int)t->lit[i], cb));
+        }
+    } else {
+        char esc[128];
+        rs_esc(esc, sizeof esc, t->lit, t->litlen);
+        eb_fmt(e, "    memcpy(dst + o, \"%s\", %d); o += %d;\n", esc, t->litlen, t->litlen);
+    }
+}
+
+/* any method-shaped reference at all (`X_<m>`, `r.<m>(`)? An element schema's
+ * writer is demanded by a LATER schema's generated code, and a value-receiver
+ * UFCS call (`cmd.to_str(&a)`) cannot be associated with its type by a
+ * per-name scan — so formatable schemas also emit under this loose
+ * file-level demand, tagged unused-ok. */
+static int rs_any_method_demand(const char* src, size_t n, const char* m) {
+    size_t ml = strlen(m);
+    for (size_t i = 1; i + ml <= n; i++) {
+        if (src[i] != m[0] || memcmp(src + i, m, ml) != 0) continue;
         if (src[i - 1] != '_' && src[i - 1] != '.') continue;
-        if (i + 5 < n && (isalnum((unsigned char)src[i + 5]) || src[i + 5] == '_')) continue;
+        if (i + ml < n && (isalnum((unsigned char)src[i + ml]) || src[i + ml] == '_')) continue;
         return 1;
     }
     return 0;
@@ -2613,46 +2640,61 @@ static int rs_any_write_demand(const char* src, size_t n) {
 static void rs_emit_write(SS* ss, EB* e, int* lbl, const char* name) {
     eb_fmt(e, "static __attribute__((unused)) size_t %s_write(const %s* v, char* dst, size_t cap) {\n"
               "    size_t o = 0;\n    (void)v;\n", name, name);
-    for (int bi = 0; bi < ss->nbody; bi++) {
-        int ti = ss->body[bi];
-        const STerm* t = &ss->terms[ti];
-        switch (t->kind) {
-        case SK_LIT: {
-            char esc[128];
-            rs_esc(esc, sizeof esc, t->lit, t->litlen);
-            eb_fmt(e, "    if (o + %d > cap) return 0;\n"
-                      "    memcpy(dst + o, \"%s\", %d); o += %d;\n",
-                   t->litlen, esc, t->litlen, t->litlen);
-            break;
+    /* consecutive fixed-max-size terms (literals, ints) share ONE bounds
+     * check for their combined worst case; only variable-size data keeps a
+     * per-term check. Halves-or-better the branch count on wire formats. */
+    int bi = 0;
+    while (bi < ss->nbody) {
+        /* measure the fixed run starting here */
+        int run_end = bi, run_max = 0;
+        while (run_end < ss->nbody) {
+            const STerm* t = &ss->terms[ss->body[run_end]];
+            if (t->kind == SK_LIT) run_max += t->litlen;
+            else if (t->kind == SK_BIND_INT) run_max += 21;
+            else if (t->kind == SK_RULE) { /* emits nothing */ }
+            else break;
+            run_end++;
         }
-        case SK_RULE:
-            break;   /* pads/matchers: canonical output emits nothing */
-        case SK_BIND_INT: {
-            int dj = rs_derived_from(ss, ti);
-            char expr[160];
-            if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
-                snprintf(expr, sizeof expr, "v->%s.len", ss->terms[dj].field);
-            else if (dj >= 0)
-                snprintf(expr, sizeof expr, "v->%s_n", ss->terms[dj].field);
-            else
-                snprintf(expr, sizeof expr, "v->%s", t->field);
-            rs_emit_write_int(e, lbl, expr);
-            break;
+        if (run_max > 0)
+            eb_fmt(e, "    if (cap - o < %d) return 0;\n", run_max);
+        for (; bi < run_end; bi++) {
+            const STerm* t = &ss->terms[ss->body[bi]];
+            if (t->kind == SK_LIT) {
+                rs_emit_write_lit(e, t);
+            } else if (t->kind == SK_BIND_INT) {
+                int dj = rs_derived_from(ss, ss->body[bi]);
+                char expr[160];
+                if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
+                    snprintf(expr, sizeof expr, "v->%s.len", ss->terms[dj].field);
+                else if (dj >= 0)
+                    snprintf(expr, sizeof expr, "v->%s_n", ss->terms[dj].field);
+                else
+                    snprintf(expr, sizeof expr, "v->%s", t->field);
+                rs_emit_write_int(e, lbl, expr, dj >= 0);
+            }
         }
-        case SK_BIND_SLICE:
-        case SK_BIND_BYTES:
-            eb_fmt(e, "    if (o + v->%s.len > cap) return 0;\n"
-                      "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
-                   t->field, t->field, t->field, t->field);
-            break;
-        case SK_BIND_ITEMS:   /* count-driven (rs_formatable guaranteed) */
-            eb_fmt(e, "    { size_t i;\n"
-                      "    for (i = 0; i < v->%s_n; i++) {\n"
-                      "        size_t k = %s_write(&v->%s[i], dst + o, cap - o);\n"
-                      "        if (k == 0) return 0;\n"
-                      "        o += k;\n    } }\n",
-                   t->field, t->etype, t->field);
-            break;
+        if (bi >= ss->nbody) break;
+        {
+            const STerm* t = &ss->terms[ss->body[bi]];
+            switch (t->kind) {
+            case SK_BIND_SLICE:
+            case SK_BIND_BYTES:
+                eb_fmt(e, "    if (cap - o < v->%s.len) return 0;\n"
+                          "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
+                       t->field, t->field, t->field, t->field);
+                break;
+            case SK_BIND_ITEMS:   /* count-driven (rs_formatable guaranteed) */
+                eb_fmt(e, "    { size_t i;\n"
+                          "    for (i = 0; i < v->%s_n; i++) {\n"
+                          "        size_t k = %s_write(&v->%s[i], dst + o, cap - o);\n"
+                          "        if (k == 0) return 0;\n"
+                          "        o += k;\n    } }\n",
+                       t->field, t->etype, t->field);
+                break;
+            default:
+                break;
+            }
+            bi++;
         }
     }
     eb_fmt(e, "    return o;\n}\n");
@@ -3190,8 +3232,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                name, name, name, name);
         eb_fmt(&e, "static int %sReader_at_end(const %sReader* r) { return r->pos == r->n; }\n",
                name, name);
-        /* instance UFCS (`r.next(&out)`, `r.at_end()`): the engine registers
-         * the Reader type natively — users never write a registration */
+        /* instance UFCS (`r.next(&out)`, `r.at_end()`, `v.to_str(&a)`): the
+         * engine registers the schema and Reader types natively — users
+         * never write a registration */
+        cc__grammar_note_ufcs_type(name);
         {
             char rn[S_NAME + 8];
             snprintf(rn, sizeof rn, "%sReader", name);
@@ -3199,21 +3243,45 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         /* the WRITE projection (schema inverted), on demand like every tier */
         {
+            int fmtable = rs_formatable(ss);
             int want_write = rs_has_token(src, src_len, name, "_write") ||
                              rs_has_op(src, src_len, "cc_write", name) ||
                              rs_has_dot(src, src_len, name, "write");
-            if (!want_write && rs_formatable(ss) && rs_any_write_demand(src, src_len))
-                want_write = 1;   /* element writers: demanded by generated code */
-            if (want_write && !rs_formatable(ss)) {
-                snprintf(err, err_sz, "@grammar(schema) %s: %s_write is referenced but the "
-                         "schema is not formatable yet (member-list combinators need codec "
-                         "inversion; delimited items need emit rules)", name, name);
+            int want_tostr = rs_has_token(src, src_len, name, "_to_str") ||
+                             rs_has_op(src, src_len, "cc_format", name) ||
+                             rs_has_dot(src, src_len, name, "to_str") ||
+                             (fmtable && rs_any_method_demand(src, src_len, "to_str"));
+            if (!want_write && fmtable &&
+                (want_tostr || rs_any_method_demand(src, src_len, "write")))
+                want_write = 1;   /* element writers / to_str substrate */
+            if ((want_write || want_tostr) && !fmtable) {
+                snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
+                         "but the schema is not formatable yet (member-list combinators need "
+                         "codec inversion; delimited items need emit rules)", name, name);
                 free(out);
                 out = NULL;
                 goto done;
             }
             if (want_write)
                 rs_emit_write(ss, &e, &lbl, name);
+            if (want_tostr) {
+                /* CCString face: composes with @string templates (a CCString
+                 * slot arm exists in the _Generic) and the language's
+                 * `x.to_str(arena)` idiom. Retry-doubling over _write; the
+                 * transient arena waste is bounded by the final size. */
+                eb_fmt(&e, "static __attribute__((unused)) CCString %s_to_str(const %s* v, CCArena* arena) {\n"
+                           "    CCString s = cc_string_new();\n"
+                           "    size_t cap = 64;\n"
+                           "    while (cap <= (size_t)1 << 30) {\n"
+                           "        char* buf = (char*)cc_arena_alloc_local(arena, cap, 1);\n"
+                           "        size_t w = buf ? %s_write(v, buf, cap) : 0;\n"
+                           "        if (w) { cc_string_push_buffer(&s, buf, (uint32_t)w, arena); return s; }\n"
+                           "        if (!buf) break;\n"
+                           "        cap *= 2;\n"
+                           "    }\n"
+                           "    return s;   /* empty: allocation failed or value unencodable */\n"
+                           "}\n", name, name, name);
+            }
         }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
         if (out) out[len - 1] = '\0';
