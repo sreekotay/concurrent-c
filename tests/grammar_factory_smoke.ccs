@@ -1,0 +1,62 @@
+// FACTORY MODEL smoke: grammars are comptime factories, every use is a
+// compile-time specialization, runtime instances are cursors.
+//
+//   define      grammar_factory_kv.rules — a grammar as a FILE artifact
+//   specialize  Kv (rules block, match projection) and Pair (schema) both
+//               `include "..."` the same factory and stamp flat C
+//   instantiate PairReader — a cursor (buffer, pos, arena); all behavior
+//               was specialized at compile time, the instance is only state
+//
+// Demand gating: this file references only Kv_match, so Kv's DOM/collect
+// tiers (tape, unwind, accessors) are never emitted — instantiation happens
+// at use, not at declaration.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Kv {~~~~
+    include "grammar_factory_kv.rules"
+~~~~}
+
+@grammar(schema) Pair {~~~~
+    rules [ include "grammar_factory_kv.rules" ]
+    ws k: key ws #'=' ws v: value ws
+~~~~}
+
+static int slice_is(CCSlice s, const char* want) {
+    size_t l = strlen(want);
+    return s.len == l && memcmp(s.ptr, want, l) == 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+
+    /* specialization 1: recognizer from the file factory */
+    if (!Kv_match("a = 42", 6)) { printf("FAIL: kv match\n"); return 1; }
+    if (Kv_match("a =", 3)) { printf("FAIL: kv bad accepted\n"); return 1; }
+
+    /* specialization 2: typed struct from the same factory */
+    {
+        Pair p;
+        if (!Pair_parse("x=7", 3, &arena, &p)) { printf("FAIL: pair parse\n"); return 1; }
+        if (!slice_is(p.k, "x") || !slice_is(p.v, "7")) { printf("FAIL: pair fields\n"); return 1; }
+    }
+
+    /* runtime instance: a Reader cursor over a pair stream */
+    {
+        const char* src = "a=1 b=22 c=333";
+        PairReader r = Pair_reader(src, strlen(src), &arena);
+        int cnt = 0;
+        Pair p;
+        while (Pair_next(&r, &p)) cnt++;
+        if (cnt != 3 || !Pair_at_end(&r)) { printf("FAIL: reader cnt=%d\n", cnt); return 1; }
+        if (!slice_is(p.k, "c") || !slice_is(p.v, "333")) { printf("FAIL: reader last\n"); return 1; }
+        /* parse error mid-stream: _next returns 0 with the cursor mid-input */
+        r = Pair_reader("a=1 !", 5, &arena);
+        cnt = 0;
+        while (Pair_next(&r, &p)) cnt++;
+        if (cnt != 1 || Pair_at_end(&r)) { printf("FAIL: reader error state\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar factory model OK\n");
+    return 0;
+}

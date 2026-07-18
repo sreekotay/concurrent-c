@@ -1,0 +1,7 @@
+; shared grammar FACTORY: whitespace-tolerant key=value pairs.
+; This file is a compile-time artifact — any grammar or schema splices it
+; with `include "grammar_factory_kv.rules"` and specializes it for use.
+pair:  [ws key ws #'=' ws value ws]
+ws:    any charset [#' ' #'\t' #'\n']
+key:   keep [some charset [#'a' - #'z']]
+value: keep [some charset [#'0' - #'9']]

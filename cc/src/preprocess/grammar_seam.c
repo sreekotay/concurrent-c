@@ -253,6 +253,7 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
                     char gerr[512] = {0};
                     char* gen = cc_grammar_builtin_emit(engine, name, src + body_start,
                                                         body_len, ofile, line,
+                                                        src, n,
                                                         gerr, sizeof(gerr));
                     if (gen) {
                         /* #line before/after so DSL body and following source
