@@ -40,9 +40,16 @@
  * `any`/`some` are greedy with an empty-match guard (a child that succeeds
  * without consuming ends the loop, so `any [any ws]` cannot hang). No arena or
  * output yet — v1 is recognition-only, which is exactly the `cc_match` layer.
- * keep/collect (spans + DOM building, borrow/materialize) and the perf
- * analyses (FIRST-set switch dispatch, SWAR stop-set scans) layer on next;
- * acceptance target: examples/serdes/json/json.h.
+ * v4 perf analyses (both grammar-derived, semantics-preserving):
+ *   - FIRST-set dispatch: alternations whose branches are non-nullable with
+ *     pairwise-disjoint FIRST byte sets compile to a lookahead switch with the
+ *     trial cascade deleted (identical to PEG order by disjointness). At most
+ *     one large-FIRST branch becomes the default arm.
+ *   - Charset-run scans: any/some over a plain charset emits a dedicated
+ *     unfailing loop (no label scaffold); large sets additionally get a SWAR
+ *     8-bytes/word skip when the stop set fits "bytes < T plus <= 2 specials"
+ *     (safe over-approximation: the byte-exact loop stays authoritative).
+ * Acceptance target: examples/serdes/json/json.h (golden).
  *
  * Design decisions (locked):
  *   - WHOLE BUFFER: end of input is plain match failure; no suspend/resume.
@@ -492,9 +499,119 @@ static int rg_parse(RG* g) {
     return 0;
 }
 
+/* ------------------------------------------------------- FIRST analysis ---- */
+/* FIRST(node) = set of bytes that can begin a match; nullable = can match
+ * empty. Rule-level memo with an in-progress state that returns the
+ * conservative answer (all bytes, nullable) on cycles — which simply disables
+ * dispatch there. Used to compile disjoint alternations into first-byte
+ * switch dispatch with NO backtracking: if the lookahead byte is outside a
+ * branch's FIRST set the branch can only fail, and with pairwise-disjoint
+ * branches at most one can match, so choosing by byte is exactly PEG order. */
+
+typedef struct {
+    unsigned char set[R_MAX_RULES][32];
+    unsigned char nullable[R_MAX_RULES];
+    unsigned char state[R_MAX_RULES];   /* 0 unvisited, 1 in progress, 2 done */
+} RFirst;
+
+static void rf_union(unsigned char* dst, const unsigned char* src) {
+    for (int i = 0; i < 32; i++) dst[i] |= src[i];
+}
+static void rf_all(unsigned char* dst) { memset(dst, 0xFF, 32); }
+static int rf_popcount(const unsigned char* set) {
+    int n = 0;
+    for (int i = 0; i < 256; i++) if (set[i >> 3] & (1u << (i & 7))) n++;
+    return n;
+}
+static int rf_disjoint(const unsigned char* a, const unsigned char* b) {
+    for (int i = 0; i < 32; i++) if (a[i] & b[i]) return 0;
+    return 1;
+}
+
+static void rf_node(const RG* g, RFirst* F, int nd, unsigned char* set, int* nullable);
+
+static void rf_rule(const RG* g, RFirst* F, int r, unsigned char* set, int* nullable) {
+    if (F->state[r] == 2) { rf_union(set, F->set[r]); if (F->nullable[r]) *nullable = 1; return; }
+    if (F->state[r] == 1) { rf_all(set); *nullable = 1; return; }   /* cycle: conservative */
+    F->state[r] = 1;
+    unsigned char tmp[32]; memset(tmp, 0, 32); int nul = 0;
+    rf_node(g, F, g->rules[r].node, tmp, &nul);
+    memcpy(F->set[r], tmp, 32);
+    F->nullable[r] = (unsigned char)nul;
+    F->state[r] = 2;
+    rf_union(set, tmp); if (nul) *nullable = 1;
+}
+
+static void rf_node(const RG* g, RFirst* F, int nd, unsigned char* set, int* nullable) {
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_LIT: {
+        unsigned char b = (unsigned char)g->pool[x->a];
+        set[b >> 3] |= (unsigned char)(1u << (b & 7));
+        break;
+    }
+    case RN_CHARSET: rf_union(set, g->sets[x->a]); break;
+    case RN_SKIP: rf_all(set); break;
+    case RN_REF: rf_rule(g, F, x->nkids, set, nullable); break;
+    case RN_KEEP: rf_node(g, F, x->a, set, nullable); break;
+    case RN_OPT: case RN_ANY: {
+        int n2 = 0; rf_node(g, F, x->a, set, &n2);
+        *nullable = 1;
+        break;
+    }
+    case RN_SOME: rf_node(g, F, x->a, set, nullable); break;
+    case RN_SEQ: {
+        int i;
+        for (i = 0; i < x->nkids; i++) {
+            int n2 = 0;
+            rf_node(g, F, g->kids[x->b + i], set, &n2);
+            if (!n2) break;             /* child can't match empty: stop */
+        }
+        if (i == x->nkids) *nullable = 1;   /* every child nullable */
+        break;
+    }
+    case RN_ALT: {
+        int any_nul = 0;
+        for (int i = 0; i < x->nkids; i++) {
+            int n2 = 0;
+            rf_node(g, F, g->kids[x->b + i], set, &n2);
+            if (n2) any_nul = 1;
+        }
+        if (any_nul) *nullable = 1;
+        break;
+    }
+    }
+}
+
+/* Charset-run scan specialization: `any`/`some` over a plain charset is an
+ * unfailing greedy run, so it emits as a dedicated loop with no label
+ * scaffold. For big sets (complement-style content scans) we additionally
+ * emit a SWAR 8-bytes/word skip when the STOP set (complement) fits
+ * "every byte < T, plus at most two specific bytes" — an OVER-approximation
+ * is safe because the word loop only fast-skips; the byte-exact bitmap loop
+ * that follows remains authoritative. This is exactly the golden json.h
+ * string-scan shape, derived from the grammar. */
+static int rf_swar_stop(const unsigned char* set, int* out_T, int* out_b1, int* out_b2) {
+    unsigned char stop[32];
+    for (int i = 0; i < 32; i++) stop[i] = (unsigned char)~set[i];
+    /* choose smallest T (<= 0x40) covering the low-byte cluster of stops */
+    for (int T = 0; T <= 0x40; T++) {
+        int extra[3]; int nx = 0;
+        for (int b = T; b < 256 && nx <= 2; b++)
+            if (stop[b >> 3] & (1u << (b & 7))) { if (nx < 3) extra[nx] = b; nx++; }
+        if (nx <= 2) {
+            *out_T = T;
+            *out_b1 = nx > 0 ? extra[0] : -1;
+            *out_b2 = nx > 1 ? extra[1] : -1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[1024];
@@ -550,6 +667,58 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         break;
     case RN_ALT: {
         int k = (*lbl)++;
+        /* FIRST-set dispatch: if every branch is non-nullable and the branch
+         * FIRST sets are pairwise disjoint, choose by lookahead byte — exactly
+         * PEG order, with the trial cascade deleted. Branches with small FIRST
+         * sets become switch cases; at most one large-set branch becomes the
+         * default arm (its own first test re-verifies membership). */
+        {
+            unsigned char bf[32][32]; int bnul[32]; int ok = x->nkids <= 32;
+            for (int i = 0; ok && i < x->nkids; i++) {
+                memset(bf[i], 0, 32); bnul[i] = 0;
+                rf_node(g, e->F, g->kids[x->b + i], bf[i], &bnul[i]);
+                if (bnul[i]) ok = 0;
+            }
+            for (int i = 0; ok && i < x->nkids; i++)
+                for (int j = i + 1; ok && j < x->nkids; j++)
+                    if (!rf_disjoint(bf[i], bf[j])) ok = 0;
+            int big = -1;
+            for (int i = 0; ok && i < x->nkids; i++)
+                if (rf_popcount(bf[i]) > 32) { if (big >= 0) ok = 0; else big = i; }
+            if (ok) {
+                eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+                eb_fmt(e, "    if (p >= n) goto Lb%d;\n", k);
+                eb_fmt(e, "    switch (s[p]) {\n", k);
+                for (int i = 0; i < x->nkids; i++) {
+                    if (i == big) continue;
+                    for (int bch = 0; bch < 256; bch++)
+                        if (bf[i][bch >> 3] & (1u << (bch & 7)))
+                            eb_fmt(e, "    case %d:\n", bch);
+                    {
+                        char br[32];
+                        snprintf(br, sizeof(br), "Lb%d", k);
+                        rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
+                    }
+                    eb_fmt(e, "    break;\n");
+                }
+                if (big >= 0) {
+                    eb_fmt(e, "    default:\n");
+                    {
+                        char br[32];
+                        snprintf(br, sizeof(br), "Lb%d", k);
+                        rg_emit_node(g, e, g->kids[x->b + big], br, lbl, rid);
+                    }
+                    eb_fmt(e, "    break;\n");
+                } else {
+                    eb_fmt(e, "    default: goto Lb%d;\n", k);
+                }
+                eb_fmt(e, "    }\n    goto Lok%d;\n", k);
+                eb_fmt(e, "Lb%d: p = sv%d; if (c) c->nlog = lv%d; goto %s;\n", k, k, k, fail);
+                eb_fmt(e, "Lok%d: ; }\n", k);
+                break;
+            }
+        }
+        /* fallback: PEG trial cascade */
         eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
@@ -573,7 +742,42 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                k, br, k, k, k);
         break;
     }
-    case RN_ANY: {
+    case RN_ANY:
+    case RN_SOME:
+        if (g->nodes[x->a].kind == RN_CHARSET) {
+            int cs = g->nodes[x->a].a;
+            if (x->kind == RN_SOME) {   /* first element is required */
+                eb_fmt(e, "    if (!(p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u))))) goto %s;\n"
+                          "    p++;\n", g->name, cs, fail);
+            }
+            {
+                int T, b1, b2;
+                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2)) {
+                    int k2 = (*lbl)++;
+                    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
+                           k2, k2);
+                    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k2, k2);
+                    eb_fmt(e, "        unsigned long long m%d = 0;\n", k2);
+                    if (T > 0)
+                        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k2, k2, k2, T, k2, k2);
+                    if (b1 >= 0)
+                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+                               k2, k2, b1, k2, k2, k2);
+                    if (b2 >= 0)
+                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+                               k2, k2, b2, k2, k2, k2);
+                    eb_fmt(e, "        if (m%d) break;\n        p += 8;\n    } }\n", k2);
+                }
+            }
+            eb_fmt(e, "    while (p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u)))) p++;\n",
+                   g->name, cs);
+            break;
+        }
+        if (x->kind == RN_SOME) {
+            /* generic some: child once (required), then greedy any */
+            rg_emit_node(g, e, x->a, fail, lbl, rid);
+        }
+        {
         int k = (*lbl)++;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
@@ -583,27 +787,16 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
                k, k, br, k, k, k);
         break;
-    }
-    case RN_SOME: {
-        /* child once (required), then greedy any */
-        rg_emit_node(g, e, x->a, fail, lbl, rid);
-        int k = (*lbl)++;
-        char br[32];
-        snprintf(br, sizeof(br), "Ly%d", k);
-        eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
-               k, k, k, k);
-        rg_emit_node(g, e, x->a, br, lbl, rid);
-        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
-               k, k, br, k, k, k);
-        break;
-    }
+        }
     }
 }
 
 static char* rg_emit(const RG* g, int origin_line) {
     char* out = NULL; size_t len = 0, cap = 0;
-    EB e = { &out, &len, &cap };
+    RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
+    EB e = { &out, &len, &cap, F };
     int lbl = 0;
+    if (!F) return NULL;
 
     eb_fmt(&e, "/* generated by @grammar(rules) %s (line %d): %d rule(s), match + collect (v2) */\n",
            g->name, origin_line, g->nrules);
@@ -708,6 +901,7 @@ static char* rg_emit(const RG* g, int origin_line) {
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
+    free(F);
     return out;
 }
 
