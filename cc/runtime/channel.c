@@ -5650,7 +5650,8 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
 
 typedef struct {
     CCChan* ch;
-    void* buf;           /* for send: source; for recv: dest */
+    void* buf;           /* for send: source (points at owned_buf); for recv: caller dest */
+    void* owned_buf;     /* send-only: task-owned copy of the value (freed on drop) */
     size_t elem_size;
     const CCDeadline* deadline;
     int is_send;         /* 1=send, 0=recv */
@@ -5813,6 +5814,8 @@ static int cc__chan_task_wait(void* frame) {
 }
 
 static void cc__chan_task_drop(void* frame) {
+    CCChanTaskFrame* f = (CCChanTaskFrame*)frame;
+    if (f && f->owned_buf) free(f->owned_buf);
     free(frame);
 }
 
@@ -5823,8 +5826,17 @@ CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size)
     CCChanTaskFrame* f = (CCChanTaskFrame*)calloc(1, sizeof(CCChanTaskFrame));
     if (!f) return invalid;
 
+    /* Own a copy of the value: send_task defers the enqueue across polls, so a
+     * bare pointer to the caller's value (typically a stack/async-frame temp
+     * materialized for the by-address parameter) would be read after its scope
+     * ends — a stack-use-after-scope confirmed by ASan on @await tx.send(v).
+     * The frame is heap-lived; the copy rides with it and is freed on drop. */
+    f->owned_buf = malloc(value_size);
+    if (!f->owned_buf) { free(f); return invalid; }
+    memcpy(f->owned_buf, value, value_size);
+
     f->ch = ch;
-    f->buf = (void*)value;  /* Note: caller must ensure value outlives task */
+    f->buf = f->owned_buf;
     f->elem_size = value_size;
     f->deadline = cc_current_deadline();
     f->is_send = 1;
