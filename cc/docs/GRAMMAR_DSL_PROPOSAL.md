@@ -41,14 +41,27 @@ declaration alone stamps nothing but the type and rule count. Runtime
 instances are cursors: every schema emits `NameReader` +
 `Name_reader(s,n,arena)` / `Name_next(&r,&out)` / `Name_at_end(&r)` — state
 only; all behavior was specialized at compile time.
-**Format (the write side)**: product schemas emit their inverse —
+**Format (the write side)**: formatable schemas emit their inverse —
 `Name_write(&v, dst, cap)` / `cc_write` / `Name.write(...)` returns bytes
 written (0 = didn't fit). Length/count fields consumed by later
 `bytes`/counted-`items` terms are DERIVED from the data (`data.len`,
 `items_n`), so output is correct by construction; matcher terms emit
-nothing (canonical). Round-trip tested on RESP (parse -> write reproduces
-wire bytes; corrupted stored counts are ignored). Member-list combinators
-await codec inversion (escape encoding) and error clearly if demanded.
+nothing (canonical). Narrowed schemas format too: the structural skeleton
+(braces, quoted keys, delimiters) is derived from the SAME rules the parse
+side narrows, and a `keep/decode(dec)/encode(enc)` codec declares its
+inverse — contract `size_t enc(p, n, dst, cap)`: always returns the exact
+encoded size; `dst == NULL` measures; with a dst, writes at most `cap`.
+Three projections are emitted per schema: `__wmeasure` (exact size, no
+stores — the skeleton folds to one constant, digits count by compare
+chain), `__wput` (unchecked; the `to_str` back end: measure once, allocate
+exactly, put), and `__wchk` (single-pass checked — `Name_write`; constant
+runs check once per batch, encoders see the real remaining cap, so
+encoder-heavy formats pay ONE encoding pass). Benchmarked at parity with
+hand-rolled unchecked encoders on both RESP (~3.0 GB/s) and canonical-JSON
+Feed formatting (~1.0 GB/s), gcc -O2. Round-trip tested on RESP and JSON
+(parse -> write reproduces wire bytes; corrupted stored counts ignored;
+write -> reparse preserves semantics). Directive-built `fields [...]`
+schemas have no rule to invert and error clearly if write is demanded.
 **No magic names**: the call-site surface is the `cc_*` operations in
 `<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
 `cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —

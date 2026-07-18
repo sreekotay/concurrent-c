@@ -216,7 +216,6 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
      * now runs in several pipelines per compile, and a no-op pass must not
      * wipe state (pending UFCS types, factories) a later phase consumes. */
     if (!cc__find_bytes(src, n, CC__GRAMMAR_KW, sizeof(CC__GRAMMAR_KW) - 1)) return NULL;
-    cc__grammar_registry_reset();   /* rules/schema cross-block state is per file */
     while (i < n) {
         char c = src[i];
         /* Skip comments and string/char literals so "@grammar" inside them is inert. */
@@ -244,6 +243,13 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
                                           &body_start, &body_len, &decl_end);
             if (r < 0) { free(out); return (char*)-1; }
             if (r == 1) {
+                /* Reset on the FIRST real declaration, not on the keyword
+                 * merely appearing in the stream: spliced output carries
+                 * "@grammar" in manifest comments, and wiping the registry
+                 * (pending UFCS types, schema names) on such a pass would
+                 * strand state a later phase consumes. Cross-block state
+                 * stays per-file: one reset ahead of the first decl. */
+                if (!found) cc__grammar_registry_reset();
                 char file[512]; int line = 0;
                 char head[1024];
                 const char* ofile;

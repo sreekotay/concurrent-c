@@ -1,5 +1,7 @@
 // NEGATIVE: requesting the write projection of a schema that is not
-// formatable yet (member-list combinators need codec inversion).
+// formatable yet. Narrowed schemas (`G.rule [...]`) format fine — but a
+// DIRECTIVE-built member list (`fields [...]`) has no single grammar rule
+// to invert, so its write side has no source of structural truth yet.
 #include <ccc/std/prelude.cch>
 
 @grammar(schema) Obj {~~~~
@@ -8,10 +10,12 @@
         strchar: complement charset [#'"' #'\\']
         str:     [#'"' keep any strchar #'"']
         val:     [ws str ws]
-        mem:     [ws str ws #':' val]
-        obj:     [#'{' ws opt [mem any [#',' mem]] #'}']
     ]
-    obj [ "k" v: str ]
+    fields: open #'{' close #'}' sep #',' kv #':'
+            key str pad ws else val
+    fields [
+        "k" v: str
+    ]
 ~~~~}
 
 int main(void) {
