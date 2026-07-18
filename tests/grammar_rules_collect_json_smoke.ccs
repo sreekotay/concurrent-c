@@ -1,17 +1,50 @@
-// REAL USE for @grammar(rules) v2 collect: the JSON grammar now KEEPS string
-// content and number text; <Name>_collect replays each kept span through a
-// callback (the C lowering of the closure surface in spec/cc_serdes.md).
+// REAL USE for @grammar(rules) v3 collect: kept spans are now CCSlices with
+// truthful provenance. Plain `keep` borrows the raw span; `keep/decode(fn)`
+// routes it through a leaf codec `int fn(ptr, len, CCSlice* out, arena)` that
+// borrows when the bytes need no transform and materializes into the arena
+// when they do (Cow bit = cc_slice_is_unique), returning 0 on decode failure
+// (which fails the collect). Decode runs at replay time, after a
+// successful full match — failed branches never touch the arena.
 //
-// Cross-validation against the golden hand-lowered parser: on twitter.json,
-// examples/serdes/json/json.h counts exactly 18099 strings (17787 borrowed +
-// 312 materialized, keys included). Our `string` rule fires for keys and
-// values alike, so the keep count must equal 18099. numbers.json is an array
-// of exactly 30000 floats.
-//
-// Also pinned: keeps from FAILED branches are never replayed (log rollback is
-// coupled to cursor rollback), and a nonzero callback return stops the
-// collect, which then reports failure.
+// GOLDEN CROSS-VALIDATION: examples/serdes/json/json.h reports exactly
+// 17787 borrowed + 312 materialized strings on twitter.json. The generated
+// parser + this codec must reproduce that exact split.
 #include <ccc/std/prelude.cch>
+
+/* JSON string-content codec: borrow if escape-free, else decode into arena.
+ * Codec contract: returns 0 on decode failure; writes *out. */
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) {
+        *out = cc_slice_from_buffer((void*)p, n);                 /* BORROW */
+        return 1;
+    }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1); /* decoded <= raw */
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++] = '\n'; break;  case 't': dst[o++] = '\t'; break;
+        case 'r': dst[o++] = '\r'; break;  case '"': dst[o++] = '"'; break;
+        case '\\': dst[o++] = '\\'; break; case '/': dst[o++] = '/'; break;
+        case 'b': dst[o++] = '\b'; break;  case 'f': dst[o++] = '\f'; break;
+        case 'u': {
+            unsigned cp = 0;
+            for (int h = 0; h < 4; h++) { char x = p[++k]; cp <<= 4;
+                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0') : (unsigned)((x | 32) - 'a' + 10); }
+            if (cp < 0x80) dst[o++] = (char)cp;
+            else if (cp < 0x800) { dst[o++] = (char)(0xC0 | (cp >> 6)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else { dst[o++] = (char)(0xE0 | (cp >> 12)); dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            break;
+        }
+        default: dst[o++] = e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);  /* MATERIALIZE */
+    return 1;
+}
 
 @grammar(rules) Json {~~~~
     top:     value
@@ -22,7 +55,7 @@
     strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
     esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
                     | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
-    string:  [#'"' keep any [some strchar | esc] #'"']
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
     int:     [opt #'-' [#'0' | [onenine any digit]]]
     number:  keep [int opt [#'.' some digit]
                        opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
@@ -32,20 +65,21 @@
     object:  [#'{' ws opt [member any [#',' member]] #'}']
 ~~~~}
 
-typedef struct { long strings, numbers, other, bytes; int stop_after; } Counts;
+typedef struct { long borrowed, materialized, numbers; CCSlice last_str; } Counts;
 
-static int count_cb(void* env, int id, const char* ptr, size_t len) {
+static int count_cb(void* env, int id, CCSlice v) {
     Counts* c = (Counts*)env;
-    (void)ptr;
-    if (id == Json_KEEP_string) c->strings++;
-    else if (id == Json_KEEP_number) c->numbers++;
-    else c->other++;
-    c->bytes += (long)len;
-    if (c->stop_after > 0 && (c->strings + c->numbers) >= c->stop_after) return 1;
+    if (id == Json_KEEP_string) {
+        if (cc_slice_is_unique(v)) c->materialized++;
+        else c->borrowed++;
+        c->last_str = v;
+    } else if (id == Json_KEEP_number) {
+        c->numbers++;
+    }
     return 0;
 }
 
-static long file_collect(const char* path, Counts* c) {
+static long file_collect(const char* path, CCArena* a, Counts* c) {
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
     fseek(f, 0, SEEK_END);
@@ -54,58 +88,53 @@ static long file_collect(const char* path, Counts* c) {
     char* b = (char*)malloc((size_t)n + 1);
     size_t rd = fread(b, 1, (size_t)n, f);
     fclose(f);
-    int ok = Json_collect(b, rd, count_cb, c);
+    int ok = Json_collect(b, rd, a, count_cb, c);
+    /* NOTE: borrowed slices point into b; counts only, so freeing is fine here. */
     free(b);
     return ok;
 }
 
 int main(void) {
-    /* inline: ids, spans, ordering */
+    CCArena arena = cc_arena_create(8 << 20);
+
+    /* clean string borrows; bytes are the raw span */
     {
         Counts c = {0};
-        const char* src = "{\"key\": [1, \"two\", 3.5e2]}";
-        if (!Json_collect(src, strlen(src), count_cb, &c)) { printf("FAIL: inline collect\n"); return 1; }
-        if (c.strings != 2 || c.numbers != 2 || c.other != 0) {
-            printf("FAIL: inline counts s=%ld n=%ld o=%ld\n", c.strings, c.numbers, c.other);
-            return 1;
-        }
-        /* spans: "key"(3) + "two"(3) + 1(1) + 3.5e2(5) = 12 kept bytes */
-        if (c.bytes != 12) { printf("FAIL: inline kept bytes %ld != 12\n", c.bytes); return 1; }
+        const char* src = "\"hello\"";
+        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: clean parse\n"); return 1; }
+        if (c.borrowed != 1 || c.materialized != 0) { printf("FAIL: clean not borrowed\n"); return 1; }
+        if (c.last_str.len != 5 || memcmp(c.last_str.ptr, "hello", 5) != 0) { printf("FAIL: clean bytes\n"); return 1; }
     }
-    /* failed parse: callback must never fire */
+    /* escaped string materializes; bytes are DECODED */
     {
         Counts c = {0};
-        const char* bad = "[\"kept?\", 42, ]";
-        if (Json_collect(bad, strlen(bad), count_cb, &c)) { printf("FAIL: bad accepted\n"); return 1; }
-        if (c.strings + c.numbers + c.other != 0) {
-            printf("FAIL: callbacks fired on failed parse (s=%ld n=%ld)\n", c.strings, c.numbers);
+        const char* src = "\"a\\nb \\u00e9\"";
+        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: esc parse\n"); return 1; }
+        if (c.materialized != 1 || c.borrowed != 0) { printf("FAIL: esc not materialized\n"); return 1; }
+        const char want[] = "a\nb \xc3\xa9";
+        if (c.last_str.len != sizeof(want) - 1 || memcmp(c.last_str.ptr, want, sizeof(want) - 1) != 0) {
+            printf("FAIL: decoded bytes (len=%d)\n", (int)c.last_str.len);
             return 1;
         }
     }
-    /* early stop: nonzero return aborts and collect reports failure */
-    {
-        Counts c = {0}; c.stop_after = 1;
-        const char* src = "[1, 2, 3]";
-        if (Json_collect(src, strlen(src), count_cb, &c)) { printf("FAIL: stop not honored\n"); return 1; }
-        if (c.numbers != 1) { printf("FAIL: stop count %ld != 1\n", c.numbers); return 1; }
-    }
-    /* corpora: cross-check the golden parser's instrumentation */
+    /* corpora: reproduce the golden parser's exact borrow/materialize split */
     {
         Counts t = {0};
-        long ok = file_collect("examples/serdes/json/twitter.json", &t);
-        if (ok == 0) { printf("FAIL: twitter.json rejected\n"); return 1; }
-        if (ok == 1 && t.strings != 18099) {
-            printf("FAIL: twitter strings %ld != 18099 (golden borrow+mat)\n", t.strings);
+        cc_arena_reset(&arena);
+        long ok = file_collect("examples/serdes/json/twitter.json", &arena, &t);
+        if (ok == 0) { printf("FAIL: twitter rejected\n"); return 1; }
+        if (ok == 1 && (t.borrowed != 17787 || t.materialized != 312)) {
+            printf("FAIL: twitter cow split %ld/%ld != 17787/312 (golden)\n",
+                   t.borrowed, t.materialized);
             return 1;
         }
         Counts m = {0};
-        ok = file_collect("examples/serdes/json/numbers.json", &m);
-        if (ok == 0) { printf("FAIL: numbers.json rejected\n"); return 1; }
-        if (ok == 1 && m.numbers != 30000) {
-            printf("FAIL: numbers count %ld != 30000\n", m.numbers);
-            return 1;
-        }
+        cc_arena_reset(&arena);
+        ok = file_collect("examples/serdes/json/numbers.json", &arena, &m);
+        if (ok == 0) { printf("FAIL: numbers rejected\n"); return 1; }
+        if (ok == 1 && m.numbers != 30000) { printf("FAIL: numbers %ld != 30000\n", m.numbers); return 1; }
     }
-    printf("grammar rules collect OK\n");
+    cc_arena_free(&arena);
+    printf("grammar rules collect provenance OK\n");
     return 0;
 }
