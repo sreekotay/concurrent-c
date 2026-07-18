@@ -742,7 +742,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 if (rf_popcount(bf[i]) > 32) { if (big >= 0) ok = 0; else big = i; }
             if (ok) {
                 int kp = rk_node(g, e->K, nd);
-                if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+                if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0;\n", k, k);
                 else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
                 eb_fmt(e, "    if (p >= n) goto Lb%d;\n", k);
                 eb_fmt(e, "    switch (s[p]) {\n", k);
@@ -770,7 +770,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     eb_fmt(e, "    default: goto Lb%d;\n", k);
                 }
                 eb_fmt(e, "    }\n    goto Lok%d;\n", k);
-                if (kp) eb_fmt(e, "Lb%d: p = sv%d; if (c) c->nlog = lv%d; goto %s;\n", k, k, k, fail);
+                if (kp) eb_fmt(e, "Lb%d: p = sv%d; if (c) c->total = lt%d; goto %s;\n", k, k, k, fail);
                 else    eb_fmt(e, "Lb%d: p = sv%d; goto %s;\n", k, k, fail);
                 eb_fmt(e, "Lok%d: ; }\n", k);
                 break;
@@ -779,7 +779,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         /* fallback: PEG trial cascade */
         {
         int kp = rk_node(g, e->K, nd);
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0;\n", k, k);
         else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
@@ -787,7 +787,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             snprintf(br, sizeof(br), "La%d_%d", k, i);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            if (kp) eb_fmt(e, "%s: p = sv%d; if (c) c->nlog = lv%d;\n", br, k, k);
+            if (kp) eb_fmt(e, "%s: p = sv%d; if (c) c->total = lt%d;\n", br, k, k);
             else    eb_fmt(e, "%s: p = sv%d;\n", br, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
         }
@@ -800,10 +800,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int kp = rk_node(g, e->K, x->a);
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0;\n", k, k);
         else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) c->total = lt%d;\nLok%d: ; }\n",
                        k, br, k, k, k);
         else    eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
         break;
@@ -849,11 +849,12 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int kp = rk_node(g, e->K, x->a);
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        if (kp) eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
+        if (kp) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0;\n"
+                          "    for (;;) { sv%d = p; if (c) lt%d = c->total;\n",
                        k, k, k, k);
         else    eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->total = lt%d;\nLok%d: ; }\n",
                        k, k, br, k, k, k);
         else    eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
                        k, k, br, k, k);
@@ -877,18 +878,37 @@ static char* rg_emit(const RG* g, int origin_line) {
     eb_fmt(&e, "static inline int %s_rule_count(void) { return %d; }\n", g->name, g->nrules);
     /* collect context: span log with cursor-coupled rollback (nlog restores
      * alongside p, so failed-branch keeps are never replayed). */
-    eb_fmt(&e, "typedef struct { struct { int id; int codec; size_t a, b; }* log; size_t nlog, cap; } %s__ctx;\n",
-           g->name);
-    eb_fmt(&e, "static int %s__push(%s__ctx* c, int id, int codec, size_t a, size_t b) {\n"
-               "    if (c->nlog == c->cap) {\n"
-               "        size_t nc = c->cap ? c->cap * 2 : 64;\n"
-               "        void* nl = realloc(c->log, nc * sizeof(*c->log));\n"
-               "        if (!nl) return 0;\n"
-               "        c->log = nl; c->cap = nc;\n"
+    /* Keep log: arena-chunked entries behind a chunk DIRECTORY, so the write
+     * position derives from `total` alone (chunk = dir[total>>8], slot =
+     * total&255). Backtracking snapshots/restores are back to ONE word while
+     * storage stays bump-allocated: no realloc-copy of entries, no free — the
+     * arena reset reclaims everything. Rolled-back chunks stay in the
+     * directory and are reused on re-append. */
+    eb_fmt(&e, "typedef struct { int id; int codec; size_t a, b; } %s__le;\n", g->name);
+    eb_fmt(&e, "typedef struct { %s__le** dir; size_t ndir, cap, total;\n"
+               "    CCArena* arena; } %s__ctx;\n", g->name, g->name);
+    /* push: tiny hot path (chunk exists) + cold grow path kept out of line so
+     * keep sites stay compact and don't perturb the matchers' code layout. */
+    eb_fmt(&e, "static __attribute__((noinline)) int %s__grow(%s__ctx* c) {\n"
+               "    if (c->ndir == c->cap) {\n"
+               "        size_t nc = c->cap ? c->cap * 2 : 16;\n"
+               "        %s__le** nd = (%s__le**)cc_arena_alloc_local(c->arena, nc * sizeof(*nd), _Alignof(void*));\n"
+               "        if (!nd) return 0;\n"
+               "        if (c->ndir) memcpy(nd, c->dir, c->ndir * sizeof(*nd));\n"
+               "        c->dir = nd; c->cap = nc;\n"
                "    }\n"
-               "    c->log[c->nlog].id = id; c->log[c->nlog].codec = codec;\n"
-               "    c->log[c->nlog].a = a; c->log[c->nlog].b = b;\n"
-               "    c->nlog++; return 1;\n}\n", g->name, g->name);
+               "    c->dir[c->ndir] = (%s__le*)cc_arena_alloc_local(c->arena, 256 * sizeof(%s__le), _Alignof(%s__le));\n"
+               "    if (!c->dir[c->ndir]) return 0;\n"
+               "    c->ndir++;\n"
+               "    return 1;\n}\n",
+           g->name, g->name, g->name, g->name, g->name, g->name, g->name);
+    eb_fmt(&e, "static int %s__push(%s__ctx* c, int id, int codec, size_t a, size_t b) {\n"
+               "    size_t k = c->total >> 8, i = c->total & 255;\n"
+               "    if (k == c->ndir && !%s__grow(c)) return 0;\n"
+               "    { %s__le* en = &c->dir[k][i];\n"
+               "      en->id = id; en->codec = codec; en->a = a; en->b = b; }\n"
+               "    c->total++; return 1;\n}\n",
+           g->name, g->name, g->name, g->name);
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
         /* reachable-keep scan (iterative stack over the rule's subtree) */
@@ -946,17 +966,17 @@ static char* rg_emit(const RG* g, int origin_line) {
            g->name, g->name, g->rules[0].name);
     eb_fmt(&e, "static int %s_collect(const char* s, size_t n, CCArena* arena,\n"
                "        int (*cb)(void* env, int id, CCSlice v), void* env) {\n"
-               "    %s__ctx c0; c0.log = 0; c0.nlog = 0; c0.cap = 0;\n"
+               "    %s__ctx c0; c0.dir = 0; c0.ndir = 0; c0.cap = 0; c0.total = 0; c0.arena = arena;\n"
                "    size_t p = 0;\n"
                "    int ok = %s__r_%s(&c0, (const unsigned char*)s, n, &p) && p == n;\n"
-               "    (void)arena;\n"
                "    if (ok && cb) {\n"
-               "        for (size_t i = 0; i < c0.nlog; i++) {\n"
-               "            const char* kp = s + c0.log[i].a;\n"
-               "            size_t kl = c0.log[i].b - c0.log[i].a;\n"
+               "        for (size_t t = 0; t < c0.total; t++) {\n"
+               "            %s__le* en = &c0.dir[t >> 8][t & 255];\n"
+               "            const char* kp = s + en->a;\n"
+               "            size_t kl = en->b - en->a;\n"
                "            CCSlice v;\n"
-               "            switch (c0.log[i].codec) {\n",
-           g->name, g->name, g->name, g->rules[0].name);
+               "            switch (en->codec) {\n",
+           g->name, g->name, g->name, g->rules[0].name, g->name);
     /* codec contract: int codec(const char* p, size_t n, CCSlice* out, CCArena* arena)
      * — returns 0 on decode failure (fails the collect); writes *out. Out-param
      * keeps unique (materialized) slices inside CC's move-only rules. */
@@ -965,11 +985,10 @@ static char* rg_emit(const RG* g, int origin_line) {
                ci + 1, g->codecs[ci]);
     eb_fmt(&e, "            default: v = cc_slice_from_buffer((void*)kp, kl); break;\n"
                "            }\n"
-               "            if (cb(env, c0.log[i].id, v)) { ok = 0; break; }\n"
+               "            if (cb(env, en->id, v)) { ok = 0; goto Ldone; }\n"
                "        }\n"
                "    }\n"
                "Ldone:\n"
-               "    free(c0.log);\n"
                "    return ok;\n}\n");
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
