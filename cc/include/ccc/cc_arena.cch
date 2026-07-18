@@ -1102,6 +1102,57 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
     }
 }
 
+/* ---- Pool element iteration ------------------------------------------------
+ * Walk every element a pool has bump-allocated from its arena, in place. The
+ * arena's slab chain is already a linked list of contiguous chunks (root is the
+ * newest block, `prev` the older ones), so the pool's fixed-size elements form a
+ * chunked sequence: contiguous within a slab, linked across slabs. This yields
+ * them by pointer — no per-element `next`.
+ *
+ * Order: within a block, allocation order; blocks newest-first. For a
+ * single-slab pool (the common request-scoped case) that is exact allocation
+ * order, which lets callers treat the slab as a contiguous tape.
+ *
+ * Contract: valid only when the pool has had NO interleaved individual frees
+ * (freelist empty) and the arena holds ONLY this pool's elements — i.e. the
+ * build-once / reset pattern. Freed slots are not skipped. */
+typedef struct {
+    CCArena* block;
+    uint8_t* cur;
+    uint8_t* end;
+    size_t   stride;     /* element pitch (elem_size rounded up to pointer align) */
+    size_t   elem_size;  /* bytes an element occupies (fit check) */
+} CCArenaPoolIter;
+
+static inline CCArenaPoolIter cc_arena_pool_iter(CCArenaPool* p) {
+    CCArenaPoolIter it = {0};
+    if (!p || !p->arena) return it;
+    it.elem_size = p->elem_size;
+    it.stride = (p->elem_size + sizeof(void*) - 1) & ~(sizeof(void*) - 1);
+    it.block = p->arena;
+    it.cur = p->arena->base;
+    it.end = p->arena->base + CC_ATOMIC_LOAD(&p->arena->offset);
+    return it;
+}
+
+/* Returns the next element, or NULL when exhausted. */
+static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
+    if (!it) return NULL;
+    while (it->block) {
+        if (it->cur && it->cur + it->elem_size <= it->end) {
+            void* e = it->cur;
+            it->cur += it->stride;
+            return e;
+        }
+        it->block = it->block->prev;   /* older chunk */
+        if (it->block) {
+            it->cur = it->block->base;
+            it->end = it->block->base + CC_ATOMIC_LOAD(&it->block->offset);
+        }
+    }
+    return NULL;
+}
+
 /* CCArenaPool / CCArenaCheckpoint UFCS dispatch is covered by the
  * global `*` registration below. */
 
