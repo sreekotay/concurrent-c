@@ -97,9 +97,11 @@ static JsonStatus json__string(JsonParser* p, const char** bytes, uint64_t* len,
       const uint64_t Q=0x2222222222222222ULL,B=0x5C5C5C5C5C5C5C5CULL;
       while (i+8<=p->len){ uint64_t w; memcpy(&w,p->src+i,8);
         uint64_t hq=w^Q; hq=(hq-L)&~hq&H; uint64_t hb=w^B; hb=(hb-L)&~hb&H;
-        if(hq|hb) break; i+=8; } }
+        if(hq|hb) break;
+        i+=8; } }
     for(; i<p->len; i++){ if(!(CLS(p->src[i])&CLS_STRSPEC)) continue;
-        if(p->src[i]=='"') break; has_escape=1; i++; }
+        if(p->src[i]=='"') break;
+        has_escape=1; i++; }
     if(i>=p->len) return JSON_BAD;                     /* unterminated */
     size_t raw_start=p->pos+1, raw_len=i-raw_start;
     if(!has_escape){
