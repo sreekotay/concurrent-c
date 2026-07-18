@@ -667,9 +667,32 @@ static int rg_effective(const RG* g, int nd) {
     return nd;
 }
 
+/* Tiny-pure-rule inlining: a ref to a rule whose subtree has no keep/collect,
+ * no non-alias refs, and few nodes (ws, digit runs) emits the body inline —
+ * golden's shape, where whitespace skipping is a loop, not a call. */
+static int rg_inline_size(const RG* g, int nd, int depth) {
+    if (depth > 8) return 1000;
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_KEEP: case RN_COLLECT: return 1000;
+    case RN_REF: {
+        int eff = rg_effective(g, nd);
+        if (eff == nd) return 1000;      /* non-alias ref: don't inline through */
+        return 1;
+    }
+    case RN_SEQ: case RN_ALT: {
+        int t = 1;
+        for (int i = 0; i < x->nkids; i++) t += rg_inline_size(g, g->kids[x->b + i], depth + 1);
+        return t;
+    }
+    case RN_SOME: case RN_ANY: case RN_OPT: return 1 + rg_inline_size(g, x->a, depth + 1);
+    default: return 1;
+    }
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -723,27 +746,40 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     case RN_REF: {
         int eff = rg_effective(g, nd);
         if (eff != nd) { rg_emit_node(g, e, eff, fail, lbl, rid); break; }
-        eb_fmt(e, "    if (!%s__r_%s(c, s, n, &p)) goto %s;\n",
-               g->name, g->rules[x->nkids].name, fail);
+        {
+            int body = g->rules[x->nkids].node;
+            if (rg_inline_size(g, body, 0) <= 8) {   /* ws-sized pure rules: inline */
+                rg_emit_node(g, e, body, fail, lbl, rid);
+                break;
+            }
+        }
+        if (e->mode)
+            eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
+                   g->name, g->rules[x->nkids].name, fail);
+        else
+            eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
+                   g->name, g->rules[x->nkids].name, fail);
         break;
     }
     case RN_KEEP: {
+        if (!e->mode) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         int k = (*lbl)++;
         eb_fmt(e, "    { size_t ka%d = p;\n", k);
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        eb_fmt(e, "    if (c && !%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
+        eb_fmt(e, "    if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
                g->name, rid, x->b, k, fail);
         break;
     }
     case RN_COLLECT: {
+        if (!e->mode) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         /* BEGIN/END markers bracket the child's span. A failing child unwinds
-         * through the log truncation, removing the BEGIN — no special casing. */
-        eb_fmt(e, "    if (c) { if (c->bdepth >= 512) goto %s;\n"
+         * through tape truncation, removing the BEGIN — no special casing. */
+        eb_fmt(e, "    { if (c->bdepth >= 512) goto %s;\n"
                   "        if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
                   "        c->tape[c->total].meta = 0x100u | %du; c->tape[c->total].u.span = 0;\n"
                   "        c->bstack[c->bdepth++] = c->total++; }\n", fail, g->name, fail, rid);
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        eb_fmt(e, "    if (c) { size_t bi = c->bstack[--c->bdepth];\n"
+        eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
                   "        c->tape[bi].u.span = c->total - bi; }\n");
         break;
     }
@@ -772,9 +808,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             for (int i = 0; ok && i < x->nkids; i++)
                 if (rf_popcount(bf[i]) > 32) { if (big >= 0) ok = 0; else big = i; }
             if (ok) {
-                int kp = rk_node(g, e->K, nd);
-                if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0, ld%d = c ? c->bdepth : 0;\n", k, k, k);
-                else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
+                /* Single-branch dispatch: nothing retries at this level, so no
+                 * save/restore — a failing branch propagates to the enclosing
+                 * resume point (opt/any/cascade/entry), which owns recovery of
+                 * both cursor and tape. */
+                eb_fmt(e, "    {\n");
                 eb_fmt(e, "    if (p >= n) goto Lb%d;\n", k);
                 eb_fmt(e, "    switch (s[p]) {\n", k);
                 for (int i = 0; i < x->nkids; i++) {
@@ -801,16 +839,15 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     eb_fmt(e, "    default: goto Lb%d;\n", k);
                 }
                 eb_fmt(e, "    }\n    goto Lok%d;\n", k);
-                if (kp) eb_fmt(e, "Lb%d: p = sv%d; if (c) { c->total = lt%d; c->bdepth = ld%d; } goto %s;\n", k, k, k, k, fail);
-                else    eb_fmt(e, "Lb%d: p = sv%d; goto %s;\n", k, k, fail);
+                eb_fmt(e, "Lb%d: goto %s;\n", k, fail);
                 eb_fmt(e, "Lok%d: ; }\n", k);
                 break;
             }
         }
         /* fallback: PEG trial cascade */
         {
-        int kp = rk_node(g, e->K, nd);
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0, ld%d = c ? c->bdepth : 0;\n", k, k, k);
+        int kp = e->mode ? rk_node(g, e->K, nd) : 0;
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
         else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
@@ -818,7 +855,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             snprintf(br, sizeof(br), "La%d_%d", k, i);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            if (kp) eb_fmt(e, "%s: p = sv%d; if (c) { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
+            if (kp) eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
             else    eb_fmt(e, "%s: p = sv%d;\n", br, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
         }
@@ -828,13 +865,13 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     }
     case RN_OPT: {
         int k = (*lbl)++;
-        int kp = rk_node(g, e->K, x->a);
+        int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c ? c->total : 0, ld%d = c ? c->bdepth : 0;\n", k, k, k);
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
         else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
+        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
                        k, br, k, k, k, k);
         else    eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
         break;
@@ -877,15 +914,15 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         {
         int k = (*lbl)++;
-        int kp = rk_node(g, e->K, x->a);
+        int kp = e->mode ? rk_node(g, e->K, x->a) : 0;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
         if (kp) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0, ld%d = 0;\n"
-                          "    for (;;) { sv%d = p; if (c) { lt%d = c->total; ld%d = c->bdepth; }\n",
+                          "    for (;;) { sv%d = p; lt%d = c->total; ld%d = c->bdepth;\n",
                        k, k, k, k, k, k);
         else    eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
+        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
                        k, k, br, k, k, k, k);
         else    eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
                        k, k, br, k, k);
@@ -969,18 +1006,33 @@ static char* rg_emit(const RG* g, int origin_line) {
         }
         eb_fmt(&e, "};\n");
     }
+    /* Two specialized matcher sets from ONE grammar walk each — the tier
+     * convergence: __m_ (match: no ctx, no sink code, no snapshots) and
+     * __b_ (build: unconditional tape sink). Each variant is leaner than a
+     * merged one; entries pick their set, so no tier pays for another's mode. */
     for (int r = 0; r < g->nrules; r++)
-        eb_fmt(&e, "static int %s__r_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
+        eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
+               g->name, g->rules[r].name);
+    for (int r = 0; r < g->nrules; r++)
+        eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
                g->name, g->rules[r].name, g->name);
 
-    for (int r = 0; r < g->nrules; r++) {
-        eb_fmt(&e, "static int %s__r_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
-                   "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
-               g->name, g->rules[r].name, g->name);
-        char fail[16];
-        snprintf(fail, sizeof(fail), "Lf%d", lbl++);
-        rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
-        eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+    for (int mode = 0; mode <= 1; mode++) {
+        e.mode = mode;
+        for (int r = 0; r < g->nrules; r++) {
+            if (mode)
+                eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
+                           "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
+                       g->name, g->rules[r].name, g->name);
+            else
+                eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                           "    size_t p = *io;\n    (void)s; (void)n;\n",
+                       g->name, g->rules[r].name);
+            char fail[16];
+            snprintf(fail, sizeof(fail), "Lf%d", lbl++);
+            rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
+            eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+        }
     }
 
     /* __leaf: codec at push — decode fuses into the parse pass; the node is
@@ -1036,7 +1088,7 @@ static char* rg_emit(const RG* g, int origin_line) {
      *   collect = parse + fold (leaves through the closure, warm sequential) */
     eb_fmt(&e, "static int %s_match(const char* s, size_t n) {\n"
                "    size_t p = 0;\n"
-               "    if (!%s__r_%s(0, (const unsigned char*)s, n, &p)) return 0;\n"
+               "    if (!%s__m_%s((const unsigned char*)s, n, &p)) return 0;\n"
                "    return p == n;\n}\n",
            g->name, g->name, g->rules[0].name);
     eb_fmt(&e, "static %sNode* %s_parse(const char* s, size_t n, CCArena* arena) {\n"
@@ -1047,7 +1099,7 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
                "    c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */\n"
-               "    if (!%s__r_%s(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
+               "    if (!%s__b_%s(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
                "    c0.tape[0].u.span = c0.total;\n"
                "    return c0.tape;\n}\n",
            g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->rules[0].name);
