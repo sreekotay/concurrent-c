@@ -1,6 +1,17 @@
 # `@grammar` — user-definable declaration kinds (proposal)
 
-**Status:** Seam implemented (v0); SERDES engines not yet built.
+**Status:** Seam implemented (v0). Two builtin engines are live in
+`cc/src/preprocess/grammar_rules.c`:
+`@grammar(rules)` (Rebol/PARSE dialect → specialized matchers; match / parse
+(tape DOM) / collect tiers, derived-restore backtracking, codec provenance) and
+`@grammar(schema)` (typed direct-to-struct over a `use`d rules grammar: fields
+bound at event sites via extract-mode keeps, key-length dispatch for unordered
+members, unknown values skipped through the match tier, `items Schema` arena
+arrays). Schema v1 dialect: `use G`, `fields:`/`items:` structural directives
+(open/close/sep/kv/key/pad/else), body terms `G.rule`, `f: G.rule`,
+`f: int G.rule`, `f: items S`, nested `fields [...]` (flattening into the one
+output struct). Smokes: `tests/grammar_rules_*.ccs`,
+`tests/grammar_schema_twitter_smoke.ccs` (schema vs DOM cross-validation).
 The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`
 (first step of `cc_comptime_prepare_source`) and lowers
 `@grammar(engine) Name {SENT … SENT}` to a synthesized `@comptime` block calling

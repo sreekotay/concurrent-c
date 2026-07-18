@@ -212,6 +212,7 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
     int found = 0;
 
     if (!src) return NULL;
+    cc__grammar_registry_reset();   /* rules/schema cross-block state is per file */
     while (i < n) {
         char c = src[i];
         /* Skip comments and string/char literals so "@grammar" inside them is inert. */

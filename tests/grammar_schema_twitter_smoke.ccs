@@ -1,0 +1,208 @@
+// REAL USE for @grammar(schema): parse twitter.json DIRECT-TO-STRUCT.
+// A schema `use`s the rules grammar declared above it and binds typed fields
+// at event sites: known object members dispatch on key (length switch +
+// memcmp), bound leaves reuse the rules engine in extract mode (keep span
+// captured into locals — no tape), unknown members skip through the MATCH
+// tier at recognizer speed, and `items` produces an arena array of a
+// previously declared schema.
+//
+// CROSS-VALIDATION: every extracted field is checked against DOM navigation
+// of the SAME grammar's tape (Json_parse) — two independent lowerings of one
+// grammar must agree byte-for-byte on ids, text, and screen names.
+#include <ccc/std/prelude.cch>
+
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) {
+        *out = cc_slice_from_buffer((void*)p, n);
+        return 1;
+    }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++] = '\n'; break;  case 't': dst[o++] = '\t'; break;
+        case 'r': dst[o++] = '\r'; break;  case '"': dst[o++] = '"'; break;
+        case '\\': dst[o++] = '\\'; break; case '/': dst[o++] = '/'; break;
+        case 'b': dst[o++] = '\b'; break;  case 'f': dst[o++] = '\f'; break;
+        case 'u': {
+            unsigned cp = 0;
+            for (int h = 0; h < 4; h++) { char x = p[++k]; cp <<= 4;
+                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0') : (unsigned)((x | 32) - 'a' + 10); }
+            if (cp < 0x80) dst[o++] = (char)cp;
+            else if (cp < 0x800) { dst[o++] = (char)(0xC0 | (cp >> 6)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else { dst[o++] = (char)(0xE0 | (cp >> 12)); dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            break;
+        }
+        default: dst[o++] = e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  keep [int opt [#'.' some digit]
+                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    ; literals are kept so the DOM oracle's (key, value) sibling pairing
+    ; holds: every member value produces exactly one tape node. The schema
+    ; tier is indifferent (its else-skip runs the match tier, keeps nothing).
+    value:   [ws [string | number | object | array
+                 | keep ["true" | "false" | "null"]] ws]
+    member:  [ws string ws #':' value]
+    array:   collect [#'[' ws opt [value any [#',' value]] #']']
+    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+@grammar(schema) Tweet {~~~~
+    use Json
+    fields: open #'{' close #'}' sep #',' kv #':'
+            key Json.string pad Json.ws else Json.value
+    fields [
+        "id"   id:   int Json.number
+        "text" text: Json.string
+        "user" fields [ "screen_name" user_name: Json.string ]
+    ]
+~~~~}
+
+@grammar(schema) Feed {~~~~
+    use Json
+    fields: open #'{' close #'}' sep #',' kv #':'
+            key Json.string pad Json.ws else Json.value
+    items:  open #'[' close #']' sep #',' pad Json.ws
+    Json.ws
+    fields [ "statuses" statuses: items Tweet ]
+    Json.ws
+~~~~}
+
+/* ---- DOM oracle: navigate the tape for the same fields ---- */
+
+static int node_key_is(JsonNode* nd, const char* k) {
+    CCSlice v; JsonNode_slice(nd, &v);
+    size_t l = strlen(k);
+    return v.len == l && memcmp(v.ptr, k, l) == 0;
+}
+
+static long long node_ll(JsonNode* nd) {
+    char b[32]; CCSlice v; JsonNode_slice(nd, &v);
+    size_t l = v.len < 31 ? v.len : 31;
+    memcpy(b, v.ptr, l); b[l] = 0;
+    return strtoll(b, 0, 10);
+}
+
+/* object children are (key, value) sibling pairs on the tape */
+static JsonNode* obj_get(JsonNode* obj, const char* key) {
+    JsonNode* ch = JsonNode_first(obj);
+    while (ch) {
+        JsonNode* val = JsonNode_next(ch, obj);
+        if (!val) return 0;
+        if (node_key_is(ch, key)) return val;
+        ch = JsonNode_next(val, obj);
+    }
+    return 0;
+}
+
+typedef struct { unsigned long long idsum; unsigned long long tlen, ulen; long cnt, mat; } Agg;
+
+static int agg_eq(const Agg* a, const Agg* b) {
+    return a->idsum == b->idsum && a->tlen == b->tlen && a->ulen == b->ulen &&
+           a->cnt == b->cnt && a->mat == b->mat;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(24 << 20);
+
+    /* semantics on a small literal: order-independence, unknown-key skip,
+     * nested binding, escape decode, missing fields zeroed */
+    {
+        const char* src =
+            "{\"x\":[{\"deep\":null}],\"id\":42,\"text\":\"a\\nb\","
+            "\"user\":{\"verified\":true,\"screen_name\":\"z\\u00e9\"}}";
+        Tweet t;
+        if (!Tweet_parse(src, strlen(src), &arena, &t)) { printf("FAIL: tweet parse\n"); return 1; }
+        if (t.id != 42) { printf("FAIL: id %lld\n", t.id); return 1; }
+        if (t.text.len != 3 || memcmp(t.text.ptr, "a\nb", 3) != 0) { printf("FAIL: text\n"); return 1; }
+        if (!cc_slice_is_unique(t.text)) { printf("FAIL: escaped text should materialize\n"); return 1; }
+        if (t.user_name.len != 3 || memcmp(t.user_name.ptr, "z\xc3\xa9", 3) != 0) { printf("FAIL: user\n"); return 1; }
+        Tweet z;
+        if (!Tweet_parse("{}", 2, &arena, &z)) { printf("FAIL: empty parse\n"); return 1; }
+        if (z.id != 0 || z.text.len != 0 || z.user_name.len != 0) { printf("FAIL: empty not zeroed\n"); return 1; }
+        /* escaped key must NOT dispatch (raw compare) — value skipped */
+        Tweet e2;
+        if (!Tweet_parse("{\"i\\u0064\":5}", 13, &arena, &e2) || e2.id != 0) { printf("FAIL: escaped key\n"); return 1; }
+        /* malformed */
+        if (Tweet_parse("{\"id\":}", 7, &arena, &e2)) { printf("FAIL: malformed accepted\n"); return 1; }
+        if (Tweet_parse("{} junk", 7, &arena, &e2)) { printf("FAIL: trailing junk accepted\n"); return 1; }
+    }
+
+    /* corpus: schema extraction vs DOM navigation must agree exactly */
+    {
+        FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
+        if (!f) { printf("grammar schema direct-to-struct OK\n"); return 0; }   /* corpus absent: skip */
+        fseek(f, 0, SEEK_END);
+        long fn = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char* buf = (char*)malloc((size_t)fn + 1);
+        size_t rd = fread(buf, 1, (size_t)fn, f);
+        fclose(f);
+
+        Feed feed;
+        if (!Feed_parse(buf, rd, &arena, &feed)) { printf("FAIL: feed parse\n"); return 1; }
+        if (feed.statuses_n == 0) { printf("FAIL: no statuses\n"); return 1; }
+
+        Agg sa = {0};
+        for (size_t i = 0; i < feed.statuses_n; i++) {
+            Tweet* t = &feed.statuses[i];
+            sa.idsum += (unsigned long long)t->id;
+            sa.tlen += t->text.len;
+            sa.ulen += t->user_name.len;
+            sa.cnt++;
+            if (cc_slice_is_unique(t->text)) sa.mat++;
+        }
+
+        Agg da = {0};
+        {
+            JsonNode* root = Json_parse(buf, rd, &arena);
+            if (!root) { printf("FAIL: dom parse\n"); return 1; }
+            JsonNode* top = JsonNode_first(root);
+            JsonNode* statuses = obj_get(top, "statuses");
+            if (!statuses) { printf("FAIL: no statuses in dom\n"); return 1; }
+            for (JsonNode* tw = JsonNode_first(statuses); tw; tw = JsonNode_next(tw, statuses)) {
+                JsonNode* id = obj_get(tw, "id");
+                JsonNode* text = obj_get(tw, "text");
+                JsonNode* user = obj_get(tw, "user");
+                JsonNode* sn = user ? obj_get(user, "screen_name") : 0;
+                da.cnt++;
+                if (id) da.idsum += (unsigned long long)node_ll(id);
+                if (text) {
+                    CCSlice v; JsonNode_slice(text, &v);
+                    da.tlen += v.len;
+                    if (cc_slice_is_unique(v)) da.mat++;
+                }
+                if (sn) { CCSlice v; JsonNode_slice(sn, &v); da.ulen += v.len; }
+            }
+        }
+        if (!agg_eq(&sa, &da)) {
+            printf("FAIL: schema/dom disagree: cnt %ld/%ld idsum %llu/%llu tlen %llu/%llu ulen %llu/%llu mat %ld/%ld\n",
+                   sa.cnt, da.cnt, sa.idsum, da.idsum, sa.tlen, da.tlen, sa.ulen, da.ulen, sa.mat, da.mat);
+            return 1;
+        }
+        free(buf);
+    }
+    cc_arena_free(&arena);
+    printf("grammar schema direct-to-struct OK\n");
+    return 0;
+}
