@@ -609,9 +609,45 @@ static int rf_swar_stop(const unsigned char* set, int* out_T, int* out_b1, int* 
     return 0;
 }
 
+/* KEEPS(subtree): can this node's subtree (transitively through rule refs)
+ * log a keep? Constructs that provably cannot keep skip the log save/restore
+ * entirely — the ctx traffic vanishes from pure-scanning hot loops (ws, digit
+ * runs, string content) for BOTH the match and collect entries. Conservative
+ * on cycles. */
+typedef struct {
+    unsigned char state[R_MAX_RULES];   /* 0 unvisited, 1 in progress, 2 done */
+    unsigned char keeps[R_MAX_RULES];
+} RKeeps;
+
+static int rk_node(const RG* g, RKeeps* K, int nd);
+
+static int rk_rule(const RG* g, RKeeps* K, int r) {
+    if (K->state[r] == 2) return K->keeps[r];
+    if (K->state[r] == 1) return 1;    /* cycle: conservative */
+    K->state[r] = 1;
+    int k = rk_node(g, K, g->rules[r].node);
+    K->keeps[r] = (unsigned char)k;
+    K->state[r] = 2;
+    return k;
+}
+
+static int rk_node(const RG* g, RKeeps* K, int nd) {
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_KEEP: return 1;
+    case RN_REF: return rk_rule(g, K, x->nkids);
+    case RN_SOME: case RN_ANY: case RN_OPT: return rk_node(g, K, x->a);
+    case RN_SEQ: case RN_ALT:
+        for (int i = 0; i < x->nkids; i++)
+            if (rk_node(g, K, g->kids[x->b + i])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[1024];
@@ -686,7 +722,9 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             for (int i = 0; ok && i < x->nkids; i++)
                 if (rf_popcount(bf[i]) > 32) { if (big >= 0) ok = 0; else big = i; }
             if (ok) {
-                eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+                int kp = rk_node(g, e->K, nd);
+                if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+                else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
                 eb_fmt(e, "    if (p >= n) goto Lb%d;\n", k);
                 eb_fmt(e, "    switch (s[p]) {\n", k);
                 for (int i = 0; i < x->nkids; i++) {
@@ -713,33 +751,42 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     eb_fmt(e, "    default: goto Lb%d;\n", k);
                 }
                 eb_fmt(e, "    }\n    goto Lok%d;\n", k);
-                eb_fmt(e, "Lb%d: p = sv%d; if (c) c->nlog = lv%d; goto %s;\n", k, k, k, fail);
+                if (kp) eb_fmt(e, "Lb%d: p = sv%d; if (c) c->nlog = lv%d; goto %s;\n", k, k, k, fail);
+                else    eb_fmt(e, "Lb%d: p = sv%d; goto %s;\n", k, k, fail);
                 eb_fmt(e, "Lok%d: ; }\n", k);
                 break;
             }
         }
         /* fallback: PEG trial cascade */
-        eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        {
+        int kp = rk_node(g, e->K, nd);
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
             int last = (i == x->nkids - 1);
             snprintf(br, sizeof(br), "La%d_%d", k, i);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            eb_fmt(e, "%s: p = sv%d; if (c) c->nlog = lv%d;\n", br, k, k);
+            if (kp) eb_fmt(e, "%s: p = sv%d; if (c) c->nlog = lv%d;\n", br, k, k);
+            else    eb_fmt(e, "%s: p = sv%d;\n", br, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
         }
         eb_fmt(e, "Lok%d: ; }\n", k);
+        }
         break;
     }
     case RN_OPT: {
         int k = (*lbl)++;
+        int kp = rk_node(g, e->K, x->a);
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        if (kp) eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        else    eb_fmt(e, "    { size_t sv%d = p;\n", k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
-               k, br, k, k, k);
+        if (kp) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+                       k, br, k, k, k);
+        else    eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
         break;
     }
     case RN_ANY:
@@ -779,13 +826,17 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         {
         int k = (*lbl)++;
+        int kp = rk_node(g, e->K, x->a);
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
-               k, k, k, k);
+        if (kp) eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
+                       k, k, k, k);
+        else    eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
-               k, k, br, k, k, k);
+        if (kp) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+                       k, k, br, k, k, k);
+        else    eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
+                       k, k, br, k, k);
         break;
         }
     }
@@ -794,9 +845,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
 static char* rg_emit(const RG* g, int origin_line) {
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
-    EB e = { &out, &len, &cap, F };
+    RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
+    EB e = { &out, &len, &cap, F, K };
     int lbl = 0;
-    if (!F) return NULL;
+    if (!F || !K) { free(F); free(K); return NULL; }
 
     eb_fmt(&e, "/* generated by @grammar(rules) %s (line %d): %d rule(s), match + collect (v2) */\n",
            g->name, origin_line, g->nrules);
@@ -901,7 +953,7 @@ static char* rg_emit(const RG* g, int origin_line) {
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
-    free(F);
+    free(F); free(K);
     return out;
 }
 
