@@ -1,0 +1,93 @@
+// REAL USE for the native @grammar(rules) engine: a complete JSON recognizer
+// written in the Rebol/PARSE-inspired dialect, compiled to specialized C
+// matchers at build time. `Json_match(s, n)` is full-input validation.
+//
+// This is the recognition layer (cc_match). The DOM/collect layer (keep ->
+// borrow/materialize spans) comes next; its golden target is
+// examples/serdes/json/json.h. Grammar notes:
+//   - first declared rule is the entry point
+//   - PEG ordered choice; `any` is greedy with an empty-match guard
+//   - faithful JSON numbers (no leading zeros, optional frac/exp)
+//   - strings: escapes incl \uXXXX; raw control bytes < 0x20 are rejected
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  [int opt [#'.' some digit]
+                  opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    value:   [ws [string | number | object | array | "true" | "false" | "null"] ws]
+    member:  [ws string ws #':' value]
+    array:   [#'[' ws opt [value any [#',' value]] #']']
+    object:  [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+static int expect(const char* src, int want) {
+    int got = Json_match(src, strlen(src));
+    if (got != want) {
+        printf("FAIL: Json_match(%s) = %d, want %d\n", src, got, want);
+        return 0;
+    }
+    return 1;
+}
+
+static int check_corpus(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;   /* absent: skip silently (test remains deterministic) */
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)n + 1);
+    size_t rd = fread(b, 1, (size_t)n, f);
+    fclose(f);
+    int ok = Json_match(b, rd);
+    free(b);
+    return ok;
+}
+
+int main(void) {
+    int pass = 1;
+    /* positives */
+    pass &= expect("{}", 1);
+    pass &= expect("[]", 1);
+    pass &= expect(" [ ] ", 1);
+    pass &= expect("null", 1);
+    pass &= expect("\"str with \\\"quote\\\" and \\u00e9\"", 1);
+    pass &= expect("-0.5e+10", 1);
+    pass &= expect("0", 1);
+    pass &= expect("[1,2.5,-3e2,\"x\",true,false,null,[],{}]", 1);
+    pass &= expect("{\"a\":[1,{\"b\":\"c\\n\"}],\"d\":{}}", 1);
+    /* negatives */
+    pass &= expect("", 0);
+    pass &= expect("01", 0);              /* leading zero */
+    pass &= expect("-", 0);
+    pass &= expect("[1,]", 0);            /* trailing comma */
+    pass &= expect("{\"a\" 1}", 0);       /* missing colon */
+    pass &= expect("[1 2]", 0);           /* missing comma */
+    pass &= expect("\"unterminated", 0);
+    pass &= expect("\"bad\\x\"", 0);      /* unknown escape */
+    pass &= expect("nul", 0);
+    pass &= expect("{} extra", 0);        /* trailing garbage */
+    pass &= expect("{\"a\":}", 0);
+    if (!pass) return 1;
+
+    /* real corpora when available (test harness runs from the repo root) */
+    {
+        int t = check_corpus("examples/serdes/json/twitter.json");
+        int m = check_corpus("examples/serdes/json/numbers.json");
+        if (t == 0 || m == 0) {
+            printf("FAIL: corpus rejected (twitter=%d numbers=%d)\n", t, m);
+            return 1;
+        }
+    }
+    printf("grammar rules JSON recognizer OK\n");
+    return 0;
+}
