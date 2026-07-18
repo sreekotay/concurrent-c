@@ -23,6 +23,20 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
     char* factory;
     if (!inout_buf || !*inout_buf || !inout_len) return -1;
 
+    /* @grammar(engine) Name {SENT...SENT}: capture the fenced body VERBATIM and
+     * rewrite to a synthesized @comptime engine call.  Must run before every
+     * other rewrite — the body is raw non-C bytes that later passes (templates,
+     * factories) must never see. */
+    {
+        char* grammar = cc_rewrite_grammar_decls_text(*inout_buf, *inout_len, input_path);
+        if (grammar == (char*)-1) return -1;
+        if (grammar) {
+            free(*inout_buf);
+            *inout_buf = grammar;
+            *inout_len = strlen(grammar);
+        }
+    }
+
     /* Expand CC_GENERIC_FACTORY(Name){...} sugar before anything else so the
      * downstream @comptime if/for + @emit lowering and the comptime collector
      * see canonical @comptime constructs. */
