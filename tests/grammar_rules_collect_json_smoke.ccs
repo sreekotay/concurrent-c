@@ -1,0 +1,111 @@
+// REAL USE for @grammar(rules) v2 collect: the JSON grammar now KEEPS string
+// content and number text; <Name>_collect replays each kept span through a
+// callback (the C lowering of the closure surface in spec/cc_serdes.md).
+//
+// Cross-validation against the golden hand-lowered parser: on twitter.json,
+// examples/serdes/json/json.h counts exactly 18099 strings (17787 borrowed +
+// 312 materialized, keys included). Our `string` rule fires for keys and
+// values alike, so the keep count must equal 18099. numbers.json is an array
+// of exactly 30000 floats.
+//
+// Also pinned: keeps from FAILED branches are never replayed (log rollback is
+// coupled to cursor rollback), and a nonzero callback return stops the
+// collect, which then reports failure.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' keep any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  keep [int opt [#'.' some digit]
+                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    value:   [ws [string | number | object | array | "true" | "false" | "null"] ws]
+    member:  [ws string ws #':' value]
+    array:   [#'[' ws opt [value any [#',' value]] #']']
+    object:  [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+typedef struct { long strings, numbers, other, bytes; int stop_after; } Counts;
+
+static int count_cb(void* env, int id, const char* ptr, size_t len) {
+    Counts* c = (Counts*)env;
+    (void)ptr;
+    if (id == Json_KEEP_string) c->strings++;
+    else if (id == Json_KEEP_number) c->numbers++;
+    else c->other++;
+    c->bytes += (long)len;
+    if (c->stop_after > 0 && (c->strings + c->numbers) >= c->stop_after) return 1;
+    return 0;
+}
+
+static long file_collect(const char* path, Counts* c) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)n + 1);
+    size_t rd = fread(b, 1, (size_t)n, f);
+    fclose(f);
+    int ok = Json_collect(b, rd, count_cb, c);
+    free(b);
+    return ok;
+}
+
+int main(void) {
+    /* inline: ids, spans, ordering */
+    {
+        Counts c = {0};
+        const char* src = "{\"key\": [1, \"two\", 3.5e2]}";
+        if (!Json_collect(src, strlen(src), count_cb, &c)) { printf("FAIL: inline collect\n"); return 1; }
+        if (c.strings != 2 || c.numbers != 2 || c.other != 0) {
+            printf("FAIL: inline counts s=%ld n=%ld o=%ld\n", c.strings, c.numbers, c.other);
+            return 1;
+        }
+        /* spans: "key"(3) + "two"(3) + 1(1) + 3.5e2(5) = 12 kept bytes */
+        if (c.bytes != 12) { printf("FAIL: inline kept bytes %ld != 12\n", c.bytes); return 1; }
+    }
+    /* failed parse: callback must never fire */
+    {
+        Counts c = {0};
+        const char* bad = "[\"kept?\", 42, ]";
+        if (Json_collect(bad, strlen(bad), count_cb, &c)) { printf("FAIL: bad accepted\n"); return 1; }
+        if (c.strings + c.numbers + c.other != 0) {
+            printf("FAIL: callbacks fired on failed parse (s=%ld n=%ld)\n", c.strings, c.numbers);
+            return 1;
+        }
+    }
+    /* early stop: nonzero return aborts and collect reports failure */
+    {
+        Counts c = {0}; c.stop_after = 1;
+        const char* src = "[1, 2, 3]";
+        if (Json_collect(src, strlen(src), count_cb, &c)) { printf("FAIL: stop not honored\n"); return 1; }
+        if (c.numbers != 1) { printf("FAIL: stop count %ld != 1\n", c.numbers); return 1; }
+    }
+    /* corpora: cross-check the golden parser's instrumentation */
+    {
+        Counts t = {0};
+        long ok = file_collect("examples/serdes/json/twitter.json", &t);
+        if (ok == 0) { printf("FAIL: twitter.json rejected\n"); return 1; }
+        if (ok == 1 && t.strings != 18099) {
+            printf("FAIL: twitter strings %ld != 18099 (golden borrow+mat)\n", t.strings);
+            return 1;
+        }
+        Counts m = {0};
+        ok = file_collect("examples/serdes/json/numbers.json", &m);
+        if (ok == 0) { printf("FAIL: numbers.json rejected\n"); return 1; }
+        if (ok == 1 && m.numbers != 30000) {
+            printf("FAIL: numbers count %ld != 30000\n", m.numbers);
+            return 1;
+        }
+    }
+    printf("grammar rules collect OK\n");
+    return 0;
+}
