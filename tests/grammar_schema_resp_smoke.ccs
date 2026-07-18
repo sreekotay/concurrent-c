@@ -12,22 +12,27 @@
 //                             pipelines (Name_parse still requires p == n)
 #include <ccc/std/prelude.cch>
 
-@grammar(rules) Resp {~~~~
-    top:    number
-    digit:  charset [#'0' - #'9']
-    number: keep [opt #'-' some digit]
-~~~~}
-
+// LIGHTWEIGHT: these schemas are fully self-contained — the rules they need
+// live INLINE in the same block (`rules [...]`), referenced bare. No separate
+// grammar declaration, no `use`, one block per wire type. Composition (`use`)
+// remains available when grammars are shared; either way the emitted code is
+// the same flat specialized C — nothing parses through an intermediate.
 @grammar(schema) RespArg {~~~~
-    use Resp
-    #'$' len: int Resp.number "\r\n"
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
     data: bytes len
     "\r\n"
 ~~~~}
 
 @grammar(schema) RespCmd {~~~~
-    use Resp
-    #'*' argc: int Resp.number "\r\n"
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
     args: items RespArg argc
 ~~~~}
 

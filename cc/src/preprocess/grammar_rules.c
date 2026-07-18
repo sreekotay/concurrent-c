@@ -104,6 +104,7 @@ typedef struct {
     char err[512]; size_t err_at; int failed;
 
     RNode nodes[R_MAX_NODES]; int nnodes;
+    int entry_idx, entry_set;   /* first rule declared at include-depth 0 */
     int kids[R_MAX_KIDS]; int nkids;
     unsigned char sets[R_MAX_SETS][32]; int nsets;
     char pool[R_MAX_POOL]; int npool;
@@ -420,6 +421,14 @@ static int rg_parse_seq(RG* g, size_t* io, int depth) {
         if (p >= g->n) break;
         if (g->body[p] == ']' || g->body[p] == '|') break;
         if (depth == 0 && rg_at_rule_header(g, p)) break;
+        /* `include` is reserved at rule-body top level: it ends the rule and
+         * starts an include directive (rule boundaries are `ident :`, so a
+         * bare directive word would otherwise absorb into the body as a ref) */
+        if (depth == 0) {
+            size_t e2;
+            if (rg_ident(g, p, &e2) && e2 - p == 7 &&
+                memcmp(g->body + p, "include", 7) == 0) break;
+        }
         int nd = rg_parse_term(g, &p, depth);
         if (nd < 0) return -1;
         if (nlocal >= (int)(sizeof(local) / sizeof(local[0])))
@@ -463,7 +472,42 @@ static int rg_parse_alt(RG* g, size_t* io, int depth) {
     return nd;
 }
 
+/* include support: bodies of earlier @grammar(rules) blocks in this file,
+ * resolved through the per-file registry (defined with the schema engine). */
+static const char* cc__rules_body_lookup(const char* name, size_t* len);
+
+static int rg_parse_text(RG* g, int depth);
+
 static int rg_parse(RG* g) {
+    if (rg_parse_text(g, 0) != 0) return -1;
+    if (g->nrules == 0) return rg_fail(g, 0, "no rules declared");
+    /* The entry point is the first rule the INCLUDING grammar declares, even
+     * when an include precedes it. Safe to reorder here: references are still
+     * by name; resolution below assigns indices. */
+    if (g->entry_set && g->entry_idx != 0) {
+        unsigned char tmp[sizeof(g->rules[0])];
+        memcpy(tmp, &g->rules[0], sizeof(g->rules[0]));
+        memcpy(&g->rules[0], &g->rules[g->entry_idx], sizeof(g->rules[0]));
+        memcpy(&g->rules[g->entry_idx], tmp, sizeof(g->rules[0]));
+    }
+    /* Resolve references now so undefined names fail here, not in emitted C. */
+    for (int i = 0; i < g->nnodes; i++) {
+        if (g->nodes[i].kind != RN_REF) continue;
+        const char* rn = g->pool + g->nodes[i].a;
+        int found = -1;
+        for (int r = 0; r < g->nrules; r++)
+            if (strcmp(g->rules[r].name, rn) == 0) { found = r; break; }
+        if (found < 0) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "reference to undefined rule '%s'", rn);
+            return rg_fail(g, g->nodes[i].at, msg);
+        }
+        g->nodes[i].nkids = found;   /* resolved rule index */
+    }
+    return 0;
+}
+
+static int rg_parse_text(RG* g, int depth) {
     size_t p = 0;
     for (;;) {
         p = rg_ws(g, p);
@@ -471,6 +515,35 @@ static int rg_parse(RG* g) {
         size_t e;
         if (!rg_ident(g, p, &e)) return rg_fail(g, p, "expected rule name");
         size_t q = rg_ws(g, e);
+        /* `include Other` — splice a previously declared grammar's rules,
+         * verbatim, at compile time. Composition without ceremony: the
+         * emitted code is the same flat specialized C either way. */
+        if (e - p == 7 && memcmp(g->body + p, "include", 7) == 0 &&
+            (q >= g->n || g->body[q] != ':')) {
+            size_t ie;
+            if (!rg_ident(g, q, &ie)) return rg_fail(g, q, "expected grammar name after include");
+            if (depth >= 4) return rg_fail(g, p, "include nesting too deep");
+            {
+                char nm[64];
+                size_t nl = ie - q < sizeof(nm) - 1 ? ie - q : sizeof(nm) - 1;
+                memcpy(nm, g->body + q, nl); nm[nl] = '\0';
+                size_t blen = 0;
+                const char* btxt = cc__rules_body_lookup(nm, &blen);
+                if (!btxt) {
+                    char msg[160];
+                    snprintf(msg, sizeof(msg), "include of unknown grammar '%s' "
+                             "(must be a @grammar(rules) block earlier in this file)", nm);
+                    return rg_fail(g, p, msg);
+                }
+                const char* sb = g->body; size_t sn = g->n;
+                g->body = btxt; g->n = blen;
+                int rc = rg_parse_text(g, depth + 1);
+                g->body = sb; g->n = sn;
+                if (rc != 0) return rc;
+            }
+            p = ie;
+            continue;
+        }
         if (q >= g->n || g->body[q] != ':') return rg_fail(g, p, "expected ':' after rule name");
         if (e - p >= R_NAME_MAX) return rg_fail(g, p, "rule name too long");
         if (g->nrules >= R_MAX_RULES) return rg_fail(g, p, "too many rules");
@@ -485,23 +558,9 @@ static int rg_parse(RG* g) {
         int nd = rg_parse_alt(g, &q, 0);
         if (nd < 0) return -1;
         g->rules[g->nrules].node = nd;
+        if (depth == 0 && !g->entry_set) { g->entry_idx = g->nrules; g->entry_set = 1; }
         g->nrules++;
         p = q;
-    }
-    if (g->nrules == 0) return rg_fail(g, 0, "no rules declared");
-    /* Resolve references now so undefined names fail here, not in emitted C. */
-    for (int i = 0; i < g->nnodes; i++) {
-        if (g->nodes[i].kind != RN_REF) continue;
-        const char* rn = g->pool + g->nodes[i].a;
-        int found = -1;
-        for (int r = 0; r < g->nrules; r++)
-            if (strcmp(g->rules[r].name, rn) == 0) { found = r; break; }
-        if (found < 0) {
-            char msg[128];
-            snprintf(msg, sizeof(msg), "reference to undefined rule '%s'", rn);
-            return rg_fail(g, g->nodes[i].at, msg);
-        }
-        g->nodes[i].nkids = found;   /* resolved rule index */
     }
     return 0;
 }
@@ -1484,6 +1543,7 @@ typedef struct {
     char err[160]; size_t err_at;
 
     char usename[S_NAME];
+    const char* rtext; size_t rlen;      /* inline rules [ ... ] section (verbatim) */
     STerm terms[S_MAX_TERMS]; int nterms;
     SKey keys[S_MAX_KEYS]; int nkeys;
     int body[S_MAX_BODY]; int nbody;
@@ -1583,8 +1643,52 @@ static int ss_ruleref_tail(SS* s, char* rname) {   /* after Usename, at '.' */
 static int ss_ruleref(SS* s, char* rname, const char* what) {
     char un[S_NAME];
     if (!ss_ident(s, un, sizeof un)) return ss_fail(s, s->p, what);
-    if (strcmp(un, s->usename) != 0) return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
-    return ss_ruleref_tail(s, rname);
+    if (s->usename[0]) {
+        if (strcmp(un, s->usename) != 0)
+            return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
+        return ss_ruleref_tail(s, rname);
+    }
+    /* self-contained schema (inline rules): a bare name IS the rule */
+    snprintf(rname, S_NAME, "%s", un);
+    return 0;
+}
+
+/* verbatim capture of an inline `rules [ ... ]` section: bracket depth with
+ * lexical awareness (comments, "strings", #'c' literals may contain brackets) */
+static int ss_rules_section(SS* s) {   /* at '[' */
+    s->p++;
+    size_t start = s->p;
+    int depth = 1;
+    while (s->p < s->n) {
+        char c = s->b[s->p];
+        if (c == ';') { while (s->p < s->n && s->b[s->p] != '\n') s->p++; continue; }
+        if (c == '"') {
+            s->p++;
+            while (s->p < s->n && s->b[s->p] != '"') {
+                if (s->b[s->p] == '\\') s->p++;
+                s->p++;
+            }
+            if (s->p >= s->n) return ss_fail(s, start, "unterminated string in rules [...]");
+            s->p++;
+            continue;
+        }
+        if (c == '#' && s->p + 1 < s->n && s->b[s->p + 1] == '\'') {
+            s->p += 2;
+            if (s->p < s->n && s->b[s->p] == '\\') s->p++;
+            if (s->p < s->n) s->p++;
+            if (!(s->p < s->n && s->b[s->p] == '\'')) return ss_fail(s, start, "bad #'c' in rules [...]");
+            s->p++;
+            continue;
+        }
+        if (c == '[') depth++;
+        else if (c == ']') { depth--; if (depth == 0) break; }
+        s->p++;
+    }
+    if (depth != 0) return ss_fail(s, start, "unterminated rules [...] section");
+    s->rtext = s->b + start;
+    s->rlen = s->p - start;
+    s->p++;
+    return 0;
 }
 
 static int ss_term(SS* s, int* out_term);
@@ -1659,8 +1763,24 @@ static int ss_term(SS* s, int* out_term) {
         return 0;
     }
     ss_ws(s);
-    if (!(s->p < s->n && s->b[s->p] == ':'))
+    if (!(s->p < s->n && s->b[s->p] == ':')) {
+        if (!s->usename[0]) {
+            /* self-contained schema: a bare ident is an inline rule ref,
+             * optionally narrowed with a [ ... ] block */
+            snprintf(t->rname, sizeof(t->rname), "%s", id);
+            if (s->p < s->n && s->b[s->p] == '[') {
+                t->kind = SK_NARROW_MEMBERS;
+                int self = s->nterms++;
+                if (ss_fields_body(s, self)) return -1;
+                *out_term = self;
+                return 0;
+            }
+            t->kind = SK_RULE;
+            *out_term = s->nterms++;
+            return 0;
+        }
         return ss_fail(s, s->p, "expected '.', ':' or fields [...] after identifier");
+    }
     s->p++;
     snprintf(t->field, sizeof(t->field), "%s", id);
     char v[S_NAME];
@@ -1694,8 +1814,12 @@ static int ss_term(SS* s, int* out_term) {
                 else snprintf(t->cfield, sizeof(t->cfield), "%s", cn);
             }
         }
-    } else if (strcmp(v, s->usename) == 0) {
-        if (ss_ruleref_tail(s, t->rname)) return -1;
+    } else if ((s->usename[0] && strcmp(v, s->usename) == 0) || !s->usename[0]) {
+        if (s->usename[0]) {
+            if (ss_ruleref_tail(s, t->rname)) return -1;
+        } else {
+            snprintf(t->rname, sizeof(t->rname), "%s", v);   /* bare inline rule */
+        }
         t->kind = SK_BIND_SLICE;
         /* `f: G.rule of Schema` — narrow a list rule: elements parse as the
          * schema, the array shape (delimiters, pads) derives from the rule */
@@ -1758,11 +1882,18 @@ static int ss_parse(SS* s) {
     s->fo = s->fc = s->fs = s->fkv = -1;
     s->io_ = s->ic_ = s->is_ = -1;
     s->rfkey = s->rfpad = s->rfelse = s->ripad = -1;
-    char id[S_NAME];
-    if (!ss_ident(s, id, sizeof id) || strcmp(id, "use") != 0)
-        return ss_fail(s, s->p, "schema must start with `use <RulesGrammar>`");
-    if (!ss_ident(s, s->usename, sizeof s->usename))
-        return ss_fail(s, s->p, "expected rules grammar name after use");
+    /* `use <Grammar>` composes with a shared grammar; an inline `rules [...]`
+     * section makes the schema self-contained. One or the other (v1). */
+    {
+        size_t save = s->p;
+        char id[S_NAME];
+        if (ss_ident(s, id, sizeof id) && strcmp(id, "use") == 0) {
+            if (!ss_ident(s, s->usename, sizeof s->usename))
+                return ss_fail(s, s->p, "expected rules grammar name after use");
+        } else {
+            s->p = save;
+        }
+    }
     for (;;) {
         ss_ws(s);
         if (s->p >= s->n) break;
@@ -1770,6 +1901,12 @@ static int ss_parse(SS* s) {
         char kw[S_NAME];
         if (ss_ident(s, kw, sizeof kw)) {
             ss_ws(s);
+            if (!strcmp(kw, "rules") && s->p < s->n && s->b[s->p] == '[') {
+                if (s->rtext) return ss_fail(s, save, "duplicate rules [...] section");
+                if (s->usename[0]) return ss_fail(s, save, "schema has `use` — inline rules [...] not allowed (v1: one or the other)");
+                if (ss_rules_section(s)) return -1;
+                continue;
+            }
             int isdir = (s->p < s->n && s->b[s->p] == ':' &&
                          (!strcmp(kw, "fields") || !strcmp(kw, "items")));
             if (isdir) {
@@ -1785,6 +1922,8 @@ static int ss_parse(SS* s) {
         s->body[s->nbody++] = ti;
     }
     if (s->nbody == 0) return ss_fail(s, 0, "schema has no body");
+    if (!s->usename[0] && !s->rtext)
+        return ss_fail(s, 0, "schema needs `use <Grammar>` or an inline rules [...] section");
     return 0;
 }
 
@@ -1823,6 +1962,13 @@ static SRulesReg* cc__find_rules(const char* name) {
     for (int i = 0; i < cc__rules_nreg; i++)
         if (strcmp(cc__rules_reg[i].name, name) == 0) return &cc__rules_reg[i];
     return NULL;
+}
+
+static const char* cc__rules_body_lookup(const char* name, size_t* len) {
+    SRulesReg* r = cc__find_rules(name);
+    if (!r) return NULL;
+    *len = r->blen;
+    return r->body;
 }
 
 static int cc__schema_known(const char* name) {
@@ -2359,21 +2505,29 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                  name, ss->err, ss_line_at(ss, ss->err_at));
         goto done;
     }
-    SRulesReg* reg = cc__find_rules(ss->usename);
-    if (!reg) {
-        snprintf(err, err_sz, "@grammar(schema) %s: unknown rules grammar '%s' "
-                 "(a @grammar(rules) %s block must appear earlier in this file)",
-                 name, ss->usename, ss->usename);
-        goto done;
+    SRulesReg* reg = NULL;
+    if (ss->usename[0]) {
+        reg = cc__find_rules(ss->usename);
+        if (!reg) {
+            snprintf(err, err_sz, "@grammar(schema) %s: unknown rules grammar '%s' "
+                     "(a @grammar(rules) %s block must appear earlier in this file)",
+                     name, ss->usename, ss->usename);
+            goto done;
+        }
     }
     g = (RG*)calloc(1, sizeof(RG));
     F = (RFirst*)calloc(1, sizeof(RFirst));
     K = (RKeeps*)calloc(1, sizeof(RKeeps));
     if (!g || !F || !K) { snprintf(err, err_sz, "@grammar(schema): out of memory"); goto done; }
-    g->body = reg->body; g->n = reg->blen; g->name = reg->pfx; g->file = file; g->line0 = line;
+    if (reg) {   /* composed: shared matchers under the <Rules>__s prefix */
+        g->body = reg->body; g->n = reg->blen; g->name = reg->pfx;
+    } else {     /* self-contained: inline rules, private matchers */
+        g->body = ss->rtext; g->n = ss->rlen; g->name = name;
+    }
+    g->file = file; g->line0 = line;
     if (rg_parse(g) != 0) {
-        snprintf(err, err_sz, "@grammar(schema) %s: rules grammar '%s' failed to reparse: %s",
-                 name, ss->usename, g->err);
+        snprintf(err, err_sz, "@grammar(schema) %s: %s grammar failed to parse: %s",
+                 name, reg ? "used" : "inline", g->err);
         goto done;
     }
     /* resolve rule references */
@@ -2475,11 +2629,14 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     {
         EB e = { &out, &len, &cap, F, K, 0, -1, 0 };
         int lbl = 0;
-        eb_fmt(&e, "/* generated by @grammar(schema) %s (line %d): use %s */\n",
-               name, line, ss->usename);
-        if (!reg->matchers_done) {
+        unsigned char local_xdone[R_MAX_RULES];
+        unsigned char* xdone = reg ? reg->x_done : local_xdone;
+        memset(local_xdone, 0, sizeof local_xdone);
+        eb_fmt(&e, "/* generated by @grammar(schema) %s (line %d): %s%s */\n",
+               name, line, reg ? "use " : "inline rules", reg ? ss->usename : "");
+        if (!reg || !reg->matchers_done) {
             rs_emit_matchers(g, &e, &lbl);
-            reg->matchers_done = 1;
+            if (reg) reg->matchers_done = 1;
         }
         /* extract variants needed by this schema (shared across schemas) */
         {
@@ -2491,14 +2648,14 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 else if (ss->terms[ti].kind == SK_NARROW_MEMBERS) {
                     r = ss->terms[ti].nw.key_rule; as_key = 1;
                 }
-                if (r < 0 || reg->x_done[r]) continue;
+                if (r < 0 || xdone[r]) continue;
                 if (!as_key) {   /* bind sites inline small top-level-keep rules — no call, no fn */
                     int body = g->rules[r].node;
                     if (g->nodes[body].kind == RN_KEEP &&
                         rg_inline_size(g, g->nodes[body].a, 0) <= 16) continue;
                 }
                 rs_emit_x(g, &e, &lbl, r);
-                reg->x_done[r] = 1;
+                xdone[r] = 1;
             }
         }
         /* the struct: fields in declaration order, at their event sites */

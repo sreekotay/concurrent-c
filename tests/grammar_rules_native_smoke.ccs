@@ -11,8 +11,19 @@
     number: [some digit]
 ~~~~}
 
+// `include Other` splices a previously declared grammar's rules verbatim at
+// compile time — grammar-level composition with zero runtime cost. The entry
+// point stays the FIRST declared rule, so declare it before the include.
+@grammar(rules) Csv {~~~~
+    row:    [number any [#',' ws number]]
+    include Toy
+~~~~}
+
 int main(void) {
     if (Toy_rule_count() != 3) { printf("FAIL: rule_count=%d\n", Toy_rule_count()); return 1; }
+    if (Csv_rule_count() != 4) { printf("FAIL: csv rule_count=%d\n", Csv_rule_count()); return 1; }
+    if (!Csv_match("1,2, 33", 7)) { printf("FAIL: csv match\n"); return 1; }
+    if (Csv_match("1,,2", 4)) { printf("FAIL: csv bad accepted\n"); return 1; }
     printf("grammar rules native engine: 3 rules OK\n");
     return 0;
 }
