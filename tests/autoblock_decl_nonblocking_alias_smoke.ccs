@@ -1,0 +1,31 @@
+/* Preferred spelling: declaration-level @nonblocking aliases @noblock.
+ * Async callers should run the known callee inline instead of autoblocking it.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+@nonblocking static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async int serve(intptr_t* helper_tid) {
+    record_tid(helper_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) return 2;
+    if (helper_tid != main_tid) return 1;
+
+    printf("ok\n");
+    return 0;
+}

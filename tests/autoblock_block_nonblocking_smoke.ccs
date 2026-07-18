@@ -1,0 +1,46 @@
+/* Lexical @nonblocking block ambient:
+ * known undecorated CC calls inside the block run inline on the poll thread,
+ * while a nested call-site @blocking still forces a blocking-pool dispatch.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async int serve(intptr_t* before_tid, intptr_t* block_tid, intptr_t* forced_tid, intptr_t* after_tid) {
+    record_tid(before_tid);
+
+    @nonblocking {
+        record_tid(block_tid);
+        @blocking record_tid(forced_tid);
+    }
+
+    record_tid(after_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t before_tid = 0;
+    intptr_t block_tid = 0;
+    intptr_t forced_tid = 0;
+    intptr_t after_tid = 0;
+
+    (void)cc_block_on(int, serve(&before_tid, &block_tid, &forced_tid, &after_tid));
+    if (before_tid == 0 || block_tid == 0 || forced_tid == 0 || after_tid == 0) return 2;
+
+    if (before_tid == main_tid) return 3;
+    if (block_tid != main_tid) return 1;
+    if (forced_tid == main_tid) return 4;
+    if (after_tid == main_tid) return 5;
+
+    printf("ok\n");
+    return 0;
+}

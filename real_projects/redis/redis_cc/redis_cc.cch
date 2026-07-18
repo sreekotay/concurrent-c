@@ -10,10 +10,6 @@
 #include <ccc/std/prelude.cch>
 #include <stdint.h>
 
-#ifndef REDIS_REPLY_INLINE_CAP
-#define REDIS_REPLY_INLINE_CAP 128
-#endif
-
 /* Inline byte budget for argv clones on a freshly-allocated RedisRequest.
  * Overflow (oversized SET values etc.) spills onto heap blocks owned by
  * req->arena. */
@@ -68,26 +64,7 @@ typedef struct RedisReply {
     RedisReplyKind kind;
     CCSlice data;
     int64_t int_value;
-    uint8_t data_inline;
-    CCArena arena;
-    char inline_buf[REDIS_REPLY_INLINE_CAP];
 } RedisReply;
-
-typedef struct RedisWireReply {
-    size_t len;
-    uint8_t data_inline;
-    CCArena arena;
-    char* heap_ptr;
-    char inline_buf[REDIS_REPLY_INLINE_CAP];
-} RedisWireReply;
-
-static inline CCSlice redis_wire_reply_slice(const RedisWireReply* reply) {
-    if (!reply) return (CCSlice){0};
-    return (CCSlice){
-        .ptr = reply->data_inline ? (void*)reply->inline_buf : (void*)reply->heap_ptr,
-        .len = reply->len,
-    };
-}
 
 static inline const char* redis_command_name(RedisCommandKind kind) {
     switch (kind) {

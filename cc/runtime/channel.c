@@ -2826,6 +2826,86 @@ static int cc__chan_try_enqueue_lockfree_impl(CCChan* ch, const void* value) {
     return ok ? 0 : EAGAIN;
 }
 
+static inline void cc__chan_build_into(CCClosure2 builder, void* slot, CCArena* arena) {
+    (void)cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+}
+
+static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena* arena) {
+    if (ch->use_ring_queue) {
+        if (ch->topology == CC_CHAN_TOPO_1_1) {
+            size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
+            size_t head = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
+            if ((tail - head) >= ch->cap) {
+                return 0;
+            }
+
+            size_t slot_idx = tail & (ch->lfqueue_cap - 1);
+            if (ch->elem_size <= sizeof(void*)) {
+                void* packed = NULL;
+                cc__chan_build_into(builder, &packed, arena);
+                ch->ring_cells[slot_idx].value = packed;
+            } else {
+                cc__chan_build_into(builder, cc__ring_slot_ptr(ch, tail), arena);
+            }
+            atomic_store_explicit(&ch->ring_tail, tail + 1, memory_order_release);
+            return 1;
+        }
+
+        size_t pos = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
+        int spins = 0;
+        for (;;) {
+            cc__ring_cell* cell = &ch->ring_cells[pos & (ch->lfqueue_cap - 1)];
+            size_t seq = atomic_load_explicit(&cell->seq, memory_order_acquire);
+            intptr_t dif = (intptr_t)seq - (intptr_t)pos;
+            if (dif == 0) {
+                if (atomic_compare_exchange_weak_explicit(&ch->ring_tail, &pos, pos + 1,
+                                                          memory_order_relaxed,
+                                                          memory_order_relaxed)) {
+                    if (ch->elem_size <= sizeof(void*)) {
+                        void* packed = NULL;
+                        cc__chan_build_into(builder, &packed, arena);
+                        cell->value = packed;
+                    } else {
+                        void* slot = cc__ring_slot_ptr(ch, pos);
+                        cc__chan_build_into(builder, slot, arena);
+                        cell->value = slot;
+                    }
+                    atomic_store_explicit(&cell->seq, pos + 1, memory_order_release);
+                    return 1;
+                }
+            } else if (dif < 0) {
+                return 0;
+            } else {
+                pos = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
+            }
+            for (int i = 0; i <= spins; i++) cc__chan_cpu_pause();
+            spins++;
+        }
+    }
+
+    if (ch->elem_size > sizeof(void*)) {
+        return 0;
+    }
+
+    void* queue_val = NULL;
+    cc__chan_build_into(builder, &queue_val, arena);
+    return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
+}
+
+static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena* arena) {
+    if (!ch->use_lockfree || ch->cap == 0 || !ch->buf) return EAGAIN;
+    if (!ch->use_ring_queue && ch->elem_size > sizeof(void*)) return EAGAIN;
+
+    int ok = cc__queue_enqueue_into_value(ch, builder, arena);
+    if (ok && !ch->use_ring_queue) {
+        atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
+    }
+    if (ok) {
+        cc__chan_trace_flow(ch, "send_into_enqueue_try", NULL, 0);
+    }
+    return ok ? 0 : EAGAIN;
+}
+
 /* Wrapper that manages inflight counter automatically */
 static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
     chan_inflight_inc(ch);
@@ -3803,6 +3883,137 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     cc_chan_enqueue(ch, value);
     cc__chan_post_enqueue_notify(ch, /*mu_held=*/1);
     return 0;
+}
+
+int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    if (!ch || !builder.fn || value_size == 0) return EINVAL;
+    if (ch->is_owned || ch->is_ordered) return EINVAL;
+
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
+        if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
+            cc_chan_lock(ch);
+            if (ch->closed) {
+                int rc2 = cc__chan_send_close_errno(ch);
+                pthread_mutex_unlock(&ch->mu);
+                return rc2;
+            }
+            if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
+            cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+            if (rnode) {
+                cc__chan_build_into(builder, rnode->data, arena);
+                atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
+                if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
+                if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+                if (rnode->is_select && rnode->select_group) {
+                    cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
+                    atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+                }
+                if (rnode->fiber) {
+                    wake_batch_add_chan(ch, rnode->fiber);
+                } else {
+                    pthread_cond_signal(&ch->not_empty);
+                }
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_signal_recv_ready(ch);
+                return 0;
+            }
+            pthread_mutex_unlock(&ch->mu);
+        }
+
+        chan_inflight_inc(ch);
+        if (ch->closed) {
+            chan_inflight_dec(ch);
+            return cc__chan_send_close_errno(ch);
+        }
+        if (ch->rx_error_closed) {
+            int err = ch->rx_error_code;
+            chan_inflight_dec(ch);
+            return err;
+        }
+        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena);
+        chan_inflight_dec(ch);
+        if (rc == 0) {
+            cc__chan_post_lockfree_enqueue_signal_receivers(ch, NULL,
+                                                            "send_into_enqueue_seen_waiter");
+        }
+        return rc;
+    }
+
+    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
+    if (ch->rx_error_closed) return ch->rx_error_code;
+
+    cc_chan_lock(ch);
+    int err = cc_chan_ensure_buf(ch, value_size);
+    if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    if (ch->closed) {
+        int rc2 = cc__chan_send_close_errno(ch);
+        pthread_mutex_unlock(&ch->mu);
+        return rc2;
+    }
+    if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
+
+    if (ch->cap == 0) {
+        cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+        if (!rnode) {
+            pthread_mutex_unlock(&ch->mu);
+            return EAGAIN;
+        }
+        cc__chan_build_into(builder, rnode->data, arena);
+        atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
+        if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
+        if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+        if (rnode->is_select && rnode->select_group) {
+            cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
+            atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+        }
+        if (rnode->fiber) {
+            wake_batch_add_chan(ch, rnode->fiber);
+        } else {
+            pthread_cond_signal(&ch->not_empty);
+        }
+        pthread_mutex_unlock(&ch->mu);
+        wake_batch_flush();
+        cc__chan_signal_recv_ready(ch);
+        return 0;
+    }
+
+    if (ch->use_lockfree && (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
+        chan_inflight_inc(ch);
+        pthread_mutex_unlock(&ch->mu);
+        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena);
+        chan_inflight_dec(ch);
+        if (rc == 0) {
+            cc__chan_post_lockfree_enqueue_signal_receivers(ch, NULL,
+                                                            "send_into_try_enqueue_signal");
+        }
+        return rc;
+    }
+
+    if (ch->count == ch->cap) {
+        pthread_mutex_unlock(&ch->mu);
+        return EAGAIN;
+    }
+    void* slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
+    cc__chan_build_into(builder, slot, arena);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->count++;
+    cc__chan_trace_flow(ch, "send_into_enqueue_mutex", slot, 0);
+    cc__chan_post_enqueue_notify(ch, /*mu_held=*/1);
+    return 0;
+}
+
+int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    int rc = cc_chan_try_send_into(ch, builder, value_size, arena);
+    if (rc != EAGAIN) return rc;
+
+    void* tmp = malloc(value_size);
+    if (!tmp) return ENOMEM;
+    cc__chan_build_into(builder, tmp, arena);
+    rc = cc_chan_send(ch, tmp, value_size);
+    free(tmp);
+    return rc;
 }
 
 /* Owned channel (pool) recv: try to get from pool, or create if empty and under capacity */

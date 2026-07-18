@@ -106,19 +106,47 @@ enum {
     redis_conn_out_buf_bytes = 1024,
 };
 
-typedef enum ReplyProvenance {
-    REPLY_PROVENANCE_STATIC = 0,
-    REPLY_PROVENANCE_REQUEST_BORROWED,
-    REPLY_PROVENANCE_DB_BORROWED,
-    REPLY_PROVENANCE_VALUE,
-} ReplyProvenance;
+typedef struct RedisPipelineBatch {
+    size_t cap;
+    size_t submitted;
+    size_t replies_pending;
+} RedisPipelineBatch;
 
-typedef struct ReplySlot {
-    void* payload;
-} ReplySlot;
+typedef enum RedisReplySendStatus {
+    REDIS_REPLY_SEND_QUEUED = 0,
+    REDIS_REPLY_SEND_CLOSED,
+} RedisReplySendStatus;
 
-typedef ReplySlot*[~k_pipeline_reply_cap 1:1 >] ReplyTx;
-typedef ReplySlot*[~k_pipeline_reply_cap 1:1 <] ReplyRx;
+typedef enum RedisPipelineStatus {
+    REDIS_PIPELINE_OK = 0,
+    REDIS_PIPELINE_OWNER_UNAVAILABLE,
+    REDIS_PIPELINE_REPLY_CLOSED,
+    REDIS_PIPELINE_WRITE_FAILED,
+} RedisPipelineStatus;
+
+static inline RedisPipelineBatch redis_pipeline_batch_start(void) {
+    return (RedisPipelineBatch){
+        .cap = (size_t)k_pipeline_reply_cap,
+        .submitted = 0,
+        .replies_pending = 0,
+    };
+}
+
+static inline bool redis_pipeline_batch_has_room(const RedisPipelineBatch* batch) {
+    return batch && batch->submitted < batch->cap;
+}
+
+static inline bool redis_pipeline_batch_is_full(const RedisPipelineBatch* batch) {
+    return batch && batch->submitted == batch->cap;
+}
+
+static inline void redis_pipeline_batch_accept(RedisPipelineBatch* batch) {
+    batch->submitted++;
+    batch->replies_pending++;
+}
+
+typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
+typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
 typedef struct RedisConn {
     _Atomic size_t refs;
@@ -130,10 +158,9 @@ typedef struct RedisConn {
      * conn->release() that may be last-ref so the pool's backing
      * arena outlives the slot walk in pool_free. */
     CCArenaPool req_pool;
-    /* Owner stores queued ReplySlot objects here. Most replies stay lightweight
-     * and serialize later on the client side; borrowed request/DB bulk payloads
-     * are copied here before crossing that boundary. Reset once per drained
-     * batch. */
+    /* Backing storage for reply bytes that cannot safely borrow request/DB
+     * memory across the owner-to-client channel handoff. Reset after the
+     * client drains one reply batch. */
     CCArena reply_arena;
     /* Owner → client reply stream (1:1, depth k_pipeline_reply_cap). */
     ReplyTx reply_tx;
@@ -176,10 +203,10 @@ static CCIoError net_to_io_error(CCNetError err) {
     }
 }
 
-/* Line-oriented stderr: build with @string on a short-lived scratch arena (stack
- * buffer + @create), then fprintf the NUL-terminated C string from cc_string_cstr
- * (tests/string_template_smoke.ccs). Prefer plain fprintf inside @async bodies:
- * @create/@string in owner_loop error arms confused the async autoblock pass. */
+/* Line-oriented stderr via @string scratch arena (see string_template_smoke).
+ * In @async bodies, wrap @create/@string in @nonblocking — default autoblock
+ * would dispatch arena init/diag to the blocking pool (see
+ * tests/async_create_string_nonblocking_smoke.ccs). */
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
@@ -292,14 +319,6 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 
 #include "redis_resp.cch"
 
-@noblock static RespReader rr_init_nb(char* data, size_t cap) {
-    return rr_init(data, cap);
-}
-
-@noblock static void cc_arena_reset_nb(CCArena* arena) {
-    cc_arena_reset(arena);
-}
-
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
     if (slice_eq_ignore_case(cmd, "GET") && argc == 1) return REDIS_CMD_GET;
@@ -310,12 +329,8 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     return (RedisCommandKind)-1;
 }
 
-/* RedisReply is ~200 bytes (mostly the 128-byte inline_buf scratch).
- * These constructors deliberately leave inline_buf/arena/data_inline
- * uninitialized: the only fields the normal path reads are kind + data
- * + int_value. Stable-storage fallback uses reply_materialize() only
- * for the rare request-owned reply case, so skipping per-reply `= {0}`
- * still saves ~200 B of zero-init on the GET/SET/INCR hot path. */
+/* Initialize only the fields read for each reply kind; avoid whole-struct
+ * zeroing on the GET/SET/INCR hot path. */
 static RedisReply reply_simple(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_SIMPLE_STRING;
@@ -348,6 +363,7 @@ static RedisReply reply_bulk(CCSlice s) {
 static RedisReply reply_null(void) {
     RedisReply r;
     r.kind = REDIS_REPLY_NULL_BULK;
+    r.data = cc_slice_empty();
     return r;
 }
 
@@ -355,6 +371,7 @@ static RedisReply reply_integer(int64_t v) {
     RedisReply r;
     r.kind = REDIS_REPLY_INTEGER;
     r.int_value = v;
+    r.data = cc_slice_empty();
     return r;
 }
 
@@ -951,9 +968,8 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
     return cc_ok(true);
 }
 
-/* Owner-private dispatch.  Called only from owner_loop, so db access
- * here needs no lock.  `@noblock` forces pass_autoblock to inline
- * each call site rather than bouncing through the threadpool. */
+/* Owner-private dispatch.  `@noblock`: owner runs on the scheduler poll
+ * thread and must not dispatch DB work to the blocking pool. */
 @noblock static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
@@ -1108,64 +1124,71 @@ static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply
     return write_reply_structured(sock, conn, reply);
 }
 
-/* Encode `reply` into `arena`.  On return reply->kind ==
- * REDIS_REPLY_RAW and reply->data points into `arena`, valid for the
- * arena's lifetime. */
-@noblock static char* !>(CCError) reply_alloc_bytes(CCArena* arena, size_t n) {
-    char* p = (char*)cc_arena_alloc(arena, n, 1);
-    if (n > 0 && !p) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
-    return cc_ok(p);
+/* Reply bytes allocated here live until the client drains or tears down the
+ * current pipeline batch and resets conn->reply_arena. */
+@noblock static CCSlice !>(CCError) reply_batch_alloc_slice(CCArena* reply_batch_arena, size_t n) {
+    CCSlice s = cc_arena_alloc_slice_bytes(reply_batch_arena, n);
+    if (n > 0 && !s.ptr) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
+    return cc_ok(s);
 }
 
-@noblock static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
-    if (!reply || !arena) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply materialize null arg"));
+@noblock static bool !>(CCError) reply_encode_into_batch_arena(RedisReply* reply,
+                                                               CCArena* reply_batch_arena) {
+    if (!reply || !reply_batch_arena) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply encode batch null arg"));
+    }
     @errhandler(CCError e) { return cc_err(e); }
 
     switch (reply->kind) {
         case REDIS_REPLY_RAW: {
-            char* dst = reply_alloc_bytes(arena, reply->data.len) !>;
+            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, reply->data.len) !>;
+            char* dst = (char*)stable.ptr;
             if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
-            reply->data = (CCSlice){ .ptr = dst, .len = reply->data.len };
+            reply->data = stable;
             return cc_ok(true);
         }
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
             size_t n = reply->data.len + 3;
-            char* dst = reply_alloc_bytes(arena, n) !>;
+            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
+            char* dst = (char*)stable.ptr;
             dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
             if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
             dst[n - 2] = '\r';
             dst[n - 1] = '\n';
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = stable;
             return cc_ok(true);
         }
         case REDIS_REPLY_BULK_STRING: {
             size_t hdr = resp_bulk_header_len(reply->data.len);
             size_t n = hdr + reply->data.len + 2;
-            char* dst = reply_alloc_bytes(arena, n) !>;
+            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
+            char* dst = (char*)stable.ptr;
             resp_encode_bulk_header_into(dst, reply->data.len);
             if (reply->data.len > 0) memcpy(dst + hdr, reply->data.ptr, reply->data.len);
             dst[n - 2] = '\r';
             dst[n - 1] = '\n';
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = stable;
             return cc_ok(true);
         }
         case REDIS_REPLY_INTEGER: {
             size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = reply_alloc_bytes(arena, n) !>;
+            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
+            char* dst = (char*)stable.ptr;
             resp_encode_integer_into(dst, reply->int_value);
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = n };
+            reply->data = stable;
             return cc_ok(true);
         }
         case REDIS_REPLY_NULL_BULK: {
             CCSlice src = cc_slice_from_cstr("$-1\r\n");
-            char* dst = reply_alloc_bytes(arena, src.len) !>;
+            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, src.len) !>;
+            char* dst = (char*)stable.ptr;
             memcpy(dst, src.ptr, src.len);
             reply->kind = REDIS_REPLY_RAW;
-            reply->data = (CCSlice){ .ptr = dst, .len = src.len };
+            reply->data = stable;
             return cc_ok(true);
         }
         default:
@@ -1173,17 +1196,18 @@ static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply
     }
 }
 
-/* Copy only a bulk payload into reply-owned arena storage.  This isolates the
- * cost of making DB-backed GET replies stable without changing the structured
- * serializer or using try_send/admission. */
-@noblock static bool !>(CCError) reply_copy_bulk_payload(RedisReply* reply, CCArena* arena) {
-    if (!reply || !arena || reply->kind != REDIS_REPLY_BULK_STRING) {
+/* Copy only a bulk payload into batch-arena storage.  DB-backed GET can keep
+ * the structured reply shape as long as its payload no longer borrows DB memory
+ * across the owner-to-client channel handoff. */
+@noblock static bool !>(CCError) reply_copy_bulk_payload_into_batch(RedisReply* reply,
+                                                                   CCArena* reply_batch_arena) {
+    if (!reply || !reply_batch_arena || reply->kind != REDIS_REPLY_BULK_STRING) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply copy bulk invalid arg"));
     }
-    char* dst = reply_alloc_bytes(arena, reply->data.len) !>;
+    CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, reply->data.len) !>;
+    char* dst = (char*)stable.ptr;
     if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
-    reply->data = (CCSlice){ .ptr = dst, .len = reply->data.len };
-    reply->data_inline = 0;
+    reply->data = stable;
     return cc_ok(true);
 }
 
@@ -1271,99 +1295,77 @@ static void redis_conn_release_request(RedisRequest* req) {
     if (conn) conn->release();
 }
 
-typedef struct Reply {
-    ReplyTx tx;
-    CCArena* arena;
-    ReplySlot* slot;
-    void* payload;
-    void* (*payload_ptr)(struct Reply* reply);
-    bool (*send)(struct Reply* reply);
-} Reply;
+@noblock static inline bool redis_slice_is_stable_for_reply_batch(CCSlice data,
+                                                                  CCArena* reply_batch_arena) {
+    if (data.len == 0) return true;
+    if (cc_slice_is_canonical(data)) return true;
+    return cc_slice_is_from_arena_epoch(data, reply_batch_arena);
+}
 
-@noblock static inline void* reply_payload(Reply* reply);
-static inline bool reply_send(Reply* reply);
-
-@noblock static inline Reply !>(CCError) reply_create(ReplyTx tx,
-                                                      CCArena* arena,
-                                                      size_t payload_size,
-                                                      size_t payload_align) {
+@noblock static inline bool !>(CCError) redis_reply_stabilize_for_channel(RedisReply* reply,
+                                                                          CCArena* reply_batch_arena) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (!arena || payload_size == 0 || payload_align == 0) {
-        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply create invalid arg"));
+    if (!reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply stabilize null"));
+    /* Scalar/null replies never borrow external payload bytes. */
+    if (reply->kind == REDIS_REPLY_INTEGER || reply->kind == REDIS_REPLY_NULL_BULK) {
+        return cc_ok(true);
     }
-    ReplySlot* slot = cc_arena_alloc_T(ReplySlot, arena) !>;
-    void* payload = cc_arena_alloc(arena, payload_size, payload_align);
-    if (!payload) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply payload OOM"));
-    slot->payload = payload;
-    return cc_ok((Reply){
-        .tx = tx,
-        .arena = arena,
-        .slot = slot,
-        .payload = payload,
-        .payload_ptr = reply_payload,
-        .send = reply_send,
-    });
-}
-
-@noblock static inline ReplyProvenance redis_reply_provenance(const RedisRequest* req,
-                                                              const RedisReply* reply) {
-    if (!reply) return REPLY_PROVENANCE_VALUE;
-    if (reply->kind != REDIS_REPLY_BULK_STRING) return REPLY_PROVENANCE_STATIC;
-    if (!req) return REPLY_PROVENANCE_VALUE;
-    if (req->kind == REDIS_CMD_PING && req->argc == 1) {
-        return REPLY_PROVENANCE_REQUEST_BORROWED;
+    if (redis_slice_is_stable_for_reply_batch(reply->data, reply_batch_arena)) {
+        return cc_ok(true);
     }
-    if (req->kind == REDIS_CMD_GET) {
-        return REPLY_PROVENANCE_DB_BORROWED;
-    }
-    return REPLY_PROVENANCE_VALUE;
-}
-
-@noblock static inline bool reply_provenance_needs_stable(ReplyProvenance provenance) {
-    return provenance == REPLY_PROVENANCE_REQUEST_BORROWED ||
-           provenance == REPLY_PROVENANCE_DB_BORROWED;
-}
-
-@noblock static inline bool !>(CCError) reply_make_stable(RedisReply* reply,
-                                                          ReplyProvenance provenance,
-                                                          CCArena* arena) {
-    @errhandler(CCError e) { return cc_err(e); }
-    if (provenance == REPLY_PROVENANCE_DB_BORROWED) {
-        reply_copy_bulk_payload(reply, arena) !>;
-    } else if (provenance == REPLY_PROVENANCE_REQUEST_BORROWED) {
-        reply_materialize(reply, arena) !>;
+    if (reply->kind == REDIS_REPLY_BULK_STRING) {
+        reply_copy_bulk_payload_into_batch(reply, reply_batch_arena) !>;
+    } else {
+        reply_encode_into_batch_arena(reply, reply_batch_arena) !>;
     }
     return cc_ok(true);
 }
 
-@noblock static inline bool !>(CCError) redis_reply_prepare_for_send(const RedisRequest* req,
-                                                                     RedisReply* reply,
-                                                                     CCArena* arena) {
-    @errhandler(CCError e) { return cc_err(e); }
-    ReplyProvenance provenance = redis_reply_provenance(req, reply);
-    if (reply_provenance_needs_stable(provenance)) {
-        reply_make_stable(reply, provenance, arena) !>;
+static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr_t arena) {
+    (void)arena;
+    RedisReply* src = (RedisReply*)env;
+    RedisReply* dst = (RedisReply*)slot;
+    if (src && dst) *dst = *src;
+    return NULL;
+}
+
+/* Queue a finished reply into the connection's channel-owned value storage.
+ * Payload bytes remain owned by conn->reply_arena, which the client resets
+ * after it drains or tears down the in-flight batch. */
+@noblock static inline RedisReplySendStatus redis_conn_queue_reply(RedisConn* conn, RedisReply* reply) {
+    if (!conn || !reply) return REDIS_REPLY_SEND_CLOSED;
+    CCClosure2 build_reply = cc_closure2_make(redis_reply_copy_into_channel_slot, reply, NULL);
+    CCResult_bool_CCIoError send_res =
+        cc_chan_result_with(conn->reply_tx.raw,
+                            cc_channel_raw_try_send_into(conn->reply_tx.raw,
+                                                         build_reply,
+                                                         sizeof(RedisReply),
+                                                         &conn->reply_arena),
+                            false);
+    if (send_res.ok && send_res.u.value) return REDIS_REPLY_SEND_QUEUED;
+
+    if (!send_res.ok) {
+        CCIoError e = send_res.u.error;
+        cc_channel_close(conn->reply_tx, e);
+        return REDIS_REPLY_SEND_CLOSED;
     }
-    return cc_ok(true);
+
+    cc_channel_close(conn->reply_tx, cc_io_error(CC_IO_CONNECTION_CLOSED));
+    return REDIS_REPLY_SEND_CLOSED;
 }
 
-@noblock static inline void* reply_payload(Reply* rep) {
-    return rep ? rep->payload : NULL;
-}
-
-/* Finish one reply. The payload is already constructed in the slot's arena
- * storage; send only hands the completed ReplySlot to the receiver. */
-static inline bool reply_send(Reply* rep) {
-    if (!rep || !rep->slot) return false;
-    @errhandler(CCError e) { cc_channel_close(rep->tx, cc_io_error(e)); return false; }
-    return rep->tx.send(rep->slot) !>(e) {
-        cc_channel_close(rep->tx, e);
-        return false;
-    };
+@noblock static inline RedisReplySendStatus !>(CCError) redis_conn_send_reply(RedisConn* conn,
+                                                                              RedisReply* reply) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!conn || !reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply send null arg"));
+    redis_reply_stabilize_for_channel(reply, &conn->reply_arena) !>;
+    return cc_ok(redis_conn_queue_reply(conn, reply));
 }
 
 @noblock static inline void reply_release_batch(RedisConn* conn) {
-    if (conn) cc_arena_reset_nb(&conn->reply_arena);
+    if (!conn) return;
+    /* @nonblocking: cc_arena_reset is synchronous arena bookkeeping. */
+    @nonblocking { cc_arena_reset(&conn->reply_arena); }
 }
 
 /* Owner loop: drain requests, execute, reply.  `db` is stack-local so
@@ -1371,17 +1373,25 @@ static inline bool reply_send(Reply* rep) {
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 1024)) {
-        fprintf(stderr, "redis_idiomatic: db_init failed (out of memory?)\n");
+        char scratch_buf[256];
+        @nonblocking {
+            CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
+            CCString line = @string("redis_idiomatic: db_init failed (out of memory?)", &scratch);
+            redis_diag_fprintln(&line, &scratch);
+        }
         return 1;
     }
     int preload_keys = db_preload_key_count();
     if (preload_keys > 0) {
         db_preload_keys(&db, preload_keys) !> {
+            /* !> handler: @create/@string breaks even inside @nonblocking. */
             fprintf(stderr, "redis_idiomatic: preload failed\n");
             return 1;
         };
         size_t preload_key_count = (size_t)preload_keys;
         {
+            /* Interpolated @string in this @async body still breaks reparse;
+             * literal @string under @nonblocking works (see db_init arm above). */
             char preload_msg[96];
             int preload_msg_len =
                 snprintf(preload_msg, sizeof(preload_msg), "redis_idiomatic: preloaded %zu keys\n", preload_key_count);
@@ -1405,22 +1415,58 @@ static inline bool reply_send(Reply* rep) {
             return 0;
         }
 
-        Reply rep = reply_create(conn->reply_tx,
-                                 &conn->reply_arena,
-                                 sizeof(RedisReply),
-                                 _Alignof(RedisReply)) !>;
-        RedisReply* reply = (RedisReply*)(rep.payload_ptr)(&rep);
-        *reply = execute_request(&db, req) ?>(e) err_reply(e);
-        redis_reply_prepare_for_send(req, reply, rep.arena) !>;
-        (void)(rep.send)(&rep);
+        RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
+        RedisReplySendStatus reply_status = redis_conn_send_reply(conn, &reply) !>;
+        if (reply_status != REDIS_REPLY_SEND_QUEUED) continue;
     }
     return 0;
+}
+
+static RedisPipelineStatus !>(CCError) submit_pipeline_batch(RedisConn* conn,
+                                                            ReqTx req_tx,
+                                                            ReqIter* req_iter,
+                                                            RedisPipelineBatch* batch) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!batch) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "pipeline batch null"));
+
+    batch->submitted = 0;
+    batch->replies_pending = 0;
+    while (redis_pipeline_batch_has_room(batch)) {
+        RedisRequest* req = NULL;
+        bool has = rr_req_iter_next(req_iter, &req) !>;
+        if (!has) break;
+        conn->next_request_id++;
+        CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
+        if (cc_is_err(send_res) || !send_res.u.value) {
+            redis_conn_release_request(req);
+            return cc_ok(REDIS_PIPELINE_OWNER_UNAVAILABLE);
+        }
+        redis_pipeline_batch_accept(batch);
+    }
+
+    return cc_ok(REDIS_PIPELINE_OK);
+}
+
+static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
+    if (!batch) return REDIS_PIPELINE_REPLY_CLOSED;
+    @defer reply_release_batch(conn);
+    while (batch->replies_pending > 0) {
+        RedisReply reply = {0};
+        CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
+        if (cc_is_err(recv_res) || !recv_res.u.value) return REDIS_PIPELINE_REPLY_CLOSED;
+        batch->replies_pending--;
+        if (!write_reply(client, conn, &reply)) return REDIS_PIPELINE_WRITE_FAILED;
+    }
+
+    /* One socket write for the whole submitted request batch. */
+    if (conn->out_len > 0 && !flush_output_buffer(client, conn)) return REDIS_PIPELINE_WRITE_FAILED;
+    return REDIS_PIPELINE_OK;
 }
 
 /* Per-connection driver.  One outer iteration = one
  * submit / drain / flush / rr_fill batch (phases labeled inline). */
 @async int handle_client(CCSocket client, ReqTx req_tx, uint64_t conn_id) {
-    @defer client.close();
+    @defer cc_socket_close(&client);
     /* Teardown: cancel reply_rx first (unblocks any owner-side send
      * stuck on a full reply channel), then drop the ref.  Encoded via
      * the @destroy body plus the registered redis_conn_release. */
@@ -1430,7 +1476,10 @@ static inline bool reply_send(Reply* rep) {
 
     /* Large enough for pipelined redis-benchmark without constant compact moves. */
     char read_buf[64 * 1024];
-    RespReader reader = rr_init_nb(read_buf, sizeof(read_buf));
+    RespReader reader;
+    /* @nonblocking: rr_init is pure struct init; default autoblock would
+     * needlessly wrap it when called from this @async body. */
+    @nonblocking { reader = rr_init(read_buf, sizeof(read_buf)); }
     ReqIter req_iter = rr_req_iter(&reader, conn);
 
     while (true) {
@@ -1442,47 +1491,27 @@ static inline bool reply_send(Reply* rep) {
         }
 
         /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
-         * accepted request owes exactly one ReplySlot back on reply_rx. */
-        size_t batch_cap = (size_t)k_pipeline_reply_cap;
-        size_t reply_slots_pending = 0;
-        size_t submitted = 0;
-        for (size_t s = 0; s < batch_cap; s++) {
-            RedisRequest* req = NULL;
-            bool has = rr_req_iter_next(&req_iter, &req) !>;
-            if (!has) break;
-            conn->next_request_id++;
-            CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
-            if (cc_is_err(send_res)) {
-                redis_conn_release_request(req);
-                (void)write_reply_now(&client, conn,
-                    reply_error("ERR owner channel unavailable"));
-                return 0;
-            }
-            reply_slots_pending++;
-            submitted++;
+         * accepted request owes exactly one RedisReply back on reply_rx. */
+        RedisPipelineBatch batch = redis_pipeline_batch_start();
+        RedisPipelineStatus submit_status =
+            submit_pipeline_batch(conn, req_tx, &req_iter, &batch) !>;
+        if (submit_status == REDIS_PIPELINE_OWNER_UNAVAILABLE) {
+            (void)write_reply_now(&client, conn,
+                reply_error("ERR owner channel unavailable"));
+            return 0;
         }
+        if (submit_status != REDIS_PIPELINE_OK) return 0;
 
-        /* Drain: exactly one ReplySlot per submitted request. This also drives
-         * reply_arena back to quiescence before reply_release_batch. */
-        while (reply_slots_pending > 0) {
-            ReplySlot* slot = NULL;
-            CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &slot);
-            if (cc_is_err(recv_res)) return 0;
-            reply_slots_pending--;
-            RedisReply* reply = slot ? (RedisReply*)slot->payload : NULL;
-            if (!reply || !write_reply(&client, conn, reply)) return 0;
-        }
-        reply_release_batch(conn);
-
-        /* Flush: one socket write for the whole batch. */
-        if (conn->out_len > 0 && !flush_output_buffer(&client, conn)) return 0;
+        /* Drain/flush: exactly one RedisReply per submitted request. */
+        RedisPipelineStatus drain_status = drain_pipeline_batch(&client, conn, &batch);
+        if (drain_status != REDIS_PIPELINE_OK) return 0;
 
         /* If the socket read already buffered more complete/partial commands
          * and this batch stopped only because of k_pipeline_reply_cap, keep parsing
          * before parking on another read.  Otherwise -P larger than the server
          * batch cap can leave commands stranded in read_buf while the fiber
          * waits for new socket readiness that may never arrive. */
-        if (submitted == batch_cap && reader.start < reader.end) continue;
+        if (redis_pipeline_batch_is_full(&batch) && reader.start < reader.end) continue;
 
         /* rr_fill: park until more bytes arrive or EOF. */
         bool more = rr_fill(&reader, &client) !>(e) { write_reply_now(&client, conn, io_err_reply(e)); return 0; };
@@ -1528,7 +1557,7 @@ int main(int argc, char** argv) {
         redis_diag_fprintln(&line, &scratch);
         return 1;
     }
-    @defer ln.close();
+    @defer cc_listener_close(&ln);
 
     /* cc_channel_pair's syntax pass matches the raw endpoint types
      * structurally (it doesn't resolve typedefs), so declare in raw
@@ -1584,7 +1613,7 @@ int main(int argc, char** argv) {
                 uint64_t id = next_conn_id++;
                 (void)server->spawn_async(handle_client(client, req_tx, id));
             }
-            req_ch.close();
+            cc_channel_close(req_ch);
         });
 
         (void)server->spawn_async(owner_loop(req_rx));

@@ -14,3 +14,6 @@ tmp/
 
 # Benchmark output
 benchmarks/generated/
+
+# Transient benchmark scratch dirs (mktemp -d from bench_*.sh)
+.bench_*

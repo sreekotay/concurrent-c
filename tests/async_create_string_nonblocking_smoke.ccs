@@ -1,0 +1,28 @@
+/* @create/@string inside @async must run under @nonblocking: default autoblock
+ * otherwise wraps cc_arena_fixed_buffer and redis_diag_fprintln in
+ * cc_run_blocking_task_intptr and breaks async lowering/reparse. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static void diag_fprintln(CCString* line, CCArena* scratch) {
+    const char* p = cc_string_cstr(line, scratch);
+    if (p) fprintf(stderr, "%s\n", p);
+}
+
+@async int owner_like(void) {
+    char scratch_buf[256];
+    @nonblocking {
+        CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
+        CCString line = @string("async_create_string_nonblocking_smoke: ok", &scratch);
+        diag_fprintln(&line, &scratch);
+    }
+    return 0;
+}
+
+int main(void) {
+    (void)cc_block_on(int, owner_like());
+    printf("async_create_string_nonblocking_smoke: PASS\n");
+    return 0;
+}

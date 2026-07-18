@@ -1,0 +1,33 @@
+/* Preferred spelling: call-site @nonblocking aliases the existing @noblock
+ * edge mode and suppresses autoblock wrapping for exactly one call. */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+@async int serve(intptr_t* wrapped_tid, intptr_t* nonblocking_tid) {
+    record_tid(wrapped_tid);
+    @nonblocking record_tid(nonblocking_tid);
+    return 0;
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t wrapped_tid = 0;
+    intptr_t nonblocking_tid = 0;
+
+    (void)cc_block_on(int, serve(&wrapped_tid, &nonblocking_tid));
+    if (wrapped_tid == 0 || nonblocking_tid == 0) return 2;
+    if (wrapped_tid == main_tid) return 3;
+    if (nonblocking_tid != main_tid) return 1;
+
+    printf("ok\n");
+    return 0;
+}

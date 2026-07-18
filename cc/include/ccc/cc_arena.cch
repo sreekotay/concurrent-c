@@ -372,13 +372,16 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
  * `<prefix><method>` callee names without pulling in the heavier string header.
  * Arena is the LAST argument by convention: read it as "concat(left, right)
  * into arena". */
+static inline CCSlice cc_arena_alloc_slice_bytes(CCArena *arena, size_t len);
+
 static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArena *arena) {
     size_t total = left.len + right.len;
-    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
-    if (!buf) return cc_slice_empty();
+    CCSlice out = arena ? cc_arena_alloc_slice_bytes(arena, total) : cc_slice_empty();
+    char *buf = (char *)out.ptr;
+    if (total > 0 && !buf) return cc_slice_empty();
     if (left.len > 0 && left.ptr) memcpy(buf, left.ptr, left.len);
     if (right.len > 0 && right.ptr) memcpy(buf + left.len, right.ptr, right.len);
-    return cc_slice_from_buffer(buf, total);
+    return out;
 }
 
 /* Generic UFCS name composer for any CamelCase-named receiver whose C
@@ -440,62 +443,13 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     size_t body_start;
     int has_cc_prefix;
     char *buf;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    t = (const char *)recv_type.ptr;
-    tlen = recv_type.len;
-    if (!t || tlen == 0 || !arena) return cc_slice_empty();
-    /* Strip optional leading "struct " / "union " qualifiers that TCC
-       occasionally reports for elaborated type names. */
-    if (tlen >= 7 && memcmp(t, "struct ", 7) == 0) { t += 7; tlen -= 7; }
-    else if (tlen >= 6 && memcmp(t, "union ", 6) == 0) { t += 6; tlen -= 6; }
-    /* Strip trailing pointer stars and whitespace so both `CCFoo` and
-       `CCFoo*` resolve to the same callee. */
-    while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
-    if (tlen == 0) return cc_slice_empty();
-    /* The bare-CC-prefix case (Shape A) prepends `cc_` and strips the
-       leading `CC`; any other CamelCase type (Shape B) emits a direct
-       snake_case transform of the whole name.  Require at least one
-       letter after `CC` for Shape A so we don't produce `cc__method`
-       for the bare `CC` typedef. */
-    has_cc_prefix = (tlen > 2 && t[0] == 'C' && t[1] == 'C' &&
-                     t[2] >= 'A' && t[2] <= 'Z');
-    /* The receiver must *look* like a named C identifier — the hook
-       rejects anything that starts with punctuation, a digit, or
-       whitespace, so non-CamelCase aliases (e.g. primitive-typedef
-       receivers like `size_t`) fall through to the UNRESOLVED path and
-       the existing strict-C-first diagnostic fires.  For user types the
-       first char should be uppercase (CamelCase); lowercase-starting
-       types (e.g. `mytype`) pass through unchanged as `mytype_method`. */
-    if (!((t[0] >= 'A' && t[0] <= 'Z') || (t[0] >= 'a' && t[0] <= 'z') || t[0] == '_'))
-        return cc_slice_empty();
-    /* Pass-through for types whose C API doesn't match the stdlib
-       `cc_<snake_type>_<method>` convention.  The compiler's channel
-       dispatch path handles these — returning the sentinel here lets
-       that path run even though this generic hook is registered globally
-       via `cc_type_register("*", ...)`.
-
-       CCChanTx / CCChanRx (bare + typed family `CCChanTx_int`, etc.)
-       already have dedicated hooks registered in cc_channel.cch;
-       their longer-prefix patterns win over `*` so we never even
-       reach this helper for those — we list them defensively anyway
-       so a future refactor that drops those hooks still compiles. */
-    if ((tlen == 6 && memcmp(t, "CCChan", 6) == 0) ||
-        (tlen >= 8 && memcmp(t, "CCChanTx", 8) == 0 &&
-         (tlen == 8 || t[8] == '_')) ||
-        (tlen >= 8 && memcmp(t, "CCChanRx", 8) == 0 &&
-         (tlen == 8 || t[8] == '_'))) {
-        /* Inline the CC_UFCS_PASS_TAG literal: cc_ufcs.cch (which defines
-           the macro + helper) includes this header, so we can't reference
-           cc_ufcs_pass() here without a circular include. */
-        static const char pass_tag[] = "__cc_ufcs_pass__";
-        return cc_slice_from_buffer((void*)pass_tag, sizeof(pass_tag) - 1);
+        return cc_slice_from_static((void*)pass_tag, sizeof(pass_tag) - 1);
     }
     /* Worst case: every char is uppercase and gains a `_`, so plan for
        2x + optional `cc_` prefix + `_` separator + method. */
     max_total = 3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
-    buf = (char *)cc_arena_alloc(arena, max_total, sizeof(char));
+    out = cc_arena_alloc_slice_bytes(arena, max_total);
+    buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     wi = 0;
     if (has_cc_prefix) {
@@ -522,7 +476,8 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         wi += method.len;
     }
     total = wi;
-    return cc_slice_from_buffer(buf, total);
+    out.len = total;
+    return out;
 }
 
 /* Slice marker types (`CCSliceUnique`, `CCSliceShared`) are ABI-compatible
@@ -539,17 +494,12 @@ static inline CCSlice cc_ufcs_generic_cc_slice_family_c(CCSlice recv_type,
     size_t prefix_len = sizeof(prefix) - 1;
     size_t total;
     char *buf;
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    if (!arena) return cc_slice_empty();
-    total = prefix_len + method.len;
-    buf = (char *)cc_arena_alloc(arena, total, sizeof(char));
+    out = cc_arena_alloc_slice_bytes(arena, total);
+    buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     memcpy(buf, prefix, prefix_len);
     if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
-    return cc_slice_from_buffer(buf, total);
+    return out;
 }
 
 /* ------------------------------------------------------------
@@ -963,6 +913,12 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     uint64_t id = cc_slice_make_id(arena->provenance, false, false, false);
     // len/alen expressed in element count, per slice ABI convention.
     return cc_slice_from_parts(ptr, count, id, count);
+}
+
+static inline bool cc_slice_is_from_arena_epoch(CCSlice slice, const CCArena *arena) {
+    return arena &&
+           !cc_slice_is_untracked(slice) &&
+           cc_slice_alloc_id(slice.id) == arena->provenance;
 }
 
 /* CCArena's UFCS dispatch is covered by the global `*` registration

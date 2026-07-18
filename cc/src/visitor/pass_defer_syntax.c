@@ -566,6 +566,34 @@ static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) 
     return 1;
 }
 
+static int cc__is_if_controlled_continue(const char* s, size_t len, size_t cont_i) {
+    (void)len;
+    if (!s || cont_i == 0) return 0;
+    size_t j = cont_i;
+    while (j > 0 && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
+    if (j == 0 || s[j - 1] != ')') return 0;
+
+    int par = 0;
+    size_t k = j - 1;
+    while (k > 0) {
+        char ch = s[k - 1];
+        if (ch == ')') par++;
+        else if (ch == '(') {
+            if (par == 0) break;
+            par--;
+        }
+        k--;
+    }
+    if (k == 0) return 0;
+
+    size_t t = k - 1;
+    while (t > 0 && (s[t - 1] == ' ' || s[t - 1] == '\t' || s[t - 1] == '\r' || s[t - 1] == '\n')) t--;
+    if (t < 2) return 0;
+    if (s[t - 2] != 'i' || s[t - 1] != 'f') return 0;
+    if (t > 2 && cc__is_ident_char(s[t - 3])) return 0;
+    return 1;
+}
+
 static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size_t* out_end_off) {
     int par = 0, brk = 0, br = 0;
     CCInertScan scan;
@@ -587,6 +615,67 @@ static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size
         i++;
     }
     return 0;
+}
+
+static int cc__find_loop_body_open_after_control(const char* s, size_t len, size_t kw_i,
+                                                 size_t* out_open_i) {
+    size_t j, close_paren, body_i;
+    if (!s || !out_open_i) return 0;
+    j = kw_i;
+    while (j < len && cc__is_ident_char(s[j])) j++;
+    j = cc_skip_ws_and_comments(s, len, j);
+    if (j >= len || s[j] != '(') return 0;
+    if (!cc_find_matching_paren(s, len, j, &close_paren)) return 0;
+    body_i = cc_skip_ws_and_comments(s, len, close_paren + 1);
+    if (body_i < len && s[body_i] == '{') {
+        *out_open_i = body_i;
+        return 1;
+    }
+    return 0;
+}
+
+static int cc__current_line_has_non_ws(const char* out, size_t out_len) {
+    size_t k;
+    if (!out) return 0;
+    k = out_len;
+    while (k > 0 && out[k - 1] != '\n') k--;
+    for (size_t q = k; q < out_len; q++) {
+        if (out[q] != ' ' && out[q] != '\t' && out[q] != '\r') return 1;
+    }
+    return 0;
+}
+
+static void cc__emit_always_defers_for_depth_range(char** out, size_t* out_len, size_t* out_cap,
+                                                   const char* in_src, size_t stmt_i,
+                                                   CCDeferStmt** defers, int* defer_counts,
+                                                   int from_depth, int to_depth) {
+    if (!out || !out_len || !out_cap || !defers || !defer_counts) return;
+    if (from_depth < to_depth) return;
+    int mid_line = cc__current_line_has_non_ws(*out, *out_len);
+    if (mid_line) {
+        for (int d = from_depth; d >= to_depth; d--) {
+            int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+            for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                if (defers[dd][k].cond == DEFER_ALWAYS) {
+                    cc__append_str(out, out_len, out_cap, defers[dd][k].stmt);
+                    cc__append_str(out, out_len, out_cap, " ");
+                }
+            }
+        }
+    } else {
+        size_t indent = cc__source_line_indent_len(in_src, stmt_i);
+        for (int d = from_depth; d >= to_depth; d--) {
+            int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+            for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                if (defers[dd][k].cond == DEFER_ALWAYS) {
+                    cc__append_missing_indent_to(out, out_len, out_cap, indent);
+                    cc__append_str(out, out_len, out_cap, defers[dd][k].stmt);
+                    cc__append_n(out, out_len, out_cap, "\n", 1);
+                }
+            }
+        }
+        cc__append_missing_indent_to(out, out_len, out_cap, indent);
+    }
 }
 
 int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
@@ -634,6 +723,9 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
     int changed = 0;
     CCDeferFunctionScope fn_scope;
     memset(&fn_scope, 0, sizeof(fn_scope));
+    size_t pending_loop_body_open = (size_t)-1;
+    int loop_body_depths[256];
+    int loop_body_count = 0;
 
     for (size_t i = 0; i < in_len; i++) {
         char ch = in_src[i];
@@ -719,6 +811,14 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
             free(out);
             return -1;
+        }
+
+        if (cc__token_is(in_src, in_len, i, "for") ||
+            cc__token_is(in_src, in_len, i, "while")) {
+            size_t loop_open = 0;
+            if (cc__find_loop_body_open_after_control(in_src, in_len, i, &loop_open)) {
+                pending_loop_body_open = loop_open;
+            }
         }
 
         /* `return ...;` should execute all active defers (current scope and outers). */
@@ -1021,6 +1121,59 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             continue;
         }
 
+        /* `continue;` exits scopes nested inside the nearest loop body before
+         * jumping to the loop's next iteration.  Without this rewrite, defers
+         * injected only at `}` are skipped by both plain C continue and the
+         * async state-machine's lowered continue edge. */
+        if (cc__token_is(in_src, in_len, i, "continue") && loop_body_count > 0) {
+            size_t stmt_end = 0;
+            if (!cc__scan_stmt_end_semicolon(in_src, in_len, i, &stmt_end)) {
+                char rel[1024];
+                const char* f = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                                  "malformed 'continue' while lowering @defer (expected ';')");
+                for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
+                free(out);
+                return -1;
+            }
+
+            int loop_body_depth = loop_body_depths[loop_body_count - 1];
+            int has_defers = 0;
+            int is_if_ctl = cc__is_if_controlled_continue(in_src, in_len, i);
+            for (int d = depth; d >= loop_body_depth; d--) {
+                int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                for (int k = 0; k < defer_counts[dd]; k++) {
+                    if (defers[dd][k].cond == DEFER_ALWAYS) {
+                        has_defers = 1;
+                        break;
+                    }
+                }
+                if (has_defers) break;
+            }
+
+            if (has_defers) {
+                if (is_if_ctl) {
+                    cc__append_str(&out, &outl, &outc, "{\n");
+                }
+                cc__emit_always_defers_for_depth_range(&out, &outl, &outc, in_src, i,
+                                                       defers, defer_counts,
+                                                       depth, loop_body_depth);
+                changed = 1;
+            }
+            cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+            if (has_defers && is_if_ctl) {
+                cc__append_str(&out, &outl, &outc, "\n");
+                cc__append_missing_indent_to(&out, &outl, &outc, cc__source_line_indent_len(in_src, i));
+                cc__append_str(&out, &outl, &outc, "}");
+            }
+
+            for (size_t k = i; k < stmt_end; k++) {
+                if (in_src[k] == '\n') line_no++;
+            }
+            i = stmt_end - 1;
+            continue;
+        }
+
         /* `@defer ...;` or `@defer(err) ...;` or `@defer(ok) ...;` */
         if (cc__token_is(in_src, in_len, i, "@defer")) {
             int defer_line = line_no;
@@ -1248,6 +1401,9 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             if (d == 1) {
                 fn_scope.active = 0;
             }
+            if (loop_body_count > 0 && loop_body_depths[loop_body_count - 1] == d) {
+                loop_body_count--;
+            }
             if (depth > 0) depth--;
             cc__append_n(&out, &outl, &outc, &ch, 1);
             continue;
@@ -1282,6 +1438,10 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             depth++;
             int dd = (depth < 0) ? 0 : (depth >= 256 ? 255 : depth);
             return_just_emitted[dd] = 0;
+            if (pending_loop_body_open == i) {
+                if (loop_body_count < 256) loop_body_depths[loop_body_count++] = dd;
+                pending_loop_body_open = (size_t)-1;
+            }
             cc__append_n(&out, &outl, &outc, &ch, 1);
             if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional && !fn_scope.is_void) {
                 cc_sb_append_fmt(&out, &outl, &outc,
