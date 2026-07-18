@@ -166,6 +166,12 @@ char* cc_rewrite_generic_factory_text(const char* src, size_t n, const char* inp
  * NULL = no declarations; (char*)-1 = malformed (diagnostic printed). */
 char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input_path);
 
+/* `Type.method(args)` -> `Type_method(args)` (type-scoped calls). Textual and
+ * pre-parse: a type name in expression position is a C syntax error, so the
+ * UFCS pass never gets to see it. Rewrites only when the lowered Type_method
+ * is visibly used/declared in this file's text. NULL = no changes. */
+char* cc_rewrite_type_scoped_calls_text(const char* src, size_t n);
+
 /* Scan a backtick template literal starting at tick_pos (which must point at '`').
  * On success sets *tick_end_out to the closing backtick index and returns 0. */
 int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);

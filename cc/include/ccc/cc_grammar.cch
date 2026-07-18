@@ -17,6 +17,14 @@
  *   cc_next(Tweet, &r, &out)                schema: next value from a cursor
  *   cc_at_end(Tweet, &r)                    schema: clean EOF vs mid-input
  *
+ * UFCS forms work too — the lowered names follow receiver conventions:
+ *   Tweet.parse(s, n, &arena, &out)   type-scoped -> Tweet_parse(...)
+ *   Json.match(s, n)                  type-scoped -> Json_match(...)
+ *   r.next(&out) / r.at_end()         instance    -> TweetReader_next(&r, ...)
+ *   nd->first() / nd->next(parent)    instance    -> JsonNode_first(nd), ...
+ * Instance dispatch is registered NATIVELY by the engines for every
+ * generated Reader and Node type — no user-written registration.
+ *
  * Every generated splice begins with a manifest comment listing exactly
  * which of these its declaration supports.
  */
@@ -28,7 +36,7 @@
 #define cc_collect(T, ...) T##_collect(__VA_ARGS__)
 #define cc_read(T, ...)    T##_read(__VA_ARGS__)
 #define cc_reader(T, ...)  T##_reader(__VA_ARGS__)
-#define cc_next(T, ...)    T##_next(__VA_ARGS__)
-#define cc_at_end(T, ...)  T##_at_end(__VA_ARGS__)
+#define cc_next(T, ...)    T##Reader_next(__VA_ARGS__)
+#define cc_at_end(T, ...)  T##Reader_at_end(__VA_ARGS__)
 
 #endif /* CCC_CC_GRAMMAR_CCH */

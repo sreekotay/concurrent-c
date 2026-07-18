@@ -37,6 +37,18 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         }
     }
 
+    /* Type-scoped calls (`Tweet.parse(...)` -> `Tweet_parse(...)`) rewrite
+     * AFTER the grammar splice so lowered names emitted by the engines count
+     * as visible; must happen before the C parse (syntax error otherwise). */
+    {
+        char* tsc = cc_rewrite_type_scoped_calls_text(*inout_buf, *inout_len);
+        if (tsc) {
+            free(*inout_buf);
+            *inout_buf = tsc;
+            *inout_len = strlen(tsc);
+        }
+    }
+
     /* Expand CC_GENERIC_FACTORY(Name){...} sugar before anything else so the
      * downstream @comptime if/for + @emit lowering and the comptime collector
      * see canonical @comptime constructs. */

@@ -10996,6 +10996,18 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (!chain) return -1;
     /* Shared phase-1 bucket: normalize CC surface syntax into more canonical
        CC, but do not introduce parser stubs or host-C survival/lowering. */
+    /* @grammar declarations lower FIRST: the generated types (schemas,
+     * Readers, tape Nodes) must be REAL in the canonical stream — the type
+     * registry and comptime collectors are seeded from it, and UFCS receiver
+     * resolution depends on the registry knowing these types. Idempotent:
+     * a stream with no @grammar decls is untouched. Type-scoped calls
+     * (`Tweet.parse(...)`) lower right after, for the same reason. */
+    {
+        char* g = cc_rewrite_grammar_decls_text(chain->src, chain->len, input_path);
+        if (g == (char*)-1) return -1;
+        if (cc_pass_chain_apply(chain, g) < 0) return -1;
+        if (cc_pass_chain_apply(chain, cc_rewrite_type_scoped_calls_text(chain->src, chain->len)) < 0) return -1;
+    }
     /* D2.0: resolve `@comptime if (...)` first — dead branches must be pruned
      * before any other rewrite or instantiation collector sees them. */
     if (!skip_comptime_surface &&

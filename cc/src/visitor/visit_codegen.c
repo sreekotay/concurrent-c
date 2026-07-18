@@ -26,6 +26,7 @@ static double cc__now_ms(void) {
 #include "visitor/pass_strip_markers.h"
 #include "visitor/pass_await_normalize.h"
 #include "visitor/pass_ufcs.h"
+#include "preprocess/grammar_engine.h"
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
 #include "visitor/pass_closure_literal_ast.h"
@@ -3581,6 +3582,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(src_raw);
             free(src_all);
             return EINVAL;
+        }
+        /* Generated grammar types (NameReader, NameNode): the @grammar
+         * engines noted them during the prepare-phase splice; register each
+         * with the NATIVE Type_method hook so instance UFCS (`r.next(&out)`,
+         * `nd.first()`) lowers with no user-written registration. */
+        for (int gi = 0; gi < cc_grammar_pending_ufcs_type_count(); gi++) {
+            const char* tn = cc_grammar_pending_ufcs_type(gi);
+            char tnp[96];
+            if (!tn) continue;
+            (void)cc_symbols_set_type_ufcs_callable(ctx->symbols, tn,
+                    cc_ufcs_grammar_type_method_native_ptr(), NULL, NULL);
+            snprintf(tnp, sizeof tnp, "%s*", tn);
+            (void)cc_symbols_set_type_ufcs_callable(ctx->symbols, tnp,
+                    cc_ufcs_grammar_type_method_native_ptr(), NULL, NULL);
         }
         if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
             fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: collected %zu type-pattern registration(s)\n",
