@@ -1,0 +1,130 @@
+// Engine-generated JSON parser benchmark — every tier the @grammar engines
+// project from ONE grammar: match (recognition), collect (closure fold),
+// DOM (tape), and schema (direct-to-struct via composed narrowing).
+// Run alongside the golden json.h and yyjson via ./bench.sh -g -y.
+// Requires a built compiler: make -C ../../../cc
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) { *out = cc_slice_from_buffer((void*)p, n); return 1; }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++]='\n'; break; case 't': dst[o++]='\t'; break;
+        case 'r': dst[o++]='\r'; break; case '"': dst[o++]='"'; break;
+        case '\\': dst[o++]='\\'; break; case '/': dst[o++]='/'; break;
+        case 'b': dst[o++]='\b'; break; case 'f': dst[o++]='\f'; break;
+        case 'u': { unsigned cp=0; for (int h=0;h<4;h++){char x=p[++k];cp<<=4;
+            cp |= (x>='0'&&x<='9')?(unsigned)(x-'0'):(unsigned)((x|32)-'a'+10);}
+            if (cp<0x80) dst[o++]=(char)cp;
+            else if (cp<0x800){dst[o++]=(char)(0xC0|(cp>>6));dst[o++]=(char)(0x80|(cp&0x3F));}
+            else {dst[o++]=(char)(0xE0|(cp>>12));dst[o++]=(char)(0x80|((cp>>6)&0x3F));dst[o++]=(char)(0x80|(cp&0x3F));}
+            break; }
+        default: dst[o++]=e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  keep [int opt [#'.' some digit]
+                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    value:   [ws [string | number | object | array | "true" | "false" | "null"] ws]
+    member:  [ws string ws #':' value]
+    array:   collect [#'[' ws opt [value any [#',' value]] #']']
+    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+
+@grammar(schema) Tweet {~~~~
+    use Json
+    Json.object [
+        "id"   id:   int Json.number
+        "text" text: Json.string
+        "user" Json.object [ "screen_name" user_name: Json.string ]
+    ]
+~~~~}
+
+@grammar(schema) Feed {~~~~
+    use Json
+    Json.ws
+    Json.object [ "statuses" statuses: Json.array of Tweet ]
+    Json.ws
+~~~~}
+
+static double now_s(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
+static long g_bytes; static long g_keeps;
+static int cb(void* env, int id, CCSlice v){ (void)env;(void)id; g_keeps++; g_bytes += (long)v.len; return 0; }
+
+int main(int argc, char** argv) {
+    const char* fn = argc > 1 ? argv[1] : "twitter.json";
+    int K = argc > 2 ? atoi(argv[2]) : 100, T = argc > 3 ? atoi(argv[3]) : 3;
+    FILE* f = fopen(fn, "rb");
+    if (!f) { perror(fn); return 1; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)n + 1);
+    size_t rd = fread(b, 1, (size_t)n, f); b[rd] = 0; fclose(f);
+    CCArena ar = cc_arena_create((size_t)n * 4 + (16 << 20));
+
+    double best = 1e18;
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) if (!Json_match(b, rd)) { printf("match FAIL\n"); return 1; }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("%-14s gen match    %6.0f MB/s  %8.1f us/parse\n", fn, n*(double)K/best/1e6, best/K*1e6);
+
+    best = 1e18;
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) { g_keeps = 0; g_bytes = 0; cc_arena_reset(&ar);
+            if (!Json_collect(b, rd, &ar, cb, 0)) { printf("collect FAIL\n"); return 1; } }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("%-14s gen collect  %6.0f MB/s  %8.1f us/parse  (keeps=%ld bytes=%ld)\n",
+           fn, n*(double)K/best/1e6, best/K*1e6, g_keeps, g_bytes);
+    best = 1e18;
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) { cc_arena_reset(&ar);
+            if (!Json_parse(b, rd, &ar)) { printf("dom FAIL\n"); return 1; } }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("%-14s gen DOM      %6.0f MB/s  %8.1f us/parse\n",
+           fn, n*(double)K/best/1e6, best/K*1e6);
+
+    /* the schema tier is twitter-shaped ({"statuses":[...]}); skip corpora
+     * it doesn't model rather than failing the whole run */
+    { Feed probe; cc_arena_reset(&ar);
+      if (!Feed_parse(b, rd, &ar, &probe)) {
+          printf("%-14s gen schema     (skipped: corpus is not Feed-shaped)\n", fn);
+          return 0;
+      } }
+    best = 1e18;
+    { size_t sn = 0; unsigned long long tl = 0;
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) { cc_arena_reset(&ar);
+            Feed fd;
+            if (!Feed_parse(b, rd, &ar, &fd)) { printf("schema FAIL\n"); return 1; }
+            sn = fd.statuses_n; tl = 0;
+            for (size_t j = 0; j < fd.statuses_n; j++) tl += fd.statuses[j].text.len; }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("%-14s gen schema   %6.0f MB/s  %8.1f us/parse  (statuses=%zu textbytes=%llu)\n",
+           fn, n*(double)K/best/1e6, best/K*1e6, sn, tl); }
+
+    return 0;
+}
