@@ -997,7 +997,12 @@ static int cc__build_compile_and_load(const char* input_path,
     }
 
     module->dl_handle = dlopen(module->dylib_path, RTLD_NOW | RTLD_LOCAL);
-    if (!module->dl_handle) { snprintf(err_buf, sizeof(err_buf), "dlopen failed: %s", dlerror() ? dlerror() : "unknown error"); goto done; }
+    if (!module->dl_handle) {
+        /* dlerror() clears the pending error on each call: fetch it once. */
+        const char* dl_msg = dlerror();
+        snprintf(err_buf, sizeof(err_buf), "dlopen failed: %s", dl_msg ? dl_msg : "unknown error");
+        goto done;
+    }
 
     for (size_t i = 0; i < n_specs; ++i) {
         out_fn_ptrs[i] = dlsym(module->dl_handle, specs[i].entry_name);

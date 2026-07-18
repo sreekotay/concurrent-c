@@ -13,6 +13,24 @@
 
 #include <ccc/cc_channel.cch>
 
+/* liblfds is an OPTIONAL backend. The native ring queue (use_ring_queue) is
+ * the primary lock-free path; liblfds is only a fallback when ring storage
+ * allocation fails. When the submodule is absent the build proceeds with the
+ * ring queue only (that rare allocation-failure case degrades to the mutex
+ * path, which is where a failed liblfds allocation would have landed too). */
+#if defined(CC_NO_LIBLFDS)
+#  define CC_HAVE_LIBLFDS 0
+#elif defined(__has_include)
+#  if __has_include("../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h")
+#    define CC_HAVE_LIBLFDS 1
+#  else
+#    define CC_HAVE_LIBLFDS 0
+#  endif
+#else
+#  define CC_HAVE_LIBLFDS 0
+#endif
+
+#if CC_HAVE_LIBLFDS
 /* liblfds lock-free data structures */
 #if defined(__APPLE__) && defined(__MACH__)
 #define LFDS711_PAL_OPERATING_SYSTEM
@@ -28,6 +46,7 @@
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_cleanup.c"
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_enqueue.c"
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_dequeue.c"
+#endif /* CC_HAVE_LIBLFDS */
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_exec.cch>
@@ -661,8 +680,10 @@ struct CCChan {
     int use_lockfree;                               /* 1 = use lock-free queue, 0 = use mutex */
     int use_ring_queue;                             /* 1 = use internal ring queue backend */
     size_t lfqueue_cap;                             /* Actual capacity (rounded up to power of 2) */
+#if CC_HAVE_LIBLFDS
     struct lfds711_queue_bmm_state lfqueue_state;   /* liblfds queue state */
     struct lfds711_queue_bmm_element *lfqueue_elements; /* Pre-allocated element array */
+#endif
     cc__ring_cell* ring_cells;                      /* Internal ring queue storage */
     _Atomic size_t ring_head __attribute__((aligned(128)));
     _Atomic size_t ring_tail __attribute__((aligned(128)));
@@ -1725,7 +1746,9 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     ch->use_lockfree = 0;
     ch->use_ring_queue = 0;
     ch->lfqueue_cap = 0;
+#if CC_HAVE_LIBLFDS
     ch->lfqueue_elements = NULL;
+#endif
     ch->ring_cells = NULL;
     atomic_store(&ch->ring_head, 0);
     atomic_store(&ch->ring_tail, 0);
@@ -1752,7 +1775,9 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
             }
             ch->use_ring_queue = 1;
             ch->use_lockfree = 1;
-        } else {
+        }
+#if CC_HAVE_LIBLFDS
+        else {
             /* Ring allocation failed: fall back to liblfds. */
             size_t alloc_size_lfds = sizeof(struct lfds711_queue_bmm_element) * lfcap;
             size_t align_lfds = LFDS711_PAL_ATOMIC_ISOLATION_IN_BYTES;
@@ -1765,6 +1790,7 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
                 ch->use_lockfree = 1;
             }
         }
+#endif
         /* If allocation fails, fall back to mutex-based (use_lockfree remains 0) */
     }
     
@@ -2082,10 +2108,12 @@ void cc_chan_free(CCChan* ch) {
     }
     
     /* Clean up lock-free queue if used */
+#if CC_HAVE_LIBLFDS
     if (ch->use_lockfree && ch->lfqueue_elements) {
         lfds711_queue_bmm_cleanup(&ch->lfqueue_state, NULL);
         free(ch->lfqueue_elements);
     }
+#endif
     if (ch->use_lockfree && ch->ring_cells) {
         free(ch->ring_cells);
     }
@@ -2677,15 +2705,25 @@ static inline int cc__queue_enqueue_raw(CCChan* ch, void* queue_val) {
     if (ch->use_ring_queue) {
         return cc__ring_enqueue_raw(ch, queue_val);
     }
+#if CC_HAVE_LIBLFDS
     return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
+#else
+    (void)queue_val;
+    return 0; /* unreachable: without liblfds, use_lockfree implies use_ring_queue */
+#endif
 }
 
 static inline int cc__queue_dequeue_raw(CCChan* ch, void** out_val) {
     if (ch->use_ring_queue) {
         return cc__ring_dequeue_raw(ch, out_val);
     }
+#if CC_HAVE_LIBLFDS
     void* key = NULL;
     return lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, out_val);
+#else
+    (void)out_val;
+    return 0; /* unreachable: without liblfds, use_lockfree implies use_ring_queue */
+#endif
 }
 
 static inline int cc__queue_enqueue_value(CCChan* ch, const void* value) {
@@ -2727,9 +2765,13 @@ static inline int cc__queue_enqueue_value(CCChan* ch, const void* value) {
         return 0;
     }
 
+#if CC_HAVE_LIBLFDS
     void* queue_val = NULL;
     cc__chan_pack_value(&queue_val, value, ch->elem_size);
     return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
+#else
+    return 0; /* unreachable: without liblfds, use_lockfree implies use_ring_queue */
+#endif
 }
 
 static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value) {
@@ -2772,6 +2814,7 @@ static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value) {
         return 0;
     }
 
+#if CC_HAVE_LIBLFDS
     void* val = NULL;
     void* key = NULL;
     if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val)) {
@@ -2779,6 +2822,9 @@ static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value) {
     }
     cc__chan_unpack_value(out_value, val, ch->elem_size);
     return 1;
+#else
+    return 0; /* unreachable: without liblfds, use_lockfree implies use_ring_queue */
+#endif
 }
 
 static inline void chan_inflight_inc(CCChan* ch) {
@@ -2887,9 +2933,14 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
         return 0;
     }
 
+#if CC_HAVE_LIBLFDS
     void* queue_val = NULL;
     cc__chan_build_into(builder, &queue_val, arena);
     return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
+#else
+    (void)builder; (void)arena;
+    return 0; /* unreachable: without liblfds, use_lockfree implies use_ring_queue */
+#endif
 }
 
 static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena* arena) {
@@ -5599,7 +5650,8 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
 
 typedef struct {
     CCChan* ch;
-    void* buf;           /* for send: source; for recv: dest */
+    void* buf;           /* for send: source (points at owned_buf); for recv: caller dest */
+    void* owned_buf;     /* send-only: task-owned copy of the value (freed on drop) */
     size_t elem_size;
     const CCDeadline* deadline;
     int is_send;         /* 1=send, 0=recv */
@@ -5762,6 +5814,8 @@ static int cc__chan_task_wait(void* frame) {
 }
 
 static void cc__chan_task_drop(void* frame) {
+    CCChanTaskFrame* f = (CCChanTaskFrame*)frame;
+    if (f && f->owned_buf) free(f->owned_buf);
     free(frame);
 }
 
@@ -5772,8 +5826,17 @@ CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size)
     CCChanTaskFrame* f = (CCChanTaskFrame*)calloc(1, sizeof(CCChanTaskFrame));
     if (!f) return invalid;
 
+    /* Own a copy of the value: send_task defers the enqueue across polls, so a
+     * bare pointer to the caller's value (typically a stack/async-frame temp
+     * materialized for the by-address parameter) would be read after its scope
+     * ends — a stack-use-after-scope confirmed by ASan on @await tx.send(v).
+     * The frame is heap-lived; the copy rides with it and is freed on drop. */
+    f->owned_buf = malloc(value_size);
+    if (!f->owned_buf) { free(f); return invalid; }
+    memcpy(f->owned_buf, value, value_size);
+
     f->ch = ch;
-    f->buf = (void*)value;  /* Note: caller must ensure value outlives task */
+    f->buf = f->owned_buf;
     f->elem_size = value_size;
     f->deadline = cc_current_deadline();
     f->is_send = 1;

@@ -96,6 +96,12 @@ static inline bool cc_slice_is_subslice_id(uint64_t id) { return (id & CC_SLICE_
 static inline bool cc_slice_is_canonical_id(uint64_t id) {
     return (id & CC_SLICE_ID_ALLOC_MASK) == CC_SLICE_ID_CANONICAL_ALLOC;
 }
+static inline uint64_t cc_slice_alloc_id(uint64_t id) { return id & CC_SLICE_ID_ALLOC_MASK; }
+static inline bool cc_slice_is_untracked_id(uint64_t id) { return id == CC_SLICE_ID_UNTRACKED; }
+static inline bool cc_slice_is_unique(CCSlice s) { return cc_slice_is_unique_id(s.id); }
+static inline bool cc_slice_is_transferable(CCSlice s) { return cc_slice_is_transferable_id(s.id); }
+static inline bool cc_slice_is_subslice(CCSlice s) { return cc_slice_is_subslice_id(s.id); }
+static inline bool cc_slice_is_canonical(CCSlice s) { return cc_slice_is_canonical_id(s.id); }
 static inline bool cc_slice_is_untracked(CCSlice s) { return cc_slice_is_untracked_id(s.id); }
 
 static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
@@ -105,6 +111,27 @@ static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
     return s;
 }
 
+static inline CCSlice cc_slice_from_static(void *ptr, size_t len) {
+    CCSlice s = {ptr, len, cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false, false), len};
+    return s;
+}
+
+static inline CCSlice cc_slice_hdr_slice(CCSliceHdr *sh) {
+    if (!sh) return cc_slice_empty();
+    return cc_slice_from_buffer(sh->ptr, sh->len);
+}
+
+static inline CCSlice cc_slice_from_parts(void *ptr,
+                                          size_t len,
+                                          uint64_t id,
+                                          size_t available_len) {
+    CCSlice s = {ptr, len, id, available_len};
+    return s;
+}
+
+static inline CCSlice cc_slice_from_cstr(const char *cstr) {
+    if (!cstr) return cc_slice_empty();
+    size_t len = strlen(cstr);
     return cc_slice_from_static((void *)cstr, len);
 }
 

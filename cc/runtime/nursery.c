@@ -184,6 +184,17 @@ static int cc_nursery_worker_frees_mode(void) {
 /* Defined in channel.c (same translation unit via runtime/concurrent_c.c). */
 void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner);
 
+/* Channel-close is routed through this hook so that programs which never
+ * register a closing channel carry no static reference to cc_chan_close —
+ * letting --gc-sections drop the whole channel-close cluster (~4KB) from
+ * channel-free binaries. cc_nursery_add_closing_chan — the only path that
+ * makes closing_count nonzero — installs it; the teardown loops only consult
+ * it when closing_count > 0, so the pointer is always set before it is
+ * needed (both writes publish under the same nursery mutex). Cost tracks
+ * source behavior: no close_on in the program, no channel code in the
+ * binary. */
+static void (*g_cc__nursery_chan_close)(CCChan*) = NULL;
+
 int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx) {
     return cc_nursery_add_closing_chan(n, tx.raw);
 }
@@ -683,11 +694,12 @@ int cc_nursery_wait(CCNursery* n) {
         }
     }
 
-    /* Close registered channels */
+    /* Close registered channels (hook is installed by add_closing_chan,
+     * the only path that makes closing_count nonzero). */
     for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i]) {
+        if (n->closing[i] && g_cc__nursery_chan_close) {
             uint64_t step0 = timing ? nursery_rdtsc() : 0;
-            cc_chan_close(n->closing[i]);
+            g_cc__nursery_chan_close(n->closing[i]);
             uint64_t step1 = timing ? nursery_rdtsc() : 0;
             if (timing) {
                 close_cycles += step1 - step0;
@@ -722,7 +734,7 @@ void cc_nursery_free(CCNursery* n) {
     /* Worker-frees mode: tasks[] entries are stale pointers; the worker
      * already returned each fiber to the v2 pool on MCO_DEAD. */
     for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i]) cc_chan_close(n->closing[i]);
+        if (n->closing[i] && g_cc__nursery_chan_close) g_cc__nursery_chan_close(n->closing[i]);
     }
     free(n->tasks);
     free(n->closing);
@@ -744,6 +756,8 @@ int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
         n->closing = nc;
         n->closing_cap = new_cap;
     }
+    /* Install the close hook before publishing the count (see decl above). */
+    g_cc__nursery_chan_close = cc_chan_close;
     n->closing[n->closing_count++] = ch;
     pthread_mutex_unlock(&n->mu);
     /* Mark channel with its autoclose owner for optional runtime guard. */

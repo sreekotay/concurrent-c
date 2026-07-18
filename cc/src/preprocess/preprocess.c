@@ -5882,11 +5882,27 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     (void)paren_close;  /* unused but kept for clarity */
                     j++;  /* skip ')' */
                     
-                    /* Scan back from '!>' to find the ok type start */
-                    /* First skip any whitespace before '!>' */
+                    /* Scan back from '!>' to find the ok type start.
+                     * Skip whitespace before '!>', including newlines and cpp
+                     * '# line' directive lines: when the ok type is a macro
+                     * (e.g. `bool` -> `_Bool` via <stdbool.h> pulled in by the
+                     * prelude), cpp separates the expanded type from the sigil
+                     * with line markers, which a space/tab-only skip mistook
+                     * for a missing type. */
                     size_t ty_end = sigil_pos;
-                    while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
-                    
+                    for (;;) {
+                        while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t' ||
+                                              src[ty_end - 1] == '\n' || src[ty_end - 1] == '\r')) ty_end--;
+                        if (ty_end == 0) break;
+                        /* If the line ending at ty_end is a '# ...' directive, drop it and retry. */
+                        size_t line_start = ty_end;
+                        while (line_start > 0 && src[line_start - 1] != '\n') line_start--;
+                        size_t p = line_start;
+                        while (p < ty_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                        if (p < ty_end && src[p] == '#') { ty_end = line_start; continue; }
+                        break;
+                    }
+
                     size_t ty_start = cc__scan_back_to_delim(src, ty_end);
                     ty_start = cc__skip_leading_decl_specs(src, ty_start);
                     
@@ -6424,16 +6440,88 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
     return out;
 }
 
+/* ---- @async body ranges (for @await context sensitivity) --------------- */
+/* Byte ranges [start,end) of @async function bodies. Inside these, `@await`
+ * must degrade to the bare `await` marker consumed by the async lowering —
+ * stripping it (the sync-context behavior below) deletes the suspension
+ * point, so e.g. `if (@await tx.send(v) != 0)` lowered the channel op as a
+ * plain call and produced type errors. Outside these ranges the historical
+ * sync-context behavior is unchanged. */
+typedef struct { size_t start, end; } CCAsyncBodyRange;
+#define CC__MAX_ASYNC_BODY_RANGES 512
+
+static int cc__collect_async_body_ranges(const char* src, size_t n,
+                                         CCAsyncBodyRange* out, int cap) {
+    int count = 0;
+    size_t i = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (i + 6 <= n && count < cap) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '@' && memcmp(src + i + 1, "async", 5) == 0 &&
+            (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            /* Find the body '{' at paren depth 0 (stop at ';' = declaration). */
+            size_t j = i + 6;
+            int pdepth = 0, found = 0;
+            CCScannerState jscan;
+            cc_scanner_init(&jscan);
+            while (j < n) {
+                if (cc_scanner_skip_non_code(&jscan, src, n, &j)) continue;
+                char d = src[j];
+                if (d == '(') pdepth++;
+                else if (d == ')') { if (pdepth > 0) pdepth--; }
+                else if (d == '{' && pdepth == 0) { found = 1; break; }
+                else if (d == ';' && pdepth == 0) break;
+                j++;
+            }
+            if (found) {
+                size_t b = j;
+                int bdepth = 0;
+                CCScannerState bscan;
+                cc_scanner_init(&bscan);
+                while (b < n) {
+                    if (cc_scanner_skip_non_code(&bscan, src, n, &b)) continue;
+                    if (src[b] == '{') bdepth++;
+                    else if (src[b] == '}') {
+                        bdepth--;
+                        if (bdepth == 0) { b++; break; }
+                    }
+                    b++;
+                }
+                out[count].start = j;
+                out[count].end = b;
+                count++;
+                i = b;
+                continue;
+            }
+        }
+        i++;
+    }
+    return count;
+}
+
+static int cc__pos_in_async_body(const CCAsyncBodyRange* ranges, int count, size_t pos) {
+    for (int r = 0; r < count; r++) {
+        if (pos >= ranges[r].start && pos < ranges[r].end) return 1;
+    }
+    return 0;
+}
+
 /* Rewrite @await <expr> in any context.
- * If <expr> is a call to a known @async function, emit cc_block_on(T, expr).
- * Otherwise strip @await and keep the expression (channel ops etc. are
- * already blocking in synchronous context). */
+ * Inside an @async body: rewrite to the bare `await` marker (the async
+ * lowering owns operand extent and suspension semantics).
+ * In synchronous context: if <expr> is a call to a known @async function,
+ * emit cc_block_on(T, expr); otherwise strip @await and keep the expression
+ * (channel ops etc. are already blocking in synchronous context). */
 char* cc__rewrite_at_await(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     /* Early exit only if `@await` is absent outside comments/strings. */
     if (!cc_contains_token_top_level(src, n, "@await")) return NULL;
 
     cc__collect_async_ret_types(src, n);
+
+    static CCAsyncBodyRange async_ranges[CC__MAX_ASYNC_BODY_RANGES];
+    int async_range_count = cc__collect_async_body_ranges(src, n, async_ranges, CC__MAX_ASYNC_BODY_RANGES);
 
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -6456,6 +6544,18 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
         if (c == '@' && i+6 <= n && memcmp(src+i+1,"await",5) == 0
                      && (i+6 >= n || !cc_is_ident_char(src[i+6]))) {
             size_t j = i + 6;
+
+            /* Inside an @async body: degrade to the bare `await` marker and
+             * let the async lowering own operand extent + suspension. */
+            if (cc__pos_in_async_body(async_ranges, async_range_count, i)) {
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "await");
+                last_emit = j;
+                changed = 1;
+                i = j;
+                continue;
+            }
+
             while (j < n && (src[j]==' '||src[j]=='\t')) j++;
 
             /* Flush source up to (not including) '@await' */

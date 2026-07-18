@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <errno.h>
 #include <limits.h>
-#include <alloca.h>
 #include <stdint.h>
 #include <math.h>
 
@@ -60,6 +59,29 @@ typedef struct CCStringHeapHeader {
     CCArena *arena;
     uint64_t provenance;
 } CCStringHeapHeader;
+
+/* Sticky failure poison.
+ *
+ * CCString is an OWNER (CCSlice borrows; CCString owns its bytes, inline or
+ * via the arena recorded in its heap header). Growth/OOM failures poison the
+ * owner instead of leaving a silently truncated string behind: without this,
+ * a mid-template push that fails is skipped while later pushes succeed,
+ * yielding corrupted output with no signal — and an owner that failed to
+ * acquire must be distinguishable from an owner of the empty string.
+ * `len == CC_STRING_LEN_POISON` is unreachable for valid strings (reserve
+ * rejects need > UINT32_MAX, so len is always at most UINT32_MAX - 1), so
+ * the sentinel costs no struct space and keeps the 16-byte ABI.
+ *
+ * Poisoned semantics: every push* is a sticky no-op returning NULL,
+ * cc_string_len() reads 0, as_slice() is empty, cstr() is NULL. Check with
+ * cc_string_failed(); cc_string_clear() resets to a valid empty string. */
+#define CC_STRING_LEN_POISON UINT32_MAX
+static inline bool cc_string_failed(const CCString *str) {
+    return str && str->len == CC_STRING_LEN_POISON;
+}
+static inline void cc__string_poison(CCString *str) {
+    if (str) str->len = CC_STRING_LEN_POISON;
+}
 
 // ------------------------- Parse error enums ------------------------------
 typedef enum {
@@ -221,7 +243,8 @@ char* cc_xjb_f32_to_string(float v, char *buf);
 #endif
 #endif
 static inline size_t cc_string_len(const CCString *str) {
-    return str ? str->len : 0;
+    if (!str || cc_string_failed(str)) return 0;
+    return str->len;
 }
 static inline size_t cc_string_cap(const CCString *str) {
     return str ? str->cap : 0;
@@ -274,10 +297,11 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     size_t old_total;
     size_t new_total;
     if (!str) return NULL;
-    if (need > UINT32_MAX) return NULL;
+    if (cc_string_failed(str)) return NULL;
+    if (need > UINT32_MAX) { cc__string_poison(str); return NULL; }
     if (cc_string_is_inline(str) && need <= CC_STRING_INLINE_CAP) return cc_string_data(str);
     if (!cc_string_is_inline(str) && cc_string_heap_data(str) && need <= str->cap) return cc_string_data(str);
-    if (!arena) return NULL;
+    if (!arena) { cc__string_poison(str); return NULL; }
     if (need <= CC_STRING_INLINE_CAP) {
         if (str->cap == 0) {
             str->cap = CC_STRING_INLINE_CAP;
@@ -288,7 +312,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     new_cap = str->cap ? str->cap : CC_STRING_INLINE_CAP;
     if (new_cap < CC_STRING_INLINE_CAP) new_cap = CC_STRING_INLINE_CAP;
     while (new_cap < need) new_cap <<= 1;
-    if (new_cap > UINT32_MAX) return NULL;
+    if (new_cap > UINT32_MAX) { cc__string_poison(str); return NULL; }
     if (cc_string_is_inline(str) || !cc_string_heap_data(str)) {
         saved_len = str->len + 1;
         if (saved_len > sizeof(saved)) saved_len = sizeof(saved);
@@ -296,7 +320,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
         if (saved_len > 0) memcpy(saved, str->inline_buf, saved_len);
         new_total = sizeof(CCStringHeapHeader) + new_cap;
         header = (CCStringHeapHeader *)cc_arena_alloc(arena, new_total, _Alignof(CCStringHeapHeader));
-        if (!header) return NULL;
+        if (!header) { cc__string_poison(str); return NULL; }
         header->arena = arena;
         header->provenance = arena->provenance;
         str->data = (char *)(header + 1);
@@ -305,12 +329,12 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
         return cc_string_heap_data(str);
     }
     header = cc__string_heap_header(str);
-    if (!header || !header->arena) return NULL;
+    if (!header || !header->arena) { cc__string_poison(str); return NULL; }
     old_arena = header->arena;
     old_total = sizeof(CCStringHeapHeader) + str->cap;
     new_total = sizeof(CCStringHeapHeader) + new_cap;
     header = (CCStringHeapHeader *)cc_arena_realloc(old_arena, arena, header, old_total, new_total, _Alignof(CCStringHeapHeader));
-    if (!header) return NULL;
+    if (!header) { cc__string_poison(str); return NULL; }
     header->arena = arena;
     header->provenance = arena->provenance;
     str->data = (char *)(header + 1);
@@ -361,7 +385,7 @@ static inline CCString* cc__string_append_u64_impl(CCString *str, uint64_t v, CC
     char *dst;
     size_t pos = sizeof(buf);
     size_t out_len;
-    if (!str) return NULL;
+    if (!str || cc_string_failed(str)) return NULL;
     do {
         uint64_t q = v / 10;
         buf[--pos] = (char)('0' + (v - q * 10));
@@ -822,21 +846,21 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str, CCArena *a
 static inline CCString cc_string_with_capacity(CCArena *arena, size_t cap) {
     CCString s = cc_string_new();
     if (cap > CC_STRING_INLINE_CAP) {
-        if (!cc_string_reserve(&s, cap, arena)) { CCString empty = {0}; return empty; }
+        (void)cc_string_reserve(&s, cap, arena); /* failure poisons s */
     }
     return s;
 }
 static inline CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
     CCString s = cc_string_new();
-    if (!cc_string_push(&s, slice, arena)) { CCString empty = {0}; return empty; }
+    (void)cc_string_push(&s, slice, arena); /* failure poisons s */
     return s;
 }
 static inline CCString* cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena *arena) {
     char *dst;
     size_t new_len;
-    if (!str) return NULL;
+    if (!str || cc_string_failed(str)) return NULL;
     new_len = (size_t)str->len + (size_t)len;
-    if (new_len > UINT32_MAX) return NULL;
+    if (new_len > UINT32_MAX) { cc__string_poison(str); return NULL; }
     dst = cc_string_reserve(str, new_len + 1, arena);
     if (!dst) return NULL;
     if (buffer && len) memcpy(dst + str->len, buffer, (size_t)len);
@@ -865,7 +889,7 @@ static inline uint64_t cc_string_provenance(const CCString *str) {
 }
 static inline CCSlice cc_string_as_slice(const CCString *str) {
     const char *data;
-    if (!str) return cc_slice_empty();
+    if (!str || cc_string_failed(str)) return cc_slice_empty();
     data = cc_string_data_const(str);
     if (!data) return cc_slice_empty();
     return cc_slice_from_parts((void *)data, str->len,
@@ -874,7 +898,7 @@ static inline CCSlice cc_string_as_slice(const CCString *str) {
 }
 static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
     char *data;
-    if (!str) return NULL;
+    if (!str || cc_string_failed(str)) return NULL;
     if (str->len + 1 > str->cap) {
         data = cc_string_reserve(str, str->len + 1, arena);
         if (!data) return NULL;
@@ -890,15 +914,37 @@ static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
 // ------------------------- Parse helpers ----------------------------------
 #ifndef CC_COMPTIME
 
+/* strtoll/strtod need a NUL-terminated buffer, but slice length is caller
+ * (potentially wire) controlled — an unbounded alloca here is a stack
+ * overflow waiting for a long token. Small slices copy to a fixed stack
+ * buffer; larger ones (rare: only pathological-but-legal inputs like
+ * thousand-digit floats or huge leading whitespace) take a malloc/free
+ * round-trip. */
+#ifndef CC_SLICE_PARSE_STACK_MAX
+#define CC_SLICE_PARSE_STACK_MAX 256
+#endif
+
+static inline char *cc__slice_parse_buf(CCSlice s, char *stack_buf, size_t stack_cap) {
+    char *buf = (s.len + 1 <= stack_cap) ? stack_buf : (char *)malloc(s.len + 1);
+    if (!buf) return NULL;
+    memcpy(buf, s.ptr, s.len);
+    buf[s.len] = '\0';
+    return buf;
+}
+
 static inline CCResult_int64_t_CC_I64ParseError cc_slice_parse_i64(CCSlice s, int base) {
     if (!s.ptr || s.len == 0) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
+    char stack_buf[CC_SLICE_PARSE_STACK_MAX];
+    char *buf = cc__slice_parse_buf(s, stack_buf, sizeof(stack_buf));
+    if (!buf) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
     char *end = NULL;
-    char *buf = (char *)alloca(s.len + 1);
-    memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     long long v = strtoll(buf, &end, base);
-    if (end == buf) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
-    if ((v == LLONG_MAX || v == LLONG_MIN) && errno == ERANGE) {
+    bool no_parse = (end == buf);
+    bool range = ((v == LLONG_MAX || v == LLONG_MIN) && errno == ERANGE);
+    if (buf != stack_buf) free(buf);
+    if (no_parse) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
+    if (range) {
         return cc_err_CCResult_int64_t_CC_I64ParseError(v == LLONG_MAX ? CC_I64_PARSE_OVERFLOW : CC_I64_PARSE_UNDERFLOW);
     }
     return cc_ok_CCResult_int64_t_CC_I64ParseError((int64_t)v);
@@ -906,13 +952,17 @@ static inline CCResult_int64_t_CC_I64ParseError cc_slice_parse_i64(CCSlice s, in
 
 static inline CCResult_uint64_t_CC_U64ParseError cc_slice_parse_u64(CCSlice s, int base) {
     if (!s.ptr || s.len == 0) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
+    char stack_buf[CC_SLICE_PARSE_STACK_MAX];
+    char *buf = cc__slice_parse_buf(s, stack_buf, sizeof(stack_buf));
+    if (!buf) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
     char *end = NULL;
-    char *buf = (char *)alloca(s.len + 1);
-    memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     unsigned long long v = strtoull(buf, &end, base);
-    if (end == buf) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
-    if (v == ULLONG_MAX && errno == ERANGE) {
+    bool no_parse = (end == buf);
+    bool range = (v == ULLONG_MAX && errno == ERANGE);
+    if (buf != stack_buf) free(buf);
+    if (no_parse) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
+    if (range) {
         return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_OVERFLOW);
     }
     return cc_ok_CCResult_uint64_t_CC_U64ParseError((uint64_t)v);
@@ -920,13 +970,17 @@ static inline CCResult_uint64_t_CC_U64ParseError cc_slice_parse_u64(CCSlice s, i
 
 static inline CCResult_double_CC_F64ParseError cc_slice_parse_f64(CCSlice s) {
     if (!s.ptr || s.len == 0) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
+    char stack_buf[CC_SLICE_PARSE_STACK_MAX];
+    char *buf = cc__slice_parse_buf(s, stack_buf, sizeof(stack_buf));
+    if (!buf) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
     char *end = NULL;
-    char *buf = (char *)alloca(s.len + 1);
-    memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     double v = strtod(buf, &end);
-    if (end == buf) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
-    if ((v == HUGE_VAL || v == -HUGE_VAL) && errno == ERANGE) {
+    bool no_parse = (end == buf);
+    bool range = ((v == HUGE_VAL || v == -HUGE_VAL) && errno == ERANGE);
+    if (buf != stack_buf) free(buf);
+    if (no_parse) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
+    if (range) {
         return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_OVERFLOW);
     }
     return cc_ok_CCResult_double_CC_F64ParseError(v);

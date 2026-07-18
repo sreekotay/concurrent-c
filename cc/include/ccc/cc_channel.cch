@@ -433,6 +433,15 @@ static inline void cc_channel_raw_free(CCChan* ch) { cc_chan_free(ch); }
 static inline int cc_channel_raw_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_send(ch, value, value_size);
 }
+static inline int cc_channel_raw_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    return cc_chan_send_into(ch, builder, value_size, arena);
+}
+static inline int cc_channel_raw_recv(CCChan* ch, void* out_value, size_t value_size) {
+    return cc_chan_recv(ch, out_value, value_size);
+}
+static inline int cc_channel_raw_try_send(CCChan* ch, const void* value, size_t value_size) {
+    return cc_chan_try_send(ch, value, value_size);
+}
 static inline int cc_channel_raw_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
     return cc_chan_try_send_into(ch, builder, value_size, arena);
 }
