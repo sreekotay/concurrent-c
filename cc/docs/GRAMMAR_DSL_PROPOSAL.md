@@ -14,7 +14,13 @@ unknown-member skip all DERIVED from the rule's decomposed structure) and
 product forms `f: G.rule`, `f: int G.rule`, count-driven `f: bytes len` /
 `f: items S count` (length-prefixed formats), and incremental `Name_read`.
 Explicit `fields:`/`items:` directives remain as the fallback for grammars
-not in narrowable shape. Smokes: `tests/grammar_rules_*.ccs`,
+not in narrowable shape. **Composition is optional, never a toll**: a schema
+may carry an inline `rules [ ... ]` section instead of `use` (self-contained
+single block, bare rule refs), and a rules grammar may `include Other` to
+splice a previously declared grammar's rules verbatim (entry point stays the
+includer's first own rule). All composition — use / inline / include /
+narrowing — resolves at compile time to the same flat specialized C; nothing
+parses through an intermediate. Smokes: `tests/grammar_rules_*.ccs`,
 `tests/grammar_schema_twitter_smoke.ccs` (composed vs DOM cross-validation,
 composed vs directive agreement), `tests/grammar_schema_resp_smoke.ccs`.
 The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`
