@@ -7,11 +7,16 @@
 `@grammar(schema)` (typed direct-to-struct over a `use`d rules grammar: fields
 bound at event sites via extract-mode keeps, key-length dispatch for unordered
 members, unknown values skipped through the match tier, `items Schema` arena
-arrays). Schema v1 dialect: `use G`, `fields:`/`items:` structural directives
-(open/close/sep/kv/key/pad/else), body terms `G.rule`, `f: G.rule`,
-`f: int G.rule`, `f: items S`, nested `fields [...]` (flattening into the one
-output struct). Smokes: `tests/grammar_rules_*.ccs`,
-`tests/grammar_schema_twitter_smoke.ccs` (schema vs DOM cross-validation).
+arrays). Schema dialect: `use G`; **composition first** — `G.rule [ "k" term
+... ]` narrows a member-list rule (delimiters, pads, key/kv shape, and the
+unknown-member skip all DERIVED from the rule's decomposed structure) and
+`f: G.rule of S` narrows a list rule to an arena array of schema S; plus
+product forms `f: G.rule`, `f: int G.rule`, count-driven `f: bytes len` /
+`f: items S count` (length-prefixed formats), and incremental `Name_read`.
+Explicit `fields:`/`items:` directives remain as the fallback for grammars
+not in narrowable shape. Smokes: `tests/grammar_rules_*.ccs`,
+`tests/grammar_schema_twitter_smoke.ccs` (composed vs DOM cross-validation,
+composed vs directive agreement), `tests/grammar_schema_resp_smoke.ccs`.
 The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`
 (first step of `cc_comptime_prepare_source`) and lowers
 `@grammar(engine) Name {SENT … SENT}` to a synthesized `@comptime` block calling

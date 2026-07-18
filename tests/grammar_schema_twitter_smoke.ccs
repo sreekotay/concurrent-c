@@ -67,7 +67,30 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     object:  collect [#'{' ws opt [member any [#',' member]] #'}']
 ~~~~}
 
+// COMPOSITION: the schemas below narrow the grammar's OWN rules. Json.object
+// and Json.member already say what '{', '}', ',', ':', ws, and the
+// unknown-member value are — the schema derives all of it structurally and
+// contributes only the bindings. Change the grammar's shape and every schema
+// follows; nothing is described twice.
 @grammar(schema) Tweet {~~~~
+    use Json
+    Json.object [
+        "id"   id:   int Json.number
+        "text" text: Json.string
+        "user" Json.object [ "screen_name" user_name: Json.string ]
+    ]
+~~~~}
+
+@grammar(schema) Feed {~~~~
+    use Json
+    Json.ws
+    Json.object [ "statuses" statuses: Json.array of Tweet ]
+    Json.ws
+~~~~}
+
+// legacy surface: explicit structural directives (kept for formats whose
+// grammar is not in narrowable shape) — must agree with the composed Tweet
+@grammar(schema) TweetM {~~~~
     use Json
     fields: open #'{' close #'}' sep #',' kv #':'
             key Json.string pad Json.ws else Json.value
@@ -76,16 +99,6 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
         "text" text: Json.string
         "user" fields [ "screen_name" user_name: Json.string ]
     ]
-~~~~}
-
-@grammar(schema) Feed {~~~~
-    use Json
-    fields: open #'{' close #'}' sep #',' kv #':'
-            key Json.string pad Json.ws else Json.value
-    items:  open #'[' close #']' sep #',' pad Json.ws
-    Json.ws
-    fields [ "statuses" statuses: items Tweet ]
-    Json.ws
 ~~~~}
 
 /* ---- DOM oracle: navigate the tape for the same fields ---- */
@@ -146,6 +159,18 @@ int main(void) {
         /* malformed */
         if (Tweet_parse("{\"id\":}", 7, &arena, &e2)) { printf("FAIL: malformed accepted\n"); return 1; }
         if (Tweet_parse("{} junk", 7, &arena, &e2)) { printf("FAIL: trailing junk accepted\n"); return 1; }
+        /* composed (narrowed) and directive-built schemas must agree */
+        {
+            const char* s2 = "{ \"x\" : 1 , \"id\" : 7 , \"user\" : { \"screen_name\" : \"ab\" } }";
+            Tweet a; TweetM b;
+            if (!Tweet_parse(s2, strlen(s2), &arena, &a) || !TweetM_parse(s2, strlen(s2), &arena, &b)) {
+                printf("FAIL: composed/manual parse\n"); return 1;
+            }
+            if (a.id != b.id || a.id != 7 ||
+                a.user_name.len != b.user_name.len || a.user_name.len != 2) {
+                printf("FAIL: composed/manual disagree\n"); return 1;
+            }
+        }
     }
 
     /* corpus: schema extraction vs DOM navigation must agree exactly */
