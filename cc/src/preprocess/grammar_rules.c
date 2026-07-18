@@ -105,6 +105,7 @@ typedef struct {
 
     RNode nodes[R_MAX_NODES]; int nnodes;
     int entry_idx, entry_set;   /* first rule declared at include-depth 0 */
+    unsigned char rule_inc[R_MAX_RULES];   /* rule came from an include */
     int kids[R_MAX_KIDS]; int nkids;
     unsigned char sets[R_MAX_SETS][32]; int nsets;
     char pool[R_MAX_POOL]; int npool;
@@ -403,6 +404,14 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
     return rg_fail(g, p, "unrecognized term");
 }
 
+/* defined with the schema engine below; used by the emitters for readable,
+ * dead-code-free lowered output (byte annotations, escaping, reachability) */
+static const char* rw_chr(int b, char buf[16]);
+static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len);
+static void rw_mark_rule(const RG* g, int r, unsigned char* mark);
+static int rw_pool_needed(const RG* g);
+static void rw_cs_desc(const unsigned char* set, char* out, size_t sz);
+
 /* Is `p` (already ws-skipped) sitting on the next rule header `ident :` ? */
 static int rg_at_rule_header(const RG* g, size_t p) {
     size_t e;
@@ -593,17 +602,36 @@ static int rg_parse_text(RG* g, int depth) {
         if (q >= g->n || g->body[q] != ':') return rg_fail(g, p, "expected ':' after rule name");
         if (e - p >= R_NAME_MAX) return rg_fail(g, p, "rule name too long");
         if (g->nrules >= R_MAX_RULES) return rg_fail(g, p, "too many rules");
+        /* Duplicates are SHADOWING when a factory is involved: a rule declared
+         * in the block overrides one spliced by an include (that's how a
+         * factory is specialized without forking its file), and among includes
+         * the first wins (so diamond includes stay legal). Two block-level
+         * definitions of one name remain an error. */
+        int dup = -1;
         for (int i = 0; i < g->nrules; i++)
             if (strlen(g->rules[i].name) == e - p &&
-                memcmp(g->rules[i].name, g->body + p, e - p) == 0)
-                return rg_fail(g, p, "duplicate rule name");
-        memcpy(g->rules[g->nrules].name, g->body + p, e - p);
-        g->rules[g->nrules].name[e - p] = '\0';
-        g->rules[g->nrules].at = p;
+                memcmp(g->rules[i].name, g->body + p, e - p) == 0) { dup = i; break; }
+        if (dup >= 0 && depth == 0 && !g->rule_inc[dup])
+            return rg_fail(g, p, "duplicate rule name");
         q++;
         int nd = rg_parse_alt(g, &q, 0);
         if (nd < 0) return -1;
+        if (dup >= 0) {
+            if (depth == 0) {              /* block definition overrides include;
+                                            * overrides do NOT claim the entry point */
+                g->rules[dup].node = nd;
+                g->rules[dup].at = p;
+                g->rule_inc[dup] = 0;
+            }
+            /* included duplicate of an existing rule: first wins, skip */
+            p = q;
+            continue;
+        }
+        memcpy(g->rules[g->nrules].name, g->body + p, e - p);
+        g->rules[g->nrules].name[e - p] = '\0';
+        g->rules[g->nrules].at = p;
         g->rules[g->nrules].node = nd;
+        g->rule_inc[g->nrules] = (unsigned char)(depth > 0);
         if (depth == 0 && !g->entry_set) { g->entry_idx = g->nrules; g->entry_set = 1; }
         g->nrules++;
         p = q;
@@ -987,12 +1015,16 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     switch (x->kind) {
     case RN_LIT:
         if (x->b == 1) {
-            eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n",
-                   (int)(unsigned char)g->pool[x->a], fail);
+            char cb[16];
+            int b = (int)(unsigned char)g->pool[x->a];
+            eb_fmt(e, "    if (!(p < n && s[p] == %d /*%s*/)) goto %s;\n    p++;\n",
+                   b, rw_chr(b, cb), fail);
         } else {
-            eb_fmt(e, "    if (!(p + %d <= n && memcmp(s + p, %s__pool + %d, %d) == 0)) goto %s;\n"
+            char lit[64];
+            rs_esc(lit, sizeof lit, (const unsigned char*)g->pool + x->a, x->b);
+            eb_fmt(e, "    if (!(p + %d <= n && memcmp(s + p, %s__pool + %d, %d) == 0)) goto %s;   /* \"%s\" */\n"
                       "    p += %d;\n",
-                   x->b, g->name, x->a, x->b, fail, x->b);
+                   x->b, g->name, x->a, x->b, fail, lit, x->b);
         }
         break;
     case RN_CHARSET:
@@ -1339,7 +1371,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
             eb_fmt(&e, "#define %s_KEEP_%s %d\n", g->name, g->rules[r].name, r);
     }
 
-    if (g->npool > 0 && (want_match || want_build)) {
+    if (g->npool > 0 && (want_match || want_build) && rw_pool_needed(g)) {
+        /* only multi-byte literals read the pool at runtime; otherwise it
+         * carries nothing but compile-time name strings — emit nothing */
         eb_fmt(&e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
         for (int i = 0; i < g->npool; i++) eb_fmt(&e, "%d,", (int)(unsigned char)g->pool[i]);
         eb_fmt(&e, "};\n");
@@ -1347,7 +1381,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     if (g->nsets > 0 && (want_match || want_build)) {
         eb_fmt(&e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
         for (int s = 0; s < g->nsets; s++) {
-            eb_fmt(&e, "  {");
+            char desc[128];
+            rw_cs_desc(g->sets[s], desc, sizeof desc);
+            eb_fmt(&e, "  /* cs%d: %s */\n  {", s, desc);
             for (int i = 0; i < 32; i++) eb_fmt(&e, "%u,", (unsigned)g->sets[s][i]);
             eb_fmt(&e, "},\n");
         }
@@ -1362,11 +1398,13 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      *             sink, no snapshots) and __b_ (unconditional sink), so no
      *             tier pays for the other's mode. */
     {
-        unsigned char skip[R_MAX_RULES], pure[R_MAX_RULES];
+        unsigned char skip[R_MAX_RULES], pure[R_MAX_RULES], mark[R_MAX_RULES];
+        memset(mark, 0, sizeof mark);
+        rw_mark_rule(g, 0, mark);   /* only rules reachable-as-functions emit */
         for (int r = 0; r < g->nrules; r++) {
             int body = g->rules[r].node;
             int aliasable = g->nodes[body].kind == RN_CHARSET || g->nodes[body].kind == RN_LIT;
-            skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 24));
+            skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 24 || !mark[r]));
             pure[r] = (unsigned char)!rk_rule(g, e.K, r);
         }
         for (int r = 0; r < g->nrules; r++) {
@@ -1601,9 +1639,10 @@ typedef struct { char key[S_NAME]; int term; } SKey;
 typedef struct {
     const char* b; size_t n, p;
     int line0;
-    char err[160]; size_t err_at;
+    char err[256]; size_t err_at;
 
     char usename[S_NAME];
+    char usepath[256];                   /* use "path" as Name: file-backed factory */
     const char* rtext; size_t rlen;      /* inline rules [ ... ] section (verbatim) */
     STerm terms[S_MAX_TERMS]; int nterms;
     SKey keys[S_MAX_KEYS]; int nkeys;
@@ -1706,7 +1745,9 @@ static int ss_ruleref(SS* s, char* rname, const char* what) {
     if (!ss_ident(s, un, sizeof un)) return ss_fail(s, s->p, what);
     if (s->usename[0]) {
         if (strcmp(un, s->usename) != 0)
-            return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
+            return ss_fail(s, s->p, "this schema composes with `use` (shared factory): "
+                                    "qualify rule references with the use name; bare names "
+                                    "are for schemas with an inline rules [...] section (private copy)");
         return ss_ruleref_tail(s, rname);
     }
     /* self-contained schema (inline rules): a bare name IS the rule */
@@ -1808,7 +1849,11 @@ static int ss_term(SS* s, int* out_term) {
         return 0;
     }
     if (s->p < s->n && s->b[s->p] == '.') {
-        if (strcmp(id, s->usename) != 0) return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
+        if (!s->usename[0])
+            return ss_fail(s, s->p, "this schema has no `use` — its rules are inline (private): "
+                                    "reference rules bare, or add `use <Grammar>` / `use \"path\" as <Name>`");
+        if (strcmp(id, s->usename) != 0)
+            return ss_fail(s, s->p, "qualified rule reference does not match this schema's `use` name");
         if (ss_ruleref_tail(s, t->rname)) return -1;
         ss_ws(s);
         if (s->p < s->n && s->b[s->p] == '[') {
@@ -1949,8 +1994,23 @@ static int ss_parse(SS* s) {
         size_t save = s->p;
         char id[S_NAME];
         if (ss_ident(s, id, sizeof id) && strcmp(id, "use") == 0) {
-            if (!ss_ident(s, s->usename, sizeof s->usename))
-                return ss_fail(s, s->p, "expected rules grammar name after use");
+            if (ss_peek(s) == '"') {
+                /* use "path.rules" as Name — file-backed shared factory */
+                s->p++;
+                size_t ps = s->p;
+                while (s->p < s->n && s->b[s->p] != '"') s->p++;
+                if (s->p >= s->n) return ss_fail(s, ps, "unterminated use path");
+                size_t pl = s->p - ps;
+                if (pl >= sizeof(s->usepath)) return ss_fail(s, ps, "use path too long");
+                memcpy(s->usepath, s->b + ps, pl); s->usepath[pl] = '\0';
+                s->p++;
+                if (!ss_ident(s, id, sizeof id) || strcmp(id, "as") != 0)
+                    return ss_fail(s, s->p, "expected `as <Name>` after use \"path\"");
+                if (!ss_ident(s, s->usename, sizeof s->usename))
+                    return ss_fail(s, s->p, "expected namespace name after as");
+            } else if (!ss_ident(s, s->usename, sizeof s->usename)) {
+                return ss_fail(s, s->p, "expected rules grammar name or \"path\" after use");
+            }
         } else {
             s->p = save;
         }
@@ -1991,11 +2051,37 @@ static int ss_parse(SS* s) {
 /* ---- registry: rules bodies + schema names, per input file ---- */
 
 typedef struct {
-    char name[S_NAME]; char pfx[S_NAME + 8];
+    char name[S_NAME]; char pfx[S_NAME + 24];
+    char path[512];                  /* nonempty for file-backed factories */
     char* body; size_t blen;
     int matchers_done;
     unsigned char x_done[R_MAX_RULES];
 } SRulesReg;
+
+/* load `relpath` relative to `base_file`'s directory (absolute passes through) */
+static char* cc__load_rel(const char* base_file, const char* relpath,
+                          char* pathbuf, size_t pathbuf_sz, size_t* out_len) {
+    const char* base = base_file ? base_file : "";
+    const char* slash = strrchr(base, '/');
+    size_t bl = (slash && relpath[0] != '/') ? (size_t)(slash - base) + 1 : 0;
+    size_t pl = strlen(relpath);
+    if (bl + pl >= pathbuf_sz) return NULL;
+    memcpy(pathbuf, base, bl);
+    memcpy(pathbuf + bl, relpath, pl);
+    pathbuf[bl + pl] = '\0';
+    FILE* f = fopen(pathbuf, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long fl = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* txt = (char*)malloc(fl > 0 ? (size_t)fl + 1 : 1);
+    if (!txt) { fclose(f); return NULL; }
+    size_t rd = fread(txt, 1, (size_t)fl, f);
+    fclose(f);
+    txt[rd] = '\0';
+    *out_len = rd;
+    return txt;
+}
 
 static SRulesReg cc__rules_reg[8]; static int cc__rules_nreg;
 static char cc__schema_reg[32][S_NAME]; static int cc__schema_nreg;
@@ -2030,6 +2116,36 @@ static const char* cc__rules_body_lookup(const char* name, size_t* len) {
     if (!r) return NULL;
     *len = r->blen;
     return r->body;
+}
+
+/* file-backed factory: `use "path" as Name`. Keyed by RESOLVED path so every
+ * schema using the same file shares one emitted matcher set (the prefix comes
+ * from the first use's alias; later uses may alias differently). */
+static SRulesReg* cc__use_rules_file(const char* base_file, const char* relpath,
+                                     const char* alias) {
+    char full[512];
+    size_t blen = 0;
+    char* body = cc__load_rel(base_file, relpath, full, sizeof(full), &blen);
+    if (!body) return NULL;
+    for (int i = 0; i < cc__rules_nreg; i++) {
+        if (strcmp(cc__rules_reg[i].path, full) == 0) {
+            free(body);
+            return &cc__rules_reg[i];
+        }
+    }
+    if (cc__rules_nreg >= (int)(sizeof(cc__rules_reg) / sizeof(cc__rules_reg[0]))) {
+        free(body);
+        return NULL;
+    }
+    SRulesReg* r = &cc__rules_reg[cc__rules_nreg++];
+    snprintf(r->name, sizeof(r->name), "%s", alias);
+    /* prefix carries the registry slot so a file-backed factory can never
+     * collide with a same-named block factory (or another alias) */
+    snprintf(r->pfx, sizeof(r->pfx), "%s__s%d", alias, cc__rules_nreg - 1);
+    snprintf(r->path, sizeof(r->path), "%s", full);
+    r->body = body; r->blen = blen; r->matchers_done = 0;
+    memset(r->x_done, 0, sizeof(r->x_done));
+    return r;
 }
 
 static int cc__schema_known(const char* name) {
@@ -2076,6 +2192,85 @@ static int rs_rule_has_keep(const RG* g, int r) {
 
 static const char* rs_class(const RG* g, RKeeps* K, int r) {
     return rk_rule(g, (RKeeps*)K, r) ? "m" : "r";
+}
+
+/* ---- lowered-code quality helpers ---- */
+
+/* reachability: which rules are needed AS FUNCTIONS, mirroring the emitter's
+ * inline-vs-call decision exactly. Inlined bodies are walked (their inner
+ * refs may still call); called rules are marked and walked. */
+static void rw_mark_node(const RG* g, int nd, unsigned char* mark);
+
+static void rw_mark_rule(const RG* g, int r, unsigned char* mark) {
+    if (mark[r]) return;
+    mark[r] = 1;
+    rw_mark_node(g, g->rules[r].node, mark);
+}
+
+static void rw_mark_node(const RG* g, int nd, unsigned char* mark) {
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_REF: {
+        int eff = rg_effective(g, nd);
+        if (eff != nd) return;                       /* charset/lit alias: inlined */
+        {
+            int body = g->rules[x->nkids].node;
+            if (rg_inline_size(g, body, 0) <= 24) {  /* inlined: walk, don't mark */
+                if (!mark[x->nkids]) rw_mark_node(g, body, mark);
+                return;
+            }
+        }
+        rw_mark_rule(g, x->nkids, mark);             /* called as a function */
+        return;
+    }
+    case RN_KEEP: case RN_COLLECT: case RN_SOME: case RN_ANY: case RN_OPT:
+        rw_mark_node(g, x->a, mark);
+        return;
+    case RN_SEQ: case RN_ALT:
+        for (int i = 0; i < x->nkids; i++) rw_mark_node(g, g->kids[x->b + i], mark);
+        return;
+    default: return;
+    }
+}
+
+/* does any literal actually need the byte pool at runtime? (single-byte lits
+ * compare inline; the pool otherwise carries only compile-time name strings) */
+static int rw_pool_needed(const RG* g) {
+    for (int i = 0; i < g->nnodes; i++)
+        if (g->nodes[i].kind == RN_LIT && g->nodes[i].b > 1) return 1;
+    return 0;
+}
+
+/* printable-byte annotation for emitted compares: 61 -> "'='". '*' and '/'
+ * stay hex so a comment can never contain a comment terminator. */
+static const char* rw_chr(int b, char buf[16]) {
+    if (b >= 0x21 && b <= 0x7e && b != '\'' && b != '\\' && b != '*' && b != '/')
+        snprintf(buf, 16, "'%c'", (char)b);
+    else if (b == ' ')  snprintf(buf, 16, "' '");
+    else if (b == '\n') snprintf(buf, 16, "nl");
+    else if (b == '\r') snprintf(buf, 16, "cr");
+    else if (b == '\t') snprintf(buf, 16, "tab");
+    else                snprintf(buf, 16, "0x%02X", b & 0xFF);
+    return buf;
+}
+
+/* compact human description of a charset row, for the emitted table */
+static void rw_cs_desc(const unsigned char* set, char* out, size_t sz) {
+    size_t o = 0;
+    int c = 0;
+    out[0] = '\0';
+    while (c < 256 && o + 16 < sz) {
+        if (!((set[c >> 3] >> (c & 7)) & 1)) { c++; continue; }
+        int d = c;
+        while (d + 1 < 256 && ((set[(d + 1) >> 3] >> ((d + 1) & 7)) & 1)) d++;
+        char a[16], b[16];
+        if (d > c)
+            o += (size_t)snprintf(out + o, sz - o, "%s%s-%s", o ? " " : "",
+                                  rw_chr(c, a), rw_chr(d, b));
+        else
+            o += (size_t)snprintf(out + o, sz - o, "%s%s", o ? " " : "", rw_chr(c, a));
+        c = d + 1;
+    }
 }
 
 /* ---- narrowing: decompose a rule's structure instead of re-describing it ---- */
@@ -2209,8 +2404,12 @@ static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len) {
     dst[o] = '\0';
 }
 
-static void rs_emit_matchers(RG* g, EB* e, int* lbl) {
-    if (g->npool > 0) {
+static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) {
+    /* mark == NULL: a SHARED factory (`use`) — later schemas in this file may
+     * need any rule, so all are emitted, tagged unused-ok. mark != NULL: a
+     * private inline grammar — only reachable-as-function rules are emitted. */
+    const char* attr = mark ? "" : "__attribute__((unused)) ";
+    if (g->npool > 0 && rw_pool_needed(g)) {
         eb_fmt(e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
         for (int i = 0; i < g->npool; i++) eb_fmt(e, "%d,", (int)(unsigned char)g->pool[i]);
         eb_fmt(e, "};\n");
@@ -2218,20 +2417,25 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl) {
     if (g->nsets > 0) {
         eb_fmt(e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
         for (int s = 0; s < g->nsets; s++) {
-            eb_fmt(e, "  {");
+            char desc[128];
+            rw_cs_desc(g->sets[s], desc, sizeof desc);
+            eb_fmt(e, "  /* cs%d: %s */\n  {", s, desc);
             for (int i = 0; i < 32; i++) eb_fmt(e, "%u,", (unsigned)g->sets[s][i]);
             eb_fmt(e, "},\n");
         }
         eb_fmt(e, "};\n");
     }
-    for (int r = 0; r < g->nrules; r++)
-        eb_fmt(e, "static int %s__%s_%s(const unsigned char* s, size_t n, size_t* io);\n",
-               g->name, rs_class(g, e->K, r), g->rules[r].name);
+    for (int r = 0; r < g->nrules; r++) {
+        if (mark && !mark[r]) continue;
+        eb_fmt(e, "static %sint %s__%s_%s(const unsigned char* s, size_t n, size_t* io);\n",
+               attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
+    }
     e->mode = 0;
     for (int r = 0; r < g->nrules; r++) {
-        eb_fmt(e, "static int %s__%s_%s(const unsigned char* s, size_t n, size_t* io) {\n"
+        if (mark && !mark[r]) continue;
+        eb_fmt(e, "static %sint %s__%s_%s(const unsigned char* s, size_t n, size_t* io) {\n"
                   "    size_t p = *io;\n    (void)s; (void)n;\n",
-               g->name, rs_class(g, e->K, r), g->rules[r].name);
+               attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
         char fail[16];
         snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
         rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
@@ -2497,8 +2701,9 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     switch (t->kind) {
     case SK_LIT:
         if (t->litlen == 1) {
-            eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n",
-                   (int)t->lit[0], fail);
+            char cb[16];
+            eb_fmt(e, "    if (!(p < n && s[p] == %d /*%s*/)) goto %s;\n    p++;\n",
+                   (int)t->lit[0], rw_chr((int)t->lit[0], cb), fail);
         } else {
             char esc[128];
             rs_esc(esc, sizeof esc, t->lit, t->litlen);
@@ -2569,12 +2774,20 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         goto done;
     }
     SRulesReg* reg = NULL;
-    if (ss->usename[0]) {
+    if (ss->usepath[0]) {
+        reg = cc__use_rules_file(file, ss->usepath, ss->usename);
+        if (!reg) {
+            snprintf(err, err_sz, "@grammar(schema) %s: cannot load factory \"%s\" "
+                     "(path is relative to this source file)", name, ss->usepath);
+            goto done;
+        }
+    } else if (ss->usename[0]) {
         reg = cc__find_rules(ss->usename);
         if (!reg) {
             snprintf(err, err_sz, "@grammar(schema) %s: unknown rules grammar '%s' "
-                     "(a @grammar(rules) %s block must appear earlier in this file)",
-                     name, ss->usename, ss->usename);
+                     "(a @grammar(rules) %s block must appear earlier in this file, "
+                     "or use \"path.rules\" as %s for a file-backed factory)",
+                     name, ss->usename, ss->usename, ss->usename);
             goto done;
         }
     }
@@ -2698,7 +2911,39 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         eb_fmt(&e, "/* generated by @grammar(schema) %s (line %d): %s%s */\n",
                name, line, reg ? "use " : "inline rules", reg ? ss->usename : "");
         if (!reg || !reg->matchers_done) {
-            rs_emit_matchers(g, &e, &lbl);
+            /* private grammars emit only what this schema can reach; rules
+             * the schema CALLS by name (pads, else, bare terms) are roots
+             * even when small, extract bodies contribute their inner refs */
+            unsigned char mark[R_MAX_RULES];
+            memset(mark, 0, sizeof mark);
+            if (ss->rfpad >= 0) rw_mark_rule(g, ss->rfpad, mark);
+            if (ss->rfelse >= 0) rw_mark_rule(g, ss->rfelse, mark);
+            if (ss->ripad >= 0) rw_mark_rule(g, ss->ripad, mark);
+            if (ss->rfkey >= 0) rw_mark_node(g, g->rules[ss->rfkey].node, mark);
+            for (int ti = 0; ti < ss->nterms; ti++) {
+                const STerm* t = &ss->terms[ti];
+                if (t->kind == SK_RULE) rw_mark_rule(g, t->rule, mark);
+                else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT)
+                    rw_mark_node(g, g->rules[t->rule].node, mark);
+                else if (t->kind == SK_NARROW_MEMBERS) {
+                    const RNarrow* w = &t->nw;
+                    rw_mark_rule(g, w->val_rule, mark);
+                    rw_mark_node(g, g->rules[w->key_rule].node, mark);
+                    for (int i = 0; i < w->nlpad; i++) rw_mark_rule(g, w->lpad[i], mark);
+                    for (int i = 0; i < w->ntpad; i++) rw_mark_rule(g, w->tpad[i], mark);
+                    for (int i = 0; i < w->nmpad_a; i++) rw_mark_rule(g, w->mpad_a[i], mark);
+                    for (int i = 0; i < w->nmpad_b; i++) rw_mark_rule(g, w->mpad_b[i], mark);
+                    for (int i = 0; i < w->nvpad_a; i++) rw_mark_rule(g, w->vpad_a[i], mark);
+                    for (int i = 0; i < w->nvpad_b; i++) rw_mark_rule(g, w->vpad_b[i], mark);
+                } else if (t->kind == SK_NARROW_LIST) {
+                    const RNarrow* w = &t->nw;
+                    for (int i = 0; i < w->nlpad; i++) rw_mark_rule(g, w->lpad[i], mark);
+                    for (int i = 0; i < w->ntpad; i++) rw_mark_rule(g, w->tpad[i], mark);
+                    for (int i = 0; i < w->nvpad_a; i++) rw_mark_rule(g, w->vpad_a[i], mark);
+                    for (int i = 0; i < w->nvpad_b; i++) rw_mark_rule(g, w->vpad_b[i], mark);
+                }
+            }
+            rs_emit_matchers(g, &e, &lbl, reg ? NULL : mark);
             if (reg) reg->matchers_done = 1;
         }
         /* extract variants needed by this schema (shared across schemas) */

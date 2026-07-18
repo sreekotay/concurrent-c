@@ -21,6 +21,26 @@
     ws k: key ws #'=' ws v: value ws
 ~~~~}
 
+// use "path" as Name — file-backed SHARED factory: no wrapper block, and
+// every schema using the same path shares one emitted matcher set
+@grammar(schema) PairQ {~~~~
+    use "grammar_factory_kv.rules" as KvF
+    KvF.ws k: KvF.key KvF.ws #'=' KvF.ws v: KvF.value KvF.ws
+~~~~}
+
+@grammar(schema) PairQ2 {~~~~
+    use "grammar_factory_kv.rules" as KvG
+    KvG.pair
+~~~~}
+
+// include + override: a block definition SHADOWS the included rule — this is
+// how a factory is specialized without forking its file. Overrides don't
+// claim the entry point (still `pair`, the file's first rule).
+@grammar(rules) KvHex {~~~~
+    include "grammar_factory_kv.rules"
+    value: keep [some charset [#'0' - #'9' #'a' - #'f']]
+~~~~}
+
 static int slice_is(CCSlice s, const char* want) {
     size_t l = strlen(want);
     return s.len == l && memcmp(s.ptr, want, l) == 0;
@@ -39,6 +59,19 @@ int main(void) {
         if (!Pair_parse("x=7", 3, &arena, &p)) { printf("FAIL: pair parse\n"); return 1; }
         if (!slice_is(p.k, "x") || !slice_is(p.v, "7")) { printf("FAIL: pair fields\n"); return 1; }
     }
+
+    /* specialization 3: file-backed shared factory, no wrapper block */
+    {
+        PairQ q;
+        if (!PairQ_parse("ab = 12", 7, &arena, &q)) { printf("FAIL: pairq parse\n"); return 1; }
+        if (!slice_is(q.k, "ab") || !slice_is(q.v, "12")) { printf("FAIL: pairq fields\n"); return 1; }
+        PairQ2 q2;
+        if (!PairQ2_parse("c=3", 3, &arena, &q2)) { printf("FAIL: pairq2 parse\n"); return 1; }
+    }
+
+    /* include + override: hex values accepted by KvHex, rejected by Kv */
+    if (!KvHex_match("x = ff", 6)) { printf("FAIL: hex override\n"); return 1; }
+    if (Kv_match("x = ff", 6)) { printf("FAIL: base accepts hex\n"); return 1; }
 
     /* runtime instance: a Reader cursor over a pair stream */
     {
