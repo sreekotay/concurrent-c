@@ -780,11 +780,18 @@ int main(int argc, char** argv) {
         }
 
         if (running + 1 > pid_cap) {
+            int old_cap = pid_cap;
             int nc = pid_cap ? pid_cap * 2 : 32;
             pid_t* np = (pid_t*)realloc(pids, (size_t)nc * sizeof(pid_t));
             char** nn = (char**)realloc(pid_names, (size_t)nc * sizeof(char*));
             if (!np || !nn) { fprintf(stderr, "cc_test: OOM\n"); return 2; }
-            pids = np; pid_names = nn; pid_cap = nc;
+            pids = np; pid_names = nn;
+            /* Zero the newly grown name slots. The exit cleanup loop iterates
+             * the full capacity and frees every non-NULL slot, so leaving
+             * these as uninitialised realloc memory frees a garbage pointer —
+             * a crash on glibc that macOS malloc happened to tolerate. */
+            for (int z = old_cap; z < nc; ++z) pid_names[z] = NULL;
+            pid_cap = nc;
         }
         pids[running] = pid;
         pid_names[running] = strdup(stem);
