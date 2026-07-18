@@ -645,6 +645,22 @@ static int rk_node(const RG* g, RKeeps* K, int nd) {
     }
 }
 
+/* Reference resolution: named rules are the dialect's readability device
+ * (`digit`, `strchar`), but a ref to a rule whose whole body is one charset or
+ * literal must not cost a function call per element. rg_effective() sees
+ * through such refs (with a hop guard), so run specialization and inline
+ * emission treat `some digit` exactly like `some charset [...]`. */
+static int rg_effective(const RG* g, int nd) {
+    int hops = 0;
+    while (g->nodes[nd].kind == RN_REF && hops++ < 8) {
+        int body = g->rules[g->nodes[nd].nkids].node;
+        int k = g->nodes[body].kind;
+        if (k == RN_CHARSET || k == RN_LIT) nd = body;
+        else break;
+    }
+    return nd;
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
 typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; } EB;
@@ -685,10 +701,13 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     case RN_SKIP:
         eb_fmt(e, "    if (!(p < n)) goto %s;\n    p++;\n", fail);
         break;
-    case RN_REF:
+    case RN_REF: {
+        int eff = rg_effective(g, nd);
+        if (eff != nd) { rg_emit_node(g, e, eff, fail, lbl, rid); break; }
         eb_fmt(e, "    if (!%s__r_%s(c, s, n, &p)) goto %s;\n",
                g->name, g->rules[x->nkids].name, fail);
         break;
+    }
     case RN_KEEP: {
         int k = (*lbl)++;
         eb_fmt(e, "    { size_t ka%d = p;\n", k);
@@ -790,9 +809,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         break;
     }
     case RN_ANY:
-    case RN_SOME:
-        if (g->nodes[x->a].kind == RN_CHARSET) {
-            int cs = g->nodes[x->a].a;
+    case RN_SOME: {
+        int eff = rg_effective(g, x->a);
+        if (g->nodes[eff].kind == RN_CHARSET) {
+            int cs = g->nodes[eff].a;
             if (x->kind == RN_SOME) {   /* first element is required */
                 eb_fmt(e, "    if (!(p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u))))) goto %s;\n"
                           "    p++;\n", g->name, cs, fail);
@@ -839,6 +859,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                        k, k, br, k, k);
         break;
         }
+    }
     }
 }
 
