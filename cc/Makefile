@@ -87,6 +87,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/template_scan.c \
 	src/preprocess/comptime_prepare.c \
 	src/preprocess/grammar_seam.c \
+	src/preprocess/grammar_rules.c \
 	src/preprocess/cpp_expand.c \
 	src/preprocess/type_registry.c \
 	src/preprocess/type_graph.c \
