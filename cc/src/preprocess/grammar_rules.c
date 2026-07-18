@@ -2,18 +2,30 @@
  * Builtin @grammar engine dispatch + the `rules` engine: a Rebol/Red
  * PARSE-inspired recognition dialect compiled to specialized C.
  *
- * v1 (this file): full dialect parse -> IR -> NAIVE but CORRECT emitter.
+ * v2 (this file): full dialect parse -> IR -> NAIVE but CORRECT emitter,
+ * recognition (`cc_match` layer) plus span collection (`cc_collect` layer).
+ * KEEP semantics: `keep term` logs the child's matched span [start,end) tagged
+ * with the ENCLOSING RULE's index (exported as #define <Name>_KEEP_<rule>).
+ * The log is coupled to the cursor: every backtracking construct restores
+ * nlog alongside p, so keeps from failed branches are never observable. On a
+ * successful full match, <Name>_collect replays the log through the caller's
+ * callback (the C lowering of the CC closure surface in spec/cc_serdes.md
+ * "Streaming Consumption"; a nonzero callback return stops and fails the
+ * collect). Log-then-replay today; immediate flush at committed positions is
+ * a planned optimization via the FIRST-set analysis, with no API change.
  * The emitted code is a set of mutually recursive matchers, one per rule:
  *
- *     static int <Name>__r_<rule>(const char* s, size_t n, size_t* io);
- *     static int <Name>_match(const char* s, size_t n);   // first rule, full input
+ *     static int <Name>__r_<rule>(<Name>__ctx* c, const unsigned char* s, size_t n, size_t* io);
+ *     static int <Name>_match(const char* s, size_t n);               // recognition
+ *     static int <Name>_collect(const char* s, size_t n, cb, env);    // keeps -> cb
  *
  * Dialect surface (v1):
  *     rule:    <alt>                       ; rule ends at next `name:` at depth 0
  *     alt:     seq { '|' seq }             ; PEG ordered choice, backtracks pos
  *     seq:     { term }
  *     term:    'some' term | 'any' term | 'opt' term      ; repetition (PEG greedy)
- *            | 'keep' term | 'collect' term               ; accepted, transparent in v1
+ *            | 'keep' term                                ; log matched span (v2)
+ *            | 'collect' term                             ; transparent (entry generated always)
  *            | 'skip'                                     ; consume one byte
  *            | 'charset' '[' items ']'                    ; byte set (bitmap)
  *            | 'complement' charset-term                  ; inverted byte set
@@ -56,7 +68,7 @@
 
 /* ------------------------------------------------------------------ IR ---- */
 
-enum { RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP };
+enum { RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP, RN_KEEP };
 
 enum {
     R_MAX_NODES = 1024,
@@ -284,8 +296,18 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
         *io = p;
         return nd;
     }
-    if (rg_kw(g, p, "keep", &after) || rg_kw(g, p, "collect", &after)) {
-        /* v1: transparent (recognition only). Collection lands with the DOM emitter. */
+    if (rg_kw(g, p, "keep", &after)) {
+        p = after;
+        int child = rg_parse_term(g, &p, depth);
+        if (child < 0) return -1;
+        int nd = rg_node(g, RN_KEEP, at);
+        if (nd < 0) return -1;
+        g->nodes[nd].a = child;
+        *io = p;
+        return nd;
+    }
+    if (rg_kw(g, p, "collect", &after)) {
+        /* transparent: the collect entry point is generated unconditionally */
         p = after;
         int child = rg_parse_term(g, &p, depth);
         if (child < 0) return -1;
@@ -451,8 +473,12 @@ static void eb_fmt(EB* e, const char* fmt, ...) {
 }
 
 /* Emit statements matching node `nd`; on mismatch: `goto <fail>;` with the
- * cursor restored by the construct that owns <fail>. `p` is the cursor var. */
-static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl) {
+ * cursor restored by the construct that owns <fail>. `p` is the cursor var.
+ * `c` is the collect context (NULL under <Name>_match): keeps append spans to
+ * its log, and every backtracking construct restores the log length alongside
+ * the cursor — so a failed branch's keeps are never observable. `rid` is the
+ * enclosing rule index (the keep id). */
+static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl, int rid) {
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
     case RN_LIT:
@@ -474,23 +500,31 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl)
         eb_fmt(e, "    if (!(p < n)) goto %s;\n    p++;\n", fail);
         break;
     case RN_REF:
-        eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
+        eb_fmt(e, "    if (!%s__r_%s(c, s, n, &p)) goto %s;\n",
                g->name, g->rules[x->nkids].name, fail);
         break;
+    case RN_KEEP: {
+        int k = (*lbl)++;
+        eb_fmt(e, "    { size_t ka%d = p;\n", k);
+        rg_emit_node(g, e, x->a, fail, lbl, rid);
+        eb_fmt(e, "    if (c && !%s__push(c, %d, ka%d, p)) goto %s;\n    }\n",
+               g->name, rid, k, fail);
+        break;
+    }
     case RN_SEQ:
         for (int i = 0; i < x->nkids; i++)
-            rg_emit_node(g, e, g->kids[x->b + i], fail, lbl);
+            rg_emit_node(g, e, g->kids[x->b + i], fail, lbl, rid);
         break;
     case RN_ALT: {
         int k = (*lbl)++;
-        eb_fmt(e, "    { size_t sv%d = p;\n", k);
+        eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
             int last = (i == x->nkids - 1);
             snprintf(br, sizeof(br), "La%d_%d", k, i);
-            rg_emit_node(g, e, g->kids[x->b + i], last ? br : br, lbl);
+            rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            eb_fmt(e, "%s: p = sv%d;\n", br, k);
+            eb_fmt(e, "%s: p = sv%d; if (c) c->nlog = lv%d;\n", br, k, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
         }
         eb_fmt(e, "Lok%d: ; }\n", k);
@@ -500,31 +534,34 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl)
         int k = (*lbl)++;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        eb_fmt(e, "    { size_t sv%d = p;\n", k);
-        rg_emit_node(g, e, x->a, br, lbl);
-        eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
+        eb_fmt(e, "    { size_t sv%d = p; size_t lv%d = c ? c->nlog : 0;\n", k, k);
+        rg_emit_node(g, e, x->a, br, lbl, rid);
+        eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+               k, br, k, k, k);
         break;
     }
     case RN_ANY: {
         int k = (*lbl)++;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
-        rg_emit_node(g, e, x->a, br, lbl);
-        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
-               k, k, br, k, k);
+        eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
+               k, k, k, k);
+        rg_emit_node(g, e, x->a, br, lbl, rid);
+        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+               k, k, br, k, k, k);
         break;
     }
     case RN_SOME: {
         /* child once (required), then greedy any */
-        rg_emit_node(g, e, x->a, fail, lbl);
+        rg_emit_node(g, e, x->a, fail, lbl, rid);
         int k = (*lbl)++;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
-        rg_emit_node(g, e, x->a, br, lbl);
-        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
-               k, k, br, k, k);
+        eb_fmt(e, "    { size_t sv%d; size_t lv%d;\n    for (;;) { sv%d = p; lv%d = c ? c->nlog : 0;\n",
+               k, k, k, k);
+        rg_emit_node(g, e, x->a, br, lbl, rid);
+        eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; if (c) c->nlog = lv%d;\nLok%d: ; }\n",
+               k, k, br, k, k, k);
         break;
     }
     }
@@ -535,10 +572,40 @@ static char* rg_emit(const RG* g, int origin_line) {
     EB e = { &out, &len, &cap };
     int lbl = 0;
 
-    eb_fmt(&e, "/* generated by @grammar(rules) %s (line %d): %d rule(s), recognition (v1) */\n",
+    eb_fmt(&e, "/* generated by @grammar(rules) %s (line %d): %d rule(s), match + collect (v2) */\n",
            g->name, origin_line, g->nrules);
     eb_fmt(&e, "typedef struct { int rule_count; } %s;\n", g->name);
     eb_fmt(&e, "static inline int %s_rule_count(void) { return %d; }\n", g->name, g->nrules);
+    /* collect context: span log with cursor-coupled rollback (nlog restores
+     * alongside p, so failed-branch keeps are never replayed). */
+    eb_fmt(&e, "typedef struct { struct { int id; size_t a, b; }* log; size_t nlog, cap; } %s__ctx;\n",
+           g->name);
+    eb_fmt(&e, "static int %s__push(%s__ctx* c, int id, size_t a, size_t b) {\n"
+               "    if (c->nlog == c->cap) {\n"
+               "        size_t nc = c->cap ? c->cap * 2 : 64;\n"
+               "        void* nl = realloc(c->log, nc * sizeof(*c->log));\n"
+               "        if (!nl) return 0;\n"
+               "        c->log = nl; c->cap = nc;\n"
+               "    }\n"
+               "    c->log[c->nlog].id = id; c->log[c->nlog].a = a; c->log[c->nlog].b = b;\n"
+               "    c->nlog++; return 1;\n}\n", g->name, g->name);
+    /* keep ids: the enclosing rule's index, exported per rule containing keeps */
+    for (int r = 0; r < g->nrules; r++) {
+        /* reachable-keep scan (iterative stack over the rule's subtree) */
+        int stack[R_MAX_NODES]; int sp = 0, haskeep = 0;
+        stack[sp++] = g->rules[r].node;
+        while (sp > 0) {
+            const RNode* x = &g->nodes[stack[--sp]];
+            if (x->kind == RN_KEEP) { haskeep = 1; break; }
+            if (x->kind == RN_SEQ || x->kind == RN_ALT)
+                for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
+            else if (x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+                stack[sp++] = x->a;
+            /* RN_REF: keeps inside other rules belong to those rules' ids */
+        }
+        if (haskeep)
+            eb_fmt(&e, "#define %s_KEEP_%s %d\n", g->name, g->rules[r].name, r);
+    }
 
     if (g->npool > 0) {
         eb_fmt(&e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
@@ -555,25 +622,40 @@ static char* rg_emit(const RG* g, int origin_line) {
         eb_fmt(&e, "};\n");
     }
     for (int r = 0; r < g->nrules; r++)
-        eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io);\n",
-               g->name, g->rules[r].name);
+        eb_fmt(&e, "static int %s__r_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
+               g->name, g->rules[r].name, g->name);
 
     for (int r = 0; r < g->nrules; r++) {
-        eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                   "    size_t p = *io;\n    (void)s; (void)n;\n",
-               g->name, g->rules[r].name);
+        eb_fmt(&e, "static int %s__r_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
+                   "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
+               g->name, g->rules[r].name, g->name);
         char fail[16];
         snprintf(fail, sizeof(fail), "Lf%d", lbl++);
-        rg_emit_node(g, &e, g->rules[r].node, fail, &lbl);
+        rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
         eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
     }
 
-    /* Entry: first declared rule, full-input match. */
+    /* Entries (first declared rule, full-input):
+     *   <Name>_match(s, n)                       recognition only
+     *   <Name>_collect(s, n, cb, env)            keeps replayed through cb on success;
+     *                                            cb nonzero return stops (returns 0). */
     eb_fmt(&e, "static int %s_match(const char* s, size_t n) {\n"
                "    size_t p = 0;\n"
-               "    if (!%s__r_%s((const unsigned char*)s, n, &p)) return 0;\n"
+               "    if (!%s__r_%s(0, (const unsigned char*)s, n, &p)) return 0;\n"
                "    return p == n;\n}\n",
            g->name, g->name, g->rules[0].name);
+    eb_fmt(&e, "static int %s_collect(const char* s, size_t n,\n"
+               "        int (*cb)(void* env, int id, const char* ptr, size_t len), void* env) {\n"
+               "    %s__ctx c0; c0.log = 0; c0.nlog = 0; c0.cap = 0;\n"
+               "    size_t p = 0;\n"
+               "    int ok = %s__r_%s(&c0, (const unsigned char*)s, n, &p) && p == n;\n"
+               "    if (ok && cb) {\n"
+               "        for (size_t i = 0; i < c0.nlog; i++)\n"
+               "            if (cb(env, c0.log[i].id, s + c0.log[i].a, c0.log[i].b - c0.log[i].a)) { ok = 0; break; }\n"
+               "    }\n"
+               "    free(c0.log);\n"
+               "    return ok;\n}\n",
+           g->name, g->name, g->name, g->rules[0].name);
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
