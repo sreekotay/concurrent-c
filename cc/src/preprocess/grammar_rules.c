@@ -696,9 +696,36 @@ static int rg_inline_size(const RG* g, int nd, int depth) {
     }
 }
 
+/* Pure-run purity: subtree consumes only via charsets/literals (incl. alias
+ * refs and seq/rep/opt over those). Inside a codec keep, ALT branches that are
+ * pure runs cannot introduce bytes the codec would transform; every other
+ * branch sets the keep's dirty flag. This fuses the matcher's knowledge into
+ * the keep: clean spans borrow inline with NO codec call and NO re-scan —
+ * golden's has_escape, derived from the grammar. Contract: a keep/decode
+ * codec's transform triggers must live in non-pure-run branches (true by
+ * construction: a pure run is the identity on its bytes). */
+static int rg_pure_run(const RG* g, int nd, int depth) {
+    if (depth > 8) return 0;
+    const RNode* x = &g->nodes[nd];
+    switch (x->kind) {
+    case RN_CHARSET: case RN_LIT: return 1;
+    case RN_REF: {
+        int eff = rg_effective(g, nd);
+        return eff != nd;   /* charset/lit alias only */
+    }
+    case RN_SEQ: case RN_ALT:
+        for (int i = 0; i < x->nkids; i++)
+            if (!rg_pure_run(g, g->kids[x->b + i], depth + 1)) return 0;
+        return 1;
+    case RN_SOME: case RN_ANY: case RN_OPT:
+        return rg_pure_run(g, x->a, depth + 1);
+    default: return 0;
+    }
+}
+
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -775,8 +802,15 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     case RN_KEEP: {
         if (!e->mode) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         int k = (*lbl)++;
-        eb_fmt(e, "    { size_t ka%d = p;\n", k);
+        int saved_dk = e->dk;
+        if (x->b > 0) {
+            eb_fmt(e, "    { size_t ka%d = p; int dr%d = 0; (void)dr%d;\n", k, k, k);
+            e->dk = k;
+        } else {
+            eb_fmt(e, "    { size_t ka%d = p;\n", k);
+        }
         rg_emit_node(g, e, x->a, fail, lbl, rid);
+        e->dk = saved_dk;
         if (x->b == 0) {
             /* raw borrow: write the 16-byte node inline — no call, no codec */
             eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
@@ -785,7 +819,20 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                       "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n",
                    g->name, fail, g->name, k, k, rid, k, k, k);
         } else {
-            eb_fmt(e, "    if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
+            /* codec keep: the child's branch structure tells us whether any
+             * transform-triggering branch ran. Clean -> borrow inline. */
+            int old_dk = e->dk;
+            /* re-emit child under a dirty scope: rewind is not possible in a
+             * single pass, so the dirty declaration was emitted before the
+             * child (see below) */
+            (void)old_dk;
+            eb_fmt(e, "    if (!dr%d) {\n"
+                      "        if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
+                      "        { %sNode* nd%d = &c->tape[c->total++];\n"
+                      "          nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n"
+                      "          nd%d->u.bytes = (const char*)(s + ka%d); }\n"
+                      "    } else if (!%s__leaf(c, %d, %d, ka%d, p, s)) goto %s;\n    }\n",
+                   k, g->name, fail, g->name, k, k, rid, k, k, k,
                    g->name, rid, x->b, k, fail);
         }
         break;
@@ -840,6 +887,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     for (int bch = 0; bch < 256; bch++)
                         if (bf[i][bch >> 3] & (1u << (bch & 7)))
                             eb_fmt(e, "    case %d:\n", bch);
+                    if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + i], 0))
+                        eb_fmt(e, "    dr%d = 1;\n", e->dk);
                     {
                         char br[32];
                         snprintf(br, sizeof(br), "Lb%d", k);
@@ -849,6 +898,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 }
                 if (big >= 0) {
                     eb_fmt(e, "    default:\n");
+                    if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + big], 0))
+                        eb_fmt(e, "    dr%d = 1;\n", e->dk);
                     {
                         char br[32];
                         snprintf(br, sizeof(br), "Lb%d", k);
@@ -873,6 +924,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             char br[32];
             int last = (i == x->nkids - 1);
             snprintf(br, sizeof(br), "La%d_%d", k, i);
+            if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + i], 0))
+                eb_fmt(e, "    dr%d = 1;\n", e->dk);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
             if (kp) eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
@@ -956,7 +1009,7 @@ static char* rg_emit(const RG* g, int origin_line) {
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    EB e = { &out, &len, &cap, F, K };
+    EB e = { &out, &len, &cap, F, K, 0, -1 };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
 
