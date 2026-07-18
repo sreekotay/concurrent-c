@@ -1,0 +1,34 @@
+/*
+ * Grammar / SERDES call-site operations — the STABLE surface over the code
+ * the @grammar engines emit.
+ *
+ * `@grammar(rules) Json { ... }` and `@grammar(schema) Tweet { ... }` lower
+ * to per-name functions (Json_match, Tweet_parse, TweetReader, ...). Those
+ * names are the LOWERING CONTRACT — deterministic and callable — but the
+ * language surface is these operations, uniform across every grammar and
+ * schema and greppable in one place:
+ *
+ *   cc_match(Json, s, n)                    full-input recognition (rules)
+ *   cc_parse(Json, s, n, arena)             rules: tape DOM -> JsonNode*
+ *   cc_parse(Tweet, s, n, arena, &out)      schema: direct-to-struct
+ *   cc_collect(Json, s, n, arena, cb, env)  rules: leaves through a closure
+ *   cc_read(Tweet, s, n, &pos, arena, &out) schema: one value, advances pos
+ *   cc_reader(Tweet, s, n, arena)           schema: -> TweetReader cursor
+ *   cc_next(Tweet, &r, &out)                schema: next value from a cursor
+ *   cc_at_end(Tweet, &r)                    schema: clean EOF vs mid-input
+ *
+ * Every generated splice begins with a manifest comment listing exactly
+ * which of these its declaration supports.
+ */
+#ifndef CCC_CC_GRAMMAR_CCH
+#define CCC_CC_GRAMMAR_CCH
+
+#define cc_match(T, ...)   T##_match(__VA_ARGS__)
+#define cc_parse(T, ...)   T##_parse(__VA_ARGS__)
+#define cc_collect(T, ...) T##_collect(__VA_ARGS__)
+#define cc_read(T, ...)    T##_read(__VA_ARGS__)
+#define cc_reader(T, ...)  T##_reader(__VA_ARGS__)
+#define cc_next(T, ...)    T##_next(__VA_ARGS__)
+#define cc_at_end(T, ...)  T##_at_end(__VA_ARGS__)
+
+#endif /* CCC_CC_GRAMMAR_CCH */

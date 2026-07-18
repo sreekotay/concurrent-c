@@ -41,6 +41,13 @@ declaration alone stamps nothing but the type and rule count. Runtime
 instances are cursors: every schema emits `NameReader` +
 `Name_reader(s,n,arena)` / `Name_next(&r,&out)` / `Name_at_end(&r)` — state
 only; all behavior was specialized at compile time.
+**No magic names**: the call-site surface is the `cc_*` operations in
+`<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
+`cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —
+uniform across every grammar/schema and recognized by the demand gate. The
+`Name_*` functions they expand to are the documented lowering contract, and
+every generated splice begins with a MANIFEST comment listing exactly which
+operations its declaration supports.
 Smokes: `tests/grammar_rules_*.ccs`, `tests/grammar_factory_smoke.ccs`
 (file factory, demand gating, Reader),
 `tests/grammar_schema_twitter_smoke.ccs` (composed vs DOM cross-validation,

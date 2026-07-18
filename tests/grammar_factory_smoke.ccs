@@ -1,5 +1,8 @@
 // FACTORY MODEL smoke: grammars are comptime factories, every use is a
-// compile-time specialization, runtime instances are cursors.
+// compile-time specialization, runtime instances are cursors. The call-site
+// surface is the cc_* operations from <ccc/cc_grammar.cch> (via the prelude);
+// the Name_* functions they expand to are the documented lowering contract
+// (each generated splice begins with a manifest listing its API).
 //
 //   define      grammar_factory_kv.rules — a grammar as a FILE artifact
 //   specialize  Kv (rules block, match projection) and Pair (schema) both
@@ -50,43 +53,43 @@ int main(void) {
     CCArena arena = cc_arena_create(1 << 20);
 
     /* specialization 1: recognizer from the file factory */
-    if (!Kv_match("a = 42", 6)) { printf("FAIL: kv match\n"); return 1; }
-    if (Kv_match("a =", 3)) { printf("FAIL: kv bad accepted\n"); return 1; }
+    if (!cc_match(Kv, "a = 42", 6)) { printf("FAIL: kv match\n"); return 1; }
+    if (cc_match(Kv, "a =", 3)) { printf("FAIL: kv bad accepted\n"); return 1; }
 
     /* specialization 2: typed struct from the same factory */
     {
         Pair p;
-        if (!Pair_parse("x=7", 3, &arena, &p)) { printf("FAIL: pair parse\n"); return 1; }
+        if (!cc_parse(Pair, "x=7", 3, &arena, &p)) { printf("FAIL: pair parse\n"); return 1; }
         if (!slice_is(p.k, "x") || !slice_is(p.v, "7")) { printf("FAIL: pair fields\n"); return 1; }
     }
 
     /* specialization 3: file-backed shared factory, no wrapper block */
     {
         PairQ q;
-        if (!PairQ_parse("ab = 12", 7, &arena, &q)) { printf("FAIL: pairq parse\n"); return 1; }
+        if (!cc_parse(PairQ, "ab = 12", 7, &arena, &q)) { printf("FAIL: pairq parse\n"); return 1; }
         if (!slice_is(q.k, "ab") || !slice_is(q.v, "12")) { printf("FAIL: pairq fields\n"); return 1; }
         PairQ2 q2;
-        if (!PairQ2_parse("c=3", 3, &arena, &q2)) { printf("FAIL: pairq2 parse\n"); return 1; }
+        if (!cc_parse(PairQ2, "c=3", 3, &arena, &q2)) { printf("FAIL: pairq2 parse\n"); return 1; }
     }
 
     /* include + override: hex values accepted by KvHex, rejected by Kv */
-    if (!KvHex_match("x = ff", 6)) { printf("FAIL: hex override\n"); return 1; }
-    if (Kv_match("x = ff", 6)) { printf("FAIL: base accepts hex\n"); return 1; }
+    if (!cc_match(KvHex, "x = ff", 6)) { printf("FAIL: hex override\n"); return 1; }
+    if (cc_match(Kv, "x = ff", 6)) { printf("FAIL: base accepts hex\n"); return 1; }
 
     /* runtime instance: a Reader cursor over a pair stream */
     {
         const char* src = "a=1 b=22 c=333";
-        PairReader r = Pair_reader(src, strlen(src), &arena);
+        PairReader r = cc_reader(Pair, src, strlen(src), &arena);
         int cnt = 0;
         Pair p;
-        while (Pair_next(&r, &p)) cnt++;
-        if (cnt != 3 || !Pair_at_end(&r)) { printf("FAIL: reader cnt=%d\n", cnt); return 1; }
+        while (cc_next(Pair, &r, &p)) cnt++;
+        if (cnt != 3 || !cc_at_end(Pair, &r)) { printf("FAIL: reader cnt=%d\n", cnt); return 1; }
         if (!slice_is(p.k, "c") || !slice_is(p.v, "333")) { printf("FAIL: reader last\n"); return 1; }
         /* parse error mid-stream: _next returns 0 with the cursor mid-input */
-        r = Pair_reader("a=1 !", 5, &arena);
+        r = cc_reader(Pair, "a=1 !", 5, &arena);
         cnt = 0;
-        while (Pair_next(&r, &p)) cnt++;
-        if (cnt != 1 || Pair_at_end(&r)) { printf("FAIL: reader error state\n"); return 1; }
+        while (cc_next(Pair, &r, &p)) cnt++;
+        if (cnt != 1 || cc_at_end(Pair, &r)) { printf("FAIL: reader error state\n"); return 1; }
     }
 
     cc_arena_free(&arena);

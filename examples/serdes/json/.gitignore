@@ -5,3 +5,5 @@ twitter_min.json
 numbers_big.json
 yyjson.c
 yyjson.h
+/bench_gen
+/.gen/

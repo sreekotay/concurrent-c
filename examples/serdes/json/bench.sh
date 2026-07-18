@@ -2,6 +2,7 @@
 # Build and run the json.h benchmark.
 #   ./bench.sh            ours, default corpora (twitter.json + numbers.json)
 #   ./bench.sh -y         also run yyjson (vendored yyjson.c/.h)
+#   ./bench.sh -g         also run the @grammar engine tiers (needs make -C cc)
 #   ./bench.sh -c         also print a correctness checksum (verified untimed)
 #   ./bench.sh [K] [corpus...]
 set -e
@@ -9,10 +10,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
 CC="${CC:-gcc} -O2 -I $INC"
-YY=0; CHK=""
+YY=0; GEN=0; CHK=""
 while :; do
   case "$1" in
     -y) YY=1; shift;;
+    -g) GEN=1; shift;;
     -c) CHK="-c"; shift;;
     *) break;;
   esac
@@ -36,9 +38,20 @@ if [ "$YY" = 1 ]; then
     $CC "$here/yy.c" "$here/yyjson.c" -o "$here/yy"
   fi
 fi
+if [ "$GEN" = 1 ]; then
+  CCC="$repo/cc/bin/ccc"
+  if [ ! -x "$CCC" ]; then
+    echo "-g: compiler not built ($CCC missing) — run: make -C $repo/cc"; exit 1
+  fi
+  if need_build "$here/bench_gen" "$here/bench_grammar.ccs" "$CCC" "$RT"; then
+    (cd "$repo" && "$CCC" build "$here/bench_grammar.ccs" --out-dir "$here/.gen" >/dev/null)
+    $CC -I "$repo/out/include" "$here/.gen/bench_grammar.c" "$RT" -o "$here/bench_gen"
+  fi
+fi
 
 for c in "${CORPORA[@]}"; do
   echo "== $c  (K=$K) =="
   printf 'ours   '; "$here/bench" $CHK "$here/$c" "$K" 3
   if [ "$YY" = 1 ]; then "$here/yy" "$here/$c" "$K"; fi
+  if [ "$GEN" = 1 ]; then "$here/bench_gen" "$here/$c" "$K" 3 | sed 's/^/  /'; fi
 done
