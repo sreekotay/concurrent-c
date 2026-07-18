@@ -862,6 +862,73 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
  * This is intentionally compatible only with the non-batched pipeline;
  * it exists purely as a diagnostic for AST-resolver regressions.
  */
+/* AST nodes speak LOGICAL coordinates (TCC honors #line directives), but the
+ * buffer being edited may contain large spliced regions (e.g. @grammar
+ * lowerings) that change physical line counts and bracket themselves with
+ * #line. Map a logical (file,line) to a physical offset by walking the
+ * directives; returns (size_t)-1 when the logical line never materializes
+ * (caller falls back to the legacy physical mapping). */
+static int cc__file_matches(const char* cur, const char* want) {
+    if (!want || !want[0]) return 1;
+    if (!cur || !cur[0]) return 1;   /* pre-directive prefix: the main file */
+    if (strcmp(cur, want) == 0) return 1;
+    {   /* tolerate absolute-vs-relative spellings: compare basenames */
+        const char* cb = strrchr(cur, '/');
+        const char* wb = strrchr(want, '/');
+        return strcmp(cb ? cb + 1 : cur, wb ? wb + 1 : want) == 0;
+    }
+}
+
+static size_t cc__offset_of_logical_line(const char* s, size_t n,
+                                         const char* want_file, int want_line) {
+    char cur_file[1024] = {0};
+    int cur_line = 1;
+    size_t i = 0;
+    int saw_directive = 0;
+    size_t last = (size_t)-1;
+    while (i < n) {
+        /* line-start directive? `# <num> ["file"]` or `#line <num> ["file"]` */
+        size_t j = i;
+        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+        if (j < n && s[j] == '#') {
+            size_t k = j + 1;
+            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+            if (k + 4 <= n && strncmp(s + k, "line", 4) == 0) k += 4;
+            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+            if (k < n && s[k] >= '0' && s[k] <= '9') {
+                int ln = 0;
+                while (k < n && s[k] >= '0' && s[k] <= '9') ln = ln * 10 + (s[k++] - '0');
+                while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+                if (k < n && s[k] == '"') {
+                    size_t fs = ++k, o = 0;
+                    while (k < n && s[k] != '"') k++;
+                    for (size_t m = fs; m < k && o + 1 < sizeof(cur_file); m++)
+                        cur_file[o++] = s[m];
+                    cur_file[o] = '\0';
+                }
+                saw_directive = 1;
+                cur_line = ln;
+                while (i < n && s[i] != '\n') i++;
+                if (i < n) i++;
+                continue;
+            }
+        }
+        if (cur_line == want_line && cc__file_matches(cur_file, want_file)) {
+            /* keep scanning: a spliced region's #line attributes GENERATED
+             * text to the declaration's line, and its physical lines then
+             * increment into ranges that collide with later user lines. The
+             * real user line is re-established by the closing directive, so
+             * the LAST logical match wins. */
+            last = i;
+        }
+        while (i < n && s[i] != '\n') i++;
+        if (i < n) i++;
+        cur_line++;
+    }
+    (void)saw_directive;
+    return last;
+}
+
 int cc__collect_ufcs_edits(const CCASTRoot* root,
                            const CCVisitorCtx* ctx,
                            CCEditBuffer* eb) {
@@ -910,6 +977,7 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         int occurrence_1based;
         int is_under_await;
         int recv_type_is_ptr;
+        const char* file;
     };
     struct UFCSNode* nodes = NULL;
     int node_count = 0;
@@ -947,6 +1015,7 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             .occurrence_1based = occ,
             .is_under_await = under_await,
             .recv_type_is_ptr = recv_type_is_ptr,
+            .file = n[i].file,
         };
     }
 
@@ -995,8 +1064,18 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         int le = nodes[i].line_end;
         if (ls <= 0) continue;
         if (le < ls) le = ls;
-        size_t rs = cc__offset_of_line_1based(in_src, in_len, ls);
-        size_t re = cc__offset_of_line_1based(in_src, in_len, le + 1);
+        /* logical (#line-aware) mapping first — spliced regions (@grammar)
+         * change physical line counts; the legacy physical mapping stays as
+         * the fallback for buffers/coordinates without directives */
+        size_t rs = cc__offset_of_logical_line(in_src, in_len, nodes[i].file, ls);
+        size_t re = (rs == (size_t)-1) ? (size_t)-1
+                  : cc__offset_of_logical_line(in_src, in_len, nodes[i].file, le + 1);
+        if (rs == (size_t)-1) {
+            rs = cc__offset_of_line_1based(in_src, in_len, ls);
+            re = cc__offset_of_line_1based(in_src, in_len, le + 1);
+        } else if (re == (size_t)-1) {
+            re = in_len;
+        }
         if (re > in_len) re = in_len;
         if (rs >= re) continue;
 

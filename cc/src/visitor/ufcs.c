@@ -711,6 +711,37 @@ static int cc__is_raw_channel_recv_type(const char* type_name) {
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
 typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena);
 
+/* Native UFCS hook for compiler-generated grammar types (NameReader,
+ * NameNode): lower `recv.method(...)` to the PascalCase `Type_method`
+ * contract the @grammar engines emit. Registered by codegen for each type
+ * the engines note (cc_grammar_pending_ufcs_type) — no comptime TU, no
+ * user-written registration. Same shape as a compiled callable. */
+static CCSlice cc_ufcs_grammar_type_method_native(CCSlice recv_type, CCSlice method,
+                                           CCSlice mode, CCSliceArray argv,
+                                           CCSliceArray arg_types, CCArena* arena) {
+    const char* t = (const char*)recv_type.ptr;
+    size_t tlen = recv_type.len;
+    CCSlice out;
+    char* buf;
+    (void)mode; (void)argv; (void)arg_types;
+    if (!t || tlen == 0 || !arena) return cc_slice_empty();
+    if (tlen >= 7 && memcmp(t, "struct ", 7) == 0) { t += 7; tlen -= 7; }
+    while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0 || method.len == 0) return cc_slice_empty();
+    out = cc_arena_alloc_slice_bytes(arena, tlen + 1 + method.len);
+    buf = (char*)out.ptr;
+    if (!buf) return cc_slice_empty();
+    memcpy(buf, t, tlen);
+    buf[tlen] = '_';
+    memcpy(buf + tlen + 1, method.ptr, method.len);
+    out.len = tlen + 1 + method.len;
+    return out;
+}
+
+const void* cc_ufcs_grammar_type_method_native_ptr(void) {
+    return (const void*)cc_ufcs_grammar_type_method_native;
+}
+
 #define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
 
 typedef struct {
@@ -1629,6 +1660,21 @@ static int emit_desugared_call(char* out,
     int dispatch_n;
     if (!out || cap == 0 || !recv || !method) return -1;
     cc__resolve_dispatch_ctx(&ctx, recv);
+    /* Type-scoped static dispatch: `Type.method(args)` where the receiver is
+     * not a value but a (PascalCase) TYPE name and the lowered `Type_method`
+     * demonstrably exists in this TU — e.g. the @grammar lowering contract:
+     * Tweet.parse(s, n, &a, &out) -> Tweet_parse(...). Fires only when the
+     * receiver has no resolvable value type, so variables always win. */
+    if (!recv_is_ptr && (!ctx.recv_type_name || !ctx.recv_type_name[0]) &&
+        is_ident_only(recv) && isupper((unsigned char)recv[0])) {
+        char fname[320];
+        snprintf(fname, sizeof(fname), "%s_%s", recv, method);
+        if (cc__ufcs_fn_name_in_source(fname)) {
+            if (!has_args || !args_rewritten || !args_rewritten[0])
+                return snprintf(out, cap, "%s()", fname);
+            return snprintf(out, cap, "%s(%s)", fname, args_rewritten);
+        }
+    }
     /* C-first dispatch: if `method` is a data member of the receiver type,
      * the source `recv.method(args)` is already a valid C call (field
      * shadows any same-named free function).  Closure-typed fields get a

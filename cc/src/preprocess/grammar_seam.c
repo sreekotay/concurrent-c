@@ -212,6 +212,10 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
     int found = 0;
 
     if (!src) return NULL;
+    /* Fast out for grammar-free streams BEFORE the registry reset: the seam
+     * now runs in several pipelines per compile, and a no-op pass must not
+     * wipe state (pending UFCS types, factories) a later phase consumes. */
+    if (!cc__find_bytes(src, n, CC__GRAMMAR_KW, sizeof(CC__GRAMMAR_KW) - 1)) return NULL;
     cc__grammar_registry_reset();   /* rules/schema cross-block state is per file */
     while (i < n) {
         char c = src[i];
@@ -305,6 +309,114 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
     if (!found) { free(out); return NULL; }
     cc_sb_append(&out, &out_len, &out_cap, src + copied, n - copied);
     cc_sb_append(&out, &out_len, &out_cap, "", 1);   /* NUL */
+    if (out) out[out_len - 1] = '\0';
+    return out;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Type-scoped calls: `Type.method(args)` -> `Type_method(args)`.          */
+/*                                                                         */
+/* A type name in expression position is a C syntax error, so this cannot  */
+/* wait for the UFCS pass (the broken parse would take every rewrite down  */
+/* with it). Textual, pre-parse, and deliberately narrow:                  */
+/*   - receiver is a bare PascalCase identifier NOT preceded by an         */
+/*     expression tail (ident char, ')', ']', '.', '->')                   */
+/*   - method is a lowercase identifier followed by '('                    */
+/*   - the lowered name `Type_method` is visibly used/declared in THIS     */
+/*     file's text (grammar splices qualify — the seam ran first), so a    */
+/*     miss stays untouched and fails loudly in the C parse.               */
+/* Strings, char literals, and comments are skipped.                       */
+
+static int cc__tsc_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static int cc__tsc_name_used(const char* src, size_t n, const char* name, size_t nl) {
+    for (size_t i = 0; i + nl <= n; i++) {
+        if (src[i] != name[0] || memcmp(src + i, name, nl) != 0) continue;
+        if (i > 0 && cc__tsc_ident_char(src[i - 1])) continue;
+        size_t j = i + nl;
+        if (j < n && cc__tsc_ident_char(src[j])) continue;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (j < n && src[j] == '(') return 1;
+    }
+    return 0;
+}
+
+char* cc_rewrite_type_scoped_calls_text(const char* src, size_t n) {
+    char* out = NULL; size_t out_len = 0, out_cap = 0;
+    size_t i = 0, copied = 0;
+    int found = 0;
+
+    if (!src) return NULL;
+    while (i < n) {
+        char c = src[i];
+        if (c == '"' || c == '\'') {                      /* string/char literal */
+            char q = c; i++;
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) { i += 2; continue; }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') { /* line comment */
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && src[i + 1] == '*') { /* block comment */
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i = i + 2 < n ? i + 2 : n;
+            continue;
+        }
+        if (!(c >= 'A' && c <= 'Z') || (i > 0 && cc__tsc_ident_char(src[i - 1]))) {
+            i++;
+            continue;
+        }
+        /* previous non-ws must not be an expression tail */
+        {
+            size_t p = i;
+            while (p > 0 && (src[p - 1] == ' ' || src[p - 1] == '\t')) p--;
+            if (p > 0) {
+                char pc = src[p - 1];
+                if (cc__tsc_ident_char(pc) || pc == ')' || pc == ']' || pc == '.' ||
+                    (pc == '>' && p > 1 && src[p - 2] == '-')) { i++; continue; }
+            }
+        }
+        size_t ts = i, te = i;
+        while (te < n && cc__tsc_ident_char(src[te])) te++;
+        size_t j = te;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (!(j < n && src[j] == '.')) { i = te; continue; }
+        j++;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (!(j < n && src[j] >= 'a' && src[j] <= 'z')) { i = te; continue; }
+        size_t ms = j, me = j;
+        while (me < n && cc__tsc_ident_char(src[me])) me++;
+        j = me;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (!(j < n && src[j] == '(')) { i = te; continue; }
+        {
+            char fname[192];
+            size_t tl = te - ts, ml = me - ms;
+            if (tl + ml + 2 >= sizeof(fname)) { i = te; continue; }
+            memcpy(fname, src + ts, tl);
+            fname[tl] = '_';
+            memcpy(fname + tl + 1, src + ms, ml);
+            fname[tl + 1 + ml] = '\0';
+            if (!cc__tsc_name_used(src, n, fname, tl + 1 + ml)) { i = te; continue; }
+            cc_sb_append(&out, &out_len, &out_cap, src + copied, ts - copied);
+            cc_sb_append(&out, &out_len, &out_cap, fname, tl + 1 + ml);
+            copied = me;   /* keep everything from '(' on (incl. ws before it) */
+            found = 1;
+            i = me;
+        }
+    }
+    if (!found) { free(out); return NULL; }
+    cc_sb_append(&out, &out_len, &out_cap, src + copied, n - copied);
+    cc_sb_append(&out, &out_len, &out_cap, "", 1);
     if (out) out[out_len - 1] = '\0';
     return out;
 }

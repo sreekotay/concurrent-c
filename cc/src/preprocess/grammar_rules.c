@@ -411,6 +411,7 @@ static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len);
 static void rw_mark_rule(const RG* g, int r, unsigned char* mark);
 static int rw_pool_needed(const RG* g);
 static void rw_cs_desc(const unsigned char* set, char* out, size_t sz);
+void cc__grammar_note_ufcs_type(const char* type_name);
 
 /* Is `p` (already ws-skipped) sitting on the next rule header `ident :` ? */
 static int rg_at_rule_header(const RG* g, size_t p) {
@@ -1511,6 +1512,12 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      *   match   = tape suppressed (NULL ctx)
      *   parse   = tape returned (root = tape[0], span covers the whole run)
      *   collect = parse + fold (leaves through the closure, warm sequential) */
+    /* instance UFCS on tape nodes (`nd.first()`, `nd.next(parent)`, ...) */
+    {
+        char nn[80];
+        snprintf(nn, sizeof nn, "%sNode", g->name);
+        cc__grammar_note_ufcs_type(nn);
+    }
     }   /* want_build: accessors */
     if (want_match)
     eb_fmt(&e, "static int %s_match(const char* s, size_t n) {\n"
@@ -2099,10 +2106,26 @@ static char* cc__load_rel(const char* base_file, const char* relpath,
 static SRulesReg cc__rules_reg[8]; static int cc__rules_nreg;
 static char cc__schema_reg[32][S_NAME]; static int cc__schema_nreg;
 
+/* generated types needing instance-UFCS dispatch (Readers, Nodes); the
+ * codegen phase registers each with the native Type_method hook */
+static char cc__ufcs_types[64][80]; static int cc__ufcs_ntypes;
+
+void cc__grammar_note_ufcs_type(const char* type_name) {
+    for (int i = 0; i < cc__ufcs_ntypes; i++)
+        if (strcmp(cc__ufcs_types[i], type_name) == 0) return;
+    if (cc__ufcs_ntypes >= (int)(sizeof(cc__ufcs_types) / sizeof(cc__ufcs_types[0]))) return;
+    snprintf(cc__ufcs_types[cc__ufcs_ntypes++], sizeof(cc__ufcs_types[0]), "%s", type_name);
+}
+
+int cc_grammar_pending_ufcs_type_count(void) { return cc__ufcs_ntypes; }
+const char* cc_grammar_pending_ufcs_type(int i) {
+    return (i >= 0 && i < cc__ufcs_ntypes) ? cc__ufcs_types[i] : NULL;
+}
+
 void cc__grammar_registry_reset(void) {
     for (int i = 0; i < cc__rules_nreg; i++) free(cc__rules_reg[i].body);
     memset(cc__rules_reg, 0, sizeof cc__rules_reg);
-    cc__rules_nreg = 0; cc__schema_nreg = 0;
+    cc__rules_nreg = 0; cc__schema_nreg = 0; cc__ufcs_ntypes = 0;
 }
 
 static void cc__register_rules(const char* name, const char* body, size_t blen) {
@@ -2923,12 +2946,13 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         memset(local_xdone, 0, sizeof local_xdone);
         eb_fmt(&e, "/* @grammar(schema) %s (line %d): %s%s. API:\n"
                    " *   typedef struct %s (+ %sReader cursor)\n"
-                   " *   cc_parse(%s, s, n, arena, &out)          -> %s_parse (whole input)\n"
-                   " *   cc_read(%s, s, n, &pos, arena, &out)     -> %s_read (one value)\n"
-                   " *   cc_reader/cc_next/cc_at_end(%s, ...)     -> %s_reader/_next/_at_end\n"
+                   " *   cc_parse(%s, s, n, arena, &out)   / %s.parse(...)  -> %s_parse\n"
+                   " *   cc_read(%s, s, n, &pos, arena, &out) / %s.read(...) -> %s_read\n"
+                   " *   cc_reader(%s, s, n, arena) / %s.reader(...)        -> %s_reader\n"
+                   " *   cc_next / cc_at_end / r.next(&out) / r.at_end()    -> %sReader_next/_at_end\n"
                    " */\n",
                name, line, reg ? "use " : "inline rules", reg ? ss->usename : "",
-               name, name, name, name, name, name, name, name);
+               name, name, name, name, name, name, name, name, name, name, name, name);
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
@@ -3044,12 +3068,21 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         eb_fmt(&e, "static %sReader %s_reader(const char* s, size_t n, CCArena* arena) {\n"
                    "    %sReader r; r.s = s; r.n = n; r.pos = 0; r.arena = arena; return r;\n}\n",
                name, name, name);
-        eb_fmt(&e, "static int %s_next(%sReader* r, %s* out) {\n"
+        /* methods are named after the RECEIVER type so instance UFCS
+         * (`r.next(&out)`, `r.at_end()`) resolves by convention */
+        eb_fmt(&e, "static int %sReader_next(%sReader* r, %s* out) {\n"
                    "    if (r->pos >= r->n) return 0;\n"
                    "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out);\n}\n",
                name, name, name, name);
-        eb_fmt(&e, "static int %s_at_end(const %sReader* r) { return r->pos == r->n; }\n",
+        eb_fmt(&e, "static int %sReader_at_end(const %sReader* r) { return r->pos == r->n; }\n",
                name, name);
+        /* instance UFCS (`r.next(&out)`, `r.at_end()`): the engine registers
+         * the Reader type natively — users never write a registration */
+        {
+            char rn[S_NAME + 8];
+            snprintf(rn, sizeof rn, "%sReader", name);
+            cc__grammar_note_ufcs_type(rn);
+        }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
         if (out) out[len - 1] = '\0';
     }
@@ -3095,6 +3128,25 @@ static int rs_has_op(const char* src, size_t n, const char* op, const char* name
     return 0;
 }
 
+/* UFCS type-scoped reference: `Name . method (` */
+static int rs_has_dot(const char* src, size_t n, const char* name, const char* method) {
+    size_t nl = strlen(name), ml = strlen(method);
+    for (size_t i = 0; i + nl < n; i++) {
+        if (src[i] != name[0] || memcmp(src + i, name, nl) != 0) continue;
+        if (i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_')) continue;
+        size_t j = i + nl;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (j >= n || src[j] != '.') continue;
+        j++;
+        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+        if (j + ml > n || memcmp(src + j, method, ml) != 0) continue;
+        size_t k = j + ml;
+        while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+        if (k < n && src[k] == '(') return 1;
+    }
+    return 0;
+}
+
 static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
                             const char* file, int line,
                             const char* src, size_t src_len,
@@ -3110,12 +3162,15 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
          * cost nothing, not even compile time. (Schemas that `use` this
          * grammar emit their own shared copy under <Name>__s — independent.) */
         int want_match = rs_has_token(src, src_len, name, "_match") ||
-                         rs_has_op(src, src_len, "cc_match", name);
+                         rs_has_op(src, src_len, "cc_match", name) ||
+                         rs_has_dot(src, src_len, name, "match");
         int want_build = rs_has_token(src, src_len, name, "_parse") ||
                          rs_has_token(src, src_len, name, "_collect") ||
                          rs_has_token(src, src_len, name, "Node") ||
                          rs_has_op(src, src_len, "cc_parse", name) ||
-                         rs_has_op(src, src_len, "cc_collect", name);
+                         rs_has_op(src, src_len, "cc_collect", name) ||
+                         rs_has_dot(src, src_len, name, "parse") ||
+                         rs_has_dot(src, src_len, name, "collect");
         out = rg_emit(g, line, want_match, want_build);
         if (out) cc__register_rules(name, body, body_len);   /* schemas may `use` it */
     } else {

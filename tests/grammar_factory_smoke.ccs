@@ -92,6 +92,21 @@ int main(void) {
         if (cnt != 1 || cc_at_end(Pair, &r)) { printf("FAIL: reader error state\n"); return 1; }
     }
 
+    /* UFCS forms: type-scoped statics (`Type.method(...)` -> Type_method)
+     * and instance methods on cursors (receiver-typed lowering, registered
+     * natively by the engine — no user-written registration) */
+    {
+        if (!Kv.match("b = 7", 5)) { printf("FAIL: ufcs type-scoped match\n"); return 1; }
+        Pair p2;
+        if (!Pair.parse("y=8", 3, &arena, &p2)) { printf("FAIL: ufcs type-scoped parse\n"); return 1; }
+        if (!slice_is(p2.k, "y") || !slice_is(p2.v, "8")) { printf("FAIL: ufcs parse fields\n"); return 1; }
+        PairReader r2 = Pair.reader("m=1 n=2", 7, &arena);
+        int cnt2 = 0;
+        while (r2.next(&p2)) cnt2++;
+        if (cnt2 != 2 || !r2.at_end()) { printf("FAIL: ufcs reader cnt=%d\n", cnt2); return 1; }
+        if (!slice_is(p2.k, "n") || !slice_is(p2.v, "2")) { printf("FAIL: ufcs reader last\n"); return 1; }
+    }
+
     cc_arena_free(&arena);
     printf("grammar factory model OK\n");
     return 0;

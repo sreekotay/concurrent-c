@@ -27,6 +27,12 @@ typedef enum {
 // explicit owner; and CC_UFCS_REWRITE_ERROR on malformed input.
 int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap);
 
+/* Native hook lowering `recv.method(...)` to PascalCase `Type_method(...)`
+ * for compiler-generated grammar types (Readers, tape Nodes). Registered by
+ * codegen for each name in cc_grammar_pending_ufcs_type(). Returned as an
+ * opaque pointer so this header needs no CC runtime types. */
+const void* cc_ufcs_grammar_type_method_native_ptr(void);
+
 // Rewrite UFCS with await context flag. When is_await=1, channel ops (send/recv)
 // emit task-returning variants (cc_chan_*_task) for use in @async functions.
 int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is_await);

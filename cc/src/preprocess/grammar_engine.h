@@ -32,4 +32,11 @@ char* cc_grammar_builtin_emit(const char* engine,
  * type names) is scoped to one input file; the seam resets it per rewrite. */
 void cc__grammar_registry_reset(void);
 
+/* Generated types needing instance-UFCS dispatch (NameReader, NameNode).
+ * The engines note them at emission; codegen registers each with the native
+ * Type_method hook (cc_ufcs_grammar_type_method_native, ufcs.c) so
+ * `r.next(&out)` / `nd.first()` lower without user-written registrations. */
+int cc_grammar_pending_ufcs_type_count(void);
+const char* cc_grammar_pending_ufcs_type(int i);
+
 #endif /* CC_GRAMMAR_ENGINE_H */

@@ -84,8 +84,11 @@ int main(void) {
         JsonNode* arr = JsonNode_first(root);
         if (!arr || !JsonNode_is_list(arr) || JsonNode_id(arr) != Json_KEEP_array ||
             JsonNode_count(arr) != 3) { printf("FAIL: array node\n"); return 1; }
-        JsonNode* n1 = JsonNode_first(arr);      /* 1 */
-        JsonNode* s1 = JsonNode_next(n1, arr);   /* "a\nb" (materialized) */
+        /* instance UFCS on tape nodes (pointer receivers use ->):
+         * engine-registered, receiver-typed lowering */
+        if (arr->count() != 3) { printf("FAIL: ufcs node count\n"); return 1; }
+        JsonNode* n1 = arr->first();             /* 1 */
+        JsonNode* s1 = n1->next(arr);            /* "a\nb" (materialized) */
         JsonNode* ob = JsonNode_next(s1, arr);   /* {…} */
         CCSlice v;
         JsonNode_slice(n1, &v);
