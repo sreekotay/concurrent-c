@@ -25,8 +25,16 @@ parses through an intermediate.
 **The factory model** (define → specialize → instantiate): a grammar is a
 comptime factory — including a FILE artifact via `include "path.rules"`
 (path relative to the including source; works in rules blocks and inline
-schema sections alike, so one factory file serves many TUs). Every use is a
-compile-time specialization, and tiers are **demand-gated**: a rules block
+schema sections alike, so one factory file serves many TUs). Schemas can
+compose with a file factory directly: `use "path.rules" as Name` (shared —
+keyed by resolved path, matchers emitted once per file no matter how many
+schemas or aliases use it). The verbs are the semantics: **`include` =
+copy** (the rules become yours; a block-level definition SHADOWS an
+included one — that is how a factory is specialized without forking its
+file; among includes the first wins, so diamonds are legal; overrides never
+claim the entry point) and **`use` = share** (one matcher set, qualified
+references). Every use is a compile-time specialization, and tiers are
+**demand-gated**: a rules block
 emits a projection (match / DOM+collect) only if the file references its
 entry points (`Name_match`, `Name_parse`, `Name_collect`, `NameNode`) — the
 declaration alone stamps nothing but the type and rule count. Runtime
