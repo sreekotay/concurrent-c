@@ -5882,11 +5882,27 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     (void)paren_close;  /* unused but kept for clarity */
                     j++;  /* skip ')' */
                     
-                    /* Scan back from '!>' to find the ok type start */
-                    /* First skip any whitespace before '!>' */
+                    /* Scan back from '!>' to find the ok type start.
+                     * Skip whitespace before '!>', including newlines and cpp
+                     * '# line' directive lines: when the ok type is a macro
+                     * (e.g. `bool` -> `_Bool` via <stdbool.h> pulled in by the
+                     * prelude), cpp separates the expanded type from the sigil
+                     * with line markers, which a space/tab-only skip mistook
+                     * for a missing type. */
                     size_t ty_end = sigil_pos;
-                    while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
-                    
+                    for (;;) {
+                        while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t' ||
+                                              src[ty_end - 1] == '\n' || src[ty_end - 1] == '\r')) ty_end--;
+                        if (ty_end == 0) break;
+                        /* If the line ending at ty_end is a '# ...' directive, drop it and retry. */
+                        size_t line_start = ty_end;
+                        while (line_start > 0 && src[line_start - 1] != '\n') line_start--;
+                        size_t p = line_start;
+                        while (p < ty_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                        if (p < ty_end && src[p] == '#') { ty_end = line_start; continue; }
+                        break;
+                    }
+
                     size_t ty_start = cc__scan_back_to_delim(src, ty_end);
                     ty_start = cc__skip_leading_decl_specs(src, ty_start);
                     
