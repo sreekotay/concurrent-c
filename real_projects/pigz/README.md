@@ -12,11 +12,15 @@ This project provides two implementations of parallel gzip compression:
 chmod +x setup.sh
 ./setup.sh
 
-# 2. Build both versions
+# 2. (Optional) Download Silesia benchmark corpus (~65 MB zip)
+chmod +x download_silesia.sh
+./download_silesia.sh
+
+# 3. Build both versions
 make pigz      # Original (requires zlib, pthreads)
 make pigz_cc   # CC version (requires CC compiler + zlib)
 
-# 3. Run benchmark
+# 4. Run benchmark
 ./benchmark.sh 200 8 3   # <size_mb> <workers> <runs>
 ```
 
@@ -24,6 +28,8 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 
 `benchmark.sh` uses a **real multi-file corpus** (Silesia corpus) and generates a single input file by concatenating corpus files until it reaches the requested size.
 
+- **Download manually**: `./download_silesia.sh` (or let `benchmark.sh` fetch on first run)
+- **Source URL**: http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip
 - **Downloaded/extracted to**: `testdata/silesia/` (and `testdata/silesia.zip`)
 - **Generated input**: `testdata/text_<size_mb>mb.bin`
 - **Not checked in**: benchmark inputs are ignored via `.gitignore`
@@ -127,6 +133,7 @@ for (int w = 0; w < num_workers; w++) {
 | File | Description |
 |------|-------------|
 | `setup.sh` | Downloads original pigz source |
+| `download_silesia.sh` | Downloads/extracts Silesia corpus to `testdata/silesia/` |
 | `Makefile` | Builds all versions |
 | `benchmark.sh` | Main benchmark (auto-downloads corpus + prints summary table) |
 | `bench_go_vs_cc.sh` | Cross-language comparison: CC vs Go vs Zig vs original |

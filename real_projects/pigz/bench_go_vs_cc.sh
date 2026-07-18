@@ -39,21 +39,17 @@ INPUT_FILE="$DATA_DIR/text_${SIZE_MB}mb.bin"
 
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Generating test data from Silesia corpus..."
-    if [ -d "$SCRIPT_DIR/silesia" ] && [ -n "$(ls -A "$SCRIPT_DIR/silesia" 2>/dev/null)" ]; then
-        TARGET=$((SIZE_MB * 1000000))
-        while [ "$(wc -c < "$INPUT_FILE" 2>/dev/null || echo 0)" -lt "$TARGET" ]; do
-            cat "$SCRIPT_DIR/silesia"/dickens "$SCRIPT_DIR/silesia"/mozilla \
-                "$SCRIPT_DIR/silesia"/mr     "$SCRIPT_DIR/silesia"/nci \
-                "$SCRIPT_DIR/silesia"/ooffice "$SCRIPT_DIR/silesia"/osdb \
-                "$SCRIPT_DIR/silesia"/reymont "$SCRIPT_DIR/silesia"/samba \
-                "$SCRIPT_DIR/silesia"/sao    "$SCRIPT_DIR/silesia"/webster \
-                "$SCRIPT_DIR/silesia"/x-ray  "$SCRIPT_DIR/silesia"/xml >> "$INPUT_FILE"
-        done
-        truncate -s "$TARGET" "$INPUT_FILE"
-    else
-        echo "Silesia corpus not found, falling back to urandom..."
-        dd if=/dev/urandom of="$INPUT_FILE" bs=1M count="$SIZE_MB" 2>/dev/null
-    fi
+    # shellcheck source=download_silesia.sh
+    source "$SCRIPT_DIR/download_silesia.sh"
+    download_silesia "$DATA_DIR"
+    TARGET=$((SIZE_MB * 1000000))
+    : > "$INPUT_FILE"
+    files=$(find "$DATA_DIR/silesia" -type f -print | LC_ALL=C sort)
+    while [ "$(wc -c < "$INPUT_FILE" 2>/dev/null || echo 0)" -lt "$TARGET" ]; do
+        # shellcheck disable=SC2086
+        cat $files >> "$INPUT_FILE"
+    done
+    head -c "$TARGET" "$INPUT_FILE" > "${INPUT_FILE}.tmp" && mv "${INPUT_FILE}.tmp" "$INPUT_FILE"
 fi
 
 # --- benchmark definitions: name, cmd, flags ---

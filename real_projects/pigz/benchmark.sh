@@ -64,57 +64,8 @@ PIGZ_CC="$OUT_DIR/pigz_cc"
 
 # Create data directory
 mkdir -p "$DATA_DIR"
-cd "$DATA_DIR"
-
-download_silesia() {
-    # We keep the extracted corpus under testdata/silesia/ to avoid cluttering testdata/.
-    if [ -d "silesia" ] && [ -n "$(ls -A silesia 2>/dev/null)" ]; then
-        return 0
-    fi
-
-    local url="http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip"
-    echo "Downloading Silesia corpus from $url ..."
-
-    rm -rf silesia
-    mkdir -p silesia
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -L --fail -o silesia.zip "$url"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O silesia.zip "$url"
-    else
-        echo "Error: need curl or wget to download silesia.zip"
-        exit 1
-    fi
-
-    echo "Extracting silesia.zip ..."
-    if command -v unzip >/dev/null 2>&1; then
-        unzip -q -o silesia.zip -d silesia
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 - <<'PY'
-import zipfile, os
-os.makedirs("silesia", exist_ok=True)
-with zipfile.ZipFile("silesia.zip") as z:
-    z.extractall("silesia")
-PY
-    else
-        echo "Error: need unzip or python3 to extract silesia.zip"
-        exit 1
-    fi
-
-    # Some zips contain a nested directory; normalize to silesia/*files*
-    if [ -d "silesia/silesia" ] && [ -n "$(ls -A silesia/silesia 2>/dev/null)" ]; then
-        rm -rf silesia.tmp
-        mv silesia/silesia silesia.tmp
-        rm -rf silesia
-        mv silesia.tmp silesia
-    fi
-
-    if [ ! -d "silesia" ] || [ -z "$(ls -A silesia 2>/dev/null)" ]; then
-        echo "Error: extraction failed (silesia directory is empty)"
-        exit 1
-    fi
-}
+# shellcheck source=download_silesia.sh
+source "$SCRIPT_DIR/download_silesia.sh"
 
 # Generate sized data by concatenating real corpus files (more realistic than repeating one file)
 generate_text_data() {
@@ -123,7 +74,8 @@ generate_text_data() {
     
     if [ ! -f "$outfile" ]; then
         echo "Generating ${size_mb}MB of real corpus data (concatenated)..."
-        download_silesia
+        download_silesia "$DATA_DIR"
+        cd "$DATA_DIR"
 
         local target_bytes=$((size_mb * 1000000))
         : > "$outfile"
@@ -131,7 +83,7 @@ generate_text_data() {
         # Deterministic order for reproducibility.
         # Use only regular files; skip directories/metadata.
         local files
-        files=$(find silesia -type f -print | LC_ALL=C sort)
+        files=$(find "$DATA_DIR/silesia" -type f -print | LC_ALL=C sort)
 
         if [ -z "$files" ]; then
             echo "Error: no files found under testdata/silesia/"

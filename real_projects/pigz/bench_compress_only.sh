@@ -24,6 +24,9 @@ INPUT="$DATA_DIR/text_${SIZE_MB}mb.bin"
 
 if [ ! -f "$INPUT" ]; then
     echo "Generating ${SIZE_MB}MB test data from Silesia corpus..."
+    # shellcheck source=download_silesia.sh
+    source "$SCRIPT_DIR/download_silesia.sh"
+    download_silesia "$DATA_DIR"
     target_bytes=$((SIZE_MB * 1000000))
     : > "$INPUT"
     files=$(find "$DATA_DIR/silesia" -type f -print | LC_ALL=C sort)
