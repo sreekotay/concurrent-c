@@ -1,0 +1,50 @@
+// Smoke: the @grammar capture-and-route seam (cc/src/preprocess/grammar_seam.c).
+//
+// `@grammar(engine) Name {SENT ... SENT}` must (1) capture the fenced body
+// VERBATIM — braces, quotes, backslashes, no tokenization — and (2) lower to a
+// single synthesized @comptime call of the named engine, which is an ordinary
+// registered @comptime function that emits C via the existing emit plan.
+//
+// The echo engine here proves the contract end to end: it re-emits the body as
+// a byte array plus its length and the origin line, and main() checks all of it
+// at runtime.
+#include <ccc/std/prelude.cch>
+
+@comptime void echoEngine(CCSlice name, CCSlice body, const char* file, int line) {
+    (void)file;
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "static const unsigned char %.*s_body[] = {",
+                   (int)name.len, (const char*)name.ptr);
+    for (size_t i = 0; i < body.len; i++)
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE, "%u,", (unsigned)((const unsigned char*)body.ptr)[i]);
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "0};\n");
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "static const int %.*s_len = %d;\n",
+                   (int)name.len, (const char*)name.ptr, (int)body.len);
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE, "static const int %.*s_line = %d;\n",
+                   (int)name.len, (const char*)name.ptr, line);
+}
+
+// Body deliberately contains everything the host lexer would choke on if the
+// fence leaked: unbalanced braces, quotes, backslashes, DSL-ish charset syntax.
+@grammar(echoEngine) Greeting {~~~~
+rule: { "hi" | '\\' } [#'0'-#'9'] }}{{
+~~~~}
+
+int main(void) {
+    const char* expect = "rule: { \"hi\" | '\\\\' } [#'0'-#'9'] }}{{\n";
+    int expect_len = (int)strlen(expect);
+    if (Greeting_len != expect_len) {
+        printf("FAIL: body len %d != %d\n", Greeting_len, expect_len);
+        return 1;
+    }
+    if (memcmp(Greeting_body, expect, (size_t)expect_len) != 0) {
+        printf("FAIL: body bytes differ\n");
+        printf("got: %s", (const char*)Greeting_body);
+        return 1;
+    }
+    if (Greeting_line <= 0) {
+        printf("FAIL: origin line %d\n", Greeting_line);
+        return 1;
+    }
+    printf("grammar seam: verbatim body (%d bytes) OK, origin line OK\n", Greeting_len);
+    return 0;
+}

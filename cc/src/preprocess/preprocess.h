@@ -162,6 +162,9 @@ char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* in
 // registration plus a `@comptime` factory function. Returns NULL when the
 // source has no occurrence, or (char*)-1 on a malformed header.
 char* cc_rewrite_generic_factory_text(const char* src, size_t n, const char* input_path);
+/* @grammar(engine) Name {SENT...SENT} -> synthesized @comptime engine call.
+ * NULL = no declarations; (char*)-1 = malformed (diagnostic printed). */
+char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input_path);
 
 /* Scan a backtick template literal starting at tick_pos (which must point at '`').
  * On success sets *tick_end_out to the closing backtick index and returns 0. */

@@ -1,6 +1,20 @@
 # `@grammar` — user-definable declaration kinds (proposal)
 
-**Status:** Proposal (design-locked, not implemented).
+**Status:** Seam implemented (v0); SERDES engines not yet built.
+The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`
+(first step of `cc_comptime_prepare_source`) and lowers
+`@grammar(engine) Name {SENT … SENT}` to a synthesized `@comptime` block calling
+the registered engine. **v0 engine contract:**
+`@comptime void engine(CCSlice name, CCSlice body, const char* file, int line)`.
+Body bytes are captured verbatim (heredoc fence; one sentinel-terminating
+whitespace char consumed, CRLF-aware); origin honors `#line` directives; the
+replaced span keeps its physical line count. Smokes:
+`tests/grammar_seam_echo_smoke.ccs` (verbatim bytes + origin) and
+`tests/grammar_seam_bad_fence_fail.ccs` (whitespace-after-`{` rejection).
+**SERDES acceptance target:** the future `rules` engine must emit code that
+matches or beats the hand-lowered golden output in
+`examples/serdes/json/json.h` (benchmarked vs yyjson; keep that file as the
+engine's golden test).
 **Audience:** anyone designing the comptime surface or SERDES.
 **Related:** [`spec/cc_serdes.md`](../../spec/cc_serdes.md) (the first consumer),
 [`COMPTIME_INSTANTIATION_SEAM.md`](COMPTIME_INSTANTIATION_SEAM.md) (the

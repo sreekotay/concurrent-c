@@ -1,0 +1,13 @@
+// A '{' followed by whitespace is a plain block, not a fence: the seam must
+// reject it loudly rather than swallowing arbitrary source as a body.
+#include <ccc/std/prelude.cch>
+
+@comptime void nopEngine(CCSlice name, CCSlice body, const char* file, int line) {
+    (void)name; (void)body; (void)file; (void)line;
+}
+
+@grammar(nopEngine) Broken { ~~~~
+rule: "hi"
+~~~~}
+
+int main(void) { return 0; }
