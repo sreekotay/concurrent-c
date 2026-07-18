@@ -748,12 +748,15 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         if (eff != nd) { rg_emit_node(g, e, eff, fail, lbl, rid); break; }
         {
             int body = g->rules[x->nkids].node;
-            if (rg_inline_size(g, body, 0) <= 8) {   /* ws-sized pure rules: inline */
+            if (rg_inline_size(g, body, 0) <= 12) {   /* ws/esc/int-sized pure rules: inline */
                 rg_emit_node(g, e, body, fail, lbl, rid);
                 break;
             }
         }
-        if (e->mode)
+        if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
+            eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
+                   g->name, g->rules[x->nkids].name, fail);
+        else if (e->mode)
             eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
                    g->name, g->rules[x->nkids].name, fail);
         else
@@ -1006,32 +1009,68 @@ static char* rg_emit(const RG* g, int origin_line) {
         }
         eb_fmt(&e, "};\n");
     }
-    /* Two specialized matcher sets from ONE grammar walk each — the tier
-     * convergence: __m_ (match: no ctx, no sink code, no snapshots) and
-     * __b_ (build: unconditional tape sink). Each variant is leaner than a
-     * merged one; entries pick their set, so no tier pays for another's mode. */
-    for (int r = 0; r < g->nrules; r++)
-        eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
-               g->name, g->rules[r].name);
-    for (int r = 0; r < g->nrules; r++)
-        eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
-               g->name, g->rules[r].name, g->name);
-
-    for (int mode = 0; mode <= 1; mode++) {
-        e.mode = mode;
+    /* Sharing is semantics-driven. Three classes per rule:
+     *   skipped — every reference inlined (aliases, tiny pure bodies): no
+     *             function emitted at all;
+     *   pure    — KEEPS analysis proves no tape effect: ONE shared ctx-free
+     *             __r_ variant, called by both tiers (truly shared code);
+     *   sunk    — touches the tape: two specializations, __m_ (no ctx, no
+     *             sink, no snapshots) and __b_ (unconditional sink), so no
+     *             tier pays for the other's mode. */
+    {
+        unsigned char skip[R_MAX_RULES], pure[R_MAX_RULES];
         for (int r = 0; r < g->nrules; r++) {
-            if (mode)
-                eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
-                           "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
-                       g->name, g->rules[r].name, g->name);
-            else
-                eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                           "    size_t p = *io;\n    (void)s; (void)n;\n",
+            int body = g->rules[r].node;
+            int aliasable = g->nodes[body].kind == RN_CHARSET || g->nodes[body].kind == RN_LIT;
+            skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 12));
+            pure[r] = (unsigned char)!rk_rule(g, e.K, r);
+        }
+        for (int r = 0; r < g->nrules; r++) {
+            if (skip[r]) continue;
+            if (pure[r])
+                eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io);\n",
                        g->name, g->rules[r].name);
-            char fail[16];
-            snprintf(fail, sizeof(fail), "Lf%d", lbl++);
-            rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
-            eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+            else {
+                eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
+                       g->name, g->rules[r].name);
+                eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
+                       g->name, g->rules[r].name, g->name);
+            }
+        }
+        for (int mode = 0; mode <= 1; mode++) {
+            e.mode = mode;
+            for (int r = 0; r < g->nrules; r++) {
+                if (skip[r]) continue;
+                if (pure[r]) {
+                    if (!mode) continue;   /* pure rules emit once, beside the build cluster */
+                    e.mode = 0;            /* ...but with ctx-free emission */
+                    eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                               "    size_t p = *io;\n    (void)s; (void)n;\n",
+                           g->name, g->rules[r].name);
+                } else if (mode) {
+                    eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
+                               "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
+                           g->name, g->rules[r].name, g->name);
+                } else {
+                    eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                               "    size_t p = *io;\n    (void)s; (void)n;\n",
+                           g->name, g->rules[r].name);
+                }
+                char fail[16];
+                snprintf(fail, sizeof(fail), "Lf%d", lbl++);
+                rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
+                eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+                e.mode = mode;
+            }
+        }
+        /* entries reference rule 0 by its class */
+        e.mode = 1;
+        {
+            const char* p0 = pure[0] ? "r" : "m";
+            const char* b0 = pure[0] ? "r" : "b";
+            eb_fmt(&e, "#define %s__ENTRY_M %s__%s_%s\n", g->name, g->name, p0, g->rules[0].name);
+            eb_fmt(&e, "#define %s__ENTRY_B %s__%s_%s\n", g->name, g->name, b0, g->rules[0].name);
+            eb_fmt(&e, "#define %s__ENTRY_PURE %d\n", g->name, pure[0] ? 1 : 0);
         }
     }
 
@@ -1088,9 +1127,9 @@ static char* rg_emit(const RG* g, int origin_line) {
      *   collect = parse + fold (leaves through the closure, warm sequential) */
     eb_fmt(&e, "static int %s_match(const char* s, size_t n) {\n"
                "    size_t p = 0;\n"
-               "    if (!%s__m_%s((const unsigned char*)s, n, &p)) return 0;\n"
+               "    if (!%s__ENTRY_M((const unsigned char*)s, n, &p)) return 0;\n"
                "    return p == n;\n}\n",
-           g->name, g->name, g->rules[0].name);
+           g->name, g->name);
     eb_fmt(&e, "static %sNode* %s_parse(const char* s, size_t n, CCArena* arena) {\n"
                "    %s__ctx c0;\n"
                "    size_t p = 0;\n"
@@ -1099,10 +1138,14 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
                "    c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */\n"
-               "    if (!%s__b_%s(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
+               "#if %s__ENTRY_PURE\n"
+               "    if (!%s__ENTRY_B((const unsigned char*)s, n, &p) || p != n) return 0;\n"
+               "#else\n"
+               "    if (!%s__ENTRY_B(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
+               "#endif\n"
                "    c0.tape[0].u.span = c0.total;\n"
                "    return c0.tape;\n}\n",
-           g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->rules[0].name);
+           g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name);
     eb_fmt(&e, "static int %s_collect(const char* s, size_t n, CCArena* arena,\n"
                "        int (*cb)(void* env, int id, CCSlice v), void* env) {\n"
                "    %sNode* tape = %s_parse(s, n, arena);\n"
