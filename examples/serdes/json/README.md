@@ -35,8 +35,8 @@ whole-buffer version here gets resumption for free from the state-machine loweri
 ./bench.sh -y           # also run yyjson (see below)
 ```
 
-`bench` reports MB/s, µs/parse, zero-copy rate, node size, and a correctness
-checksum (stable per parse, independent of iteration count).
+`bench` reports MB/s, µs/parse, zero-copy rate, and node size (parse only —
+no post-walk in the timed loop).
 
 ## Corpora
 
@@ -49,12 +49,12 @@ checksum (stable per parse, independent of iteration count).
 
 ## Comparing against yyjson (optional)
 
-The comparison isn't vendored. To enable `./bench.sh -y`, drop `yyjson.c` and
-`yyjson.h` (from <https://github.com/ibireme/yyjson>) into this directory.
+`yyjson.c` / `yyjson.h` (v0.12.0 from <https://github.com/ibireme/yyjson>, MIT)
+are checked in so `./bench.sh -y` works out of the box.
 
-Rough standing (best-of, this parser vs yyjson-default, minified inputs so
-whitespace-skipping doesn't mask either side): competitive on string-heavy input,
-~within 15% on number-heavy. yyjson's remaining edge is a denser 16-byte tape and
+Rough standing (best-of, parse-only vs yyjson-default, minified inputs so
+whitespace-skipping doesn't mask either side): within ~2× on string-heavy input,
+closer on number-heavy. yyjson's remaining edge is a denser 16-byte tape and
 years of micro-tuning — both of which trade away the provenance and simplicity this
 example keeps. `insitu` yyjson is faster still but destructively rewrites the input
 buffer and eager-parses numbers.
@@ -64,7 +64,8 @@ buffer and eager-parses numbers.
 | file | what |
 |------|------|
 | `json.h` | the DOM: parser, compact node, accessors |
-| `bench.c` | throughput + zero-copy + checksum harness |
+| `bench.c` | throughput + zero-copy harness |
 | `bench.sh` | build + run driver |
-| `yy.c` | optional yyjson comparison harness |
+| `yy.c` | yyjson comparison harness |
+| `yyjson.c`, `yyjson.h` | vendored yyjson 0.12.0 |
 | `tools/gen_numbers.py`, `tools/minify.py` | corpus helpers |

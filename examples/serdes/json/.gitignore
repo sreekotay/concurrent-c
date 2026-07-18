@@ -1,5 +1,6 @@
 /bench
 /yy
+*.dSYM/
 twitter_min.json
 numbers_big.json
 yyjson.c

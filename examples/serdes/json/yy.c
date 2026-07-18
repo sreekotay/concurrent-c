@@ -1,5 +1,5 @@
-/* Optional yyjson comparison (default + insitu). Requires yyjson.c/.h in this dir
- * (see README). Build via ./bench.sh -y, or: gcc -O2 yy.c yyjson.c -o yy */
+/* yyjson comparison (default + insitu). Build via ./bench.sh -y, or:
+ *   gcc -O2 yy.c yyjson.c -o yy */
 #include "yyjson.h"
 #include <stdio.h>
 #include <stdlib.h>
