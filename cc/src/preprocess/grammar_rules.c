@@ -1438,7 +1438,7 @@ static char* rg_emit(const RG* g, int origin_line) {
 /* under the `<Rules>__s` prefix and shared by every schema.             */
 /* ==================================================================== */
 
-enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_FIELDS };
+enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS };
 enum { S_MAX_TERMS = 96, S_MAX_KEYS = 64, S_NAME = 64, S_MAX_BODY = 32 };
 
 typedef struct {
@@ -1447,6 +1447,8 @@ typedef struct {
     char rname[S_NAME]; int rule;        /* SK_RULE / SK_BIND_SLICE / SK_BIND_INT */
     char field[S_NAME];                  /* SK_BIND_* */
     char etype[S_NAME];                  /* SK_BIND_ITEMS: element schema type */
+    char cfield[S_NAME];                 /* count-driven items / bytes: an earlier
+                                            `int` field naming the count/length */
     int kidx[24]; int k_cnt;             /* SK_FIELDS: entries (indices into keys[];
                                             nested fields interleave the pool, so an
                                             explicit list, not a contiguous range) */
@@ -1635,11 +1637,32 @@ static int ss_term(SS* s, int* out_term) {
     if (strcmp(v, "int") == 0) {
         if (ss_ruleref(s, t->rname, "expected rules reference after int")) return -1;
         t->kind = SK_BIND_INT;
+    } else if (strcmp(v, "bytes") == 0) {
+        /* count-driven raw read: exactly <field> bytes, zero-copy borrow.
+         * This is the length-prefix primitive (RESP bulk strings, TLV). */
+        char cn[S_NAME];
+        if (!ss_ident(s, cn, sizeof cn)) return ss_fail(s, s->p, "expected length field after bytes");
+        snprintf(t->cfield, sizeof(t->cfield), "%s", cn);
+        t->kind = SK_BIND_BYTES;
     } else if (strcmp(v, "items") == 0) {
         char en[S_NAME];
         if (!ss_ident(s, en, sizeof en)) return ss_fail(s, s->p, "expected schema name after items");
         snprintf(t->etype, sizeof(t->etype), "%s", en);
         t->kind = SK_BIND_ITEMS;
+        /* optional trailing count field => count-driven repetition (no
+         * open/close/sep). Lookahead: a bare ident that is not the start of
+         * the next term (ruleref `X.`, binding `x:`, or `fields [`). */
+        {
+            size_t save = s->p;
+            char cn[S_NAME];
+            if (ss_ident(s, cn, sizeof cn)) {
+                ss_ws(s);
+                int next_is_term = (s->p < s->n && (s->b[s->p] == '.' || s->b[s->p] == ':')) ||
+                                   strcmp(cn, "fields") == 0;
+                if (next_is_term) s->p = save;
+                else snprintf(t->cfield, sizeof(t->cfield), "%s", cn);
+            }
+        }
     } else if (strcmp(v, s->usename) == 0) {
         if (ss_ruleref_tail(s, t->rname)) return -1;
         t->kind = SK_BIND_SLICE;
@@ -1865,16 +1888,37 @@ static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
 static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     (void)ss;
     int k = (*lbl)++;
-    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
-              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n",
-           k, k, k, g->name, g->rules[t->rule].name, k, k, k, fail);
+    /* small top-level-keep rules extract INLINE at the bind site — the
+     * pointer indirection folds to registers and the call disappears. The
+     * top-level-keep gate guarantees the capture fires on every success
+     * path, so the locals are always written. Bigger rules stay calls. */
+    int body = g->rules[t->rule].node;
+    if (g->nodes[body].kind == RN_KEEP && rg_inline_size(g, g->nodes[body].a, 0) <= 16) {
+        eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d = 0;\n"
+                  "      { size_t* xa = &xa%d; size_t* xb = &xb%d; int* xdr = &xd%d;\n"
+                  "        (void)xa; (void)xb; (void)xdr;\n",
+               k, k, k, k, k, k);
+        e->mode = 2;
+        rg_emit_node(g, e, body, fail, lbl, t->rule);
+        e->mode = 0;
+        eb_fmt(e, "      }\n");
+    } else {
+        eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
+                  "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n",
+               k, k, k, g->name, g->rules[t->rule].name, k, k, k, fail);
+    }
     if (t->kind == SK_BIND_INT) {
+        /* inline accumulation over the captured span — the matcher already
+         * validated the digits; strtoll would copy and re-scan them (and is
+         * a strtoll prefix-parse either way: stops at the first non-digit,
+         * so `int` over a float span binds its integer part). */
         eb_fmt(e, "      (void)xd%d;\n"
-                  "      { char nb%d[32]; size_t nl%d = xb%d - xa%d;\n"
-                  "        if (nl%d > 31) nl%d = 31;\n"
-                  "        memcpy(nb%d, s + xa%d, nl%d); nb%d[nl%d] = 0;\n"
-                  "        out->%s = strtoll(nb%d, 0, 10); } }\n",
-               k, k, k, k, k, k, k, k, k, k, k, k, t->field, k);
+                  "      { long long v%d = 0; size_t q%d = xa%d; int ng%d = 0;\n"
+                  "        if (q%d < xb%d && s[q%d] == '-') { ng%d = 1; q%d++; }\n"
+                  "        for (; q%d < xb%d && s[q%d] >= '0' && s[q%d] <= '9'; q%d++)\n"
+                  "            v%d = v%d * 10 + (s[q%d] - '0');\n"
+                  "        out->%s = ng%d ? -v%d : v%d; } }\n",
+               k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, t->field, k, k, k);
         return;
     }
     int cd = rs_rule_codec(g, t->rule);
@@ -1943,6 +1987,33 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->fc, fail);
 }
 
+static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
+    int k = (*lbl)++;
+    /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
+     * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
+    eb_fmt(e, "    { long long L%d = out->%s;\n"
+              "      if (L%d < 0 || (unsigned long long)L%d > (unsigned long long)(n - p)) goto %s;\n"
+              "      out->%s = cc_slice_from_buffer((void*)(s + p), (size_t)L%d);\n"
+              "      p += (size_t)L%d; }\n",
+           k, t->cfield, k, k, fail, t->field, k, k);
+}
+
+static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
+    int k = (*lbl)++;
+    const char* T = t->etype;
+    /* the count is data: exact-size allocation, no realloc, no delimiters */
+    eb_fmt(e, "    { long long C%d = out->%s;\n"
+              "      if (C%d < 0 || (unsigned long long)C%d > n - p) goto %s;\n"
+              "      size_t cap%d = C%d > 0 ? (size_t)C%d : 1;\n"
+              "      %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
+              "      if (!v%d) goto %s;\n"
+              "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
+              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d])) goto %s;\n"
+              "      out->%s = v%d; out->%s_n = (size_t)C%d; }\n",
+           k, t->cfield, k, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
+           k, k, k, k, T, k, k, fail, t->field, k, t->field, k);
+}
+
 static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     const char* T = t->etype;
@@ -1992,7 +2063,11 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         rs_emit_bind_value(ss, g, e, lbl, t, fail);
         break;
     case SK_BIND_ITEMS:
-        rs_emit_items(ss, g, e, lbl, t, fail);
+        if (t->cfield[0]) rs_emit_items_counted(e, lbl, t, fail);
+        else rs_emit_items(ss, g, e, lbl, t, fail);
+        break;
+    case SK_BIND_BYTES:
+        rs_emit_bytes(e, lbl, t, fail);
         break;
     case SK_FIELDS:
         rs_emit_fields(ss, g, e, lbl, t, fail);
@@ -2000,9 +2075,16 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     }
 }
 
+static int rs_find_int_field(const SS* ss, int before, const char* nm) {
+    for (int i = 0; i < before; i++)
+        if (ss->terms[i].kind == SK_BIND_INT && strcmp(ss->terms[i].field, nm) == 0) return i;
+    return -1;
+}
+
 static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
     const STerm* t = &ss->terms[ti];
-    if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_ITEMS) {
+    if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT ||
+        t->kind == SK_BIND_ITEMS || t->kind == SK_BIND_BYTES) {
         order[(*cnt)++] = ti;
     } else if (t->kind == SK_FIELDS) {
         for (int i = 0; i < t->k_cnt; i++)
@@ -2091,9 +2173,16 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                          "`fields:` directive with open/close/sep/kv/key", name);
                 goto done;
             }
-            if (t->kind == SK_BIND_ITEMS && (ss->io_ < 0 || ss->ic_ < 0 || ss->is_ < 0)) {
+            if (t->kind == SK_BIND_ITEMS && !t->cfield[0] &&
+                (ss->io_ < 0 || ss->ic_ < 0 || ss->is_ < 0)) {
                 snprintf(err, err_sz, "@grammar(schema) %s: items requires an "
-                         "`items:` directive with open/close/sep", name);
+                         "`items:` directive with open/close/sep (or a count field)", name);
+                goto done;
+            }
+            if ((t->kind == SK_BIND_BYTES || (t->kind == SK_BIND_ITEMS && t->cfield[0])) &&
+                rs_find_int_field(ss, ti, t->cfield) < 0) {
+                snprintf(err, err_sz, "@grammar(schema) %s: '%s' must name an earlier "
+                         "`int` field of this schema", name, t->cfield);
                 goto done;
             }
         }
@@ -2121,6 +2210,11 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 else if (ss->terms[ti].kind == SK_BIND_SLICE || ss->terms[ti].kind == SK_BIND_INT)
                     r = ss->terms[ti].rule;
                 if (r < 0 || reg->x_done[r]) continue;
+                {   /* bind sites inline small top-level-keep rules — no call, no fn */
+                    int body = g->rules[r].node;
+                    if (ti >= 0 && g->nodes[body].kind == RN_KEEP &&
+                        rg_inline_size(g, g->nodes[body].a, 0) <= 16) continue;
+                }
                 rs_emit_x(g, &e, &lbl, r);
                 reg->x_done[r] = 1;
             }
@@ -2134,7 +2228,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 const STerm* t = &ss->terms[order[i]];
                 if (t->kind == SK_BIND_INT)
                     eb_fmt(&e, "    long long %s;\n", t->field);
-                else if (t->kind == SK_BIND_SLICE)
+                else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
                     eb_fmt(&e, "    CCSlice %s;\n", t->field);
                 else
                     eb_fmt(&e, "    %s* %s; size_t %s_n;\n", t->etype, t->field, t->field);
@@ -2144,8 +2238,18 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         eb_fmt(&e, "static int %s__fill(const unsigned char* s, size_t n, size_t* io,\n"
                    "        CCArena* arena, %s* out) {\n"
-                   "    size_t p = *io;\n    (void)arena;\n"
-                   "    memset(out, 0, sizeof *out);\n", name, name);
+                   "    size_t p = *io;\n    (void)arena;\n", name, name);
+        /* zero the struct only when some bind is conditional (inside a
+         * fields dispatch): a body whose binds are all unconditional terms
+         * assigns every member on the success path — missing-member zeroing
+         * is a fields-combinator semantic, not a product-schema one. */
+        {
+            int conditional = 0;
+            for (int ti = 0; ti < ss->nterms && !conditional; ti++)
+                if (ss->terms[ti].kind == SK_FIELDS) conditional = 1;
+            if (conditional)
+                eb_fmt(&e, "    memset(out, 0, sizeof *out);\n");
+        }
         {
             char fail[16];
             snprintf(fail, sizeof(fail), "Lz%d", lbl++);
@@ -2158,6 +2262,11 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    "    size_t p = 0;\n"
                    "    if (!%s__fill(s, n, &p, arena, out)) return 0;\n"
                    "    return p == n;\n}\n", name, name, name);
+        /* incremental entry: parse ONE value at *pos, advance it — pipelines
+         * and framed streams call this in a loop instead of requiring p == n */
+        eb_fmt(&e, "static int %s_read(const char* s0, size_t n, size_t* pos, CCArena* arena, %s* out) {\n"
+                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out);\n}\n",
+               name, name, name);
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
         if (out) out[len - 1] = '\0';
     }
