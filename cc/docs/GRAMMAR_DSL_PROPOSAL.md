@@ -20,7 +20,21 @@ single block, bare rule refs), and a rules grammar may `include Other` to
 splice a previously declared grammar's rules verbatim (entry point stays the
 includer's first own rule). All composition — use / inline / include /
 narrowing — resolves at compile time to the same flat specialized C; nothing
-parses through an intermediate. Smokes: `tests/grammar_rules_*.ccs`,
+parses through an intermediate.
+
+**The factory model** (define → specialize → instantiate): a grammar is a
+comptime factory — including a FILE artifact via `include "path.rules"`
+(path relative to the including source; works in rules blocks and inline
+schema sections alike, so one factory file serves many TUs). Every use is a
+compile-time specialization, and tiers are **demand-gated**: a rules block
+emits a projection (match / DOM+collect) only if the file references its
+entry points (`Name_match`, `Name_parse`, `Name_collect`, `NameNode`) — the
+declaration alone stamps nothing but the type and rule count. Runtime
+instances are cursors: every schema emits `NameReader` +
+`Name_reader(s,n,arena)` / `Name_next(&r,&out)` / `Name_at_end(&r)` — state
+only; all behavior was specialized at compile time.
+Smokes: `tests/grammar_rules_*.ccs`, `tests/grammar_factory_smoke.ccs`
+(file factory, demand gating, Reader),
 `tests/grammar_schema_twitter_smoke.ccs` (composed vs DOM cross-validation,
 composed vs directive agreement), `tests/grammar_schema_resp_smoke.ccs`.
 The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`

@@ -18,10 +18,14 @@
 
 #include <stddef.h>
 
+/* src/src_len: the WHOLE input file's text. Engines use it for demand
+ * analysis — a grammar declaration is a factory, and a projection (tier) is
+ * only stamped out when the file actually references its entry points. */
 char* cc_grammar_builtin_emit(const char* engine,
                               const char* name,
                               const char* body, size_t body_len,
                               const char* file, int line,
+                              const char* src, size_t src_len,
                               char* err, size_t err_sz);
 
 /* Cross-block state (rules bodies that @grammar(schema) blocks `use`, schema
