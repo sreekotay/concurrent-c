@@ -75,7 +75,7 @@
 
 /* ------------------------------------------------------------------ IR ---- */
 
-enum { RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP, RN_KEEP };
+enum { RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP, RN_KEEP, RN_COLLECT };
 
 enum {
     R_MAX_NODES = 1024,
@@ -347,12 +347,16 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
         return nd;
     }
     if (rg_kw(g, p, "collect", &after)) {
-        /* transparent: the collect entry point is generated unconditionally */
+        /* brackets its span with BEGIN/END log markers: nesting for the DOM
+         * builder, inherited rollback safety from the log truncation. */
         p = after;
         int child = rg_parse_term(g, &p, depth);
         if (child < 0) return -1;
+        int nd = rg_node(g, RN_COLLECT, at);
+        if (nd < 0) return -1;
+        g->nodes[nd].a = child;
         *io = p;
-        return child;
+        return nd;
     }
     if (rg_kw(g, p, "skip", &after)) {
         int nd = rg_node(g, RN_SKIP, at);
@@ -553,7 +557,7 @@ static void rf_node(const RG* g, RFirst* F, int nd, unsigned char* set, int* nul
     case RN_CHARSET: rf_union(set, g->sets[x->a]); break;
     case RN_SKIP: rf_all(set); break;
     case RN_REF: rf_rule(g, F, x->nkids, set, nullable); break;
-    case RN_KEEP: rf_node(g, F, x->a, set, nullable); break;
+    case RN_KEEP: case RN_COLLECT: rf_node(g, F, x->a, set, nullable); break;
     case RN_OPT: case RN_ANY: {
         int n2 = 0; rf_node(g, F, x->a, set, &n2);
         *nullable = 1;
@@ -634,7 +638,7 @@ static int rk_rule(const RG* g, RKeeps* K, int r) {
 static int rk_node(const RG* g, RKeeps* K, int nd) {
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
-    case RN_KEEP: return 1;
+    case RN_KEEP: case RN_COLLECT: return 1;
     case RN_REF: return rk_rule(g, K, x->nkids);
     case RN_SOME: case RN_ANY: case RN_OPT: return rk_node(g, K, x->a);
     case RN_SEQ: case RN_ALT:
@@ -666,12 +670,25 @@ static int rg_effective(const RG* g, int nd) {
 typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
-    char tmp[1024];
-    va_list ap;
+    char tmp[16384];
+    char* big = NULL;
+    va_list ap, ap2;
     va_start(ap, fmt);
+    va_copy(ap2, ap);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n > 0) cc_sb_append(e->buf, e->len, e->cap, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
+    if (n < 0) { va_end(ap2); return; }
+    if ((size_t)n < sizeof(tmp)) {
+        cc_sb_append(e->buf, e->len, e->cap, tmp, (size_t)n);
+    } else {   /* never truncate emitted code */
+        big = (char*)malloc((size_t)n + 1);
+        if (big) {
+            vsnprintf(big, (size_t)n + 1, fmt, ap2);
+            cc_sb_append(e->buf, e->len, e->cap, big, (size_t)n);
+            free(big);
+        }
+    }
+    va_end(ap2);
 }
 
 /* Emit statements matching node `nd`; on mismatch: `goto <fail>;` with the
@@ -714,6 +731,14 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         rg_emit_node(g, e, x->a, fail, lbl, rid);
         eb_fmt(e, "    if (c && !%s__push(c, %d, %d, ka%d, p)) goto %s;\n    }\n",
                g->name, rid, x->b, k, fail);
+        break;
+    }
+    case RN_COLLECT: {
+        /* BEGIN/END markers bracket the child's span. A failing child unwinds
+         * through the log truncation, removing the BEGIN — no special casing. */
+        eb_fmt(e, "    if (c && !%s__push(c, %d, -1, p, p)) goto %s;\n", g->name, rid, fail);
+        rg_emit_node(g, e, x->a, fail, lbl, rid);
+        eb_fmt(e, "    if (c && !%s__push(c, %d, -2, p, p)) goto %s;\n", g->name, rid, fail);
         break;
     }
     case RN_SEQ:
@@ -916,7 +941,7 @@ static char* rg_emit(const RG* g, int origin_line) {
         stack[sp++] = g->rules[r].node;
         while (sp > 0) {
             const RNode* x = &g->nodes[stack[--sp]];
-            if (x->kind == RN_KEEP) { haskeep = 1; break; }
+            if (x->kind == RN_KEEP || x->kind == RN_COLLECT) { haskeep = 1; break; }
             if (x->kind == RN_SEQ || x->kind == RN_ALT)
                 for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
             else if (x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
@@ -972,6 +997,7 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (ok && cb) {\n"
                "        for (size_t t = 0; t < c0.total; t++) {\n"
                "            %s__le* en = &c0.dir[t >> 8][t & 255];\n"
+               "            if (en->codec < 0) continue;   /* BEGIN/END markers: DOM tier only */\n"
                "            const char* kp = s + en->a;\n"
                "            size_t kl = en->b - en->a;\n"
                "            CCSlice v;\n"
@@ -990,6 +1016,84 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    }\n"
                "Ldone:\n"
                "    return ok;\n}\n");
+
+    /* ---- DOM tier: a tree of VIEWS over the source. 24-byte nodes, golden
+     * json.h layout. Leaves hold kept spans — borrowed from src when the codec
+     * left them clean (cow=0), materialized into the arena otherwise (cow=1).
+     * meta = ruleid(8) | cow(1) | len_or_count(<<9). Interior nodes come from
+     * `collect` rules; children are a sibling list (object members appear as
+     * key,value pairs by grammar order). Provenance is reconstructed on demand
+     * by <Name>Node_slice — the Cow bit decides borrowed vs unique, so a
+     * consumer cannot mistake a view for an owner. */
+    eb_fmt(&e, "typedef struct %sNode { unsigned long long meta;\n"
+               "    union { const char* bytes; struct %sNode* head; } u;\n"
+               "    struct %sNode* next; } %sNode;\n", g->name, g->name, g->name, g->name);
+    eb_fmt(&e, "static int %sNode_id(const %sNode* nd) { return (int)(nd->meta & 0xFFu); }\n",
+           g->name, g->name);
+    eb_fmt(&e, "static int %sNode_is_list(const %sNode* nd) { return (int)((nd->meta >> 8) & 1u); }\n",
+           g->name, g->name);
+    eb_fmt(&e, "static size_t %sNode_len(const %sNode* nd) { return (size_t)(nd->meta >> 10); }\n",
+           g->name, g->name);
+    eb_fmt(&e, "static void %sNode_slice(const %sNode* nd, CCSlice* out) {\n"
+               "    size_t l = (size_t)(nd->meta >> 10);\n"
+               "    if ((nd->meta >> 9) & 1u)\n"
+               "        *out = cc_slice_from_parts((void*)nd->u.bytes, l,\n"
+               "                   cc_slice_make_id(3ULL, true, false, false), l);\n"
+               "    else\n"
+               "        *out = cc_slice_from_buffer((void*)nd->u.bytes, l);\n}\n",
+           g->name, g->name);
+    eb_fmt(&e, "static %sNode* %s_parse(const char* s, size_t n, CCArena* arena) {\n"
+               "    %s__ctx c0; c0.dir = 0; c0.ndir = 0; c0.cap = 0; c0.total = 0; c0.arena = arena;\n"
+               "    size_t p = 0;\n"
+               "    if (!%s__r_%s(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
+               "    {\n"
+               "    %sNode* root = (%sNode*)cc_arena_alloc_local(arena, sizeof(%sNode), _Alignof(%sNode));\n"
+               "    %sNode** tails[512]; %sNode* lists[512]; size_t cnts[512]; size_t depth = 0;\n"
+               "    if (!root) return 0;\n"
+               "    root->meta = 0x100u; root->u.head = 0; root->next = 0;\n"
+               "    lists[0] = root; tails[0] = &root->u.head; cnts[0] = 0;\n"
+               "    for (size_t t = 0; t < c0.total; t++) {\n"
+               "        %s__le* en = &c0.dir[t >> 8][t & 255];\n"
+               "        if (en->codec == -1) {   /* BEGIN */\n"
+               "            %sNode* nd = (%sNode*)cc_arena_alloc_local(arena, sizeof(%sNode), _Alignof(%sNode));\n"
+               "            if (!nd || depth + 1 >= 512) return 0;\n"
+               "            nd->meta = 0x100u | (unsigned long long)en->id; nd->u.head = 0; nd->next = 0;\n"
+               "            *tails[depth] = nd; tails[depth] = &nd->next; cnts[depth]++;\n"
+               "            depth++; lists[depth] = nd; tails[depth] = &nd->u.head; cnts[depth] = 0;\n"
+               "            continue;\n"
+               "        }\n"
+               "        if (en->codec == -2) {   /* END: patch child count into len */\n"
+               "            lists[depth]->meta |= ((unsigned long long)cnts[depth]) << 10;\n"
+               "            depth--;\n"
+               "            continue;\n"
+               "        }\n"
+               "        {\n"
+               "        const char* kp = s + en->a;\n"
+               "        size_t kl = en->b - en->a;\n"
+               "        CCSlice v;\n"
+               "        switch (en->codec) {\n",
+           g->name, g->name, g->name, g->name, g->rules[0].name,
+           g->name, g->name, g->name, g->name, g->name, g->name,
+           g->name, g->name, g->name, g->name, g->name);
+    for (int ci = 0; ci < g->ncodecs; ci++)
+        eb_fmt(&e, "        case %d: if (!%s(kp, kl, &v, arena)) return 0; break;\n",
+               ci + 1, g->codecs[ci]);
+    eb_fmt(&e, "        default: v = cc_slice_from_buffer((void*)kp, kl); break;\n"
+               "        }\n"
+               "        {\n"
+               "        %sNode* nd = (%sNode*)cc_arena_alloc_local(arena, sizeof(%sNode), _Alignof(%sNode));\n"
+               "        if (!nd) return 0;\n"
+               "        nd->meta = (unsigned long long)en->id\n"
+               "                 | (cc_slice_is_unique(v) ? 0x200u : 0u)\n"
+               "                 | (((unsigned long long)v.len) << 10);\n"
+               "        nd->u.bytes = (const char*)v.ptr; nd->next = 0;\n"
+               "        *tails[depth] = nd; tails[depth] = &nd->next; cnts[depth]++;\n"
+               "        }\n"
+               "        }\n"
+               "    }\n"
+               "    return root;\n"
+               "    }\n}\n",
+           g->name, g->name, g->name, g->name);
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';

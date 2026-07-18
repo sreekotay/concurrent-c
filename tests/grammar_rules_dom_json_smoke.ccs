@@ -1,0 +1,131 @@
+// DOM tier for @grammar(rules): `collect` rules become interior nodes, kept
+// spans become leaves — a tree of VIEWS over the source (zero-copy where the
+// codec left bytes clean; materialized into the arena otherwise). Provenance
+// makes the sharing safe: JsonNode_slice reconstructs a CCSlice whose Cow bit
+// says borrowed-view vs arena-owned, so a consumer cannot mistake one for the
+// other. Golden cross-check: twitter leaf borrow/mat must be 17787/312.
+#include <ccc/std/prelude.cch>
+
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) { *out = cc_slice_from_buffer((void*)p, n); return 1; }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++] = '\n'; break;  case 't': dst[o++] = '\t'; break;
+        case 'r': dst[o++] = '\r'; break;  case '"': dst[o++] = '"'; break;
+        case '\\': dst[o++] = '\\'; break; case '/': dst[o++] = '/'; break;
+        case 'b': dst[o++] = '\b'; break;  case 'f': dst[o++] = '\f'; break;
+        case 'u': { unsigned cp = 0;
+            for (int h = 0; h < 4; h++) { char x = p[++k]; cp <<= 4;
+                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0') : (unsigned)((x | 32) - 'a' + 10); }
+            if (cp < 0x80) dst[o++] = (char)cp;
+            else if (cp < 0x800) { dst[o++] = (char)(0xC0 | (cp >> 6)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else { dst[o++] = (char)(0xE0 | (cp >> 12)); dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            break; }
+        default: dst[o++] = e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  keep [int opt [#'.' some digit]
+                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    value:   [ws [string | number | object | array | "true" | "false" | "null"] ws]
+    member:  [ws string ws #':' value]
+    array:   collect [#'[' ws opt [value any [#',' value]] #']']
+    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+typedef struct { long borrow, mat; const char* s; size_t n; int bad_ptr; } Walk;
+
+static void walk(JsonNode* nd, Walk* w) {
+    if (JsonNode_is_list(nd)) {
+        for (JsonNode* ch = nd->u.head; ch; ch = ch->next) walk(ch, w);
+        return;
+    }
+    CCSlice v;
+    JsonNode_slice(nd, &v);
+    if (cc_slice_is_unique(v)) w->mat++;
+    else {
+        w->borrow++;
+        /* zero-copy proof: a borrowed leaf points INTO the source buffer */
+        if (JsonNode_id(nd) == Json_KEEP_string || JsonNode_id(nd) == Json_KEEP_number) {
+            const char* pp = (const char*)v.ptr;
+            if (v.len && (pp < w->s || pp + v.len > w->s + w->n)) w->bad_ptr = 1;
+        }
+    }
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(32 << 20);
+
+    /* structure + provenance on a small doc */
+    {
+        const char* src = "[1, \"a\\nb\", {\"k\": 2}]";
+        JsonNode* root = Json_parse(src, strlen(src), &arena);
+        if (!root) { printf("FAIL: parse\n"); return 1; }
+        JsonNode* arr = root->u.head;
+        if (!arr || !JsonNode_is_list(arr) || JsonNode_id(arr) != Json_KEEP_array ||
+            JsonNode_len(arr) != 3) { printf("FAIL: array node\n"); return 1; }
+        JsonNode* n1 = arr->u.head;              /* 1 */
+        JsonNode* s1 = n1->next;                 /* "a\nb" (materialized) */
+        JsonNode* ob = s1->next;                 /* {…} */
+        CCSlice v;
+        JsonNode_slice(n1, &v);
+        if (JsonNode_id(n1) != Json_KEEP_number || cc_slice_is_unique(v) ||
+            v.len != 1 || ((const char*)v.ptr)[0] != '1') { printf("FAIL: num leaf\n"); return 1; }
+        JsonNode_slice(s1, &v);
+        if (JsonNode_id(s1) != Json_KEEP_string || !cc_slice_is_unique(v) ||
+            v.len != 3 || memcmp(v.ptr, "a\nb", 3) != 0) { printf("FAIL: str leaf\n"); return 1; }
+        if (!JsonNode_is_list(ob) || JsonNode_id(ob) != Json_KEEP_object ||
+            JsonNode_len(ob) != 2) { printf("FAIL: object node (len=%d)\n", (int)JsonNode_len(ob)); return 1; }
+        /* member appears as key,value pair */
+        JsonNode_slice(ob->u.head, &v);
+        if (v.len != 1 || ((const char*)v.ptr)[0] != 'k') { printf("FAIL: key leaf\n"); return 1; }
+    }
+    /* malformed: no tree */
+    {
+        cc_arena_reset(&arena);
+        if (Json_parse("[1,]", 4, &arena) != 0) { printf("FAIL: bad accepted\n"); return 1; }
+    }
+    /* corpora: golden Cow split through the DOM, zero-copy pointer proof */
+    {
+        FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+            char* b = (char*)malloc((size_t)n);
+            size_t rd = fread(b, 1, (size_t)n, f); fclose(f);
+            cc_arena_reset(&arena);
+            JsonNode* root = Json_parse(b, rd, &arena);
+            if (!root) { printf("FAIL: twitter parse\n"); return 1; }
+            Walk w = {0}; w.s = b; w.n = rd;
+            walk(root, &w);
+            if (w.borrow != 17787 + 2109 || w.mat != 312) {
+                /* strings borrow 17787 + all 2109 numbers borrow; 312 materialize */
+                printf("FAIL: twitter cow %ld/%ld\n", w.borrow, w.mat); return 1;
+            }
+            if (w.bad_ptr) { printf("FAIL: borrowed leaf outside source\n"); return 1; }
+            free(b);
+        }
+    }
+    cc_arena_free(&arena);
+    printf("grammar rules DOM OK\n");
+    return 0;
+}
