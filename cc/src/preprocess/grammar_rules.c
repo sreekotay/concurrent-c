@@ -99,6 +99,7 @@ typedef struct {
     char pool[R_MAX_POOL]; int npool;
     struct { char name[R_NAME_MAX]; int node; size_t at; } rules[R_MAX_RULES];
     int nrules;
+    char codecs[16][R_NAME_MAX]; int ncodecs;   /* keep/decode(fn) codec names */
 } RG;
 
 static int rg_line_at(const RG* g, size_t at) {
@@ -297,12 +298,44 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
         return nd;
     }
     if (rg_kw(g, p, "keep", &after)) {
+        int codec = 0;   /* 0 = raw borrow; k+1 = codec index k */
         p = after;
+        if (p < g->n && g->body[p] == '/') {
+            p++;
+            if (!rg_kw(g, p, "decode", &after))
+                return rg_fail(g, p, "expected keep/decode(codec)");
+            p = rg_ws(g, after);
+            if (p >= g->n || g->body[p] != '(')
+                return rg_fail(g, p, "expected '(' after keep/decode");
+            p = rg_ws(g, p + 1);
+            size_t ce;
+            if (!rg_ident(g, p, &ce) || ce - p >= R_NAME_MAX)
+                return rg_fail(g, p, "expected codec function name");
+            {
+                char cn[R_NAME_MAX];
+                memcpy(cn, g->body + p, ce - p); cn[ce - p] = '\0';
+                int idx = -1;
+                for (int i = 0; i < g->ncodecs; i++)
+                    if (strcmp(g->codecs[i], cn) == 0) { idx = i; break; }
+                if (idx < 0) {
+                    if (g->ncodecs >= (int)(sizeof(g->codecs) / sizeof(g->codecs[0])))
+                        return rg_fail(g, p, "too many distinct codecs");
+                    idx = g->ncodecs++;
+                    strcpy(g->codecs[idx], cn);
+                }
+                codec = idx + 1;
+            }
+            p = rg_ws(g, ce);
+            if (p >= g->n || g->body[p] != ')')
+                return rg_fail(g, p, "expected ')' closing keep/decode(codec)");
+            p++;
+        }
         int child = rg_parse_term(g, &p, depth);
         if (child < 0) return -1;
         int nd = rg_node(g, RN_KEEP, at);
         if (nd < 0) return -1;
         g->nodes[nd].a = child;
+        g->nodes[nd].b = codec;
         *io = p;
         return nd;
     }
@@ -507,8 +540,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int k = (*lbl)++;
         eb_fmt(e, "    { size_t ka%d = p;\n", k);
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        eb_fmt(e, "    if (c && !%s__push(c, %d, ka%d, p)) goto %s;\n    }\n",
-               g->name, rid, k, fail);
+        eb_fmt(e, "    if (c && !%s__push(c, %d, %d, ka%d, p)) goto %s;\n    }\n",
+               g->name, rid, x->b, k, fail);
         break;
     }
     case RN_SEQ:
@@ -578,16 +611,17 @@ static char* rg_emit(const RG* g, int origin_line) {
     eb_fmt(&e, "static inline int %s_rule_count(void) { return %d; }\n", g->name, g->nrules);
     /* collect context: span log with cursor-coupled rollback (nlog restores
      * alongside p, so failed-branch keeps are never replayed). */
-    eb_fmt(&e, "typedef struct { struct { int id; size_t a, b; }* log; size_t nlog, cap; } %s__ctx;\n",
+    eb_fmt(&e, "typedef struct { struct { int id; int codec; size_t a, b; }* log; size_t nlog, cap; } %s__ctx;\n",
            g->name);
-    eb_fmt(&e, "static int %s__push(%s__ctx* c, int id, size_t a, size_t b) {\n"
+    eb_fmt(&e, "static int %s__push(%s__ctx* c, int id, int codec, size_t a, size_t b) {\n"
                "    if (c->nlog == c->cap) {\n"
                "        size_t nc = c->cap ? c->cap * 2 : 64;\n"
                "        void* nl = realloc(c->log, nc * sizeof(*c->log));\n"
                "        if (!nl) return 0;\n"
                "        c->log = nl; c->cap = nc;\n"
                "    }\n"
-               "    c->log[c->nlog].id = id; c->log[c->nlog].a = a; c->log[c->nlog].b = b;\n"
+               "    c->log[c->nlog].id = id; c->log[c->nlog].codec = codec;\n"
+               "    c->log[c->nlog].a = a; c->log[c->nlog].b = b;\n"
                "    c->nlog++; return 1;\n}\n", g->name, g->name);
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
@@ -644,18 +678,33 @@ static char* rg_emit(const RG* g, int origin_line) {
                "    if (!%s__r_%s(0, (const unsigned char*)s, n, &p)) return 0;\n"
                "    return p == n;\n}\n",
            g->name, g->name, g->rules[0].name);
-    eb_fmt(&e, "static int %s_collect(const char* s, size_t n,\n"
-               "        int (*cb)(void* env, int id, const char* ptr, size_t len), void* env) {\n"
+    eb_fmt(&e, "static int %s_collect(const char* s, size_t n, CCArena* arena,\n"
+               "        int (*cb)(void* env, int id, CCSlice v), void* env) {\n"
                "    %s__ctx c0; c0.log = 0; c0.nlog = 0; c0.cap = 0;\n"
                "    size_t p = 0;\n"
                "    int ok = %s__r_%s(&c0, (const unsigned char*)s, n, &p) && p == n;\n"
+               "    (void)arena;\n"
                "    if (ok && cb) {\n"
-               "        for (size_t i = 0; i < c0.nlog; i++)\n"
-               "            if (cb(env, c0.log[i].id, s + c0.log[i].a, c0.log[i].b - c0.log[i].a)) { ok = 0; break; }\n"
-               "    }\n"
-               "    free(c0.log);\n"
-               "    return ok;\n}\n",
+               "        for (size_t i = 0; i < c0.nlog; i++) {\n"
+               "            const char* kp = s + c0.log[i].a;\n"
+               "            size_t kl = c0.log[i].b - c0.log[i].a;\n"
+               "            CCSlice v;\n"
+               "            switch (c0.log[i].codec) {\n",
            g->name, g->name, g->name, g->rules[0].name);
+    /* codec contract: int codec(const char* p, size_t n, CCSlice* out, CCArena* arena)
+     * — returns 0 on decode failure (fails the collect); writes *out. Out-param
+     * keeps unique (materialized) slices inside CC's move-only rules. */
+    for (int ci = 0; ci < g->ncodecs; ci++)
+        eb_fmt(&e, "            case %d: if (!%s(kp, kl, &v, arena)) { ok = 0; goto Ldone; } break;\n",
+               ci + 1, g->codecs[ci]);
+    eb_fmt(&e, "            default: v = cc_slice_from_buffer((void*)kp, kl); break;\n"
+               "            }\n"
+               "            if (cb(env, c0.log[i].id, v)) { ok = 0; break; }\n"
+               "        }\n"
+               "    }\n"
+               "Ldone:\n"
+               "    free(c0.log);\n"
+               "    return ok;\n}\n");
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
