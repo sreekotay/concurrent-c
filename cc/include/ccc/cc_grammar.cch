@@ -16,6 +16,9 @@
  *   cc_reader(Tweet, s, n, arena)           schema: -> TweetReader cursor
  *   cc_next(Tweet, &r, &out)                schema: next value from a cursor
  *   cc_at_end(Tweet, &r)                    schema: clean EOF vs mid-input
+ *   cc_write(Cmd, &v, dst, cap)             schema: FORMAT (inverted parse) ->
+ *                                           bytes written, 0 = didn't fit;
+ *                                           length/count fields are DERIVED
  *
  * UFCS forms work too — the lowered names follow receiver conventions:
  *   Tweet.parse(s, n, &arena, &out)   type-scoped -> Tweet_parse(...)
@@ -38,5 +41,6 @@
 #define cc_reader(T, ...)  T##_reader(__VA_ARGS__)
 #define cc_next(T, ...)    T##Reader_next(__VA_ARGS__)
 #define cc_at_end(T, ...)  T##Reader_at_end(__VA_ARGS__)
+#define cc_write(T, ...)   T##_write(__VA_ARGS__)
 
 #endif /* CCC_CC_GRAMMAR_CCH */

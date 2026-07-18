@@ -2554,6 +2554,110 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
 
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail);
 
+/* ---- format: the schema INVERTED (write side of SERDES) ----
+ * A product schema is a byte template: literals emit verbatim, slice/bytes
+ * binds emit their bytes, int binds emit decimal — and a length/count field
+ * consumed by a later `bytes`/counted-`items` term is DERIVED from the data
+ * (data.len / items_n), so output is correct by construction. Matcher terms
+ * (pads) emit nothing: format is canonical. Member-list combinators need
+ * codec inversion (escape ENCODING) and are not formatable yet. */
+
+static int rs_derived_from(const SS* ss, int ti) {
+    /* is terms[ti] (an int bind) the length/count source of a LATER term?
+     * returns that term's index, or -1 */
+    for (int j = ti + 1; j < ss->nterms; j++) {
+        const STerm* t = &ss->terms[j];
+        if ((t->kind == SK_BIND_BYTES ||
+             (t->kind == SK_BIND_ITEMS && t->cfield[0])) &&
+            strcmp(t->cfield, ss->terms[ti].field) == 0)
+            return j;
+    }
+    return -1;
+}
+
+static int rs_formatable(const SS* ss) {
+    for (int i = 0; i < ss->nterms; i++) {
+        int k = ss->terms[i].kind;
+        if (k == SK_FIELDS || k == SK_NARROW_MEMBERS || k == SK_NARROW_LIST) return 0;
+        if (k == SK_BIND_ITEMS && !ss->terms[i].cfield[0]) return 0;   /* delimited: later */
+    }
+    return 1;
+}
+
+static void rs_emit_write_int(EB* e, int* lbl, const char* expr) {
+    int k = (*lbl)++;
+    eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
+              "      char nb%d[21]; int nl%d = 0;\n"
+              "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
+              "      if (x%d < 0) { if (o >= cap) return 0; dst[o++] = '-'; }\n"
+              "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
+              "      if (o + (size_t)nl%d > cap) return 0;\n"
+              "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
+           k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
+}
+
+/* any write-shaped reference at all (`X_write`, `r.write`, `cc_write(`)?
+ * An element schema's writer is demanded by a LATER schema's generated code,
+ * which the per-name scan cannot see — so a formatable schema also emits its
+ * writer under this loose file-level demand, tagged unused-ok. */
+static int rs_any_write_demand(const char* src, size_t n) {
+    for (size_t i = 1; i + 5 <= n; i++) {
+        if (src[i] != 'w' || memcmp(src + i, "write", 5) != 0) continue;
+        if (src[i - 1] != '_' && src[i - 1] != '.') continue;
+        if (i + 5 < n && (isalnum((unsigned char)src[i + 5]) || src[i + 5] == '_')) continue;
+        return 1;
+    }
+    return 0;
+}
+
+static void rs_emit_write(SS* ss, EB* e, int* lbl, const char* name) {
+    eb_fmt(e, "static __attribute__((unused)) size_t %s_write(const %s* v, char* dst, size_t cap) {\n"
+              "    size_t o = 0;\n    (void)v;\n", name, name);
+    for (int bi = 0; bi < ss->nbody; bi++) {
+        int ti = ss->body[bi];
+        const STerm* t = &ss->terms[ti];
+        switch (t->kind) {
+        case SK_LIT: {
+            char esc[128];
+            rs_esc(esc, sizeof esc, t->lit, t->litlen);
+            eb_fmt(e, "    if (o + %d > cap) return 0;\n"
+                      "    memcpy(dst + o, \"%s\", %d); o += %d;\n",
+                   t->litlen, esc, t->litlen, t->litlen);
+            break;
+        }
+        case SK_RULE:
+            break;   /* pads/matchers: canonical output emits nothing */
+        case SK_BIND_INT: {
+            int dj = rs_derived_from(ss, ti);
+            char expr[160];
+            if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
+                snprintf(expr, sizeof expr, "v->%s.len", ss->terms[dj].field);
+            else if (dj >= 0)
+                snprintf(expr, sizeof expr, "v->%s_n", ss->terms[dj].field);
+            else
+                snprintf(expr, sizeof expr, "v->%s", t->field);
+            rs_emit_write_int(e, lbl, expr);
+            break;
+        }
+        case SK_BIND_SLICE:
+        case SK_BIND_BYTES:
+            eb_fmt(e, "    if (o + v->%s.len > cap) return 0;\n"
+                      "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
+                   t->field, t->field, t->field, t->field);
+            break;
+        case SK_BIND_ITEMS:   /* count-driven (rs_formatable guaranteed) */
+            eb_fmt(e, "    { size_t i;\n"
+                      "    for (i = 0; i < v->%s_n; i++) {\n"
+                      "        size_t k = %s_write(&v->%s[i], dst + o, cap - o);\n"
+                      "        if (k == 0) return 0;\n"
+                      "        o += k;\n    } }\n",
+                   t->field, t->etype, t->field);
+            break;
+        }
+    }
+    eb_fmt(e, "    return o;\n}\n");
+}
+
 static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* fail) {
     for (int i = 0; i < npads; i++) rs_emit_pad(g, e, pads[i], fail);
 }
@@ -2796,6 +2900,10 @@ static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
     }
 }
 
+static int rs_has_token(const char* src, size_t n, const char* name, const char* suffix);
+static int rs_has_op(const char* src, size_t n, const char* op, const char* name);
+static int rs_has_dot(const char* src, size_t n, const char* name, const char* method);
+
 static char* cc__schema_emit(const char* name, const char* body, size_t body_len,
                              const char* file, int line,
                              const char* src, size_t src_len,
@@ -2953,9 +3061,12 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    " *   cc_read(%s, s, n, &pos, arena, &out) / %s.read(...) -> %s_read\n"
                    " *   cc_reader(%s, s, n, arena) / %s.reader(...)        -> %s_reader\n"
                    " *   cc_next / cc_at_end / r.next(&out) / r.at_end()    -> %sReader_next/_at_end\n"
-                   " */\n",
+                   "%s */\n",
                name, line, reg ? "use " : "inline rules", reg ? ss->usename : "",
-               name, name, name, name, name, name, name, name, name, name, name, name);
+               name, name, name, name, name, name, name, name, name, name, name, name,
+               rs_formatable(ss)
+                   ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
+                   : "");
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
@@ -3085,6 +3196,24 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             char rn[S_NAME + 8];
             snprintf(rn, sizeof rn, "%sReader", name);
             cc__grammar_note_ufcs_type(rn);
+        }
+        /* the WRITE projection (schema inverted), on demand like every tier */
+        {
+            int want_write = rs_has_token(src, src_len, name, "_write") ||
+                             rs_has_op(src, src_len, "cc_write", name) ||
+                             rs_has_dot(src, src_len, name, "write");
+            if (!want_write && rs_formatable(ss) && rs_any_write_demand(src, src_len))
+                want_write = 1;   /* element writers: demanded by generated code */
+            if (want_write && !rs_formatable(ss)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: %s_write is referenced but the "
+                         "schema is not formatable yet (member-list combinators need codec "
+                         "inversion; delimited items need emit rules)", name, name);
+                free(out);
+                out = NULL;
+                goto done;
+            }
+            if (want_write)
+                rs_emit_write(ss, &e, &lbl, name);
         }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
         if (out) out[len - 1] = '\0';
