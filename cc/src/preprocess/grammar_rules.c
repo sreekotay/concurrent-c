@@ -1438,7 +1438,28 @@ static char* rg_emit(const RG* g, int origin_line) {
 /* under the `<Rules>__s` prefix and shared by every schema.             */
 /* ==================================================================== */
 
-enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS };
+enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
+       SK_NARROW_MEMBERS,   /* G.rule [ "k" term ... ] — narrow a member-list rule */
+       SK_NARROW_LIST };    /* f: G.rule of Schema    — narrow a list rule to an array */
+
+/* Derived structural parameters of a narrowed rule. Narrowing is COMPOSITION:
+ * the schema names a rules-grammar rule and the engine decomposes its shape —
+ * open/sep/close delimiters, pad rules, the member's key/kv/value structure —
+ * instead of the schema re-describing them in directives. The grammar stays
+ * the single source of structural truth; the schema only selects bindings. */
+typedef struct {
+    int open_b, sep_b, close_b;        /* single-byte delimiters */
+    int lpad[2]; int nlpad;            /* pads after open */
+    int tpad[2]; int ntpad;            /* pads before close */
+    int elem;                          /* element rule (member / value) */
+    int mpad_a[2]; int nmpad_a;        /* member: pads before key */
+    int key_rule;                      /* member: keep-bearing key rule */
+    int mpad_b[2]; int nmpad_b;        /* member: pads before kv */
+    int kv_b;                          /* member: kv delimiter */
+    int val_rule;                      /* member: default value rule (the skip) */
+    int vpad_a[2]; int nvpad_a;        /* value: pads before its core */
+    int vpad_b[2]; int nvpad_b;        /* value: pads after its core */
+} RNarrow;
 enum { S_MAX_TERMS = 96, S_MAX_KEYS = 64, S_NAME = 64, S_MAX_BODY = 32 };
 
 typedef struct {
@@ -1449,7 +1470,8 @@ typedef struct {
     char etype[S_NAME];                  /* SK_BIND_ITEMS: element schema type */
     char cfield[S_NAME];                 /* count-driven items / bytes: an earlier
                                             `int` field naming the count/length */
-    int kidx[24]; int k_cnt;             /* SK_FIELDS: entries (indices into keys[];
+    RNarrow nw;                          /* SK_NARROW_*: derived structure */
+    int kidx[24]; int k_cnt;             /* SK_FIELDS / SK_NARROW_MEMBERS: entries (indices into keys[];
                                             nested fields interleave the pool, so an
                                             explicit list, not a contiguous range) */
 } STerm;
@@ -1623,6 +1645,15 @@ static int ss_term(SS* s, int* out_term) {
     if (s->p < s->n && s->b[s->p] == '.') {
         if (strcmp(id, s->usename) != 0) return ss_fail(s, s->p, "rules reference must use the `use`d grammar");
         if (ss_ruleref_tail(s, t->rname)) return -1;
+        ss_ws(s);
+        if (s->p < s->n && s->b[s->p] == '[') {
+            /* G.rule [ ... ] — narrow the rule's member-list structure */
+            t->kind = SK_NARROW_MEMBERS;
+            int self = s->nterms++;
+            if (ss_fields_body(s, self)) return -1;
+            *out_term = self;
+            return 0;
+        }
         t->kind = SK_RULE;
         *out_term = s->nterms++;
         return 0;
@@ -1666,6 +1697,22 @@ static int ss_term(SS* s, int* out_term) {
     } else if (strcmp(v, s->usename) == 0) {
         if (ss_ruleref_tail(s, t->rname)) return -1;
         t->kind = SK_BIND_SLICE;
+        /* `f: G.rule of Schema` — narrow a list rule: elements parse as the
+         * schema, the array shape (delimiters, pads) derives from the rule */
+        {
+            size_t save = s->p;
+            char kw[S_NAME];
+            if (ss_ident(s, kw, sizeof kw)) {
+                if (strcmp(kw, "of") == 0) {
+                    char en[S_NAME];
+                    if (!ss_ident(s, en, sizeof en)) return ss_fail(s, s->p, "expected schema name after of");
+                    snprintf(t->etype, sizeof(t->etype), "%s", en);
+                    t->kind = SK_NARROW_LIST;
+                } else {
+                    s->p = save;
+                }
+            }
+        }
     } else {
         return ss_fail(s, s->p, "binding must be `int Use.rule`, `Use.rule`, or `items Schema`");
     }
@@ -1824,6 +1871,125 @@ static const char* rs_class(const RG* g, RKeeps* K, int r) {
     return rk_rule(g, (RKeeps*)K, r) ? "m" : "r";
 }
 
+/* ---- narrowing: decompose a rule's structure instead of re-describing it ---- */
+
+static int rw_unwrap(const RG* g, int nd) {   /* look through collect/keep wrappers */
+    while (g->nodes[nd].kind == RN_COLLECT || g->nodes[nd].kind == RN_KEEP)
+        nd = g->nodes[nd].a;
+    return nd;
+}
+
+static int rw_lit1(const RG* g, int nd) {     /* single-byte literal -> byte, else -1 */
+    const RNode* x = &g->nodes[nd];
+    if (x->kind == RN_LIT && x->b == 1) return (int)(unsigned char)g->pool[x->a];
+    return -1;
+}
+
+static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd) {
+    /* a pad is a nullable keep-free rule reference (e.g. ws) */
+    const RNode* x = &g->nodes[nd];
+    if (x->kind != RN_REF) return -1;
+    if (rk_rule((RG*)g, K, x->nkids)) return -1;
+    if (!rn_nullable(g, F, nd)) return -1;
+    return x->nkids;
+}
+
+/* delimited list: SEQ( LIT1 pad* OPT(SEQ(REF e, ANY(SEQ(LIT1, REF e)))) pad* LIT1 ) */
+static int rw_match_list(const RG* g, RFirst* F, RKeeps* K, int rule, RNarrow* o) {
+    int body = rw_unwrap(g, g->rules[rule].node);
+    const RNode* x = &g->nodes[body];
+    if (x->kind != RN_SEQ || x->nkids < 3) return 0;
+    int nk = x->nkids, i = 0;
+    o->open_b = rw_lit1(g, g->kids[x->b + i]); if (o->open_b < 0) return 0;
+    i++;
+    while (i < nk) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + i]);
+        if (pr < 0) break;
+        if (o->nlpad < 2) o->lpad[o->nlpad++] = pr;
+        i++;
+    }
+    if (i >= nk) return 0;
+    {
+        const RNode* op = &g->nodes[g->kids[x->b + i]];
+        if (op->kind != RN_OPT) return 0;
+        const RNode* isq = &g->nodes[op->a];
+        if (isq->kind != RN_SEQ || isq->nkids != 2) return 0;
+        int k0 = g->kids[isq->b], k1 = g->kids[isq->b + 1];
+        if (g->nodes[k0].kind != RN_REF) return 0;
+        const RNode* an = &g->nodes[k1];
+        if (an->kind != RN_ANY) return 0;
+        const RNode* asq = &g->nodes[an->a];
+        if (asq->kind != RN_SEQ || asq->nkids != 2) return 0;
+        o->sep_b = rw_lit1(g, g->kids[asq->b]); if (o->sep_b < 0) return 0;
+        if (g->nodes[g->kids[asq->b + 1]].kind != RN_REF) return 0;
+        if (g->nodes[k0].nkids != g->nodes[g->kids[asq->b + 1]].nkids) return 0;
+        o->elem = g->nodes[k0].nkids;
+        i++;
+    }
+    while (i < nk - 1) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + i]);
+        if (pr < 0) return 0;
+        if (o->ntpad < 2) o->tpad[o->ntpad++] = pr;
+        i++;
+    }
+    o->close_b = rw_lit1(g, g->kids[x->b + (nk - 1)]); if (o->close_b < 0) return 0;
+    return 1;
+}
+
+/* member: SEQ( pad* REF(key, keep-bearing) pad* LIT1 REF(value) ) */
+static int rw_match_member(const RG* g, RFirst* F, RKeeps* K, RNarrow* o) {
+    int body = rw_unwrap(g, g->rules[o->elem].node);
+    const RNode* x = &g->nodes[body];
+    if (x->kind != RN_SEQ || x->nkids < 3) return 0;
+    int nk = x->nkids, i = 0;
+    while (i < nk) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + i]);
+        if (pr < 0) break;
+        if (o->nmpad_a < 2) o->mpad_a[o->nmpad_a++] = pr;
+        i++;
+    }
+    if (i >= nk) return 0;
+    if (g->nodes[g->kids[x->b + i]].kind != RN_REF) return 0;
+    o->key_rule = g->nodes[g->kids[x->b + i]].nkids;
+    if (!rs_rule_has_keep(g, o->key_rule)) return 0;
+    i++;
+    while (i < nk) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + i]);
+        if (pr < 0) break;
+        if (o->nmpad_b < 2) o->mpad_b[o->nmpad_b++] = pr;
+        i++;
+    }
+    if (i + 2 != nk) return 0;
+    o->kv_b = rw_lit1(g, g->kids[x->b + i]); if (o->kv_b < 0) return 0;
+    if (g->nodes[g->kids[x->b + (nk - 1)]].kind != RN_REF) return 0;
+    o->val_rule = g->nodes[g->kids[x->b + (nk - 1)]].nkids;
+    return 1;
+}
+
+/* value: SEQ( pad* core... pad* ) — pads around the core, for bound paths
+ * (bound terms replace the core; the pads still belong to the grammar) */
+static void rw_match_value(const RG* g, RFirst* F, RKeeps* K, int vrule, RNarrow* o) {
+    int body = rw_unwrap(g, g->rules[vrule].node);
+    const RNode* x = &g->nodes[body];
+    if (x->kind != RN_SEQ) return;   /* no pads */
+    int nk = x->nkids, lo = 0, hi = nk;
+    while (lo < hi) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + lo]);
+        if (pr < 0) break;
+        if (o->nvpad_a < 2) o->vpad_a[o->nvpad_a++] = pr;
+        lo++;
+    }
+    while (hi > lo + 1) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + (hi - 1)]);
+        if (pr < 0) break;
+        hi--;
+    }
+    for (int j = hi; j < nk; j++) {
+        int pr = rw_pad_rule(g, F, K, g->kids[x->b + j]);
+        if (pr >= 0 && o->nvpad_b < 2) o->vpad_b[o->nvpad_b++] = pr;
+    }
+}
+
 static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len) {
     size_t o = 0;
     for (int i = 0; i < len && o + 5 < dstsz; i++) {
@@ -1937,6 +2103,86 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
 }
 
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail);
+
+static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* fail) {
+    for (int i = 0; i < npads; i++) rs_emit_pad(g, e, pads[i], fail);
+}
+
+/* narrowed member list: every delimiter, pad, and the unknown-member skip
+ * come from the decomposed rule — the schema contributed only the bindings */
+static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
+    const RNarrow* w = &t->nw;
+    int k = (*lbl)++;
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->open_b, fail);
+    rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
+    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", w->close_b);
+    rw_emit_pads(g, e, w->mpad_a, w->nmpad_a, fail);
+    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
+              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n"
+              "      (void)xd%d;\n",
+           k, k, k, g->name, g->rules[w->key_rule].name, k, k, k, fail, k);
+    rw_emit_pads(g, e, w->mpad_b, w->nmpad_b, fail);
+    eb_fmt(e, "      if (!(p < n && s[p] == %d)) goto %s;\n      p++;\n", w->kv_b, fail);
+    eb_fmt(e, "      switch (xb%d - xa%d) {\n", k, k);
+    {
+        unsigned char done[S_MAX_KEYS] = {0};
+        for (int i = 0; i < t->k_cnt; i++) {
+            if (done[i]) continue;
+            const SKey* ki = &ss->keys[t->kidx[i]];
+            size_t L = strlen(ki->key);
+            eb_fmt(e, "      case %d:\n", (int)L);
+            for (int j = i; j < t->k_cnt; j++) {
+                const SKey* kj = &ss->keys[t->kidx[j]];
+                if (done[j] || strlen(kj->key) != L) continue;
+                done[j] = 1;
+                char esc[4 * S_NAME];
+                rs_esc(esc, sizeof esc, (const unsigned char*)kj->key, (int)L);
+                eb_fmt(e, "        if (memcmp(s + xa%d, \"%s\", %d) == 0) {\n", k, esc, (int)L);
+                rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
+                rs_emit_term(ss, g, e, lbl, kj->term, fail);
+                rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
+                eb_fmt(e, "          break; }\n");
+            }
+            eb_fmt(e, "        goto Ld%d;\n", k);
+        }
+    }
+    eb_fmt(e, "      default: goto Ld%d;\n      }\n      goto Ln%d;\n", k, k);
+    eb_fmt(e, "Ld%d:\n", k);
+    eb_fmt(e, "      if (!%s__%s_%s(s, n, &p)) goto %s;\n",
+           g->name, rs_class(g, e->K, w->val_rule), g->rules[w->val_rule].name, fail);
+    eb_fmt(e, "Ln%d: ;\n    }\n", k);
+    eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
+    rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->close_b, fail);
+}
+
+/* narrowed list: array shape from the rule, elements parsed as the schema
+ * (placed at the element rule's core, inside its own pads) */
+static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
+    const RNarrow* w = &t->nw;
+    int k = (*lbl)++;
+    const char* T = t->etype;
+    eb_fmt(e, "    { size_t cap%d = 8, cnt%d = 0;\n"
+              "    %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
+              "    if (!v%d) goto %s;\n",
+           k, k, T, k, T, k, T, T, k, fail);
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->open_b, fail);
+    rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
+    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", w->close_b);
+    eb_fmt(e, "    if (cnt%d == cap%d) {\n"
+              "        %s* nv%d = (%s*)cc_arena_realloc(arena, arena, v%d,\n"
+              "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
+              "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
+           k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
+    rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d])) goto %s;\n    cnt%d++;\n",
+           T, k, k, fail, k);
+    rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
+    eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
+    rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
+    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->close_b, fail);
+    eb_fmt(e, "    out->%s = v%d; out->%s_n = cnt%d; }\n", t->field, k, t->field, k);
+}
 
 static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
@@ -2072,6 +2318,12 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     case SK_FIELDS:
         rs_emit_fields(ss, g, e, lbl, t, fail);
         break;
+    case SK_NARROW_MEMBERS:
+        rs_emit_narrow_members(ss, g, e, lbl, t, fail);
+        break;
+    case SK_NARROW_LIST:
+        rs_emit_narrow_list(g, e, lbl, t, fail);
+        break;
     }
 }
 
@@ -2084,9 +2336,10 @@ static int rs_find_int_field(const SS* ss, int before, const char* nm) {
 static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
     const STerm* t = &ss->terms[ti];
     if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT ||
-        t->kind == SK_BIND_ITEMS || t->kind == SK_BIND_BYTES) {
+        t->kind == SK_BIND_ITEMS || t->kind == SK_BIND_BYTES ||
+        t->kind == SK_NARROW_LIST) {
         order[(*cnt)++] = ti;
-    } else if (t->kind == SK_FIELDS) {
+    } else if (t->kind == SK_FIELDS || t->kind == SK_NARROW_MEMBERS) {
         for (int i = 0; i < t->k_cnt; i++)
             rs_collect_binds(ss, ss->keys[t->kidx[i]].term, order, cnt);
     }
@@ -2141,7 +2394,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         for (int ti = 0; ti < ss->nterms; ti++) {
             STerm* t = &ss->terms[ti];
-            if (t->kind != SK_RULE && t->kind != SK_BIND_SLICE && t->kind != SK_BIND_INT) continue;
+            if (t->kind != SK_RULE && t->kind != SK_BIND_SLICE && t->kind != SK_BIND_INT &&
+                t->kind != SK_NARROW_MEMBERS && t->kind != SK_NARROW_LIST) continue;
             t->rule = rs_rule_by_name(g, t->rname);
             if (t->rule < 0) {
                 snprintf(err, err_sz, "@grammar(schema) %s: unknown rule '%s.%s'",
@@ -2153,6 +2407,31 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 snprintf(err, err_sz, "@grammar(schema) %s: rule '%s.%s' has no keep to extract",
                          name, ss->usename, t->rname);
                 goto done;
+            }
+            if (t->kind == SK_NARROW_MEMBERS) {
+                if (!rw_match_list(g, F, K, t->rule, &t->nw) ||
+                    !rw_match_member(g, F, K, &t->nw)) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: rule '%s.%s' does not "
+                             "narrow to a member list (need: open pad* opt[member "
+                             "any[sep member]] pad* close; member: pad* key pad* kv value)",
+                             name, ss->usename, t->rname);
+                    goto done;
+                }
+                rw_match_value(g, F, K, t->nw.val_rule, &t->nw);
+            }
+            if (t->kind == SK_NARROW_LIST) {
+                if (!rw_match_list(g, F, K, t->rule, &t->nw)) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: rule '%s.%s' does not "
+                             "narrow to a list (need: open pad* opt[elem any[sep elem]] pad* close)",
+                             name, ss->usename, t->rname);
+                    goto done;
+                }
+                rw_match_value(g, F, K, t->nw.elem, &t->nw);
+                if (!cc__schema_known(t->etype)) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
+                             "(must be declared earlier in this file)", name, t->etype);
+                    goto done;
+                }
             }
             if (t->kind == SK_BIND_ITEMS && !cc__schema_known(t->etype)) {
                 snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
@@ -2205,14 +2484,17 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         /* extract variants needed by this schema (shared across schemas) */
         {
             for (int ti = -1; ti < ss->nterms; ti++) {
-                int r = -1;
-                if (ti < 0) r = ss->rfkey;
+                int r = -1, as_key = 0;
+                if (ti < 0) { r = ss->rfkey; as_key = 1; }
                 else if (ss->terms[ti].kind == SK_BIND_SLICE || ss->terms[ti].kind == SK_BIND_INT)
                     r = ss->terms[ti].rule;
+                else if (ss->terms[ti].kind == SK_NARROW_MEMBERS) {
+                    r = ss->terms[ti].nw.key_rule; as_key = 1;
+                }
                 if (r < 0 || reg->x_done[r]) continue;
-                {   /* bind sites inline small top-level-keep rules — no call, no fn */
+                if (!as_key) {   /* bind sites inline small top-level-keep rules — no call, no fn */
                     int body = g->rules[r].node;
-                    if (ti >= 0 && g->nodes[body].kind == RN_KEEP &&
+                    if (g->nodes[body].kind == RN_KEEP &&
                         rg_inline_size(g, g->nodes[body].a, 0) <= 16) continue;
                 }
                 rs_emit_x(g, &e, &lbl, r);
@@ -2246,7 +2528,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         {
             int conditional = 0;
             for (int ti = 0; ti < ss->nterms && !conditional; ti++)
-                if (ss->terms[ti].kind == SK_FIELDS) conditional = 1;
+                if (ss->terms[ti].kind == SK_FIELDS ||
+                    ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
             if (conditional)
                 eb_fmt(&e, "    memset(out, 0, sizeof *out);\n");
         }
