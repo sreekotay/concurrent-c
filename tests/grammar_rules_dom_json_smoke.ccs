@@ -57,7 +57,7 @@ typedef struct { long borrow, mat; const char* s; size_t n; int bad_ptr; } Walk;
 
 static void walk(JsonNode* nd, Walk* w) {
     if (JsonNode_is_list(nd)) {
-        for (JsonNode* ch = nd->u.head; ch; ch = ch->next) walk(ch, w);
+        for (JsonNode* ch = JsonNode_first(nd); ch; ch = JsonNode_next(ch, nd)) walk(ch, w);
         return;
     }
     CCSlice v;
@@ -81,12 +81,12 @@ int main(void) {
         const char* src = "[1, \"a\\nb\", {\"k\": 2}]";
         JsonNode* root = Json_parse(src, strlen(src), &arena);
         if (!root) { printf("FAIL: parse\n"); return 1; }
-        JsonNode* arr = root->u.head;
+        JsonNode* arr = JsonNode_first(root);
         if (!arr || !JsonNode_is_list(arr) || JsonNode_id(arr) != Json_KEEP_array ||
-            JsonNode_len(arr) != 3) { printf("FAIL: array node\n"); return 1; }
-        JsonNode* n1 = arr->u.head;              /* 1 */
-        JsonNode* s1 = n1->next;                 /* "a\nb" (materialized) */
-        JsonNode* ob = s1->next;                 /* {…} */
+            JsonNode_count(arr) != 3) { printf("FAIL: array node\n"); return 1; }
+        JsonNode* n1 = JsonNode_first(arr);      /* 1 */
+        JsonNode* s1 = JsonNode_next(n1, arr);   /* "a\nb" (materialized) */
+        JsonNode* ob = JsonNode_next(s1, arr);   /* {…} */
         CCSlice v;
         JsonNode_slice(n1, &v);
         if (JsonNode_id(n1) != Json_KEEP_number || cc_slice_is_unique(v) ||
@@ -95,9 +95,9 @@ int main(void) {
         if (JsonNode_id(s1) != Json_KEEP_string || !cc_slice_is_unique(v) ||
             v.len != 3 || memcmp(v.ptr, "a\nb", 3) != 0) { printf("FAIL: str leaf\n"); return 1; }
         if (!JsonNode_is_list(ob) || JsonNode_id(ob) != Json_KEEP_object ||
-            JsonNode_len(ob) != 2) { printf("FAIL: object node (len=%d)\n", (int)JsonNode_len(ob)); return 1; }
+            JsonNode_count(ob) != 2) { printf("FAIL: object node (cnt=%d)\n", (int)JsonNode_count(ob)); return 1; }
         /* member appears as key,value pair */
-        JsonNode_slice(ob->u.head, &v);
+        JsonNode_slice(JsonNode_first(ob), &v);
         if (v.len != 1 || ((const char*)v.ptr)[0] != 'k') { printf("FAIL: key leaf\n"); return 1; }
     }
     /* malformed: no tree */
