@@ -6,6 +6,7 @@
 #   ./bench.sh -w         also run the @grammar WRITE bench (Feed -> canonical JSON)
 #   ./bench.sh -s         also run the hidden-class (shapes) DOM vs tape DOM
 #   ./bench.sh -d         also run the ENGINE shaped DOM (cc_dom) vs tape + access
+#   ./bench.sh -a         all of the above (-y -g -w -s -d)
 #   ./bench.sh -c         also print a correctness checksum (verified untimed)
 #   ./bench.sh [K] [corpus...]
 set -e
@@ -21,6 +22,7 @@ while :; do
     -w) WR=1; shift;;
     -s) SH=1; shift;;
     -d) DM=1; shift;;
+    -a) YY=1; GEN=1; WR=1; SH=1; DM=1; shift;;
     -c) CHK="-c"; shift;;
     *) break;;
   esac
