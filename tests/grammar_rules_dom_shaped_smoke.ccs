@@ -1,0 +1,189 @@
+// SHAPED DOM tier (`cc_dom`): the hidden-class model over a rules grammar.
+// The engine classifies container rules by the SAME narrowing analysis the
+// schema tier uses — `object` (member list) builds objects whose keys live
+// in the caller's persistent CCShapeReg trie; `array` builds arrays;
+// map-shaped data degrades to per-instance dictionaries.
+//
+// Cross-validated against the tape DOM (Json_parse) of the same grammar:
+// two lowerings of one grammar must agree on every field.
+#include <ccc/std/prelude.cch>
+
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) { *out = cc_slice_from_buffer((void*)p, n); return 1; }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++] = '\n'; break; case 't': dst[o++] = '\t'; break;
+        case '"': dst[o++] = '"'; break;  case '\\': dst[o++] = '\\'; break;
+        default: dst[o++] = e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    number:  keep [opt #'-' some digit opt [#'.' some digit]]
+    value:   [ws [string | number | object | array
+                 | keep ["true" | "false" | "null"]] ws]
+    member:  [ws string ws #':' value]
+    array:   collect [#'[' ws opt [value any [#',' value]] #']']
+    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+static int slice_is(const CCShapeVal* v, const char* want) {
+    CCSlice s = cc_shape_slice(v);
+    size_t l = strlen(want);
+    return s.len == l && memcmp(s.ptr, want, l) == 0;
+}
+
+int main(void) {
+    CCArena shp = cc_arena_create(16 << 20);   /* persistent: shapes */
+    CCArena rec = cc_arena_create(16 << 20);   /* per-parse: records */
+    CCShapeReg* reg = cc_shape_reg_create(&shp);
+    if (!reg) { printf("FAIL: reg\n"); return 1; }
+
+    /* objects, arrays, nesting, escapes, key addressing */
+    {
+        const char* src =
+            "{\"id\":42,\"text\":\"a\\nb\",\"tags\":[\"x\",\"y\"],"
+            "\"user\":{\"name\":\"z\",\"ok\":true}}";
+        CCShapeVal v;
+        if (!cc_dom(Json, src, strlen(src), reg, &rec, &v)) { printf("FAIL: dom parse\n"); return 1; }
+        if (cc_shape_kind(&v) != CC_SHAPE_OBJ || cc_shape_len(&v) != 4) {
+            printf("FAIL: root obj\n"); return 1;
+        }
+        CCShapeVal* id = cc_shape_get(&v, "id");
+        if (!id || !slice_is(id, "42")) { printf("FAIL: id\n"); return 1; }
+        CCShapeVal* tx = cc_shape_get(&v, "text");
+        if (!tx || !slice_is(tx, "a\nb") || !cc_shape_cow(tx)) { printf("FAIL: text decode\n"); return 1; }
+        CCShapeVal* tags = cc_shape_get(&v, "tags");
+        if (!tags || cc_shape_kind(tags) != CC_SHAPE_ARR || tags->u.arr->n != 2 ||
+            !slice_is(&tags->u.arr->items[1], "y")) { printf("FAIL: tags\n"); return 1; }
+        CCShapeVal* u = cc_shape_get(&v, "user");
+        CCShapeVal* nm = u ? cc_shape_get(u, "name") : 0;
+        if (!nm || !slice_is(nm, "z")) { printf("FAIL: nested\n"); return 1; }
+        if (cc_shape_get(&v, "nope")) { printf("FAIL: phantom key\n"); return 1; }
+
+        /* registry persistence: same wire shape on parse #2 = zero new shapes */
+        uint32_t before = reg->nshapes;
+        cc_arena_reset(&rec);
+        if (!Json_dom(src, strlen(src), reg, &rec, &v)) { printf("FAIL: reparse\n"); return 1; }
+        if (reg->nshapes != before) { printf("FAIL: shapes not reused\n"); return 1; }
+        if (!slice_is(cc_shape_get(&v, "id"), "42")) { printf("FAIL: reparse id\n"); return 1; }
+    }
+
+    /* cross-validation vs the tape DOM on the corpus (skip if absent) */
+    {
+        FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
+            char* buf = (char*)malloc((size_t)fn + 1);
+            size_t rd = fread(buf, 1, (size_t)fn, f);
+            fclose(f);
+            CCArena big = cc_arena_create(64 << 20);
+            cc_arena_reset(&rec);
+            CCShapeVal sv;
+            if (!Json_dom(buf, rd, reg, &big, &sv)) { printf("FAIL: corpus dom\n"); return 1; }
+            JsonNode* root = Json_parse(buf, rd, &big);
+            if (!root) { printf("FAIL: corpus tape\n"); return 1; }
+
+            /* every tweet: id/text/user.screen_name must agree byte-for-byte */
+            CCShapeVal* st = cc_shape_get(&sv, "statuses");
+            if (!st || cc_shape_kind(st) != CC_SHAPE_ARR) { printf("FAIL: statuses\n"); return 1; }
+            unsigned long long ssum = 0, tsum = 0;
+            long scnt = 0;
+            CCShapeKey kid = cc_shape_key("id"), ktx = cc_shape_key("text"),
+                       kus = cc_shape_key("user"), ksn = cc_shape_key("screen_name");
+            for (uint64_t i = 0; i < st->u.arr->n; i++) {
+                CCShapeVal* tw = &st->u.arr->items[i];
+                CCShapeVal* id = cc_shape_get_k(tw, kid);
+                CCShapeVal* tx = cc_shape_get_k(tw, ktx);
+                CCShapeVal* us = cc_shape_get_k(tw, kus);
+                CCShapeVal* sn = us ? cc_shape_get_k(us, ksn) : 0;
+                if (id) ssum += cc_shape_len(id) * 3 + 1;
+                if (tx) ssum += cc_shape_len(tx);
+                if (sn) ssum += cc_shape_len(sn) * 7;
+                scnt++;
+            }
+            {
+                /* tape: statuses via (key,value) pair walk; root is the
+                 * wrapping list, its single child is the object */
+                JsonNode* stn = 0;
+                JsonNode* obj = JsonNode_first(root);
+                for (JsonNode* k = JsonNode_first(obj); k; ) {
+                    JsonNode* val = JsonNode_next(k, obj);
+                    CCSlice ks; JsonNode_slice(k, &ks);
+                    if (ks.len == 8 && memcmp(ks.ptr, "statuses", 8) == 0) { stn = val; break; }
+                    k = JsonNode_next(val, obj);
+                }
+                if (!stn) { printf("FAIL: tape statuses\n"); return 1; }
+                long tcnt = 0;
+                for (JsonNode* tw = JsonNode_first(stn); tw; tw = JsonNode_next(tw, stn)) {
+                    JsonNode *idn = 0, *txn = 0, *usn = 0, *snn = 0;
+                    for (JsonNode* k = JsonNode_first(tw); k; ) {
+                        JsonNode* val = JsonNode_next(k, tw);
+                        CCSlice ks; JsonNode_slice(k, &ks);
+                        if (ks.len == 2 && !memcmp(ks.ptr, "id", 2)) idn = val;
+                        else if (ks.len == 4 && !memcmp(ks.ptr, "text", 4)) txn = val;
+                        else if (ks.len == 4 && !memcmp(ks.ptr, "user", 4)) usn = val;
+                        k = JsonNode_next(val, tw);
+                    }
+                    if (usn)
+                        for (JsonNode* k = JsonNode_first(usn); k; ) {
+                            JsonNode* val = JsonNode_next(k, usn);
+                            CCSlice ks; JsonNode_slice(k, &ks);
+                            if (ks.len == 11 && !memcmp(ks.ptr, "screen_name", 11)) { snn = val; break; }
+                            k = JsonNode_next(val, usn);
+                        }
+                    if (idn) { CCSlice x; JsonNode_slice(idn, &x); tsum += x.len * 3 + 1; }
+                    if (txn) { CCSlice x; JsonNode_slice(txn, &x); tsum += x.len; }
+                    if (snn) { CCSlice x; JsonNode_slice(snn, &x); tsum += x.len * 7; }
+                    tcnt++;
+                }
+                if (tcnt != scnt || tsum != ssum) {
+                    printf("FAIL: shaped/tape disagree cnt %ld/%ld sum %llu/%llu\n",
+                           scnt, tcnt, ssum, tsum);
+                    return 1;
+                }
+            }
+            if (reg->dict_objs != 0) { printf("FAIL: corpus dicted\n"); return 1; }
+            cc_arena_free(&big);
+            free(buf);
+        }
+    }
+
+    /* dictionary fallback: a 200-key map object stays bounded and readable */
+    {
+        char mj[8192]; size_t mn = 0;
+        mn += (size_t)snprintf(mj + mn, sizeof mj - mn, "{");
+        for (int i = 0; i < 200; i++)
+            mn += (size_t)snprintf(mj + mn, sizeof mj - mn, "%s\"u%03d\":%d", i ? "," : "", i, i);
+        mn += (size_t)snprintf(mj + mn, sizeof mj - mn, "}");
+        uint32_t before = reg->nshapes;
+        cc_arena_reset(&rec);
+        CCShapeVal v;
+        if (!Json_dom(mj, mn, reg, &rec, &v)) { printf("FAIL: map parse\n"); return 1; }
+        if (reg->dict_objs < 1) { printf("FAIL: map did not dict\n"); return 1; }
+        if (reg->nshapes - before > CC_SHAPE_DICT_DEPTH + 2) { printf("FAIL: shape explosion\n"); return 1; }
+        CCShapeVal* u = cc_shape_get(&v, "u150");
+        if (!u || !slice_is(u, "150")) { printf("FAIL: dict get\n"); return 1; }
+        if (cc_shape_get(&v, "u999")) { printf("FAIL: dict phantom\n"); return 1; }
+    }
+
+    cc_arena_free(&shp);
+    cc_arena_free(&rec);
+    printf("grammar shaped DOM OK\n");
+    return 0;
+}
