@@ -1852,25 +1852,30 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         }
         for (int r = 0; r < g->nrules; r++) {
             if (skip[r]) continue;
+            /* padded trampolines are force-inlined; gcc needs the attribute
+             * visible at call sites that precede the definition */
+            const char* al = has_np[r]
+                ? "static inline __attribute__((always_inline)) int "
+                : "static int ";
             if (pure[r]) {
                 if (want_match || want_build) {
-                    eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io);\n",
-                           g->name, g->rules[r].name);
+                    eb_fmt(&e, "%s%s__r_%s(const unsigned char* s, size_t n, size_t* io);\n",
+                           al, g->name, g->rules[r].name);
                     if (has_np[r])
                         eb_fmt(&e, "static int %s__r_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
                                g->name, g->rules[r].name);
                 }
             } else {
                 if (want_match) {
-                    eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
-                           g->name, g->rules[r].name);
+                    eb_fmt(&e, "%s%s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
+                           al, g->name, g->rules[r].name);
                     if (has_np[r])
                         eb_fmt(&e, "static int %s__m_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
                                g->name, g->rules[r].name);
                 }
                 if (want_build) {
-                    eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
-                           g->name, g->rules[r].name, g->name);
+                    eb_fmt(&e, "%s%s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
+                           al, g->name, g->rules[r].name, g->name);
                     if (has_np[r])
                         eb_fmt(&e, "static int %s__b_%s__np(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
                                g->name, g->rules[r].name, g->name);
@@ -1886,23 +1891,33 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                 for (int np = has_np[r] ? 1 : 0; np >= 0; np--) {
                     int is_np = has_np[r] && np == 1;
                     const char* suf = is_np ? "__np" : "";
+                    /* The full padded entry is a thin trampoline (lead pad +
+                     * __np call). Force-inline it: callgrind showed gcc keeps
+                     * it out of line, costing a frame per JSON value/member —
+                     * splicing it into call sites measured +11-14% on twitter
+                     * match and +4-9% on DOM, numbers neutral. (This is NOT
+                     * the rejected call-site pad+__np emission: one
+                     * definition, the C compiler does the splicing.) */
+                    const char* al = (!is_np && has_np[r])
+                        ? "static inline __attribute__((always_inline)) int "
+                        : "static int ";
                     if (pure[r]) {
                         if (!mode) continue;
                         if (!want_match && !want_build) continue;
                         e.mode = 0;
-                        eb_fmt(&e, "static int %s__r_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                        eb_fmt(&e, "%s%s__r_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
                                    "    size_t p = *io;\n    (void)s; (void)n;\n",
-                               g->name, g->rules[r].name, suf);
+                               al, g->name, g->rules[r].name, suf);
                     } else if (mode) {
                         if (!want_build) continue;
-                        eb_fmt(&e, "static int %s__b_%s%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
+                        eb_fmt(&e, "%s%s__b_%s%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
                                    "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
-                               g->name, g->rules[r].name, suf, g->name);
+                               al, g->name, g->rules[r].name, suf, g->name);
                     } else {
                         if (!want_match) continue;
-                        eb_fmt(&e, "static int %s__m_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                        eb_fmt(&e, "%s%s__m_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
                                    "    size_t p = *io;\n    (void)s; (void)n;\n",
-                               g->name, g->rules[r].name, suf);
+                               al, g->name, g->rules[r].name, suf);
                     }
                     char fail[16];
                     snprintf(fail, sizeof(fail), "Lf%d", lbl++);
