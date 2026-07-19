@@ -774,6 +774,32 @@ static int rf_swar_stop(const unsigned char* set, int* out_T, int* out_b1, int* 
     return 0;
 }
 
+/* Contiguous charset → range test `(unsigned)(s[p]-lo) <= hi-lo`. */
+static int rf_charset_range(const unsigned char* set, int* lo, int* hi) {
+    int a = -1, b = -1, n = 0;
+    for (int i = 0; i < 256; i++)
+        if (set[i >> 3] & (1u << (i & 7))) {
+            if (a < 0) a = i;
+            b = i;
+            n++;
+        }
+    if (a < 0 || n != (b - a + 1)) return 0;
+    *lo = a;
+    *hi = b;
+    return 1;
+}
+
+/* Tiny charset → equality list (e/E, +/-). Returns count, fills bytes[4]. */
+static int rf_charset_bytes(const unsigned char* set, int* bytes, int max) {
+    int n = 0;
+    for (int i = 0; i < 256 && n <= max; i++)
+        if (set[i >> 3] & (1u << (i & 7))) {
+            if (n < max) bytes[n] = i;
+            n++;
+        }
+    return n;
+}
+
 /* KEEPS(subtree): can this node's subtree (transitively through rule refs)
  * log a keep? Constructs that provably cannot keep skip the log save/restore
  * entirely — the ctx traffic vanishes from pure-scanning hot loops (ws, digit
@@ -1107,6 +1133,30 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
     return -1;
 }
 
+/* C boolean: `s[p]` ∈ charset `cs` — range / tiny equality / bitset. */
+static void rg_cs_expr(const RG* g, int cs, char* out, size_t outs) {
+    int lo, hi, bytes[4];
+    if (rf_charset_range(g->sets[cs], &lo, &hi)) {
+        if (lo == hi) snprintf(out, outs, "s[p] == %d", lo);
+        else snprintf(out, outs, "((unsigned)(s[p] - %d) <= %uu)", lo, (unsigned)(hi - lo));
+        return;
+    }
+    int n = rf_charset_bytes(g->sets[cs], bytes, 4);
+    if (n >= 1 && n <= 4) {
+        size_t o = 0;
+        if (n > 1) { out[o++] = '('; out[o] = 0; }
+        for (int i = 0; i < n && o + 24 < outs; i++) {
+            int w = snprintf(out + o, outs - o, "%ss[p] == %d", i ? " || " : "", bytes[i]);
+            if (w > 0) o += (size_t)w;
+        }
+        if (n > 1 && o + 1 < outs) { out[o++] = ')'; out[o] = 0; }
+        return;
+    }
+    snprintf(out, outs,
+             "(%s__cs[%d][((unsigned char)s[p]) >> 3] & (1u << (((unsigned char)s[p]) & 7u)))",
+             g->name, cs);
+}
+
 /* Emit a pad rule by index (inline when tiny). No-op if already satisfied. */
 static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int* lbl) {
     if (pad < 0 || e->last_pad == pad) return;
@@ -1167,12 +1217,13 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                    x->b, g->name, x->a, x->b, fail, lit, x->b);
         }
         break;
-    case RN_CHARSET:
+    case RN_CHARSET: {
+        char cx[192];
         e->last_pad = -1;
-        eb_fmt(e, "    if (!(p < n && (%s__cs[%d][((unsigned char)s[p]) >> 3] & (1u << (((unsigned char)s[p]) & 7u))))) goto %s;\n"
-                  "    p++;\n",
-               g->name, x->a, fail);
+        rg_cs_expr(g, x->a, cx, sizeof cx);
+        eb_fmt(e, "    if (!(p < n && %s)) goto %s;\n    p++;\n", cx, fail);
         break;
+    }
     case RN_SKIP:
         e->last_pad = -1;
         eb_fmt(e, "    if (!(p < n)) goto %s;\n    p++;\n", fail);
@@ -1440,8 +1491,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
                               "        p += 8;\n    } }\n", k, k);
                 }
-                eb_fmt(e, "    while (p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u)))) p++;\n",
-                       g->name, scs);
+                {
+                    char cx[192];
+                    rg_cs_expr(g, scs, cx, sizeof cx);
+                    eb_fmt(e, "    while (p < n && %s) p++;\n", cx);
+                }
                 {
                     char br[32];
                     snprintf(br, sizeof(br), "Le%d", k);
@@ -1460,9 +1514,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int eff = rg_effective(g, x->a);
         if (g->nodes[eff].kind == RN_CHARSET) {
             int cs = g->nodes[eff].a;
+            char cx[192];
+            rg_cs_expr(g, cs, cx, sizeof cx);
             if (x->kind == RN_SOME) {   /* first element is required */
-                eb_fmt(e, "    if (!(p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u))))) goto %s;\n"
-                          "    p++;\n", g->name, cs, fail);
+                eb_fmt(e, "    if (!(p < n && %s)) goto %s;\n    p++;\n", cx, fail);
             }
             {
                 int T, b1, b2;
@@ -1486,8 +1541,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                               "        p += 8;\n    } }\n", k2, k2);
                 }
             }
-            eb_fmt(e, "    while (p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u)))) p++;\n",
-                   g->name, cs);
+            eb_fmt(e, "    while (p < n && %s) p++;\n", cx);
             break;
         }
         if (x->kind == RN_SOME) {
