@@ -135,6 +135,12 @@ unchecked hand (~2.5 GB/s window-dependent); JSON write gen == hand ==
 beats yyjson_mut_write on identical bytes (with a table-driven escape
 codec); JSON parse: match/schema ~90% of the golden tape, shaped DOM ~80%
 of tape (the delta IS the shaping work), tape DOM ~1.25x yyjson default.
+PLATFORM CAVEAT on the encode parity: it does not reproduce on the Linux
+container (gcc): RESP checked-encode gen measures ~47% of hand unchecked
+there — STABLE across v15/v16/HEAD compilers (bisected via worktrees, so
+not a regression), while JSON write parity holds on the same box. RESP
+checked-write's per-batch bounds pattern apparently codegens much worse
+under that gcc; per-platform, format-specific, cause unidentified.
 Method note kept on purpose: one measured "+8%" turned out to be a
 frame-pointer-handicapped control AND a detector that never fired —
 re-measured honestly it was +17%, then +14% more from cap. Interleave or
