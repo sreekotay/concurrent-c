@@ -1814,6 +1814,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
 /* ==================================================================== */
 
 enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
+       SK_UNION,            /* one of [ variant [ product-terms ] ... ] — tagged union */
        SK_NARROW_MEMBERS,   /* G.rule [ "k" term ... ] — narrow a member-list rule */
        SK_NARROW_LIST };    /* f: G.rule of Schema    — narrow a list rule to an array */
 
@@ -1836,6 +1837,12 @@ typedef struct {
     int vpad_b[2]; int nvpad_b;        /* value: pads after its core */
 } RNarrow;
 enum { S_MAX_TERMS = 96, S_MAX_KEYS = 64, S_NAME = 64, S_MAX_BODY = 32 };
+
+/* variant field prefix ("u.<name>." while emitting a union variant's terms;
+ * "" otherwise) and the schema name (kind constants) — engine emission is
+ * single-threaded per splice */
+static char cc__fpfx[72];
+static const char* cc__sname;
 
 typedef struct {
     int kind;
@@ -1873,6 +1880,15 @@ typedef struct {
     int io_, ic_, is_;                            /* items: open/close/sep */
     char ipad[S_NAME];
     int rfkey, rfpad, rfelse, ripad;              /* resolved rule idx, -1 unset */
+
+    /* tagged union (`one of`): variants are product-term runs; dispatch is
+     * the first byte of each variant's leading literal (one optional
+     * non-literal DEFAULT arm — e.g. redis inline commands) */
+    struct { char name[S_NAME]; int t[16]; int nt; int db; } uv[24];
+    int nuv;
+    int uterm;                           /* the SK_UNION term idx, -1 none */
+    signed char vof[S_MAX_TERMS];        /* term idx -> variant idx (-1 top) */
+    char fpfx[72];                       /* "u.<variant>." while emitting variant terms */
 
     int bindbit[S_MAX_TERMS];            /* term idx -> presence bit (-1 none) */
     int nbinds;                          /* fields in declaration order */
@@ -2065,6 +2081,46 @@ static int ss_term(SS* s, int* out_term) {
     }
     char id[S_NAME];
     if (!ss_ident(s, id, sizeof id)) return ss_fail(s, s->p, "expected term");
+    if (strcmp(id, "one") == 0) {
+        size_t save1 = s->p;
+        char kw[S_NAME];
+        if (ss_ident(s, kw, sizeof kw) && strcmp(kw, "of") == 0) {
+            ss_ws(s);
+            if (!(s->p < s->n && s->b[s->p] == '[')) return ss_fail(s, s->p, "expected '[' after one of");
+            s->p++;
+            if (s->uterm >= 0) return ss_fail(s, s->p, "one union per schema");
+            t->kind = SK_UNION;
+            int self = s->nterms++;
+            for (;;) {
+                ss_ws(s);
+                if (s->p < s->n && s->b[s->p] == ']') { s->p++; break; }
+                if (s->nuv >= 24) return ss_fail(s, s->p, "too many variants");
+                char vn[S_NAME];
+                if (!ss_ident(s, vn, sizeof vn)) return ss_fail(s, s->p, "expected variant name");
+                snprintf(s->uv[s->nuv].name, S_NAME, "%s", vn);
+                s->uv[s->nuv].nt = 0;
+                ss_ws(s);
+                if (!(s->p < s->n && s->b[s->p] == '[')) return ss_fail(s, s->p, "expected '[' after variant name");
+                s->p++;
+                for (;;) {
+                    ss_ws(s);
+                    if (s->p < s->n && s->b[s->p] == ']') { s->p++; break; }
+                    if (s->uv[s->nuv].nt >= 16) return ss_fail(s, s->p, "variant too large");
+                    int ti;
+                    if (ss_term(s, &ti)) return -1;
+                    s->vof[ti] = (signed char)s->nuv;
+                    s->uv[s->nuv].t[s->uv[s->nuv].nt++] = ti;
+                }
+                if (s->uv[s->nuv].nt == 0) return ss_fail(s, s->p, "empty variant");
+                s->nuv++;
+            }
+            if (s->nuv < 2) return ss_fail(s, s->p, "one of needs at least two variants");
+            s->uterm = self;
+            *out_term = self;
+            return 0;
+        }
+        s->p = save1;
+    }
     if (strcmp(id, "fields") == 0) {
         t->kind = SK_FIELDS;
         int self = s->nterms++;          /* reserve BEFORE recursing */
@@ -2801,9 +2857,9 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
                       "          v%d = v%d * 10 + (s[p] - '0');\n"
                       "      if (p == d%d) { if (p >= n) *cc_inc = 1; goto %s; }\n", k, k, k, k, fail);
             if (neg)
-                eb_fmt(e, "      out->%s = ng%d ? -v%d : v%d; }\n", t->field, k, k, k);
+                eb_fmt(e, "      out->%s%s = ng%d ? -v%d : v%d; }\n", cc__fpfx, t->field, k, k, k);
             else
-                eb_fmt(e, "      out->%s = v%d; }\n", t->field, k);
+                eb_fmt(e, "      out->%s%s = v%d; }\n", cc__fpfx, t->field, k);
             return;
         }
     }
@@ -2836,22 +2892,22 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
                   "        if (q%d < xb%d && s[q%d] == '-') { ng%d = 1; q%d++; }\n"
                   "        for (; q%d < xb%d && s[q%d] >= '0' && s[q%d] <= '9'; q%d++)\n"
                   "            v%d = v%d * 10 + (s[q%d] - '0');\n"
-                  "        out->%s = ng%d ? -v%d : v%d; } }\n",
-               k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, t->field, k, k, k);
+                  "        out->%s%s = ng%d ? -v%d : v%d; } }\n",
+               k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, cc__fpfx, t->field, k, k, k);
         return;
     }
     int cd = rs_rule_codec(g, t->rule);
     if (cd > 0) {
         /* clean spans borrow raw; dirty spans decode through the rule's codec
          * (same provenance contract as the collect/DOM tiers) */
-        eb_fmt(e, "      if (!xd%d) out->%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n"
-                  "      else if (!%s((const char*)(s + xa%d), xb%d - xa%d, &out->%s, arena)) goto %s;\n"
+        eb_fmt(e, "      if (!xd%d) out->%s%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n"
+                  "      else if (!%s((const char*)(s + xa%d), xb%d - xa%d, &out->%s%s, arena)) goto %s;\n"
                   "    }\n",
-               k, t->field, k, k, k, g->codecs[cd - 1], k, k, k, t->field, fail);
+               k, cc__fpfx, t->field, k, k, k, g->codecs[cd - 1], k, k, k, cc__fpfx, t->field, fail);
     } else {
         eb_fmt(e, "      (void)xd%d;\n"
-                  "      out->%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n    }\n",
-               k, t->field, k, k, k);
+                  "      out->%s%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n    }\n",
+               k, cc__fpfx, t->field, k, k, k);
     }
 }
 
@@ -2870,6 +2926,7 @@ static int rs_derived_from(const SS* ss, int ti) {
      * returns that term's index, or -1 */
     for (int j = ti + 1; j < ss->nterms; j++) {
         const STerm* t = &ss->terms[j];
+        if (ss->vof[j] != ss->vof[ti]) continue;       /* stay in-variant */
         if ((t->kind == SK_BIND_BYTES ||
              (t->kind == SK_BIND_ITEMS && t->cfield[0])) &&
             strcmp(t->cfield, ss->terms[ti].field) == 0)
@@ -3443,13 +3500,13 @@ static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const ch
               "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
            k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
     rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc)) goto %s;\n    cnt%d++;\n",
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc, cc_depth + 1)) goto %s;\n    cnt%d++;\n",
            T, k, k, fail, k);
     rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
     eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
     eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->close_b, fail);
-    eb_fmt(e, "    out->%s = v%d; out->%s_n = cnt%d; }\n", t->field, k, t->field, k);
+    eb_fmt(e, "    out->%s%s = v%d; out->%s%s_n = cnt%d; }\n", cc__fpfx, t->field, k, cc__fpfx, t->field, k);
 }
 
 static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
@@ -3505,12 +3562,12 @@ static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
      * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
-    eb_fmt(e, "    { long long L%d = out->%s;\n"
+    eb_fmt(e, "    { long long L%d = out->%s%s;\n"
               "      if (L%d < 0) goto %s;\n"
               "      if ((unsigned long long)L%d > (unsigned long long)(n - p)) { *cc_inc = 1; goto %s; }\n"
-              "      out->%s = cc_slice_from_buffer((void*)(s + p), (size_t)L%d);\n"
+              "      out->%s%s = cc_slice_from_buffer((void*)(s + p), (size_t)L%d);\n"
               "      p += (size_t)L%d; }\n",
-           k, t->cfield, k, fail, k, fail, t->field, k, k);
+           k, cc__fpfx, t->cfield, k, fail, k, fail, cc__fpfx, t->field, k, k);
 }
 
 static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
@@ -3519,28 +3576,28 @@ static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* f
     if (t->cap > 0) {
         /* comptime cap: elements fill the struct's INLINE array — no
          * allocation at all; a larger count is a protocol error */
-        eb_fmt(e, "    { long long C%d = out->%s;\n"
+        eb_fmt(e, "    { long long C%d = out->%s%s;\n"
                   "      if (C%d < 0 || C%d > %d) goto %s;\n"
                   "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
                   "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
-                  "          if (!%s__fill(s, n, &p, arena, &out->%s[i%d], cc_inc)) goto %s;\n"
-                  "      out->%s_n = (size_t)C%d; }\n",
-               k, t->cfield, k, k, t->cap, fail, k, fail,
-               k, k, k, k, T, t->field, k, fail, t->field, k);
+                  "          if (!%s__fill(s, n, &p, arena, &out->%s%s[i%d], cc_inc, cc_depth + 1)) goto %s;\n"
+                  "      out->%s%s_n = (size_t)C%d; }\n",
+               k, cc__fpfx, t->cfield, k, k, t->cap, fail, k, fail,
+               k, k, k, k, T, cc__fpfx, t->field, k, fail, cc__fpfx, t->field, k);
         return;
     }
     /* the count is data: exact-size allocation, no realloc, no delimiters */
-    eb_fmt(e, "    { long long C%d = out->%s;\n"
+    eb_fmt(e, "    { long long C%d = out->%s%s;\n"
               "      if (C%d < 0) goto %s;\n"
               "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
               "      size_t cap%d = C%d > 0 ? (size_t)C%d : 1;\n"
               "      %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
               "      if (!v%d) goto %s;\n"
               "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
-              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d], cc_inc)) goto %s;\n"
-              "      out->%s = v%d; out->%s_n = (size_t)C%d; }\n",
-           k, t->cfield, k, fail, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
-           k, k, k, k, T, k, k, fail, t->field, k, t->field, k);
+              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d], cc_inc, cc_depth + 1)) goto %s;\n"
+              "      out->%s%s = v%d; out->%s%s_n = (size_t)C%d; }\n",
+           k, cc__fpfx, t->cfield, k, fail, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
+           k, k, k, k, T, k, k, fail, cc__fpfx, t->field, k, cc__fpfx, t->field, k);
 }
 
 static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
@@ -3558,14 +3615,14 @@ static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const 
               "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
               "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
            k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc)) goto %s;\n    cnt%d++;\n",
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc, cc_depth + 1)) goto %s;\n    cnt%d++;\n",
            T, k, k, fail, k);
     rs_emit_pad(g, e, ss->ripad, fail);
     eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->is_);
     rs_emit_pad(g, e, ss->ripad, fail);
     eb_fmt(e, "    continue; }\n    break;\n    }\n    }\n");
     eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->ic_, fail);
-    eb_fmt(e, "    out->%s = v%d; out->%s_n = cnt%d; }\n", t->field, k, t->field, k);
+    eb_fmt(e, "    out->%s%s = v%d; out->%s%s_n = cnt%d; }\n", cc__fpfx, t->field, k, cc__fpfx, t->field, k);
 }
 
 static void rs_emit_presence(const SS* ss, EB* e, int ti) {
@@ -3621,12 +3678,47 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         rs_emit_narrow_list(g, e, lbl, t, fail);
         rs_emit_presence(ss, e, ti);
         break;
+    case SK_UNION: {
+        /* first-byte dispatch; the default arm (if any) takes everything
+         * else. Recursion is bounded: self-referential variants ride the
+         * items depth counter. */
+        int defv = -1;
+        eb_fmt(e, "    if (p >= n) { *cc_inc = 1; goto %s; }\n", fail);
+        eb_fmt(e, "    if (cc_depth > 128) goto %s;\n", fail);
+        eb_fmt(e, "    switch (s[p]) {\n");
+        for (int vi = 0; vi < ss->nuv; vi++) {
+            if (ss->uv[vi].db < 0) { defv = vi; continue; }
+            char cb[16];
+            eb_fmt(e, "    case %d: /*%s*/ {\n        out->kind = %s_%s;\n",
+                   ss->uv[vi].db, rw_chr(ss->uv[vi].db, cb), cc__sname, ss->uv[vi].name);
+            snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[vi].name);
+            for (int j = 0; j < ss->uv[vi].nt; j++)
+                rs_emit_term(ss, g, e, lbl, ss->uv[vi].t[j], fail);
+            cc__fpfx[0] = '\0';
+            eb_fmt(e, "        break; }\n");
+        }
+        if (defv >= 0) {
+            eb_fmt(e, "    default: {\n        out->kind = %s_%s;\n",
+                   cc__sname, ss->uv[defv].name);
+            snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[defv].name);
+            for (int j = 0; j < ss->uv[defv].nt; j++)
+                rs_emit_term(ss, g, e, lbl, ss->uv[defv].t[j], fail);
+            cc__fpfx[0] = '\0';
+            eb_fmt(e, "        break; }\n");
+        } else {
+            eb_fmt(e, "    default: goto %s;\n", fail);
+        }
+        eb_fmt(e, "    }\n");
+        break;
+    }
     }
 }
 
 static int rs_find_int_field(const SS* ss, int before, const char* nm) {
-    for (int i = 0; i < before; i++)
+    for (int i = 0; i < before; i++) {
+        if (ss->vof[i] != ss->vof[before]) continue;   /* stay in-variant */
         if (ss->terms[i].kind == SK_BIND_INT && strcmp(ss->terms[i].field, nm) == 0) return i;
+    }
     return -1;
 }
 
@@ -3640,6 +3732,7 @@ static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
         for (int i = 0; i < t->k_cnt; i++)
             rs_collect_binds(ss, ss->keys[t->kidx[i]].term, order, cnt);
     }
+    /* SK_UNION: variant fields live inside the union, not as flat binds */
 }
 
 static int rs_has_token(const char* src, size_t n, const char* name, const char* suffix);
@@ -3656,6 +3749,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     char* out = NULL; size_t len = 0, cap = 0;
     if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
     ss->b = body; ss->n = body_len; ss->line0 = line;
+    ss->uterm = -1;
+    memset(ss->vof, -1, sizeof ss->vof);
 
     if (ss_parse(ss)) {
         snprintf(err, err_sz, "@grammar(schema) %s: %s (at line %d)",
@@ -3752,7 +3847,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     goto done;
                 }
             }
-            if (t->kind == SK_BIND_ITEMS && !cc__schema_known(t->etype)) {
+            if (t->kind == SK_BIND_ITEMS && strcmp(t->etype, name) != 0 &&
+                !cc__schema_known(t->etype)) {
                 snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
                          "(must be declared earlier in this file)", name, t->etype);
                 goto done;
@@ -3760,7 +3856,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         for (int ti = 0; ti < ss->nterms; ti++) {
             STerm* t = &ss->terms[ti];
-            if (t->kind == SK_BIND_ITEMS && !cc__schema_known(t->etype)) {
+            if (t->kind == SK_BIND_ITEMS && strcmp(t->etype, name) != 0 &&
+                !cc__schema_known(t->etype)) {
                 snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
                          "(must be declared earlier in this file)", name, t->etype);
                 goto done;
@@ -3789,8 +3886,50 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                      name, ss->usename, ss->fkey);
             goto done;
         }
+        if (ss->uterm >= 0) {
+            if (ss->nbody != 1 || ss->body[0] != ss->uterm) {
+                snprintf(err, err_sz, "@grammar(schema) %s: `one of` must be the "
+                         "entire schema body", name);
+                goto done;
+            }
+            /* dispatch: each variant's leading literal's first byte; at most
+             * one non-literal DEFAULT arm; bytes must be distinct */
+            {
+                int ndef = 0;
+                for (int i = 0; i < ss->nuv; i++) {
+                    const STerm* ft = &ss->terms[ss->uv[i].t[0]];
+                    ss->uv[i].db = (ft->kind == SK_LIT && ft->litlen >= 1)
+                                       ? (int)ft->lit[0] : -1;
+                    if (ss->uv[i].db < 0 && ++ndef > 1) {
+                        snprintf(err, err_sz, "@grammar(schema) %s: at most one "
+                                 "variant may lack a leading literal (the default arm)",
+                                 name);
+                        goto done;
+                    }
+                    for (int j = 0; j < i; j++)
+                        if (ss->uv[j].db >= 0 && ss->uv[j].db == ss->uv[i].db) {
+                            snprintf(err, err_sz, "@grammar(schema) %s: variants '%s' "
+                                     "and '%s' dispatch on the same first byte",
+                                     name, ss->uv[j].name, ss->uv[i].name);
+                            goto done;
+                        }
+                }
+            }
+            /* recursion: self items must use the arena form */
+            for (int ti = 0; ti < ss->nterms; ti++) {
+                const STerm* t = &ss->terms[ti];
+                if (t->kind == SK_BIND_ITEMS && strcmp(t->etype, name) == 0 && t->cap > 0) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: a recursive variant "
+                             "cannot use cap (an inline array of yourself has "
+                             "infinite size) — use the arena items form", name);
+                    goto done;
+                }
+            }
+        }
     }
 
+    cc__sname = name;
+    cc__fpfx[0] = '\0';
     {
         EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0 };
         int lbl = 0;
@@ -3883,6 +4022,12 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 ss->presence = conditional && cnt > 0 && cnt <= 64;
             }
             for (int i = 0; i < cnt; i++) ss->bindbit[order[i]] = i;
+            if (ss->uterm >= 0) {
+                eb_fmt(&e, "typedef enum { ");
+                for (int vi = 0; vi < ss->nuv; vi++)
+                    eb_fmt(&e, "%s%s_%s", vi ? ", " : "", name, ss->uv[vi].name);
+                eb_fmt(&e, " } %sKind;\n", name);
+            }
             eb_fmt(&e, "typedef struct %s {\n", name);
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
@@ -3897,12 +4042,33 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             }
             if (ss->presence)
                 eb_fmt(&e, "    unsigned long long cc__set;   /* presence bitmap, bit i = field i */\n");
-            if (cnt == 0) eb_fmt(&e, "    char cc__empty;\n");
+            if (ss->uterm >= 0) {
+                eb_fmt(&e, "    %sKind kind;\n    union {\n", name);
+                for (int vi = 0; vi < ss->nuv; vi++) {
+                    eb_fmt(&e, "        struct {\n");
+                    for (int j = 0; j < ss->uv[vi].nt; j++) {
+                        const STerm* t = &ss->terms[ss->uv[vi].t[j]];
+                        if (t->kind == SK_BIND_INT)
+                            eb_fmt(&e, "            long long %s;\n", t->field);
+                        else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
+                            eb_fmt(&e, "            CCSlice %s;\n", t->field);
+                        else if (t->kind == SK_BIND_ITEMS && t->cap > 0)
+                            eb_fmt(&e, "            %s %s[%d]; size_t %s_n;\n",
+                                   t->etype, t->field, t->cap, t->field);
+                        else if (t->kind == SK_BIND_ITEMS)
+                            eb_fmt(&e, "            struct %s* %s; size_t %s_n;\n",
+                                   t->etype, t->field, t->field);
+                    }
+                    eb_fmt(&e, "        } %s;\n", ss->uv[vi].name);
+                }
+                eb_fmt(&e, "    } u;\n");
+            }
+            if (cnt == 0 && ss->uterm < 0) eb_fmt(&e, "    char cc__empty;\n");
             eb_fmt(&e, "} %s;\n", name);
         }
         eb_fmt(&e, "static int %s__fill(const unsigned char* s, size_t n, size_t* io,\n"
-                   "        CCArena* arena, %s* out, int* cc_inc) {\n"
-                   "    (void)cc_inc;\n"
+                   "        CCArena* arena, %s* out, int* cc_inc, int cc_depth) {\n"
+                   "    (void)cc_inc; (void)cc_depth;\n"
                    "    size_t p = *io;\n    (void)arena;\n", name, name);
         /* zero the struct only when some bind is conditional (inside a
          * fields dispatch): a body whose binds are all unconditional terms
@@ -3927,7 +4093,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    "    const unsigned char* s = (const unsigned char*)s0;\n"
                    "    size_t p = 0;\n"
                    "    { int cc_i0 = 0;\n"
-                   "    if (!%s__fill(s, n, &p, arena, out, &cc_i0)) return 0; }\n"
+                   "    if (!%s__fill(s, n, &p, arena, out, &cc_i0, 0)) return 0; }\n"
                    "    return p == n;\n}\n", name, name, name);
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
          * and framed streams call this in a loop instead of requiring p == n */
@@ -3948,7 +4114,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    "    size_t p = *pos;\n"
                    "    int cc_i0 = 0;\n"
                    "    if (p >= n) return cc_ok(false);   /* clean end at frame boundary */\n"
-                   "    if (%s__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0)) {\n"
+                   "    if (%s__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0, 0)) {\n"
                    "        *pos = p;\n"
                    "        return cc_ok(true);\n"
                    "    }\n"
@@ -3958,7 +4124,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                name, name, name, name, name);
         eb_fmt(&e, "static int %s_read(const char* s0, size_t n, size_t* pos, CCArena* arena, %s* out) {\n"
                    "    int cc_i0 = 0;\n"
-                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0);\n}\n",
+                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0, 0);\n}\n",
                name, name, name);
         /* the runtime instance: a Reader is a CURSOR over resources (buffer,
          * position, arena) — all behavior was specialized at compile time.
@@ -3975,7 +4141,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         eb_fmt(&e, "static int %sReader_next(%sReader* r, %s* out) {\n"
                    "    if (r->pos >= r->n) return 0;\n"
                    "    int cc_i0 = 0;\n"
-                   "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0);\n}\n",
+                   "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0, 0);\n}\n",
                name, name, name, name);
         eb_fmt(&e, "static int %sReader_at_end(const %sReader* r) { return r->pos == r->n; }\n",
                name, name);
