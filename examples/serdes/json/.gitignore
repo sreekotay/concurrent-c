@@ -3,6 +3,7 @@
 *.dSYM/
 twitter_min.json
 numbers_big.json
+freq_*.json
 yyjson.c
 yyjson.h
 /bench_gen

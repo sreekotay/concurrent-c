@@ -1,0 +1,78 @@
+/*
+ * Where Rust wins: proving the pointee is safe to share.
+ *
+ * CC already rejects the *obvious* shared mutation:
+ *
+ *   n->spawn(() => [&counter] { counter++; });  // compile error
+ *
+ * And even the hole below is not *hidden* sharing: you must list `p` in
+ * the capture list. Explicit capture makes the concurrent edge visible
+ * at the spawn site — locality of reasoning still holds for "what does
+ * this task see?"
+ *
+ * What Rust still proves that CC does not: that sharing is *safe*.
+ * Value-capturing an `int*` copies the address; both tasks race on the
+ * pointee; the program still compiles. Rust's Send/Sync + borrows reject
+ * that shape in safe code.
+ *
+ * So: CC makes the share visible; Rust makes the race unrepresentable.
+ * Pair: race_pointer_alias.rs / race_pointer_alias_rejected.rs
+ *
+ * Run:
+ *   ./cc/bin/ccc build run examples/compare_rust_data_race/race_pointer_alias.ccs
+ *
+ * Expect: counter well below N_TASKS * N_ITERS (lost updates), unless
+ * the scheduler happens to serialize you (rare under load).
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+enum { N_TASKS = 8, N_ITERS = 100000 };
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    int counter = 0;
+    int* p = &counter; /* shared mutable memory behind a copyable address */
+
+    printf("=== CC: pointer alias race (compiles; wrong answer) ===\n");
+    printf("tasks=%d iters/task=%d expected=%d\n",
+           N_TASKS, N_ITERS, N_TASKS * N_ITERS);
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        for (int t = 0; t < N_TASKS; t++) {
+            /* [p] is explicit: this task sees that address.
+             * Bug/gap: capturing the pointer is allowed; racing the
+             * pointee is not proven away. No @unsafe required. */
+            n->spawn(() => [p] {
+                for (int i = 0; i < N_ITERS; i++)
+                    (*p)++;
+            });
+        }
+    }
+
+    int expected = N_TASKS * N_ITERS;
+    printf("counter=%d expected=%d %s\n",
+           counter, expected,
+           counter == expected ? "(lucky serialize — re-run)" : "(data race: lost updates)");
+
+    /*
+     * Idiomatic CC: don't share the cell — pass work on a channel, or
+     * wrap the cell in CCAtomic::[int] / CCMutex::[int]. See
+     * recipe_worker_pool.ccs and recipe_explicit_capture.ccs.
+     *
+     * Rust win (proof): non-Sync mutable sharing is rejected across the
+     * whole type graph (pointers, Arc, interiors) — not only "did you
+     * mutate a ref-captured local?"
+     *
+     * CC win (visibility): the capture list still names what crossed
+     * into the task. The failure mode is "I shared something unsafe,"
+     * not "ambient mutation I never declared."
+     */
+    return counter == expected ? 0 : 2;
+}

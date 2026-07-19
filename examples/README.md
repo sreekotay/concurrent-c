@@ -51,6 +51,16 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | Task handles over channels, FIFO await |
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Every `!>` / `?>` / `@destroy` combination (regression sentinel) |
 
+### Comparison: where Rust wins (data races)
+
+| Directory | Point |
+|-----------|--------|
+| `compare_rust_data_race/` | Capture list makes the share visible (`[p]`); Rust still wins on proving the pointee is Sync-safe |
+
+```bash
+./examples/compare_rust_data_race/run.sh
+```
+
 Run any recipe:
 ```bash
 ./cc/bin/ccc build run examples/recipe_channel_pipeline.ccs
