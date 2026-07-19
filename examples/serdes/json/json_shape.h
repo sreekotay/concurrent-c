@@ -51,6 +51,11 @@ struct JShShape {
     JShShape* last_to;                   /* 1-entry monomorphic transition cache */
     uint32_t last_hash, last_klen;
     const char* last_key;
+    uint32_t nkids;                      /* outgoing transitions (trie width) */
+    uint8_t diverge;                     /* too wide: map-like data — objects
+                                          * transitioning here fall back to
+                                          * per-instance DICTIONARY mode */
+    uint8_t is_dict;                     /* the dictionary sentinel shape */
     JShDesc* lookup;                     /* key->slot table (cap = pow2); built
                                           * ON FIRST FINALIZATION only — prefix
                                           * nodes of the shape trie never get
@@ -71,8 +76,20 @@ struct JShShape {
  * request #10000 (keys are copied into the shape arena at creation, and
  * each shape's key->slot table is built eagerly there too). */
 #ifndef JSH_MAX_SHAPES
-#define JSH_MAX_SHAPES 4096              /* prototype bound; parse fails beyond */
+#define JSH_MAX_SHAPES 4096              /* beyond this NO parse fails — new
+                                          * divergence goes to dictionary mode */
 #endif
+#define JSH_DICT_DEPTH 64                /* an object growing past this many
+                                          * members is map-shaped, not struct-
+                                          * shaped: switch it to a dictionary */
+#define JSH_DICT_WIDTH 32                /* a shape with this many distinct
+                                          * child keys is a map key site: mark
+                                          * diverging, dict from here on */
+
+/* dictionary-mode object: per-INSTANCE open-addressed (key -> value); the
+ * V8 fallback for data that IS a map, where shapes would only explode */
+typedef struct { const char* key; uint32_t klen, hash; JShVal v; } JShDEnt;
+typedef struct { uint32_t n, cap; JShDEnt ents[]; } JShDict;
 typedef struct {
     JsonParser jp;                       /* reuse json.h scanning state (per parse) */
     CCArena* shape_arena;                /* persistent: shapes, keys, lookups, stack */
@@ -80,7 +97,11 @@ typedef struct {
     struct { uint64_t h; JShShape* to; } ttab[JSH_MAX_SHAPES * 2];
     uint32_t nshapes;
     JShVal* stack;                       /* member/element scratch during build */
+    struct { const char* k; uint32_t klen, hash; } * kstack;   /* dict-mode keys */
     size_t sp, stack_cap;
+    JShShape dict_shape;                 /* is_dict sentinel for instances */
+    int alloc_fail;                      /* distinguishes OOM from dict switch */
+    long dict_objs;
     char* rb; size_t rb_left;            /* record slab: one arena hit per ~8KB
                                           * (same amortization as json.h's
                                           * node batches) */
@@ -132,7 +153,9 @@ static inline JShParser* jsh_parser(CCArena* shape_arena) {
     p->shape_arena = shape_arena;
     p->stack_cap = 1u << 16;
     p->stack = (JShVal*)cc_arena_alloc_local(shape_arena, p->stack_cap * sizeof(JShVal), _Alignof(JShVal));
-    return p->stack ? p : NULL;
+    p->kstack = cc_arena_alloc_local(shape_arena, p->stack_cap * sizeof(*p->kstack), 16);
+    p->dict_shape.is_dict = 1;
+    return p->stack && p->kstack ? p : NULL;
 }
 
 /* per-shape key->slot table: built ONCE at shape creation (in the shape
@@ -154,8 +177,12 @@ static JShDesc* jsh__build_lookup(JShShape* s, CCArena* arena) {
     return t;
 }
 
-/* transition: current shape + member key -> next shape (create on first sight) */
-static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t klen) {
+/* transition: current shape + member key -> next shape (created on first
+ * sight only when `create`). At a DIVERGED shape callers pass create=0:
+ * known transitions still follow the trie — struct-shaped objects stay fast
+ * even when they share a site with map-shaped ones — and only NEW keys fall
+ * back to dictionary mode. */
+static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t klen, int create) {
     /* monomorphic fast path FIRST, no hashing: one length check + one memcmp.
      * With a stable wire shape (the overwhelmingly common case) every member
      * of every object after the first takes this path. */
@@ -178,10 +205,11 @@ static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t
         }
         i = (i + 1) & (cap - 1);
     }
-    if (p->nshapes >= JSH_MAX_SHAPES) return NULL;
+    if (!create) return NULL;                        /* diverged site, new key */
+    if (p->nshapes >= JSH_MAX_SHAPES) return NULL;   /* dict, not failure */
     p->shape_misses++;
     JShShape* to = (JShShape*)cc_arena_alloc_local(p->shape_arena, sizeof(JShShape), _Alignof(JShShape));
-    if (!to) return NULL;
+    if (!to) { p->alloc_fail = 1; return NULL; }
     memset(to, 0, sizeof *to);
     /* key bytes are copied ONCE per shape — instances never carry keys and
      * the shape outlives any single parse buffer */
@@ -190,7 +218,7 @@ static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t
          * the shape side never leave the allocation */
         size_t kcap = ((size_t)klen + 8u) & ~7u;
         char* kc = (char*)cc_arena_alloc_local(p->shape_arena, kcap, 8);
-        if (!kc) return NULL;
+        if (!kc) { p->alloc_fail = 1; return NULL; }
         memset(kc + klen, 0, kcap - klen);
         memcpy(kc, k, klen);
         to->key = kc;
@@ -198,6 +226,7 @@ static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t
     to->parent = s; to->klen = klen; to->keyhash = kh;
     to->nslots = s->nslots + 1;
     to->ar = p->shape_arena;
+    if (++s->nkids > JSH_DICT_WIDTH) s->diverge = 1;   /* map key site */
     p->ttab[i].h = th; p->ttab[i].to = to;
     p->nshapes++;
     s->last_to = to; s->last_hash = kh; s->last_klen = klen; s->last_key = to->key;
@@ -214,21 +243,59 @@ static JsonStatus jsh__object(JShParser* p, JShVal* out) {
     size_t base = p->sp;
     JShVal* direct = NULL;               /* predicted exact-size slot lane */
     uint32_t dcap = 0, dn = 0;
-    int first = 1;
+    int first = 1, dict = 0;
     if (jp->pos < jp->len && jp->src[jp->pos] == '}') { jp->pos++; goto done; }
     for (;;) {
         json__skip_ws(jp);
         if (jp->pos >= jp->len || jp->src[jp->pos] != '"') return JSON_BAD;
         const char* kb; uint64_t kl; int kcow;
         if (json__string(jp, &kb, &kl, &kcow) != JSON_OK) return JSON_BAD;
-        s = jsh__advance(p, s, kb, (uint32_t)kl);
-        if (!s) return JSON_BAD;
+        if (!dict) {
+            JShShape* nx = s->nslots >= JSH_DICT_DEPTH
+                               ? NULL : jsh__advance(p, s, kb, (uint32_t)kl, !s->diverge);
+            if (!nx) {
+                if (p->alloc_fail) return JSON_BAD;
+                /* SWITCH TO DICTIONARY: this object is map-shaped. Values so
+                 * far sit in the stack (or direct lane); their keys are
+                 * recoverable from the shape chain — copy both down, then
+                 * carry keys per member from here on. */
+                uint32_t m = s->nslots;
+                if (base + m >= p->stack_cap) return JSON_BAD;
+                if (direct) {
+                    memcpy(p->stack + base, direct, dn * sizeof(JShVal));
+                    p->sp = base + dn;
+                    direct = NULL;
+                }
+                {
+                    uint32_t idx = m;
+                    for (JShShape* e = s; e->parent; e = e->parent) {
+                        idx--;
+                        p->kstack[base + idx].k = e->key;
+                        p->kstack[base + idx].klen = e->klen;
+                        p->kstack[base + idx].hash = e->keyhash;
+                    }
+                }
+                dict = 1;
+                p->dict_objs++;
+            } else {
+                s = nx;
+            }
+        }
+        if (dict) {
+            if (p->sp == p->stack_cap) return JSON_BAD;
+            p->kstack[p->sp].k = kb;
+            p->kstack[p->sp].klen = (uint32_t)kl;
+            p->kstack[p->sp].hash = jsh__hash(kb, kl);
+        }
         if (first) {
-            first = 0; s1 = s;
-            if (s1->predicted) {         /* seen this opener before: write direct */
-                dcap = s1->predicted->nslots;
-                direct = (JShVal*)jsh__ralloc(p, dcap * sizeof(JShVal));
-                if (!direct) return JSON_BAD;
+            first = 0;
+            if (!dict) {
+                s1 = s;
+                if (s1->predicted) {     /* seen this opener before: write direct */
+                    dcap = s1->predicted->nslots;
+                    direct = (JShVal*)jsh__ralloc(p, dcap * sizeof(JShVal));
+                    if (!direct) return JSON_BAD;
+                }
             }
         }
         json__skip_ws(jp);
@@ -257,6 +324,41 @@ static JsonStatus jsh__object(JShParser* p, JShVal* out) {
         if (d != ',') return JSON_BAD;
     }
 done: ;
+    if (dict) {
+        uint32_t n = (uint32_t)(p->sp - base), cap = 4;
+        while (cap < n * 2) cap <<= 1;
+        JShDict* dd = (JShDict*)jsh__ralloc(p, sizeof(JShDict) + cap * sizeof(JShDEnt));
+        if (!dd) return JSON_BAD;
+        memset(dd->ents, 0, cap * sizeof(JShDEnt));
+        dd->cap = cap; dd->n = 0;
+        for (uint32_t i = 0; i < n; i++) {   /* insert; duplicate key = last wins */
+            uint32_t h = p->kstack[base + i].hash, j = h & (cap - 1);
+            for (;;) {
+                if (!dd->ents[j].key) {
+                    dd->ents[j].key = p->kstack[base + i].k;
+                    dd->ents[j].klen = p->kstack[base + i].klen;
+                    dd->ents[j].hash = h;
+                    dd->ents[j].v = p->stack[base + i];
+                    dd->n++;
+                    break;
+                }
+                if (dd->ents[j].hash == h && dd->ents[j].klen == p->kstack[base + i].klen &&
+                    memcmp(dd->ents[j].key, p->kstack[base + i].k, dd->ents[j].klen) == 0) {
+                    dd->ents[j].v = p->stack[base + i];
+                    break;
+                }
+                j = (j + 1) & (cap - 1);
+            }
+        }
+        JShObj* o = (JShObj*)jsh__ralloc(p, sizeof(JShObj));
+        if (!o) return JSON_BAD;
+        o->shape = &p->dict_shape;
+        o->slots = (JShVal*)dd;
+        p->sp = base;
+        out->meta = JSON_META(JSON_OBJ, 0, dd->n);
+        out->u.obj = o;
+        return JSON_OK;
+    }
     JShObj* o = (JShObj*)jsh__ralloc(p, sizeof(JShObj));
     if (!o) return JSON_BAD;
     uint32_t n = direct ? dn : (uint32_t)(p->sp - base);
@@ -347,6 +449,7 @@ static inline JsonStatus JShParser_parse(JShParser* p, const char* src, size_t l
                                          CCArena* rec_arena, JShVal* out) {
     p->jp = json_parser(src, len, rec_arena);
     p->sp = 0;
+    p->alloc_fail = 0;
     p->rb = NULL; p->rb_left = 0;        /* invalidate across arena reset */
     json__skip_ws(&p->jp);
     return jsh__value(p, out);
@@ -362,6 +465,15 @@ static inline JShKey jsh_key(const char* key) {
 
 static inline JShVal* JShObj_get_k(JShObj* o, JShKey k) {
     JShShape* s = o->shape;
+    if (s->is_dict) {
+        JShDict* d = (JShDict*)o->slots;
+        uint32_t cap = d->cap;
+        for (uint32_t i = k.hash & (cap - 1); d->ents[i].key; i = (i + 1) & (cap - 1))
+            if (d->ents[i].hash == k.hash && d->ents[i].klen == k.klen &&
+                memcmp(d->ents[i].key, k.key, k.klen) == 0)
+                return &d->ents[i].v;
+        return NULL;
+    }
     if (s->nslots == 0) return NULL;
     JShDesc* t = s->lookup;
     uint32_t cap = s->lookup_cap;
