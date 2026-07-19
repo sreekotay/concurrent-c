@@ -1,0 +1,21 @@
+// NEGATIVE: two variants dispatching on the same first byte is a compile
+// error — union dispatch must be decidable from one byte (or one default).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bad {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [some digit]
+    ]
+    one of [
+        a [ #'$' x: int number "\r\n" ]
+        b [ #'$' y: int number ";" ]
+    ]
+~~~~}
+
+int main(void) {
+    Bad v;
+    CCArena a = cc_arena_create(1 << 16);
+    (void)Bad_parse("$1\r\n", 4, &a, &v);
+    return 0;
+}

@@ -108,6 +108,19 @@ items keep the arena path. Fused integer binds: an `int` bind whose rule
 is `keep [opt '-' some digit]` (detected structurally, refs resolved)
 emits ONE accumulate-while-scan loop with range compares — the hand
 parser's inner loop, derived from the grammar.
+**Tagged unions (`one of`)**: alternation narrowing, option B — a schema
+whose body is `one of [ variant [ product-terms ] ... ]` lowers to
+`typedef enum { Name_variant, ... } NameKind` + `struct Name { NameKind
+kind; union { ... } u; }`. Dispatch is the first byte of each variant's
+leading literal (comptime-verified distinct); at most one variant may
+lack one — the DEFAULT arm (redis framed|inline commands). Variants are
+product schemas; recursion (RESP reply arrays) uses the arena items form
+with a depth guard — `cap` on a self-reference is a compile error, as is
+ambiguous dispatch. try_read semantics carry through: unknown first byte
+is PARSE, truncation anywhere inside a variant is WOULD_BLOCK. v1 is
+read-side; write inversion (switch on kind) is the next increment, and
+the `G.altrule [...]` qualified form (variant names = branch rule names,
+dispatch from the grammar's FIRST sets) layers on this same lowering.
 **Acceptance against real code**: `tests/redis_resp_gen_parity_smoke.ccs`
 includes the real project's hand RESP reader
 (`real_projects/redis/redis_resp.cch`, UNCHANGED) and proves a generated

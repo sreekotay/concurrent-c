@@ -1,0 +1,119 @@
+// TAGGED UNIONS (`one of`): RESP *replies* — the client-side sum type that
+// motivated alternation narrowing. A reply is one of five shapes dispatched
+// on its first byte; `array` is RECURSIVE (replies containing replies, via
+// the arena items form — cap on a self-reference is a compile error).
+//
+//   one of [ variant [ product-terms ] ... ]
+// lowers to: typedef enum { Reply_simple, ... } ReplyKind;
+//            struct Reply { ReplyKind kind; union { ... } u; }
+// Dispatch = first byte of each variant's leading literal; at most one
+// variant may lack one (the DEFAULT arm — see the inline-command union).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Reply {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
+    ]
+    one of [
+        simple  [ #'+' s: line "\r\n" ]
+        error   [ #'-' msg: line "\r\n" ]
+        integer [ #':' v: int number "\r\n" ]
+        bulk    [ #'$' len: int number "\r\n" data: bytes len "\r\n" ]
+        array   [ #'*' n: int number "\r\n" items: items Reply n ]
+    ]
+~~~~}
+
+/* the redis-command shape from the parity wrapper: framed | inline, where
+ * the inline arm is the DEFAULT (no leading literal) */
+@grammar(schema) Cmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
+    ]
+    one of [
+        framed [ #'*' argc: int number "\r\n" ]
+        plain  [ text: line "\r\n" ]
+    ]
+~~~~}
+
+static int slice_is(CCSlice v, const char* want) {
+    size_t l = strlen(want);
+    return v.len == l && memcmp(v.ptr, want, l) == 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+
+    /* each variant parses, tags, and binds into its own union member */
+    {
+        Reply r;
+        if (!Reply_parse("+OK\r\n", 5, &arena, &r) || r.kind != Reply_simple ||
+            !slice_is(r.u.simple.s, "OK")) { printf("FAIL: simple\n"); return 1; }
+        if (!Reply_parse("-ERR bad key\r\n", 14, &arena, &r) || r.kind != Reply_error ||
+            !slice_is(r.u.error.msg, "ERR bad key")) { printf("FAIL: error\n"); return 1; }
+        if (!Reply_parse(":1234\r\n", 7, &arena, &r) || r.kind != Reply_integer ||
+            r.u.integer.v != 1234) { printf("FAIL: integer\n"); return 1; }
+        if (!Reply_parse(":-42\r\n", 6, &arena, &r) || r.u.integer.v != -42) {
+            printf("FAIL: negative integer\n"); return 1; }
+        if (!Reply_parse("$5\r\nhello\r\n", 11, &arena, &r) || r.kind != Reply_bulk ||
+            r.u.bulk.len != 5 || !slice_is(r.u.bulk.data, "hello")) {
+            printf("FAIL: bulk\n"); return 1; }
+    }
+
+    /* recursion: an array of mixed replies, and arrays nested in arrays */
+    {
+        const char* src = "*3\r\n:1\r\n$2\r\nab\r\n*2\r\n+A\r\n-B\r\n";
+        Reply r;
+        if (!Reply_parse(src, strlen(src), &arena, &r) || r.kind != Reply_array ||
+            r.u.array.items_n != 3) { printf("FAIL: array parse\n"); return 1; }
+        Reply* it = r.u.array.items;
+        if (it[0].kind != Reply_integer || it[0].u.integer.v != 1) { printf("FAIL: arr[0]\n"); return 1; }
+        if (it[1].kind != Reply_bulk || !slice_is(it[1].u.bulk.data, "ab")) { printf("FAIL: arr[1]\n"); return 1; }
+        if (it[2].kind != Reply_array || it[2].u.array.items_n != 2 ||
+            it[2].u.array.items[0].kind != Reply_simple ||
+            it[2].u.array.items[1].kind != Reply_error) { printf("FAIL: nested\n"); return 1; }
+    }
+
+    /* streaming face: unknown first byte = PARSE; truncation = WOULD_BLOCK */
+    {
+        size_t pos = 0;
+        Reply r;
+        bool !>(CCError) t = Reply_try_read("?x\r\n", 4, &pos, &arena, &r);
+        if (!t.is_err() || t.error().kind != CC_ERR_PARSE) { printf("FAIL: bad dispatch\n"); return 1; }
+        pos = 0;
+        t = Reply_try_read("$10\r\nhel", 8, &pos, &arena, &r);
+        if (!t.is_err() || t.error().kind != CC_ERR_WOULD_BLOCK || pos != 0) {
+            printf("FAIL: truncated bulk\n"); return 1; }
+        pos = 0;
+        t = Reply_try_read("*2\r\n:1\r\n", 8, &pos, &arena, &r);
+        if (!t.is_err() || t.error().kind != CC_ERR_WOULD_BLOCK) {
+            printf("FAIL: truncated array\n"); return 1; }
+    }
+
+    /* recursion bound: a depth bomb fails cleanly, no crash */
+    {
+        char bomb[1024]; size_t n = 0;
+        for (int i = 0; i < 200; i++) { memcpy(bomb + n, "*1\r\n", 4); n += 4; }
+        memcpy(bomb + n, ":1\r\n", 4); n += 4;
+        Reply r;
+        if (Reply_parse(bomb, n, &arena, &r)) { printf("FAIL: depth bomb accepted\n"); return 1; }
+    }
+
+    /* DEFAULT arm: framed dispatches on '*', anything else is inline */
+    {
+        Cmd c;
+        if (!Cmd_parse("*3\r\n", 4, &arena, &c) || c.kind != Cmd_framed ||
+            c.u.framed.argc != 3) { printf("FAIL: framed\n"); return 1; }
+        if (!Cmd_parse("PING\r\n", 6, &arena, &c) || c.kind != Cmd_plain ||
+            !slice_is(c.u.plain.text, "PING")) { printf("FAIL: inline\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar tagged unions OK\n");
+    return 0;
+}
