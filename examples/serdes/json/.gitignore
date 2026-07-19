@@ -7,3 +7,5 @@ yyjson.c
 yyjson.h
 /bench_gen
 /.gen/
+/bench_write
+/.genw/
