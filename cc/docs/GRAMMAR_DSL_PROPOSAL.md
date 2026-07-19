@@ -167,6 +167,17 @@ SPECIALIZATION MULTIPLICITY — nm shows the rules core emitted per mode
 matcher/skip variants at ~1.5 KB each; `_string` appears 4x). Harder
 demand-gating (emit only modes actually called) or core-sharing is the
 identified lever to reach hand-size parity.
+Number-corpus callgrind attribution (why gen match trails hand there and
+NOT on documents): hand's golden number path is a PERMISSIVE one-loop
+class scan (CLS_NUM table — accepts "1.2.3e+-"); gen emits the exact
+grammar (int / opt-frac / opt-exp with rollbacks). The delta is mostly
+the price of validating, not emitter inefficiency — closing it would
+mean scan-superset-then-validate trickery or an opt-in lax mode, not
+tuning. Padded-rule trampolines (lead pad + __np call) are force-inlined
+(callgrind showed gcc keeping them out of line: a frame per JSON value);
+measured +2-4% on twitter match/DOM over 6 alternating rounds, neutral
+on numbers — NOT the +14% a one-off probe suggested; code-layout and
+box drift inflate untight comparisons.
 **High-frequency small-doc parse (the service workload: object-ish API
 payloads, arena reset / doc free per parse, macOS):** throughput is FLAT
 with size for both sides (27 KB / 200 KB / 2 MB: ours ~1.6 GB/s
