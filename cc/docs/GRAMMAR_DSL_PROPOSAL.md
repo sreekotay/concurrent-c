@@ -158,6 +158,20 @@ SPECIALIZATION MULTIPLICITY — nm shows the rules core emitted per mode
 matcher/skip variants at ~1.5 KB each; `_string` appears 4x). Harder
 demand-gating (emit only modes actually called) or core-sharing is the
 identified lever to reach hand-size parity.
+**High-frequency small-doc parse (the service workload: object-ish API
+payloads, arena reset / doc free per parse, macOS):** throughput is FLAT
+with size for both sides (27 KB / 200 KB / 2 MB: ours ~1.6 GB/s
+constant, yyjson ~2.8-2.9), so per-parse setup (arena reset vs doc_free)
+is NOT where the gap lives — the hot loop is, and yyjson's ratio holds
+steady at ~1.7-1.8x across the whole size range. Two readings kept
+together on purpose: (a) small-and-often does NOT flip the ranking, and
+at 100k QPS pure-parse-bound yyjson's 100k vs our 58k parse/s is a real
+difference; (b) the absolute frame is ~17 vs ~10 us on a 27 KB payload —
+noise next to I/O, TLS, and business logic on most real request paths,
+and there is NO small-doc cliff: the DSL's specialized C holds a steady
+fraction of the fastest scalar reader at every size people actually hit,
+while keeping the size/memory/borrow advantages above. Gen match == hand
+(~1.5-1.6 GB/s) in the same window.
 **No magic names**: the call-site surface is the `cc_*` operations in
 `<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
 `cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —
