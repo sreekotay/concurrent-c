@@ -92,6 +92,16 @@ static void cc__net_disable_sigpipe_best_effort(int fd) {
 #endif
 }
 
+/* Linux has no SO_NOSIGPIPE; SIGPIPE must be suppressed per-send with
+ * MSG_NOSIGNAL instead (a peer that closes mid-stream would otherwise
+ * kill the whole process on the second write after its FIN/RST).  send()
+ * with these flags is equivalent to write() for connected sockets. */
+#ifdef MSG_NOSIGNAL
+#define CC__NET_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define CC__NET_SEND_FLAGS 0
+#endif
+
 static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     if (!cc__fiber_in_context()) return 0;
     if (flags && (*flags & CC_NET_FLAG_NONBLOCK)) return 0;
@@ -461,7 +471,7 @@ size_t cc_socket_write_deadline(CCSocket* sock,
     const struct timespec* abs_deadline = cc_deadline_as_timespec(deadline, &ts);
 
     while (1) {
-        ssize_t n = write(sock->fd, data, len);
+        ssize_t n = send(sock->fd, data, len, CC__NET_SEND_FLAGS);
         if (n >= 0) {
             return (size_t)n;
         }
@@ -629,7 +639,7 @@ size_t cc_udp_send_to(CCUdpSocket* sock, const char* data, size_t len,
         return 0;
     }
 
-    ssize_t n = sendto(sock->fd, data, len, 0, (struct sockaddr*)&sa, sa_len);
+    ssize_t n = sendto(sock->fd, data, len, CC__NET_SEND_FLAGS, (struct sockaddr*)&sa, sa_len);
     if (n < 0) {
         *out_err = errno_to_net_error(errno);
         return 0;
