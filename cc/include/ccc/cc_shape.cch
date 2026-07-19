@@ -87,15 +87,12 @@ typedef struct { uint32_t n, cap; CCShapeDEnt ents[]; } CCShapeDict;
 #endif
 #define CC_SHAPE_DICT_DEPTH 64
 #define CC_SHAPE_DICT_WIDTH 32
-#define CC_SHAPE_STACK (1u << 16)
 
 typedef struct {
     CCArena* ar;                         /* persistent: shapes, keys, lookups */
     CCShape root, dict;
     struct { uint64_t h; CCShape* to; } ttab[CC_SHAPE_MAX * 2];
     uint32_t nshapes;
-    CCShapeVal* stack;                   /* build scratch (single builder at a time) */
-    struct { const char* k; uint32_t klen, hash; } * kstack;
     long dict_objs;                      /* observability */
 } CCShapeReg;
 
@@ -111,9 +108,7 @@ static inline CCShapeReg* cc_shape_reg_create(CCArena* persistent) {
     memset(r, 0, sizeof *r);
     r->ar = persistent;
     r->dict.is_dict = 1;
-    r->stack = (CCShapeVal*)cc_arena_alloc_local(persistent, CC_SHAPE_STACK * sizeof(CCShapeVal), 16);
-    r->kstack = cc_arena_alloc_local(persistent, CC_SHAPE_STACK * sizeof(*r->kstack), 16);
-    return r->stack && r->kstack ? r : 0;
+    return r;
 }
 
 /* key->slot table, built once when a shape is first finalized */
@@ -173,16 +168,18 @@ static inline CCShape* cc_shape__advance(CCShapeReg* r, CCShape* s,
     }
 }
 
-/* ---- builder: one session over a record arena ---- */
+/* ---- builder: one session over a record arena ----
+ * DIRECT FILL: callers that know each container's child count up front
+ * (tape walkers do — spans) allocate exact-size and write every value
+ * ONCE, straight into its slot. No scratch stack, no copy-out. */
 typedef struct {
     CCShapeReg* rg;
     CCArena* rec;
-    size_t sp;
     char* rb; size_t rb_left;            /* record slab: 1 arena hit / ~8KB */
 } CCShapeB;
 
 static inline void cc_shape_build(CCShapeB* b, CCShapeReg* rg, CCArena* rec) {
-    b->rg = rg; b->rec = rec; b->sp = 0; b->rb = 0; b->rb_left = 0;
+    b->rg = rg; b->rec = rec; b->rb = 0; b->rb_left = 0;
 }
 
 static inline void* cc_shape__ralloc(CCShapeB* b, size_t sz) {
@@ -203,126 +200,111 @@ static inline CCShapeVal cc_shape_leaf(int id, const char* bytes, size_t len, in
     return v;
 }
 
-static inline size_t cc_shape_mark(CCShapeB* b) { return b->sp; }
-static inline int cc_shape_push(CCShapeB* b, CCShapeVal v) {
-    if (b->sp >= CC_SHAPE_STACK) return 0;
-    b->rg->stack[b->sp++] = v;
-    return 1;
-}
-
-static inline int cc_shape_arr_end(CCShapeB* b, size_t mark, CCShapeVal* out) {
-    uint64_t n = (uint64_t)(b->sp - mark);
+/* array: exact-size, fill items[i] directly */
+static inline CCShapeVal* cc_shape_arrd(CCShapeB* b, size_t n, CCShapeVal* out) {
     CCShapeArr* a = (CCShapeArr*)cc_shape__ralloc(b, sizeof(CCShapeArr));
     if (!a) return 0;
-    a->n = n; a->items = 0;
+    a->n = n;
+    a->items = 0;
     if (n) {
-        a->items = (CCShapeVal*)cc_shape__ralloc(b, (size_t)n * sizeof(CCShapeVal));
+        a->items = (CCShapeVal*)cc_shape__ralloc(b, n * sizeof(CCShapeVal));
         if (!a->items) return 0;
-        memcpy(a->items, b->rg->stack + mark, (size_t)n * sizeof(CCShapeVal));
     }
-    b->sp = mark;
     out->meta = CC_SHAPE_META(CC_SHAPE_ARR, 0, 0, n);
     out->u.arr = a;
+    return n ? a->items : (CCShapeVal*)a;   /* non-NULL success token when empty */
+}
+
+/* object: m members known up front. cc_shape_objd_slot advances the shape
+ * (or switches this instance to dictionary mode — prior values convert in
+ * place, their keys recovered from the shape chain) and returns the slot
+ * to fill. Duplicate keys in dict mode: last wins (same slot returned). */
+typedef struct {
+    CCShapeVal* slots; uint32_t i, m;
+    CCShape* s;
+    CCShapeDict* d;                      /* non-NULL once dictionary-mode */
+} CCShapeObjD;
+
+static inline int cc_shape_objd_begin(CCShapeB* b, CCShapeObjD* od, uint32_t m) {
+    od->i = 0; od->m = m; od->s = &b->rg->root; od->d = 0;
+    od->slots = 0;
+    if (m) {
+        od->slots = (CCShapeVal*)cc_shape__ralloc(b, m * sizeof(CCShapeVal));
+        if (!od->slots) return 0;
+    }
     return 1;
 }
 
-typedef struct { size_t base; CCShape* s; int dict; } CCShapeObjB;
-
-static inline void cc_shape_obj_begin(CCShapeB* b, CCShapeObjB* ob) {
-    ob->base = b->sp; ob->s = &b->rg->root; ob->dict = 0;
+static inline CCShapeDEnt* cc_shape__dict_ins(CCShapeDict* d, const char* k,
+                                              uint32_t klen, uint32_t h) {
+    uint32_t j = h & (d->cap - 1);
+    for (;;) {
+        if (!d->ents[j].key) {
+            d->ents[j].key = k; d->ents[j].klen = klen; d->ents[j].hash = h;
+            d->n++;
+            return &d->ents[j];
+        }
+        if (d->ents[j].hash == h && d->ents[j].klen == klen &&
+            memcmp(d->ents[j].key, k, klen) == 0)
+            return &d->ents[j];          /* duplicate: last wins */
+        j = (j + 1) & (d->cap - 1);
+    }
 }
 
-static inline int cc_shape_obj_member(CCShapeB* b, CCShapeObjB* ob,
-                                      const char* k, uint32_t klen, CCShapeVal v) {
+static inline CCShapeVal* cc_shape_objd_slot(CCShapeB* b, CCShapeObjD* od,
+                                             const char* k, uint32_t klen) {
     CCShapeReg* r = b->rg;
-    if (b->sp >= CC_SHAPE_STACK) return 0;
-    if (!ob->dict) {
+    if (!od->d) {
         CCShape* nx = 0;
         int oom = 0;
-        if (ob->s->nslots < CC_SHAPE_DICT_DEPTH)
-            nx = cc_shape__advance(r, ob->s, k, klen, !ob->s->diverge, &oom);
-        if (!nx) {
-            if (oom) return 0;
-            /* SWITCH TO DICTIONARY: keys so far recover from the chain */
+        if (od->s->nslots < CC_SHAPE_DICT_DEPTH)
+            nx = cc_shape__advance(r, od->s, k, klen, !od->s->diverge, &oom);
+        if (nx) {
+            od->s = nx;
+            return &od->slots[od->i++];
+        }
+        if (oom) return 0;
+        /* SWITCH TO DICTIONARY: convert values already placed; their keys
+         * recover from the shape chain */
+        {
+            uint32_t cap = 4;
+            while (cap < od->m * 2) cap <<= 1;
             {
-                uint32_t idx = ob->s->nslots;
-                for (CCShape* e = ob->s; e->parent; e = e->parent) {
-                    idx--;
-                    r->kstack[ob->base + idx].k = e->key;
-                    r->kstack[ob->base + idx].klen = e->klen;
-                    r->kstack[ob->base + idx].hash = e->keyhash;
+                CCShapeDict* d = (CCShapeDict*)cc_shape__ralloc(b,
+                    sizeof(CCShapeDict) + cap * sizeof(CCShapeDEnt));
+                if (!d) return 0;
+                memset(d->ents, 0, cap * sizeof(CCShapeDEnt));
+                d->cap = cap; d->n = 0;
+                {
+                    uint32_t idx = od->i;
+                    for (CCShape* e = od->s; e->parent && idx; e = e->parent) {
+                        idx--;
+                        cc_shape__dict_ins(d, e->key, e->klen, e->keyhash)->v = od->slots[idx];
+                    }
                 }
+                od->d = d;
+                r->dict_objs++;
             }
-            ob->dict = 1;
-            r->dict_objs++;
-        } else {
-            ob->s = nx;
         }
     }
-    if (ob->dict) {
-        r->kstack[b->sp].k = k;
-        r->kstack[b->sp].klen = klen;
-        r->kstack[b->sp].hash = cc_shape__hash(k, klen);
-    }
-    r->stack[b->sp++] = v;
-    return 1;
+    return &cc_shape__dict_ins(od->d, k, klen, cc_shape__hash(k, klen))->v;
 }
 
-static inline int cc_shape_obj_end(CCShapeB* b, CCShapeObjB* ob, CCShapeVal* out) {
-    CCShapeReg* r = b->rg;
-    uint32_t n = (uint32_t)(b->sp - ob->base);
-    if (ob->dict) {
-        uint32_t cap = 4;
-        while (cap < n * 2) cap <<= 1;
-        {
-            CCShapeDict* d = (CCShapeDict*)cc_shape__ralloc(b, sizeof(CCShapeDict) + cap * sizeof(CCShapeDEnt));
-            CCShapeObj* o = (CCShapeObj*)cc_shape__ralloc(b, sizeof(CCShapeObj));
-            if (!d || !o) return 0;
-            memset(d->ents, 0, cap * sizeof(CCShapeDEnt));
-            d->cap = cap; d->n = 0;
-            for (uint32_t i = 0; i < n; i++) {   /* duplicate key: last wins */
-                uint32_t h = r->kstack[ob->base + i].hash, j = h & (cap - 1);
-                for (;;) {
-                    if (!d->ents[j].key) {
-                        d->ents[j].key = r->kstack[ob->base + i].k;
-                        d->ents[j].klen = r->kstack[ob->base + i].klen;
-                        d->ents[j].hash = h;
-                        d->ents[j].v = r->stack[ob->base + i];
-                        d->n++;
-                        break;
-                    }
-                    if (d->ents[j].hash == h && d->ents[j].klen == r->kstack[ob->base + i].klen &&
-                        memcmp(d->ents[j].key, r->kstack[ob->base + i].k, d->ents[j].klen) == 0) {
-                        d->ents[j].v = r->stack[ob->base + i];
-                        break;
-                    }
-                    j = (j + 1) & (cap - 1);
-                }
-            }
-            o->shape = &r->dict;
-            o->slots = (CCShapeVal*)d;
-            b->sp = ob->base;
-            out->meta = CC_SHAPE_META(CC_SHAPE_OBJ, 0, 0, d->n);
-            out->u.obj = o;
-            return 1;
-        }
+static inline int cc_shape_objd_end(CCShapeB* b, CCShapeObjD* od, CCShapeVal* out) {
+    CCShapeObj* o = (CCShapeObj*)cc_shape__ralloc(b, sizeof(CCShapeObj));
+    if (!o) return 0;
+    if (od->d) {
+        o->shape = &b->rg->dict;
+        o->slots = (CCShapeVal*)od->d;
+        out->meta = CC_SHAPE_META(CC_SHAPE_OBJ, 0, 0, od->d->n);
+    } else {
+        o->shape = od->s;
+        o->slots = od->slots;
+        if (od->s->nslots && !od->s->lookup && !cc_shape__build_lookup(od->s)) return 0;
+        out->meta = CC_SHAPE_META(CC_SHAPE_OBJ, 0, 0, od->i);
     }
-    {
-        CCShapeObj* o = (CCShapeObj*)cc_shape__ralloc(b, sizeof(CCShapeObj));
-        if (!o) return 0;
-        o->shape = ob->s;
-        o->slots = 0;
-        if (n) {
-            o->slots = (CCShapeVal*)cc_shape__ralloc(b, n * sizeof(CCShapeVal));
-            if (!o->slots) return 0;
-            memcpy(o->slots, r->stack + ob->base, n * sizeof(CCShapeVal));
-        }
-        if (ob->s->nslots && !ob->s->lookup && !cc_shape__build_lookup(ob->s)) return 0;
-        b->sp = ob->base;
-        out->meta = CC_SHAPE_META(CC_SHAPE_OBJ, 0, 0, n);
-        out->u.obj = o;
-        return 1;
-    }
+    out->u.obj = o;
+    return 1;
 }
 
 /* ---- access ---- */
