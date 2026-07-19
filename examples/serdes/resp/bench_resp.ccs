@@ -19,7 +19,7 @@
         number: keep [opt #'-' some digit]
     ]
     #'*' argc: int number "\r\n"
-    args: items RespArg argc
+    args: items RespArg argc cap 16
 ~~~~}
 
 static double now_s(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
@@ -101,11 +101,10 @@ int main(int argc, char** argv) {
     if (gc != hc || gb != hb) { printf("MISMATCH gen %ld/%llu hand %ld/%llu\n", gc, gb, hc, hb); return 1; }
     /* ENCODE: generated writer vs hand snprintf — the Redis-client hot path */
     {
-        RespArg parts[3];
-        parts[0].data = cc_slice_from_buffer((void*)"SET", 3);
-        parts[1].data = cc_slice_from_buffer((void*)"key:12345", 9);
-        parts[2].data = cc_slice_from_buffer((void*)"value-12345-xxxxxxxx", 20);
-        RespCmd cmd = { .argc = 0, .args = parts, .args_n = 3 };
+        RespCmd cmd = { .argc = 0, .args_n = 3 };
+        cmd.args[0].data = cc_slice_from_buffer((void*)"SET", 3);
+        cmd.args[1].data = cc_slice_from_buffer((void*)"key:12345", 9);
+        cmd.args[2].data = cc_slice_from_buffer((void*)"value-12345-xxxxxxxx", 20);
         char* eb = (char*)malloc((size_t)NCMD * 64);
         size_t en = 0;
         best = 1e18;
@@ -134,11 +133,11 @@ int main(int argc, char** argv) {
                     d[o++] = '\r'; d[o++] = '\n';
                     for (int a2 = 0; a2 < 3; a2++) {
                         d[o++] = '$';
-                        { unsigned long long u = (unsigned long long)parts[a2].data.len; char nb[21]; int nl = 0;
+                        { unsigned long long u = (unsigned long long)cmd.args[a2].data.len; char nb[21]; int nl = 0;
                           do { nb[nl++] = (char)('0' + u % 10); u /= 10; } while (u);
                           while (nl) d[o++] = nb[--nl]; }
                         d[o++] = '\r'; d[o++] = '\n';
-                        memcpy(d + o, parts[a2].data.ptr, parts[a2].data.len); o += parts[a2].data.len;
+                        memcpy(d + o, cmd.args[a2].data.ptr, cmd.args[a2].data.len); o += cmd.args[a2].data.len;
                         d[o++] = '\r'; d[o++] = '\n';
                     }
                     en += o;
