@@ -199,6 +199,28 @@ int main(void) {
                 printf("FAIL: composed/manual disagree\n"); return 1;
             }
         }
+        /* reflection face: field by NAME over the same packed struct — the
+         * key->field map is per TYPE (static table + compiled dispatch),
+         * instances carry only values (+ a presence bitmap: this schema has
+         * conditional members, so absent vs zero is distinguishable) */
+        {
+            CCGramValue gv;
+            if (!cc_get(Tweet, &t, "id", &gv) || gv.kind != CC_GK_INT ||
+                gv.i != 42 || !gv.present) { printf("FAIL: get id\n"); return 1; }
+            if (!t.get("text", &gv) || gv.kind != CC_GK_SLICE ||
+                gv.s.len != 3 || memcmp(gv.s.ptr, "a\nb", 3) != 0) {
+                printf("FAIL: ufcs get text\n"); return 1;
+            }
+            if (Tweet_get(&t, "nope", &gv)) { printf("FAIL: unknown key accepted\n"); return 1; }
+            const CCGramField* f = cc_field(Tweet, "user_name", 9);
+            if (!f || f->kind != CC_GK_SLICE || strcmp(f->name, "user_name") != 0) {
+                printf("FAIL: field table\n"); return 1;
+            }
+            /* `{}` parse: fields are zeroed AND flagged absent */
+            if (!Tweet_get(&z, "id", &gv) || gv.present || gv.i != 0) {
+                printf("FAIL: absent field reported present\n"); return 1;
+            }
+        }
     }
 
     /* FORMAT: the narrowed schema inverted. The structural skeleton (braces,
@@ -243,6 +265,16 @@ int main(void) {
         Feed feed;
         if (!Feed_parse(buf, rd, &arena, &feed)) { printf("FAIL: feed parse\n"); return 1; }
         if (feed.statuses_n == 0) { printf("FAIL: no statuses\n"); return 1; }
+
+        /* reflection over items: the array field by name */
+        {
+            CCGramValue gv;
+            if (!cc_get(Feed, &feed, "statuses", &gv) || gv.kind != CC_GK_ITEMS ||
+                gv.items != (const void*)feed.statuses || gv.items_n != feed.statuses_n ||
+                strcmp(gv.field->etype, "Tweet") != 0) {
+                printf("FAIL: get statuses\n"); return 1;
+            }
+        }
 
         Agg sa = {0};
         for (size_t i = 0; i < feed.statuses_n; i++) {

@@ -1697,6 +1697,10 @@ typedef struct {
     int io_, ic_, is_;                            /* items: open/close/sep */
     char ipad[S_NAME];
     int rfkey, rfpad, rfelse, ripad;              /* resolved rule idx, -1 unset */
+
+    int bindbit[S_MAX_TERMS];            /* term idx -> presence bit (-1 none) */
+    int nbinds;                          /* fields in declaration order */
+    int presence;                        /* conditional schema: emit cc__set bitmap */
 } SS;
 
 static int ss_fail(SS* s, size_t at, const char* msg) {
@@ -2974,6 +2978,98 @@ static int rs_any_method_demand(const char* src, size_t n, const char* m) {
     return 0;
 }
 
+/* ---- reflection face: keys separated from values ----
+ * The schema's key->field knowledge, KEPT after parse instead of consumed
+ * by it: a static per-TYPE table (name, kind, offset — the comptime hidden
+ * class) plus a compiled get() whose dispatch is the same length-switch +
+ * memcmp the parser uses. Instances stay packed C; the table is shared by
+ * all of them. This is the comptime rung of the shapes ladder (see
+ * examples/serdes/json/json_shape.h for the runtime rungs). */
+static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt);
+
+static const char* rs_gk(const STerm* t) {
+    switch (t->kind) {
+    case SK_BIND_INT:   return "CC_GK_INT";
+    case SK_BIND_BYTES: return "CC_GK_BYTES";
+    case SK_BIND_ITEMS: case SK_NARROW_LIST: return "CC_GK_ITEMS";
+    default:            return "CC_GK_SLICE";
+    }
+}
+
+static void rs_emit_get(SS* ss, EB* e, const char* name) {
+    int order[S_MAX_TERMS]; int cnt = 0;
+    for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
+    eb_fmt(e, "static const CCGramField %s__fields[%d] = {\n", name, cnt > 0 ? cnt : 1);
+    for (int i = 0; i < cnt; i++) {
+        const STerm* t = &ss->terms[order[i]];
+        int is_items = t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST;
+        if (is_items)
+            eb_fmt(e, "    { \"%s\", %s, (unsigned)offsetof(%s, %s), "
+                      "(unsigned)offsetof(%s, %s_n), \"%s\" },\n",
+                   t->field, rs_gk(t), name, t->field, name, t->field, t->etype);
+        else
+            eb_fmt(e, "    { \"%s\", %s, (unsigned)offsetof(%s, %s), 0, 0 },\n",
+                   t->field, rs_gk(t), name, t->field);
+    }
+    if (cnt == 0) eb_fmt(e, "    { 0, 0, 0, 0, 0 },\n");
+    eb_fmt(e, "};\n");
+    eb_fmt(e, "static __attribute__((unused)) const CCGramField* %s_field(const char* k, size_t kl) {\n"
+              "    switch (kl) {\n", name);
+    {
+        unsigned char done[S_MAX_TERMS] = {0};
+        for (int i = 0; i < cnt; i++) {
+            if (done[i]) continue;
+            size_t L = strlen(ss->terms[order[i]].field);
+            eb_fmt(e, "    case %d:\n", (int)L);
+            for (int j = i; j < cnt; j++) {
+                const STerm* t = &ss->terms[order[j]];
+                if (done[j] || strlen(t->field) != L) continue;
+                done[j] = 1;
+                eb_fmt(e, "        if (memcmp(k, \"%s\", %d) == 0) return &%s__fields[%d];\n",
+                       t->field, (int)L, name, j);
+            }
+            eb_fmt(e, "        break;\n");
+        }
+    }
+    eb_fmt(e, "    }\n    return 0;\n}\n");
+    /* compiled get: dispatch straight to member reads — the field table is
+     * the reflective face, this is the fast one */
+    eb_fmt(e, "static __attribute__((unused)) int %s_get(const %s* v, const char* k, CCGramValue* out) {\n"
+              "    size_t kl = strlen(k);\n    (void)v;\n"
+              "    switch (kl) {\n", name, name);
+    {
+        unsigned char done[S_MAX_TERMS] = {0};
+        for (int i = 0; i < cnt; i++) {
+            if (done[i]) continue;
+            size_t L = strlen(ss->terms[order[i]].field);
+            eb_fmt(e, "    case %d:\n", (int)L);
+            for (int j = i; j < cnt; j++) {
+                const STerm* t = &ss->terms[order[j]];
+                if (done[j] || strlen(t->field) != L) continue;
+                done[j] = 1;
+                eb_fmt(e, "        if (memcmp(k, \"%s\", %d) == 0) {\n"
+                          "            out->kind = %s;\n"
+                          "            out->field = &%s__fields[%d];\n",
+                       t->field, (int)L, rs_gk(t), name, j);
+                if (ss->presence)
+                    eb_fmt(e, "            out->present = (int)((v->cc__set >> %d) & 1);\n", j);
+                else
+                    eb_fmt(e, "            out->present = 1;\n");
+                if (t->kind == SK_BIND_INT)
+                    eb_fmt(e, "            out->i = v->%s;\n", t->field);
+                else if (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST)
+                    eb_fmt(e, "            out->items = v->%s; out->items_n = v->%s_n;\n",
+                           t->field, t->field);
+                else
+                    eb_fmt(e, "            out->s = v->%s;\n", t->field);
+                eb_fmt(e, "            return 1;\n        }\n");
+            }
+            eb_fmt(e, "        break;\n");
+        }
+    }
+    eb_fmt(e, "    }\n    return 0;\n}\n");
+}
+
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
     for (int md = RW_MEASURE; md <= RW_CHK; md++) {
         WAcc w;
@@ -3182,6 +3278,11 @@ static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const 
     eb_fmt(e, "    out->%s = v%d; out->%s_n = cnt%d; }\n", t->field, k, t->field, k);
 }
 
+static void rs_emit_presence(const SS* ss, EB* e, int ti) {
+    if (ss->presence && ss->bindbit[ti] >= 0)
+        eb_fmt(e, "    out->cc__set |= 1ULL << %d;\n", ss->bindbit[ti]);
+}
+
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail) {
     const STerm* t = &ss->terms[ti];
     switch (t->kind) {
@@ -3205,13 +3306,16 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     case SK_BIND_SLICE:
     case SK_BIND_INT:
         rs_emit_bind_value(ss, g, e, lbl, t, fail);
+        rs_emit_presence(ss, e, ti);
         break;
     case SK_BIND_ITEMS:
         if (t->cfield[0]) rs_emit_items_counted(e, lbl, t, fail);
         else rs_emit_items(ss, g, e, lbl, t, fail);
+        rs_emit_presence(ss, e, ti);
         break;
     case SK_BIND_BYTES:
         rs_emit_bytes(e, lbl, t, fail);
+        rs_emit_presence(ss, e, ti);
         break;
     case SK_FIELDS:
         rs_emit_fields(ss, g, e, lbl, t, fail);
@@ -3221,6 +3325,7 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         break;
     case SK_NARROW_LIST:
         rs_emit_narrow_list(g, e, lbl, t, fail);
+        rs_emit_presence(ss, e, ti);
         break;
     }
 }
@@ -3404,6 +3509,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                    " *   cc_read(%s, s, n, &pos, arena, &out) / %s.read(...) -> %s_read\n"
                    " *   cc_reader(%s, s, n, arena) / %s.reader(...)        -> %s_reader\n"
                    " *   cc_next / cc_at_end / r.next(&out) / r.at_end()    -> %sReader_next/_at_end\n"
+                   " *   cc_get(T, &v, \"field\", &out) / v.get(...)          -> T_get + T__fields table\n"
                    "%s */\n",
                name, line, reg ? "use " : "inline rules", reg ? ss->usename : "",
                name, name, name, name, name, name, name, name, name, name, name, name,
@@ -3470,6 +3576,19 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         {
             int order[S_MAX_TERMS]; int cnt = 0;
             for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
+            for (int i = 0; i < ss->nterms; i++) ss->bindbit[i] = -1;
+            ss->nbinds = cnt;
+            /* presence tracking only where absence is possible: a dispatching
+             * schema (fields/narrowed members) may leave fields unassigned; a
+             * product schema assigns every field on any successful parse */
+            {
+                int conditional = 0;
+                for (int ti = 0; ti < ss->nterms && !conditional; ti++)
+                    if (ss->terms[ti].kind == SK_FIELDS ||
+                        ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
+                ss->presence = conditional && cnt > 0 && cnt <= 64;
+            }
+            for (int i = 0; i < cnt; i++) ss->bindbit[order[i]] = i;
             eb_fmt(&e, "typedef struct %s {\n", name);
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
@@ -3480,6 +3599,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 else
                     eb_fmt(&e, "    %s* %s; size_t %s_n;\n", t->etype, t->field, t->field);
             }
+            if (ss->presence)
+                eb_fmt(&e, "    unsigned long long cc__set;   /* presence bitmap, bit i = field i */\n");
             if (cnt == 0) eb_fmt(&e, "    char cc__empty;\n");
             eb_fmt(&e, "} %s;\n", name);
         }
@@ -3541,6 +3662,17 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             char rn[S_NAME + 8];
             snprintf(rn, sizeof rn, "%sReader", name);
             cc__grammar_note_ufcs_type(rn);
+        }
+        /* reflection face (field table + compiled get), on demand */
+        {
+            int want_get = rs_has_token(src, src_len, name, "_get") ||
+                           rs_has_token(src, src_len, name, "_field") ||
+                           rs_has_token(src, src_len, name, "__fields") ||
+                           rs_has_op(src, src_len, "cc_get", name) ||
+                           rs_has_op(src, src_len, "cc_field", name) ||
+                           rs_has_dot(src, src_len, name, "get") ||
+                           rs_any_method_demand(src, src_len, "get");
+            if (want_get) rs_emit_get(ss, &e, name);
         }
         /* the WRITE projection (schema inverted), on demand like every tier */
         {
