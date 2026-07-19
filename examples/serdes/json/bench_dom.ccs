@@ -5,8 +5,8 @@
 #include <ccc/std/prelude.cch>
 #include <time.h>
 
+/* keep/decode: dirty spans only — no memchr re-scan. */
 static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
-    if (!memchr(p, '\\', n)) { *out = cc_slice_from_buffer((void*)p, n); return 1; }
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
     if (!dst) return 0;
     size_t o = 0;

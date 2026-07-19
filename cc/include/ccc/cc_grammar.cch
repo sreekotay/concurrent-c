@@ -75,7 +75,7 @@
 
 /* Field descriptor: one row of a schema's static Name__fields[] table —
  * the keys, separated from the values. Emitted on demand per schema. */
-typedef enum { CC_GK_INT = 1, CC_GK_SLICE, CC_GK_BYTES, CC_GK_ITEMS } CCGramFieldKind;
+typedef enum { CC_GK_INT = 1, CC_GK_SLICE, CC_GK_BYTES, CC_GK_ITEMS, CC_GK_FLOAT } CCGramFieldKind;
 typedef struct {
     const char* name;
     unsigned kind;                /* CCGramFieldKind */
@@ -92,6 +92,7 @@ typedef struct {
     unsigned kind;                /* CCGramFieldKind */
     int present;
     long long i;                  /* CC_GK_INT */
+    double f;                     /* CC_GK_FLOAT */
     CCSlice s;                    /* CC_GK_SLICE / CC_GK_BYTES */
     const void* items;            /* CC_GK_ITEMS: elements (of field->etype) */
     size_t items_n;

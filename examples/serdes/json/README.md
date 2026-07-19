@@ -13,7 +13,8 @@ into a real, competitive serde without giving up the safety story.
   not a demo flag. On the `twitter.json` corpus, **98.3% of strings borrow** — copies
   happen only at the escape boundary.
 - **Lazy numbers.** A number borrows its text and is parsed on demand
-  (`JsonNode_as_f64`) — a second zero-copy that eager parsers give up.
+  (`JsonNode_as_f64` via [ffc.h](https://github.com/kolemannix/ffc.h)) — a second
+  zero-copy that eager parsers give up.
 - **Compact 24-byte node** (yyjson-inspired). `meta` packs tag + Cow bit + length in
   one word; object members are stored as `(key, value)` pairs so a value/array
   element carries no key field. The full `CCSlice` — with provenance id and

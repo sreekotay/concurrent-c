@@ -13,11 +13,8 @@
 
 /* JSON string-content codec: borrow if escape-free, else decode into arena.
  * Codec contract: returns 0 on decode failure; writes *out. */
+/* keep/decode: dirty spans only — no memchr re-scan. */
 static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
-    if (!memchr(p, '\\', n)) {
-        *out = cc_slice_from_buffer((void*)p, n);                 /* BORROW */
-        return 1;
-    }
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1); /* decoded <= raw */
     if (!dst) return 0;
     size_t o = 0;

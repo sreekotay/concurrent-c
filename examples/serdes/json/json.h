@@ -29,6 +29,7 @@
 #ifndef CC_JSON_H
 #define CC_JSON_H
 #include <ccc/cc_arena.cch>          /* pulls cc_slice.cch */
+#include <ccc/vendor/ffc.h>          /* JsonNode_as_f64 — link arena_state.c (FFC_IMPL) */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -127,7 +128,8 @@ static JsonStatus json__string(JsonParser* p, const char** bytes, uint64_t* len,
       const uint64_t Q=0x2222222222222222ULL,B=0x5C5C5C5C5C5C5C5CULL;
       while (i+8<=p->len){ uint64_t w; memcpy(&w,p->src+i,8);
         uint64_t hq=w^Q; hq=(hq-L)&~hq&H; uint64_t hb=w^B; hb=(hb-L)&~hb&H;
-        if(hq|hb) break;
+        uint64_t m=hq|hb;
+        if(m){ i+=(size_t)(__builtin_ctzll(m)>>3); break; }  /* hit offset, not word restart */
         i+=8; } }
     for(; i<p->len; i++){ if(!(CLS(p->src[i])&CLS_STRSPEC)) continue;
         if(p->src[i]=='"') break;
@@ -242,8 +244,14 @@ static inline CCSlice JsonNode_slice(const JsonNode* n){
     return cc_slice_from_parts((void*)n->u.bytes, l, id, l);
 }
 
-static inline double JsonNode_as_f64(const JsonNode* n){ if(JSON_TAG(n->meta)!=JSON_NUM) return 0;
-    uint64_t l=JSON_LEN(n->meta); char t[64]; size_t k=l<63?l:63; memcpy(t,n->u.bytes,k); t[k]=0; return strtod(t,NULL); }
+static inline double JsonNode_as_f64(const JsonNode* n){
+    if (JSON_TAG(n->meta) != JSON_NUM) return 0;
+    uint64_t l = JSON_LEN(n->meta);
+    double v = 0;
+    ffc_parse_options o; o.format = FFC_PRESET_JSON; o.decimal_point = '.';
+    ffc_result r = ffc_from_chars_double_options(n->u.bytes, n->u.bytes + (size_t)l, &v, o);
+    return r.outcome == FFC_OUTCOME_OK ? v : 0;
+}
 
 /* object lookup: child list is key0->val0->key1->val1->... (every key has a value) */
 static inline JsonNode* JsonNode_get(JsonNode* v, const char* key){

@@ -862,7 +862,9 @@ static int rg_inline_size(const RG* g, int nd, int depth) {
  * the keep: clean spans borrow inline with NO codec call and NO re-scan —
  * golden's has_escape, derived from the grammar. Contract: a keep/decode
  * codec's transform triggers must live in non-pure-run branches (true by
- * construction: a pure run is the identity on its bytes). */
+ * construction: a pure run is the identity on its bytes). Codecs are
+ * invoked ONLY on dirty spans — they must decode, not re-probe (no
+ * memchr for the trigger the matcher already recorded). */
 static int rg_pure_run(const RG* g, int nd, int depth) {
     if (depth > 8) return 0;
     const RNode* x = &g->nodes[nd];
@@ -1005,7 +1007,17 @@ static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
 
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; int risk; int dom; } EB;
+/* last_pad / omit_lead_pad: absorb adjacent identical pads so authors can
+ * write natural `value: [ws … ws]` + `member: [ws …]` without stacked skips.
+ * last_pad = rule idx of a pad just satisfied; omit_lead_pad strips that pad
+ * from the next SEQ (used when emitting __np rule variants). */
+typedef struct {
+    char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K;
+    int mode; int dk; int risk; int dom;
+    int last_pad; int omit_lead_pad;
+} EB;
+
+static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -1029,6 +1041,16 @@ static void eb_fmt(EB* e, const char* fmt, ...) {
     va_end(ap2);
 }
 
+/* Leading pad rule of `rule` (nullable keep-free ref at SEQ head), else -1. */
+static int rg_leading_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
+    int body = g->rules[rule].node;
+    while (g->nodes[body].kind == RN_COLLECT || g->nodes[body].kind == RN_KEEP)
+        body = g->nodes[body].a;
+    const RNode* x = &g->nodes[body];
+    if (x->kind != RN_SEQ || x->nkids < 1) return -1;
+    return rw_pad_rule(g, F, K, g->kids[x->b]);
+}
+
 /* Emit statements matching node `nd`; on mismatch: `goto <fail>;` with the
  * cursor restored by the construct that owns <fail>. `p` is the cursor var.
  * `c` is the collect context (NULL under <Name>_match): keeps append spans to
@@ -1039,6 +1061,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
     case RN_LIT:
+        e->last_pad = -1;
         if (x->b == 1) {
             char cb[16];
             int b = (int)(unsigned char)g->pool[x->a];
@@ -1053,34 +1076,78 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
         break;
     case RN_CHARSET:
+        e->last_pad = -1;
         eb_fmt(e, "    if (!(p < n && (%s__cs[%d][((unsigned char)s[p]) >> 3] & (1u << (((unsigned char)s[p]) & 7u))))) goto %s;\n"
                   "    p++;\n",
                g->name, x->a, fail);
         break;
     case RN_SKIP:
+        e->last_pad = -1;
         eb_fmt(e, "    if (!(p < n)) goto %s;\n    p++;\n", fail);
         break;
     case RN_REF: {
+        int pad = rw_pad_rule(g, e->F, e->K, nd);
+        if (pad >= 0) {
+            /* Identical pad already satisfied at the call site — skip. */
+            if (e->last_pad == pad) break;
+            int eff = rg_effective(g, nd);
+            if (eff != nd) rg_emit_node(g, e, eff, fail, lbl, rid);
+            else {
+                int body = g->rules[x->nkids].node;
+                if (rg_inline_size(g, body, 0) <= 24)
+                    rg_emit_node(g, e, body, fail, lbl, x->nkids);
+                else if (!rk_rule(g, e->K, x->nkids))
+                    eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
+                           g->name, g->rules[x->nkids].name, fail);
+                else if (e->mode == 1)
+                    eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
+                           g->name, g->rules[x->nkids].name, fail);
+                else
+                    eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
+                           g->name, g->rules[x->nkids].name, fail);
+            }
+            e->last_pad = pad;
+            break;
+        }
         int eff = rg_effective(g, nd);
-        if (eff != nd) { rg_emit_node(g, e, eff, fail, lbl, rid); break; }
+        if (eff != nd) { e->last_pad = -1; rg_emit_node(g, e, eff, fail, lbl, rid); break; }
         {
             int body = g->rules[x->nkids].node;
+            int lp = rg_leading_pad_rule(g, e->F, e->K, x->nkids);
+            int use_np = (lp >= 0 && e->last_pad == lp);
             if (rg_inline_size(g, body, 0) <= 24) {   /* small keep-free-or-raw-keep rules: inline per mode */
                 /* the inlined subtree keeps the TARGET rule's identity: keep
                  * ids are "enclosing rule", which inlining must not rewrite */
+                if (use_np) e->omit_lead_pad = lp;
                 rg_emit_node(g, e, body, fail, lbl, x->nkids);
+                e->omit_lead_pad = -1;
+                e->last_pad = -1;
                 break;
             }
+            const char* suf = use_np ? "__np" : "";
+            if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
+                eb_fmt(e, "    if (!%s__r_%s%s(s, n, &p)) goto %s;\n",
+                       g->name, g->rules[x->nkids].name, suf, fail);
+            else if (e->mode == 1)
+                eb_fmt(e, "    if (!%s__b_%s%s(c, s, n, &p)) goto %s;\n",
+                       g->name, g->rules[x->nkids].name, suf, fail);
+            else
+                eb_fmt(e, "    if (!%s__m_%s%s(s, n, &p)) goto %s;\n",
+                       g->name, g->rules[x->nkids].name, suf, fail);
+            e->last_pad = -1;
+            break;
         }
-        if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
-            eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
-                   g->name, g->rules[x->nkids].name, fail);
-        else if (e->mode == 1)
-            eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
-                   g->name, g->rules[x->nkids].name, fail);
-        else
-            eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
-                   g->name, g->rules[x->nkids].name, fail);
+    }
+    case RN_SEQ: {
+        int i = 0;
+        if (e->omit_lead_pad >= 0) {
+            while (i < x->nkids &&
+                   rw_pad_rule(g, e->F, e->K, g->kids[x->b + i]) == e->omit_lead_pad)
+                i++;
+            e->omit_lead_pad = -1;
+        }
+        for (; i < x->nkids; i++)
+            rg_emit_node(g, e, g->kids[x->b + i], fail, lbl, rid);
         break;
     }
     case RN_KEEP: {
@@ -1105,19 +1172,45 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 eb_fmt(e, "    *xa = ka%d; *xb = p;\n    }\n", k);
             break;
         }
-        /* every keep writes its node inline with the RAW source span; codec
-         * keeps add the dirty bit when a transform-triggering branch ran.
-         * Decode is deferred to the materialize pass (lazy strings, like lazy
-         * numbers) — which is what keeps u a source anchor for __unwind. */
-        eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
-                  "    { %sNode* nd%d = &c->tape[c->total++];\n",
-               g->name, fail, g->name, k);
+        /* Keep writes the RAW source span into u.bytes (unwind anchor).
+         * Codec keeps: if dirty, decode NOW while the span is hot into the
+         * mat_* stash; materialize installs without re-scanning. */
+        eb_fmt(e, "    if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n",
+               g->name, fail);
         if (x->b == 0)
-            eb_fmt(e, "      nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n", k, rid, k);
-        else
-            eb_fmt(e, "      nd%d->meta = %du | (dr%d ? 0x200u : 0u) | (((unsigned long long)(p - ka%d)) << 10);\n",
-                   k, rid, k, k);
-        eb_fmt(e, "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n", k, k);
+            eb_fmt(e, "    { %sNode* nd%d = &c->tape[c->total++];\n"
+                      "      nd%d->meta = %du | (((unsigned long long)(p - ka%d)) << 10);\n"
+                      "      nd%d->u.bytes = (const char*)(s + ka%d); }\n    }\n",
+                   g->name, k, k, rid, k, k, k);
+        else {
+            eb_fmt(e, "    { size_t ti%d = c->total;\n"
+                      "      %sNode* nd%d = &c->tape[c->total++];\n"
+                      "      nd%d->meta = %du | (dr%d ? 0x200u : 0u) | (((unsigned long long)(p - ka%d)) << 10);\n"
+                      "      nd%d->u.bytes = (const char*)(s + ka%d);\n"
+                      "      if (dr%d) {\n"
+                      "        if (!c->mat_ptr) {\n"
+                      "          c->mat_ptr = (const char**)cc_arena_alloc_local(c->arena, c->cap * sizeof(char*), 8);\n"
+                      "          c->mat_len = (size_t*)cc_arena_alloc_local(c->arena, c->cap * sizeof(size_t), 8);\n"
+                      "          c->mat_cow = (unsigned char*)cc_arena_alloc_local(c->arena, c->cap, 1);\n"
+                      "          if (!c->mat_ptr || !c->mat_len || !c->mat_cow) goto %s;\n"
+                      "          memset(c->mat_ptr, 0, c->cap * sizeof(char*));\n"
+                      "        }\n"
+                      "        { CCSlice v%d;\n"
+                      "          switch (%d) {\n",
+                   k, g->name, k, k, rid, k, k, k, k, k, fail, k, x->b);
+            /* single codec index on this keep — emit that case + default fail */
+            eb_fmt(e, "          case %d: if (!%s((const char*)(s + ka%d), (size_t)(p - ka%d), &v%d, c->arena)) goto %s; break;\n"
+                      "          default: goto %s;\n"
+                      "          }\n"
+                      "          c->mat_ptr[ti%d] = (const char*)v%d.ptr;\n"
+                      "          c->mat_len[ti%d] = v%d.len;\n"
+                      "          c->mat_cow[ti%d] = (unsigned char)cc_slice_is_unique(v%d);\n"
+                      "        }\n"
+                      "      }\n"
+                      "    }\n    }\n",
+                   x->b, g->codecs[x->b - 1], k, k, k, fail, fail,
+                   k, k, k, k, k, k);
+        }
         break;
     }
     case RN_COLLECT: {
@@ -1140,12 +1233,9 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         else
             eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
                       "        c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10; }\n");
+        e->last_pad = -1;
         break;
     }
-    case RN_SEQ:
-        for (int i = 0; i < x->nkids; i++)
-            rg_emit_node(g, e, g->kids[x->b + i], fail, lbl, rid);
-        break;
     case RN_ALT: {
         int k = (*lbl)++;
         /* FIRST-set dispatch: if every branch is non-nullable and the branch
@@ -1271,7 +1361,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                     if (b2 >= 0)
                         eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
                                k2, k2, b2, k2, k2, k2);
-                    eb_fmt(e, "        if (m%d) break;\n        p += 8;\n    } }\n", k2);
+                    /* On a hit, advance to the first stop byte — don't restart
+                     * the scalar walk at the word base (up to 7 double-touches). */
+                    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
+                              "        p += 8;\n    } }\n", k2, k2);
                 }
             }
             eb_fmt(e, "    while (p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u)))) p++;\n",
@@ -1311,7 +1404,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0 };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1 };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
     e.dom = want_dom;
@@ -1341,20 +1434,14 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      * alongside p, so failed-branch keeps are never replayed). */
     /* THE TAPE — the one substrate every consumption form projects from.
      * The committed event stream is reified as contiguous 16-byte nodes in
-     * pre-order: leaves from `keep` (codec applied AT PUSH — decode fuses into
-     * the parse pass), interior nodes from `collect` (span back-patched at
-     * END, O(1)). Adjacency is the child link (first child = nd+1) and span
-     * is the sibling link (next = nd + span) — no pointers, so PEG rollback
-     * is tape truncation: restore (total, bdepth), two words. Reserved once
-     * from the request arena at <= 16 bytes per input byte (a node consumes
-     * at least one source byte), so the tape never grows, never copies.
+     * pre-order: leaves from `keep`, interior nodes from `collect` (span
+     * back-patched at END, O(1)). Dirty codec keeps decode at keep-commit into
+     * mat_* (span still hot) while u.bytes stays the SOURCE anchor for
+     * __unwind; materialize installs the stash. Adjacency is the child link
+     * (first child = nd+1) and span is the sibling link (next = nd + span).
      *   meta = ruleid(8) | is_list(1<<8) | cow(1<<9) | byte_len(<<10)
-     *   meta bits 10+ = leaf: byte length; interior: subtree span (nodes)
-     *   u    = byte pointer, ALWAYS: during the parse it is the node's source
-     *          anchor (which is what makes derived restore possible); after
-     *          the materialize pass, dirty leaves point at decoded arena bytes
-     * match = tape suppressed (NULL ctx); collect = tape folded; parse = tape
-     * returned; schema will specialize it away; format will invert it. */
+     *   u    = source anchor during parse; decoded arena bytes after materialize
+     * match = tape suppressed; collect = fold; parse = tape; schema specializes. */
     if (want_build) {
     eb_fmt(&e, "typedef struct { unsigned long long meta;\n"
                "    union { const char* bytes; } u; } %sNode;\n",
@@ -1364,8 +1451,12 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      * full definitions are needed only when cc_dom is demanded, and a dom
      * caller necessarily includes <ccc/cc_shape.cch> for CCShapeReg. */
     eb_fmt(&e, "struct CCShapeB; struct CCShapeVal;\n");
+    /* mat_* : eager keep/decode stash. Dirty keeps decode while the span is
+     * still hot, but u.bytes stays the SOURCE anchor so __unwind works.
+     * Materialize installs mat_ptr without re-scanning. */
     eb_fmt(&e, "typedef struct { %sNode* tape; size_t total, cap;\n"
                "    size_t bstack[512]; size_t bdepth; CCArena* arena;\n"
+               "    const char** mat_ptr; size_t* mat_len; unsigned char* mat_cow;\n"
                "    /* shaped-DOM hook (armed by _dom; NULL for plain parse):\n"
                "     * completed containers hand their value up this stack —\n"
                "     * one push per container, anchored for derived restore */\n"
@@ -1379,8 +1470,22 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    %sNode* nt = (%sNode*)cc_arena_realloc(c->arena, c->arena, c->tape,\n"
                "        c->cap * sizeof(%sNode), nc * sizeof(%sNode), _Alignof(%sNode));\n"
                "    if (!nt) return 0;\n"
-               "    c->tape = nt; c->cap = nc; return 1;\n}\n",
+               "    c->tape = nt;\n",
            g->name, g->name, g->name, g->name, g->name, g->name, g->name);
+    if (g->ncodecs > 0) {
+        eb_fmt(&e, "    if (c->mat_ptr) {\n"
+                   "        const char** np = (const char**)cc_arena_realloc(c->arena, c->arena, c->mat_ptr,\n"
+                   "            c->cap * sizeof(char*), nc * sizeof(char*), 8);\n"
+                   "        size_t* nl = (size_t*)cc_arena_realloc(c->arena, c->arena, c->mat_len,\n"
+                   "            c->cap * sizeof(size_t), nc * sizeof(size_t), 8);\n"
+                   "        unsigned char* ncw = (unsigned char*)cc_arena_realloc(c->arena, c->arena, c->mat_cow,\n"
+                   "            c->cap, nc, 1);\n"
+                   "        if (!np || !nl || !ncw) return 0;\n"
+                   "        memset(np + c->cap, 0, (nc - c->cap) * sizeof(char*));\n"
+                   "        c->mat_ptr = np; c->mat_len = nl; c->mat_cow = ncw;\n"
+                   "    }\n");
+    }
+    eb_fmt(&e, "    c->cap = nc; return 1;\n}\n");
     /* codec table: rule id -> codec index (0 = none). Lazy decode reads it.
      * Keep ids are the enclosing rule's index (inlining preserves this), so a
      * per-rule subtree scan resolves each rule's codec. Two DIFFERENT codecs
@@ -1475,48 +1580,100 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
             skip[r] = (unsigned char)(r != 0 && (aliasable || rg_inline_size(g, body, 0) <= 24 || !mark[r]));
             pure[r] = (unsigned char)!rk_rule(g, e.K, r);
         }
+        /* leading-pad rules get a __np sibling (body without the lead pad) so
+         * call sites that just ran the same pad can skip the stacked re-walk */
+        unsigned char has_np[R_MAX_RULES];
+        memset(has_np, 0, sizeof has_np);
+        for (int r = 0; r < g->nrules; r++) {
+            if (skip[r]) continue;
+            if (rg_leading_pad_rule(g, F, K, r) >= 0) has_np[r] = 1;
+        }
         for (int r = 0; r < g->nrules; r++) {
             if (skip[r]) continue;
             if (pure[r]) {
-                if (want_match || want_build)
+                if (want_match || want_build) {
                     eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io);\n",
                            g->name, g->rules[r].name);
+                    if (has_np[r])
+                        eb_fmt(&e, "static int %s__r_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
+                               g->name, g->rules[r].name);
+                }
             } else {
-                if (want_match)
+                if (want_match) {
                     eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io);\n",
                            g->name, g->rules[r].name);
-                if (want_build)
+                    if (has_np[r])
+                        eb_fmt(&e, "static int %s__m_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
+                               g->name, g->rules[r].name);
+                }
+                if (want_build) {
                     eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
                            g->name, g->rules[r].name, g->name);
+                    if (has_np[r])
+                        eb_fmt(&e, "static int %s__b_%s__np(%s__ctx* c, const unsigned char* s, size_t n, size_t* io);\n",
+                               g->name, g->rules[r].name, g->name);
+                }
             }
         }
         for (int mode = 0; mode <= 1; mode++) {
             e.mode = mode;
             for (int r = 0; r < g->nrules; r++) {
                 if (skip[r]) continue;
-                if (pure[r]) {
-                    if (!mode) continue;   /* pure rules emit once, beside the build cluster */
-                    if (!want_match && !want_build) continue;
-                    e.mode = 0;            /* ...but with ctx-free emission */
-                    eb_fmt(&e, "static int %s__r_%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                               "    size_t p = *io;\n    (void)s; (void)n;\n",
-                           g->name, g->rules[r].name);
-                } else if (mode) {
-                    if (!want_build) continue;
-                    eb_fmt(&e, "static int %s__b_%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
-                               "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
-                           g->name, g->rules[r].name, g->name);
-                } else {
-                    if (!want_match) continue;
-                    eb_fmt(&e, "static int %s__m_%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                               "    size_t p = *io;\n    (void)s; (void)n;\n",
-                           g->name, g->rules[r].name);
+                int lp = has_np[r] ? rg_leading_pad_rule(g, F, K, r) : -1;
+                /* emit __np before the full rule so the wrapper can call it */
+                for (int np = has_np[r] ? 1 : 0; np >= 0; np--) {
+                    int is_np = has_np[r] && np == 1;
+                    const char* suf = is_np ? "__np" : "";
+                    if (pure[r]) {
+                        if (!mode) continue;
+                        if (!want_match && !want_build) continue;
+                        e.mode = 0;
+                        eb_fmt(&e, "static int %s__r_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                                   "    size_t p = *io;\n    (void)s; (void)n;\n",
+                               g->name, g->rules[r].name, suf);
+                    } else if (mode) {
+                        if (!want_build) continue;
+                        eb_fmt(&e, "static int %s__b_%s%s(%s__ctx* c, const unsigned char* s, size_t n, size_t* io) {\n"
+                                   "    size_t p = *io;\n    (void)c; (void)s; (void)n;\n",
+                               g->name, g->rules[r].name, suf, g->name);
+                    } else {
+                        if (!want_match) continue;
+                        eb_fmt(&e, "static int %s__m_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                                   "    size_t p = *io;\n    (void)s; (void)n;\n",
+                               g->name, g->rules[r].name, suf);
+                    }
+                    char fail[16];
+                    snprintf(fail, sizeof(fail), "Lf%d", lbl++);
+                    e.last_pad = -1;
+                    e.omit_lead_pad = is_np ? lp : -1;
+                    if (!is_np && lp >= 0) {
+                        /* full rule: lead pad then __np (shared core) */
+                        eb_fmt(&e, "    { size_t _pp = p;\n");
+                        e.last_pad = -1;
+                        /* emit the leading pad kid only */
+                        {
+                            int body = g->rules[r].node;
+                            while (g->nodes[body].kind == RN_COLLECT ||
+                                   g->nodes[body].kind == RN_KEEP)
+                                body = g->nodes[body].a;
+                            rg_emit_node(g, &e, g->kids[g->nodes[body].b], fail, &lbl, r);
+                        }
+                        if (pure[r] || !mode)
+                            eb_fmt(&e, "    if (!%s__%s_%s__np(s, n, &p)) goto %s;\n",
+                                   g->name, pure[r] ? "r" : "m", g->rules[r].name, fail);
+                        else
+                            eb_fmt(&e, "    if (!%s__b_%s__np(c, s, n, &p)) goto %s;\n",
+                                   g->name, g->rules[r].name, fail);
+                        eb_fmt(&e, "    (void)_pp; }\n");
+                    } else {
+                        rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
+                    }
+                    e.omit_lead_pad = -1;
+                    e.last_pad = -1;
+                    eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+                    e.mode = mode;
+                    if (!has_np[r]) break;
                 }
-                char fail[16];
-                snprintf(fail, sizeof(fail), "Lf%d", lbl++);
-                rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
-                eb_fmt(&e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
-                e.mode = mode;
             }
         }
         /* entries reference rule 0 by its class */
@@ -1561,6 +1718,17 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    else\n"
                "        *out = cc_slice_from_buffer((void*)nd->u.bytes, l);\n}\n",
            g->name, g->name);
+    /* Lazy number accessor — borrow stays default; ffc runs on use.
+     * Link a TU that defines FFC_IMPL (cc/runtime/arena_state.c). */
+    eb_fmt(&e, "#include <ccc/vendor/ffc.h>\n"
+               "static inline double %sNode_as_f64(const %sNode* nd) {\n"
+               "    if ((nd->meta >> 8) & 1u) return 0.0;\n"
+               "    { double v = 0.0; size_t l = (size_t)(nd->meta >> 10);\n"
+               "      ffc_parse_options o; o.format = FFC_PRESET_JSON; o.decimal_point = '.';\n"
+               "      ffc_result r = ffc_from_chars_double_options(\n"
+               "          nd->u.bytes, nd->u.bytes + l, &v, o);\n"
+               "      return r.outcome == FFC_OUTCOME_OK ? v : 0.0; }\n}\n",
+           g->name, g->name);
 
     /* Entries — every form is a projection of the same run:
      *   match   = tape suppressed (NULL ctx)
@@ -1587,6 +1755,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
+               "    c0.mat_ptr = 0; c0.mat_len = 0; c0.mat_cow = 0;\n"
                "    c0.sb = 0; c0.vstack = 0; c0.vanchor = 0; c0.vsp = 0; c0.vcap = 0;\n"
                "    c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */\n"
                "    c0.tape[0].u.bytes = s;             /* source anchor */\n"
@@ -1598,27 +1767,34 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;\n",
            g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name);
     if (g->ncodecs > 0) {
-        /* Materialize pass: dirty leaves (0x200 set during the parse when a
-         * transform-triggering branch ran) decode HERE, once, on the
-         * committed tape — failed branches were unwound and never decode.
-         * The cow bit is rewritten from the codec's actual provenance. */
+        /* Materialize: install eager mat_* stash (decoded at keep-commit while
+         * hot). Fallback codec path covers leaves that somehow skipped stash.
+         * Failed branches were unwound and never decode. */
         eb_fmt(&e, "    { size_t t;\n"
                    "    for (t = 1; t < c0.total; t++) {\n"
                    "        unsigned long long m = c0.tape[t].meta;\n"
                    "        if ((m & 0x300u) != 0x200u) continue;   /* dirty leaves only */\n"
-                   "        { CCSlice v; int id = (int)(m & 0xFFu);\n"
-                   "          const char* kp = c0.tape[t].u.bytes;\n"
-                   "          size_t kl = (size_t)(m >> 10);\n"
-                   "          switch (%s__codec_of[id]) {\n", g->name);
-        for (int ci = 0; ci < g->ncodecs; ci++)
-            eb_fmt(&e, "          case %d: if (!%s(kp, kl, &v, arena)) return 0; break;\n",
-                   ci + 1, g->codecs[ci]);
-        eb_fmt(&e, "          default: continue;\n"
+                   "        { int id = (int)(m & 0xFFu);\n"
+                   "          if (c0.mat_ptr && c0.mat_ptr[t]) {\n"
+                   "            c0.tape[t].meta = (unsigned long long)id\n"
+                   "                | (c0.mat_cow[t] ? 0x200u : 0u)\n"
+                   "                | (((unsigned long long)c0.mat_len[t]) << 10);\n"
+                   "            c0.tape[t].u.bytes = c0.mat_ptr[t];\n"
+                   "            continue;\n"
                    "          }\n"
-                   "          c0.tape[t].meta = (unsigned long long)id\n"
-                   "              | (cc_slice_is_unique(v) ? 0x200u : 0u)\n"
-                   "              | (((unsigned long long)v.len) << 10);\n"
-                   "          c0.tape[t].u.bytes = (const char*)v.ptr; }\n"
+                   "          { CCSlice v;\n"
+                   "            const char* kp = c0.tape[t].u.bytes;\n"
+                   "            size_t kl = (size_t)(m >> 10);\n"
+                   "            switch (%s__codec_of[id]) {\n", g->name);
+        for (int ci = 0; ci < g->ncodecs; ci++)
+            eb_fmt(&e, "            case %d: if (!%s(kp, kl, &v, arena)) return 0; break;\n",
+                   ci + 1, g->codecs[ci]);
+        eb_fmt(&e, "            default: continue;\n"
+                   "            }\n"
+                   "            c0.tape[t].meta = (unsigned long long)id\n"
+                   "                | (cc_slice_is_unique(v) ? 0x200u : 0u)\n"
+                   "                | (((unsigned long long)v.len) << 10);\n"
+                   "            c0.tape[t].u.bytes = (const char*)v.ptr; } }\n"
                    "    } }\n");
     }
     eb_fmt(&e, "    return c0.tape;\n}\n");
@@ -1668,8 +1844,13 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                    "    int id = (int)(m & 0xFFu);\n",
                g->name, g->name, g->name);
         if (g->ncodecs > 0) {
-            eb_fmt(&e, "    if (m & 0x200u) {   /* dirty: decode now; a discarded branch just wastes arena */\n"
-                       "        CCSlice v;\n"
+            eb_fmt(&e, "    if (m & 0x200u) {   /* dirty: prefer keep-commit stash; else decode */\n"
+                       "        size_t ti = (size_t)(ln - c->tape);\n"
+                       "        if (c->mat_ptr && c->mat_ptr[ti]) {\n"
+                       "            *out = cc_shape_leaf(id, c->mat_ptr[ti], c->mat_len[ti], c->mat_cow[ti]);\n"
+                       "            return 1;\n"
+                       "        }\n"
+                       "        { CCSlice v;\n"
                        "        switch (%s__codec_of[id]) {\n", g->name);
             for (int ci = 0; ci < g->ncodecs; ci++)
                 eb_fmt(&e, "        case %d: if (!%s((const char*)ln->u.bytes, (size_t)(m >> 10), &v, c->arena)) return 0; break;\n",
@@ -1677,7 +1858,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
             eb_fmt(&e, "        default: *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0); return 1;\n"
                        "        }\n"
                        "        *out = cc_shape_leaf(id, (const char*)v.ptr, v.len, cc_slice_is_unique(v));\n"
-                       "        return 1;\n    }\n");
+                       "        return 1; }\n    }\n");
         }
         eb_fmt(&e, "    *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0);\n"
                    "    return 1;\n}\n");
@@ -1753,6 +1934,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                    "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
                    "    if (!c0.tape) return 0;\n"
                    "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
+                   "    c0.mat_ptr = 0; c0.mat_len = 0; c0.mat_cow = 0;\n"
                    "    c0.tape[0].meta = 0x100u | 0xFFu;\n"
                    "    c0.tape[0].u.bytes = (const char*)s;\n"
                    "    cc_shape_build(&b, reg, arena);\n"
@@ -1813,7 +1995,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
 /* under the `<Rules>__s` prefix and shared by every schema.             */
 /* ==================================================================== */
 
-enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
+enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_FLOAT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
        SK_UNION,            /* one of [ variant [ product-terms ] ... ] — tagged union */
        SK_NARROW_MEMBERS,   /* G.rule [ "k" term ... ] — narrow a member-list rule */
        SK_NARROW_LIST };    /* f: G.rule of Schema    — narrow a list rule to an array */
@@ -1847,7 +2029,7 @@ static const char* cc__sname;
 typedef struct {
     int kind;
     unsigned char lit[24]; int litlen;   /* SK_LIT */
-    char rname[S_NAME]; int rule;        /* SK_RULE / SK_BIND_SLICE / SK_BIND_INT */
+    char rname[S_NAME]; int rule;        /* SK_RULE / SK_BIND_SLICE / SK_BIND_INT / SK_BIND_FLOAT */
     char field[S_NAME];                  /* SK_BIND_* */
     char etype[S_NAME];                  /* SK_BIND_ITEMS: element schema type */
     int cap;                             /* counted items: comptime capacity ->
@@ -2174,6 +2356,11 @@ static int ss_term(SS* s, int* out_term) {
     if (strcmp(v, "int") == 0) {
         if (ss_ruleref(s, t->rname, "expected rules reference after int")) return -1;
         t->kind = SK_BIND_INT;
+    } else if (strcmp(v, "float") == 0 || strcmp(v, "double") == 0) {
+        /* Lazy borrow remains the number default; float/double binds parse at
+         * the keep site via ffc (JSON number grammar). */
+        if (ss_ruleref(s, t->rname, "expected rules reference after float")) return -1;
+        t->kind = SK_BIND_FLOAT;
     } else if (strcmp(v, "bytes") == 0) {
         /* count-driven raw read: exactly <field> bytes, zero-copy borrow.
          * This is the length-prefix primitive (RESP bulk strings, TLV). */
@@ -2620,6 +2807,7 @@ static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd) {
 
 /* delimited list: SEQ( LIT1 pad* OPT(SEQ(REF e, ANY(SEQ(LIT1, REF e)))) pad* LIT1 ) */
 static int rw_match_list(const RG* g, RFirst* F, RKeeps* K, int rule, RNarrow* o) {
+    memset(o, 0, sizeof *o);
     int body = rw_unwrap(g, g->rules[rule].node);
     const RNode* x = &g->nodes[body];
     if (x->kind != RN_SEQ || x->nkids < 3) return 0;
@@ -2753,21 +2941,48 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         }
         eb_fmt(e, "};\n");
     }
+    unsigned char has_np[R_MAX_RULES];
+    memset(has_np, 0, sizeof has_np);
+    for (int r = 0; r < g->nrules; r++) {
+        if (mark && !mark[r]) continue;
+        if (rg_leading_pad_rule(g, e->F, e->K, r) >= 0) has_np[r] = 1;
+    }
     for (int r = 0; r < g->nrules; r++) {
         if (mark && !mark[r]) continue;
         eb_fmt(e, "static %sint %s__%s_%s(const unsigned char* s, size_t n, size_t* io);\n",
                attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
+        if (has_np[r])
+            eb_fmt(e, "static %sint %s__%s_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
+                   attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
     }
     e->mode = 0;
     for (int r = 0; r < g->nrules; r++) {
         if (mark && !mark[r]) continue;
-        eb_fmt(e, "static %sint %s__%s_%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                  "    size_t p = *io;\n    (void)s; (void)n;\n",
-               attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
-        char fail[16];
-        snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
-        rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
-        eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+        int lp = has_np[r] ? rg_leading_pad_rule(g, e->F, e->K, r) : -1;
+        for (int vi = 0; vi < (has_np[r] ? 2 : 1); vi++) {
+            int is_np = has_np[r] && vi == 0;
+            const char* suf = is_np ? "__np" : "";
+            eb_fmt(e, "static %sint %s__%s_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
+                      "    size_t p = *io;\n    (void)s; (void)n;\n",
+                   attr, g->name, rs_class(g, e->K, r), g->rules[r].name, suf);
+            char fail[16];
+            snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
+            e->last_pad = -1;
+            e->omit_lead_pad = is_np ? lp : -1;
+            if (!is_np && lp >= 0) {
+                int body = g->rules[r].node;
+                while (g->nodes[body].kind == RN_COLLECT || g->nodes[body].kind == RN_KEEP)
+                    body = g->nodes[body].a;
+                rg_emit_node(g, e, g->kids[g->nodes[body].b], fail, lbl, r);
+                eb_fmt(e, "    if (!%s__%s_%s__np(s, n, &p)) goto %s;\n",
+                       g->name, rs_class(g, e->K, r), g->rules[r].name, fail);
+            } else {
+                rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
+            }
+            e->omit_lead_pad = -1;
+            e->last_pad = -1;
+            eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+        }
     }
 }
 
@@ -2896,6 +3111,18 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
                k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, cc__fpfx, t->field, k, k, k);
         return;
     }
+    if (t->kind == SK_BIND_FLOAT) {
+        /* Number text was borrowed by the keep; ffc parses JSON doubles here. */
+        eb_fmt(e, "      (void)xd%d;\n"
+                  "      { ffc_parse_options o%d; o%d.format = FFC_PRESET_JSON; o%d.decimal_point = '.';\n"
+                  "        double v%d = 0.0;\n"
+                  "        ffc_result r%d = ffc_from_chars_double_options(\n"
+                  "            (const char*)(s + xa%d), (const char*)(s + xb%d), &v%d, o%d);\n"
+                  "        if (r%d.outcome != FFC_OUTCOME_OK) goto %s;\n"
+                  "        out->%s%s = v%d; } }\n",
+               k, k, k, k, k, k, k, k, k, k, k, fail, cc__fpfx, t->field, k);
+        return;
+    }
     int cd = rs_rule_codec(g, t->rule);
     if (cd > 0) {
         /* clean spans borrow raw; dirty spans decode through the rule's codec
@@ -2987,7 +3214,7 @@ static int rs_formatable_entries(const SS* ss, const RG* g, const STerm* t) {
 static int rs_formatable_term(const SS* ss, const RG* g, int ti) {
     const STerm* t = &ss->terms[ti];
     switch (t->kind) {
-    case SK_LIT: case SK_RULE: case SK_BIND_INT: case SK_BIND_BYTES:
+    case SK_LIT: case SK_RULE: case SK_BIND_INT: case SK_BIND_FLOAT: case SK_BIND_BYTES:
         return 1;
     case SK_BIND_SLICE: {
         RWLeaf lf;
@@ -3173,6 +3400,29 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
         for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
         break;
     }
+    case SK_BIND_FLOAT: {
+        RWLeaf lf;
+        rw_leaf_shape(g, t->rule, &lf);
+        for (int i = 0; i < lf.npre; i++) rw_wacc_lit_node(g, e, w, md, lf.pre[i]);
+        {
+            int k = (*lbl)++;
+            if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+            if (md == RW_PUT)
+                eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
+                          "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
+                       k, k, k, k, t->field, k, k, k);
+            else if (md == RW_CHK)
+                eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
+                          "      if (n%d < 0 || cap - o < (size_t)n%d) return 0;\n"
+                          "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
+                       k, k, k, k, t->field, k, k, k, k, k);
+            else
+                eb_fmt(e, "    { char tb%d[64]; o += (size_t)snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s); }\n",
+                       k, k, k, t->field);
+        }
+        for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
+        break;
+    }
     case SK_BIND_SLICE: {
         RWLeaf lf;
         rw_leaf_shape(g, t->rule, &lf);
@@ -3205,6 +3455,23 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         else
             snprintf(pe, sizeof pe, "v->%s", t->field);
         rw_emit_wint(e, w, lbl, md, pe, dj >= 0);
+        break;
+    }
+    case SK_BIND_FLOAT: {
+        int k = (*lbl)++;
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        if (md == RW_PUT)
+            eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
+                      "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
+                   k, k, k, k, t->field, k, k, k);
+        else if (md == RW_CHK)
+            eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
+                      "      if (n%d < 0 || cap - o < (size_t)n%d) return 0;\n"
+                      "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
+                   k, k, k, k, t->field, k, k, k, k, k);
+        else
+            eb_fmt(e, "    { char tb%d[64]; o += (size_t)snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s); }\n",
+                   k, k, k, t->field);
         break;
     }
     case SK_BIND_SLICE: {
@@ -3322,6 +3589,7 @@ static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt);
 static const char* rs_gk(const STerm* t) {
     switch (t->kind) {
     case SK_BIND_INT:   return "CC_GK_INT";
+    case SK_BIND_FLOAT: return "CC_GK_FLOAT";
     case SK_BIND_BYTES: return "CC_GK_BYTES";
     case SK_BIND_ITEMS: case SK_NARROW_LIST: return "CC_GK_ITEMS";
     default:            return "CC_GK_SLICE";
@@ -3389,6 +3657,8 @@ static void rs_emit_get(SS* ss, EB* e, const char* name) {
                     eb_fmt(e, "            out->present = 1;\n");
                 if (t->kind == SK_BIND_INT)
                     eb_fmt(e, "            out->i = v->%s;\n", t->field);
+                else if (t->kind == SK_BIND_FLOAT)
+                    eb_fmt(e, "            out->f = v->%s;\n", t->field);
                 else if (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST)
                     eb_fmt(e, "            out->items = v->%s; out->items_n = v->%s_n;\n",
                            t->field, t->field);
@@ -3656,6 +3926,7 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         break;
     case SK_BIND_SLICE:
     case SK_BIND_INT:
+    case SK_BIND_FLOAT:
         rs_emit_bind_value(ss, g, e, lbl, t, fail);
         rs_emit_presence(ss, e, ti);
         break;
@@ -3724,7 +3995,7 @@ static int rs_find_int_field(const SS* ss, int before, const char* nm) {
 
 static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
     const STerm* t = &ss->terms[ti];
-    if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT ||
+    if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT ||
         t->kind == SK_BIND_ITEMS || t->kind == SK_BIND_BYTES ||
         t->kind == SK_NARROW_LIST) {
         order[(*cnt)++] = ti;
@@ -3809,6 +4080,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         for (int ti = 0; ti < ss->nterms; ti++) {
             STerm* t = &ss->terms[ti];
             if (t->kind != SK_RULE && t->kind != SK_BIND_SLICE && t->kind != SK_BIND_INT &&
+                t->kind != SK_BIND_FLOAT &&
                 t->kind != SK_NARROW_MEMBERS && t->kind != SK_NARROW_LIST) continue;
             t->rule = rs_rule_by_name(g, t->rname);
             if (t->rule < 0) {
@@ -3816,7 +4088,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                          name, ss->usename, t->rname);
                 goto done;
             }
-            if ((t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT) &&
+            if ((t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT) &&
                 !rs_rule_has_keep(g, t->rule)) {
                 snprintf(err, err_sz, "@grammar(schema) %s: rule '%s.%s' has no keep to extract",
                          name, ss->usename, t->rname);
@@ -3931,7 +4203,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0 };
+        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1 };
         int lbl = 0;
         unsigned char local_xdone[R_MAX_RULES];
         unsigned char* xdone = reg ? reg->x_done : local_xdone;
@@ -3962,7 +4234,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             for (int ti = 0; ti < ss->nterms; ti++) {
                 const STerm* t = &ss->terms[ti];
                 if (t->kind == SK_RULE) rw_mark_rule(g, t->rule, mark);
-                else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT)
+                else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT)
                     rw_mark_node(g, g->rules[t->rule].node, mark);
                 else if (t->kind == SK_NARROW_MEMBERS) {
                     const RNarrow* w = &t->nw;
@@ -3990,7 +4262,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             for (int ti = -1; ti < ss->nterms; ti++) {
                 int r = -1, as_key = 0;
                 if (ti < 0) { r = ss->rfkey; as_key = 1; }
-                else if (ss->terms[ti].kind == SK_BIND_SLICE || ss->terms[ti].kind == SK_BIND_INT)
+                else if (ss->terms[ti].kind == SK_BIND_SLICE || ss->terms[ti].kind == SK_BIND_INT ||
+                         ss->terms[ti].kind == SK_BIND_FLOAT)
                     r = ss->terms[ti].rule;
                 else if (ss->terms[ti].kind == SK_NARROW_MEMBERS) {
                     r = ss->terms[ti].nw.key_rule; as_key = 1;
@@ -4028,11 +4301,19 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     eb_fmt(&e, "%s%s_%s", vi ? ", " : "", name, ss->uv[vi].name);
                 eb_fmt(&e, " } %sKind;\n", name);
             }
+            {
+                int need_ffc = 0;
+                for (int i = 0; i < cnt && !need_ffc; i++)
+                    if (ss->terms[order[i]].kind == SK_BIND_FLOAT) need_ffc = 1;
+                if (need_ffc) eb_fmt(&e, "#include <ccc/vendor/ffc.h>\n");
+            }
             eb_fmt(&e, "typedef struct %s {\n", name);
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
                 if (t->kind == SK_BIND_INT)
                     eb_fmt(&e, "    long long %s;\n", t->field);
+                else if (t->kind == SK_BIND_FLOAT)
+                    eb_fmt(&e, "    double %s;\n", t->field);
                 else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
                     eb_fmt(&e, "    CCSlice %s;\n", t->field);
                 else if (t->cap > 0)
@@ -4050,6 +4331,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
                         if (t->kind == SK_BIND_INT)
                             eb_fmt(&e, "            long long %s;\n", t->field);
+                        else if (t->kind == SK_BIND_FLOAT)
+                            eb_fmt(&e, "            double %s;\n", t->field);
                         else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
                             eb_fmt(&e, "            CCSlice %s;\n", t->field);
                         else if (t->kind == SK_BIND_ITEMS && t->cap > 0)
