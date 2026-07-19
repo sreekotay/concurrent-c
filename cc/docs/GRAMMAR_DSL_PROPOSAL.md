@@ -167,6 +167,18 @@ SPECIALIZATION MULTIPLICITY — nm shows the rules core emitted per mode
 matcher/skip variants at ~1.5 KB each; `_string` appears 4x). Harder
 demand-gating (emit only modes actually called) or core-sharing is the
 identified lever to reach hand-size parity.
+SIZE ADDENDUM (post-ffc, dead-stripped): the bench harness now links like
+`ccc --release` does (-ffunction-sections + --gc-sections/-dead_strip) —
+without that, every harness binary carried ~35 KB of DEAD ffc surface
+(the runtime TU exports all of it; only from_chars_double is live) and
+the size comparison lied. Linux, stripped: hand 18.6 KB / gen 35.0 KB /
+yyjson 116.9 KB. gen's delta over hand is now mostly the LIVE ffc float
+parser (correctness we chose) plus mode clusters; ccc-built release
+binaries were never affected (redis has zero dead ffc symbols). Emitted-
+but-unused static projections already cost zero binary bytes (gcc DCEs
+them) — the per-mode gating lever is compile time and .c size, not
+binary size; the remaining binary-side dedupe (schema __s cluster vs
+rules cluster, ~2.4 KB overlap) is deliberately unchased.
 Number-corpus callgrind attribution (why gen match trails hand there and
 NOT on documents): hand's golden number path is a PERMISSIVE one-loop
 class scan (CLS_NUM table — accepts "1.2.3e+-"); gen emits the exact

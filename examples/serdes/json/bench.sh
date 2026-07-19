@@ -13,7 +13,10 @@ set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
-CC="${CC:-gcc} -O2 -I $INC"
+# Dead-strip like ccc --release does: without it every binary carries the
+# runtime TU's full ffc surface (~35 KB dead) and size comparisons lie.
+case "$(uname)" in Darwin) LDGC="-Wl,-dead_strip";; *) LDGC="-Wl,--gc-sections";; esac
+CC="${CC:-gcc} -O2 -ffunction-sections -fdata-sections $LDGC -I $INC"
 YY=0; GEN=0; WR=0; SH=0; DM=0; CHK=""
 while :; do
   case "$1" in

@@ -8,7 +8,9 @@ set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
-CC="${CC:-gcc} -O2"
+# Dead-strip like ccc --release does (see json/bench.sh)
+case "$(uname)" in Darwin) LDGC="-Wl,-dead_strip";; *) LDGC="-Wl,--gc-sections";; esac
+CC="${CC:-gcc} -O2 -ffunction-sections -fdata-sections $LDGC"
 CCC="$repo/cc/bin/ccc"
 NCMD=${1:-100000}; K=${2:-30}
 
