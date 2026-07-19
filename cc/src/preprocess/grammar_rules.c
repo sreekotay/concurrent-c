@@ -1843,6 +1843,9 @@ typedef struct {
     char rname[S_NAME]; int rule;        /* SK_RULE / SK_BIND_SLICE / SK_BIND_INT */
     char field[S_NAME];                  /* SK_BIND_* */
     char etype[S_NAME];                  /* SK_BIND_ITEMS: element schema type */
+    int cap;                             /* counted items: comptime capacity ->
+                                          * INLINE array in the struct, no alloc;
+                                          * over-cap is a parse error (0 = none) */
     char cfield[S_NAME];                 /* count-driven items / bytes: an earlier
                                             `int` field naming the count/length */
     RNarrow nw;                          /* SK_NARROW_*: derived structure */
@@ -2136,9 +2139,32 @@ static int ss_term(SS* s, int* out_term) {
             if (ss_ident(s, cn, sizeof cn)) {
                 ss_ws(s);
                 int next_is_term = (s->p < s->n && (s->b[s->p] == '.' || s->b[s->p] == ':')) ||
-                                   strcmp(cn, "fields") == 0;
+                                   strcmp(cn, "fields") == 0 || strcmp(cn, "cap") == 0;
                 if (next_is_term) s->p = save;
                 else snprintf(t->cfield, sizeof(t->cfield), "%s", cn);
+            }
+        }
+        /* `cap N`: comptime capacity — the field becomes an inline array,
+         * the parse rejects larger counts (a protocol policy, not a tuning
+         * knob), and the hot path allocates NOTHING */
+        {
+            size_t save = s->p;
+            char kw[S_NAME];
+            if (ss_ident(s, kw, sizeof kw)) {
+                if (strcmp(kw, "cap") == 0) {
+                    if (!t->cfield[0])
+                        return ss_fail(s, s->p, "cap requires a count field (items Elem count cap N)");
+                    ss_ws(s);
+                    long v = 0; int nd = 0;
+                    while (s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9') {
+                        v = v * 10 + (s->b[s->p++] - '0'); nd++;
+                        if (v > 65536) return ss_fail(s, s->p, "cap too large (max 65536)");
+                    }
+                    if (!nd || v < 1) return ss_fail(s, s->p, "expected capacity after cap");
+                    t->cap = (int)v;
+                } else {
+                    s->p = save;
+                }
             }
         }
     } else if ((s->usename[0] && strcmp(v, s->usename) == 0) || !s->usename[0]) {
@@ -2724,12 +2750,16 @@ static int rs_int_run_shape(const RG* g, int rule, int* out_neg) {
         int k0 = rg_effective(g, g->kids[x->b]);
         if (g->nodes[k0].kind != RN_OPT) return 0;
         int c0 = rg_effective(g, g->nodes[k0].a);
-        if (g->nodes[c0].kind != RN_CHARSET) return 0;
-        {
+        if (g->nodes[c0].kind == RN_LIT) {
+            /* `opt #'-'` — the common spelling */
+            if (g->nodes[c0].b != 1 || g->pool[g->nodes[c0].a] != '-') return 0;
+        } else if (g->nodes[c0].kind == RN_CHARSET) {
             const unsigned char* set = g->sets[g->nodes[c0].a];
             for (int b = 0; b < 256; b++)
                 if ((set[b >> 3] & (1u << (b & 7))) && b != '-') return 0;
             if (!(set['-' >> 3] & (1u << ('-' & 7)))) return 0;
+        } else {
+            return 0;
         }
         neg = 1;
         digits = rg_effective(g, g->kids[x->b + 1]);
@@ -2769,7 +2799,7 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
             eb_fmt(e, "      d%d = p;\n"
                       "      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++)\n"
                       "          v%d = v%d * 10 + (s[p] - '0');\n"
-                      "      if (p == d%d) goto %s;\n", k, k, k, k, fail);
+                      "      if (p == d%d) { if (p >= n) *cc_inc = 1; goto %s; }\n", k, k, k, k, fail);
             if (neg)
                 eb_fmt(e, "      out->%s = ng%d ? -v%d : v%d; }\n", t->field, k, k, k);
             else
@@ -3413,7 +3443,7 @@ static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const ch
               "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
            k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
     rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d])) goto %s;\n    cnt%d++;\n",
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc)) goto %s;\n    cnt%d++;\n",
            T, k, k, fail, k);
     rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
     eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
@@ -3476,25 +3506,40 @@ static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
     /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
      * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
     eb_fmt(e, "    { long long L%d = out->%s;\n"
-              "      if (L%d < 0 || (unsigned long long)L%d > (unsigned long long)(n - p)) goto %s;\n"
+              "      if (L%d < 0) goto %s;\n"
+              "      if ((unsigned long long)L%d > (unsigned long long)(n - p)) { *cc_inc = 1; goto %s; }\n"
               "      out->%s = cc_slice_from_buffer((void*)(s + p), (size_t)L%d);\n"
               "      p += (size_t)L%d; }\n",
-           k, t->cfield, k, k, fail, t->field, k, k);
+           k, t->cfield, k, fail, k, fail, t->field, k, k);
 }
 
 static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     const char* T = t->etype;
+    if (t->cap > 0) {
+        /* comptime cap: elements fill the struct's INLINE array — no
+         * allocation at all; a larger count is a protocol error */
+        eb_fmt(e, "    { long long C%d = out->%s;\n"
+                  "      if (C%d < 0 || C%d > %d) goto %s;\n"
+                  "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
+                  "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
+                  "          if (!%s__fill(s, n, &p, arena, &out->%s[i%d], cc_inc)) goto %s;\n"
+                  "      out->%s_n = (size_t)C%d; }\n",
+               k, t->cfield, k, k, t->cap, fail, k, fail,
+               k, k, k, k, T, t->field, k, fail, t->field, k);
+        return;
+    }
     /* the count is data: exact-size allocation, no realloc, no delimiters */
     eb_fmt(e, "    { long long C%d = out->%s;\n"
-              "      if (C%d < 0 || (unsigned long long)C%d > n - p) goto %s;\n"
+              "      if (C%d < 0) goto %s;\n"
+              "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
               "      size_t cap%d = C%d > 0 ? (size_t)C%d : 1;\n"
               "      %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
               "      if (!v%d) goto %s;\n"
               "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
-              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d])) goto %s;\n"
+              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d], cc_inc)) goto %s;\n"
               "      out->%s = v%d; out->%s_n = (size_t)C%d; }\n",
-           k, t->cfield, k, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
+           k, t->cfield, k, fail, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
            k, k, k, k, T, k, k, fail, t->field, k, t->field, k);
 }
 
@@ -3513,7 +3558,7 @@ static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const 
               "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
               "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
            k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d])) goto %s;\n    cnt%d++;\n",
+    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc)) goto %s;\n    cnt%d++;\n",
            T, k, k, fail, k);
     rs_emit_pad(g, e, ss->ripad, fail);
     eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->is_);
@@ -3532,16 +3577,20 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     const STerm* t = &ss->terms[ti];
     switch (t->kind) {
     case SK_LIT:
+        /* bounds-driven failure = INCOMPLETE (the frame ran past the bytes
+         * given); content-driven = malformed. Exactly decidable here. */
         if (t->litlen == 1) {
             char cb[16];
-            eb_fmt(e, "    if (!(p < n && s[p] == %d /*%s*/)) goto %s;\n    p++;\n",
-                   (int)t->lit[0], rw_chr((int)t->lit[0], cb), fail);
+            eb_fmt(e, "    if (p >= n) { *cc_inc = 1; goto %s; }\n"
+                      "    if (s[p] != %d /*%s*/) goto %s;\n    p++;\n",
+                   fail, (int)t->lit[0], rw_chr((int)t->lit[0], cb), fail);
         } else {
             char esc[128];
             rs_esc(esc, sizeof esc, t->lit, t->litlen);
-            eb_fmt(e, "    if (!(p + %d <= n && memcmp(s + p, \"%s\", %d) == 0)) goto %s;\n"
+            eb_fmt(e, "    if (p + %d > n) { *cc_inc = 1; goto %s; }\n"
+                      "    if (memcmp(s + p, \"%s\", %d) != 0) goto %s;\n"
                       "    p += %d;\n",
-                   t->litlen, esc, t->litlen, fail, t->litlen);
+                   t->litlen, fail, esc, t->litlen, fail, t->litlen);
         }
         break;
     case SK_RULE:
@@ -3841,6 +3890,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     eb_fmt(&e, "    long long %s;\n", t->field);
                 else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
                     eb_fmt(&e, "    CCSlice %s;\n", t->field);
+                else if (t->cap > 0)
+                    eb_fmt(&e, "    %s %s[%d]; size_t %s_n;\n", t->etype, t->field, t->cap, t->field);
                 else
                     eb_fmt(&e, "    %s* %s; size_t %s_n;\n", t->etype, t->field, t->field);
             }
@@ -3850,7 +3901,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             eb_fmt(&e, "} %s;\n", name);
         }
         eb_fmt(&e, "static int %s__fill(const unsigned char* s, size_t n, size_t* io,\n"
-                   "        CCArena* arena, %s* out) {\n"
+                   "        CCArena* arena, %s* out, int* cc_inc) {\n"
+                   "    (void)cc_inc;\n"
                    "    size_t p = *io;\n    (void)arena;\n", name, name);
         /* zero the struct only when some bind is conditional (inside a
          * fields dispatch): a body whose binds are all unconditional terms
@@ -3874,12 +3926,39 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         eb_fmt(&e, "static int %s_parse(const char* s0, size_t n, CCArena* arena, %s* out) {\n"
                    "    const unsigned char* s = (const unsigned char*)s0;\n"
                    "    size_t p = 0;\n"
-                   "    if (!%s__fill(s, n, &p, arena, out)) return 0;\n"
+                   "    { int cc_i0 = 0;\n"
+                   "    if (!%s__fill(s, n, &p, arena, out, &cc_i0)) return 0; }\n"
                    "    return p == n;\n}\n", name, name, name);
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
          * and framed streams call this in a loop instead of requiring p == n */
+        /* the streaming face, in the house Result idiom — the SAME contract
+         * as channel recv:
+         *   Ok(true)                 frame parsed; pos advanced
+         *   Ok(false)                clean end-of-input AT a frame boundary
+         *                            (pos == n): graceful close
+         *   Err(CC_ERR_WOULD_BLOCK)  partial frame — need more bytes; pos
+         *                            unmoved; refill and retry. Source
+         *                            closed too? caller escalates.
+         *   Err(CC_ERR_PARSE)        malformed, evidence in hand
+         * Bounds-vs-content is decided exactly at product terms (literals,
+         * fused ints, bytes, counted items); matcher-tier failures report
+         * Err(PARSE) conservatively. */
+        eb_fmt(&e, "static bool !>(CCError) %s_try_read(const char* s0, size_t n,\n"
+                   "        size_t* pos, CCArena* arena, %s* out) {\n"
+                   "    size_t p = *pos;\n"
+                   "    int cc_i0 = 0;\n"
+                   "    if (p >= n) return cc_ok(false);   /* clean end at frame boundary */\n"
+                   "    if (%s__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0)) {\n"
+                   "        *pos = p;\n"
+                   "        return cc_ok(true);\n"
+                   "    }\n"
+                   "    if (cc_i0) return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, \"%s: incomplete frame\"));\n"
+                   "    return cc_err(CC_ERROR(CC_ERR_PARSE, \"%s: malformed input\"));\n"
+                   "}\n",
+               name, name, name, name, name);
         eb_fmt(&e, "static int %s_read(const char* s0, size_t n, size_t* pos, CCArena* arena, %s* out) {\n"
-                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out);\n}\n",
+                   "    int cc_i0 = 0;\n"
+                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0);\n}\n",
                name, name, name);
         /* the runtime instance: a Reader is a CURSOR over resources (buffer,
          * position, arena) — all behavior was specialized at compile time.
@@ -3895,7 +3974,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
          * (`r.next(&out)`, `r.at_end()`) resolves by convention */
         eb_fmt(&e, "static int %sReader_next(%sReader* r, %s* out) {\n"
                    "    if (r->pos >= r->n) return 0;\n"
-                   "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out);\n}\n",
+                   "    int cc_i0 = 0;\n"
+                   "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0);\n}\n",
                name, name, name, name);
         eb_fmt(&e, "static int %sReader_at_end(const %sReader* r) { return r->pos == r->n; }\n",
                name, name);

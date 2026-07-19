@@ -1,0 +1,135 @@
+// STREAMING smoke for the schema tier's Result face + comptime caps — the
+// contract a buffered socket reader needs (real_projects/redis is the
+// consumer this is shaped for):
+//
+//   cc_try_read = the channel-recv contract:
+//     Ok(true)                 frame parsed, pos advanced
+//     Ok(false)                clean end AT a frame boundary (pos == n)
+//     Err(CC_ERR_WOULD_BLOCK)  partial frame: refill and retry, pos unmoved
+//     Err(CC_ERR_PARSE)        malformed, evidence in hand
+//
+//   `items Elem count cap N` = comptime capacity: the field is an INLINE
+//   array in the struct (zero allocation on the parse hot path) and a
+//   larger count is a protocol ERROR — the redis server's own policy.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) RespArg {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+    data: bytes len
+    "\r\n"
+~~~~}
+
+@grammar(schema) RespCmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
+    args: items RespArg argc cap 4
+~~~~}
+
+static int arg_is(const RespArg* a, const char* want) {
+    size_t l = strlen(want);
+    return a->data.len == l && memcmp(a->data.ptr, want, l) == 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+
+    /* the struct embeds its elements: no pointer, no parse-time alloc */
+    {
+        RespCmd c;
+        if (sizeof(c.args) != 4 * sizeof(RespArg)) { printf("FAIL: args not inline\n"); return 1; }
+    }
+
+    /* incremental delivery: every proper prefix is WOULD_BLOCK with pos
+     * unmoved; the full frame parses; the drained buffer is Ok(false) */
+    {
+        const char* src = "*2\r\n$3\r\nSET\r\n$1\r\nk\r\n";
+        size_t full = strlen(src);
+        for (size_t n = 0; n < full; n++) {
+            size_t pos = 0;
+            RespCmd c;
+            bool !>(CCError) r = RespCmd_try_read(src, n, &pos, &arena, &c);
+            if (n == 0) {
+                if (r.is_err() || r.value() != false) { printf("FAIL: empty not Ok(false)\n"); return 1; }
+                continue;
+            }
+            if (!r.is_err() || r.error().kind != CC_ERR_WOULD_BLOCK) {
+                printf("FAIL: prefix %zu not WOULD_BLOCK\n", n); return 1;
+            }
+            if (pos != 0) { printf("FAIL: pos moved on partial (%zu)\n", n); return 1; }
+        }
+        size_t pos = 0;
+        RespCmd c;
+        bool !>(CCError) r = cc_try_read(RespCmd, src, full, &pos, &arena, &c);
+        if (r.is_err() || r.value() != true) { printf("FAIL: full frame\n"); return 1; }
+        if (pos != full || c.args_n != 2 || !arg_is(&c.args[0], "SET") || !arg_is(&c.args[1], "k")) {
+            printf("FAIL: parsed frame\n"); return 1;
+        }
+        r = cc_try_read(RespCmd, src, full, &pos, &arena, &c);
+        if (r.is_err() || r.value() != false) { printf("FAIL: drained not Ok(false)\n"); return 1; }
+    }
+
+    /* a pipeline drains like a channel: recv until Ok(false) */
+    {
+        const char* pipe =
+            "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
+            "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+            "*1\r\n$4\r\nPING\r\n";
+        size_t n = strlen(pipe), pos = 0;
+        long cmds = 0, args = 0;
+        for (;;) {
+            RespCmd c;
+            bool !>(CCError) r = RespCmd_try_read(pipe, n, &pos, &arena, &c);
+            if (r.is_err()) { printf("FAIL: pipeline err\n"); return 1; }
+            if (!r.value()) break;
+            cmds++; args += (long)c.args_n;
+        }
+        if (cmds != 3 || args != 6 || pos != n) { printf("FAIL: pipeline totals\n"); return 1; }
+    }
+
+    /* malformed: content present and wrong -> CC_ERR_PARSE (terminal) */
+    {
+        size_t pos = 0;
+        RespCmd c;
+        bool !>(CCError) r = RespCmd_try_read("@2\r\n", 4, &pos, &arena, &c);
+        if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: bad lead\n"); return 1; }
+        pos = 0;
+        r = RespCmd_try_read("*1\r\n$1\r\nab\r\n", 12, &pos, &arena, &c);
+        if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: long data\n"); return 1; }
+        pos = 0;
+        r = RespCmd_try_read("*-1\r\n", 5, &pos, &arena, &c);
+        if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: negative count\n"); return 1; }
+    }
+
+    /* over-cap: argc 5 against cap 4 is a PROTOCOL error, not would-block —
+     * exactly the real server's "unsupported argument count" */
+    {
+        const char* src = "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
+        size_t pos = 0;
+        RespCmd c;
+        bool !>(CCError) r = RespCmd_try_read(src, strlen(src), &pos, &arena, &c);
+        if (!r.is_err() || r.error().kind != CC_ERR_PARSE) { printf("FAIL: over-cap\n"); return 1; }
+    }
+
+    /* boolean faces still agree (same __fill underneath) */
+    {
+        const char* src = "*1\r\n$4\r\nPING\r\n";
+        RespCmd c;
+        if (!RespCmd_parse(src, strlen(src), &arena, &c) || c.args_n != 1 ||
+            !arg_is(&c.args[0], "PING")) { printf("FAIL: bool parse\n"); return 1; }
+        /* write side over the inline array: round-trip */
+        char buf[64];
+        size_t w = cc_write(RespCmd, &c, buf, sizeof buf);
+        if (w != strlen(src) || memcmp(buf, src, w) != 0) { printf("FAIL: capped write\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar RESP streaming OK\n");
+    return 0;
+}
