@@ -23,6 +23,12 @@ static long jsh_sum(const JShVal* v) {
     case JSON_ARR: { long s = len; const JShArr* a = v->u.arr;
         for (uint64_t i = 0; i < a->n; i++) s += jsh_sum(&a->items[i]); return s; }
     case JSON_OBJ: { long s = len; const JShObj* o = v->u.obj; const JShShape* sh = o->shape;
+        if (sh->is_dict) {
+            const JShDict* d = (const JShDict*)o->slots;
+            for (uint32_t i = 0; i < d->cap; i++)
+                if (d->ents[i].key) s += (long)d->ents[i].klen + jsh_sum(&d->ents[i].v);
+            return s;
+        }
         /* walk shape chain for key lens (deepest slot first) */
         for (const JShShape* e = sh; e->parent; e = e->parent)
             s += (long)e->klen + jsh_sum(&o->slots[e->nslots - 1]);
@@ -234,6 +240,56 @@ int main(int argc, char** argv) {
         printf("access shapes %7.1f Mlookups/s  (inline cache: shape check + slot)\n",
                (double)nlk / best / 1e6);
         if (csum != tsum) { fprintf(stderr, "IC SUM MISMATCH\n"); return 1; }
+    }
+
+    /* ---- dictionary fallback: map-shaped data must not explode shapes ----
+     * (fresh parser: divergence marks are sticky training state) */
+    {
+        CCArena m_shp = cc_arena_create(16 << 20);
+        CCArena m_rec = cc_arena_create(48 << 20);
+        JShParser* mp = jsh_parser(&m_shp);
+
+        /* DEEP: one 3000-key map object (unique keys) -> depth cap trips */
+        size_t mcap = 1 << 20, mn = 0;
+        char* mj = malloc(mcap);
+        mn += (size_t)snprintf(mj + mn, mcap - mn, "{");
+        for (int i = 0; i < 3000; i++)
+            mn += (size_t)snprintf(mj + mn, mcap - mn, "%s\"user%05d\":{\"a\":%d}", i ? "," : "", i, i);
+        mn += (size_t)snprintf(mj + mn, mcap - mn, "}");
+
+        cc_arena_reset(&tape_ar);
+        JsonParser mtp = json_parser(mj, mn, &tape_ar); JsonNode mtv;
+        if (JsonParser_parse(&mtp, &mtv) != JSON_OK) { fprintf(stderr, "map tape parse failed\n"); return 1; }
+        JShVal msv;
+        if (JShParser_parse(mp, mj, mn, &m_rec, &msv) != JSON_OK) { fprintf(stderr, "map shape parse failed\n"); return 1; }
+        if (node_sum(&mtv) != jsh_sum(&msv)) { fprintf(stderr, "MAP DIGEST MISMATCH\n"); return 1; }
+        if (mp->dict_objs < 1) { fprintf(stderr, "map did not dict\n"); return 1; }
+        {
+            JShVal* u = JShVal_get(&msv, "user01500");
+            JShVal* a = u ? JShVal_get(u, "a") : 0;
+            if (!a || JSON_TAG(a->meta) != JSON_NUM) { fprintf(stderr, "dict get failed\n"); return 1; }
+            if (JShVal_get(&msv, "user09999")) { fprintf(stderr, "dict phantom key\n"); return 1; }
+        }
+        uint32_t deep_shapes = mp->nshapes;
+        long deep_dicts = mp->dict_objs;
+
+        /* WIDE: 500 one-key objects with unique keys -> width cap marks the
+         * site diverging; new keys dict, struct-shaped neighbors unaffected */
+        mn = 0;
+        mn += (size_t)snprintf(mj + mn, mcap - mn, "[");
+        for (int i = 0; i < 500; i++)
+            mn += (size_t)snprintf(mj + mn, mcap - mn, "%s{\"u%04d\":%d,\"x\":1}", i ? "," : "", i, i);
+        mn += (size_t)snprintf(mj + mn, mcap - mn, "]");
+        cc_arena_reset(&tape_ar); cc_arena_reset(&m_rec);
+        mtp = json_parser(mj, mn, &tape_ar);
+        if (JsonParser_parse(&mtp, &mtv) != JSON_OK) { fprintf(stderr, "wide tape parse failed\n"); return 1; }
+        if (JShParser_parse(mp, mj, mn, &m_rec, &msv) != JSON_OK) { fprintf(stderr, "wide shape parse failed\n"); return 1; }
+        if (node_sum(&mtv) != jsh_sum(&msv)) { fprintf(stderr, "WIDE DIGEST MISMATCH\n"); return 1; }
+
+        printf("dict fallback  deep: shapes=%u dicts=%ld   wide: shapes=%u dicts=%ld  (bounded, digests agree)\n",
+               deep_shapes, deep_dicts, mp->nshapes - deep_shapes, mp->dict_objs - deep_dicts);
+        free(mj);
+        cc_arena_free(&m_shp); cc_arena_free(&m_rec);
     }
 
     cc_arena_free(&tape_ar); cc_arena_free(&rec_ar); cc_arena_free(&shp_ar);
