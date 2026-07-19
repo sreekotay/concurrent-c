@@ -171,11 +171,19 @@ size_t cc_find_protos_insertion_point(const char* src, size_t len) {
  * The exclusion of `do` is intentional: `do { ... } while(...)` could
  * otherwise be mistaken for a function definition.  Returns `len` when
  * the buffer has no top-level function definition (header-only file).
+ *
+ * The returned offset is the start of the line where the definition's
+ * DECLARATION begins (first code char after the previous top-level `;` /
+ * `}`), not the line holding the `{` — a signature wrapped across lines
+ * (`static int f(int a,\n  int b) {`) must not have text inserted between
+ * its lines.
  */
 size_t cc_find_first_func_def_offset(const char* src, size_t len) {
     if (!src || len == 0) return len;
     size_t i = 0;
     size_t last_line_off = 0;
+    size_t decl_line_off = 0;    /* line where the current top-level decl starts */
+    int pending_decl_start = 1;  /* next code char begins a new top-level decl */
     int brace_depth = 0;
     /* Inert-region tracking (comments/strings/chars/pp-directives) is
      * delegated to `CCInertScan`; `brace_depth` and `last_line_off` stay
@@ -194,6 +202,11 @@ size_t cc_find_first_func_def_offset(const char* src, size_t len) {
         }
         char c = src[i];
         if (c == '\n') { last_line_off = i + 1; i++; continue; }
+        if (pending_decl_start && c != ' ' && c != '\t') {
+            decl_line_off = last_line_off;
+            pending_decl_start = 0;
+        }
+        if (c == ';' && brace_depth == 0) { pending_decl_start = 1; i++; continue; }
         if (c == '{') {
             if (brace_depth == 0) {
                 size_t j = i;
@@ -227,7 +240,7 @@ size_t cc_find_first_func_def_offset(const char* src, size_t len) {
                                               (kw_n == 6 && strncmp(kw, "switch", 6) == 0) ||
                                               (kw_n == 6 && strncmp(kw, "return", 6) == 0) ||
                                               (kw_n == 6 && strncmp(kw, "sizeof", 6) == 0));
-                            if (!is_keyword) return last_line_off;
+                            if (!is_keyword) return decl_line_off;
                         }
                     }
                 }
@@ -238,6 +251,7 @@ size_t cc_find_first_func_def_offset(const char* src, size_t len) {
         }
         if (c == '}') {
             if (brace_depth > 0) brace_depth--;
+            if (brace_depth == 0) pending_decl_start = 1;
             i++;
             continue;
         }

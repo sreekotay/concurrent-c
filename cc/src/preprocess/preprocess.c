@@ -6626,24 +6626,48 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
 
 /* Rewrite `*res` -> `cc_unwrap(res)` for variables declared with CCResult_*
  * type. Two-pass approach:
- *   1. Scan for CCResult_<T>_<E> or `__CC_RESULT(T, E)` variable declarations.
- *   2. Rewrite `*varname` to `cc_unwrap(varname)`. */
+ *   1. Scan for CCResult_<T>_<E> or `__CC_RESULT(T, E)` variable declarations,
+ *      recording each variable's LIVE RANGE: from its declaration to the end
+ *      of the brace scope it was declared in (a parameter's scope is the
+ *      function body that follows).  A `CCResult_...` local named `a` must
+ *      not capture `*a` in some other function where `a` is a `T*`.
+ *   2. Rewrite `*varname` to `cc_unwrap(varname)` only inside that range. */
 static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
 
-    /* Pass 1: Collect Result variable names. */
+    /* Pass 1: Collect Result variable names + live ranges. */
     #define MAX_UNWRAP_VARS 256
     char* vars[MAX_UNWRAP_VARS];
+    size_t var_from[MAX_UNWRAP_VARS];   /* decl position */
+    size_t var_to[MAX_UNWRAP_VARS];     /* end of enclosing scope (n = open) */
+    int var_depth[MAX_UNWRAP_VARS];     /* brace depth the decl lives at */
     int var_count = 0;
 
     size_t i = 0;
+    int depth = 0;        /* brace depth */
+    int pdepth = 0;       /* paren depth (param lists) */
     CCScannerState scan;
     cc_scanner_init(&scan);
 
-    while (i < n && var_count < MAX_UNWRAP_VARS) {
+    while (i < n) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
 
         char c = src[i];
+        if (c == '{') { depth++; i++; continue; }
+        if (c == '}') {
+            depth--;
+            if (depth < 0) depth = 0;
+            /* close every var whose scope just ended */
+            for (int j = 0; j < var_count; j++) {
+                if (var_to[j] == n && var_depth[j] > depth) var_to[j] = i;
+            }
+            i++;
+            continue;
+        }
+        if (c == '(') { pdepth++; i++; continue; }
+        if (c == ')') { if (pdepth > 0) pdepth--; i++; continue; }
+        if (var_count >= MAX_UNWRAP_VARS) { i++; continue; }
+
         int is_cc_result = (c == 'C' && i + 8 < n && strncmp(src + i, "CCResult_", 9) == 0);
         int is_macro_result = (c == '_' && i + 13 < n && strncmp(src + i, "__CC_RESULT(", 12) == 0);
 
@@ -6674,7 +6698,13 @@ static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
                     if (varname) {
                         memcpy(varname, src + var_start, var_len);
                         varname[var_len] = 0;
-                        vars[var_count++] = varname;
+                        vars[var_count] = varname;
+                        var_from[var_count] = var_start;
+                        /* a decl inside parens is a parameter: it lives in
+                         * the function body that follows, one level deeper */
+                        var_depth[var_count] = pdepth > 0 ? depth + 1 : depth;
+                        var_to[var_count] = n;
+                        var_count++;
                     }
                 }
             }
@@ -6726,7 +6756,8 @@ static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
 
                 int found_idx = -1;
                 for (int j = 0; j < var_count; j++) {
-                    if (strlen(vars[j]) == var_len && strncmp(vars[j], src + var_start, var_len) == 0) {
+                    if (strlen(vars[j]) == var_len && strncmp(vars[j], src + var_start, var_len) == 0 &&
+                        star_pos >= var_from[j] && star_pos < var_to[j]) {
                         found_idx = j;
                         break;
                     }
@@ -8852,12 +8883,31 @@ char* cc_preprocess_include_expanded(const char* input_path) {
         }
     }
     repo_root[0] = '\0';
-    if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
-        snprintf(cmd, sizeof(cmd),
-                 "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
-                 repo_root, repo_root, expand_path);
-    } else {
-        snprintf(cmd, sizeof(cmd), "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c \"%s\" 2>/dev/null", expand_path);
+    /* When expanding the grammar-spliced TEMP copy, quoted includes
+     * (`#include "local.cch"`) must still resolve relative to the ORIGINAL
+     * file's directory — the temp lives in /tmp. */
+    {
+        char inc_dir[1024];
+        inc_dir[0] = '\0';
+        if (expand_path != input_path) {
+            const char* slash = strrchr(input_path, '/');
+            if (slash && (size_t)(slash - input_path) < sizeof(inc_dir)) {
+                size_t dl = (size_t)(slash - input_path);
+                memcpy(inc_dir, input_path, dl);
+                inc_dir[dl] = '\0';
+            }
+        }
+        if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
+            snprintf(cmd, sizeof(cmd),
+                     "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c%s%s%s -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
+                     inc_dir[0] ? " -iquote\"" : "", inc_dir[0] ? inc_dir : "", inc_dir[0] ? "\"" : "",
+                     repo_root, repo_root, expand_path);
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c%s%s%s \"%s\" 2>/dev/null",
+                     inc_dir[0] ? " -iquote\"" : "", inc_dir[0] ? inc_dir : "", inc_dir[0] ? "\"" : "",
+                     expand_path);
+        }
     }
     pp = popen(cmd, "r");
     if (!pp) {
@@ -11062,6 +11112,9 @@ static char* cc__rewrite_result_field_sugar_pass(const char* src, size_t len) {
     return cc__rewrite_result_field_sugar_text(NULL, src, len);
 }
 
+#define CC__CANON_STEP(name) \
+    do { if (getenv("CC_DEBUG_CANON")) fprintf(stderr, "[cc:canon] %s\n", name); } while (0)
+
 static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
                                              const char* input_path,
                                              int skip_comptime_surface) {
@@ -11078,40 +11131,40 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
         char* g = cc_rewrite_grammar_decls_text(chain->src, chain->len, input_path);
         if (g == (char*)-1) return -1;
         if (cc_pass_chain_apply(chain, g) < 0) return -1;
-        if (cc_pass_chain_apply(chain, cc_rewrite_type_scoped_calls_text(chain->src, chain->len)) < 0) return -1;
+        CC__CANON_STEP("cc_rewrite_type_scoped_calls_text"); if (cc_pass_chain_apply(chain, cc_rewrite_type_scoped_calls_text(chain->src, chain->len)) < 0) return -1;
     }
     /* D2.0: resolve `@comptime if (...)` first — dead branches must be pruned
      * before any other rewrite or instantiation collector sees them. */
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__resolve_comptime_if(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     /* Channel-pair lowering must run while `[~ ... >]` / `[~ ... <]` bracket
      * declarations are still in the source; chan-handle lowering erases them. */
-    if (cc_pass_chain_apply(chain, cc__rewrite_channel_pair_pass(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_chan_handle_types(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_slice_types(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc_rewrite_generic_containers(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_channel_pair_pass"); if (cc_pass_chain_apply(chain, cc__rewrite_channel_pair_pass(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_chan_handle_types"); if (cc_pass_chain_apply(chain, cc__rewrite_chan_handle_types(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_slice_types"); if (cc_pass_chain_apply(chain, cc__rewrite_slice_types(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc_rewrite_generic_containers"); if (cc_pass_chain_apply(chain, cc_rewrite_generic_containers(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_optional_types"); if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
     /* D1.0: fold `type_of(T).size`/`.align` to `sizeof(T)`/`_Alignof(T)`.  After
      * container lowering so mangled names (`CCVec_int`) are already in place. */
-    if (cc_pass_chain_apply(chain, cc__lower_type_of_constexpr(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_result_field_sugar_pass(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__lower_type_of_constexpr"); if (cc_pass_chain_apply(chain, cc__lower_type_of_constexpr(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_inferred_result_ctors"); if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_result_types"); if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_result_field_sugar_pass"); if (cc_pass_chain_apply(chain, cc__rewrite_result_field_sugar_pass(chain->src, chain->len)) < 0) return -1;
     /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
      * that phase-3 reparse sees a task-returning signature (required for
      * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check).
      * async_ast recognises CCAsyncVoidRet as an originally-void declaration. */
-    if (cc_pass_chain_apply(chain, cc__rewrite_async_void_ret(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_async_void_ret"); if (cc_pass_chain_apply(chain, cc__rewrite_async_void_ret(chain->src, chain->len)) < 0) return -1;
     /* Call-site `@blocking f(...)` / `@noblock f(...)` annotations
      * (spec §8.2.2 rule 1).  Runs before @await so an `@await`-wrapping
      * is not accidentally treated as a call-site mode host. */
-    if (cc_pass_chain_apply(chain, cc__rewrite_at_call_site_mode(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_at_call_site_mode"); if (cc_pass_chain_apply(chain, cc__rewrite_at_call_site_mode(chain->src, chain->len)) < 0) return -1;
     /* @await fname(...) -> cc_block_on(ReturnType, fname(...)).  Runs after
      * result-type rewriting so the return types are already in canonical form. */
-    if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_at_await"); if (cc_pass_chain_apply(chain, cc__rewrite_at_await(chain->src, chain->len)) < 0) return -1;
     return 0;
 }
 

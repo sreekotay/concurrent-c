@@ -352,6 +352,11 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
             .is_under_await = under_await,
             .recv_type_is_ptr = recv_type_is_ptr,
         };
+        if (getenv("CC_DEBUG_UFCS_NODES")) {
+            fprintf(stderr, "[cc:ufcs-node] line=%d..%d method=%s recv=%s occ=%d\n",
+                    ls, le, n[i].aux_s1 ? n[i].aux_s1 : "?",
+                    n[i].aux_s2 ? n[i].aux_s2 : "?", occ);
+        }
     }
 
     char* cur = (char*)malloc(in_len + 1);
@@ -1017,6 +1022,12 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             .recv_type_is_ptr = recv_type_is_ptr,
             .file = n[i].file,
         };
+        if (getenv("CC_DEBUG_UFCS_NODES")) {
+            fprintf(stderr, "[cc:ufcs-node2] file=%s line=%d..%d method=%s recv=%s occ=%d\n",
+                    n[i].file ? n[i].file : "?", ls, le,
+                    n[i].aux_s1 ? n[i].aux_s1 : "?",
+                    n[i].aux_s2 ? n[i].aux_s2 : "?", occ);
+        }
     }
 
     if (node_count == 0) {
@@ -1097,6 +1108,30 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         if (!have_span) {
             if (cc__find_ufcs_span_in_range(in_src, rs, re, nodes[i].method, nodes[i].occurrence_1based, &sp)) {
                 have_span = 1;
+            }
+        }
+        if (!have_span) {
+            /* Coordinate ambiguity: TCC-ext nodes may carry PHYSICAL lines
+             * while the buffer's #line directives (from spliced regions)
+             * make the logical mapping above land on an unrelated user line
+             * that happens to share the number.  The span finder is the
+             * arbiter: if the logical range doesn't contain the call, retry
+             * the plain physical mapping before dropping the node. */
+            size_t prs = cc__offset_of_line_1based(in_src, in_len, ls);
+            size_t pre = cc__offset_of_line_1based(in_src, in_len, le + 1);
+            if (pre > in_len) pre = in_len;
+            if (prs < pre && prs != rs) {
+                if (nodes[i].col_start > 0 && nodes[i].col_end > 0 && nodes[i].line_end > 0) {
+                    size_t sep_pos = cc__offset_of_line_col_1based(in_src, in_len, nodes[i].line_start, nodes[i].col_start);
+                    size_t end_pos = cc__offset_of_line_col_1based(in_src, in_len, nodes[i].line_end, nodes[i].col_end);
+                    if (cc__span_from_anchor_and_end(in_src, prs, sep_pos, end_pos, &sp)) {
+                        have_span = 1;
+                    }
+                }
+                if (!have_span &&
+                    cc__find_ufcs_span_in_range(in_src, prs, pre, nodes[i].method, nodes[i].occurrence_1based, &sp)) {
+                    have_span = 1;
+                }
             }
         }
         if (!have_span && have_lax) {

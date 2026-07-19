@@ -1,0 +1,213 @@
+// REGRESSION for three pipeline bugs surfaced by @grammar splices in a
+// closure-bearing TU (the real_projects/redis integration):
+//   1. closure forward-decl insertion must not split a multi-line function
+//      signature (the splice's generated signatures wrap);
+//   2. `*a = ...` deref must not be unwrap-rewritten just because SOME other
+//      function has a Result-typed local named `a` (scope-aware rewrite);
+//   3. UFCS on registered types BELOW the splice must lower even when the
+//      node's physical line collides with a real logical line (the padding
+//      block at the bottom makes max-logical exceed the site's physical
+//      line, forcing the collision).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) RG {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' v: int number "\r\n"
+~~~~}
+
+static size_t !>(CCError) mk_seven(void) {
+    return cc_ok((size_t)7);
+}
+
+/* bug 2: Result-typed local named `a` ... */
+static size_t result_local_a(void) {
+    size_t !>(CCError) a = mk_seven();
+    if (a.is_err()) return 0;
+    return a.value();
+}
+
+/* ... must not capture this CCArena* parameter, also named `a` */
+static bool arena_init(CCArena* a, size_t root) {
+    *a = cc_arena_create(root);
+    if (!a->valid()) return false;   /* bug 3: UFCS below the splice */
+    return true;
+}
+
+int main(void) {
+    CCArena ar;
+    if (!arena_init(&ar, 1 << 16)) { printf("FAIL: arena init\n"); return 1; }
+    RG v;
+    if (!RG_parse("*42\r\n", 5, &ar, &v) || v.v != 42) { printf("FAIL: parse\n"); return 1; }
+    if (result_local_a() != 7) { printf("FAIL: result local\n"); return 1; }
+    {
+        /* bug 1: closures force the proto-insertion path */
+        CCNursery* n = cc_nursery_create(NULL);
+        if (!n) { printf("FAIL: nursery\n"); return 1; }
+        int base = 5;
+        n->spawn(() => [base] { (void)base; });
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+    }
+    ar.destroy();
+    printf("grammar closure ufcs regression OK\n");
+    return 0;
+}
+
+/* Padding: keeps max-logical-line past the physical position of the UFCS
+ * sites above, so the logical/physical collision (bug 3) actually occurs.
+ * The @grammar splice adds ~120 physical lines; this block adds more than
+ * that many logical lines after the sites. */
+
+/* pad 000 */
+/* pad 001 */
+/* pad 002 */
+/* pad 003 */
+/* pad 004 */
+/* pad 005 */
+/* pad 006 */
+/* pad 007 */
+/* pad 008 */
+/* pad 009 */
+/* pad 010 */
+/* pad 011 */
+/* pad 012 */
+/* pad 013 */
+/* pad 014 */
+/* pad 015 */
+/* pad 016 */
+/* pad 017 */
+/* pad 018 */
+/* pad 019 */
+/* pad 020 */
+/* pad 021 */
+/* pad 022 */
+/* pad 023 */
+/* pad 024 */
+/* pad 025 */
+/* pad 026 */
+/* pad 027 */
+/* pad 028 */
+/* pad 029 */
+/* pad 030 */
+/* pad 031 */
+/* pad 032 */
+/* pad 033 */
+/* pad 034 */
+/* pad 035 */
+/* pad 036 */
+/* pad 037 */
+/* pad 038 */
+/* pad 039 */
+/* pad 040 */
+/* pad 041 */
+/* pad 042 */
+/* pad 043 */
+/* pad 044 */
+/* pad 045 */
+/* pad 046 */
+/* pad 047 */
+/* pad 048 */
+/* pad 049 */
+/* pad 050 */
+/* pad 051 */
+/* pad 052 */
+/* pad 053 */
+/* pad 054 */
+/* pad 055 */
+/* pad 056 */
+/* pad 057 */
+/* pad 058 */
+/* pad 059 */
+/* pad 060 */
+/* pad 061 */
+/* pad 062 */
+/* pad 063 */
+/* pad 064 */
+/* pad 065 */
+/* pad 066 */
+/* pad 067 */
+/* pad 068 */
+/* pad 069 */
+/* pad 070 */
+/* pad 071 */
+/* pad 072 */
+/* pad 073 */
+/* pad 074 */
+/* pad 075 */
+/* pad 076 */
+/* pad 077 */
+/* pad 078 */
+/* pad 079 */
+/* pad 080 */
+/* pad 081 */
+/* pad 082 */
+/* pad 083 */
+/* pad 084 */
+/* pad 085 */
+/* pad 086 */
+/* pad 087 */
+/* pad 088 */
+/* pad 089 */
+/* pad 090 */
+/* pad 091 */
+/* pad 092 */
+/* pad 093 */
+/* pad 094 */
+/* pad 095 */
+/* pad 096 */
+/* pad 097 */
+/* pad 098 */
+/* pad 099 */
+/* pad 100 */
+/* pad 101 */
+/* pad 102 */
+/* pad 103 */
+/* pad 104 */
+/* pad 105 */
+/* pad 106 */
+/* pad 107 */
+/* pad 108 */
+/* pad 109 */
+/* pad 110 */
+/* pad 111 */
+/* pad 112 */
+/* pad 113 */
+/* pad 114 */
+/* pad 115 */
+/* pad 116 */
+/* pad 117 */
+/* pad 118 */
+/* pad 119 */
+/* pad 120 */
+/* pad 121 */
+/* pad 122 */
+/* pad 123 */
+/* pad 124 */
+/* pad 125 */
+/* pad 126 */
+/* pad 127 */
+/* pad 128 */
+/* pad 129 */
+/* pad 130 */
+/* pad 131 */
+/* pad 132 */
+/* pad 133 */
+/* pad 134 */
+/* pad 135 */
+/* pad 136 */
+/* pad 137 */
+/* pad 138 */
+/* pad 139 */
+/* pad 140 */
+/* pad 141 */
+/* pad 142 */
+/* pad 143 */
+/* pad 144 */
+/* pad 145 */
+/* pad 146 */
+/* pad 147 */
+/* pad 148 */
+/* pad 149 */
