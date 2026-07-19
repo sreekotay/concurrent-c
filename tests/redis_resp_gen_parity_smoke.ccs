@@ -46,29 +46,27 @@ static CCIoError net_to_io_error(CCNetError e) { (void)e; return cc_io_error(CC_
     rules [
         digit:  charset [#'0' - #'9']
         number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
     ]
-    #'*' argc: int number "\r\n"
-    args: items GArg argc cap 4
+    one of [
+        framed [ #'*' argc: int number "\r\n" args: items GArg argc cap 4 ]
+        plain  [ text: line "\r\n" ]
+    ]
 ~~~~}
 
-/* same signature and contract as rr_try_read_args_buffered */
+/* same signature and contract as rr_try_read_args_buffered.  The command is
+ * a tagged union: '*' dispatches framed, everything else is the inline
+ * DEFAULT arm — no first-byte peeking in the wrapper.  Known divergence
+ * (pathological input only, keep the harness clear of it): a lone CR or LF
+ * INSIDE an inline line is a parse error here but accepted by the hand
+ * reader's \r\n pair scan. */
 static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                                                   CCSlice* args,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err,
                                                   CCArena* arena) {
-    if (r->end > r->start && r->data[r->start] != '*') {
-        /* inline commands: not '*'-framed — the hand line path (tagged-union
-         * alternation is the future owner of this branch) */
-        size_t saved = r->start;
-        CCSlice line = {0};
-        if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
-        size_t !>(CCError) a = parse_inline_args(line, args, cap);
-        if (a.is_err()) { r->start = saved; *err = a.error(); return RESP_PARSE_ERROR; }
-        *out_argc = a.value();
-        return RESP_PARSE_OK;
-    }
     size_t pos = 0;
     GCmd c;
     bool !>(CCError) rr = GCmd_try_read((const char*)(r->data + r->start),
@@ -79,12 +77,19 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
         return RESP_PARSE_ERROR;
     }
     if (!rr.value()) return RESP_PARSE_INCOMPLETE;   /* empty window */
-    if (c.args_n < 1 || c.args_n > cap) {
+    if (c.kind == GCmd_plain) {
+        size_t !>(CCError) a = parse_inline_args(c.u.plain.text, args, cap);
+        if (a.is_err()) { *err = a.error(); return RESP_PARSE_ERROR; }
+        *out_argc = a.value();
+        r->start += pos;
+        return RESP_PARSE_OK;
+    }
+    if (c.u.framed.args_n < 1 || c.u.framed.args_n > cap) {
         *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
         return RESP_PARSE_ERROR;
     }
-    for (size_t i = 0; i < c.args_n; i++) args[i] = c.args[i].data;
-    *out_argc = c.args_n;
+    for (size_t i = 0; i < c.u.framed.args_n; i++) args[i] = c.u.framed.args[i].data;
+    *out_argc = c.u.framed.args_n;
     r->start += pos;
     return RESP_PARSE_OK;
 }
