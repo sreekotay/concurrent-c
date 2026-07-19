@@ -9,3 +9,4 @@ yyjson.h
 /.gen/
 /bench_write
 /.genw/
+/bench_shape

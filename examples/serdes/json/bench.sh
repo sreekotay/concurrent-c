@@ -4,6 +4,7 @@
 #   ./bench.sh -y         also run yyjson (vendored yyjson.c/.h)
 #   ./bench.sh -g         also run the @grammar engine tiers (needs make -C cc)
 #   ./bench.sh -w         also run the @grammar WRITE bench (Feed -> canonical JSON)
+#   ./bench.sh -s         also run the hidden-class (shapes) DOM vs tape DOM
 #   ./bench.sh -c         also print a correctness checksum (verified untimed)
 #   ./bench.sh [K] [corpus...]
 set -e
@@ -11,12 +12,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
 CC="${CC:-gcc} -O2 -I $INC"
-YY=0; GEN=0; WR=0; CHK=""
+YY=0; GEN=0; WR=0; SH=0; CHK=""
 while :; do
   case "$1" in
     -y) YY=1; shift;;
     -g) GEN=1; shift;;
     -w) WR=1; shift;;
+    -s) SH=1; shift;;
     -c) CHK="-c"; shift;;
     *) break;;
   esac
@@ -50,6 +52,11 @@ if [ "$GEN" = 1 ]; then
     $CC -I "$repo/out/include" "$here/.gen/bench_grammar.c" "$RT" -o "$here/bench_gen"
   fi
 fi
+if [ "$SH" = 1 ]; then
+  if need_build "$here/bench_shape" "$here/bench_shape.c" "$here/json_shape.h" "$here/json.h" "$RT"; then
+    $CC "$here/bench_shape.c" "$RT" -o "$here/bench_shape"
+  fi
+fi
 if [ "$WR" = 1 ]; then
   CCC="$repo/cc/bin/ccc"
   if [ ! -x "$CCC" ]; then
@@ -67,4 +74,5 @@ for c in "${CORPORA[@]}"; do
   if [ "$YY" = 1 ]; then "$here/yy" "$here/$c" "$K"; fi
   if [ "$GEN" = 1 ]; then "$here/bench_gen" "$here/$c" "$K" 3 | sed 's/^/  /'; fi
   if [ "$WR" = 1 ]; then "$here/bench_write" "$here/$c" | sed 's/^/  /'; fi
+  if [ "$SH" = 1 ]; then "$here/bench_shape" "$here/$c" "$K" 3 | sed 's/^/  /'; fi
 done
