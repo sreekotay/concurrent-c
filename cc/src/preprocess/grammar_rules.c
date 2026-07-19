@@ -1359,13 +1359,18 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     eb_fmt(&e, "typedef struct { unsigned long long meta;\n"
                "    union { const char* bytes; } u; } %sNode;\n",
            g->name);
+    /* the ctx only holds POINTERS to shape types, so the substrate stays
+     * dependency-free: plain struct forward decls (always repeatable) —
+     * full definitions are needed only when cc_dom is demanded, and a dom
+     * caller necessarily includes <ccc/cc_shape.cch> for CCShapeReg. */
+    eb_fmt(&e, "struct CCShapeB; struct CCShapeVal;\n");
     eb_fmt(&e, "typedef struct { %sNode* tape; size_t total, cap;\n"
                "    size_t bstack[512]; size_t bdepth; CCArena* arena;\n"
                "    /* shaped-DOM hook (armed by _dom; NULL for plain parse):\n"
                "     * completed containers hand their value up this stack —\n"
                "     * one push per container, anchored for derived restore */\n"
-               "    CCShapeB* sb;\n"
-               "    CCShapeVal* vstack; const unsigned char** vanchor;\n"
+               "    struct CCShapeB* sb;\n"
+               "    struct CCShapeVal* vstack; const unsigned char** vanchor;\n"
                "    size_t vsp, vcap;\n"
                "    size_t vbase[512]; } %s__ctx;\n",
            g->name, g->name);

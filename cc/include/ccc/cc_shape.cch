@@ -44,7 +44,7 @@
 enum { CC_SHAPE_LEAF = 0, CC_SHAPE_OBJ = 1, CC_SHAPE_ARR = 2 };
 typedef struct CCShapeObj CCShapeObj;
 typedef struct CCShapeArr CCShapeArr;
-typedef struct {
+typedef struct CCShapeVal {
     uint64_t meta;
     union { const char* bytes; CCShapeObj* obj; CCShapeArr* arr; } u;
 } CCShapeVal;
@@ -172,7 +172,7 @@ static inline CCShape* cc_shape__advance(CCShapeReg* r, CCShape* s,
  * DIRECT FILL: callers that know each container's child count up front
  * (tape walkers do — spans) allocate exact-size and write every value
  * ONCE, straight into its slot. No scratch stack, no copy-out. */
-typedef struct {
+typedef struct CCShapeB {
     CCShapeReg* rg;
     CCArena* rec;
     char* rb; size_t rb_left;            /* record slab: 1 arena hit / ~8KB */
