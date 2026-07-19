@@ -510,10 +510,10 @@ static int rg_parse_alt(RG* g, size_t* io, int depth) {
  * resolved through the per-file registry (defined with the schema engine). */
 static const char* cc__rules_body_lookup(const char* name, size_t* len);
 
-static int rg_parse_text(RG* g, int depth);
+static int rg_parse_text(RG* g, int depth, int base);
 
 static int rg_parse(RG* g) {
-    if (rg_parse_text(g, 0) != 0) return -1;
+    if (rg_parse_text(g, 0, 0) != 0) return -1;
     if (g->nrules == 0) return rg_fail(g, 0, "no rules declared");
     /* The entry point is the first rule the INCLUDING grammar declares, even
      * when an include precedes it. Safe to reorder here: references are still
@@ -541,7 +541,11 @@ static int rg_parse(RG* g) {
     return 0;
 }
 
-static int rg_parse_text(RG* g, int depth) {
+/* `base` = g->nrules when THIS file's parse began: a depth>0 file may
+ * override only rules its OWN includes introduced (dup >= base) — that
+ * is nested factory specialization. Dups older than the file (sibling
+ * includes, ancestors) stay first-wins, keeping diamonds legal. */
+static int rg_parse_text(RG* g, int depth, int base) {
     size_t p = 0;
     for (;;) {
         p = rg_ws(g, p);
@@ -593,7 +597,7 @@ static int rg_parse_text(RG* g, int depth) {
                     const char* sf = g->file;
                     g->body = ftxt; g->n = frd;
                     g->file = path;   /* nested file includes resolve relative to this file */
-                    int rc = rg_parse_text(g, depth + 1);
+                    int rc = rg_parse_text(g, depth + 1, g->nrules);
                     g->body = sb; g->n = sn; g->file = sf;
                     free(ftxt);   /* names/literals were copied into the pool */
                     if (rc != 0) return rc;
@@ -617,7 +621,7 @@ static int rg_parse_text(RG* g, int depth) {
                 }
                 const char* sb = g->body; size_t sn = g->n;
                 g->body = btxt; g->n = blen;
-                int rc = rg_parse_text(g, depth + 1);
+                int rc = rg_parse_text(g, depth + 1, g->nrules);
                 g->body = sb; g->n = sn;
                 if (rc != 0) return rc;
             }
@@ -645,12 +649,13 @@ static int rg_parse_text(RG* g, int depth) {
             /* Specialize a factory: a later definition overrides a rule that
              * came from an include. Depth 0 (the @grammar block) always wins
              * and clears rule_inc so further includes cannot clobber it.
-             * Nested .rules files may also override (e.g. json_dom.rules
-             * includes json.rules then redefines string/number) — those stay
-             * marked included so the outer block can still specialize. Two
-             * includes of the same name without an intervening override: first
-             * wins. */
-            if (depth == 0 || g->rule_inc[dup]) {
+             * A nested .rules file may override ONLY rules its own includes
+             * added (dup >= base — e.g. json_dom.rules includes json.rules
+             * then redefines string/number); those stay marked included so
+             * the outer block can still specialize. A dup that predates this
+             * file (sibling include, ancestor) is first-wins: diamonds stay
+             * legal and include order keeps its documented meaning. */
+            if (depth == 0 || (g->rule_inc[dup] && dup >= base)) {
                 g->rules[dup].node = nd;
                 g->rules[dup].at = p;
                 if (depth == 0) g->rule_inc[dup] = 0;
