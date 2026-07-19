@@ -10,86 +10,13 @@
 // of the SAME grammar's tape (Json_parse) — two independent lowerings of one
 // grammar must agree byte-for-byte on ids, text, and screen names.
 #include <ccc/std/prelude.cch>
-
-/* keep/decode: dirty spans only — no memchr re-scan. */
-static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
-    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
-    if (!dst) return 0;
-    size_t o = 0;
-    for (size_t k = 0; k < n; k++) {
-        char c = p[k];
-        if (c != '\\') { dst[o++] = c; continue; }
-        char e = p[++k];
-        switch (e) {
-        case 'n': dst[o++] = '\n'; break;  case 't': dst[o++] = '\t'; break;
-        case 'r': dst[o++] = '\r'; break;  case '"': dst[o++] = '"'; break;
-        case '\\': dst[o++] = '\\'; break; case '/': dst[o++] = '/'; break;
-        case 'b': dst[o++] = '\b'; break;  case 'f': dst[o++] = '\f'; break;
-        case 'u': {
-            unsigned cp = 0;
-            for (int h = 0; h < 4; h++) { char x = p[++k]; cp <<= 4;
-                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0') : (unsigned)((x | 32) - 'a' + 10); }
-            if (cp < 0x80) dst[o++] = (char)cp;
-            else if (cp < 0x800) { dst[o++] = (char)(0xC0 | (cp >> 6)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
-            else { dst[o++] = (char)(0xE0 | (cp >> 12)); dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
-            break;
-        }
-        default: dst[o++] = e; break;
-        }
-    }
-    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
-    return 1;
-}
-
-/* the codec's /encode inverse: canonical JSON escaping. The contract:
- * ALWAYS return the exact encoded size; dst == NULL measures only; with a
- * dst, write at most cap bytes (the caller treats need > cap as overflow,
- * so partial output within cap is fine). */
-static size_t jstr_enc(const char* p, size_t n, char* dst, size_t cap) {
-    size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)p[i];
-        const char* two = 0;
-        switch (c) {
-        case '"':  two = "\\\""; break; case '\\': two = "\\\\"; break;
-        case '\n': two = "\\n";  break; case '\r': two = "\\r";  break;
-        case '\t': two = "\\t";  break; case '\b': two = "\\b";  break;
-        case '\f': two = "\\f";  break;
-        }
-        if (two) { if (dst && o + 2 <= cap) { dst[o] = two[0]; dst[o + 1] = two[1]; } o += 2; }
-        else if (c < 0x20) {
-            if (dst && o + 6 <= cap) {
-                memcpy(dst + o, "\\u00", 4);
-                dst[o + 4] = "0123456789abcdef"[c >> 4];
-                dst[o + 5] = "0123456789abcdef"[c & 15];
-            }
-            o += 6;
-        } else { if (dst && o < cap) dst[o] = (char)c; o++; }
-    }
-    return o;
-}
+#include "../examples/serdes/json/json_codec.cch"
 
 @grammar(rules) Json {~~~~
-    top:     value
-    ws:      any charset [#' ' #'\t' #'\r' #'\n']
-    digit:   charset [#'0' - #'9']
-    onenine: charset [#'1' - #'9']
-    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
-    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
-    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
-                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    include "../examples/serdes/json/json_dom.rules"
     string:  [#'"' keep/decode(jstr)/encode(jstr_enc) any [some strchar | esc] #'"']
-    int:     [opt #'-' [#'0' | [onenine any digit]]]
-    number:  keep [int opt [#'.' some digit]
-                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
-    ; literals are kept so the DOM oracle's (key, value) sibling pairing
-    ; holds: every member value produces exactly one tape node. The schema
-    ; tier is indifferent (its else-skip runs the match tier, keeps nothing).
     value:   [ws [string | number | object | array
                  | keep ["true" | "false" | "null"]] ws]
-    member:  [ws string ws #':' value]
-    array:   collect [#'[' ws opt [value any [#',' value]] #']']
-    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
 ~~~~}
 
 // COMPOSITION: the schemas below narrow the grammar's OWN rules. Json.object

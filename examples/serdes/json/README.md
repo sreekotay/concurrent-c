@@ -1,9 +1,13 @@
-# Hand-lowered zero-copy JSON DOM
+# JSON serdes (engine + golden)
 
-`json.h` is the C that a `@grammar(rules) Json` engine would emit for a JSON DOM
-parser — written by hand so the lowering is legible. It exists to demonstrate how
-Concurrent-C's building blocks (arenas, `CCSlice` provenance, borrow-vs-own) turn
-into a real, competitive serde without giving up the safety story.
+**Production path:** `@grammar(rules)` / `@grammar(schema)` over the shared
+factory in this directory (`json.rules` recognition, `json_dom.rules` DOM
+specialization, `json_codec.cch` for `jstr` / `jstr_enc`). Benches:
+`./bench.sh -g` (engine tiers), `-d` (shaped DOM), `-w` (write).
+
+**Golden reference:** `json.h` is the hand-lowered C a rules engine would emit
+for a JSON DOM — kept legible so the lowering stays inspectable. It is the
+oracle for borrow/materialize splits, not the product parser.
 
 ## What it demonstrates
 
@@ -68,9 +72,13 @@ buffer and eager-parses numbers.
 
 | file | what |
 |------|------|
-| `json.h` | the DOM: parser, compact node, accessors |
-| `bench.c` | throughput + zero-copy harness |
-| `bench.sh` | build + run driver |
+| `json.rules` | shared recognition factory (`include` this) |
+| `json_dom.rules` | DOM specialization (`keep` / `collect` overrides) |
+| `json_codec.cch` | `jstr` decode + `jstr_enc` encode |
+| `bench_grammar.ccs` | engine match / collect / DOM / schema bench |
+| `json.h` | hand golden DOM (lowering oracle) |
+| `bench.c` | golden throughput + zero-copy harness |
+| `bench.sh` | build + run driver (`-g`/`-y`/`-d`/`-w`) |
 | `yy.c` | yyjson comparison harness |
 | `yyjson.c`, `yyjson.h` | vendored yyjson 0.12.0 |
 | `tools/gen_numbers.py`, `tools/minify.py` | corpus helpers |

@@ -1,17 +1,34 @@
 # Concurrent-C Grammar and SERDES Specification
 
 **Version:** 0.3-draft  
-**Date:** 2026-05-31  
-**Status:** Concept-phase draft (inclusion-oriented language and lowering intent)
+**Date:** 2026-07-19  
+**Status:** Living draft — `rules` and `schema` are implemented in-tree; several
+sections below remain design intent (marked **Future**).
 
 > **Delivery model (harmonized 0.3):** SERDES is a **stdlib `@grammar` engine**,
 > not a set of compiler-blessed modes. The compiler blesses only the
 > capture-and-route seam — `@grammar(engine) Name { …raw body… }` packages a
 > fenced block and hands `(name, bytes, origin)` to a named `@comptime` **engine**
-> (a library function). `fragments` / `rules` / `schema` are engines the SERDES
-> stdlib ships, sitting in the same parens as any user engine. See
+> (a library function). See
 > [`cc/docs/GRAMMAR_DSL_PROPOSAL.md`](../cc/docs/GRAMMAR_DSL_PROPOSAL.md) for the
 > seam; this document specifies the **SERDES engine's** semantics.
+
+### Implementation status (Jul 2026)
+
+| Surface | In tree today | Notes |
+| ------- | ------------- | ----- |
+| `@grammar(rules)` | **Live** | Builtin engine in `cc/src/preprocess/grammar_rules.c` |
+| `@grammar(schema)` | **Live** | Same file; parse + write, narrowing, `use` / `include` factories |
+| Pad absorption / `__np` | **Live** | Normative for stacked whitespace (see Whitespace and padding) |
+| FIRST / SWAR / string-fuse | **Live** | Emitter lowering; not a dialect feature |
+| `to` / `thru` | Rejected at parse | Reserved; not implemented |
+| `@grammar(fragments)` | **Future** | Speculative; no engine registered |
+| Streaming / `@async` resume | **Future** | Whole-buffer contract locked for now |
+| Protocol Buffers sketch | **Future** | Pressure-test only — not a product claim |
+| Structured farthest-error | Partial | Fail paths exist; rich positioned errors TBD |
+
+Canonical JSON factory (recognition + DOM specialization): 
+`examples/serdes/json/json.rules`, `json_dom.rules`, `json_codec.cch`.
 
 ---
 
@@ -21,18 +38,16 @@ Concurrent-C grammar and SERDES provides lightweight recognition grammars and
 schema-driven parsing and formatting for structured text and binary formats. It
 centers on:
 
-1. **One stdlib engine family in the `@grammar` seam:** `@grammar(fragments)`,
-  `@grammar(rules)`, and `@grammar(schema)` select SERDES-provided engines — not
-   compiler builtins (see [Surface: `@grammar(…)](#surface-grammar)`).
-2. **Runtime operations:** `cc_parse` / `cc_format` for schema-driven I/O, plus
-  companions such as `cc_match` / `cc_collect` for rule entry points when the
-   language contract exposes them.
+1. **One stdlib engine family in the `@grammar` seam:** `@grammar(rules)` and
+  `@grammar(schema)` are the engines shipped today; `@grammar(fragments)` is a
+   **Future** third engine in the same seam (see [Surface: `@grammar(…)](#surface-grammar)`).
+2. **Runtime operations:** `cc_parse` / `cc_write` (format) for schema-driven I/O,
+  plus `cc_match` / `cc_collect` / `cc_dom` for rule entry points.
 
-Conceptual names in prose — **fragments**, **rules**, **schema** — name those
-three SERDES engines. Older drafts used type-like spellings (`CCFragments`,
-`CCRules`, `CCSchema`) and treated the paren argument as a compiler **mode**; as
-of 0.3 the paren argument is an **engine** (a `@comptime` function), and these
-three are the engines SERDES ships.
+Conceptual names in prose — **rules**, **schema**, and (Future) **fragments** —
+name SERDES engines. Older drafts used type-like spellings (`CCRules`,
+`CCSchema`) and treated the paren argument as a compiler **mode**; as of 0.3 the
+paren argument is an **engine** (a `@comptime` function).
 
 **Design intent:** keep the grammar declarative, keep ownership truthful, keep
 lowering transparent, and keep the generated hot path competitive with (or
@@ -134,7 +149,10 @@ independent identity.
 
 ---
 
-## Fragments (replacement-only)
+## Fragments (replacement-only) {#fragments-future}
+
+> **Future:** no `@grammar(fragments)` engine is registered in the compiler yet.
+> This section is design intent for reuse-without-runtime-semantics.
 
 **Fragments** (`@grammar(fragments)`) are **named replacement tokens**, analogous
 in spirit to CSS custom properties: they exist to reduce repetition and keep
@@ -522,7 +540,10 @@ When `cc_parse` produces slices or nested values, the implementation must preser
 
 ---
 
-## Streaming Consumption (contract)
+## Streaming Consumption (contract) {#streaming-future}
+
+> **Future:** today's engines are whole-buffer. Streaming resume is a later
+> `@async` lowering concern; do not treat this section as implemented.
 
 The generated collection surface is **closure-based internal iteration** — one
 entry point, everything else is user-side composition over existing primitives
@@ -666,7 +687,10 @@ the compiler packages the fenced body and calls the engine at comptime —
 
 ---
 
-## Protocol Buffers as a Pressure Test
+## Protocol Buffers as a Pressure Test {#protobuf-future}
+
+> **Future / non-normative:** a design pressure-test sketch, not an implemented
+> protobuf codec or product claim.
 
 Protocol Buffers are a useful **benchmark** for whether `@grammar(schema)` plus
 codecs describe real wire formats without becoming a parser library. This section is
@@ -750,21 +774,26 @@ and prefer explicit `opt` + unions in examples
 
 ## MVP Guidance
 
-v1 should prioritize:
+**Done / in progress (rules + schema):**
 
 - shared vocabulary between `@grammar(rules)` and `@grammar(schema)`
-- clear `@grammar(fragments)` vs `@grammar(rules)` boundary (substitution vs runtime grammar)
-- unified `@grammar(fragments|rules|schema)` declaration family
-- explicit directional semantics and format completeness checks
-- codec-as-leaf-hook
-- truthful provenance and canonical `cc_format`
-- structured errors and transparent lowering
+- `include` / `use` grammar factories (file-backed and in-file)
+- codec-as-leaf-hook (`keep/decode` / `/encode`)
+- truthful provenance and tape / schema / write projections
+- transparent lowering (direct specialized C; FIRST, SWAR, pad absorption)
 
-v1 should avoid:
+**Still open (Future):**
+
+- `@grammar(fragments)` engine and clear fragments-vs-rules boundary
+- richer structured / farthest-error reporting
+- streaming resume
+- any protobuf-shaped surface
+
+Avoid:
 
 - codecs as general grammar callbacks
 - hidden ownership changes
-- claiming parse and `cc_format` are exact inverses
+- claiming parse and write are exact inverses
 - forcing tokenizer grammars through struct generation
 - parser VMs on the hot path
 
@@ -772,17 +801,14 @@ v1 should avoid:
 
 ## Summary
 
-- `**@grammar(fragments)`** — replacement-only reuse (CSS-variable spirit), no
-standalone grammar semantics.
-- `**@grammar(rules)`** — lightweight recognition and collection (parse-first).
-- `**@grammar(schema)**` — typed wire structure with `**cc_parse**` and
-`**cc_format**`.
+- `**@grammar(rules)`** — **live:** lightweight recognition and collection.
+- `**@grammar(schema)`** — **live:** typed wire structure with `cc_parse` / write.
+- `**@grammar(fragments)`** — **Future:** replacement-only reuse (CSS-variable spirit).
 - `**@grammar` vs codecs** — pattern and structure live in `@grammar`; codecs are
 leaf hooks only, not a `@grammar` engine.
-- **Engine model** — `fragments`/`rules`/`schema` are stdlib engines in the
-`@grammar(engine)` seam, not compiler modes; the compiler captures the fenced
-body and routes it to the named engine.
-- **Provenance** — truthful; **errors** — structured; **lowering** — direct C.
+- **Engine model** — paren argument names an engine in the `@grammar(engine)` seam;
+the compiler captures the fenced body and routes it.
+- **Provenance** — truthful; **lowering** — direct C.
 
 ---
 

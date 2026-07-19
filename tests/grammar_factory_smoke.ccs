@@ -44,6 +44,11 @@
     value: keep [some charset [#'0' - #'9' #'a' - #'f']]
 ~~~~}
 
+/* nested .rules specialization (include-inside-include override) */
+@grammar(rules) KvHexF {~~~~
+    include "grammar_factory_hex.rules"
+~~~~}
+
 static int slice_is(CCSlice s, const char* want) {
     size_t l = strlen(want);
     return s.len == l && memcmp(s.ptr, want, l) == 0;
@@ -75,6 +80,7 @@ int main(void) {
     /* include + override: hex values accepted by KvHex, rejected by Kv */
     if (!cc_match(KvHex, "x = ff", 6)) { printf("FAIL: hex override\n"); return 1; }
     if (cc_match(Kv, "x = ff", 6)) { printf("FAIL: base accepts hex\n"); return 1; }
+    if (!cc_match(KvHexF, "x = ff", 6)) { printf("FAIL: nested hex factory\n"); return 1; }
 
     /* runtime instance: a Reader cursor over a pair stream */
     {

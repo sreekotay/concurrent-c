@@ -642,13 +642,19 @@ static int rg_parse_text(RG* g, int depth) {
         int nd = rg_parse_alt(g, &q, 0);
         if (nd < 0) return -1;
         if (dup >= 0) {
-            if (depth == 0) {              /* block definition overrides include;
-                                            * overrides do NOT claim the entry point */
+            /* Specialize a factory: a later definition overrides a rule that
+             * came from an include. Depth 0 (the @grammar block) always wins
+             * and clears rule_inc so further includes cannot clobber it.
+             * Nested .rules files may also override (e.g. json_dom.rules
+             * includes json.rules then redefines string/number) — those stay
+             * marked included so the outer block can still specialize. Two
+             * includes of the same name without an intervening override: first
+             * wins. */
+            if (depth == 0 || g->rule_inc[dup]) {
                 g->rules[dup].node = nd;
                 g->rules[dup].at = p;
-                g->rule_inc[dup] = 0;
+                if (depth == 0) g->rule_inc[dup] = 0;
             }
-            /* included duplicate of an existing rule: first wins, skip */
             p = q;
             continue;
         }
@@ -1133,6 +1139,27 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
     return -1;
 }
 
+/* Emit a SWAR 8-byte skip loop for stop-set (T, b1, b2); advances `p` to the
+ * first hit or word-past-end. Shared by fused string-body and charset runs. */
+static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
+    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
+           k, k);
+    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k, k);
+    eb_fmt(e, "        unsigned long long m%d = 0;\n", k);
+    if (T > 0)
+        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k, k, k, T, k, k);
+    if (b1 >= 0)
+        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+               k, k, b1, k, k, k);
+    if (b2 >= 0)
+        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+               k, k, b2, k, k, k);
+    /* On a hit, advance to the first stop byte — don't restart the scalar
+     * walk at the word base (up to 7 double-touches). */
+    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
+              "        p += 8;\n    } }\n", k, k);
+}
+
 /* C boolean: `s[p]` ∈ charset `cs` — range / tiny equality / bitset. */
 static void rg_cs_expr(const RG* g, int cs, char* out, size_t outs) {
     int lo, hi, bytes[4];
@@ -1563,22 +1590,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 int k = (*lbl)++;
                 int T, b1, b2;
                 eb_fmt(e, "    for (;;) {\n");
-                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2)) {
-                    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
-                           k, k);
-                    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k, k);
-                    eb_fmt(e, "        unsigned long long m%d = 0;\n", k);
-                    if (T > 0)
-                        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k, k, k, T, k, k);
-                    if (b1 >= 0)
-                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-                               k, k, b1, k, k, k);
-                    if (b2 >= 0)
-                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-                               k, k, b2, k, k, k);
-                    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
-                              "        p += 8;\n    } }\n", k, k);
-                }
+                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2))
+                    rg_emit_swar_run(e, k, T, b1, b2);
                 {
                     char cx[192];
                     rg_cs_expr(g, scs, cx, sizeof cx);
@@ -1609,25 +1622,8 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             }
             {
                 int T, b1, b2;
-                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2)) {
-                    int k2 = (*lbl)++;
-                    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
-                           k2, k2);
-                    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k2, k2);
-                    eb_fmt(e, "        unsigned long long m%d = 0;\n", k2);
-                    if (T > 0)
-                        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k2, k2, k2, T, k2, k2);
-                    if (b1 >= 0)
-                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-                               k2, k2, b1, k2, k2, k2);
-                    if (b2 >= 0)
-                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-                               k2, k2, b2, k2, k2, k2);
-                    /* On a hit, advance to the first stop byte — don't restart
-                     * the scalar walk at the word base (up to 7 double-touches). */
-                    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
-                              "        p += 8;\n    } }\n", k2, k2);
-                }
+                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2))
+                    rg_emit_swar_run(e, (*lbl)++, T, b1, b2);
             }
             eb_fmt(e, "    while (p < n && %s) p++;\n", cx);
             break;
@@ -2012,7 +2008,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     eb_fmt(&e, "static %sNode* %s_parse(const char* s, size_t n, CCArena* arena) {\n"
                "    %s__ctx c0;\n"
                "    size_t p = 0;\n"
-               "    c0.cap = 2048 + (n / 8);   /* one alloc covers typical dense JSON */\n"
+               "    c0.cap = 2048 + (n / 24);  /* ~real density; tgrow covers denser input */\n"
                "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
@@ -2191,7 +2187,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                    "    %s__ctx c0;\n"
                    "    size_t p = 0;\n"
                    "    CCShapeB b;\n"
-                   "    c0.cap = 2048 + (n / 8);   /* one alloc covers typical dense JSON */\n"
+                   "    c0.cap = 2048 + (n / 24);  /* ~real density; tgrow covers denser input */\n"
                    "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
                    "    if (!c0.tape) return 0;\n"
                    "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"

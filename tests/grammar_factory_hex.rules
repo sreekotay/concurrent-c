@@ -1,0 +1,5 @@
+; Nested factory specialization: include a base factory, then override a rule.
+; Verifies included .rules files may shadow rules from deeper includes
+; (same model as examples/serdes/json/json_dom.rules).
+include "grammar_factory_kv.rules"
+value: keep [some charset [#'0' - #'9' #'a' - #'f']]
