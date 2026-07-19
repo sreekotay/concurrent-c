@@ -139,6 +139,25 @@ Method note kept on purpose: one measured "+8%" turned out to be a
 frame-pointer-handicapped control AND a detector that never fired —
 re-measured honestly it was +17%, then +14% more from cap. Interleave or
 don't believe.
+**Size & memory (the other two axes, measured on macOS against the JSON
+bench):** stripped binaries — hand DOM ~51 KB (~16 KB __TEXT), gen ~67 KB
+(~32 KB), yyjson ~250 KB (~229 KB): ~5x smaller than yyjson, and
+source-weight is 13 KB/259 lines (json.h) vs yyjson.c's 423 KB/~11k
+lines. DOM working memory, twitter.json (~632 KB, 98.3% string borrow):
+ours ~704 KB arena bump vs yyjson default ~1.26 MB heap (copies strings)
+vs insitu ~632 KB (destroys the input); numbers.json (30k floats, lazy
+nums): ours ~720 KB vs 1.20 MB / 871 KB. Honest accounting: borrow means
+the input buffer must stay alive — total-bytes-to-keep-the-doc is
+~1.34 MB ours vs ~1.89 MB yyjson default — and bump_used/alc_peak are
+the real DOM numbers, not the harness's arena reservation. Net Pareto:
+yyjson wins straight-line speed; we win code size hard and DOM memory on
+string-heavy input because CCSlice provenance makes borrow structural.
+The gen-vs-hand text gap (~2x) is not per-function bloat but
+SPECIALIZATION MULTIPLICITY — nm shows the rules core emitted per mode
+(`Json__b_value` tape builder + `Json__m_value` and `Json__s__m_value`
+matcher/skip variants at ~1.5 KB each; `_string` appears 4x). Harder
+demand-gating (emit only modes actually called) or core-sharing is the
+identified lever to reach hand-size parity.
 **No magic names**: the call-site surface is the `cc_*` operations in
 `<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
 `cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —
