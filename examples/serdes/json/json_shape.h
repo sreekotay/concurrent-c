@@ -51,8 +51,13 @@ struct JShShape {
     JShShape* last_to;                   /* 1-entry monomorphic transition cache */
     uint32_t last_hash, last_klen;
     const char* last_key;
-    JShDesc* lookup;                     /* key->slot table (cap = pow2) */
+    JShDesc* lookup;                     /* key->slot table (cap = pow2); built
+                                          * ON FIRST FINALIZATION only — prefix
+                                          * nodes of the shape trie never get
+                                          * one (a.b.c.d is shared structure,
+                                          * not an object anyone queries) */
     uint32_t lookup_cap;
+    CCArena* ar;                         /* shape arena (for the lazy build) */
     JShShape* predicted;                 /* final shape last completed from this
                                           * FIRST-key shape — allocation-site
                                           * prediction: slots preallocated
@@ -192,7 +197,7 @@ static JShShape* jsh__advance(JShParser* p, JShShape* s, const char* k, uint32_t
     }
     to->parent = s; to->klen = klen; to->keyhash = kh;
     to->nslots = s->nslots + 1;
-    if (!jsh__build_lookup(to, p->shape_arena)) return NULL;
+    to->ar = p->shape_arena;
     p->ttab[i].h = th; p->ttab[i].to = to;
     p->nshapes++;
     s->last_to = to; s->last_hash = kh; s->last_klen = klen; s->last_key = to->key;
@@ -266,6 +271,7 @@ done: ;
             memcpy(o->slots, p->stack + base, n * sizeof(JShVal));
         }
     }
+    if (s->nslots && !s->lookup && !jsh__build_lookup(s, s->ar)) return JSON_BAD;
     if (s1) s1->predicted = s;           /* train the site (monomorphic update) */
     p->sp = base;
     out->meta = JSON_META(JSON_OBJ, 0, n);
