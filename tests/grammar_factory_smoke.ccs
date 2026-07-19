@@ -49,6 +49,14 @@
     include "grammar_factory_hex.rules"
 ~~~~}
 
+/* SIBLING includes stay first-wins (diamonds legal): the plain kv factory
+ * first, then the hex-specialized one — `value` must remain plain digits.
+ * Only a file's OWN later definitions may override its OWN includes. */
+@grammar(rules) KvSib {~~~~
+    include "grammar_factory_kv.rules"
+    include "grammar_factory_hex.rules"
+~~~~}
+
 static int slice_is(CCSlice s, const char* want) {
     size_t l = strlen(want);
     return s.len == l && memcmp(s.ptr, want, l) == 0;
@@ -81,6 +89,10 @@ int main(void) {
     if (!cc_match(KvHex, "x = ff", 6)) { printf("FAIL: hex override\n"); return 1; }
     if (cc_match(Kv, "x = ff", 6)) { printf("FAIL: base accepts hex\n"); return 1; }
     if (!cc_match(KvHexF, "x = ff", 6)) { printf("FAIL: nested hex factory\n"); return 1; }
+
+    /* sibling include conflict: FIRST include owns `value` (plain digits) */
+    if (!cc_match(KvSib, "x = 12", 6)) { printf("FAIL: sibling first-wins digits\n"); return 1; }
+    if (cc_match(KvSib, "x = ff", 6)) { printf("FAIL: sibling include overrode first\n"); return 1; }
 
     /* runtime instance: a Reader cursor over a pair stream */
     {
