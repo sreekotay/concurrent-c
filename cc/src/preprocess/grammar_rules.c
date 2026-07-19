@@ -2708,9 +2708,75 @@ static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
            g->name, rs_class(g, e->K, prule), g->rules[prule].name, fail);
 }
 
+/* fusable int run: `keep [opt(charset=={'-'}) some(charset=contiguous range
+ * within '0'..'9')]` (refs resolved) — the shape every length/count field
+ * takes. Qualifying binds emit ONE accumulate-while-scan loop: no second
+ * conversion pass, no charset bitmap loads (a range compare beats a table
+ * load for digits), no opt scaffold. The hand-parser inner loop, derived. */
+static int rs_int_run_shape(const RG* g, int rule, int* out_neg) {
+    int body = g->rules[rule].node;
+    if (g->nodes[body].kind != RN_KEEP || g->nodes[body].b != 0) return 0;
+    int ch = rg_effective(g, g->nodes[body].a);
+    int neg = 0, digits;
+    if (g->nodes[ch].kind == RN_SEQ) {
+        const RNode* x = &g->nodes[ch];
+        if (x->nkids != 2) return 0;
+        int k0 = rg_effective(g, g->kids[x->b]);
+        if (g->nodes[k0].kind != RN_OPT) return 0;
+        int c0 = rg_effective(g, g->nodes[k0].a);
+        if (g->nodes[c0].kind != RN_CHARSET) return 0;
+        {
+            const unsigned char* set = g->sets[g->nodes[c0].a];
+            for (int b = 0; b < 256; b++)
+                if ((set[b >> 3] & (1u << (b & 7))) && b != '-') return 0;
+            if (!(set['-' >> 3] & (1u << ('-' & 7)))) return 0;
+        }
+        neg = 1;
+        digits = rg_effective(g, g->kids[x->b + 1]);
+    } else {
+        digits = ch;
+    }
+    if (g->nodes[digits].kind != RN_SOME) return 0;
+    {
+        int dc = rg_effective(g, g->nodes[digits].a);
+        if (g->nodes[dc].kind != RN_CHARSET) return 0;
+        const unsigned char* set = g->sets[g->nodes[dc].a];
+        int lo = -1, hi = -1;
+        for (int b = 0; b < 256; b++) {
+            if (set[b >> 3] & (1u << (b & 7))) {
+                if (b < '0' || b > '9') return 0;
+                if (lo < 0) lo = b;
+                else if (b != hi + 1) return 0;
+                hi = b;
+            }
+        }
+        if (lo != '0' || hi != '9') return 0;   /* exact decimal range only */
+    }
+    *out_neg = neg;
+    return 1;
+}
+
 static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     (void)ss;
     int k = (*lbl)++;
+    if (t->kind == SK_BIND_INT) {
+        int neg;
+        if (rs_int_run_shape(g, t->rule, &neg)) {
+            eb_fmt(e, "    { long long v%d = 0; size_t d%d;\n", k, k);
+            if (neg)
+                eb_fmt(e, "      int ng%d = 0;\n"
+                          "      if (p < n && s[p] == '-') { ng%d = 1; p++; }\n", k, k);
+            eb_fmt(e, "      d%d = p;\n"
+                      "      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++)\n"
+                      "          v%d = v%d * 10 + (s[p] - '0');\n"
+                      "      if (p == d%d) goto %s;\n", k, k, k, k, fail);
+            if (neg)
+                eb_fmt(e, "      out->%s = ng%d ? -v%d : v%d; }\n", t->field, k, k, k);
+            else
+                eb_fmt(e, "      out->%s = v%d; }\n", t->field, k);
+            return;
+        }
+    }
     /* small top-level-keep rules extract INLINE at the bind site — the
      * pointer indirection folds to registers and the call disappears. The
      * top-level-keep gate guarantees the capture fires on every success
