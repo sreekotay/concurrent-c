@@ -190,6 +190,23 @@ tuning. Padded-rule trampolines (lead pad + __np call) are force-inlined
 measured +2-4% on twitter match/DOM over 6 alternating rounds, neutral
 on numbers — NOT the +14% a one-off probe suggested; code-layout and
 box drift inflate untight comparisons.
+**Vector scan ladder — SSE2 yes, NEON no (both by measurement):** the
+run-scanner emits 16 B SSE2 (+10-11% twitter match/DOM on Linux, 8/8
+interleaved rounds) with the 8 B SWAR as the portable arm (and what the
+TCC front-end parses). A NEON arm (vld1q/vclt + vshrn-nibble movemask)
+was compile-verified, shipped, and measured a 33% REGRESSION on Apple
+Silicon — median runs are ~11 bytes, and the vector->GPR lane-extract
+latency dominates short runs where M-series chews through GPR SWAR.
+Removed, not gated: re-adding NEON needs a stay-in-vector-domain design
+plus on-hardware interleaved numbers first. Lesson pinned: compile-
+verified is NOT perf-verified, and hot-loop tricks do not transfer
+across ISAs.
+**Cross-platform speed picture (same code, two truths):** on the Linux
+x86 container gen match beats yyjson default ~1.5x (1751 vs 1143 MB/s,
+twitter); on Apple Silicon yyjson (default == insitu there, ~3.9-4.3
+GB/s) leads gen match (~3.0 GB/s post-revert) by ~1.3x, while gen match
+leads the golden hand parser ~1.5x on that box. Platform changes WHO
+wins; the size/memory axes and the checked-write parity hold on both.
 **High-frequency small-doc parse (the service workload: object-ish API
 payloads, arena reset / doc free per parse, macOS):** throughput is FLAT
 with size for both sides (27 KB / 200 KB / 2 MB: ours ~1.6 GB/s

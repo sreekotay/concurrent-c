@@ -1147,10 +1147,15 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
 /* Emit a SWAR 8-byte skip loop for stop-set (T, b1, b2); advances `p` to the
  * first hit or word-past-end. Shared by fused string-body and charset runs. */
 /* Stop set = {b < T} u {b1} u {b2}: emit an arch ladder over the same
- * contract — 16 B/step SSE2 / NEON when the host compiler has them, the
- * portable 8 B SWAR otherwise (also what the TCC front-end parses; TCC
- * defines neither __SSE2__ nor __ARM_NEON, so it always sees the SWAR
- * arm). On a hit every arm advances p to the FIRST stop byte. */
+ * contract — 16 B/step SSE2 where the host compiler has it, the portable
+ * 8 B SWAR otherwise (also what the TCC front-end parses; TCC defines no
+ * arch macros). On a hit every arm advances p to the FIRST stop byte.
+ * NO NEON ARM by measurement: on Apple Silicon a vld1q/vclt/vshrn +
+ * vget_lane movemask arm was a 33% REGRESSION on twitter (median run is
+ * ~11 bytes; the vector->GPR lane extract latency dominates short runs,
+ * where M-series chews through the 8 B GPR SWAR). Re-adding NEON needs a
+ * design that stays in the vector domain (or 8 B NEON), plus on-hardware
+ * interleaved numbers — compile-verified is not perf-verified. */
 static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
     eb_fmt(e, "#if defined(__SSE2__)\n");
     eb_fmt(e, "    { while (p + 16 <= n) {\n"
@@ -1167,21 +1172,6 @@ static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
                k, k, k, b2);
     eb_fmt(e, "        { int hm%d = _mm_movemask_epi8(m%d);\n"
               "          if (hm%d) { p += (size_t)__builtin_ctz((unsigned)hm%d); break; } }\n"
-              "        p += 16;\n    } }\n", k, k, k, k);
-    eb_fmt(e, "#elif defined(__ARM_NEON)\n");
-    eb_fmt(e, "    { while (p + 16 <= n) {\n"
-              "        uint8x16_t w%d = vld1q_u8(s + p);\n"
-              "        uint8x16_t m%d = vdupq_n_u8(0);\n", k, k);
-    if (T > 0)
-        eb_fmt(e, "        m%d = vcltq_u8(w%d, vdupq_n_u8(%d));\n", k, k, T);
-    if (b1 >= 0)
-        eb_fmt(e, "        m%d = vorrq_u8(m%d, vceqq_u8(w%d, vdupq_n_u8(%d)));\n", k, k, k, b1);
-    if (b2 >= 0)
-        eb_fmt(e, "        m%d = vorrq_u8(m%d, vceqq_u8(w%d, vdupq_n_u8(%d)));\n", k, k, k, b2);
-    /* nibble-narrow movemask: 4 bits per lane, ctz>>2 = first hit lane */
-    eb_fmt(e, "        { unsigned long long hm%d = vget_lane_u64(vreinterpret_u64_u8(\n"
-              "              vshrn_n_u16(vreinterpretq_u16_u8(m%d), 4)), 0);\n"
-              "          if (hm%d) { p += (size_t)(__builtin_ctzll(hm%d) >> 2); break; } }\n"
               "        p += 16;\n    } }\n", k, k, k, k);
     eb_fmt(e, "#else\n");
     eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
@@ -1852,8 +1842,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         eb_fmt(&e, "};\n");
     }
     if (g->nsets > 0 && (want_match || want_build)) {
-        eb_fmt(&e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n"
-                   "#elif defined(__ARM_NEON)\n#include <arm_neon.h>\n#endif\n");
+        eb_fmt(&e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n#endif\n");
         eb_fmt(&e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
         for (int s = 0; s < g->nsets; s++) {
             char desc[128];
@@ -3248,8 +3237,7 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         eb_fmt(e, "};\n");
     }
     if (g->nsets > 0) {
-        eb_fmt(e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n"
-                   "#elif defined(__ARM_NEON)\n#include <arm_neon.h>\n#endif\n");
+        eb_fmt(e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n#endif\n");
         eb_fmt(e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
         for (int s = 0; s < g->nsets; s++) {
             char desc[128];
