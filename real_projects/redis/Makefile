@@ -36,6 +36,15 @@ upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(RED
 $(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
+# Reader A/B variants: gen (the default @grammar reader, same as plain
+# redis_idiomatic) and hand (-DREDIS_RESP_HAND selects redis_resp.cch's
+# handrolled reader).  Distinct outputs so both coexist for bench_readers.sh.
+$(OUT_DIR)/redis_idiomatic_gen: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
+
+$(OUT_DIR)/redis_idiomatic_hand: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS) -DREDIS_RESP_HAND=1"
+
 # Profile: optimized release build with symbols (sample / Instruments).
 $(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS) -g"
@@ -48,6 +57,8 @@ $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
+redis_idiomatic_gen: $(OUT_DIR)/redis_idiomatic_gen
+redis_idiomatic_hand: $(OUT_DIR)/redis_idiomatic_hand
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_idiomatic_debug: $(OUT_DIR)/redis_idiomatic_debug
 redis_cc: $(OUT_DIR)/redis_cc
@@ -63,4 +74,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config

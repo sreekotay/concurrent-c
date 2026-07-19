@@ -320,8 +320,9 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 
 #include "redis_resp.cch"
 
-#ifdef REDIS_RESP_GEN
-/* ---- @grammar RESP reader (build with -DREDIS_RESP_GEN=1) ----
+#ifndef REDIS_RESP_HAND
+/* ---- @grammar RESP reader (the DEFAULT; -DREDIS_RESP_HAND selects the
+ * handrolled reader in redis_resp.cch for A/B benching) ----
  * The schema IS the protocol description; parity with the hand reader is
  * pinned by tests/redis_resp_gen_parity_smoke.ccs. The command is a tagged
  * union: '*' dispatches the framed arm, anything else is the inline-command
@@ -388,7 +389,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     r->start += pos;
     return RESP_PARSE_OK;
 }
-#endif /* REDIS_RESP_GEN */
+#endif /* !REDIS_RESP_HAND */
 
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
@@ -565,10 +566,10 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     CCSlice args[4] = {0};
     size_t argc = 0;
     CCError perr = {0};
-#ifdef REDIS_RESP_GEN
-    RespParseStatus argc_status = gen_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
-#else
+#ifdef REDIS_RESP_HAND
     RespParseStatus argc_status = rr_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
+#else
+    RespParseStatus argc_status = gen_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
 #endif
     if (argc_status == RESP_PARSE_INCOMPLETE) {
         return cc_ok(false);
