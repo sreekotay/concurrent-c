@@ -1,0 +1,153 @@
+// RESP request-pipeline bench: generated @grammar(schema) parser vs a
+// hand-rolled reference. Corpus: K SET commands, redis-benchmark shaped.
+#include <ccc/std/prelude.cch>
+#include <time.h>
+
+@grammar(schema) RespArg {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+    data: bytes len
+    "\r\n"
+~~~~}
+
+@grammar(schema) RespCmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
+    args: items RespArg argc
+~~~~}
+
+static double now_s(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
+
+/* hand-rolled reference: same job, same zero-copy contract */
+typedef struct { const char* p; size_t len; } HArg;
+static long hand_parse(const char* s, size_t n, HArg* args, int max_args, unsigned long long* bytes) {
+    size_t p = 0; long cmds = 0;
+    while (p < n) {
+        if (s[p++] != '*') return -1;
+        long argc = 0;
+        while (p < n && s[p] >= '0' && s[p] <= '9') argc = argc * 10 + (s[p++] - '0');
+        if (p + 2 > n || s[p] != '\r' || s[p+1] != '\n') return -1;
+        p += 2;
+        if (argc > max_args) return -1;
+        for (long i = 0; i < argc; i++) {
+            if (p >= n || s[p++] != '$') return -1;
+            long len = 0;
+            while (p < n && s[p] >= '0' && s[p] <= '9') len = len * 10 + (s[p++] - '0');
+            if (p + 2 > n || s[p] != '\r' || s[p+1] != '\n') return -1;
+            p += 2;
+            if (p + (size_t)len + 2 > n) return -1;
+            args[i].p = s + p; args[i].len = (size_t)len;
+            *bytes += (unsigned long long)len;
+            p += (size_t)len;
+            if (s[p] != '\r' || s[p+1] != '\n') return -1;
+            p += 2;
+        }
+        cmds++;
+    }
+    return cmds;
+}
+
+int main(int argc, char** argv) {
+    int NCMD = argc > 1 ? atoi(argv[1]) : 100000;
+    int K = argc > 2 ? atoi(argv[2]) : 30, T = argc > 3 ? atoi(argv[3]) : 3;
+
+    /* synthesize the pipeline */
+    size_t cap = (size_t)NCMD * 64;
+    char* buf = (char*)malloc(cap);
+    size_t n = 0;
+    for (int i = 0; i < NCMD; i++) {
+        char key[32], val[32];
+        int kl = snprintf(key, sizeof key, "key:%d", i);
+        int vl = snprintf(val, sizeof val, "value-%d-xxxxxxxx", i);
+        n += (size_t)snprintf(buf + n, cap - n, "*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
+                              kl, key, vl, val);
+    }
+
+    CCArena ar = cc_arena_create(64 << 20);
+    double best;
+
+    best = 1e18;
+    long gc = 0; unsigned long long gb = 0;
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) {
+            cc_arena_reset(&ar);
+            size_t pos = 0; gc = 0; gb = 0;
+            while (pos < n) {
+                RespCmd c;
+                if (!RespCmd_read(buf, n, &pos, &ar, &c)) { printf("gen FAIL\n"); return 1; }
+                gc++;
+                for (size_t j = 0; j < c.args_n; j++) gb += c.args[j].data.len;
+            }
+        }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("resp gen      %6.0f MB/s  %6.2f Mcmd/s  (cmds=%ld argbytes=%llu)\n",
+           n*(double)K/best/1e6, gc*(double)K/best/1e6, gc, gb);
+
+    best = 1e18;
+    long hc = 0; unsigned long long hb = 0;
+    HArg ha[16];
+    for (int t = 0; t < T; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) { hb = 0; hc = hand_parse(buf, n, ha, 16, &hb); if (hc < 0) { printf("hand FAIL\n"); return 1; } }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("resp hand     %6.0f MB/s  %6.2f Mcmd/s  (cmds=%ld argbytes=%llu)\n",
+           n*(double)K/best/1e6, hc*(double)K/best/1e6, hc, hb);
+
+    if (gc != hc || gb != hb) { printf("MISMATCH gen %ld/%llu hand %ld/%llu\n", gc, gb, hc, hb); return 1; }
+    /* ENCODE: generated writer vs hand snprintf — the Redis-client hot path */
+    {
+        RespArg parts[3];
+        parts[0].data = cc_slice_from_buffer((void*)"SET", 3);
+        parts[1].data = cc_slice_from_buffer((void*)"key:12345", 9);
+        parts[2].data = cc_slice_from_buffer((void*)"value-12345-xxxxxxxx", 20);
+        RespCmd cmd = { .argc = 0, .args = parts, .args_n = 3 };
+        char* eb = (char*)malloc((size_t)NCMD * 64);
+        size_t en = 0;
+        best = 1e18;
+        for (int t = 0; t < T; t++) { double t0 = now_s();
+            for (int i = 0; i < K; i++) {
+                en = 0;
+                for (int j = 0; j < NCMD; j++) {
+                    size_t w = RespCmd_write(&cmd, eb + en, (size_t)NCMD * 64 - en);
+                    if (!w) { printf("encode FAIL\n"); return 1; }
+                    en += w;
+                }
+            }
+            double dt = now_s() - t0; if (dt < best) best = dt; }
+        printf("resp enc gen  %6.0f MB/s  %6.2f Mcmd/s\n", en*(double)K/best/1e6, NCMD*(double)K/best/1e6);
+        best = 1e18;
+        for (int t = 0; t < T; t++) { double t0 = now_s();
+            for (int i = 0; i < K; i++) {
+                en = 0;
+                for (int j = 0; j < NCMD; j++) {
+                    /* fair peer: dynamic ints + memcpy from parts, no checks */
+                    char* d = eb + en; size_t o = 0;
+                    d[o++] = '*';
+                    { unsigned long long u = (unsigned long long)3; char nb[21]; int nl = 0;
+                      do { nb[nl++] = (char)('0' + u % 10); u /= 10; } while (u);
+                      while (nl) d[o++] = nb[--nl]; }
+                    d[o++] = '\r'; d[o++] = '\n';
+                    for (int a2 = 0; a2 < 3; a2++) {
+                        d[o++] = '$';
+                        { unsigned long long u = (unsigned long long)parts[a2].data.len; char nb[21]; int nl = 0;
+                          do { nb[nl++] = (char)('0' + u % 10); u /= 10; } while (u);
+                          while (nl) d[o++] = nb[--nl]; }
+                        d[o++] = '\r'; d[o++] = '\n';
+                        memcpy(d + o, parts[a2].data.ptr, parts[a2].data.len); o += parts[a2].data.len;
+                        d[o++] = '\r'; d[o++] = '\n';
+                    }
+                    en += o;
+                }
+            }
+            double dt = now_s() - t0; if (dt < best) best = dt; }
+        printf("resp enc hand %6.0f MB/s  %6.2f Mcmd/s  (dynamic, unchecked)\n", en*(double)K/best/1e6, NCMD*(double)K/best/1e6);
+        free(eb);
+    }
+
+    return 0;
+}
