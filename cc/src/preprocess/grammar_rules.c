@@ -1005,7 +1005,7 @@ static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
 
 /* ------------------------------------------------------------- emitter ---- */
 
-typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; int risk; } EB;
+typedef struct { char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K; int mode; int dk; int risk; int dom; } EB;
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -1128,10 +1128,18 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                   "        if (c->total == c->cap && !%s__tgrow(c)) goto %s;\n"
                   "        c->tape[c->total].meta = 0x100u | %du;\n"
                   "        c->tape[c->total].u.bytes = (const char*)(s + p);   /* source anchor */\n"
-                  "        c->bstack[c->bdepth++] = c->total++; }\n", fail, g->name, fail, rid);
+                  "%s"
+                  "        c->bstack[c->bdepth++] = c->total++; }\n", fail, g->name, fail, rid,
+               e->dom ? "        if (c->sb) c->vbase[c->bdepth] = c->vsp;\n" : "");
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
-                  "        c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10; }\n");
+        if (e->dom)
+            eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
+                      "        c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10;\n"
+                      "        if (c->sb && !%s__shape_end(c, bi)) goto %s;\n"
+                      "    }\n", g->name, fail);
+        else
+            eb_fmt(e, "    { size_t bi = c->bstack[--c->bdepth];\n"
+                      "        c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10; }\n");
         break;
     }
     case RN_SEQ:
@@ -1203,7 +1211,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         {
         int kp = e->mode == 1 ? rk_node(g, e->K, nd) : 0;
         int rk = kp ? e->risk : 0;
-        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth, lv%d = c->vsp;\n", k, k, k, k);
         else          eb_fmt(e, "    { size_t sv%d = p;\n", k);
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
@@ -1213,7 +1221,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 eb_fmt(e, "    dr%d = 1;\n", e->dk);
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
             eb_fmt(e, "    goto Lok%d;\n", k);
-            if (kp && rk)      eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\n", br, k, k, k);
+            if (kp && rk)      eb_fmt(e, "%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; c->vsp = lv%d; }\n", br, k, k, k, k);
             else if (kp)       eb_fmt(e, "%s: p = sv%d; %s__unwind(c, s + p);\n", br, k, g->name);
             else               eb_fmt(e, "%s: p = sv%d;\n", br, k);
             if (last) eb_fmt(e, "    goto %s;\n", fail);
@@ -1228,11 +1236,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth;\n", k, k, k);
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d = p; size_t lt%d = c->total, ld%d = c->bdepth, lv%d = c->vsp;\n", k, k, k, k);
         else          eb_fmt(e, "    { size_t sv%d = p;\n", k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp && rk) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
-                             k, br, k, k, k, k);
+        if (kp && rk) eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; c->vsp = lv%d; }\nLok%d: ; }\n",
+                             k, br, k, k, k, k, k);
         else if (kp)  eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d; %s__unwind(c, s + p);\nLok%d: ; }\n",
                              k, br, k, g->name, k);
         else          eb_fmt(e, "    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n", k, br, k, k);
@@ -1280,13 +1288,13 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        if (kp && rk) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0, ld%d = 0;\n"
-                                "    for (;;) { sv%d = p; lt%d = c->total; ld%d = c->bdepth;\n",
-                             k, k, k, k, k, k);
+        if (kp && rk) eb_fmt(e, "    { size_t sv%d; size_t lt%d = 0, ld%d = 0, lv%d = 0;\n"
+                                "    for (;;) { sv%d = p; lt%d = c->total; ld%d = c->bdepth; lv%d = c->vsp;\n",
+                             k, k, k, k, k, k, k, k);
         else          eb_fmt(e, "    { size_t sv%d;\n    for (;;) { sv%d = p;\n", k, k);
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        if (kp && rk) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; }\nLok%d: ; }\n",
-                             k, k, br, k, k, k, k);
+        if (kp && rk) eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; { c->total = lt%d; c->bdepth = ld%d; c->vsp = lv%d; }\nLok%d: ; }\n",
+                             k, k, br, k, k, k, k, k);
         else if (kp)  eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d; %s__unwind(c, s + p);\nLok%d: ; }\n",
                              k, k, br, k, g->name, k);
         else          eb_fmt(e, "    if (p == sv%d) break;\n    }\n    goto Lok%d;\n%s: p = sv%d;\nLok%d: ; }\n",
@@ -1303,9 +1311,10 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0 };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0 };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
+    e.dom = want_dom;
     e.risk = rg_grammar_risk(g, F, K);
 
     /* the manifest: what this declaration lowered to, and how to call it —
@@ -1351,7 +1360,14 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    union { const char* bytes; } u; } %sNode;\n",
            g->name);
     eb_fmt(&e, "typedef struct { %sNode* tape; size_t total, cap;\n"
-               "    size_t bstack[512]; size_t bdepth; CCArena* arena; } %s__ctx;\n",
+               "    size_t bstack[512]; size_t bdepth; CCArena* arena;\n"
+               "    /* shaped-DOM hook (armed by _dom; NULL for plain parse):\n"
+               "     * completed containers hand their value up this stack —\n"
+               "     * one push per container, anchored for derived restore */\n"
+               "    CCShapeB* sb;\n"
+               "    CCShapeVal* vstack; const unsigned char** vanchor;\n"
+               "    size_t vsp, vcap;\n"
+               "    size_t vbase[512]; } %s__ctx;\n",
            g->name, g->name);
     eb_fmt(&e, "static __attribute__((noinline)) int %s__tgrow(%s__ctx* c) {\n"
                "    size_t nc = c->cap * 2;\n"
@@ -1394,7 +1410,11 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    while (c->total > 1 && (const unsigned char*)c->tape[c->total - 1].u.bytes >= sv)\n"
                "        c->total--;\n"
                "    while (c->bdepth > 0 && c->bstack[c->bdepth - 1] >= c->total) c->bdepth--;\n"
+               "    if (c->vanchor)\n"
+               "        while (c->vsp > 0 && c->vanchor[c->vsp - 1] >= sv) c->vsp--;\n"
                "}\n", g->name, g->name);
+    if (want_dom)
+        eb_fmt(&e, "static int %s__shape_end(%s__ctx* c, size_t bi);\n", g->name, g->name);
     }   /* want_build: tape substrate */
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
@@ -1562,6 +1582,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
                "    if (!c0.tape) return 0;\n"
                "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
+               "    c0.sb = 0; c0.vstack = 0; c0.vanchor = 0; c0.vsp = 0; c0.vcap = 0;\n"
                "    c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */\n"
                "    c0.tape[0].u.bytes = s;             /* source anchor */\n"
                "#if %s__ENTRY_PURE\n"
@@ -1611,97 +1632,145 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     }   /* want_build: parse + collect entries */
 
     if (want_dom) {
-        /* ---- shaped (hidden-class) DOM: a post-pass over the committed tape,
-         * exactly like collect — the parse machinery is untouched. Container
-         * rules whose shape narrows to a member list (the same rw_match_*
-         * analysis narrowing uses) build OBJECTS: keys go to the shared shape
-         * trie in the caller's CCShapeReg, instances carry 16 B value slots
-         * only. Everything else builds ARRAYS. Pairing is verified per
-         * container at runtime; a container that doesn't pair cleanly falls
-         * back to an array — never wrong, just not key-addressable. */
+        /* ---- shaped (hidden-class) DOM, CONSTRUCTED AS WE TAPE ----
+         * Shaping happens at each container's END marker, bottom-up, while
+         * its children are committed, contiguous, and cache-hot: leaves
+         * shape inline (dirty spans decode HERE — a codec failure is an
+         * ordinary branch failure); completed child containers hand their
+         * value up the ctx value stack (one push per container, anchored
+         * so derived restore unwinds them like keeps). No post-pass, no
+         * recursive walker, each node visited once. Container rules are
+         * classified by the SAME narrowing analysis the schema tier uses:
+         * member lists build OBJECTS (keys -> the caller's persistent
+         * CCShapeReg trie; instances carry 16 B value slots only), all
+         * else ARRAYS; a container that doesn't pair (key,value) cleanly
+         * falls back to an array — never wrong, just not key-addressable. */
         eb_fmt(&e, "static const unsigned char %s__dynobj[%d] = {", g->name, g->nrules);
         for (int r = 0; r < g->nrules; r++)
             eb_fmt(&e, "%s%d", r ? "," : "", rw_is_objlist(g, e.F, e.K, r) ? 1 : 0);
         eb_fmt(&e, "};\n");
-        eb_fmt(&e, "static int %s__dyn(const %sNode* nd, CCShapeB* b, CCShapeVal* out) {\n"
-                   "    unsigned long long m = nd->meta;\n"
-                   "    if (!((m >> 8) & 1u)) {\n"
-                   "        *out = cc_shape_leaf((int)(m & 0xFFu), nd->u.bytes,\n"
-                   "                             (size_t)(m >> 10), (int)((m >> 9) & 1u));\n"
-                   "        return 1;\n    }\n"
-                   "    { size_t span = (size_t)(m >> 10);\n"
-                   "      int id = (int)(m & 0xFFu);\n"
-                   "      /* one hop pass: count children; objects verify (key,value) pairing */\n"
-                   "      size_t cnt = 0;\n"
-                   "      int pairs = id != 0xFF && %s__dynobj[id];\n"
-                   "      { size_t t = 1; int odd = 0;\n"
-                   "        while (t < span) {\n"
-                   "            unsigned long long cm = nd[t].meta;\n"
-                   "            if (pairs && !odd && ((cm >> 8) & 1u)) pairs = 0;\n"
-                   "            odd ^= 1;\n"
-                   "            cnt++;\n"
-                   "            t += ((cm >> 8) & 1u) ? (size_t)(cm >> 10) : 1;\n"
-                   "        }\n"
-                   "        if (odd) pairs = 0;   /* dangling key */\n"
+        eb_fmt(&e, "static __attribute__((noinline)) int %s__vgrow(%s__ctx* c) {\n"
+                   "    size_t nc = c->vcap * 2;\n"
+                   "    CCShapeVal* nv = (CCShapeVal*)cc_arena_realloc(c->arena, c->arena, c->vstack,\n"
+                   "        c->vcap * sizeof(CCShapeVal), nc * sizeof(CCShapeVal), 16);\n"
+                   "    const unsigned char** na = (const unsigned char**)cc_arena_realloc(c->arena, c->arena,\n"
+                   "        (void*)c->vanchor, c->vcap * sizeof(void*), nc * sizeof(void*), 16);\n"
+                   "    if (!nv || !na) return 0;\n"
+                   "    c->vstack = nv; c->vanchor = na; c->vcap = nc; return 1;\n}\n",
+               g->name, g->name);
+        eb_fmt(&e, "static int %s__shape_leaf(%s__ctx* c, const %sNode* ln, CCShapeVal* out) {\n"
+                   "    unsigned long long m = ln->meta;\n"
+                   "    int id = (int)(m & 0xFFu);\n",
+               g->name, g->name, g->name);
+        if (g->ncodecs > 0) {
+            eb_fmt(&e, "    if (m & 0x200u) {   /* dirty: decode now; a discarded branch just wastes arena */\n"
+                       "        CCSlice v;\n"
+                       "        switch (%s__codec_of[id]) {\n", g->name);
+            for (int ci = 0; ci < g->ncodecs; ci++)
+                eb_fmt(&e, "        case %d: if (!%s((const char*)ln->u.bytes, (size_t)(m >> 10), &v, c->arena)) return 0; break;\n",
+                       ci + 1, g->codecs[ci]);
+            eb_fmt(&e, "        default: *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0); return 1;\n"
+                       "        }\n"
+                       "        *out = cc_shape_leaf(id, (const char*)v.ptr, v.len, cc_slice_is_unique(v));\n"
+                       "        return 1;\n    }\n");
+        }
+        eb_fmt(&e, "    *out = cc_shape_leaf(id, ln->u.bytes, (size_t)(m >> 10), 0);\n"
+                   "    return 1;\n}\n");
+        eb_fmt(&e, "static int %s__shape_end(%s__ctx* c, size_t bi) {\n"
+                   "    %sNode* nd = c->tape + bi;\n"
+                   "    size_t span = c->total - bi;\n"
+                   "    int id = (int)(nd->meta & 0xFFu);\n"
+                   "    size_t vb = c->vbase[c->bdepth];\n"
+                   "    size_t vidx = vb;\n"
+                   "    CCShapeVal out;\n"
+                   "    size_t cnt = 0;\n"
+                   "    int pairs = id != 0xFF && id < %d && %s__dynobj[id];\n"
+                   "    { size_t t = 1; int odd = 0;\n"
+                   "      while (t < span) {\n"
+                   "          unsigned long long cm = nd[t].meta;\n"
+                   "          if (pairs && !odd && ((cm >> 8) & 1u)) pairs = 0;\n"
+                   "          odd ^= 1; cnt++;\n"
+                   "          t += ((cm >> 8) & 1u) ? (size_t)(cm >> 10) : 1;\n"
                    "      }\n"
-                   "      if (pairs) {\n"
-                   "          CCShapeObjD od;\n"
-                   "          if (!cc_shape_objd_begin(b, &od, (unsigned)(cnt / 2))) return 0;\n"
-                   "          { size_t t = 1;\n"
-                   "            while (t < span) {\n"
-                   "                const %sNode* kn = nd + t;\n"
-                   "                t++;\n"
-                   "                { unsigned long long vm = nd[t].meta;\n"
-                   "                  CCShapeVal* tgt = cc_shape_objd_slot(b, &od,\n"
-                   "                      kn->u.bytes, (unsigned)(kn->meta >> 10));\n"
-                   "                  if (!tgt) return 0;\n"
-                   "                  if (!((vm >> 8) & 1u)) {   /* leaf value: no call */\n"
-                   "                      *tgt = cc_shape_leaf((int)(vm & 0xFFu), nd[t].u.bytes,\n"
-                   "                                           (size_t)(vm >> 10), (int)((vm >> 9) & 1u));\n"
-                   "                      t += 1;\n"
-                   "                  } else {\n"
-                   "                      if (!%s__dyn(nd + t, b, tgt)) return 0;\n"
-                   "                      t += (size_t)(vm >> 10);\n"
-                   "                  } }\n"
-                   "            } }\n"
-                   "          return cc_shape_objd_end(b, &od, out);\n"
-                   "      }\n"
-                   "      { CCShapeVal av;\n"
-                   "        CCShapeVal* items = cc_shape_arrd(b, cnt, &av);\n"
+                   "      if (odd) pairs = 0;   /* dangling key */\n"
+                   "    }\n"
+                   "    if (pairs) {\n"
+                   "        CCShapeObjD od;\n"
+                   "        if (!cc_shape_objd_begin(c->sb, &od, (unsigned)(cnt / 2))) return 0;\n"
+                   "        { size_t t = 1;\n"
+                   "          while (t < span) {\n"
+                   "              const %sNode* kn = nd + t;\n"
+                   "              t++;\n"
+                   "              { unsigned long long vm = nd[t].meta;\n"
+                   "                CCShapeVal* tgt = cc_shape_objd_slot(c->sb, &od,\n"
+                   "                    kn->u.bytes, (unsigned)(kn->meta >> 10));\n"
+                   "                if (!tgt) return 0;\n"
+                   "                if (!((vm >> 8) & 1u)) {\n"
+                   "                    if (!%s__shape_leaf(c, nd + t, tgt)) return 0;\n"
+                   "                    t += 1;\n"
+                   "                } else {\n"
+                   "                    *tgt = c->vstack[vidx++];\n"
+                   "                    t += (size_t)(vm >> 10);\n"
+                   "                } }\n"
+                   "          } }\n"
+                   "        if (!cc_shape_objd_end(c->sb, &od, &out)) return 0;\n"
+                   "    } else {\n"
+                   "        CCShapeVal av;\n"
+                   "        CCShapeVal* items = cc_shape_arrd(c->sb, cnt, &av);\n"
                    "        if (!items) return 0;\n"
                    "        { size_t t = 1, i = 0;\n"
                    "          while (t < span) {\n"
                    "              unsigned long long cm = nd[t].meta;\n"
-                   "              if (!((cm >> 8) & 1u)) {   /* leaf element: no call */\n"
-                   "                  items[i++] = cc_shape_leaf((int)(cm & 0xFFu), nd[t].u.bytes,\n"
-                   "                                             (size_t)(cm >> 10), (int)((cm >> 9) & 1u));\n"
+                   "              if (!((cm >> 8) & 1u)) {\n"
+                   "                  if (!%s__shape_leaf(c, nd + t, &items[i++])) return 0;\n"
                    "                  t += 1;\n"
                    "              } else {\n"
-                   "                  if (!%s__dyn(nd + t, b, &items[i++])) return 0;\n"
+                   "                  items[i++] = c->vstack[vidx++];\n"
                    "                  t += (size_t)(cm >> 10);\n"
                    "              }\n"
                    "          } }\n"
-                   "        *out = av;\n"
-                   "        return 1;\n"
-                   "      } }\n"
-                   "}\n",
-               g->name, g->name, g->name, g->name, g->name, g->name);
-        eb_fmt(&e, "static __attribute__((unused)) int %s_dom(const char* s, size_t n,\n"
+                   "        out = av;\n"
+                   "    }\n"
+                   "    /* consume children values, push own (anchored at the open) */\n"
+                   "    c->vsp = vb;\n"
+                   "    if (c->vsp == c->vcap && !%s__vgrow(c)) return 0;\n"
+                   "    c->vanchor[c->vsp] = (const unsigned char*)nd->u.bytes;\n"
+                   "    c->vstack[c->vsp++] = out;\n"
+                   "    return 1;\n}\n",
+               g->name, g->name, g->name, g->nrules, g->name, g->name, g->name, g->name, g->name);
+        eb_fmt(&e, "static __attribute__((unused)) int %s_dom(const char* s0, size_t n,\n"
                    "        CCShapeReg* reg, CCArena* arena, CCShapeVal* out) {\n"
-                   "    %sNode* tape = %s_parse(s, n, arena);\n"
-                   "    if (!tape) return 0;\n"
-                   "    { CCShapeB b;\n"
-                   "      cc_shape_build(&b, reg, arena);\n"
-                   "      { size_t total = (size_t)(tape[0].meta >> 10);\n"
-                   "        if (total > 1) {\n"
-                   "            size_t cs = ((tape[1].meta >> 8) & 1u) ? (size_t)(tape[1].meta >> 10) : 1;\n"
-                   "            if (1 + cs == total)   /* single root value: unwrap */\n"
-                   "                return %s__dyn(tape + 1, &b, out);\n"
-                   "        }\n"
-                   "        return %s__dyn(tape, &b, out);   /* zero/many roots: array */\n"
-                   "      } }\n"
-                   "}\n",
-               g->name, g->name, g->name, g->name, g->name);
+                   "    const unsigned char* s = (const unsigned char*)s0;\n"
+                   "    %s__ctx c0;\n"
+                   "    size_t p = 0;\n"
+                   "    CCShapeB b;\n"
+                   "    c0.cap = 1024;\n"
+                   "    c0.tape = (%sNode*)cc_arena_alloc_local(arena, c0.cap * sizeof(%sNode), _Alignof(%sNode));\n"
+                   "    if (!c0.tape) return 0;\n"
+                   "    c0.total = 1; c0.bdepth = 0; c0.arena = arena;\n"
+                   "    c0.tape[0].meta = 0x100u | 0xFFu;\n"
+                   "    c0.tape[0].u.bytes = (const char*)s;\n"
+                   "    cc_shape_build(&b, reg, arena);\n"
+                   "    c0.sb = &b;\n"
+                   "    c0.vcap = 1024;\n"
+                   "    c0.vstack = (CCShapeVal*)cc_arena_alloc_local(arena, c0.vcap * sizeof(CCShapeVal), 16);\n"
+                   "    c0.vanchor = (const unsigned char**)cc_arena_alloc_local(arena, c0.vcap * sizeof(void*), 16);\n"
+                   "    if (!c0.vstack || !c0.vanchor) return 0;\n"
+                   "    c0.vsp = 0;\n"
+                   "    c0.vbase[0] = 0;\n"
+                   "#if %s__ENTRY_PURE\n"
+                   "    if (!%s__ENTRY_B((const unsigned char*)s, n, &p) || p != n) return 0;\n"
+                   "#else\n"
+                   "    if (!%s__ENTRY_B(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;\n"
+                   "#endif\n"
+                   "    c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;\n"
+                   "    c0.bdepth = 0;\n"
+                   "    if (!%s__shape_end(&c0, 0)) return 0;\n"
+                   "    *out = c0.vstack[0];\n"
+                   "    if (cc_shape_kind(out) == CC_SHAPE_ARR && out->u.arr->n == 1)\n"
+                   "        *out = out->u.arr->items[0];   /* single root: unwrap */\n"
+                   "    return 1;\n}\n",
+               g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name, g->name);
     }
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
@@ -3603,7 +3672,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     }
 
     {
-        EB e = { &out, &len, &cap, F, K, 0, -1, 0 };
+        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0 };
         int lbl = 0;
         unsigned char local_xdone[R_MAX_RULES];
         unsigned char* xdone = reg ? reg->x_done : local_xdone;
