@@ -1157,6 +1157,89 @@ static void rg_cs_expr(const RG* g, int cs, char* out, size_t outs) {
              g->name, cs);
 }
 
+/* ---- JSON-number shape: int · opt frac · opt exp, with int early-out ---- */
+static int rg_unwrap_rule_body(const RG* g, int nd) {
+    int hops = 0;
+    while (g->nodes[nd].kind == RN_REF && hops++ < 8)
+        nd = g->rules[g->nodes[nd].nkids].node;
+    return nd;
+}
+static int rg_is_cs_range_nd(const RG* g, int nd, int lo, int hi) {
+    int eff = rg_effective(g, nd);
+    if (g->nodes[eff].kind != RN_CHARSET) return 0;
+    int a, b;
+    return rf_charset_range(g->sets[g->nodes[eff].a], &a, &b) && a == lo && b == hi;
+}
+static int rg_is_cs_pair(const RG* g, int nd, int x, int y) {
+    int eff = rg_effective(g, nd);
+    if (g->nodes[eff].kind != RN_CHARSET) return 0;
+    int bytes[4];
+    if (rf_charset_bytes(g->sets[g->nodes[eff].a], bytes, 4) != 2) return 0;
+    return (bytes[0] == x && bytes[1] == y) || (bytes[0] == y && bytes[1] == x);
+}
+static int rg_is_int_shape(const RG* g, int nd) {
+    nd = rg_unwrap_rule_body(g, nd);
+    const RNode* x = &g->nodes[nd];
+    if (x->kind != RN_SEQ || x->nkids != 2) return 0;
+    int optm = g->kids[x->b], alt = g->kids[x->b + 1];
+    if (g->nodes[optm].kind != RN_OPT || rw_lit1(g, g->nodes[optm].a) != '-') return 0;
+    if (g->nodes[alt].kind != RN_ALT || g->nodes[alt].nkids != 2) return 0;
+    int z = g->kids[g->nodes[alt].b], rest = g->kids[g->nodes[alt].b + 1];
+    if (rw_lit1(g, z) != '0') return 0;
+    rest = rg_unwrap_rule_body(g, rest);
+    if (g->nodes[rest].kind != RN_SEQ || g->nodes[rest].nkids != 2) return 0;
+    if (!rg_is_cs_range_nd(g, g->kids[g->nodes[rest].b], '1', '9')) return 0;
+    int ad = g->kids[g->nodes[rest].b + 1];
+    return g->nodes[ad].kind == RN_ANY && rg_is_cs_range_nd(g, g->nodes[ad].a, '0', '9');
+}
+static int rg_is_frac_opt(const RG* g, int nd) {
+    if (g->nodes[nd].kind != RN_OPT) return 0;
+    int body = g->nodes[nd].a;
+    if (g->nodes[body].kind != RN_SEQ || g->nodes[body].nkids != 2) return 0;
+    if (rw_lit1(g, g->kids[g->nodes[body].b]) != '.') return 0;
+    int sm = g->kids[g->nodes[body].b + 1];
+    return g->nodes[sm].kind == RN_SOME && rg_is_cs_range_nd(g, g->nodes[sm].a, '0', '9');
+}
+static int rg_is_exp_opt(const RG* g, int nd) {
+    if (g->nodes[nd].kind != RN_OPT) return 0;
+    int body = g->nodes[nd].a;
+    if (g->nodes[body].kind != RN_SEQ || g->nodes[body].nkids != 3) return 0;
+    int ee = g->kids[g->nodes[body].b];
+    int sg = g->kids[g->nodes[body].b + 1];
+    int sm = g->kids[g->nodes[body].b + 2];
+    if (!rg_is_cs_pair(g, ee, 'e', 'E')) return 0;
+    if (g->nodes[sg].kind != RN_OPT || !rg_is_cs_pair(g, g->nodes[sg].a, '+', '-')) return 0;
+    return g->nodes[sm].kind == RN_SOME && rg_is_cs_range_nd(g, g->nodes[sm].a, '0', '9');
+}
+/* SEQ(int, opt frac, opt exp) — the keep-body of JSON `number`. */
+static int rg_match_number_seq(const RG* g, int nd, int* out_int) {
+    const RNode* x = &g->nodes[nd];
+    if (x->kind != RN_SEQ || x->nkids != 3) return 0;
+    int a = g->kids[x->b], b = g->kids[x->b + 1], c = g->kids[x->b + 2];
+    if (!rg_is_int_shape(g, a) || !rg_is_frac_opt(g, b) || !rg_is_exp_opt(g, c)) return 0;
+    *out_int = a;
+    return 1;
+}
+/* After int: if next is not ./e/E, skip frac/exp scaffolding entirely. */
+static void rg_emit_number_fast(const RG* g, EB* e, int int_nd, const char* fail, int* lbl, int rid) {
+    int k = (*lbl)++;
+    rg_emit_node(g, e, int_nd, fail, lbl, rid);
+    eb_fmt(e, "    if (p < n && (s[p] == 46 || s[p] == 69 || s[p] == 101)) {\n");
+    eb_fmt(e, "    if (s[p] == 46) {\n"
+              "      size_t svf%d = p; p++;\n"
+              "      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = svf%d;\n"
+              "      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }\n"
+              "    }\n", k, k);
+    eb_fmt(e, "    if (p < n && (s[p] == 69 || s[p] == 101)) {\n"
+              "      size_t sve%d = p; p++;\n"
+              "      if (p < n && (s[p] == 43 || s[p] == 45)) p++;\n"
+              "      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = sve%d;\n"
+              "      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }\n"
+              "    }\n", k, k);
+    eb_fmt(e, "    }\n");
+    e->last_pad = -1;
+}
+
 /* Emit a pad rule by index (inline when tiny). No-op if already satisfied. */
 static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int* lbl) {
     if (pad < 0 || e->last_pad == pad) return;
@@ -1269,6 +1352,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         }
     }
     case RN_SEQ: {
+        int int_nd;
+        if (e->omit_lead_pad < 0 && rg_match_number_seq(g, nd, &int_nd)) {
+            rg_emit_number_fast(g, e, int_nd, fail, lbl, rid);
+            break;
+        }
         int i = 0;
         if (e->omit_lead_pad >= 0) {
             while (i < x->nkids &&
