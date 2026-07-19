@@ -826,6 +826,40 @@ static int rg_effective(const RG* g, int nd) {
     return nd;
 }
 
+/* any [some CS | ESC] with FIRST(ESC) ∩ CS = ∅: fused content scan (golden
+ * string body). Avoids per-chunk ALT switch around the SWAR run. */
+static int rg_scan_body_alt(const RG* g, RFirst* F, int alt, int* out_cs, int* out_esc) {
+    const RNode* x = &g->nodes[alt];
+    if (x->kind != RN_ALT || x->nkids != 2) return 0;
+    int cs = -1, esc = -1;
+    for (int i = 0; i < 2; i++) {
+        int br = g->kids[x->b + i];
+        const RNode* b = &g->nodes[br];
+        if (b->kind == RN_SOME) {
+            int eff = rg_effective(g, b->a);
+            if (g->nodes[eff].kind == RN_CHARSET) {
+                if (cs >= 0) return 0;
+                cs = g->nodes[eff].a;
+                continue;
+            }
+        }
+        if (esc >= 0) return 0;
+        esc = br;
+    }
+    if (cs < 0 || esc < 0) return 0;
+    unsigned char ef[32]; int enul = 0;
+    memset(ef, 0, sizeof ef);
+    rf_node(g, F, esc, ef, &enul);
+    if (enul) return 0;
+    for (int b = 0; b < 256; b++)
+        if ((ef[b >> 3] & (1u << (b & 7))) &&
+            (g->sets[cs][b >> 3] & (1u << (b & 7))))
+            return 0;
+    *out_cs = cs;
+    *out_esc = esc;
+    return 1;
+}
+
 /* Tiny-pure-rule inlining: a ref to a rule whose subtree has no keep/collect,
  * no non-alias refs, and few nodes (ws, digit runs) emits the body inline —
  * golden's shape, where whitespace skipping is a loop, not a call. */
@@ -1018,6 +1052,8 @@ typedef struct {
 } EB;
 
 static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
+static int rw_lit1(const RG* g, int nd);
+static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl, int rid);
 
 static void eb_fmt(EB* e, const char* fmt, ...) {
     char tmp[16384];
@@ -1051,6 +1087,44 @@ static int rg_leading_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
     return rw_pad_rule(g, F, K, g->kids[x->b]);
 }
 
+/* Trailing pad of `rule`, looking through a final REF (so `member` ending in
+ * padded `value` reports value's trailing pad). Else -1. */
+static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
+    int hops = 0;
+    while (hops++ < 8) {
+        int body = g->rules[rule].node;
+        while (g->nodes[body].kind == RN_COLLECT || g->nodes[body].kind == RN_KEEP)
+            body = g->nodes[body].a;
+        const RNode* x = &g->nodes[body];
+        if (x->kind == RN_REF) { rule = x->nkids; continue; }
+        if (x->kind != RN_SEQ || x->nkids < 1) return -1;
+        int last = g->kids[x->b + x->nkids - 1];
+        int pad = rw_pad_rule(g, F, K, last);
+        if (pad >= 0) return pad;
+        if (g->nodes[last].kind == RN_REF) { rule = g->nodes[last].nkids; continue; }
+        return -1;
+    }
+    return -1;
+}
+
+/* Emit a pad rule by index (inline when tiny). No-op if already satisfied. */
+static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int* lbl) {
+    if (pad < 0 || e->last_pad == pad) return;
+    int body = g->rules[pad].node;
+    if (rg_inline_size(g, body, 0) <= 24)
+        rg_emit_node(g, e, body, fail, lbl, pad);
+    else if (!rk_rule(g, e->K, pad))
+        eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
+               g->name, g->rules[pad].name, fail);
+    else if (e->mode == 1)
+        eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
+               g->name, g->rules[pad].name, fail);
+    else
+        eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
+               g->name, g->rules[pad].name, fail);
+    e->last_pad = pad;
+}
+
 /* Emit statements matching node `nd`; on mismatch: `goto <fail>;` with the
  * cursor restored by the construct that owns <fail>. `p` is the cursor var.
  * `c` is the collect context (NULL under <Name>_match): keeps append spans to
@@ -1067,6 +1141,24 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             int b = (int)(unsigned char)g->pool[x->a];
             eb_fmt(e, "    if (!(p < n && s[p] == %d /*%s*/)) goto %s;\n    p++;\n",
                    b, rw_chr(b, cb), fail);
+        } else if (x->b == 4 || x->b == 5) {
+            /* Word compare — golden's true/false/null path; beats memcmp on
+             * the structural hot path where these are single-byte dispatch arms. */
+            const unsigned char* b = (const unsigned char*)g->pool + x->a;
+            unsigned w = (unsigned)b[0] | ((unsigned)b[1] << 8) |
+                         ((unsigned)b[2] << 16) | ((unsigned)b[3] << 24);
+            char lit[64];
+            rs_esc(lit, sizeof lit, b, x->b);
+            if (x->b == 4)
+                eb_fmt(e, "    if (!(p + 4 <= n)) goto %s;\n"
+                          "    { unsigned int w; memcpy(&w, s + p, 4); if (w != %uu) goto %s; }  /* \"%s\" */\n"
+                          "    p += 4;\n",
+                       fail, w, fail, lit);
+            else
+                eb_fmt(e, "    if (!(p + 5 <= n)) goto %s;\n"
+                          "    { unsigned int w; memcpy(&w, s + p, 4); if (w != %uu || s[p + 4] != %d) goto %s; }  /* \"%s\" */\n"
+                          "    p += 5;\n",
+                       fail, w, (int)b[4], fail, lit);
         } else {
             char lit[64];
             rs_esc(lit, sizeof lit, (const unsigned char*)g->pool + x->a, x->b);
@@ -1089,24 +1181,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int pad = rw_pad_rule(g, e->F, e->K, nd);
         if (pad >= 0) {
             /* Identical pad already satisfied at the call site — skip. */
-            if (e->last_pad == pad) break;
-            int eff = rg_effective(g, nd);
-            if (eff != nd) rg_emit_node(g, e, eff, fail, lbl, rid);
-            else {
-                int body = g->rules[x->nkids].node;
-                if (rg_inline_size(g, body, 0) <= 24)
-                    rg_emit_node(g, e, body, fail, lbl, x->nkids);
-                else if (!rk_rule(g, e->K, x->nkids))
-                    eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
-                           g->name, g->rules[x->nkids].name, fail);
-                else if (e->mode == 1)
-                    eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
-                           g->name, g->rules[x->nkids].name, fail);
-                else
-                    eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
-                           g->name, g->rules[x->nkids].name, fail);
-            }
-            e->last_pad = pad;
+            rg_emit_pad_rule(g, e, pad, fail, lbl);
             break;
         }
         int eff = rg_effective(g, nd);
@@ -1114,6 +1189,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         {
             int body = g->rules[x->nkids].node;
             int lp = rg_leading_pad_rule(g, e->F, e->K, x->nkids);
+            int tp = rg_trailing_pad_rule(g, e->F, e->K, x->nkids);
             int use_np = (lp >= 0 && e->last_pad == lp);
             if (rg_inline_size(g, body, 0) <= 24) {   /* small keep-free-or-raw-keep rules: inline per mode */
                 /* the inlined subtree keeps the TARGET rule's identity: keep
@@ -1121,9 +1197,12 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 if (use_np) e->omit_lead_pad = lp;
                 rg_emit_node(g, e, body, fail, lbl, x->nkids);
                 e->omit_lead_pad = -1;
-                e->last_pad = -1;
+                e->last_pad = tp;
                 break;
             }
+            /* Prefer __np when the lead pad is already satisfied. Otherwise call
+             * the full padded entry (trampoline). Emitting pad+__np at the call
+             * site creates mutual recursion that blocks C inlining — net loss. */
             const char* suf = use_np ? "__np" : "";
             if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
                 eb_fmt(e, "    if (!%s__r_%s%s(s, n, &p)) goto %s;\n",
@@ -1134,7 +1213,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             else
                 eb_fmt(e, "    if (!%s__m_%s%s(s, n, &p)) goto %s;\n",
                        g->name, g->rules[x->nkids].name, suf, fail);
-            e->last_pad = -1;
+            e->last_pad = tp;
             break;
         }
     }
@@ -1338,6 +1417,46 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     }
     case RN_ANY:
     case RN_SOME: {
+        /* Fused string-body scan: any [some CS | ESC] → SWAR run + escape. */
+        if (x->kind == RN_ANY) {
+            int scs = -1, sesc = -1;
+            if (rg_scan_body_alt(g, e->F, x->a, &scs, &sesc)) {
+                int k = (*lbl)++;
+                int T, b1, b2;
+                eb_fmt(e, "    for (;;) {\n");
+                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2)) {
+                    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
+                           k, k);
+                    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k, k);
+                    eb_fmt(e, "        unsigned long long m%d = 0;\n", k);
+                    if (T > 0)
+                        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k, k, k, T, k, k);
+                    if (b1 >= 0)
+                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+                               k, k, b1, k, k, k);
+                    if (b2 >= 0)
+                        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
+                               k, k, b2, k, k, k);
+                    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
+                              "        p += 8;\n    } }\n", k, k);
+                }
+                eb_fmt(e, "    while (p < n && (%s__cs[%d][s[p] >> 3] & (1u << (s[p] & 7u)))) p++;\n",
+                       g->name, scs);
+                {
+                    char br[32];
+                    snprintf(br, sizeof(br), "Le%d", k);
+                    eb_fmt(e, "    { size_t sv%d = p;\n", k);
+                    /* Mark dirty only after a successful escape — probing the
+                     * escape arm at the closing quote must not poison clean spans. */
+                    rg_emit_node(g, e, sesc, br, lbl, rid);
+                    if (e->mode && e->dk >= 0 && !rg_pure_run(g, sesc, 0))
+                        eb_fmt(e, "    dr%d = 1;\n", e->dk);
+                    eb_fmt(e, "    continue;\n%s: p = sv%d; }\n    break;\n    }\n", br, k);
+                }
+                e->last_pad = -1;
+                break;
+            }
+        }
         int eff = rg_effective(g, x->a);
         if (g->nodes[eff].kind == RN_CHARSET) {
             int cs = g->nodes[eff].a;

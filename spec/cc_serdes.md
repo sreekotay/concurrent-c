@@ -276,6 +276,32 @@ many tokenizers.
 tokens) without promoting rules into full schema. Recursive structural domain
 modeling remains the responsibility of schema.
 
+### Whitespace and padding
+
+Rules grammars have no implicit whitespace insertion: every byte a rule
+consumes is written in the grammar. Formats with insignificant whitespace
+declare a pad rule once and bake it into the reused nonterminal:
+
+```c
+ws:    any charset [#' ' #'\t' #'\r' #'\n']
+value: [ws [string | number | object | array] ws]     // padded once, here
+member: [ws string ws #':' value]                     // reuse covers the rest
+```
+
+Only the positions a padded nonterminal cannot cover (e.g. before a key, or
+after an opening delimiter in the empty-container case) mention the pad rule
+again.
+
+**Rule:** Composing padded rules must not cost repeated scanning. When a
+nullable, keep-free pad rule ends where the same pad rule would begin (e.g.
+`ws` followed by a rule whose sequence starts with `ws`), an implementation
+must recognize the adjacency and skip the region once. Authors write the
+grammar in its natural padded form and rely on this guarantee.
+
+**Rule:** Implementations must not insert pad rules the author did not write.
+Whitespace significance inside lexical rules (string bodies, numbers, escapes)
+makes implicit insertion unsound as a default.
+
 ---
 
 ## Schema (`@grammar(schema)`)
