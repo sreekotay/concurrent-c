@@ -1297,7 +1297,9 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     }
 }
 
-static char* rg_emit(const RG* g, int origin_line, int want_match, int want_build) {
+static int rw_is_objlist(const RG* g, RFirst* F, RKeeps* K, int rule);
+
+static char* rg_emit(const RG* g, int origin_line, int want_match, int want_build, int want_dom) {
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
@@ -1315,6 +1317,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         eb_fmt(&e, " *   cc_parse(%s, s, n, arena)              -> %s_parse -> %sNode* tape\n",
                g->name, g->name, g->name);
         eb_fmt(&e, " *   cc_collect(%s, s, n, arena, cb, env)   -> %s_collect\n", g->name, g->name);
+    if (want_dom)
+        eb_fmt(&e, " *   cc_dom(%s, s, n, reg, arena, &out)      -> %s_dom (shaped: hidden-class DOM)\n",
+               g->name, g->name);
         eb_fmt(&e, " *   nodes: %sNode_{id,is_list,len,first,next,count,slice}; ids: %s_KEEP_<rule>\n",
                g->name, g->name);
     }
@@ -1604,6 +1609,82 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                "    return 1;\n}\n",
            g->name, g->name, g->name, g->name);
     }   /* want_build: parse + collect entries */
+
+    if (want_dom) {
+        /* ---- shaped (hidden-class) DOM: a post-pass over the committed tape,
+         * exactly like collect — the parse machinery is untouched. Container
+         * rules whose shape narrows to a member list (the same rw_match_*
+         * analysis narrowing uses) build OBJECTS: keys go to the shared shape
+         * trie in the caller's CCShapeReg, instances carry 16 B value slots
+         * only. Everything else builds ARRAYS. Pairing is verified per
+         * container at runtime; a container that doesn't pair cleanly falls
+         * back to an array — never wrong, just not key-addressable. */
+        eb_fmt(&e, "static const unsigned char %s__dynobj[%d] = {", g->name, g->nrules);
+        for (int r = 0; r < g->nrules; r++)
+            eb_fmt(&e, "%s%d", r ? "," : "", rw_is_objlist(g, e.F, e.K, r) ? 1 : 0);
+        eb_fmt(&e, "};\n");
+        eb_fmt(&e, "static int %s__dyn(const %sNode* nd, CCShapeB* b, CCShapeVal* out) {\n"
+                   "    unsigned long long m = nd->meta;\n"
+                   "    if (!((m >> 8) & 1u)) {\n"
+                   "        *out = cc_shape_leaf((int)(m & 0xFFu), nd->u.bytes,\n"
+                   "                             (size_t)(m >> 10), (int)((m >> 9) & 1u));\n"
+                   "        return 1;\n    }\n"
+                   "    { size_t span = (size_t)(m >> 10);\n"
+                   "      int id = (int)(m & 0xFFu);\n"
+                   "      if (id != 0xFF && %s__dynobj[id]) {\n"
+                   "          int pairs = 1;\n"
+                   "          { size_t t = 1;\n"
+                   "            while (t < span) {\n"
+                   "                if ((nd[t].meta >> 8) & 1u) { pairs = 0; break; }\n"
+                   "                t++;\n"
+                   "                if (t >= span) { pairs = 0; break; }\n"
+                   "                t += ((nd[t].meta >> 8) & 1u) ? (size_t)(nd[t].meta >> 10) : 1;\n"
+                   "            } }\n"
+                   "          if (pairs) {\n"
+                   "              CCShapeObjB ob;\n"
+                   "              cc_shape_obj_begin(b, &ob);\n"
+                   "              { size_t t = 1;\n"
+                   "                while (t < span) {\n"
+                   "                    const %sNode* kn = nd + t;\n"
+                   "                    CCShapeVal vv;\n"
+                   "                    t++;\n"
+                   "                    if (!%s__dyn(nd + t, b, &vv)) return 0;\n"
+                   "                    if (!cc_shape_obj_member(b, &ob, kn->u.bytes,\n"
+                   "                            (unsigned)(kn->meta >> 10), vv)) return 0;\n"
+                   "                    t += ((nd[t].meta >> 8) & 1u) ? (size_t)(nd[t].meta >> 10) : 1;\n"
+                   "                } }\n"
+                   "              return cc_shape_obj_end(b, &ob, out);\n"
+                   "          }\n"
+                   "      }\n"
+                   "      { size_t mk = cc_shape_mark(b);\n"
+                   "        size_t t = 1;\n"
+                   "        while (t < span) {\n"
+                   "            CCShapeVal vv;\n"
+                   "            if (!%s__dyn(nd + t, b, &vv)) return 0;\n"
+                   "            if (!cc_shape_push(b, vv)) return 0;\n"
+                   "            t += ((nd[t].meta >> 8) & 1u) ? (size_t)(nd[t].meta >> 10) : 1;\n"
+                   "        }\n"
+                   "        return cc_shape_arr_end(b, mk, out);\n"
+                   "      } }\n"
+                   "}\n",
+               g->name, g->name, g->name, g->name, g->name, g->name);
+        eb_fmt(&e, "static __attribute__((unused)) int %s_dom(const char* s, size_t n,\n"
+                   "        CCShapeReg* reg, CCArena* arena, CCShapeVal* out) {\n"
+                   "    %sNode* tape = %s_parse(s, n, arena);\n"
+                   "    if (!tape) return 0;\n"
+                   "    { CCShapeB b;\n"
+                   "      cc_shape_build(&b, reg, arena);\n"
+                   "      { size_t total = (size_t)(tape[0].meta >> 10);\n"
+                   "        if (total > 1) {\n"
+                   "            size_t cs = ((tape[1].meta >> 8) & 1u) ? (size_t)(tape[1].meta >> 10) : 1;\n"
+                   "            if (1 + cs == total)   /* single root value: unwrap */\n"
+                   "                return %s__dyn(tape + 1, &b, out);\n"
+                   "        }\n"
+                   "        return %s__dyn(tape, &b, out);   /* zero/many roots: array */\n"
+                   "      } }\n"
+                   "}\n",
+               g->name, g->name, g->name, g->name, g->name);
+    }
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
@@ -2437,6 +2518,12 @@ static int rw_match_member(const RG* g, RFirst* F, RKeeps* K, RNarrow* o) {
 
 /* value: SEQ( pad* core... pad* ) — pads around the core, for bound paths
  * (bound terms replace the core; the pads still belong to the grammar) */
+/* dom classification: does this rule narrow to a member list (object)? */
+static int rw_is_objlist(const RG* g, RFirst* F, RKeeps* K, int rule) {
+    RNarrow nw;
+    return rw_match_list(g, F, K, rule, &nw) && rw_match_member(g, F, K, &nw);
+}
+
 static void rw_match_value(const RG* g, RFirst* F, RKeeps* K, int vrule, RNarrow* o) {
     int body = rw_unwrap(g, g->rules[vrule].node);
     const RNode* x = &g->nodes[body];
@@ -3802,7 +3889,11 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
                          rs_has_op(src, src_len, "cc_collect", name) ||
                          rs_has_dot(src, src_len, name, "parse") ||
                          rs_has_dot(src, src_len, name, "collect");
-        out = rg_emit(g, line, want_match, want_build);
+        int want_dom = rs_has_token(src, src_len, name, "_dom") ||
+                       rs_has_op(src, src_len, "cc_dom", name) ||
+                       rs_has_dot(src, src_len, name, "dom");
+        if (want_dom) want_build = 1;   /* the tape is the dom's substrate */
+        out = rg_emit(g, line, want_match, want_build, want_dom);
         if (out) cc__register_rules(name, body, body_len);   /* schemas may `use` it */
     } else {
         snprintf(err, err_sz, "%s (at line %d)", g->err, rg_line_at(g, g->err_at));

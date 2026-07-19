@@ -23,6 +23,17 @@
  *                                           composes with @string templates
  *                                           (`${cmd.to_str(&a)}`) and the
  *                                           language's x.to_str(arena) idiom
+ *   cc_dom(Json, s, n, reg, arena, &out)    rules: SHAPED DOM -> CCShapeVal.
+ *                                           Hidden classes (<ccc/cc_shape.cch>):
+ *                                           instances carry 16 B value slots
+ *                                           only; keys live in the caller's
+ *                                           persistent CCShapeReg trie. Member-
+ *                                           list containers (derived from the
+ *                                           grammar's own rules) build objects,
+ *                                           everything else arrays; map-shaped
+ *                                           data degrades to per-instance
+ *                                           dictionaries, never fails.
+ *                                           cc_shape_get(&v, "key") to read.
  *   cc_get(Tweet, &v, "id", &out)           schema: field by NAME -> CCGramValue.
  *                                           Instances stay packed C; the
  *                                           key->field map is per TYPE (the
@@ -86,5 +97,6 @@ typedef struct {
 #define cc_format(T, ...)  T##_to_str(__VA_ARGS__)
 #define cc_get(T, ...)     T##_get(__VA_ARGS__)
 #define cc_field(T, ...)   T##_field(__VA_ARGS__)
+#define cc_dom(T, ...)     T##_dom(__VA_ARGS__)
 
 #endif /* CCC_CC_GRAMMAR_CCH */
