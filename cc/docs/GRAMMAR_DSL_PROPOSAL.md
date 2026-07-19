@@ -62,6 +62,70 @@ Feed formatting (~1.0 GB/s), gcc -O2. Round-trip tested on RESP and JSON
 (parse -> write reproduces wire bytes; corrupted stored counts ignored;
 write -> reparse preserves semantics). Directive-built `fields [...]`
 schemas have no rule to invert and error clearly if write is demanded.
+**The access model — keys separated from values** (one idea, three binding
+times): a schema struct is packed C, and the key->field knowledge the
+parser dispatches on is KEPT, not consumed. (1) COMPTIME: `cc_get(Tweet,
+&v, "id", &out)` — a static `Tweet__fields[]` {name, kind, offset} table
+(the comptime hidden class) plus a compiled length-switch+memcmp dispatch;
+a literal key constant-folds to a member load. Presence is real where
+absence is possible: dispatching schemas carry a bitmap set during parse
+(`out.present`); product schemas report 1. (2) PARSE TIME: `cc_dom(Json,
+s, n, reg, arena, &out)` — the SHAPED DOM (`<ccc/cc_shape.cch>`), V8-style
+hidden classes discovered as data streams through: instances carry 16 B
+value slots only; keys live in a persistent `CCShapeReg` trie shared
+across parses (twitter.json: 147 shapes, 100% transition-cache hits after
+warmup, shapes reused verbatim). Object-vs-array classification derives
+from the SAME narrowing analysis the schema tier uses; construction is
+FUSED into the tape build at container END markers (bottom-up, cache-hot,
+no post-pass; completed containers hand values up an anchored stack so
+derived restore unwinds them like keeps; dirty leaves decode at END, so a
+codec failure is an ordinary branch failure). (3) DEGRADED: map-shaped
+data (high-cardinality keys) must not explode the trie — depth/width caps
+switch an INSTANCE to a per-object dictionary (known transitions at a
+diverged site still ride the trie); the shape cap degrades, never fails.
+Access: `cc_shape_get` = one probe + one memcmp against the shape's
+shared table; prepared keys (`cc_shape_key`/`get_k`) hash once for loops.
+Deliberately NO inline-cache tier: comptime `get` owns that niche.
+**Streaming (the Result face)**: `cc_try_read` speaks the SAME contract as
+channel recv — `bool !>(CCError)`: Ok(true) = frame parsed, pos advanced;
+Ok(false) = clean end AT a frame boundary (pos == n), the graceful close;
+Err(CC_ERR_WOULD_BLOCK) = partial frame, pos unmoved — refill and retry,
+and the CALLER (who alone knows whether more bytes can exist) escalates to
+truncation when the source is closed; Err(CC_ERR_PARSE) = malformed with
+the evidence in hand. Bounds-vs-content is decided EXACTLY at product
+terms (literals, fused int runs, `bytes`, counted items); matcher-tier
+failures report Err conservatively. A parser drain loop reads identically
+to a channel drain loop, and cancellation/timeout/closed pass through the
+parse stage as ordinary CCError values in the same Result plumbing. The
+generated entry is emitted as `!>` SURFACE syntax — the result-type
+rewriter runs after the grammar seam, so generated code speaks the
+language's own idiom.
+**Zero-alloc hot paths**: `f: items S count cap N` gives the count field a
+comptime capacity — the field becomes an INLINE array in the struct
+(`RespArg args[4]`), the parse allocates NOTHING, and a larger count is a
+protocol ERROR (the policy the real redis server itself applies); uncapped
+items keep the arena path. Fused integer binds: an `int` bind whose rule
+is `keep [opt '-' some digit]` (detected structurally, refs resolved)
+emits ONE accumulate-while-scan loop with range compares — the hand
+parser's inner loop, derived from the grammar.
+**Acceptance against real code**: `tests/redis_resp_gen_parity_smoke.ccs`
+includes the real project's hand RESP reader
+(`real_projects/redis/redis_resp.cch`, UNCHANGED) and proves a generated
+wrapper behaviorally identical on identical streams at chunk sizes
+1..4096 — pipelines, inline commands, binary payloads, malformed input,
+over-cap, truncated tails. ~120 lines of hand protocol code vs a 12-line
+schema + ~35-line adapter. Benchmarks (same-window interleaved, plain
+-O2; window drifts +-10% between sessions so only interleaved ratios are
+trusted): RESP parse gen ~3155 MB/s vs hand ~3740 (84%; the remainder is
+the CCSlice provenance contract), RESP encode CHECKED gen at parity with
+unchecked hand (~2.5 GB/s window-dependent); JSON write gen == hand ==
+beats yyjson_mut_write on identical bytes (with a table-driven escape
+codec); JSON parse: match/schema ~90% of the golden tape, shaped DOM ~80%
+of tape (the delta IS the shaping work), tape DOM ~1.25x yyjson default.
+Method note kept on purpose: one measured "+8%" turned out to be a
+frame-pointer-handicapped control AND a detector that never fired —
+re-measured honestly it was +17%, then +14% more from cap. Interleave or
+don't believe.
 **No magic names**: the call-site surface is the `cc_*` operations in
 `<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
 `cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —
@@ -69,10 +133,19 @@ uniform across every grammar/schema and recognized by the demand gate. The
 `Name_*` functions they expand to are the documented lowering contract, and
 every generated splice begins with a MANIFEST comment listing exactly which
 operations its declaration supports.
-Smokes: `tests/grammar_rules_*.ccs`, `tests/grammar_factory_smoke.ccs`
-(file factory, demand gating, Reader),
+Smokes: `tests/grammar_rules_*.ccs` (incl. `_dom_shaped_smoke`: shaped DOM
+vs tape cross-validation, registry persistence, dict fallback),
+`tests/grammar_factory_smoke.ccs` (file factory, demand gating, Reader),
 `tests/grammar_schema_twitter_smoke.ccs` (composed vs DOM cross-validation,
-composed vs directive agreement), `tests/grammar_schema_resp_smoke.ccs`.
+composed vs directive agreement, write round-trips),
+`tests/grammar_schema_resp_smoke.ccs`,
+`tests/grammar_schema_resp_stream_smoke.ccs` (byte-at-a-time try_read
+contract, cap layout/policy), `tests/redis_resp_gen_parity_smoke.ccs`
+(acceptance vs the real project's hand reader), plus 12 negative
+`.ccs`/`.compile_err` pairs. Benchmarks: `examples/serdes/json/bench.sh`
+(`-a` = full ladder: golden tape / yyjson / generated tiers / write /
+shapes prototype / engine shaped DOM) and `examples/serdes/resp/bench.sh`
+(gen vs hand, parse + encode).
 The capture-and-route rewrite lives in `cc/src/preprocess/grammar_seam.c`
 (first step of `cc_comptime_prepare_source`) and lowers
 `@grammar(engine) Name {SENT … SENT}` to a synthesized `@comptime` block calling
