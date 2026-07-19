@@ -1,0 +1,215 @@
+// ACCEPTANCE DIFF for the @grammar streaming face: the real project's hand
+// RESP reader (real_projects/redis/redis_resp.cch, included UNCHANGED) vs a
+// generated-schema wrapper with the same contract, driven with identical
+// byte streams at many chunk sizes. The hand reader is ~120 lines of
+// protocol code; the schema is 12 lines + a ~35-line adapter. Every place
+// the adapter is awkward is an API bug — that's what this test is for.
+//
+// Known, documented divergence: a frame larger than the reader buffer is
+// ERROR (INVALID_ARG) in the hand reader but INCOMPLETE from the schema —
+// the "frame can never fit" policy belongs to the caller's buffer-full
+// handling (the fill layer), so the harness stays under that bound.
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+
+/* project-local deps of redis_resp.cch, provided by redis_idiomatic.ccs in
+ * the real build — minimal faithful versions here */
+static int64_t !>(CCError) parse_i64(CCSlice s) {
+    const char* p = (const char*)s.ptr;
+    size_t n = s.len, i = 0;
+    int neg = 0;
+    if (i < n && (p[i] == '-' || p[i] == '+')) { neg = p[i] == '-'; i++; }
+    if (i >= n) return cc_err(CC_ERROR(CC_ERR_PARSE, "not a number"));
+    int64_t v = 0;
+    for (; i < n; i++) {
+        if (p[i] < '0' || p[i] > '9') return cc_err(CC_ERROR(CC_ERR_PARSE, "not a number"));
+        v = v * 10 + (p[i] - '0');
+    }
+    return cc_ok(neg ? -v : v);
+}
+static CCIoError net_to_io_error(CCNetError e) { (void)e; return cc_io_error(CC_IO_INVALID_ARGUMENT); }
+
+#include "../real_projects/redis/redis_resp.cch"
+
+/* ---- the generated side: the schema IS the protocol description ---- */
+@grammar(schema) GArg {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+    data: bytes len
+    "\r\n"
+~~~~}
+
+@grammar(schema) GCmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
+    args: items GArg argc cap 4
+~~~~}
+
+/* same signature and contract as rr_try_read_args_buffered */
+static RespParseStatus gen_try_read_args_buffered(RespReader* r,
+                                                  CCSlice* args,
+                                                  size_t cap,
+                                                  size_t* out_argc,
+                                                  CCError* err,
+                                                  CCArena* arena) {
+    if (r->end > r->start && r->data[r->start] != '*') {
+        /* inline commands: not '*'-framed — the hand line path (tagged-union
+         * alternation is the future owner of this branch) */
+        size_t saved = r->start;
+        CCSlice line = {0};
+        if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
+        size_t !>(CCError) a = parse_inline_args(line, args, cap);
+        if (a.is_err()) { r->start = saved; *err = a.error(); return RESP_PARSE_ERROR; }
+        *out_argc = a.value();
+        return RESP_PARSE_OK;
+    }
+    size_t pos = 0;
+    GCmd c;
+    bool !>(CCError) rr = GCmd_try_read((const char*)(r->data + r->start),
+                                        r->end - r->start, &pos, arena, &c);
+    if (rr.is_err()) {
+        if (rr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
+        *err = rr.error();
+        return RESP_PARSE_ERROR;
+    }
+    if (!rr.value()) return RESP_PARSE_INCOMPLETE;   /* empty window */
+    if (c.args_n < 1 || c.args_n > cap) {
+        *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+        return RESP_PARSE_ERROR;
+    }
+    for (size_t i = 0; i < c.args_n; i++) args[i] = c.args[i].data;
+    *out_argc = c.args_n;
+    r->start += pos;
+    return RESP_PARSE_OK;
+}
+
+/* ---- parity harness: identical streams, many chunkings, equal event logs ---- */
+typedef struct { int status; size_t argc; unsigned long hash; } Ev;
+
+static unsigned long ev_hash(CCSlice* args, size_t argc) {
+    unsigned long h = 5381;
+    for (size_t i = 0; i < argc; i++) {
+        const unsigned char* p = (const unsigned char*)args[i].ptr;
+        for (size_t j = 0; j < args[i].len; j++) h = h * 33 + p[j];
+        h = h * 33 + 0xFF;
+    }
+    return h;
+}
+
+/* drive one reader over the stream at a fixed chunk size; log events */
+static int drive(const char* stream, size_t slen, size_t chunk, int use_gen,
+                 CCArena* arena, Ev* evs, int max_evs) {
+    static char buf[4096];
+    RespReader r = rr_init(buf, sizeof buf);
+    int nev = 0;
+    size_t fed = 0;
+    for (;;) {
+        /* drain */
+        for (;;) {
+            CCSlice args[4];
+            size_t argc = 0;
+            CCError err = {0};
+            RespParseStatus st = use_gen
+                ? gen_try_read_args_buffered(&r, args, 4, &argc, &err, arena)
+                : rr_try_read_args_buffered(&r, args, 4, &argc, &err);
+            if (st == RESP_PARSE_OK) {
+                if (nev < max_evs) { evs[nev].status = 0; evs[nev].argc = argc;
+                                     evs[nev].hash = ev_hash(args, argc); nev++; }
+                continue;
+            }
+            if (st == RESP_PARSE_ERROR) {
+                if (nev < max_evs) { evs[nev].status = 1; evs[nev].argc = (size_t)err.kind;
+                                     evs[nev].hash = 0; nev++; }
+                return nev;   /* connection would be torn down */
+            }
+            break;   /* INCOMPLETE: need more bytes */
+        }
+        if (fed >= slen) return nev;   /* stream exhausted, mid-frame or clean */
+        rr_compact(&r);
+        size_t room = rr_write_capacity(&r);
+        size_t take = slen - fed;
+        if (take > chunk) take = chunk;
+        if (take > room) take = room;
+        memcpy(r.data + r.end, stream + fed, take);
+        r.end += take;
+        fed += take;
+    }
+}
+
+static int parity(const char* name, const char* stream, size_t slen, CCArena* arena) {
+    static Ev a[128], b[128];
+    size_t chunks[] = { 1, 2, 3, 5, 7, 16, 64, 4096 };
+    for (size_t ci = 0; ci < sizeof chunks / sizeof chunks[0]; ci++) {
+        int na = drive(stream, slen, chunks[ci], 0, arena, a, 128);
+        int nb = drive(stream, slen, chunks[ci], 1, arena, b, 128);
+        if (na != nb) {
+            printf("FAIL: %s chunk=%zu event count %d vs %d\n", name, chunks[ci], na, nb);
+            return 0;
+        }
+        for (int i = 0; i < na; i++) {
+            /* parity on status + argc + payload bytes; error KIND may differ
+             * in message but must agree on PARSE-ness */
+            if (a[i].status != b[i].status ||
+                (a[i].status == 0 && (a[i].argc != b[i].argc || a[i].hash != b[i].hash))) {
+                printf("FAIL: %s chunk=%zu event %d diverges\n", name, chunks[ci], i);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+
+    /* clean pipeline: framed commands */
+    {
+        const char* s =
+            "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n"
+            "*2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n"
+            "*1\r\n$4\r\nPING\r\n"
+            "*4\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n";
+        if (!parity("pipeline", s, strlen(s), &arena)) return 1;
+    }
+    /* inline commands mixed with framed */
+    {
+        const char* s =
+            "PING\r\n"
+            "*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n"
+            "SET inlinekey inlineval\r\n";
+        if (!parity("inline-mix", s, strlen(s), &arena)) return 1;
+    }
+    /* binary payload: embedded CR/LF and NUL inside a bulk */
+    {
+        char s[64]; size_t n = 0;
+        memcpy(s + n, "*2\r\n$3\r\nSET\r\n$8\r\n", 18); n += 18;
+        memcpy(s + n, "a\r\nb\0c\r\n", 8); n += 8;
+        memcpy(s + n, "\r\n", 2); n += 2;
+        if (!parity("binary", s, n, &arena)) return 1;
+    }
+    /* malformed: both must ERROR at the same event */
+    {
+        const char* s = "*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGE!\r\n$1x\r\n";
+        if (!parity("malformed", s, strlen(s), &arena)) return 1;
+    }
+    /* over-cap: argc 5 against cap 4 — both protocol errors */
+    {
+        const char* s = "*5\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n";
+        if (!parity("over-cap", s, strlen(s), &arena)) return 1;
+    }
+    /* truncated tail: stream ends mid-frame — both end INCOMPLETE, no error */
+    {
+        const char* s = "*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$5\r\nmyk";
+        if (!parity("truncated-tail", s, strlen(s), &arena)) return 1;
+    }
+
+    cc_arena_free(&arena);
+    printf("redis RESP gen/hand parity OK\n");
+    return 0;
+}
