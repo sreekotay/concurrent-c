@@ -23,6 +23,15 @@
  *                                           composes with @string templates
  *                                           (`${cmd.to_str(&a)}`) and the
  *                                           language's x.to_str(arena) idiom
+ *   cc_get(Tweet, &v, "id", &out)           schema: field by NAME -> CCGramValue.
+ *                                           Instances stay packed C; the
+ *                                           key->field map is per TYPE (the
+ *                                           comptime hidden class): a static
+ *                                           Tweet__fields[] {name,kind,offset}
+ *                                           table plus a compiled dispatch —
+ *                                           length switch + memcmp, the same
+ *                                           structure the parser uses.
+ *   cc_field(Tweet, "id", 2)                -> const CCGramField* (reflection)
  *
  * UFCS forms work too — the lowered names follow receiver conventions:
  *   Tweet.parse(s, n, &arena, &out)   type-scoped -> Tweet_parse(...)
@@ -38,6 +47,34 @@
 #ifndef CCC_CC_GRAMMAR_CCH
 #define CCC_CC_GRAMMAR_CCH
 
+#include <ccc/cc_slice.cch>
+#include <stddef.h>
+
+/* Field descriptor: one row of a schema's static Name__fields[] table —
+ * the keys, separated from the values. Emitted on demand per schema. */
+typedef enum { CC_GK_INT = 1, CC_GK_SLICE, CC_GK_BYTES, CC_GK_ITEMS } CCGramFieldKind;
+typedef struct {
+    const char* name;
+    unsigned kind;                /* CCGramFieldKind */
+    unsigned off;                 /* byte offset of the value in the struct */
+    unsigned off_n;               /* CC_GK_ITEMS: offset of the size_t count */
+    const char* etype;            /* CC_GK_ITEMS: element schema type name */
+} CCGramField;
+
+/* What Name_get(&v, "field", &out) fills. `present` is real for schemas
+ * with conditional members (a presence bitmap is set during parse); product
+ * schemas always report 1. Manually constructed values have no bitmap set —
+ * presence describes PARSES, not literals. */
+typedef struct {
+    unsigned kind;                /* CCGramFieldKind */
+    int present;
+    long long i;                  /* CC_GK_INT */
+    CCSlice s;                    /* CC_GK_SLICE / CC_GK_BYTES */
+    const void* items;            /* CC_GK_ITEMS: elements (of field->etype) */
+    size_t items_n;
+    const CCGramField* field;
+} CCGramValue;
+
 #define cc_match(T, ...)   T##_match(__VA_ARGS__)
 #define cc_parse(T, ...)   T##_parse(__VA_ARGS__)
 #define cc_collect(T, ...) T##_collect(__VA_ARGS__)
@@ -47,5 +84,7 @@
 #define cc_at_end(T, ...)  T##Reader_at_end(__VA_ARGS__)
 #define cc_write(T, ...)   T##_write(__VA_ARGS__)
 #define cc_format(T, ...)  T##_to_str(__VA_ARGS__)
+#define cc_get(T, ...)     T##_get(__VA_ARGS__)
+#define cc_field(T, ...)   T##_field(__VA_ARGS__)
 
 #endif /* CCC_CC_GRAMMAR_CCH */
