@@ -5,6 +5,7 @@
 #   ./bench.sh -g         also run the @grammar engine tiers (needs make -C cc)
 #   ./bench.sh -w         also run the @grammar WRITE bench (Feed -> canonical JSON)
 #   ./bench.sh -s         also run the hidden-class (shapes) DOM vs tape DOM
+#   ./bench.sh -d         also run the ENGINE shaped DOM (cc_dom) vs tape + access
 #   ./bench.sh -c         also print a correctness checksum (verified untimed)
 #   ./bench.sh [K] [corpus...]
 set -e
@@ -12,13 +13,14 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
 CC="${CC:-gcc} -O2 -I $INC"
-YY=0; GEN=0; WR=0; SH=0; CHK=""
+YY=0; GEN=0; WR=0; SH=0; DM=0; CHK=""
 while :; do
   case "$1" in
     -y) YY=1; shift;;
     -g) GEN=1; shift;;
     -w) WR=1; shift;;
     -s) SH=1; shift;;
+    -d) DM=1; shift;;
     -c) CHK="-c"; shift;;
     *) break;;
   esac
@@ -57,6 +59,16 @@ if [ "$SH" = 1 ]; then
     $CC "$here/bench_shape.c" "$RT" -o "$here/bench_shape"
   fi
 fi
+if [ "$DM" = 1 ]; then
+  CCC="$repo/cc/bin/ccc"
+  if [ ! -x "$CCC" ]; then
+    echo "-d: compiler not built ($CCC missing) — run: make -C $repo/cc"; exit 1
+  fi
+  if need_build "$here/bench_dom" "$here/bench_dom.ccs" "$CCC" "$RT"; then
+    (cd "$repo" && "$CCC" build "$here/bench_dom.ccs" --out-dir "$here/.gend" >/dev/null)
+    $CC -I "$repo/out/include" -I "$repo/cc/include" "$here/.gend/bench_dom.c" "$RT" -o "$here/bench_dom"
+  fi
+fi
 if [ "$WR" = 1 ]; then
   CCC="$repo/cc/bin/ccc"
   if [ ! -x "$CCC" ]; then
@@ -75,4 +87,5 @@ for c in "${CORPORA[@]}"; do
   if [ "$GEN" = 1 ]; then "$here/bench_gen" "$here/$c" "$K" 3 | sed 's/^/  /'; fi
   if [ "$WR" = 1 ]; then "$here/bench_write" "$here/$c" | sed 's/^/  /'; fi
   if [ "$SH" = 1 ]; then "$here/bench_shape" "$here/$c" "$K" 3 | sed 's/^/  /'; fi
+  if [ "$DM" = 1 ]; then "$here/bench_dom" "$here/$c" "$K" | sed 's/^/  /'; fi
 done

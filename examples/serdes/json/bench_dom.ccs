@@ -1,0 +1,125 @@
+// Engine shaped-DOM bench: Json_dom (hidden classes, constructed as we
+// tape) vs Json_parse (pair-tape) on the same grammar, plus key access
+// with prepared keys.
+//   ./bench_dom <corpus.json> [K] [AK]     AK=0 skips the access section
+#include <ccc/std/prelude.cch>
+#include <time.h>
+
+static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
+    if (!memchr(p, '\\', n)) { *out = cc_slice_from_buffer((void*)p, n); return 1; }
+    char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
+    if (!dst) return 0;
+    size_t o = 0;
+    for (size_t k = 0; k < n; k++) {
+        char c = p[k];
+        if (c != '\\') { dst[o++] = c; continue; }
+        char e = p[++k];
+        switch (e) {
+        case 'n': dst[o++] = '\n'; break; case 't': dst[o++] = '\t'; break;
+        case '"': dst[o++] = '"'; break;  case '\\': dst[o++] = '\\'; break;
+        case 'u': { unsigned cp = 0; for (int h = 0; h < 4; h++) { char x = p[++k]; cp <<= 4;
+                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0') : (unsigned)((x | 32) - 'a' + 10); }
+            if (cp < 0x80) dst[o++] = (char)cp;
+            else if (cp < 0x800) { dst[o++] = (char)(0xC0 | (cp >> 6)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            else { dst[o++] = (char)(0xE0 | (cp >> 12)); dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[o++] = (char)(0x80 | (cp & 0x3F)); }
+            break; }
+        default: dst[o++] = e; break;
+        }
+    }
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    return 1;
+}
+
+@grammar(rules) Json {~~~~
+    top:     value
+    ws:      any charset [#' ' #'\t' #'\r' #'\n']
+    digit:   charset [#'0' - #'9']
+    onenine: charset [#'1' - #'9']
+    hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
+    strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+    esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
+                    | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
+    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
+    int:     [opt #'-' [#'0' | [onenine any digit]]]
+    number:  keep [int opt [#'.' some digit]
+                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    value:   [ws [string | number | object | array
+                 | keep ["true" | "false" | "null"]] ws]
+    member:  [ws string ws #':' value]
+    array:   collect [#'[' ws opt [value any [#',' value]] #']']
+    object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+~~~~}
+
+static double now_s(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
+
+int main(int argc, char** argv) {
+    const char* path = argc > 1 ? argv[1] : "examples/serdes/json/twitter.json";
+    int K = argc > 2 ? atoi(argv[2]) : 200;
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("no corpus\n"); return 1; }
+    fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
+    char* buf = (char*)malloc((size_t)fn + 1);
+    size_t rd = fread(buf, 1, (size_t)fn, f);
+    fclose(f);
+
+    CCArena ar = cc_arena_create((size_t)fn * 24 + (48 << 20));
+    CCArena shp = cc_arena_create(16 << 20);
+    CCShapeReg* reg = cc_shape_reg_create(&shp);
+    double best;
+
+    best = 1e18;
+    for (int t = 0; t < 3; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) {
+            cc_arena_reset(&ar);
+            if (!Json_parse(buf, rd, &ar)) return 1;
+        }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("gen tape DOM   %6.0f MB/s  %7.1f us/parse\n", rd*(double)K/best/1e6, best/K*1e6);
+
+    best = 1e18;
+    for (int t = 0; t < 3; t++) { double t0 = now_s();
+        for (int i = 0; i < K; i++) {
+            cc_arena_reset(&ar);
+            CCShapeVal v;
+            if (!Json_dom(buf, rd, reg, &ar, &v)) return 1;
+        }
+        double dt = now_s() - t0; if (dt < best) best = dt; }
+    printf("gen shaped DOM %6.0f MB/s  %7.1f us/parse  shapes=%u dicts=%ld\n",
+           rd*(double)K/best/1e6, best/K*1e6, reg->nshapes, reg->dict_objs);
+
+    /* access: id/text/retweet_count/user.screen_name per tweet */
+    {
+        cc_arena_reset(&ar);
+        CCShapeVal sv;
+        if (!Json_dom(buf, rd, reg, &ar, &sv)) return 1;
+        CCShapeVal* st = cc_shape_get(&sv, "statuses");
+        if (!st) { printf("no statuses\n"); return 0; }
+        CCShapeKey kid = cc_shape_key("id"), ktx = cc_shape_key("text"),
+                   krc = cc_shape_key("retweet_count"),
+                   kus = cc_shape_key("user"), ksn = cc_shape_key("screen_name");
+        const int AK = argc > 3 ? atoi(argv[3]) : 20000;
+        if (AK == 0) return 0;
+        unsigned long long sum = 0; long nlk = 0;
+        best = 1e18;
+        for (int t = 0; t < 3; t++) { double t0 = now_s(); sum = 0; nlk = 0;
+            for (int i = 0; i < AK; i++) {
+                for (uint64_t j = 0; j < st->u.arr->n; j++) {
+                    CCShapeVal* tw = &st->u.arr->items[j];
+                    CCShapeVal* id = cc_shape_get_k(tw, kid);
+                    CCShapeVal* tx = cc_shape_get_k(tw, ktx);
+                    CCShapeVal* rc = cc_shape_get_k(tw, krc);
+                    CCShapeVal* us = cc_shape_get_k(tw, kus);
+                    CCShapeVal* sn = us ? cc_shape_get_k(us, ksn) : 0;
+                    if (id) sum += cc_shape_len(id);
+                    if (tx) sum += cc_shape_len(tx);
+                    if (rc) sum += cc_shape_len(rc);
+                    if (sn) sum += cc_shape_len(sn);
+                    nlk += 5;
+                }
+            }
+            double dt = now_s() - t0; if (dt < best) best = dt; }
+        printf("access shaped  %7.1f Mlookups/s (prepared keys, sum=%llu)\n",
+               (double)nlk/best/1e6, sum);
+    }
+    return 0;
+}

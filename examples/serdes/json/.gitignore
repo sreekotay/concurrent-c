@@ -10,3 +10,5 @@ yyjson.h
 /bench_write
 /.genw/
 /bench_shape
+/bench_dom
+/.gend/
