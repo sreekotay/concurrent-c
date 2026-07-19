@@ -1422,6 +1422,7 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
         cc_debug_log("reparse", "stage=%s path=%s", stage ? stage : "?", input_path ? input_path : "?");
     }
     reg_pushed = cc_type_registry_scope_push(&reg_scope);
+    cc__debug_dump_reparse_source("reparse_prepared", prep, pp_len, input_path);
     root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
     if (!root) {
         cc__report_reparse_failure(stage, input_path, src, src_len, prep, pp_len);
@@ -3634,6 +3635,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         /* Initial AST was built from CPP-expanded parse_view; src_ufcs is the
          * emit-ready buffer.  Reparse once so phase-3 AST walks match the text
          * UFCS and downstream coarse passes will edit. */
+        cc__debug_dump_reparse_source("phase3_entry", src_ufcs, src_ufcs_len, ctx->input_path);
         phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
                                                           "phase3 entry (emit-ready AST sync)");
         if (!phase3_owned_root) {

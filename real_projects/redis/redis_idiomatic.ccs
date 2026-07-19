@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <netinet/in.h>   /* IPPROTO_TCP (not transitive from tcp.h on glibc) */
 #include <netinet/tcp.h>
 #include <sys/resource.h>
 #if defined(__APPLE__)
@@ -319,6 +320,69 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 
 #include "redis_resp.cch"
 
+#ifdef REDIS_RESP_GEN
+/* ---- @grammar RESP reader (build with -DREDIS_RESP_GEN=1) ----
+ * The schema IS the protocol description; parity with the hand reader is
+ * pinned by tests/redis_resp_gen_parity_smoke.ccs. cap 4 = the server's
+ * own "unsupported argument count" policy, as an inline array: the parse
+ * hot path allocates nothing (the arena parameter of try_read is unused
+ * by a fully capped product schema). */
+@grammar(schema) RespGArg {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+    data: bytes len
+    "\r\n"
+~~~~}
+
+@grammar(schema) RespGCmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
+    args: items RespGArg argc cap 4
+~~~~}
+
+static RespParseStatus gen_try_read_args_buffered(RespReader* r,
+                                                  CCSlice* args,
+                                                  size_t cap,
+                                                  size_t* out_argc,
+                                                  CCError* err) {
+    if (r->end > r->start && r->data[r->start] != '*') {
+        /* inline commands: the hand line path (a tagged-union default arm
+         * once the reader moves wholly to the Cmd union) */
+        size_t saved = r->start;
+        CCSlice line = {0};
+        if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
+        size_t !>(CCError) pargs = parse_inline_args(line, args, cap);
+        if (pargs.is_err()) { r->start = saved; *err = pargs.error(); return RESP_PARSE_ERROR; }
+        *out_argc = pargs.value();
+        return RESP_PARSE_OK;
+    }
+    size_t pos = 0;
+    RespGCmd c;
+    bool !>(CCError) tr = RespGCmd_try_read((const char*)(r->data + r->start),
+                                            r->end - r->start, &pos, NULL, &c);
+    if (tr.is_err()) {
+        if (tr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
+        *err = tr.error();
+        return RESP_PARSE_ERROR;
+    }
+    if (!tr.value()) return RESP_PARSE_INCOMPLETE;
+    if (c.args_n < 1 || c.args_n > cap) {
+        *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+        return RESP_PARSE_ERROR;
+    }
+    for (size_t i = 0; i < c.args_n; i++) args[i] = c.args[i].data;
+    *out_argc = c.args_n;
+    r->start += pos;
+    return RESP_PARSE_OK;
+}
+#endif /* REDIS_RESP_GEN */
+
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
     if (slice_eq_ignore_case(cmd, "GET") && argc == 1) return REDIS_CMD_GET;
@@ -494,7 +558,11 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     CCSlice args[4] = {0};
     size_t argc = 0;
     CCError perr = {0};
+#ifdef REDIS_RESP_GEN
+    RespParseStatus argc_status = gen_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
+#else
     RespParseStatus argc_status = rr_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
+#endif
     if (argc_status == RESP_PARSE_INCOMPLETE) {
         return cc_ok(false);
     }

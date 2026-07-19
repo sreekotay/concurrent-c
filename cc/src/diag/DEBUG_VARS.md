@@ -14,6 +14,8 @@ All debug output uses the prefix `[cc:<phase>]`.
 | `CC_DEBUG_STUB_NODES` | Dump stub-AST node counts (arenas/nurseries) after parse |
 | `CC_DEBUG_PRE_EXPAND` | Log CPP pre-expand attempts and TCC errors |
 | `CC_DEBUG_PRE_EXPAND_DUMP=<path>` | Dump the post-CPP-expand buffer to a file |
+| `CC_DEBUG_CANON` | Log each phase-1 canonical pass as it applies |
+| `CC_DEBUG_UFCS_NODES` | Dump every UFCS candidate AST node (file/line/method/recv) |
 
 CLI: `--show-lowered=<phase>` dumps the post-phase buffer to stderr (I7).
 `--emit-c-inspect[=PATH]` writes the merged translation unit for inspection.
