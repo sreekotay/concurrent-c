@@ -92,9 +92,16 @@ int main(int argc, char** argv) {
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
     hits = sp->shape_hits; misses = sp->shape_misses; nshapes = sp->nshapes;
-    printf("parse shapes  %6.0f MB/s  %7.1f us/parse  slot=16B  shapes=%u  trans-hit=%.2f%%\n",
-           n * (double)K / best / 1e6, best / K * 1e6, nshapes,
-           hits + misses ? 100.0 * hits / (hits + misses) : 100.0);
+    {
+        /* trie sharing: prefix nodes are shared structure; only shapes some
+         * object actually finalized as carry a key->slot table */
+        uint32_t fin = 0;
+        for (uint32_t i = 0; i < JSH_MAX_SHAPES * 2; i++)
+            if (sp->ttab[i].to && sp->ttab[i].to->lookup) fin++;
+        printf("parse shapes  %6.0f MB/s  %7.1f us/parse  slot=16B  shapes=%u (%u finalized)  trans-hit=%.2f%%\n",
+               n * (double)K / best / 1e6, best / K * 1e6, nshapes, fin,
+               hits + misses ? 100.0 * hits / (hits + misses) : 100.0);
+    }
 
     /* ---- access: id/text/user.screen_name per tweet ---- */
     cc_arena_reset(&tape_ar);
