@@ -116,6 +116,20 @@ int cc_template_next_piece(const char* src, size_t n,
             size_t tag_s = 0, tag_e = 0, brace_pos = 0;
             int tagged = 0;
             int ok = 0;
+            if (i + 2 < body_e && src[i + 1] == '{' && src[i + 2] == '{' &&
+                !cc__tpl_is_escaped_dollar(src, body_s, i)) {
+                /* ${{...}} verbatim span: raw until the first `}}` */
+                size_t p = i + 3;
+                while (p + 1 < body_e && !(src[p] == '}' && src[p + 1] == '}')) p++;
+                if (p + 1 >= body_e) return -3;
+                out->kind = CC_TPL_PIECE_VERBATIM;
+                out->lit_off = *pos;
+                out->lit_len = i - *pos;
+                out->expr_off = i + 3;
+                out->expr_len = p - (i + 3);
+                *pos = p + 2;
+                return 1;
+            }
             if (src[i + 1] == '{') {
                 brace_pos = i + 1;
                 ok = 1;

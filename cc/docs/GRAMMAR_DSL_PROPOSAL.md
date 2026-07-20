@@ -221,6 +221,29 @@ and there is NO small-doc cliff: the DSL's specialized C holds a steady
 fraction of the fastest scalar reader at every size people actually hit,
 while keeping the size/memory/borrow advantages above. Gen match == hand
 (~1.5-1.6 GB/s) in the same window.
+**Engine-in-CC port (dogfooding invariant):** the emitter is being ported
+from printf-style C (`eb_fmt`) to CC itself —
+`cc/src/preprocess/emit/grammar_emit.cch`, plain CC using `@string`
+templates + CCString, lowered by `lower_headers` with the lowered `.h`
+CHECKED IN beside it (bootstrap: the tool links grammar_rules.c, so it
+cannot be a hard prereq; `make engine-headers` regenerates). The
+regression gate is BYTE-IDENTICAL emitted C across 5 reference TUs
+(bench_grammar/bench_write/bench_resp + union and shaped-DOM smokes).
+Ported so far: run-scanner ladder, number fast path, tape-node API, tape
+substrate, match entry, schema streaming face. INVARIANT: engine source
+is user-visible CC — any construct the header-lowering path can't take is
+a convergence bug, not a boundary.
+**`${{...}}` verbatim template spans (language addition driven by the
+port):** inside any backtick template (`@string`, `@emit`), `${{` opens a
+VERBATIM span closed by the FIRST `}}`: bytes pass through raw — no
+escape interpretation (`\n` stays two bytes), no interpolation, and
+backticks do NOT terminate the literal (previously inexpressible).
+`\${{` stays literal text; `${{}}` is legal; to emit `}}` split it
+across spans (`}${{}}}` idiom). Policies apply to slots, never to
+verbatim spans. Implemented once in the shared template machinery
+(extent scanner + piece scanner), so every template consumer inherits
+it. Smokes: `tests/string_template_verbatim_smoke.ccs` + unterminated
+`.compile_err`.
 **No magic names**: the call-site surface is the `cc_*` operations in
 `<ccc/cc_grammar.cch>` (in the prelude) — `cc_match(Json, s, n)`,
 `cc_parse(Tweet, s, n, arena, &out)`, `cc_reader`/`cc_next`/`cc_at_end` —

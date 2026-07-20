@@ -1437,6 +1437,16 @@ static int cc__scan_template_literal(const char* src,
         }
         if (c == '$' && i + 1 < n) {
             size_t brace_pos = (size_t)-1;
+            if (i + 2 < n && src[i + 1] == '{' && src[i + 2] == '{' &&
+                !cc__is_escaped_dollar(src, tick_pos + 1, i)) {
+                /* ${{...}} verbatim span: skip raw to the first `}}` so its
+                 * content (backticks included) can't terminate the literal */
+                size_t p = i + 3;
+                while (p + 1 < n && !(src[p] == '}' && src[p + 1] == '}')) p++;
+                if (p + 1 >= n) return -1;
+                i = p + 2;
+                continue;
+            }
             if (src[i + 1] == '{') {
                 brace_pos = i + 1;
             } else if (i + 2 < n && src[i + 1] == '~' &&
@@ -1582,6 +1592,27 @@ static void cc__append_c_string_escaped(char** out,
     cc_sb_append(out, out_len, out_cap, "\"", 1);
 }
 
+/* Encode raw bytes as a C string literal with NO template-escape
+ * interpretation — a source `\n` is two bytes (backslash, n), unlike the
+ * template escaper above.  Used for ${{...}} verbatim spans. */
+static void cc__append_c_string_raw(char** out,
+                                    size_t* out_len,
+                                    size_t* out_cap,
+                                    const char* src,
+                                    size_t len) {
+    cc_sb_append(out, out_len, out_cap, "\"", 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\') cc_sb_append(out, out_len, out_cap, "\\\\", 2);
+        else if (c == '"') cc_sb_append(out, out_len, out_cap, "\\\"", 2);
+        else if (c == '\n') cc_sb_append(out, out_len, out_cap, "\\n", 2);
+        else if (c == '\r') cc_sb_append(out, out_len, out_cap, "\\r", 2);
+        else if (c == '\t') cc_sb_append(out, out_len, out_cap, "\\t", 2);
+        else cc_sb_append(out, out_len, out_cap, (const char*)&c, 1);
+    }
+    cc_sb_append(out, out_len, out_cap, "\"", 1);
+}
+
 static size_t cc__template_literal_decoded_len(const char* src, size_t len) {
     size_t out = 0;
     size_t i = 0;
@@ -1644,11 +1675,22 @@ static int cc__rewrite_template_body(char** out,
     while (pos < body_e) {
         CCTemplatePiece piece;
         int r = cc_template_next_piece(src, n, body_s, body_e, &pos, &piece);
-        if (r < 0) return -1;
+        if (r < 0) return r;
         if (r == 0) break;
         if (piece.lit_len > 0) {
             cc__emit_template_literal_push(out, out_len, out_cap, builder_name, arena_name,
                                            src + piece.lit_off, piece.lit_len);
+        }
+        if (piece.kind == CC_TPL_PIECE_VERBATIM && piece.expr_len > 0) {
+            /* raw bytes: semantic length == raw length (no escape decoding),
+             * and policies never apply to verbatim spans */
+            cc__sb_append_fmt_local(out, out_len, out_cap,
+                                    "cc_string_push_buffer(&%s, ", builder_name);
+            cc__append_c_string_raw(out, out_len, out_cap,
+                                    src + piece.expr_off, piece.expr_len);
+            cc__sb_append_fmt_local(out, out_len, out_cap, ", %zu, ", piece.expr_len);
+            cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+            cc_sb_append_cstr(out, out_len, out_cap, "); ");
         }
         if (piece.kind == CC_TPL_PIECE_SLOT || piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
             if (policy_name && policy_name[0]) {
@@ -1862,7 +1904,9 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                         char rel[1024];
                         const char* msg = (tpl_rc == -2)
                             ? "tagged template slots require @string(policy, `...`, arena)"
-                            : "unterminated interpolation in @emit template";
+                            : (tpl_rc == -3)
+                                ? "unterminated ${{...}} verbatim span in @emit template"
+                                : "unterminated interpolation in @emit template";
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                         line, col, "syntax", msg);
                         free(out);
@@ -1951,7 +1995,9 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                             char rel[1024];
                             const char* msg = (tpl_rc == -2)
                                 ? "tagged template slots require @string(policy, `...`, arena)"
-                                : "unterminated interpolation in @string template";
+                                : (tpl_rc == -3)
+                                    ? "unterminated ${{...}} verbatim span in @string template"
+                                    : "unterminated interpolation in @string template";
                             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                             line, col, "syntax", msg);
                             free(out);
@@ -2011,14 +2057,20 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, " = cc_string_new(); ");
-                    if (cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
-                                                  arg2_s + 1, tick_e, builder_name,
-                                                  policy_name, arena_name) != 0) {
-                        char rel[1024];
-                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated interpolation in @string template");
-                        free(out);
-                        return (char*)-1;
+                    {
+                        int tpl_rc = cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
+                                                               arg2_s + 1, tick_e, builder_name,
+                                                               policy_name, arena_name);
+                        if (tpl_rc != 0) {
+                            char rel[1024];
+                            const char* msg = (tpl_rc == -3)
+                                ? "unterminated ${{...}} verbatim span in @string template"
+                                : "unterminated interpolation in @string template";
+                            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                            line, col, "syntax", msg);
+                            free(out);
+                            return (char*)-1;
+                        }
                     }
                     cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "; })");
