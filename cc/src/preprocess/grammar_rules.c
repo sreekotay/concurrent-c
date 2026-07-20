@@ -3754,47 +3754,43 @@ static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* f
 static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     const RNarrow* w = &t->nw;
     int k = (*lbl)++;
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->open_b, fail);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_byte_check_text(&a, w->open_b, fail));
     rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
-    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", w->close_b);
+    eb_put_cs(e, cc_gr_loop_open_text(&a, w->close_b));
     rw_emit_pads(g, e, w->mpad_a, w->nmpad_a, fail);
-    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
-              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n"
-              "      (void)xd%d;\n",
-           k, k, k, g->name, g->rules[w->key_rule].name, k, k, k, fail, k);
+    eb_put_cs(e, cc_gr_key_span_text(&a, k, g->name, g->rules[w->key_rule].name, fail));
     rw_emit_pads(g, e, w->mpad_b, w->nmpad_b, fail);
-    eb_fmt(e, "      if (!(p < n && s[p] == %d)) goto %s;\n      p++;\n", w->kv_b, fail);
-    eb_fmt(e, "      switch (xb%d - xa%d) {\n", k, k);
+    eb_put_cs(e, cc_gr_kv_check_text(&a, w->kv_b, fail));
+    eb_put_cs(e, cc_gr_key_switch_open_text(&a, k));
     {
         unsigned char done[S_MAX_KEYS] = {0};
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
             size_t L = strlen(ki->key);
-            eb_fmt(e, "      case %d:\n", (int)L);
+            eb_put_cs(e, cc_gr_key_case_text(&a, (int)L));
             for (int j = i; j < t->k_cnt; j++) {
                 const SKey* kj = &ss->keys[t->kidx[j]];
                 if (done[j] || strlen(kj->key) != L) continue;
                 done[j] = 1;
-                char esc[4 * S_NAME];
-                rs_esc(esc, sizeof esc, (const unsigned char*)kj->key, (int)L);
-                eb_fmt(e, "        if (memcmp(s + xa%d, \"%s\", %d) == 0) {\n", k, esc, (int)L);
+                eb_put_cs(e, cc_gr_key_memcmp_open_text(&a, k, (const unsigned char*)kj->key, (int)L));
                 rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
                 rs_emit_term(ss, g, e, lbl, kj->term, fail);
                 rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-                eb_fmt(e, "          break; }\n");
+                eb_put_cs(e, cc_gr_key_break_text(&a));
             }
-            eb_fmt(e, "        goto Ld%d;\n", k);
+            eb_put_cs(e, cc_gr_key_goto_dflt_text(&a, k));
         }
     }
-    eb_fmt(e, "      default: goto Ld%d;\n      }\n      goto Ln%d;\n", k, k);
-    eb_fmt(e, "Ld%d:\n", k);
-    eb_fmt(e, "      if (!%s__%s_%s(s, n, &p)) goto %s;\n",
-           g->name, rs_class(g, e->K, w->val_rule), g->rules[w->val_rule].name, fail);
-    eb_fmt(e, "Ln%d: ;\n    }\n", k);
-    eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
+    eb_put_cs(e, cc_gr_key_default_text(&a, k));
+    eb_put_cs(e, cc_gr_pad_call6_text(&a, g->name, rs_class(g, e->K, w->val_rule),
+                                      g->rules[w->val_rule].name, fail));
+    eb_put_cs(e, cc_gr_key_loop_end_text(&a, k));
+    eb_put_cs(e, cc_gr_lvec_sep_close_text(&a, w->sep_b));
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->close_b, fail);
+    eb_put_cs(e, cc_gr_byte_check_text(&a, w->close_b, fail));
+    cc_arena_free(&a);
 }
 
 /* narrowed list: array shape from the rule, elements parsed as the schema
@@ -3821,51 +3817,47 @@ static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const ch
 
 static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->fo, fail);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->fo, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", ss->fc);
-    eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
-              "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n"
-              "      (void)xd%d;\n",
-           k, k, k, g->name, g->rules[ss->rfkey].name, k, k, k, fail, k);
+    eb_put_cs(e, cc_gr_loop_open_text(&a, ss->fc));
+    eb_put_cs(e, cc_gr_key_span_text(&a, k, g->name, g->rules[ss->rfkey].name, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_fmt(e, "      if (!(p < n && s[p] == %d)) goto %s;\n      p++;\n", ss->fkv, fail);
+    eb_put_cs(e, cc_gr_kv_check_text(&a, ss->fkv, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
     /* key dispatch: switch on length, memcmp chain within a length class */
-    eb_fmt(e, "      switch (xb%d - xa%d) {\n", k, k);
+    eb_put_cs(e, cc_gr_key_switch_open_text(&a, k));
     {
         unsigned char done[S_MAX_KEYS] = {0};
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
             size_t L = strlen(ki->key);
-            eb_fmt(e, "      case %d:\n", (int)L);
+            eb_put_cs(e, cc_gr_key_case_text(&a, (int)L));
             for (int j = i; j < t->k_cnt; j++) {
                 const SKey* kj = &ss->keys[t->kidx[j]];
                 if (done[j] || strlen(kj->key) != L) continue;
                 done[j] = 1;
-                char esc[4 * S_NAME];
-                rs_esc(esc, sizeof esc, (const unsigned char*)kj->key, (int)L);
-                eb_fmt(e, "        if (memcmp(s + xa%d, \"%s\", %d) == 0) {\n", k, esc, (int)L);
+                eb_put_cs(e, cc_gr_key_memcmp_open_text(&a, k, (const unsigned char*)kj->key, (int)L));
                 rs_emit_term(ss, g, e, lbl, kj->term, fail);
-                eb_fmt(e, "          break; }\n");
+                eb_put_cs(e, cc_gr_key_break_text(&a));
             }
-            eb_fmt(e, "        goto Ld%d;\n", k);
+            eb_put_cs(e, cc_gr_key_goto_dflt_text(&a, k));
         }
     }
-    eb_fmt(e, "      default: goto Ld%d;\n      }\n      goto Ln%d;\n", k, k);
-    eb_fmt(e, "Ld%d:\n", k);
+    eb_put_cs(e, cc_gr_key_default_text(&a, k));
     if (ss->rfelse >= 0)
-        eb_fmt(e, "      if (!%s__%s_%s(s, n, &p)) goto %s;\n",
-               g->name, rs_class(g, e->K, ss->rfelse), g->rules[ss->rfelse].name, fail);
+        eb_put_cs(e, cc_gr_pad_call6_text(&a, g->name, rs_class(g, e->K, ss->rfelse),
+                                          g->rules[ss->rfelse].name, fail));
     else
-        eb_fmt(e, "      goto %s;   /* unknown member and no else rule */\n", fail);
-    eb_fmt(e, "Ln%d: ;\n    }\n", k);
+        eb_put_cs(e, cc_gr_unknown_member_text(&a, fail));
+    eb_put_cs(e, cc_gr_key_loop_end_text(&a, k));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->fs);
+    eb_put_cs(e, cc_gr_lvec_sep_open_text(&a, ss->fs));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_fmt(e, "    continue; }\n    break;\n    }\n    }\n");
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->fc, fail);
+    eb_put_cs(e, cc_gr_lvec_loop_close_text(&a));
+    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->fc, fail));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
