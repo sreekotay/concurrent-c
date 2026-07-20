@@ -105,6 +105,7 @@ CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char*
     root->node_count = r->count;
     root->skipped_clo_ids = r->skipped_clo_ids;
     root->skipped_clo_count = r->skipped_clo_count;
+    root->parse_src_shift = -1; /* set by the reparse wrapper when exact */
 
     /* Debug: dump stub nodes (best-effort) */
     if (getenv("CC_DEBUG_STUB_NODES") && root->nodes && root->node_count > 0) {
@@ -158,6 +159,7 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
     root->node_count = r->count;
     root->skipped_clo_ids = r->skipped_clo_ids;
     root->skipped_clo_count = r->skipped_clo_count;
+    root->parse_src_shift = -1; /* set by the reparse wrapper when exact */
 
     /* Debug: dump stub nodes (best-effort) */
     if (getenv("CC_DEBUG_STUB_NODES") && root->nodes && root->node_count > 0) {
