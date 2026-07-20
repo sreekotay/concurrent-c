@@ -742,26 +742,22 @@ static int cc_try_cc_at_stmt(void) {
         return 1; /* handled as a full block now */
     }
 
-    /* --- @comptime { ... } --- */
+    /* --- @comptime { ... } ---
+     * NOTE: no cc_ast_record_start here.  A `return 2` falls through to
+     * block(), which records (and closes) its own BLOCK node; an extra
+     * unclosed record here leaked a node-stack entry per occurrence — the
+     * same imbalance class as the decl() function-definition leak — and
+     * nothing consumed the tagged STMT node. */
     if (strcmp(cc_at, "comptime") == 0) {
-        cc_ast_record_start(CC_AST_NODE_STMT);
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("comptime");
-        }
         next(); /* consume 'comptime' */
         if (tok != '{')
             tcc_error("expected '{' after @comptime");
         return 2; /* handled, fall through to block */
     }
     
-    /* --- @with_deadline(expr) { ... } --- */
+    /* --- @with_deadline(expr) { ... } ---
+     * No record_start here either — see the @comptime note above. */
     if (strcmp(cc_at, "with_deadline") == 0) {
-        cc_ast_record_start(CC_AST_NODE_STMT);
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("with_deadline");
-        }
         next(); /* consume 'with_deadline' */
         
         /* Parse optional (expr) for deadline specification */
