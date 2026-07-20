@@ -93,6 +93,13 @@ typedef struct CCASTRoot {
     /* Canonical CC buffer for visit_codegen (pre-cpp-expand). */
     char*  codegen_buffer;
     size_t codegen_buffer_len;
+    /* Closure-ID markers (/ *CC_CLO:N* /) that sat inside #if-skipped
+     * regions of THIS parse — their closure literals were discarded by
+     * conditional compilation and have no AST nodes.  Borrowed from the
+     * TCC stub root (freed with it).  The closure pass prunes these IDs
+     * before binding markers to CLOSURE nodes. */
+    const int* skipped_clo_ids;
+    int skipped_clo_count;
 } CCASTRoot;
 
 #endif // CC_AST_AST_H

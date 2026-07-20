@@ -13,10 +13,10 @@ index d21f1cad..cfff431b 100644
  -LTCC = $(TOP)/$(LIBTCC)
  
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..677ed782 100644
+index 171e3622..da4d71bd 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,662 @@
+@@ -66,6 +66,667 @@
  
  #include "tcc.h"
  
@@ -148,10 +148,14 @@ index 171e3622..677ed782 100644
 +    root->nodes = s->cc_nodes;
 +    root->count = s->cc_nodes_count;
 +    root->side = NULL;
-+    
++    root->skipped_clo_ids = s->cc_skipped_clo_ids;
++    root->skipped_clo_count = s->cc_skipped_clo_count;
++
 +    /* Detach ownership so tcc_delete doesn't free the node slab. */
 +    s->cc_nodes = NULL;
 +    s->cc_nodes_count = 0;
++    s->cc_skipped_clo_ids = NULL;
++    s->cc_skipped_clo_count = s->cc_skipped_clo_cap = 0;
 +    if (s->cc_node_stack)
 +        tcc_free(s->cc_node_stack);
 +    s->cc_node_stack = NULL;
@@ -647,6 +651,7 @@ index 171e3622..677ed782 100644
 +
 +PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root) {
 +    if (!root) return;
++    tcc_free(root->skipped_clo_ids);
 +    if (root->nodes) {
 +#ifdef CONFIG_CC_EXT
 +        for (int i = 0; i < root->count; i++) {
@@ -679,7 +684,7 @@ index 171e3622..677ed782 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1394,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1399,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -687,7 +692,7 @@ index 171e3622..677ed782 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1616,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1621,16 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -700,14 +705,15 @@ index 171e3622..677ed782 100644
 +        tcc_free(s1->cc_typedef_map);
 +    }
 +#endif
++    tcc_free(s1->cc_skipped_clo_ids);
      tcc_free(s1);
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..0923f173 100644
+index e7a2f1e2..786b04d6 100644
 --- a/tcc.h
 +++ b/tcc.h
-@@ -452,6 +452,100 @@ typedef struct TokenSym {
+@@ -452,6 +452,104 @@ typedef struct TokenSym {
      char str[1];
  } TokenSym;
  
@@ -773,6 +779,10 @@ index e7a2f1e2..0923f173 100644
 +    void *side;                /* reserved for CC */
 +    struct CCASTStubNode *nodes;
 +    int count;
++    /* Closure-ID markers (/ *CC_CLO:N* /) that sat inside #if-skipped
++       regions of THIS parse: their closures never became AST nodes. */
++    int *skipped_clo_ids;
++    int skipped_clo_count;
 +};
 +struct TCCExtParser {
 +    int (*try_cc_decl)(void);
@@ -808,7 +818,7 @@ index e7a2f1e2..0923f173 100644
  #ifdef TCC_TARGET_PE
  typedef unsigned short nwchar_t;
  #else
-@@ -642,6 +736,9 @@ typedef struct BufferedFile {
+@@ -642,6 +740,9 @@ typedef struct BufferedFile {
      int fd;
      struct BufferedFile *prev;
      int line_num;    /* current line number - here to simplify code */
@@ -818,7 +828,7 @@ index e7a2f1e2..0923f173 100644
      int line_ref;    /* tcc -E: last printed line */
      int ifndef_macro;  /* #ifndef macro / #endif search */
      int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +968,66 @@ struct TCCState {
+@@ -871,6 +972,73 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
@@ -839,6 +849,13 @@ index e7a2f1e2..0923f173 100644
 +    int cc_last_member_line;
 +    int cc_last_member_col;
 +    long cc_last_member_off;  /* CC ext: member-token byte offset (-1 unknown) */
++    /* CC closure-ID markers found inside #if-skipped regions: conditional
++       compilation drops their closures, so the CC closure pass must not
++       expect AST nodes for them.  Exact accounting — preprocess_skip knows
++       precisely which bytes it discarded. */
++    int *cc_skipped_clo_ids;
++    int cc_skipped_clo_count;
++    int cc_skipped_clo_cap;
 +    char cc_last_recv_type[128]; /* Receiver type name for UFCS (e.g., "Point", "CCVec_int") */
 +    int cc_last_rparen_line;
 +    int cc_last_rparen_col;
@@ -885,7 +902,7 @@ index e7a2f1e2..0923f173 100644
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1308,7 @@ struct filespec {
+@@ -1151,6 +1319,7 @@ struct filespec {
  #define TOK_TWODOTS 0xa2 /* C++ token ? */
  #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
  #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
@@ -893,7 +910,7 @@ index e7a2f1e2..0923f173 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1384,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1395,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -947,7 +964,7 @@ index e7a2f1e2..0923f173 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1539,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1550,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;
@@ -2542,7 +2559,7 @@ index 50802edf..887c8755 100644
  }
  
 diff --git a/tccpp.c b/tccpp.c
-index e19e8504..803ba05b 100644
+index e19e8504..024a5dda 100644
 --- a/tccpp.c
 +++ b/tccpp.c
 @@ -32,6 +32,8 @@ ST_DATA int parse_flags;
@@ -2571,7 +2588,54 @@ index e19e8504..803ba05b 100644
      case TOK_A_SHL:
          return strcpy(p, "<<=");
      case TOK_A_SAR:
-@@ -2592,6 +2597,18 @@ static void next_nomacro(void)
+@@ -875,8 +880,10 @@ static void preprocess_skip(void)
+ {
+     int a, start_of_line, c, in_warn_or_error;
+     uint8_t *p;
++    uint8_t *cc_skip_start;
+ 
+     p = file->buf_ptr;
++    cc_skip_start = p;
+     a = 0;
+ redo_start:
+     start_of_line = 1;
+@@ -957,6 +964,35 @@ _default:
+         start_of_line = 0;
+     }
+  the_end: ;
++    /* CC extension: record closure-ID markers (/ *CC_CLO:N* /) inside the
++       skipped range.  Conditional compilation just discarded their closure
++       literals, so the CC closure pass must not expect AST nodes for them.
++       Only the top-level in-memory buffer carries markers. */
++    if (tcc_state && file && !file->prev && p > cc_skip_start) {
++        const char *s2 = (const char*)cc_skip_start;
++        const char *e2 = (const char*)p;
++        while (s2 + 11 < e2) {
++            const char *m = memchr(s2, '/', (size_t)(e2 - s2));
++            if (!m || m + 10 >= e2) break;
++            if (memcmp(m, "/*CC_CLO:", 9) == 0) {
++                int id = 0;
++                const char *q = m + 9;
++                while (q < e2 && *q >= '0' && *q <= '9') id = id * 10 + (*q++ - '0');
++                if (q + 1 < e2 && q[0] == '*' && q[1] == '/' && id > 0) {
++                    if (tcc_state->cc_skipped_clo_count >= tcc_state->cc_skipped_clo_cap) {
++                        int nc = tcc_state->cc_skipped_clo_cap ? tcc_state->cc_skipped_clo_cap * 2 : 8;
++                        tcc_state->cc_skipped_clo_ids =
++                            tcc_realloc(tcc_state->cc_skipped_clo_ids, nc * sizeof(int));
++                        tcc_state->cc_skipped_clo_cap = nc;
++                    }
++                    tcc_state->cc_skipped_clo_ids[tcc_state->cc_skipped_clo_count++] = id;
++                    s2 = q + 2;
++                    continue;
++                }
++            }
++            s2 = m + 1;
++        }
++    }
+     file->buf_ptr = p;
+ }
+ 
+@@ -2592,6 +2628,18 @@ static void next_nomacro(void)
  
      p = file->buf_ptr;
   redo_no_start:
@@ -2590,7 +2654,7 @@ index e19e8504..803ba05b 100644
      c = *p;
      switch(c) {
      case ' ':
-@@ -2656,6 +2673,8 @@ static void next_nomacro(void)
+@@ -2656,6 +2704,8 @@ static void next_nomacro(void)
      case '\n':
          file->line_num++;
          p++;
@@ -2599,7 +2663,7 @@ index e19e8504..803ba05b 100644
  maybe_newline:
          tok_flags |= TOK_FLAG_BOL;
          if (0 == (parse_flags & PARSE_FLAG_LINEFEED))
-@@ -2923,8 +2942,20 @@ maybe_newline:
+@@ -2923,8 +2973,20 @@ maybe_newline:
          }
          break;
  
@@ -2621,7 +2685,7 @@ index e19e8504..803ba05b 100644
      PARSE2('*', '*', '=', TOK_A_MUL)
      PARSE2('%', '%', '=', TOK_A_MOD)
      PARSE2('^', '^', '=', TOK_A_XOR)
-@@ -3516,6 +3547,10 @@ ST_FUNC void next(void)
+@@ -3516,6 +3578,10 @@ ST_FUNC void next(void)
      int t;
      while (macro_ptr) {
  redo:
@@ -2632,7 +2696,7 @@ index e19e8504..803ba05b 100644
          t = *macro_ptr;
          if (TOK_HAS_VALUE(t)) {
              tok_get(&tok, &macro_ptr, &tokc);
-@@ -3773,6 +3808,12 @@ ST_FUNC void tccpp_new(TCCState *s)
+@@ -3773,6 +3839,12 @@ ST_FUNC void tccpp_new(TCCState *s)
          p = r;
      }
  
@@ -2645,7 +2709,7 @@ index e19e8504..803ba05b 100644
      /* we add dummy defines for some special macros to speed up tests
         and to have working defined() */
      define_push(TOK___LINE__, MACRO_OBJ, NULL, NULL);
-@@ -3846,7 +3887,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
+@@ -3846,7 +3918,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
  
      if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_NONE) {
          ;

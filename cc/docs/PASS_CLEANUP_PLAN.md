@@ -146,7 +146,27 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    the caller-less legacy wholesale rewriter
    (`cc__rewrite_ufcs_spans_with_nodes`, −260 lines).  The coordinates
    propose, the bytes dispose.  Still line/col-keyed: candidate generation
-   moves to the phase-2 anchor map when it lands.  Next →
+   moves to the phase-2 anchor map when it lands.
+   pass_closure_literal_ast DONE — markers are the ONLY closure identity:
+   every producer emits /*CC_CLO:N*/ (parse-build for user closures,
+   autoblock for its 8 synthesized `() => [...]` wrappers — 47 corpus
+   files used to fall back because synthesized closures were unmarked),
+   TCC's preprocess_skip records marker IDs inside #if-skipped regions
+   (exact conditional-compilation accounting; the reparse buffer now
+   preserves CC_CLO comments so TCC can see them), and the closure pass
+   prunes those IDs before binding marker k ↔ closure k.  After pruning,
+   count equality is an INVARIANT: mismatch is a hard internal error, not
+   a heuristic retry.  Deleted: the (line,col)+arrow-scan best-effort
+   resolver, the whole-buffer `=>` recovery scan, the backward-arrow
+   scanner, the heuristic re-sort of closure nodes (parse order IS source
+   order), and the CC_NO_CLOSURE_MARKERS escape hatch.
+   pass_autoblock scanner hygiene DONE — the mechanical inline
+   comment/string state machines now delegate to the shared scanners
+   (cc_skip_ws_and_comments, cc_find_matching_paren,
+   cc_find_char_top_level, one cc__ab_split_args helper); the three
+   marker-comment READERS (@CC_BLOCK/@CC_SITE) remain hand-rolled by
+   design — they inspect comment bodies, which the skip-scanners
+   deliberately hide.  Next →
    pass_closure_literal_ast (finish `/*CC_CLO:N*/` marker identity, delete
    the `=>` recovery scan) → pass_autoblock (13 inline SMs → CCInertScan)
    → async_ast (anchoring only; analysis stays) → pass_result_unwrap
