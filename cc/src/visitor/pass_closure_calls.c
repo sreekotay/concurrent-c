@@ -377,22 +377,8 @@ static int cc__node_file_matches_this_tu(const CCASTRoot* root,
     return 0;
 }
 
-/* A local view of the stub AST node layout. */
-typedef struct {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    long off_start;   /* byte offsets in parse buffer; -1 unknown (layout mirror of tcc.h) */
-    long off_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} NodeView;
+/* Layout lives in pass_common.h (CCNodeView); alias kept for diff hygiene. */
+typedef CCNodeView NodeView;
 
 /* NOTE: do not use FUNC/PARAM arity to decide closure calls.
    A regular function call also has an arity; we only rewrite calls whose callee is typed as CCClosure1/2. */

@@ -1,4 +1,5 @@
 #include "visitor.h"
+#include "visitor/pass_common.h"
 #include "visit_codegen.h"
 
 #include <errno.h>
@@ -3457,22 +3458,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     if (root && root->nodes && root->node_count > 0) {
         const char* dump = getenv("CC_DUMP_TCC_STUB_AST");
         if (dump && dump[0] == '1') {
-            typedef struct {
-                int kind;
-                int parent;
-                const char* file;
-                int line_start;
-                int line_end;
-                int col_start;
-                int col_end;
-                long off_start;   /* byte offsets in parse buffer; -1 unknown (layout mirror of tcc.h) */
-                long off_end;
-                int aux1;
-                int aux2;
-                const char* aux_s1;
-                const char* aux_s2;
-            } CCASTStubNodeView;
-            const CCASTStubNodeView* n = (const CCASTStubNodeView*)root->nodes;
+            const CCNodeView* n = (const CCNodeView*)root->nodes;
             fprintf(stderr, "[cc] stub ast nodes: %d\n", root->node_count);
             int max_dump = root->node_count;
             if (max_dump > 4000) max_dump = 4000;

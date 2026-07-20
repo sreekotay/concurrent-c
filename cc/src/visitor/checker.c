@@ -112,21 +112,9 @@ static void cc__commit_pending_moves(CCScope* scopes, int scope_n) {
     }
 }
 
-typedef struct StubNodeView {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    long off_start;   /* byte offsets in parse buffer; -1 unknown (layout mirror of tcc.h) */
-    long off_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} StubNodeView;
+/* Layout lives in pass_common.h (CCNodeView) — single mirror, guarded by
+ * the tcc_bridge _Static_assert. Local name kept for diff hygiene. */
+typedef CCNodeView StubNodeView;
 
 enum {
     CC_STUB_DECL = 1,

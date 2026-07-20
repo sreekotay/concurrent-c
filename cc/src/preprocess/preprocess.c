@@ -1319,154 +1319,10 @@ static void cc__sb_append_fmt_local(char** out,
     cc_sb_append(out, out_len, out_cap, buf, (size_t)n);
 }
 
-static int cc__is_template_tag_start(const char* src, size_t n, size_t pos) {
-    return pos < n && (cc_is_ident_start(src[pos]) || src[pos] == '_');
-}
 
 /* Odd run of '\\' immediately before '$' => that '$' is literal (`\${` -> `${` in output). */
-static int cc__is_escaped_dollar(const char* src, size_t body_s, size_t dollar_pos) {
-    if (!src || dollar_pos < body_s || src[dollar_pos] != '$') return 0;
-    size_t k = dollar_pos;
-    int bs = 0;
-    while (k > body_s && src[k - 1] == '\\') {
-        bs++;
-        k--;
-    }
-    return (bs % 2) == 1;
-}
 
-static int cc__scan_interp_body(const char* src,
-                                size_t n,
-                                size_t brace_pos,
-                                size_t* body_end_out) {
-    size_t i = brace_pos + 1;
-    int brace_depth = 1;
-    int paren_depth = 0;
-    int bracket_depth = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    if (!src || !body_end_out || brace_pos >= n || src[brace_pos] != '{') return -1;
-    while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && c2 == '/') {
-                in_block_comment = 0;
-                i += 2;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-        if (c == '/' && c2 == '/') {
-            in_line_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            in_block_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (c == '"') {
-            in_str = 1;
-            i++;
-            continue;
-        }
-        if (c == '\'') {
-            in_chr = 1;
-            i++;
-            continue;
-        }
-        if (c == '{') {
-            brace_depth++;
-            i++;
-            continue;
-        }
-        if (c == '}') {
-            brace_depth--;
-            if (brace_depth == 0 && paren_depth == 0 && bracket_depth == 0) {
-                *body_end_out = i;
-                return 0;
-            }
-            i++;
-            continue;
-        }
-        if (c == '(') paren_depth++;
-        else if (c == ')' && paren_depth > 0) paren_depth--;
-        else if (c == '[') bracket_depth++;
-        else if (c == ']' && bracket_depth > 0) bracket_depth--;
-        i++;
-    }
-    return -1;
-}
 
-static int cc__scan_template_literal(const char* src,
-                                     size_t n,
-                                     size_t tick_pos,
-                                     size_t* tick_end_out) {
-    size_t i = tick_pos + 1;
-    if (!src || !tick_end_out || tick_pos >= n || src[tick_pos] != '`') return -1;
-    while (i < n) {
-        char c = src[i];
-        if (c == '`') {
-            *tick_end_out = i;
-            return 0;
-        }
-        if (c == '$' && i + 1 < n) {
-            size_t brace_pos = (size_t)-1;
-            if (i + 2 < n && src[i + 1] == '{' && src[i + 2] == '{' &&
-                !cc__is_escaped_dollar(src, tick_pos + 1, i)) {
-                /* ${{...}} verbatim span: skip raw to the first `}}` so its
-                 * content (backticks included) can't terminate the literal */
-                size_t p = i + 3;
-                while (p + 1 < n && !(src[p] == '}' && src[p + 1] == '}')) p++;
-                if (p + 1 >= n) return -1;
-                i = p + 2;
-                continue;
-            }
-            if (src[i + 1] == '{') {
-                brace_pos = i + 1;
-            } else if (i + 2 < n && src[i + 1] == '~' &&
-                       cc__is_template_tag_start(src, n, i + 2)) {
-                size_t t = i + 2;
-                while (t < n && cc_is_ident_char(src[t])) t++;
-                if (t < n && src[t] == '{') brace_pos = t;
-            }
-            if (brace_pos != (size_t)-1 &&
-                !cc__is_escaped_dollar(src, tick_pos + 1, i)) {
-                size_t body_end = 0;
-                if (cc__scan_interp_body(src, n, brace_pos, &body_end) != 0) return -1;
-                i = body_end + 1;
-                continue;
-            }
-        }
-        i++;
-    }
-    return -1;
-}
 
 static size_t cc__scan_to_top_level_delim(const char* src,
                                           size_t n,
@@ -1533,7 +1389,7 @@ static size_t cc__scan_to_top_level_delim(const char* src,
         }
         if (c == '`') {
             size_t tick_end = 0;
-            if (cc__scan_template_literal(src, n, i, &tick_end) != 0) return n;
+            if (cc_tpl_scan_literal(src, n, i, &tick_end) != 0) return n;
             i = tick_end + 1;
             continue;
         }
@@ -1821,7 +1677,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 free(out);
                 return (char*)-1;
             }
-            if (cc__scan_template_literal(src, n, tick_s, &tick_e) != 0) {
+            if (cc_tpl_scan_literal(src, n, tick_s, &tick_e) != 0) {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 line, col, "syntax", "unterminated template literal in @emit(...)");
@@ -1952,7 +1808,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     size_t tick_e = 0;
                     size_t arg2_s, arg2_e;
                     char builder_name[64], arena_name[64];
-                    if (cc__scan_template_literal(src, n, arg1_s, &tick_e) != 0) {
+                    if (cc_tpl_scan_literal(src, n, arg1_s, &tick_e) != 0) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                         line, col, "syntax", "unterminated template literal in @string(...)");
@@ -2016,7 +1872,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     size_t tick_e = 0;
                     size_t arg3_s, arg3_e;
                     char builder_name[64], policy_name[64], arena_name[64];
-                    if (cc__scan_template_literal(src, n, arg2_s, &tick_e) != 0) {
+                    if (cc_tpl_scan_literal(src, n, arg2_s, &tick_e) != 0) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                         line, col, "syntax", "unterminated template literal in @string(...)");
@@ -2305,7 +2161,7 @@ char* cc_rewrite_generic_factory_text(const char* src, size_t n, const char* inp
 }
 
 int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out) {
-    return cc__scan_template_literal(src, n, tick_pos, tick_end_out);
+    return cc_tpl_scan_literal(src, n, tick_pos, tick_end_out);
 }
 
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);

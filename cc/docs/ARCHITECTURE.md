@@ -52,6 +52,44 @@ Five non-goals (§5) document architectural moves that have been **considered an
 
 ---
 
+## 1.5 Design principle: FAIL LOUDLY
+
+Stated once, enforced everywhere: **failures move up the loudness
+gradient** —
+
+    runtime-at-a-distance → runtime-at-the-site → link time →
+    compile time → apply/patch time → impossible by construction
+
+Every step up is worth taking even when the top is out of reach. Quiet
+failure is the single most expensive defect class this project has
+recorded; every incident that cost real time shared it:
+
+- a deleted-but-still-referenced helper survived because a stale binary
+  kept passing the gates (the failed link never surfaced);
+- a truly-clean build had never worked — ordering luck made it look fine
+  for the project's entire life;
+- a misplaced Makefile rule became the default goal: `make` returned 0
+  while building nothing, silently invalidating a green suite run;
+- a struct mirrored in six places segfaulted three subsystems away from
+  the field that was added to only some of them.
+
+And every durable fix was the same move: convert quiet to loud, as early
+as possible. The patch set fails at APPLY time, not as miscompiled
+output. The stage-1 bootstrap stub HARD-ERRORS on @grammar — the error
+message is the enforcement that engine sources stay grammar-free. Layout
+skew is a `_Static_assert` naming the fix, not a crash. The edit buffer
+rejects overlapping edits with both pass names in the message. Cap-N
+schema counts over cap are protocol errors, not reallocations. The
+checked-in generated header didn't get a drift check — it got DELETED
+(the top rung: impossible by construction).
+
+Corollaries for new code: check exit status, not output ("rc=0 or it
+didn't happen"); silent fallback paths need a stated justification at
+the fallback site; a heuristic that can be wrong quietly (edit the wrong
+text, match the wrong line) is a bug even while it happens to work.
+Verification itself obeys the principle — a gate that can pass against
+stale state is a quiet failure of the gate.
+
 ## 2. The four constraints
 
 These are the *non-negotiable* properties of the problem domain. They are not engineering choices — they are facts about CC and TCC that the pipeline must accommodate.

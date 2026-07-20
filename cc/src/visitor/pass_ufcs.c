@@ -285,22 +285,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     *out_len = 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
-    struct NodeView {
-        int kind;
-        int parent;
-        const char* file;
-        int line_start;
-        int line_end;
-        int col_start;
-        int col_end;
-        long off_start;   /* byte offsets in parse buffer; -1 unknown (layout mirror of tcc.h) */
-        long off_end;
-        int aux1;
-        int aux2;
-        const char* aux_s1;
-        const char* aux_s2;
-    };
-    const struct NodeView* n = (const struct NodeView*)root->nodes;
+    const CCNodeView* n = (const CCNodeView*)root->nodes;
 
     /* Collect UFCS call nodes (line spans + method), then rewrite each span in-place. */
     struct UFCSNode {
