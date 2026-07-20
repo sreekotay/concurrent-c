@@ -958,7 +958,7 @@ index e7a2f1e2..0923f173 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..cf910b20 100644
+index 50802edf..887c8755 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
@@ -1644,7 +1644,7 @@ index 50802edf..cf910b20 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6139,17 +6576,122 @@ special_math_val:
+@@ -6139,17 +6576,151 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -1675,6 +1675,35 @@ index 50802edf..cf910b20 100644
 +                if (tok == '(')
 +                    cc_is_ufcs = 1;
 +                unget_tok(cc_method_tok);
++            }
++            if (cc_is_ufcs) {
++                /* A member that is a CALLABLE field of the receiver's struct
++                   (function pointer / function type, e.g. c->cb(...)) is
++                   plain C field access, never UFCS.  Non-callable fields do
++                   NOT block UFCS: `p.x()` with an int field x still means
++                   the Point_x accessor.  Probe non-erroringly: passing the
++                   token with SYM_FIELD already set makes find_field return
++                   NULL instead of diagnosing. */
++                CType cc_rt;
++                if (vtop >= vstack) {
++                    cc_rt = vtop->type;
++                    if ((cc_rt.t & VT_BTYPE) == VT_STRUCT && !cc_rt.ref && vtop->sym)
++                        cc_rt = vtop->sym->type;
++                    if ((cc_rt.t & VT_BTYPE) == VT_PTR)
++                        cc_rt = *pointed_type(&cc_rt);
++                    if ((cc_rt.t & VT_BTYPE) == VT_STRUCT && cc_rt.ref &&
++                        cc_rt.ref->c >= 0) {
++                        int cc_fo;
++                        Sym *cc_f = find_field(&cc_rt, cc_method_tok | SYM_FIELD, &cc_fo);
++                        if (cc_f) {
++                            CType cc_ft = cc_f->type;
++                            if ((cc_ft.t & VT_BTYPE) == VT_PTR)
++                                cc_ft = *pointed_type(&cc_ft);
++                            if ((cc_ft.t & VT_BTYPE) == VT_FUNC)
++                                cc_is_ufcs = 0;
++                        }
++                    }
++                }
 +            }
 +            if (cc_is_ufcs) {
 +                const char *cc_method_name = get_tok_str(cc_method_tok, NULL);
@@ -1771,7 +1800,7 @@ index 50802edf..cf910b20 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,13 +6710,28 @@ special_math_val:
+@@ -6168,13 +6739,28 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -1801,7 +1830,7 @@ index 50802edf..cf910b20 100644
          } else if (tok == '(') {
              SValue ret;
              Sym *sa;
-@@ -6182,6 +6739,8 @@ special_math_val:
+@@ -6182,6 +6768,8 @@ special_math_val:
              TokenString *p, *p2;
  
              /* function call  */
@@ -1810,7 +1839,7 @@ index 50802edf..cf910b20 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6190,6 +6749,53 @@ special_math_val:
+@@ -6190,6 +6778,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -1864,7 +1893,7 @@ index 50802edf..cf910b20 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6264,8 +6870,13 @@ special_math_val:
+@@ -6264,8 +6899,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -1879,7 +1908,7 @@ index 50802edf..cf910b20 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6282,10 +6893,51 @@ special_math_val:
+@@ -6282,10 +6922,51 @@ special_math_val:
                  vrev(n);
              }
  
@@ -1931,7 +1960,7 @@ index 50802edf..cf910b20 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6366,9 +7018,11 @@ static void expr_prod(void)
+@@ -6366,9 +7047,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -1943,7 +1972,7 @@ index 50802edf..cf910b20 100644
      }
  }
  
-@@ -6378,9 +7032,11 @@ static void expr_sum(void)
+@@ -6378,9 +7061,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -1955,7 +1984,7 @@ index 50802edf..cf910b20 100644
      }
  }
  
-@@ -6509,11 +7165,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7194,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -1969,7 +1998,7 @@ index 50802edf..cf910b20 100644
          }
          t = tok;
      }
-@@ -6703,12 +7361,13 @@ static void expr_cond(void)
+@@ -6703,12 +7390,13 @@ static void expr_cond(void)
      }
  }
  
@@ -1984,7 +2013,7 @@ index 50802edf..cf910b20 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6719,6 +7378,7 @@ static void expr_eq(void)
+@@ -6719,6 +7407,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -1992,7 +2021,7 @@ index 50802edf..cf910b20 100644
      }
  }
  
-@@ -7119,7 +7779,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7808,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -2016,7 +2045,7 @@ index 50802edf..cf910b20 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7818,76 @@ static void gexpr_decl(void)
+@@ -7142,14 +7847,76 @@ static void gexpr_decl(void)
      }
  }
  
@@ -2094,7 +2123,7 @@ index 50802edf..cf910b20 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +7898,40 @@ again:
+@@ -7160,24 +7927,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -2135,7 +2164,7 @@ index 50802edf..cf910b20 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,12 +7944,33 @@ again:
+@@ -7190,12 +7973,33 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -2169,7 +2198,7 @@ index 50802edf..cf910b20 100644
          /* handle local labels declarations */
          while (tok == TOK_LABEL) {
              do {
-@@ -7211,7 +7986,24 @@ again:
+@@ -7211,7 +8015,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -2194,7 +2223,7 @@ index 50802edf..cf910b20 100644
              }
          }
  
-@@ -7223,7 +8015,19 @@ again:
+@@ -7223,7 +8044,19 @@ again:
          else if (!nocode_wanted)
              check_func_return();
  
@@ -2214,7 +2243,7 @@ index 50802edf..cf910b20 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +8046,7 @@ again:
+@@ -7242,6 +8075,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -2222,7 +2251,7 @@ index 50802edf..cf910b20 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8074,7 @@ again:
+@@ -7269,6 +8103,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -2230,7 +2259,7 @@ index 50802edf..cf910b20 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8108,7 @@ again:
+@@ -7302,6 +8137,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -2238,7 +2267,7 @@ index 50802edf..cf910b20 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8295,7 @@ again:
+@@ -7488,6 +8324,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -2246,7 +2275,7 @@ index 50802edf..cf910b20 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8626,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8655,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -2256,7 +2285,7 @@ index 50802edf..cf910b20 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8116,6 +8927,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+@@ -8116,6 +8956,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
              && is_compatible_unqualified_types(type, &vtop->type)) {
          goto one_elem;
  
@@ -2276,7 +2305,7 @@ index 50802edf..cf910b20 100644
      } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
          no_oblock = 1;
          if ((flags & DIF_FIRST) || tok == '{') {
-@@ -8672,6 +9496,15 @@ static int decl(int l)
+@@ -8672,12 +9525,23 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -2292,7 +2321,16 @@ index 50802edf..cf910b20 100644
      while (1) {
  
          oldint = 0;
-@@ -8687,6 +9520,44 @@ static int decl(int l)
+         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
+-            if (l == VT_JMP)
++            if (l == VT_JMP) {
++                CC_REC_END(); /* decl */
+                 return 0;
++            }
+             /* skip redundant ';' if not in old parameter decl scope */
+             if (tok == ';' && l != VT_CMP) {
+                 next();
+@@ -8687,6 +9551,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2337,7 +2375,19 @@ index 50802edf..cf910b20 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8723,8 +9594,68 @@ static int decl(int l)
+@@ -8714,8 +9616,10 @@ static int decl(int l)
+                 ; /* enum decl */
+             else
+                 tcc_warning("useless type defines no instances");
+-            if (l == VT_JMP)
++            if (l == VT_JMP) {
++                CC_REC_END(); /* decl */
+                 return 1;
++            }
+             next();
+             continue;
+         }
+@@ -8723,8 +9627,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2407,7 +2457,18 @@ index 50802edf..cf910b20 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8832,6 +9763,31 @@ static int decl(int l)
+@@ -8810,6 +9774,10 @@ static int decl(int l)
+                         cur_text_section->sh_flags = text_section->sh_flags;
+                     gen_function(sym);
+                 }
++                CC_REC_END(); /* decl item (function definition) — without
++                                 this every fn def leaked a node-stack entry
++                                 and all later nodes nested one level deeper,
++                                 driving checker recursion depth to O(#fns) */
+                 break;
+             } else {
+                 has_init = 0;
+@@ -8832,6 +9800,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2439,7 +2500,7 @@ index 50802edf..cf910b20 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9819,11 @@ static int decl(int l)
+@@ -8863,6 +9856,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2451,12 +2512,17 @@ index 50802edf..cf910b20 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8903,14 +9864,22 @@ static int decl(int l)
+@@ -8902,15 +9900,26 @@ static int decl(int l)
+                     }
                  }
                  if (tok != ',') {
-                     if (l == VT_JMP)
+-                    if (l == VT_JMP)
 -                        return has_init ? v : 1;
++                    if (l == VT_JMP) {
++                        CC_REC_END(); /* decl item — decl_done_return pops
++                                         the DECL node, not this one */
 +                        goto decl_done_return;
++                    }
                      skip(';');
 +                    CC_REC_END(); /* decl item */
                      break;

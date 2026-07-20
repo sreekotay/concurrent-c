@@ -1,0 +1,32 @@
+// Function-pointer MEMBER calls are plain C field access, not UFCS.
+//
+// Historical bug 1: the UFCS probe classified any `expr->name(` as UFCS,
+// dropped the receiver, and emitted a call to a nonexistent free function.
+// Historical bug 2: every function DEFINITION leaked a recorder node-stack
+// entry, nesting all later nodes one level deeper; with the prelude included
+// that drove checker recursion depth to O(#functions) and overflowed the
+// native stack at -O2.
+//
+// The classification rule: a CALLABLE field (function pointer / function
+// type) wins over UFCS; a non-callable field does NOT block UFCS — p.x()
+// with an int field x still calls the Point_x accessor.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct FpT { int (*cb)(int, void*, int); void* user; } FpT;
+static int fp_hi(int st, void* u, int e) { (void)u; return st + e; }
+
+struct Point { int x; int y; };
+static inline int Point_x(struct Point* p) { return p->x; }
+
+int main(void) {
+    FpT t = { fp_hi, 0 };
+    FpT* c = &t;
+    int st = 5, err = 2;
+    int r1 = c->cb(st, c->user, err);      /* fn-ptr field via -> */
+    int r2 = t.cb(1, t.user, 1);           /* fn-ptr field via .  */
+    struct Point p = { 40, 2 };
+    int r3 = p.x() + p.y;                  /* UFCS accessor beats int field */
+    printf("r1=%d r2=%d r3=%d\n", r1, r2, r3);
+    return (r1 == 7 && r2 == 2 && r3 == 42) ? 0 : 1;
+}
