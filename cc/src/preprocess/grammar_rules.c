@@ -1152,14 +1152,18 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
  * time and compiled in.  This shim owns the EB append and the scratch
  * arena; the .cch owns the text.  Emission is byte-identical to the C
  * emitter it replaced (the port's regression gate). */
-#include "emit/grammar_emit_swar.h"
+#include "emit/grammar_emit.h"
 
-static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
-    CCArena a = cc_arena_create(8192);
-    CCString t = cc_gr_swar_run_text(&a, k, T, b1, b2);
+/* Append a CC-built CCString to the emit buffer. */
+static void eb_put_cs(EB* e, CCString t) {
     CCSlice sl = cc_string_as_slice(&t);
     if (sl.ptr && sl.len)
         cc_sb_append(e->buf, e->len, e->cap, (const char*)sl.ptr, sl.len);
+}
+
+static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_swar_run_text(&a, k, T, b1, b2));
     cc_arena_free(&a);
 }
 
@@ -1254,19 +1258,9 @@ static int rg_match_number_seq(const RG* g, int nd, int* out_int) {
 static void rg_emit_number_fast(const RG* g, EB* e, int int_nd, const char* fail, int* lbl, int rid) {
     int k = (*lbl)++;
     rg_emit_node(g, e, int_nd, fail, lbl, rid);
-    eb_fmt(e, "    if (p < n && (s[p] == 46 || s[p] == 69 || s[p] == 101)) {\n");
-    eb_fmt(e, "    if (s[p] == 46) {\n"
-              "      size_t svf%d = p; p++;\n"
-              "      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = svf%d;\n"
-              "      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }\n"
-              "    }\n", k, k);
-    eb_fmt(e, "    if (p < n && (s[p] == 69 || s[p] == 101)) {\n"
-              "      size_t sve%d = p; p++;\n"
-              "      if (p < n && (s[p] == 43 || s[p] == 45)) p++;\n"
-              "      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = sve%d;\n"
-              "      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }\n"
-              "    }\n", k, k);
-    eb_fmt(e, "    }\n");
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_number_fast_tail_text(&a, k));
+      cc_arena_free(&a); }
     e->last_pad = -1;
 }
 
@@ -1703,49 +1697,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      *   u    = source anchor during parse; decoded arena bytes after materialize
      * match = tape suppressed; collect = fold; parse = tape; schema specializes. */
     if (want_build) {
-    eb_fmt(&e, "typedef struct { unsigned long long meta;\n"
-               "    union { const char* bytes; } u; } %sNode;\n",
-           g->name);
-    /* the ctx only holds POINTERS to shape types, so the substrate stays
-     * dependency-free: plain struct forward decls (always repeatable) —
-     * full definitions are needed only when cc_dom is demanded, and a dom
-     * caller necessarily includes <ccc/cc_shape.cch> for CCShapeReg. */
-    eb_fmt(&e, "struct CCShapeB; struct CCShapeVal;\n");
-    /* mat_* : eager keep/decode stash. Dirty keeps decode while the span is
-     * still hot, but u.bytes stays the SOURCE anchor so __unwind works.
-     * Materialize installs mat_ptr without re-scanning. */
-    eb_fmt(&e, "typedef struct { %sNode* tape; size_t total, cap;\n"
-               "    size_t bstack[512]; size_t bdepth; CCArena* arena;\n"
-               "    const char** mat_ptr; size_t* mat_len; unsigned char* mat_cow;\n"
-               "    /* shaped-DOM hook (armed by _dom; NULL for plain parse):\n"
-               "     * completed containers hand their value up this stack —\n"
-               "     * one push per container, anchored for derived restore */\n"
-               "    struct CCShapeB* sb;\n"
-               "    struct CCShapeVal* vstack; const unsigned char** vanchor;\n"
-               "    size_t vsp, vcap;\n"
-               "    size_t vbase[512]; } %s__ctx;\n",
-           g->name, g->name);
-    eb_fmt(&e, "static __attribute__((noinline)) int %s__tgrow(%s__ctx* c) {\n"
-               "    size_t nc = c->cap * 2;\n"
-               "    %sNode* nt = (%sNode*)cc_arena_realloc(c->arena, c->arena, c->tape,\n"
-               "        c->cap * sizeof(%sNode), nc * sizeof(%sNode), _Alignof(%sNode));\n"
-               "    if (!nt) return 0;\n"
-               "    c->tape = nt;\n",
-           g->name, g->name, g->name, g->name, g->name, g->name, g->name);
-    if (g->ncodecs > 0) {
-        eb_fmt(&e, "    if (c->mat_ptr) {\n"
-                   "        const char** np = (const char**)cc_arena_realloc(c->arena, c->arena, c->mat_ptr,\n"
-                   "            c->cap * sizeof(char*), nc * sizeof(char*), 8);\n"
-                   "        size_t* nl = (size_t*)cc_arena_realloc(c->arena, c->arena, c->mat_len,\n"
-                   "            c->cap * sizeof(size_t), nc * sizeof(size_t), 8);\n"
-                   "        unsigned char* ncw = (unsigned char*)cc_arena_realloc(c->arena, c->arena, c->mat_cow,\n"
-                   "            c->cap, nc, 1);\n"
-                   "        if (!np || !nl || !ncw) return 0;\n"
-                   "        memset(np + c->cap, 0, (nc - c->cap) * sizeof(char*));\n"
-                   "        c->mat_ptr = np; c->mat_len = nl; c->mat_cow = ncw;\n"
-                   "    }\n");
-    }
-    eb_fmt(&e, "    c->cap = nc; return 1;\n}\n");
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(&e, cc_gr_tape_substrate_text(&a, g->name, g->ncodecs > 0));
+      cc_arena_free(&a); }
     /* codec table: rule id -> codec index (0 = none). Lazy decode reads it.
      * Keep ids are the enclosing rule's index (inlining preserves this), so a
      * per-rule subtree scan resolves each rule's codec. Two DIFFERENT codecs
@@ -1968,43 +1922,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     if (want_build) {
     /* tape accessors: adjacency and span ARE the tree. Spans live in meta
      * (bits 10+) for interior nodes; u stays a byte pointer everywhere. */
-    eb_fmt(&e, "static int %sNode_id(const %sNode* nd) { return (int)(nd->meta & 0xFFu); }\n",
-           g->name, g->name);
-    eb_fmt(&e, "static int %sNode_is_list(const %sNode* nd) { return (int)((nd->meta >> 8) & 1u); }\n",
-           g->name, g->name);
-    eb_fmt(&e, "static size_t %sNode_len(const %sNode* nd) { return (size_t)(nd->meta >> 10); }\n",
-           g->name, g->name);
-    eb_fmt(&e, "static %sNode* %sNode_first(%sNode* nd) {\n"
-               "    return %sNode_is_list(nd) && (nd->meta >> 10) > 1 ? nd + 1 : 0; }\n",
-           g->name, g->name, g->name, g->name);
-    eb_fmt(&e, "static %sNode* %sNode_next(%sNode* nd, %sNode* parent) {\n"
-               "    %sNode* nx = nd + (%sNode_is_list(nd) ? (size_t)(nd->meta >> 10) : 1);\n"
-               "    return nx < parent + (size_t)(parent->meta >> 10) ? nx : 0; }\n",
-           g->name, g->name, g->name, g->name, g->name, g->name);
-    eb_fmt(&e, "static size_t %sNode_count(%sNode* nd) {\n"
-               "    size_t k = 0;\n"
-               "    for (%sNode* ch = %sNode_first(nd); ch; ch = %sNode_next(ch, nd)) k++;\n"
-               "    return k; }\n",
-           g->name, g->name, g->name, g->name, g->name);
-    eb_fmt(&e, "static void %sNode_slice(const %sNode* nd, CCSlice* out) {\n"
-               "    size_t l = (size_t)(nd->meta >> 10);\n"
-               "    if ((nd->meta >> 9) & 1u)\n"
-               "        *out = cc_slice_from_parts((void*)nd->u.bytes, l,\n"
-               "                   cc_slice_make_id(3ULL, true, false, false), l);\n"
-               "    else\n"
-               "        *out = cc_slice_from_buffer((void*)nd->u.bytes, l);\n}\n",
-           g->name, g->name);
-    /* Lazy number accessor — borrow stays default; ffc runs on use.
-     * Link a TU that defines FFC_IMPL (cc/runtime/arena_state.c). */
-    eb_fmt(&e, "#include <ccc/vendor/ffc.h>\n"
-               "static inline double %sNode_as_f64(const %sNode* nd) {\n"
-               "    if ((nd->meta >> 8) & 1u) return 0.0;\n"
-               "    { double v = 0.0; size_t l = (size_t)(nd->meta >> 10);\n"
-               "      ffc_parse_options o; o.format = FFC_PRESET_JSON; o.decimal_point = '.';\n"
-               "      ffc_result r = ffc_from_chars_double_options(\n"
-               "          nd->u.bytes, nd->u.bytes + l, &v, o);\n"
-               "      return r.outcome == FFC_OUTCOME_OK ? v : 0.0; }\n}\n",
-           g->name, g->name);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(&e, cc_gr_node_api_text(&a, g->name));
+      cc_arena_free(&a); }
 
     /* Entries — every form is a projection of the same run:
      *   match   = tape suppressed (NULL ctx)
