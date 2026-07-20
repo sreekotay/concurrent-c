@@ -66,13 +66,32 @@ static int cc__is_async_owner(const CCASTRoot* root,
 }
 
 
+/* REPARSE DIET payoff: when the root advertises an exact parse↔source
+ * offset mapping (parse_src_shift/valid_from — see ast.h), node spans come
+ * straight from the recorder's token-exact byte offsets instead of the
+ * physical (line,col) walk.  Set at pass entry; -1 disables (fallback to
+ * the legacy line/col mapping, e.g. when a coordinate-breaking transform
+ * fired for this reparse). */
+static long g_aa_off_shift = -1;
+static long g_aa_off_valid_from = 0;
+
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
-    if (!nd || nd->line_start <= 0) return 0;
+    if (!nd) return 0;
+    if (g_aa_off_shift >= 0 && nd->off_start >= 0) {
+        long so = nd->off_start - g_aa_off_shift;
+        if (so >= g_aa_off_valid_from && (size_t)so < len) return (size_t)so;
+    }
+    if (nd->line_start <= 0) return 0;
     return cc__offset_of_line_col_1based(src, len, nd->line_start, nd->col_start > 0 ? nd->col_start : 1);
 }
 
 static size_t cc__node_end_off(const char* src, size_t len, const NodeView* nd) {
-    if (!nd || nd->line_end <= 0) return 0;
+    if (!nd) return 0;
+    if (g_aa_off_shift >= 0 && nd->off_end >= 0) {
+        long eo = nd->off_end - g_aa_off_shift;
+        if (eo >= g_aa_off_valid_from && (size_t)eo <= len) return (size_t)eo;
+    }
+    if (nd->line_end <= 0) return 0;
     return cc__offset_of_line_col_1based(src, len, nd->line_end, nd->col_end > 0 ? nd->col_end : 1);
 }
 
@@ -2898,6 +2917,11 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
     *out_src = NULL;
     *out_len = 0;
     if (!root->nodes || root->node_count <= 0) return 0;
+
+    /* Arm the exact offset mapping for this root (see cc__node_start_off). */
+    g_aa_off_shift = root->parse_src_shift;
+    g_aa_off_valid_from = root->parse_src_valid_from;
+    if (getenv("CC_ASYNC_NO_EXACT_OFFSETS")) g_aa_off_shift = -1;
 
     const NodeView* n = (const NodeView*)root->nodes;
 

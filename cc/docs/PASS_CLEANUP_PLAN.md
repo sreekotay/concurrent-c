@@ -206,9 +206,15 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    measurement: 930/937 reparses EXACT (99.3%); the 7 broken are real
    family-UFCS reintroductions (2) and L2 idioms (5), which degrade to
    the line-keyed fallback by design.
-   REMAINING: async_ast consumes the invariant (slice statements by node
-   offsets when exact, delete its 21 line mappings); then the 5-reparse
-   ceiling itself.
+   async_ast now CONSUMES the invariant: its two span primitives
+   (cc__node_start_off/cc__node_end_off — the funnel for statement/block
+   slicing) return token-exact recorder offsets when the root is exact,
+   falling back to the (line,col) walk otherwise
+   (CC_ASYNC_NO_EXACT_OFFSETS reverts for A/B).  Corpus cross-validation:
+   output byte-identical under both mechanisms.
+   REMAINING: delete the direct line-mapping call sites that bypass the
+   funnel (the mutated-`cur` buffer scans can't use parse offsets and
+   stay line-keyed by design); then the 5-reparse ceiling itself.
 
 Non-goals: no AST for OUTPUT (text emission stays; the byte-identity gate
 depends on it), no full CC AST rewrite — the stub table + offsets is
