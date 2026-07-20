@@ -304,8 +304,21 @@ int cc__collect_await_normalize_edits(const CCASTRoot* root,
         if (n[i].kind != 6) continue; /* AWAIT */
         if (n[i].line_start <= 0 || n[i].col_start <= 0) continue;
         if (n[i].line_end <= 0 || n[i].col_end <= 0) continue;
-        size_t a_s = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_start, n[i].col_start);
+        /* Exact-first (reparse-diet invariant): the AWAIT node's recorded
+         * byte offset lands on the `await` keyword directly; the (line,col)
+         * walk is the fallback.  Either way the keyword bytes are verified
+         * below before anything is rewritten. */
+        size_t exact = cc_pass_node_exact_off(root, n[i].off_start, in_len);
+        size_t a_s = (exact != (size_t)-1)
+            ? exact
+            : cc__offset_of_line_col_1based(in_src, in_len, n[i].line_start, n[i].col_start);
         size_t a_e = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
+        if (exact != (size_t)-1 && (a_e <= a_s || a_e > in_len)) {
+            /* A col-derived end can trail an exact start; require the
+             * structural end scan to recover it rather than skipping. */
+            size_t inferred = cc__infer_await_expr_end(in_src, in_len, a_s);
+            if (inferred > a_s && inferred <= in_len) a_e = inferred;
+        }
         if (a_e <= a_s || a_e > in_len) continue;
 
         /* Recover a stable `await` keyword offset, even when the stub node points at the operand. */

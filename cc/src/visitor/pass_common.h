@@ -152,6 +152,22 @@ static inline int cc_pass_node_in_tu(const CCASTRoot* root,
  * Span Helpers
  * ============================================================================ */
 
+/* Exact node→source offset under the reparse-diet invariant: when the root
+ * advertises parse_src_shift (>= 0), a node's parse-buffer offset maps to
+ * source offset (off - shift) for source offsets >= parse_src_valid_from.
+ * Returns (size_t)-1 when the invariant doesn't apply — the caller falls
+ * back to line/col resolution.  See ast.h for the invariant's contract. */
+static inline size_t cc_pass_node_exact_off(const CCASTRoot* root, long off,
+                                            size_t src_len) {
+    if (!root || root->parse_src_shift < 0 || off < 0) return (size_t)-1;
+    {
+        long so = off - root->parse_src_shift;
+        if (so < root->parse_src_valid_from || (size_t)so >= src_len)
+            return (size_t)-1;
+        return (size_t)so;
+    }
+}
+
 /* Get byte offset for a node's start position */
 static inline size_t cc_pass_node_start_offset(const CCNodeView* n,
                                                const char* src,
