@@ -1,0 +1,190 @@
+/* CC-AUTHORED EMITTER SECTIONS — grammar_rules.c peeled into the language
+ * itself, one section at a time.  This file is user CC (@string templates,
+ * CCString, arenas), lowered at compiler-build time by the SAME shared
+ * passes as every user header (lower_headers stage) and compiled into ccc.
+ * The lowered .h is CHECKED IN beside this file (bootstrap: lower_headers
+ * itself links grammar_rules.c); `make engine-headers` regenerates it.
+ *
+ * INVARIANT: engine source is user CC.  Any construct valid in a .ccs is
+ * valid here; a lowering gap is a BUG in header-lowering convergence, not
+ * a boundary to write around.
+ *
+ * PORT RULE: every section must emit BYTE-IDENTICAL text to the printf
+ * emitter it replaces — verified by diffing the generated C of the five
+ * reference TUs (json bench, write bench, resp bench, union smoke,
+ * shaped-dom smoke) before landing. */
+#ifndef CC_GRAMMAR_EMIT_CCH
+#define CC_GRAMMAR_EMIT_CCH
+
+/* Compiler-internal consumers (ccc itself, lower_headers) get the
+ * header-only bodies — same standalone flavor comptime dylibs use — so
+ * no runtime link is required wherever this header lands. */
+#ifndef CC_COMPTIME
+#define CC_COMPTIME 1
+#endif
+
+#include <ccc/cc_arena.cch>
+#include <ccc/std/string.cch>
+
+static inline void cc_gr__cat(CCString* o, CCString piece, CCArena* a) {
+    cc_string_push_slice(o, cc_string_as_slice(&piece), a);
+}
+
+/* ---- run-scanner: stop set {b < T} u {b1} u {b2} as an arch ladder ----
+ * 16 B SSE2 where the host compiler has it, portable 8 B SWAR otherwise
+ * (also what the TCC front-end parses).  On a hit every arm advances p to
+ * the FIRST stop byte.  NO NEON ARM by measurement: 33% regression on
+ * Apple Silicon (vector->GPR lane-extract latency dominates ~11-byte
+ * median runs); re-adding needs a stay-in-vector-domain design plus
+ * on-hardware interleaved numbers. */
+static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int b2) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`#if defined(__SSE2__)
+    { while (p + 16 <= n) {
+        __m128i w${k} = _mm_loadu_si128((const __m128i*)(s + p));
+        __m128i m${k} = _mm_setzero_si128();
+`, a), a);
+    if (T > 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_cmpeq_epi8(_mm_min_epu8(w${k}, _mm_set1_epi8((char)${T - 1})), w${k});
+`, a), a);
+    if (b1 >= 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_or_si128(m${k}, _mm_cmpeq_epi8(w${k}, _mm_set1_epi8((char)${b1})));
+`, a), a);
+    if (b2 >= 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_or_si128(m${k}, _mm_cmpeq_epi8(w${k}, _mm_set1_epi8((char)${b2})));
+`, a), a);
+    cc_gr__cat(&o, @string(`        { int hm${k} = _mm_movemask_epi8(m${k});
+          if (hm${k}) { p += (size_t)__builtin_ctz((unsigned)hm${k}); break; } }
+        p += 16;
+    } }
+#else
+    { const unsigned long long L${k} = 0x0101010101010101ULL, H${k} = 0x8080808080808080ULL;
+    while (p + 8 <= n) { unsigned long long w${k}; memcpy(&w${k}, s + p, 8);
+        unsigned long long m${k} = 0;
+`, a), a);
+    if (T > 0)
+        cc_gr__cat(&o, @string(`        m${k} |= (w${k} - L${k} * ${T}) & ~w${k} & H${k};
+`, a), a);
+    if (b1 >= 0)
+        cc_gr__cat(&o, @string(`        { unsigned long long x = w${k} ^ (L${k} * ${b1}); m${k} |= (x - L${k}) & ~x & H${k}; }
+`, a), a);
+    if (b2 >= 0)
+        cc_gr__cat(&o, @string(`        { unsigned long long x = w${k} ^ (L${k} * ${b2}); m${k} |= (x - L${k}) & ~x & H${k}; }
+`, a), a);
+    cc_gr__cat(&o, @string(`        if (m${k}) { p += (size_t)(__builtin_ctzll(m${k}) >> 3); break; }
+        p += 8;
+    } }
+#endif
+`, a), a);
+    return o;
+}
+
+/* ---- JSON-number fast path, the tail after the int part ----
+ * Emitted after the int-shape scan: if the next byte is not . / e / E the
+ * frac/exp scaffolding is skipped entirely (the common path for ids and
+ * plain integers).  svf/sve rollbacks preserve the grammar's opt-frac /
+ * opt-exp semantics ("1.5e" parses as the number "1.5"). */
+static inline CCString cc_gr_number_fast_tail_text(CCArena* a, int k) {
+    return @string(`    if (p < n && (s[p] == 46 || s[p] == 69 || s[p] == 101)) {
+    if (s[p] == 46) {
+      size_t svf${k} = p; p++;
+      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = svf${k};
+      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }
+    }
+    if (p < n && (s[p] == 69 || s[p] == 101)) {
+      size_t sve${k} = p; p++;
+      if (p < n && (s[p] == 43 || s[p] == 45)) p++;
+      if (!(p < n && ((unsigned)(s[p] - 48) <= 9u))) p = sve${k};
+      else { p++; while (p < n && ((unsigned)(s[p] - 48) <= 9u)) p++; }
+    }
+    }
+`, a);
+}
+
+/* ---- tape-node API: adjacency and span ARE the tree ----
+ * Spans live in meta (bits 10+) for interior nodes; u stays a byte pointer
+ * everywhere.  Includes the lazy ffc number accessor (borrow stays the
+ * default; ffc runs on use; FFC_IMPL lives in cc/runtime/arena_state.c). */
+static inline CCString cc_gr_node_api_text(CCArena* a, const char* n) {
+    return @string(`static int ${n}Node_id(const ${n}Node* nd) { return (int)(nd->meta & 0xFFu); }
+static int ${n}Node_is_list(const ${n}Node* nd) { return (int)((nd->meta >> 8) & 1u); }
+static size_t ${n}Node_len(const ${n}Node* nd) { return (size_t)(nd->meta >> 10); }
+static ${n}Node* ${n}Node_first(${n}Node* nd) {
+    return ${n}Node_is_list(nd) && (nd->meta >> 10) > 1 ? nd + 1 : 0; }
+static ${n}Node* ${n}Node_next(${n}Node* nd, ${n}Node* parent) {
+    ${n}Node* nx = nd + (${n}Node_is_list(nd) ? (size_t)(nd->meta >> 10) : 1);
+    return nx < parent + (size_t)(parent->meta >> 10) ? nx : 0; }
+static size_t ${n}Node_count(${n}Node* nd) {
+    size_t k = 0;
+    for (${n}Node* ch = ${n}Node_first(nd); ch; ch = ${n}Node_next(ch, nd)) k++;
+    return k; }
+static void ${n}Node_slice(const ${n}Node* nd, CCSlice* out) {
+    size_t l = (size_t)(nd->meta >> 10);
+    if ((nd->meta >> 9) & 1u)
+        *out = cc_slice_from_parts((void*)nd->u.bytes, l,
+                   cc_slice_make_id(3ULL, true, false, false), l);
+    else
+        *out = cc_slice_from_buffer((void*)nd->u.bytes, l);
+}
+#include <ccc/vendor/ffc.h>
+static inline double ${n}Node_as_f64(const ${n}Node* nd) {
+    if ((nd->meta >> 8) & 1u) return 0.0;
+    { double v = 0.0; size_t l = (size_t)(nd->meta >> 10);
+      ffc_parse_options o; o.format = FFC_PRESET_JSON; o.decimal_point = '.';
+      ffc_result r = ffc_from_chars_double_options(
+          nd->u.bytes, nd->u.bytes + l, &v, o);
+      return r.outcome == FFC_OUTCOME_OK ? v : 0.0; }
+}
+`, a);
+}
+
+/* ---- tape substrate: Node, ctx, tgrow ----
+ * The ctx only holds POINTERS to shape types so the substrate stays
+ * dependency-free (plain struct forward decls); full definitions are
+ * needed only when cc_dom is demanded.  mat_* is the eager keep/decode
+ * stash: dirty keeps decode while the span is hot, u.bytes stays the
+ * SOURCE anchor so __unwind works; materialize installs without a
+ * re-scan.  tgrow doubles the tape (and, when the grammar has codecs,
+ * the stash arrays in lockstep). */
+static inline CCString cc_gr_tape_substrate_text(CCArena* a, const char* n, int has_codecs) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`typedef struct { unsigned long long meta;
+    union { const char* bytes; } u; } ${n}Node;
+struct CCShapeB; struct CCShapeVal;
+typedef struct { ${n}Node* tape; size_t total, cap;
+    size_t bstack[512]; size_t bdepth; CCArena* arena;
+    const char** mat_ptr; size_t* mat_len; unsigned char* mat_cow;
+    /* shaped-DOM hook (armed by _dom; NULL for plain parse):
+     * completed containers hand their value up this stack —
+     * one push per container, anchored for derived restore */
+    struct CCShapeB* sb;
+    struct CCShapeVal* vstack; const unsigned char** vanchor;
+    size_t vsp, vcap;
+    size_t vbase[512]; } ${n}__ctx;
+static __attribute__((noinline)) int ${n}__tgrow(${n}__ctx* c) {
+    size_t nc = c->cap * 2;
+    ${n}Node* nt = (${n}Node*)cc_arena_realloc(c->arena, c->arena, c->tape,
+        c->cap * sizeof(${n}Node), nc * sizeof(${n}Node), _Alignof(${n}Node));
+    if (!nt) return 0;
+    c->tape = nt;
+`, a), a);
+    if (has_codecs)
+        cc_gr__cat(&o, @string(`    if (c->mat_ptr) {
+        const char** np = (const char**)cc_arena_realloc(c->arena, c->arena, c->mat_ptr,
+            c->cap * sizeof(char*), nc * sizeof(char*), 8);
+        size_t* nl = (size_t*)cc_arena_realloc(c->arena, c->arena, c->mat_len,
+            c->cap * sizeof(size_t), nc * sizeof(size_t), 8);
+        unsigned char* ncw = (unsigned char*)cc_arena_realloc(c->arena, c->arena, c->mat_cow,
+            c->cap, nc, 1);
+        if (!np || !nl || !ncw) return 0;
+        memset(np + c->cap, 0, (nc - c->cap) * sizeof(char*));
+        c->mat_ptr = np; c->mat_len = nl; c->mat_cow = ncw;
+    }
+`, a), a);
+    cc_gr__cat(&o, @string(`    c->cap = nc; return 1;
+}
+`, a), a);
+    return o;
+}
+
+#endif /* CC_GRAMMAR_EMIT_CCH */
