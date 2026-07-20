@@ -104,6 +104,50 @@ static int cc__tpl_scan_interp_body(const char* src, size_t n, size_t brace_pos,
     return -1;
 }
 
+int cc_tpl_scan_literal(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out) {
+    size_t i = tick_pos + 1;
+    if (!src || !tick_end_out || tick_pos >= n || src[tick_pos] != '`') return -1;
+    while (i < n) {
+        char c = src[i];
+        if (c == '`') {
+            *tick_end_out = i;
+            return 0;
+        }
+        if (c == '$' && i + 1 < n) {
+            if (i + 2 < n && src[i + 1] == '{' && src[i + 2] == '{' &&
+                !cc__tpl_is_escaped_dollar(src, tick_pos + 1, i)) {
+                /* ${{...}} verbatim span: skip raw to the first `}}` so its
+                 * content (backticks included) can't terminate the literal */
+                size_t p = i + 3;
+                while (p + 1 < n && !(src[p] == '}' && src[p + 1] == '}')) p++;
+                if (p + 1 >= n) return -1;
+                i = p + 2;
+                continue;
+            }
+            {
+                size_t brace_pos = (size_t)-1;
+                if (src[i + 1] == '{') {
+                    brace_pos = i + 1;
+                } else if (i + 2 < n && src[i + 1] == '~' &&
+                           cc__tpl_is_tag_start(src, n, i + 2)) {
+                    size_t t = i + 2;
+                    while (t < n && cc_is_ident_char(src[t])) t++;
+                    if (t < n && src[t] == '{') brace_pos = t;
+                }
+                if (brace_pos != (size_t)-1 &&
+                    !cc__tpl_is_escaped_dollar(src, tick_pos + 1, i)) {
+                    size_t body_end = 0;
+                    if (cc__tpl_scan_interp_body(src, n, brace_pos, &body_end) != 0) return -1;
+                    i = body_end + 1;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    return -1;
+}
+
 int cc_template_next_piece(const char* src, size_t n,
                            size_t body_s, size_t body_e,
                            size_t* pos, CCTemplatePiece* out) {

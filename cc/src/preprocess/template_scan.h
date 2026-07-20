@@ -30,6 +30,12 @@ int cc_template_next_piece(const char* src, size_t n,
                            size_t body_s, size_t body_e,
                            size_t* pos, CCTemplatePiece* out);
 
+/* Scan a backtick template literal starting at tick_pos (must point at '`').
+ * Skips ${...} / $~tag{...} interpolations and ${{...}} verbatim spans while
+ * hunting the closing backtick. 0 on success (*tick_end_out = closing tick),
+ * -1 unterminated. THE canonical extent scanner — do not re-implement. */
+int cc_tpl_scan_literal(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);
+
 /* True when [body_s, body_e) contains `@emit(` with a backtick template (needs
  * comptime exec after `@comptime for` unrolling). */
 int cc_template_body_needs_emit_exec(const char* src, size_t n,
