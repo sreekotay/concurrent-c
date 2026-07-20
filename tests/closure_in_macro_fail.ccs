@@ -1,0 +1,13 @@
+// Closure literals written inside #define bodies cannot carry their
+// /*CC_CLO:N*/ identity through CPP token replay (comments are stripped
+// when the macro body is tokenized), so closure lowering rejects them
+// with a clear diagnostic instead of an "internal error" (or, worse,
+// silently misbinding spans — the pre-marker heuristic's failure mode).
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#define MAKE_CB() (() => { printf("from macro\n"); })
+int main(void) {
+    CCClosure0 c = MAKE_CB();
+    c.call();
+    return 0;
+}

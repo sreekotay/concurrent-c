@@ -172,6 +172,21 @@ static inline size_t cc_pass_node_exact_off(const CCASTRoot* root, long off,
     }
 }
 
+/* END-offset variant: node off_end is EXCLUSIVE, so a construct ending at
+ * EOF legitimately maps to src_len — the start variant's `>= src_len`
+ * rejection would silently drop it (audit finding: three hand-rolled
+ * copies of this arithmetic had already diverged on exactly this bound). */
+static inline size_t cc_pass_node_exact_end_off(const CCASTRoot* root, long off,
+                                                size_t src_len) {
+    if (!root || root->parse_src_shift < 0 || off < 0) return (size_t)-1;
+    {
+        long so = off - root->parse_src_shift;
+        if (so < root->parse_src_valid_from || (size_t)so > src_len)
+            return (size_t)-1;
+        return (size_t)so;
+    }
+}
+
 /* Get byte offset for a node's start position */
 static inline size_t cc_pass_node_start_offset(const CCNodeView* n,
                                                const char* src,

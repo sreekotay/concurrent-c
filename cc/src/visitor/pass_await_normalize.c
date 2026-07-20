@@ -300,7 +300,18 @@ int cc__collect_await_normalize_edits(const CCASTRoot* root,
         }
     }
 
-    for (int i = 0; i < root->node_count && rep_n < (int)(sizeof(reps) / sizeof(reps[0])); i++) {
+    for (int i = 0; i < root->node_count; i++) {
+        if (rep_n >= (int)(sizeof(reps) / sizeof(reps[0]))) {
+            /* FAIL LOUDLY: silently ignoring the 129th await would leave it
+             * un-normalized in the output — a miscompile, not a degrade. */
+            fprintf(stderr,
+                    "cc: error: %s: more than %d await expressions require "
+                    "normalization in one TU (internal cap)\n",
+                    ctx->input_path ? ctx->input_path : "<input>",
+                    (int)(sizeof(reps) / sizeof(reps[0])));
+            for (int r = 0; r < rep_n; r++) free(reps[r].insert_text);
+            return -1;
+        }
         if (n[i].kind != 6) continue; /* AWAIT */
         if (n[i].line_start <= 0 || n[i].col_start <= 0) continue;
         if (n[i].line_end <= 0 || n[i].col_end <= 0) continue;
@@ -417,7 +428,7 @@ int cc__collect_await_normalize_edits(const CCASTRoot* root,
     }
 
     /* Build insertion texts. Ensure nested awaits inside an await-expression are replaced
-+       by the corresponding temp names (so outer hoists don't contain raw inner `await`). */
+ *      by the corresponding temp names (so outer hoists don't contain raw inner `await`). */
     for (int i = 0; i < rep_n; i++) {
         /* Indent prefix for this insertion */
         size_t insert_off = reps[i].insert_off;

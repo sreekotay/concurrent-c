@@ -1,0 +1,1 @@
+closure literals inside #define bodies are not supported

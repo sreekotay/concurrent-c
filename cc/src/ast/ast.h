@@ -104,7 +104,11 @@ typedef struct CCASTRoot {
      * the source buffer handed to cc__reparse_source_to_ast_ex and the
      * text TCC lexed was either length-preserving in-place blanking or
      * the pure prelude prepend — so a node's parse-buffer offset X maps
-     * EXACTLY to source offset (X - parse_src_shift).  -1 when a
+     * EXACTLY to source offset (X - parse_src_shift).  The mapping is
+     * POSITIONAL, not byte-identical: the sanitizers blank comments and
+     * CC constructs to spaces in the parse buffer, so the byte AT a
+     * mapped position can differ between the buffers — verify construct
+     * bytes against the buffer you actually slice from.  -1 when a
      * coordinate-breaking transform fired (or for non-reparse roots);
      * consumers must then fall back to line-keyed resolution.
      * The mapping holds for source offsets >= parse_src_valid_from (the

@@ -159,10 +159,11 @@ int cc_build_parse_input(const char* file_buf,
      * forward-`=>`-scan recovery heuristic.  Markers are inert C comments:
      * TCC strips them from the parse, and `cc__strip_cc_decl_markers`
      * strips them from the emitted C.  Initial parse only (reparses reuse
-     * the already-marked `src_ufcs`).  `CC_NO_CLOSURE_MARKERS` disables the
-     * whole feature (consumer falls back to the heuristic when no markers
-     * are present). */
-    if (!for_reparse && !getenv("CC_NO_CLOSURE_MARKERS")) {
+     * the already-marked `src_ufcs`).  Markers are the ONLY closure
+     * identity — the heuristic fallback is gone, so there is deliberately
+     * no disable knob (the old CC_NO_CLOSURE_MARKERS would now just
+     * guarantee a marker/node mismatch error on every closure file). */
+    if (!for_reparse) {
         size_t can_len = strlen(canonical);
         size_t cm_len = 0;
         char* cm = cc_inject_closure_markers(canonical, can_len, &cm_len);
