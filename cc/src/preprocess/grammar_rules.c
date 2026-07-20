@@ -1268,17 +1268,18 @@ static void rg_emit_number_fast(const RG* g, EB* e, int int_nd, const char* fail
 static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int* lbl) {
     if (pad < 0 || e->last_pad == pad) return;
     int body = g->rules[pad].node;
-    if (rg_inline_size(g, body, 0) <= 24)
+    if (rg_inline_size(g, body, 0) <= 24) {
         rg_emit_node(g, e, body, fail, lbl, pad);
-    else if (!rk_rule(g, e->K, pad))
-        eb_fmt(e, "    if (!%s__r_%s(s, n, &p)) goto %s;\n",
-               g->name, g->rules[pad].name, fail);
-    else if (e->mode == 1)
-        eb_fmt(e, "    if (!%s__b_%s(c, s, n, &p)) goto %s;\n",
-               g->name, g->rules[pad].name, fail);
-    else
-        eb_fmt(e, "    if (!%s__m_%s(s, n, &p)) goto %s;\n",
-               g->name, g->rules[pad].name, fail);
+    } else {
+        CCArena a = cc_arena_create(32768);
+        if (!rk_rule(g, e->K, pad))
+            eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, "r", g->rules[pad].name, fail));
+        else if (e->mode == 1)
+            eb_put_cs(e, cc_gr_pad_call_ctx_text(&a, g->name, "b", g->rules[pad].name, fail));
+        else
+            eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, "m", g->rules[pad].name, fail));
+        cc_arena_free(&a);
+    }
     e->last_pad = pad;
 }
 
@@ -2957,25 +2958,6 @@ static const char* rw_chr(int b, char buf[16]) {
     return buf;
 }
 
-/* compact human description of a charset row, for the emitted table */
-static void rw_cs_desc(const unsigned char* set, char* out, size_t sz) {
-    size_t o = 0;
-    int c = 0;
-    out[0] = '\0';
-    while (c < 256 && o + 16 < sz) {
-        if (!((set[c >> 3] >> (c & 7)) & 1)) { c++; continue; }
-        int d = c;
-        while (d + 1 < 256 && ((set[(d + 1) >> 3] >> ((d + 1) & 7)) & 1)) d++;
-        char a[16], b[16];
-        if (d > c)
-            o += (size_t)snprintf(out + o, sz - o, "%s%s-%s", o ? " " : "",
-                                  rw_chr(c, a), rw_chr(d, b));
-        else
-            o += (size_t)snprintf(out + o, sz - o, "%s%s", o ? " " : "", rw_chr(c, a));
-        c = d + 1;
-    }
-}
-
 /* ---- narrowing: decompose a rule's structure instead of re-describing it ---- */
 
 static int rw_unwrap(const RG* g, int nd) {   /* look through collect/keep wrappers */
@@ -3120,21 +3102,17 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
      * private inline grammar — only reachable-as-function rules are emitted. */
     const char* attr = mark ? "" : "__attribute__((unused)) ";
     if (g->npool > 0 && rw_pool_needed(g)) {
-        eb_fmt(e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
-        for (int i = 0; i < g->npool; i++) eb_fmt(e, "%d,", (int)(unsigned char)g->pool[i]);
-        eb_fmt(e, "};\n");
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_pool_table_text(&a, g->name, (const unsigned char*)g->pool, g->npool));
+        cc_arena_free(&a);
     }
     if (g->nsets > 0) {
-        eb_fmt(e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n#endif\n");
-        eb_fmt(e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
-        for (int s = 0; s < g->nsets; s++) {
-            char desc[128];
-            rw_cs_desc(g->sets[s], desc, sizeof desc);
-            eb_fmt(e, "  /* cs%d: %s */\n  {", s, desc);
-            for (int i = 0; i < 32; i++) eb_fmt(e, "%u,", (unsigned)g->sets[s][i]);
-            eb_fmt(e, "},\n");
-        }
-        eb_fmt(e, "};\n");
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_cs_head_text(&a, g->name, g->nsets));
+        for (int s = 0; s < g->nsets; s++)
+            eb_put_cs(e, cc_gr_cs_row_text(&a, s, g->sets[s]));
+        eb_put_cs(e, cc_gr_ftable_close_text(&a));
+        cc_arena_free(&a);
     }
     unsigned char has_np[R_MAX_RULES];
     memset(has_np, 0, sizeof has_np);
@@ -3142,14 +3120,16 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         if (mark && !mark[r]) continue;
         if (rg_leading_pad_rule(g, e->F, e->K, r) >= 0) has_np[r] = 1;
     }
-    for (int r = 0; r < g->nrules; r++) {
-        if (mark && !mark[r]) continue;
-        eb_fmt(e, "static %sint %s__%s_%s(const unsigned char* s, size_t n, size_t* io);\n",
-               attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
-        if (has_np[r])
-            eb_fmt(e, "static %sint %s__%s_%s__np(const unsigned char* s, size_t n, size_t* io);\n",
-                   attr, g->name, rs_class(g, e->K, r), g->rules[r].name);
-    }
+    { CCArena a = cc_arena_create(32768);
+      for (int r = 0; r < g->nrules; r++) {
+          if (mark && !mark[r]) continue;
+          eb_put_cs(e, cc_gr_matcher_proto_text(&a, attr, g->name, rs_class(g, e->K, r),
+                                                g->rules[r].name, ""));
+          if (has_np[r])
+              eb_put_cs(e, cc_gr_matcher_proto_text(&a, attr, g->name, rs_class(g, e->K, r),
+                                                    g->rules[r].name, "__np"));
+      }
+      cc_arena_free(&a); }
     e->mode = 0;
     for (int r = 0; r < g->nrules; r++) {
         if (mark && !mark[r]) continue;
@@ -3157,9 +3137,9 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         for (int vi = 0; vi < (has_np[r] ? 2 : 1); vi++) {
             int is_np = has_np[r] && vi == 0;
             const char* suf = is_np ? "__np" : "";
-            eb_fmt(e, "static %sint %s__%s_%s%s(const unsigned char* s, size_t n, size_t* io) {\n"
-                      "    size_t p = *io;\n    (void)s; (void)n;\n",
-                   attr, g->name, rs_class(g, e->K, r), g->rules[r].name, suf);
+            CCArena a = cc_arena_create(32768);
+            eb_put_cs(e, cc_gr_matcher_head_text(&a, attr, g->name, rs_class(g, e->K, r),
+                                                 g->rules[r].name, suf));
             char fail[16];
             snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
             e->last_pad = -1;
@@ -3169,14 +3149,15 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
                 while (g->nodes[body].kind == RN_COLLECT || g->nodes[body].kind == RN_KEEP)
                     body = g->nodes[body].a;
                 rg_emit_node(g, e, g->kids[g->nodes[body].b], fail, lbl, r);
-                eb_fmt(e, "    if (!%s__%s_%s__np(s, n, &p)) goto %s;\n",
-                       g->name, rs_class(g, e->K, r), g->rules[r].name, fail);
+                eb_put_cs(e, cc_gr_np_call_text(&a, g->name, rs_class(g, e->K, r),
+                                                g->rules[r].name, fail));
             } else {
                 rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
             }
             e->omit_lead_pad = -1;
             e->last_pad = -1;
-            eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+            eb_put_cs(e, cc_gr_x_tail_text(&a, fail));
+            cc_arena_free(&a);
         }
     }
 }
