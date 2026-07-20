@@ -1938,11 +1938,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     }
     }   /* want_build: accessors */
     if (want_match)
-    eb_fmt(&e, "static int %s_match(const char* s, size_t n) {\n"
-               "    size_t p = 0;\n"
-               "    if (!%s__ENTRY_M((const unsigned char*)s, n, &p)) return 0;\n"
-               "    return p == n;\n}\n",
-           g->name, g->name);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(&e, cc_gr_match_entry_text(&a, g->name));
+      cc_arena_free(&a); }
     if (want_build) {
     eb_fmt(&e, "static %sNode* %s_parse(const char* s, size_t n, CCArena* arena) {\n"
                "    %s__ctx c0;\n"
@@ -4589,42 +4587,9 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
          * Bounds-vs-content is decided exactly at product terms (literals,
          * fused ints, bytes, counted items); matcher-tier failures report
          * Err(PARSE) conservatively. */
-        eb_fmt(&e, "static bool !>(CCError) %s_try_read(const char* s0, size_t n,\n"
-                   "        size_t* pos, CCArena* arena, %s* out) {\n"
-                   "    size_t p = *pos;\n"
-                   "    int cc_i0 = 0;\n"
-                   "    if (p >= n) return cc_ok(false);   /* clean end at frame boundary */\n"
-                   "    if (%s__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0, 0)) {\n"
-                   "        *pos = p;\n"
-                   "        return cc_ok(true);\n"
-                   "    }\n"
-                   "    if (cc_i0) return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, \"%s: incomplete frame\"));\n"
-                   "    return cc_err(CC_ERROR(CC_ERR_PARSE, \"%s: malformed input\"));\n"
-                   "}\n",
-               name, name, name, name, name);
-        eb_fmt(&e, "static int %s_read(const char* s0, size_t n, size_t* pos, CCArena* arena, %s* out) {\n"
-                   "    int cc_i0 = 0;\n"
-                   "    return %s__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0, 0);\n}\n",
-               name, name, name);
-        /* the runtime instance: a Reader is a CURSOR over resources (buffer,
-         * position, arena) — all behavior was specialized at compile time.
-         * _next returns 0 at clean end-of-input AND on parse error; the two
-         * are distinguished by _at_end (error leaves the cursor mid-input). */
-        eb_fmt(&e, "typedef struct %sReader {\n"
-                   "    const char* s; size_t n; size_t pos; CCArena* arena;\n"
-                   "} %sReader;\n", name, name);
-        eb_fmt(&e, "static %sReader %s_reader(const char* s, size_t n, CCArena* arena) {\n"
-                   "    %sReader r; r.s = s; r.n = n; r.pos = 0; r.arena = arena; return r;\n}\n",
-               name, name, name);
-        /* methods are named after the RECEIVER type so instance UFCS
-         * (`r.next(&out)`, `r.at_end()`) resolves by convention */
-        eb_fmt(&e, "static int %sReader_next(%sReader* r, %s* out) {\n"
-                   "    if (r->pos >= r->n) return 0;\n"
-                   "    int cc_i0 = 0;\n"
-                   "    return %s__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0, 0);\n}\n",
-               name, name, name, name);
-        eb_fmt(&e, "static int %sReader_at_end(const %sReader* r) { return r->pos == r->n; }\n",
-               name, name);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(&e, cc_gr_stream_face_text(&a, name));
+          cc_arena_free(&a); }
         /* instance UFCS (`r.next(&out)`, `r.at_end()`, `v.to_str(&a)`): the
          * engine registers the schema and Reader types natively — users
          * never write a registration */
