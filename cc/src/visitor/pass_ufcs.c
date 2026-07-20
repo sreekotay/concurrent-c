@@ -688,6 +688,7 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         int is_under_await;
         int recv_type_is_ptr;
         const char* file;
+        long off_start;   /* member-separator offset in the PARSE buffer */
     };
     struct UFCSNode* nodes = NULL;
     int node_count = 0;
@@ -758,6 +759,7 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             .is_under_await = under_await,
             .recv_type_is_ptr = recv_type_is_ptr,
             .file = n[i].file,
+            .off_start = n[i].off_start,
         };
         if (getenv("CC_DEBUG_UFCS_NODES")) {
             fprintf(stderr, "[cc:ufcs-node2] file=%s line=%d..%d method=%s recv=%s occ=%d\n",
@@ -823,7 +825,33 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
          * the bytes dispose. */
         struct CC__UFCSSpan sp;
         int have_span = 0;
-        {
+        /* EXACT-FIRST: when this root's reparse carried the coordinate
+         * invariant (parse_src_shift — 100% of corpus reparses after the
+         * diet), the member separator's position in the edit buffer is
+         * just off_start - shift.  The member bytes are still verified —
+         * arithmetic alone is never trusted; a miss falls through to the
+         * candidate resolver. */
+        if (root->parse_src_shift >= 0 && nodes[i].off_start >= 0) {
+            long so = nodes[i].off_start - root->parse_src_shift;
+            if (so >= root->parse_src_valid_from && (size_t)so < in_len &&
+                cc__verify_member_at(in_src, in_len, (size_t)so, nodes[i].method)) {
+                size_t sep = (size_t)so;
+                size_t ln_lo = sep;
+                while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
+                size_t mp = sep + (in_src[sep] == '.' ? 1 : 2);
+                while (mp < in_len && isspace((unsigned char)in_src[mp])) mp++;
+                mp += strlen(nodes[i].method);
+                while (mp < in_len && isspace((unsigned char)in_src[mp])) mp++;
+                size_t rp = 0;
+                if (mp < in_len && in_src[mp] == '(' &&
+                    cc_find_matching_paren(in_src, in_len, mp, &rp)) {
+                    sp.start = cc__scan_receiver_start_left(in_src, ln_lo, sep);
+                    sp.end = rp + 1;
+                    if (sp.start < sp.end) have_span = 1;
+                }
+            }
+        }
+        if (!have_span) {
             size_t cand[32];
             int ncand = cc_span_logical_line_candidates(in_src, in_len, nodes[i].file, ls,
                                                         cand, 32);

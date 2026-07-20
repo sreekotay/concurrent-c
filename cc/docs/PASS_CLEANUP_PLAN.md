@@ -150,6 +150,10 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    (`cc__rewrite_ufcs_spans_with_nodes`, −260 lines).  The coordinates
    propose, the bytes dispose.  Still line/col-keyed: candidate generation
    moves to the phase-2 anchor map when it lands.
+   EXACT-FIRST now leads: with the reparse diet at 100%, the resolver
+   maps the member separator directly (off_start - parse_src_shift),
+   byte-verified; the candidate enumeration is the fallback for exotic
+   roots.  Corpus cross-validation: byte-identical output either way.
    pass_closure_literal_ast DONE — markers are the ONLY closure identity:
    every producer emits /*CC_CLO:N*/ (parse-build for user closures,
    autoblock for its 8 synthesized `() => [...]` wrappers — 47 corpus
