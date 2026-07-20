@@ -3448,8 +3448,8 @@ static int rs_formatable(const SS* ss, const RG* g) {
  *       report exact need (snprintf-style), so encoder-heavy formats pay
  *       one encoding pass, not measure+put's two. */
 enum { RW_MEASURE, RW_PUT, RW_CHK };
-_Static_assert(RW_MEASURE == CC_GR_WMEASURE && RW_PUT == CC_GR_WPUT &&
-               RW_CHK == CC_GR_WCHK, "write-mode values shared with grammar_emit.cch");
+_Static_assert((int)RW_MEASURE == (int)CC_GR_WMEASURE && (int)RW_PUT == (int)CC_GR_WPUT &&
+               (int)RW_CHK == (int)CC_GR_WCHK, "write-mode values shared with grammar_emit.cch");
 
 typedef struct {
     long cfix;                    /* measure: compile-time constant bytes */
@@ -3582,29 +3582,17 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         break;
     }
     case SK_BIND_BYTES:
-        if (md == RW_MEASURE) {
-            eb_fmt(e, "    o += v->%s.len;\n", t->field);
-        } else {
-            rw_wacc_flush_put(e, w, md);
-            if (md == RW_CHK)
-                eb_fmt(e, "    if (cap - o < v->%s.len) return 0;\n", t->field);
-            eb_fmt(e, "    memcpy(dst + o, v->%s.ptr, v->%s.len); o += v->%s.len;\n",
-                   t->field, t->field, t->field);
-        }
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_wbytes_text(&a, md, t->field));
+          cc_arena_free(&a); }
         break;
     case SK_BIND_ITEMS: {   /* count-driven */
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_fmt(e, "    { size_t i%d;\n    for (i%d = 0; i%d < v->%s_n; i%d++)\n",
-               k, k, k, t->field, k);
-        if (md == RW_PUT)
-            eb_fmt(e, "        o += %s__wput(&v->%s[i%d], dst + o);\n", t->etype, t->field, k);
-        else if (md == RW_CHK)
-            eb_fmt(e, "        if (!%s__wchk(&v->%s[i%d], dst, cap, &o)) return 0;\n",
-                   t->etype, t->field, k);
-        else
-            eb_fmt(e, "        o += %s__wmeasure(&v->%s[i%d]);\n", t->etype, t->field, k);
-        eb_fmt(e, "    }\n");
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_witems_text(&a, k, md, t->field, t->etype));
+          cc_arena_free(&a); }
         break;
     }
     case SK_NARROW_MEMBERS: {
@@ -3636,21 +3624,9 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         unsigned char b = (unsigned char)nw->open_b;
         rw_wacc_bytes(e, w, md, &b, 1);
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_fmt(e, "    { size_t i%d;\n    for (i%d = 0; i%d < v->%s_n; i%d++) {\n",
-               k, k, k, t->field, k);
-        if (md == RW_PUT)
-            eb_fmt(e, "        if (i%d) dst[o++] = (char)%d;\n"
-                      "        o += %s__wput(&v->%s[i%d], dst + o);\n",
-                   k, nw->sep_b, t->etype, t->field, k);
-        else if (md == RW_CHK)
-            eb_fmt(e, "        if (i%d) { if (cap - o < 1) return 0; dst[o++] = (char)%d; }\n"
-                      "        if (!%s__wchk(&v->%s[i%d], dst, cap, &o)) return 0;\n",
-                   k, nw->sep_b, t->etype, t->field, k);
-        else
-            eb_fmt(e, "        if (i%d) o++;\n"
-                      "        o += %s__wmeasure(&v->%s[i%d]);\n",
-                   k, t->etype, t->field, k);
-        eb_fmt(e, "    }\n    }\n");
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_wnarrow_list_text(&a, k, md, t->field, t->etype, nw->sep_b));
+          cc_arena_free(&a); }
         b = (unsigned char)nw->close_b;
         rw_wacc_bytes(e, w, md, &b, 1);
         break;
@@ -3775,27 +3751,19 @@ static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name
     for (int md = RW_MEASURE; md <= RW_CHK; md++) {
         WAcc w;
         memset(&w, 0, sizeof w);
-        if (md == RW_PUT)
-            eb_fmt(e, "static __attribute__((unused)) size_t %s__wput(const %s* v, char* dst) {\n"
-                      "    size_t o = 0;\n    (void)v;\n", name, name);
-        else if (md == RW_CHK)
-            eb_fmt(e, "static __attribute__((unused)) int %s__wchk(const %s* v, char* dst, size_t cap, size_t* io) {\n"
-                      "    size_t o = *io;\n    (void)v;\n", name, name);
-        else
-            eb_fmt(e, "static __attribute__((unused)) size_t %s__wmeasure(const %s* v) {\n"
-                      "    size_t o = 0;\n    (void)v;\n", name, name);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_write_head_text(&a, md, name));
+          cc_arena_free(&a); }
         for (int i = 0; i < ss->nbody; i++)
             rw_emit_wterm(ss, g, e, &w, lbl, md, ss->body[i]);
         if (md != RW_MEASURE) rw_wacc_flush_put(e, &w, md);
-        else if (w.cfix) eb_fmt(e, "    o += %ld;   /* structural skeleton */\n", w.cfix);
-        if (md == RW_CHK) eb_fmt(e, "    *io = o;\n    return 1;\n}\n");
-        else eb_fmt(e, "    return o;\n}\n");
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_write_tail_text(&a, md, w.cfix));
+          cc_arena_free(&a); }
     }
-    eb_fmt(e, "static __attribute__((unused)) size_t %s_write(const %s* v, char* dst, size_t cap) {\n"
-              "    size_t o = 0;\n"
-              "    if (!%s__wchk(v, dst, cap, &o)) return 0;\n"
-              "    return o;\n}\n",
-           name, name, name);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_write_entry_text(&a, name));
+      cc_arena_free(&a); }
 }
 
 static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* fail) {

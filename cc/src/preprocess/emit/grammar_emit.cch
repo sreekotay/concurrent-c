@@ -378,6 +378,113 @@ static inline CCString cc_gr_wleaf_body_text(CCArena* a, int md, int k, const ch
 `, a);
 }
 
+/* raw bytes field: measure is just the length; put/chk memcpy (flush done
+ * by the caller on the non-measure paths) */
+static inline CCString cc_gr_wbytes_text(CCArena* a, int md, const char* field) {
+    if (md == CC_GR_WMEASURE)
+        return @string(`    o += v->${field}.len;
+`, a);
+    CCString o = cc_string_new();
+    if (md == CC_GR_WCHK)
+        cc_gr__cat(&o, @string(`    if (cap - o < v->${field}.len) return 0;
+`, a), a);
+    cc_gr__cat(&o, @string(`    memcpy(dst + o, v->${field}.ptr, v->${field}.len); o += v->${field}.len;
+`, a), a);
+    return o;
+}
+
+/* count-driven items: delegate each element to its own writer triplet */
+static inline CCString cc_gr_witems_text(CCArena* a, int k, int md,
+                                         const char* field, const char* etype) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`    { size_t i${k};
+    for (i${k} = 0; i${k} < v->${field}_n; i${k}++)
+`, a), a);
+    if (md == CC_GR_WPUT)
+        cc_gr__cat(&o, @string(`        o += ${etype}__wput(&v->${field}[i${k}], dst + o);
+`, a), a);
+    else if (md == CC_GR_WCHK)
+        cc_gr__cat(&o, @string(`        if (!${etype}__wchk(&v->${field}[i${k}], dst, cap, &o)) return 0;
+`, a), a);
+    else
+        cc_gr__cat(&o, @string(`        o += ${etype}__wmeasure(&v->${field}[i${k}]);
+`, a), a);
+    cc_gr__cat(&o, @string(`    }
+`, a), a);
+    return o;
+}
+
+/* narrowed delimited list: separator byte between elements comes from the
+ * decomposed rule; open/close bytes ride the caller's constant-run WAcc */
+static inline CCString cc_gr_wnarrow_list_text(CCArena* a, int k, int md,
+                                               const char* field, const char* etype, int sep_b) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`    { size_t i${k};
+    for (i${k} = 0; i${k} < v->${field}_n; i${k}++) {
+`, a), a);
+    if (md == CC_GR_WPUT)
+        cc_gr__cat(&o, @string(`        if (i${k}) dst[o++] = (char)${sep_b};
+        o += ${etype}__wput(&v->${field}[i${k}], dst + o);
+`, a), a);
+    else if (md == CC_GR_WCHK)
+        cc_gr__cat(&o, @string(`        if (i${k}) { if (cap - o < 1) return 0; dst[o++] = (char)${sep_b}; }
+        if (!${etype}__wchk(&v->${field}[i${k}], dst, cap, &o)) return 0;
+`, a), a);
+    else
+        cc_gr__cat(&o, @string(`        if (i${k}) o++;
+        o += ${etype}__wmeasure(&v->${field}[i${k}]);
+`, a), a);
+    cc_gr__cat(&o, @string(`    }
+    }
+`, a), a);
+    return o;
+}
+
+/* writer-triplet function heads/tails and the checked _write entry.
+ * measure's tail folds the whole structural skeleton to ONE constant. */
+static inline CCString cc_gr_write_head_text(CCArena* a, int md, const char* n) {
+    if (md == CC_GR_WPUT)
+        return @string(`static __attribute__((unused)) size_t ${n}__wput(const ${n}* v, char* dst) {
+    size_t o = 0;
+    (void)v;
+`, a);
+    if (md == CC_GR_WCHK)
+        return @string(`static __attribute__((unused)) int ${n}__wchk(const ${n}* v, char* dst, size_t cap, size_t* io) {
+    size_t o = *io;
+    (void)v;
+`, a);
+    return @string(`static __attribute__((unused)) size_t ${n}__wmeasure(const ${n}* v) {
+    size_t o = 0;
+    (void)v;
+`, a);
+}
+
+static inline CCString cc_gr_write_tail_text(CCArena* a, int md, long cfix) {
+    CCString o = cc_string_new();
+    if (md == CC_GR_WMEASURE && cfix)
+        cc_gr__cat(&o, @string(`    o += ${cfix};   /* structural skeleton */
+`, a), a);
+    if (md == CC_GR_WCHK)
+        cc_gr__cat(&o, @string(`    *io = o;
+    return 1;
+}
+`, a), a);
+    else
+        cc_gr__cat(&o, @string(`    return o;
+}
+`, a), a);
+    return o;
+}
+
+static inline CCString cc_gr_write_entry_text(CCArena* a, const char* n) {
+    return @string(`static __attribute__((unused)) size_t ${n}_write(const ${n}* v, char* dst, size_t cap) {
+    size_t o = 0;
+    if (!${n}__wchk(v, dst, cap, &o)) return 0;
+    return o;
+}
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
