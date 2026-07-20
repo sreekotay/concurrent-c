@@ -3448,6 +3448,8 @@ static int rs_formatable(const SS* ss, const RG* g) {
  *       report exact need (snprintf-style), so encoder-heavy formats pay
  *       one encoding pass, not measure+put's two. */
 enum { RW_MEASURE, RW_PUT, RW_CHK };
+_Static_assert(RW_MEASURE == CC_GR_WMEASURE && RW_PUT == CC_GR_WPUT &&
+               RW_CHK == CC_GR_WCHK, "write-mode values shared with grammar_emit.cch");
 
 typedef struct {
     long cfix;                    /* measure: compile-time constant bytes */
@@ -3457,18 +3459,9 @@ typedef struct {
 
 static void rw_wacc_flush_put(EB* e, WAcc* w, int md) {
     if (w->nlit == 0) return;
-    if (md == RW_CHK) eb_fmt(e, "    if (cap - o < %d) return 0;\n", w->nlit);
-    if (w->nlit <= 4) {
-        for (int i = 0; i < w->nlit; i++) {
-            char cb[16];
-            eb_fmt(e, "    dst[o++] = (char)%d; /*%s*/\n",
-                   (int)w->lit[i], rw_chr((int)w->lit[i], cb));
-        }
-    } else {
-        char esc[4 * 224 + 8];
-        rs_esc(esc, sizeof esc, w->lit, w->nlit);
-        eb_fmt(e, "    memcpy(dst + o, \"%s\", %d); o += %d;\n", esc, w->nlit, w->nlit);
-    }
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_wflush_text(&a, md, w->lit, w->nlit));
+      cc_arena_free(&a); }
     w->nlit = 0;
 }
 
@@ -3484,71 +3477,12 @@ static void rw_wacc_lit_node(const RG* g, EB* e, WAcc* w, int md, int nd) {
     rw_wacc_bytes(e, w, md, (const unsigned char*)g->pool + g->nodes[nd].a, g->nodes[nd].b);
 }
 
-/* compare-chain digit count into `dest` — no divisions on the 1-6 digit
- * values wire formats actually carry; full 20-digit chain so it's total */
-static void rw_emit_digits_expr(EB* e, int k, const char* dest) {
-    unsigned long long p = 10;
-    eb_fmt(e, "      %s ", dest);
-    for (int d = 1; d <= 19; d++) {
-        eb_fmt(e, "u%d < %lluULL ? %d\n         : ", k, p, d);
-        if (d < 19) p *= 10;
-    }
-    eb_fmt(e, "20;\n");
-}
-
 static void rw_emit_wint(EB* e, WAcc* w, int* lbl, int md, const char* expr, int is_unsigned) {
     int k = (*lbl)++;
-    char dest[32];
     if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-    if (md == RW_PUT && is_unsigned) {
-        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n"
-                  "      char nb%d[21]; int nl%d = 0;\n"
-                  "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
-                  "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
-               k, expr, k, k, k, k, k, k, k, k, k, k);
-    } else if (md == RW_PUT) {
-        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
-                  "      char nb%d[21]; int nl%d = 0;\n"
-                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
-                  "      if (x%d < 0) dst[o++] = '-';\n"
-                  "      do { nb%d[nl%d++] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
-                  "      while (nl%d) dst[o++] = nb%d[--nl%d]; }\n",
-               k, expr, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k);
-    } else if (md == RW_CHK && is_unsigned) {
-        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n"
-                  "      size_t nd%d;\n", k, expr, k);
-        snprintf(dest, sizeof dest, "nd%d =", k);
-        rw_emit_digits_expr(e, k, dest);
-        eb_fmt(e, "      if (cap - o < nd%d) return 0;\n"
-                  "      o += nd%d;\n"
-                  "      { size_t q%d = o;\n"
-                  "        do { dst[--q%d] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d); } }\n",
-               k, k, k, k, k, k, k);
-    } else if (md == RW_CHK) {
-        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
-                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
-                  "      size_t nd%d;\n", k, expr, k, k, k, k, k);
-        snprintf(dest, sizeof dest, "nd%d =", k);
-        rw_emit_digits_expr(e, k, dest);
-        eb_fmt(e, "      if (x%d < 0) nd%d++;\n"
-                  "      if (cap - o < nd%d) return 0;\n"
-                  "      o += nd%d;\n"
-                  "      { size_t q%d = o;\n"
-                  "        do { dst[--q%d] = (char)('0' + (u%d %% 10)); u%d /= 10; } while (u%d);\n"
-                  "        if (x%d < 0) dst[--q%d] = '-'; } }\n",
-               k, k, k, k, k, k, k, k, k, k, k);
-    } else if (is_unsigned) {
-        eb_fmt(e, "    { unsigned long long u%d = (unsigned long long)(%s);\n", k, expr);
-        rw_emit_digits_expr(e, k, "o +=");
-        eb_fmt(e, "    }\n");
-    } else {
-        eb_fmt(e, "    { long long x%d = (long long)(%s);\n"
-                  "      unsigned long long u%d = x%d < 0 ? (unsigned long long)-x%d : (unsigned long long)x%d;\n"
-                  "      if (x%d < 0) o++;\n",
-               k, expr, k, k, k, k, k);
-        rw_emit_digits_expr(e, k, "o +=");
-        eb_fmt(e, "    }\n");
-    }
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_wint_text(&a, k, md, expr, is_unsigned));
+      cc_arena_free(&a); }
 }
 
 /* slice-shaped payload through a leaf rule: pre-lits, bytes (encoded when the
@@ -3559,24 +3493,12 @@ static void rw_emit_wleaf(const RG* g, EB* e, WAcc* w, int* lbl, int md,
     const char* enc = (lf->codec > 0 && g->codenc[lf->codec - 1][0])
                           ? g->codenc[lf->codec - 1] : NULL;
     if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-    if (enc && md == RW_PUT) {
-        eb_fmt(e, "    o += %s((const char*)%s, %s, dst + o, (size_t)-1);\n", enc, pexpr, lexpr);
-    } else if (enc && md == RW_CHK) {
-        int k = (*lbl)++;
-        eb_fmt(e, "    { size_t en%d = %s((const char*)%s, %s, dst + o, cap - o);\n"
-                  "      if (en%d > cap - o) return 0;\n"
-                  "      o += en%d; }\n",
-               k, enc, pexpr, lexpr, k, k);
-    } else if (enc) {
-        eb_fmt(e, "    o += %s((const char*)%s, %s, 0, 0);\n", enc, pexpr, lexpr);
-    } else if (md == RW_PUT) {
-        eb_fmt(e, "    memcpy(dst + o, %s, %s); o += %s;\n", pexpr, lexpr, lexpr);
-    } else if (md == RW_CHK) {
-        eb_fmt(e, "    if (cap - o < %s) return 0;\n"
-                  "    memcpy(dst + o, %s, %s); o += %s;\n", lexpr, pexpr, lexpr, lexpr);
-    } else {
-        eb_fmt(e, "    o += %s;\n", lexpr);
-    }
+    /* only the chk+encoder arm consumes a label — allocate conditionally so
+     * the emitted label sequence is unchanged */
+    { int k = (enc && md == RW_CHK) ? (*lbl)++ : 0;
+      CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_wleaf_body_text(&a, md, k, enc, pexpr, lexpr));
+      cc_arena_free(&a); }
     for (int i = 0; i < lf->npost; i++) rw_wacc_lit_node(g, e, w, md, lf->post[i]);
 }
 
@@ -3602,18 +3524,9 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
         {
             int k = (*lbl)++;
             if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-            if (md == RW_PUT)
-                eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
-                          "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
-                       k, k, k, k, t->field, k, k, k);
-            else if (md == RW_CHK)
-                eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
-                          "      if (n%d < 0 || cap - o < (size_t)n%d) return 0;\n"
-                          "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
-                       k, k, k, k, t->field, k, k, k, k, k);
-            else
-                eb_fmt(e, "    { char tb%d[64]; o += (size_t)snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s); }\n",
-                       k, k, k, t->field);
+            { CCArena a = cc_arena_create(32768);
+              eb_put_cs(e, cc_gr_wfloat_text(&a, k, md, t->field));
+              cc_arena_free(&a); }
         }
         for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
         break;
@@ -3655,18 +3568,9 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
     case SK_BIND_FLOAT: {
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        if (md == RW_PUT)
-            eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
-                      "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
-                   k, k, k, k, t->field, k, k, k);
-        else if (md == RW_CHK)
-            eb_fmt(e, "    { char tb%d[64]; int n%d = snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s);\n"
-                      "      if (n%d < 0 || cap - o < (size_t)n%d) return 0;\n"
-                      "      memcpy(dst + o, tb%d, (size_t)n%d); o += (size_t)n%d; }\n",
-                   k, k, k, k, t->field, k, k, k, k, k);
-        else
-            eb_fmt(e, "    { char tb%d[64]; o += (size_t)snprintf(tb%d, sizeof tb%d, \"%%.17g\", v->%s); }\n",
-                   k, k, k, t->field);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_wfloat_text(&a, k, md, t->field));
+          cc_arena_free(&a); }
         break;
     }
     case SK_BIND_SLICE: {

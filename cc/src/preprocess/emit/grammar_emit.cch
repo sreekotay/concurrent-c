@@ -187,6 +187,197 @@ static __attribute__((noinline)) int ${n}__tgrow(${n}__ctx* c) {
     return o;
 }
 
+/* ---- write tier: measure/put/chk text generators ----
+ * Mode values mirror grammar_rules.c's RW_MEASURE/RW_PUT/RW_CHK.  Label
+ * allocation and constant-run flushing stay with the C callers so the
+ * emitted label sequence (and therefore the bytes) cannot drift. */
+enum { CC_GR_WMEASURE = 0, CC_GR_WPUT = 1, CC_GR_WCHK = 2 };
+
+/* printable-byte annotation for emitted compares: 61 -> "'='". '*' and '/'
+ * stay hex so a comment can never contain a comment terminator. */
+static inline CCString cc_gr_chr_text(CCArena* a, int b) {
+    if (b >= 0x21 && b <= 0x7e && b != '\'' && b != '\\' && b != '*' && b != '/') {
+        char ch = (char)b;
+        return @string(`'${ch}'`, a);
+    }
+    if (b == ' ')  return @string(`' '`, a);
+    if (b == '\n') return @string(`nl`, a);
+    if (b == '\r') return @string(`cr`, a);
+    if (b == '\t') return @string(`tab`, a);
+    {
+        const char* hx = "0123456789ABCDEF";
+        char hi = hx[(b >> 4) & 0xF];
+        char lo = hx[b & 0xF];
+        return @string(`0x${hi}${lo}`, a);
+    }
+}
+
+/* C-string-literal escape for emitted byte runs: identifier-ish bytes pass,
+ * everything else becomes \NNN octal (always 3 digits, so a following
+ * digit can't extend the escape). */
+static inline CCString cc_gr_esc_text(CCArena* a, const unsigned char* src, int len) {
+    CCString o = cc_string_new();
+    for (int i = 0; i < len; i++) {
+        unsigned char c = src[i];
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') || c == '_' || c == ' ' || c == '-') {
+            char ch = (char)c;
+            cc_string_push_buffer(&o, &ch, 1, a);
+        } else {
+            char b[4];
+            b[0] = '\\';
+            b[1] = (char)('0' + ((c >> 6) & 7));
+            b[2] = (char)('0' + ((c >> 3) & 7));
+            b[3] = (char)('0' + (c & 7));
+            cc_string_push_buffer(&o, b, 4, a);
+        }
+    }
+    return o;
+}
+
+/* pending constant-byte run: short runs as annotated stores, long runs as
+ * one memcpy of an escaped literal; chk proves space once per run */
+static inline CCString cc_gr_wflush_text(CCArena* a, int md, const unsigned char* lit, int nlit) {
+    CCString o = cc_string_new();
+    if (md == CC_GR_WCHK)
+        cc_gr__cat(&o, @string(`    if (cap - o < ${nlit}) return 0;
+`, a), a);
+    if (nlit <= 4) {
+        for (int i = 0; i < nlit; i++) {
+            int b = (int)lit[i];
+            CCString c = cc_gr_chr_text(a, b);
+            cc_gr__cat(&o, @string(`    dst[o++] = (char)${b}; /*${c}*/
+`, a), a);
+        }
+    } else {
+        CCString esc = cc_gr_esc_text(a, lit, nlit);
+        cc_gr__cat(&o, @string(`    memcpy(dst + o, "${esc}", ${nlit}); o += ${nlit};
+`, a), a);
+    }
+    return o;
+}
+
+/* compare-chain digit count into `dest` — no divisions on the 1-6 digit
+ * values wire formats actually carry; full 20-digit chain so it's total */
+static inline CCString cc_gr_digits_expr_text(CCArena* a, int k, CCString dest) {
+    CCString o = cc_string_new();
+    unsigned long long p = 10;
+    cc_gr__cat(&o, @string(`      ${dest} `, a), a);
+    for (int d = 1; d <= 19; d++) {
+        cc_gr__cat(&o, @string(`u${k} < ${p}ULL ? ${d}
+         : `, a), a);
+        if (d < 19) p *= 10;
+    }
+    cc_gr__cat(&o, @string(`20;
+`, a), a);
+    return o;
+}
+
+/* integer writer body (flush already done by the caller):
+ *   measure — digit count by compare chain, no divisions
+ *   put     — reversed digit buffer, space already proven
+ *   chk     — count first, prove space, then write BACKWARD in place */
+static inline CCString cc_gr_wint_text(CCArena* a, int k, int md, const char* expr, int is_unsigned) {
+    CCString o = cc_string_new();
+    if (md == CC_GR_WPUT && is_unsigned) {
+        cc_gr__cat(&o, @string(`    { unsigned long long u${k} = (unsigned long long)(${expr});
+      char nb${k}[21]; int nl${k} = 0;
+      do { nb${k}[nl${k}++] = (char)('0' + (u${k} % 10)); u${k} /= 10; } while (u${k});
+      while (nl${k}) dst[o++] = nb${k}[--nl${k}]; }
+`, a), a);
+    } else if (md == CC_GR_WPUT) {
+        cc_gr__cat(&o, @string(`    { long long x${k} = (long long)(${expr});
+      char nb${k}[21]; int nl${k} = 0;
+      unsigned long long u${k} = x${k} < 0 ? (unsigned long long)-x${k} : (unsigned long long)x${k};
+      if (x${k} < 0) dst[o++] = '-';
+      do { nb${k}[nl${k}++] = (char)('0' + (u${k} % 10)); u${k} /= 10; } while (u${k});
+      while (nl${k}) dst[o++] = nb${k}[--nl${k}]; }
+`, a), a);
+    } else if (md == CC_GR_WCHK && is_unsigned) {
+        cc_gr__cat(&o, @string(`    { unsigned long long u${k} = (unsigned long long)(${expr});
+      size_t nd${k};
+`, a), a);
+        cc_gr__cat(&o, cc_gr_digits_expr_text(a, k, @string(`nd${k} =`, a)), a);
+        cc_gr__cat(&o, @string(`      if (cap - o < nd${k}) return 0;
+      o += nd${k};
+      { size_t q${k} = o;
+        do { dst[--q${k}] = (char)('0' + (u${k} % 10)); u${k} /= 10; } while (u${k}); } }
+`, a), a);
+    } else if (md == CC_GR_WCHK) {
+        cc_gr__cat(&o, @string(`    { long long x${k} = (long long)(${expr});
+      unsigned long long u${k} = x${k} < 0 ? (unsigned long long)-x${k} : (unsigned long long)x${k};
+      size_t nd${k};
+`, a), a);
+        cc_gr__cat(&o, cc_gr_digits_expr_text(a, k, @string(`nd${k} =`, a)), a);
+        cc_gr__cat(&o, @string(`      if (x${k} < 0) nd${k}++;
+      if (cap - o < nd${k}) return 0;
+      o += nd${k};
+      { size_t q${k} = o;
+        do { dst[--q${k}] = (char)('0' + (u${k} % 10)); u${k} /= 10; } while (u${k});
+        if (x${k} < 0) dst[--q${k}] = '-'; } }
+`, a), a);
+    } else if (is_unsigned) {
+        cc_gr__cat(&o, @string(`    { unsigned long long u${k} = (unsigned long long)(${expr});
+`, a), a);
+        cc_gr__cat(&o, cc_gr_digits_expr_text(a, k, @string(`o +=`, a)), a);
+        cc_gr__cat(&o, @string(`    }
+`, a), a);
+    } else {
+        cc_gr__cat(&o, @string(`    { long long x${k} = (long long)(${expr});
+      unsigned long long u${k} = x${k} < 0 ? (unsigned long long)-x${k} : (unsigned long long)x${k};
+      if (x${k} < 0) o++;
+`, a), a);
+        cc_gr__cat(&o, cc_gr_digits_expr_text(a, k, @string(`o +=`, a)), a);
+        cc_gr__cat(&o, @string(`    }
+`, a), a);
+    }
+    return o;
+}
+
+/* float writer body (flush already done by the caller): %.17g round-trips
+ * doubles exactly; chk asks snprintf for the exact need first */
+static inline CCString cc_gr_wfloat_text(CCArena* a, int k, int md, const char* field) {
+    if (md == CC_GR_WPUT)
+        return @string(`    { char tb${k}[64]; int n${k} = snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field});
+      memcpy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
+`, a);
+    if (md == CC_GR_WCHK)
+        return @string(`    { char tb${k}[64]; int n${k} = snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field});
+      if (n${k} < 0 || cap - o < (size_t)n${k}) return 0;
+      memcpy(dst + o, tb${k}, (size_t)n${k}); o += (size_t)n${k}; }
+`, a);
+    return @string(`    { char tb${k}[64]; o += (size_t)snprintf(tb${k}, sizeof tb${k}, "%.17g", v->${field}); }
+`, a);
+}
+
+/* slice-leaf payload body (pre/post literal runs and flush stay with the
+ * caller): encoded when the rule's codec has an /encode inverse, memcpy
+ * otherwise; k is meaningful only for the chk+encoder arm (the caller
+ * allocates it only then, keeping the label sequence stable) */
+static inline CCString cc_gr_wleaf_body_text(CCArena* a, int md, int k, const char* enc,
+                                             const char* pexpr, const char* lexpr) {
+    if (enc && md == CC_GR_WPUT)
+        return @string(`    o += ${enc}((const char*)${pexpr}, ${lexpr}, dst + o, (size_t)-1);
+`, a);
+    if (enc && md == CC_GR_WCHK)
+        return @string(`    { size_t en${k} = ${enc}((const char*)${pexpr}, ${lexpr}, dst + o, cap - o);
+      if (en${k} > cap - o) return 0;
+      o += en${k}; }
+`, a);
+    if (enc)
+        return @string(`    o += ${enc}((const char*)${pexpr}, ${lexpr}, 0, 0);
+`, a);
+    if (md == CC_GR_WPUT)
+        return @string(`    memcpy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
+`, a);
+    if (md == CC_GR_WCHK)
+        return @string(`    if (cap - o < ${lexpr}) return 0;
+    memcpy(dst + o, ${pexpr}, ${lexpr}); o += ${lexpr};
+`, a);
+    return @string(`    o += ${lexpr};
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
