@@ -1075,6 +1075,13 @@ static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
 
 /* ------------------------------------------------------------- emitter ---- */
 
+/* The emitter's TEXT is CC-AUTHORED: every piece lives in
+ * src/preprocess/emit/grammar_emit.cch (user CC — @string templates,
+ * CCString, arenas), lowered by the shared header passes at compiler-build
+ * time and compiled in.  Included here, above the EB type, because EB
+ * carries the CC scratch arena the pieces build in. */
+#include "emit/grammar_emit.h"
+
 /* last_pad / omit_lead_pad: absorb adjacent identical pads so authors can
  * write natural `value: [ws … ws]` + `member: [ws …]` without stacked skips.
  * last_pad = rule idx of a pad just satisfied; omit_lead_pad strips that pad
@@ -1083,6 +1090,11 @@ typedef struct {
     char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K;
     int mode; int dk; int risk; int dom;
     int last_pad; int omit_lead_pad;
+    /* piece-scratch arena: stack-rooted, heap-overflow (CC_ARENA_STACK at
+     * the driver entries). Contents are valid only until the next eb_emit —
+     * every text piece is copied into the output buffer and the scratch
+     * rewinds to its stack root (overflow extents freed). */
+    CCArena* scratch;
 } EB;
 
 static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
@@ -1119,16 +1131,6 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
     return -1;
 }
 
-/* Emit a SWAR 8-byte skip loop for stop-set (T, b1, b2); advances `p` to the
- * first hit or word-past-end. Shared by fused string-body and charset runs. */
-/* The run-scanner emitter is CC-AUTHORED: cc_gr_swar_run_text lives in
- * src/preprocess/emit/grammar_emit_swar.cch (user CC — @string templates,
- * CCString, arenas), lowered by the shared header passes at compiler-build
- * time and compiled in.  This shim owns the EB append and the scratch
- * arena; the .cch owns the text.  Emission is byte-identical to the C
- * emitter it replaced (the port's regression gate). */
-#include "emit/grammar_emit.h"
-
 /* Append a CC-built CCString to the emit buffer. */
 static void eb_put_cs(EB* e, CCString t) {
     CCSlice sl = cc_string_as_slice(&t);
@@ -1136,10 +1138,17 @@ static void eb_put_cs(EB* e, CCString t) {
         cc_sb_append(e->buf, e->len, e->cap, (const char*)sl.ptr, sl.len);
 }
 
+/* Append a piece and retire its scratch storage: the piece's bytes are
+ * copied into the output buffer, then e->scratch rewinds to its stack
+ * root. Anything built from e->scratch dies here — never hold a scratch
+ * CCString across an eb_emit (or a recursive rg_emit_node, which emits). */
+static void eb_emit(EB* e, CCString t) {
+    eb_put_cs(e, t);
+    cc_arena_reset(e->scratch);
+}
+
 static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_swar_run_text(&a, k, T, b1, b2));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_swar_run_text(e->scratch, k, T, b1, b2));
 }
 
 /* C boolean: `s[p]` ∈ charset `cs` — range / tiny equality / bitset.
@@ -1224,9 +1233,7 @@ static int rg_match_number_seq(const RG* g, int nd, int* out_int) {
 static void rg_emit_number_fast(const RG* g, EB* e, int int_nd, const char* fail, int* lbl, int rid) {
     int k = (*lbl)++;
     rg_emit_node(g, e, int_nd, fail, lbl, rid);
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_number_fast_tail_text(&a, k));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_number_fast_tail_text(e->scratch, k));
     e->last_pad = -1;
 }
 
@@ -1237,14 +1244,12 @@ static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int*
     if (rg_inline_size(g, body, 0) <= 24) {
         rg_emit_node(g, e, body, fail, lbl, pad);
     } else {
-        CCArena a = cc_arena_create(32768);
         if (!rk_rule(g, e->K, pad))
-            eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, "r", g->rules[pad].name, fail));
+            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "r", g->rules[pad].name, fail));
         else if (e->mode == 1)
-            eb_put_cs(e, cc_gr_pad_call_ctx_text(&a, g->name, "b", g->rules[pad].name, fail));
+            eb_emit(e, cc_gr_pad_call_ctx_text(e->scratch, g->name, "b", g->rules[pad].name, fail));
         else
-            eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, "m", g->rules[pad].name, fail));
-        cc_arena_free(&a);
+            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "m", g->rules[pad].name, fail));
     }
     e->last_pad = pad;
 }
@@ -1259,36 +1264,30 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
     case RN_LIT: {
-        CCArena a = cc_arena_create(32768);
         e->last_pad = -1;
         if (x->b == 1) {
-            eb_put_cs(e, cc_gr_m_lit1_text(&a, (int)(unsigned char)g->pool[x->a], fail));
+            eb_emit(e, cc_gr_m_lit1_text(e->scratch, (int)(unsigned char)g->pool[x->a], fail));
         } else if (x->b == 4 || x->b == 5) {
             /* Word compare — golden's true/false/null path; beats memcmp on
              * the structural hot path where these are single-byte dispatch arms. */
             const unsigned char* b = (const unsigned char*)g->pool + x->a;
             unsigned w = (unsigned)b[0] | ((unsigned)b[1] << 8) |
                          ((unsigned)b[2] << 16) | ((unsigned)b[3] << 24);
-            eb_put_cs(e, cc_gr_m_word_text(&a, w, b, x->b, fail));
+            eb_emit(e, cc_gr_m_word_text(e->scratch, w, b, x->b, fail));
         } else {
-            eb_put_cs(e, cc_gr_m_litn_text(&a, g->name, x->a, x->b,
+            eb_emit(e, cc_gr_m_litn_text(e->scratch, g->name, x->a, x->b,
                                            (const unsigned char*)g->pool + x->a, fail));
         }
-        cc_arena_free(&a);
         break;
     }
     case RN_CHARSET: {
-        CCArena a = cc_arena_create(32768);
         e->last_pad = -1;
-        eb_put_cs(e, cc_gr_m_cs1_text(&a, rg_cs_expr_cs(g, x->a, &a), fail));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_m_cs1_text(e->scratch, rg_cs_expr_cs(g, x->a, e->scratch), fail));
         break;
     }
     case RN_SKIP: {
-        CCArena a = cc_arena_create(32768);
         e->last_pad = -1;
-        eb_put_cs(e, cc_gr_m_skip_text(&a, fail));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_m_skip_text(e->scratch, fail));
         break;
     }
     case RN_REF: {
@@ -1318,17 +1317,15 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
              * the full padded entry (trampoline). Emitting pad+__np at the call
              * site creates mutual recursion that blocks C inlining — net loss. */
             const char* suf = use_np ? "__np" : "";
-            CCArena a = cc_arena_create(32768);
             if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
-                eb_put_cs(e, cc_gr_ref_call_text(&a, g->name, "r", g->rules[x->nkids].name,
+                eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "r", g->rules[x->nkids].name,
                                                  suf, 0, fail));
             else if (e->mode == 1)
-                eb_put_cs(e, cc_gr_ref_call_text(&a, g->name, "b", g->rules[x->nkids].name,
+                eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "b", g->rules[x->nkids].name,
                                                  suf, 1, fail));
             else
-                eb_put_cs(e, cc_gr_ref_call_text(&a, g->name, "m", g->rules[x->nkids].name,
+                eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "m", g->rules[x->nkids].name,
                                                  suf, 0, fail));
-            cc_arena_free(&a);
             e->last_pad = tp;
             break;
         }
@@ -1354,9 +1351,7 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         if (!e->mode) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         int k = (*lbl)++;
         int saved_dk = e->dk;
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_keep_open_text(&a, k, x->b > 0));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_keep_open_text(e->scratch, k, x->b > 0));
         if (x->b > 0) e->dk = k;
         rg_emit_node(g, e, x->a, fail, lbl, rid);
         e->dk = saved_dk;
@@ -1364,36 +1359,28 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             /* extract mode (schema tier): the keep captures into out-params —
              * no tape, no ctx. Backtracking is free: a retried branch simply
              * overwrites the locals; a failed rule reports nothing. */
-            CCArena a = cc_arena_create(32768);
-            eb_put_cs(e, cc_gr_keep_x_close_text(&a, k, x->b > 0));
-            cc_arena_free(&a);
+            eb_emit(e, cc_gr_keep_x_close_text(e->scratch, k, x->b > 0));
             break;
         }
         /* Keep writes the RAW source span into u.bytes (unwind anchor).
          * Codec keeps: if dirty, decode NOW while the span is hot into the
          * mat_* stash; materialize installs without re-scanning. */
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_tgrow_guard_text(&a, g->name, fail));
-          if (x->b == 0)
-              eb_put_cs(e, cc_gr_keep_tape_text(&a, g->name, k, rid));
-          else
-              /* single codec index on this keep — that case + default fail */
-              eb_put_cs(e, cc_gr_keep_codec_tape_text(&a, g->name, k, rid, x->b,
-                                                      g->codecs[x->b - 1], fail));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_tgrow_guard_text(e->scratch, g->name, fail));
+        if (x->b == 0)
+            eb_emit(e, cc_gr_keep_tape_text(e->scratch, g->name, k, rid));
+        else
+            /* single codec index on this keep — that case + default fail */
+            eb_emit(e, cc_gr_keep_codec_tape_text(e->scratch, g->name, k, rid, x->b,
+                                                    g->codecs[x->b - 1], fail));
         break;
     }
     case RN_COLLECT: {
         if (e->mode != 1) { rg_emit_node(g, e, x->a, fail, lbl, rid); break; }
         /* BEGIN/END markers bracket the child's span. A failing child unwinds
          * through tape truncation, removing the BEGIN — no special casing. */
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_collect_begin_text(&a, g->name, rid, fail, e->dom));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_collect_begin_text(e->scratch, g->name, rid, fail, e->dom));
         rg_emit_node(g, e, x->a, fail, lbl, rid);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_collect_end_text(&a, g->name, fail, e->dom));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_collect_end_text(e->scratch, g->name, fail, e->dom));
         e->last_pad = -1;
         break;
     }
@@ -1422,37 +1409,35 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                  * save/restore — a failing branch propagates to the enclosing
                  * resume point (opt/any/cascade/entry), which owns recovery of
                  * both cursor and tape. */
-                CCArena a = cc_arena_create(32768);
-                eb_put_cs(e, cc_gr_alt_disp_head_text(&a, k));
+                eb_emit(e, cc_gr_alt_disp_head_text(e->scratch, k));
                 for (int i = 0; i < x->nkids; i++) {
                     if (i == big) continue;
                     for (int bch = 0; bch < 256; bch++)
                         if (bf[i][bch >> 3] & (1u << (bch & 7)))
-                            eb_put_cs(e, cc_gr_alt_case_text(&a, bch));
+                            eb_emit(e, cc_gr_alt_case_text(e->scratch, bch));
                     if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + i], 0))
-                        eb_put_cs(e, cc_gr_mark_dirty_text(&a, e->dk));
+                        eb_emit(e, cc_gr_mark_dirty_text(e->scratch, e->dk));
                     {
                         char br[32];
                         snprintf(br, sizeof(br), "Lb%d", k);
                         rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
                     }
-                    eb_put_cs(e, cc_gr_break_text(&a));
+                    eb_emit(e, cc_gr_break_text(e->scratch));
                 }
                 if (big >= 0) {
-                    eb_put_cs(e, cc_gr_default_text(&a));
+                    eb_emit(e, cc_gr_default_text(e->scratch));
                     if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + big], 0))
-                        eb_put_cs(e, cc_gr_mark_dirty_text(&a, e->dk));
+                        eb_emit(e, cc_gr_mark_dirty_text(e->scratch, e->dk));
                     {
                         char br[32];
                         snprintf(br, sizeof(br), "Lb%d", k);
                         rg_emit_node(g, e, g->kids[x->b + big], br, lbl, rid);
                     }
-                    eb_put_cs(e, cc_gr_break_text(&a));
+                    eb_emit(e, cc_gr_break_text(e->scratch));
                 } else {
-                    eb_put_cs(e, cc_gr_alt_default_fail_text(&a, k));
+                    eb_emit(e, cc_gr_alt_default_fail_text(e->scratch, k));
                 }
-                eb_put_cs(e, cc_gr_alt_disp_tail_text(&a, k, fail));
-                cc_arena_free(&a);
+                eb_emit(e, cc_gr_alt_disp_tail_text(e->scratch, k, fail));
                 break;
             }
         }
@@ -1460,21 +1445,19 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         {
         int kp = e->mode == 1 ? rk_node(g, e->K, nd) : 0;
         int rk = kp ? e->risk : 0;
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_save_text(&a, k, kp && rk));
+        eb_emit(e, cc_gr_save_text(e->scratch, k, kp && rk));
         for (int i = 0; i < x->nkids; i++) {
             char br[32];
             int last = (i == x->nkids - 1);
             snprintf(br, sizeof(br), "La%d_%d", k, i);
             if (e->mode && e->dk >= 0 && !rg_pure_run(g, g->kids[x->b + i], 0))
-                eb_put_cs(e, cc_gr_mark_dirty_text(&a, e->dk));
+                eb_emit(e, cc_gr_mark_dirty_text(e->scratch, e->dk));
             rg_emit_node(g, e, g->kids[x->b + i], br, lbl, rid);
-            eb_put_cs(e, cc_gr_goto_ok_text(&a, k));
-            eb_put_cs(e, cc_gr_restore_text(&a, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
-            if (last) eb_put_cs(e, cc_gr_goto_fail_text(&a, fail));
+            eb_emit(e, cc_gr_goto_ok_text(e->scratch, k));
+            eb_emit(e, cc_gr_restore_text(e->scratch, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
+            if (last) eb_emit(e, cc_gr_goto_fail_text(e->scratch, fail));
         }
-        eb_put_cs(e, cc_gr_ok_close_text(&a, k));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
         }
         break;
     }
@@ -1484,15 +1467,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Lo%d", k);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_save_text(&a, k, kp && rk));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_save_text(e->scratch, k, kp && rk));
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_goto_ok_text(&a, k));
-          eb_put_cs(e, cc_gr_restore_text(&a, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
-          eb_put_cs(e, cc_gr_ok_close_text(&a, k));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_goto_ok_text(e->scratch, k));
+        eb_emit(e, cc_gr_restore_text(e->scratch, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
+        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
         break;
     }
     case RN_ANY:
@@ -1503,28 +1482,20 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             if (rg_scan_body_alt(g, e->F, x->a, &scs, &sesc)) {
                 int k = (*lbl)++;
                 int T, b1, b2;
-                { CCArena a = cc_arena_create(32768);
-                  eb_put_cs(e, cc_gr_forever_open_text(&a));
-                  cc_arena_free(&a); }
+                eb_emit(e, cc_gr_forever_open_text(e->scratch));
                 if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2))
                     rg_emit_swar_run(e, k, T, b1, b2);
-                { CCArena a = cc_arena_create(32768);
-                  eb_put_cs(e, cc_gr_cs_run_text(&a, rg_cs_expr_cs(g, scs, &a)));
-                  cc_arena_free(&a); }
+                eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, scs, e->scratch)));
                 {
                     char br[32];
                     snprintf(br, sizeof(br), "Le%d", k);
-                    { CCArena a = cc_arena_create(32768);
-                      eb_put_cs(e, cc_gr_save_text(&a, k, 0));
-                      cc_arena_free(&a); }
+                    eb_emit(e, cc_gr_save_text(e->scratch, k, 0));
                     /* Mark dirty only after a successful escape — probing the
                      * escape arm at the closing quote must not poison clean spans. */
                     rg_emit_node(g, e, sesc, br, lbl, rid);
-                    { CCArena a = cc_arena_create(32768);
-                      if (e->mode && e->dk >= 0 && !rg_pure_run(g, sesc, 0))
-                          eb_put_cs(e, cc_gr_mark_dirty_text(&a, e->dk));
-                      eb_put_cs(e, cc_gr_scan_esc_tail_text(&a, br, k));
-                      cc_arena_free(&a); }
+                    if (e->mode && e->dk >= 0 && !rg_pure_run(g, sesc, 0))
+                        eb_emit(e, cc_gr_mark_dirty_text(e->scratch, e->dk));
+                    eb_emit(e, cc_gr_scan_esc_tail_text(e->scratch, br, k));
                 }
                 e->last_pad = -1;
                 break;
@@ -1534,18 +1505,14 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         if (g->nodes[eff].kind == RN_CHARSET) {
             int cs = g->nodes[eff].a;
             if (x->kind == RN_SOME) {   /* first element is required */
-                CCArena a = cc_arena_create(32768);
-                eb_put_cs(e, cc_gr_m_cs1_text(&a, rg_cs_expr_cs(g, cs, &a), fail));
-                cc_arena_free(&a);
+                eb_emit(e, cc_gr_m_cs1_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch), fail));
             }
             {
                 int T, b1, b2;
                 if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2))
                     rg_emit_swar_run(e, (*lbl)++, T, b1, b2);
             }
-            { CCArena a = cc_arena_create(32768);
-              eb_put_cs(e, cc_gr_cs_run_text(&a, rg_cs_expr_cs(g, cs, &a)));
-              cc_arena_free(&a); }
+            eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
             break;
         }
         if (x->kind == RN_SOME) {
@@ -1558,16 +1525,12 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         int rk = kp ? e->risk : 0;
         char br[32];
         snprintf(br, sizeof(br), "Ly%d", k);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_loop_head_text(&a, k, kp && rk));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_loop_head_text(e->scratch, k, kp && rk));
         rg_emit_node(g, e, x->a, br, lbl, rid);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_loop_break_text(&a, k));
-          eb_put_cs(e, cc_gr_goto_ok_text(&a, k));
-          eb_put_cs(e, cc_gr_restore_text(&a, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
-          eb_put_cs(e, cc_gr_ok_close_text(&a, k));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_loop_break_text(e->scratch, k));
+        eb_emit(e, cc_gr_goto_ok_text(e->scratch, k));
+        eb_emit(e, cc_gr_restore_text(e->scratch, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
+        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
         break;
         }
     }
@@ -1580,7 +1543,8 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1 };
+    CC_ARENA_STACK(sc, 32768);   /* piece scratch: stack root, heap overflow */
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
     e.dom = want_dom;
@@ -1588,22 +1552,20 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
 
     /* the manifest: what this declaration lowered to, and how to call it —
      * the stable surface is the cc_* ops in <ccc/cc_grammar.cch> */
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_rules_manifest_head_text(&a, g->name, origin_line, g->nrules));
-      if (want_match)
-          eb_put_cs(&e, cc_gr_rules_manifest_match_text(&a, g->name));
-      if (want_build) {
-          eb_put_cs(&e, cc_gr_rules_manifest_parse_text(&a, g->name));
-          eb_put_cs(&e, cc_gr_rules_manifest_collect_text(&a, g->name));
-      if (want_dom)
-          eb_put_cs(&e, cc_gr_rules_manifest_dom_text(&a, g->name));
-          eb_put_cs(&e, cc_gr_rules_manifest_nodes_text(&a, g->name));
-      }
-      if (!want_match && !want_build)
-          eb_put_cs(&e, cc_gr_rules_manifest_none_text(&a));
-      eb_put_cs(&e, cc_gr_rules_manifest_close_text(&a));
-      eb_put_cs(&e, cc_gr_rules_typedef_text(&a, g->name, g->nrules));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_rules_manifest_head_text(e.scratch, g->name, origin_line, g->nrules));
+    if (want_match)
+        eb_emit(&e, cc_gr_rules_manifest_match_text(e.scratch, g->name));
+    if (want_build) {
+        eb_emit(&e, cc_gr_rules_manifest_parse_text(e.scratch, g->name));
+        eb_emit(&e, cc_gr_rules_manifest_collect_text(e.scratch, g->name));
+    if (want_dom)
+        eb_emit(&e, cc_gr_rules_manifest_dom_text(e.scratch, g->name));
+        eb_emit(&e, cc_gr_rules_manifest_nodes_text(e.scratch, g->name));
+    }
+    if (!want_match && !want_build)
+        eb_emit(&e, cc_gr_rules_manifest_none_text(e.scratch));
+    eb_emit(&e, cc_gr_rules_manifest_close_text(e.scratch));
+    eb_emit(&e, cc_gr_rules_typedef_text(e.scratch, g->name, g->nrules));
     /* collect context: span log with cursor-coupled rollback (nlog restores
      * alongside p, so failed-branch keeps are never replayed). */
     /* THE TAPE — the one substrate every consumption form projects from.
@@ -1617,16 +1579,13 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      *   u    = source anchor during parse; decoded arena bytes after materialize
      * match = tape suppressed; collect = fold; parse = tape; schema specializes. */
     if (want_build) {
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_tape_substrate_text(&a, g->name, g->ncodecs > 0));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_tape_substrate_text(e.scratch, g->name, g->ncodecs > 0));
     /* codec table: rule id -> codec index (0 = none). Lazy decode reads it.
      * Keep ids are the enclosing rule's index (inlining preserves this), so a
      * per-rule subtree scan resolves each rule's codec. Two DIFFERENT codecs
      * in one rule would collide — engine limitation, detectable, none here. */
     if (g->ncodecs > 0) {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(&e, cc_gr_codec_of_head_text(&a, g->name, g->nrules));
+        eb_emit(&e, cc_gr_codec_of_head_text(e.scratch, g->name, g->nrules));
         for (int r = 0; r < g->nrules; r++) {
             int cd = 0;
             int stack[R_MAX_NODES]; int sp = 0;
@@ -1643,20 +1602,17 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                     for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
                 }
             }
-            eb_put_cs(&e, cc_gr_short_item_text(&a, cd));
+            eb_emit(&e, cc_gr_short_item_text(e.scratch, cd));
         }
-        eb_put_cs(&e, cc_gr_ftable_close_text(&a));
-        cc_arena_free(&a);
+        eb_emit(&e, cc_gr_ftable_close_text(e.scratch));
     }
     /* Derived restore: the cursor is the ONLY live parse state. Every node's
      * u is its source anchor during the parse (leaves: raw span pointer;
      * BEGINs: position at open; spans live in meta), so failure recovery is
      * a cold backward pop of nodes born at/after the resume position. */
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_unwind_fn_text(&a, g->name));
-      if (want_dom)
-          eb_put_cs(&e, cc_gr_shape_end_proto_text(&a, g->name));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_unwind_fn_text(e.scratch, g->name));
+    if (want_dom)
+        eb_emit(&e, cc_gr_shape_end_proto_text(e.scratch, g->name));
     }   /* want_build: tape substrate */
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
@@ -1673,26 +1629,20 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
             /* RN_REF: keeps inside other rules belong to those rules' ids */
         }
         if (haskeep) {
-            CCArena a = cc_arena_create(32768);
-            eb_put_cs(&e, cc_gr_keep_def_text(&a, g->name, g->rules[r].name, r));
-            cc_arena_free(&a);
+            eb_emit(&e, cc_gr_keep_def_text(e.scratch, g->name, g->rules[r].name, r));
         }
     }
 
     if (g->npool > 0 && (want_match || want_build) && rw_pool_needed(g)) {
         /* only multi-byte literals read the pool at runtime; otherwise it
          * carries nothing but compile-time name strings — emit nothing */
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(&e, cc_gr_pool_table_text(&a, g->name, (const unsigned char*)g->pool, g->npool));
-        cc_arena_free(&a);
+        eb_emit(&e, cc_gr_pool_table_text(e.scratch, g->name, (const unsigned char*)g->pool, g->npool));
     }
     if (g->nsets > 0 && (want_match || want_build)) {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(&e, cc_gr_cs_head_text(&a, g->name, g->nsets));
+        eb_emit(&e, cc_gr_cs_head_text(e.scratch, g->name, g->nsets));
         for (int s = 0; s < g->nsets; s++)
-            eb_put_cs(&e, cc_gr_cs_row_text(&a, s, g->sets[s]));
-        eb_put_cs(&e, cc_gr_ftable_close_text(&a));
-        cc_arena_free(&a);
+            eb_emit(&e, cc_gr_cs_row_text(e.scratch, s, g->sets[s]));
+        eb_emit(&e, cc_gr_ftable_close_text(e.scratch));
     }
     /* Sharing is semantics-driven. Three classes per rule:
      *   skipped — every reference inlined (aliases, tiny pure bodies): no
@@ -1727,32 +1677,30 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
             const char* al = has_np[r]
                 ? "static inline __attribute__((always_inline)) int "
                 : "static int ";
-            CCArena a = cc_arena_create(32768);
             if (pure[r]) {
                 if (want_match || want_build) {
-                    eb_put_cs(&e, cc_gr_rule_proto_text(&a, al, g->name, "r",
+                    eb_emit(&e, cc_gr_rule_proto_text(e.scratch, al, g->name, "r",
                                                         g->rules[r].name, "", 0));
                     if (has_np[r])
-                        eb_put_cs(&e, cc_gr_rule_proto_text(&a, "static int ", g->name, "r",
+                        eb_emit(&e, cc_gr_rule_proto_text(e.scratch, "static int ", g->name, "r",
                                                             g->rules[r].name, "__np", 0));
                 }
             } else {
                 if (want_match) {
-                    eb_put_cs(&e, cc_gr_rule_proto_text(&a, al, g->name, "m",
+                    eb_emit(&e, cc_gr_rule_proto_text(e.scratch, al, g->name, "m",
                                                         g->rules[r].name, "", 0));
                     if (has_np[r])
-                        eb_put_cs(&e, cc_gr_rule_proto_text(&a, "static int ", g->name, "m",
+                        eb_emit(&e, cc_gr_rule_proto_text(e.scratch, "static int ", g->name, "m",
                                                             g->rules[r].name, "__np", 0));
                 }
                 if (want_build) {
-                    eb_put_cs(&e, cc_gr_rule_proto_text(&a, al, g->name, "b",
+                    eb_emit(&e, cc_gr_rule_proto_text(e.scratch, al, g->name, "b",
                                                         g->rules[r].name, "", 1));
                     if (has_np[r])
-                        eb_put_cs(&e, cc_gr_rule_proto_text(&a, "static int ", g->name, "b",
+                        eb_emit(&e, cc_gr_rule_proto_text(e.scratch, "static int ", g->name, "b",
                                                             g->rules[r].name, "__np", 1));
                 }
             }
-            cc_arena_free(&a);
         }
         for (int mode = 0; mode <= 1; mode++) {
             e.mode = mode;
@@ -1777,22 +1725,16 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                         if (!mode) continue;
                         if (!want_match && !want_build) continue;
                         e.mode = 0;
-                        { CCArena a = cc_arena_create(32768);
-                          eb_put_cs(&e, cc_gr_rule_head_text(&a, al, g->name, "r",
-                                                             g->rules[r].name, suf, 0));
-                          cc_arena_free(&a); }
+                        eb_emit(&e, cc_gr_rule_head_text(e.scratch, al, g->name, "r",
+                                                           g->rules[r].name, suf, 0));
                     } else if (mode) {
                         if (!want_build) continue;
-                        { CCArena a = cc_arena_create(32768);
-                          eb_put_cs(&e, cc_gr_rule_head_text(&a, al, g->name, "b",
-                                                             g->rules[r].name, suf, 1));
-                          cc_arena_free(&a); }
+                        eb_emit(&e, cc_gr_rule_head_text(e.scratch, al, g->name, "b",
+                                                           g->rules[r].name, suf, 1));
                     } else {
                         if (!want_match) continue;
-                        { CCArena a = cc_arena_create(32768);
-                          eb_put_cs(&e, cc_gr_rule_head_text(&a, al, g->name, "m",
-                                                             g->rules[r].name, suf, 0));
-                          cc_arena_free(&a); }
+                        eb_emit(&e, cc_gr_rule_head_text(e.scratch, al, g->name, "m",
+                                                           g->rules[r].name, suf, 0));
                     }
                     char fail[16];
                     snprintf(fail, sizeof(fail), "Lf%d", lbl++);
@@ -1800,9 +1742,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                     e.omit_lead_pad = is_np ? lp : -1;
                     if (!is_np && lp >= 0) {
                         /* full rule: lead pad then __np (shared core) */
-                        { CCArena a = cc_arena_create(32768);
-                          eb_put_cs(&e, cc_gr_pp_open_text(&a));
-                          cc_arena_free(&a); }
+                        eb_emit(&e, cc_gr_pp_open_text(e.scratch));
                         e.last_pad = -1;
                         /* emit the leading pad kid only */
                         {
@@ -1812,23 +1752,19 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                                 body = g->nodes[body].a;
                             rg_emit_node(g, &e, g->kids[g->nodes[body].b], fail, &lbl, r);
                         }
-                        { CCArena a = cc_arena_create(32768);
-                          if (pure[r] || !mode)
-                              eb_put_cs(&e, cc_gr_ref_call_text(&a, g->name, pure[r] ? "r" : "m",
-                                                                g->rules[r].name, "__np", 0, fail));
-                          else
-                              eb_put_cs(&e, cc_gr_ref_call_text(&a, g->name, "b",
-                                                                g->rules[r].name, "__np", 1, fail));
-                          eb_put_cs(&e, cc_gr_pp_close_text(&a));
-                          cc_arena_free(&a); }
+                        if (pure[r] || !mode)
+                            eb_emit(&e, cc_gr_ref_call_text(e.scratch, g->name, pure[r] ? "r" : "m",
+                                                              g->rules[r].name, "__np", 0, fail));
+                        else
+                            eb_emit(&e, cc_gr_ref_call_text(e.scratch, g->name, "b",
+                                                              g->rules[r].name, "__np", 1, fail));
+                        eb_emit(&e, cc_gr_pp_close_text(e.scratch));
                     } else {
                         rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
                     }
                     e.omit_lead_pad = -1;
                     e.last_pad = -1;
-                    { CCArena a = cc_arena_create(32768);
-                      eb_put_cs(&e, cc_gr_x_tail_text(&a, fail));
-                      cc_arena_free(&a); }
+                    eb_emit(&e, cc_gr_x_tail_text(e.scratch, fail));
                     e.mode = mode;
                     if (!has_np[r]) break;
                 }
@@ -1839,22 +1775,18 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         {
             const char* p0 = pure[0] ? "r" : "m";
             const char* b0 = pure[0] ? "r" : "b";
-            CCArena a = cc_arena_create(32768);
             if (want_match)
-                eb_put_cs(&e, cc_gr_entry_def_text(&a, g->name, "M", p0, g->rules[0].name));
+                eb_emit(&e, cc_gr_entry_def_text(e.scratch, g->name, "M", p0, g->rules[0].name));
             if (want_build)
-                eb_put_cs(&e, cc_gr_entry_def_text(&a, g->name, "B", b0, g->rules[0].name));
-            eb_put_cs(&e, cc_gr_entry_pure_def_text(&a, g->name, pure[0] ? 1 : 0));
-            cc_arena_free(&a);
+                eb_emit(&e, cc_gr_entry_def_text(e.scratch, g->name, "B", b0, g->rules[0].name));
+            eb_emit(&e, cc_gr_entry_pure_def_text(e.scratch, g->name, pure[0] ? 1 : 0));
         }
     }
 
     if (want_build) {
     /* tape accessors: adjacency and span ARE the tree. Spans live in meta
      * (bits 10+) for interior nodes; u stays a byte pointer everywhere. */
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_node_api_text(&a, g->name));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_node_api_text(e.scratch, g->name));
 
     /* Entries — every form is a projection of the same run:
      *   match   = tape suppressed (NULL ctx)
@@ -1868,24 +1800,20 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     }
     }   /* want_build: accessors */
     if (want_match)
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_match_entry_text(&a, g->name));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_match_entry_text(e.scratch, g->name));
     if (want_build) {
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(&e, cc_gr_parse_entry_head_text(&a, g->name));
-      if (g->ncodecs > 0) {
-          /* Materialize: install eager mat_* stash (decoded at keep-commit while
-           * hot). Fallback codec path covers leaves that somehow skipped stash.
-           * Failed branches were unwound and never decode. */
-          eb_put_cs(&e, cc_gr_mat_head_text(&a, g->name));
-          for (int ci = 0; ci < g->ncodecs; ci++)
-              eb_put_cs(&e, cc_gr_mat_case_text(&a, ci + 1, g->codecs[ci]));
-          eb_put_cs(&e, cc_gr_mat_tail_text(&a));
-      }
-      eb_put_cs(&e, cc_gr_parse_entry_tail_text(&a));
-      eb_put_cs(&e, cc_gr_collect_fn_text(&a, g->name));
-      cc_arena_free(&a); }
+    eb_emit(&e, cc_gr_parse_entry_head_text(e.scratch, g->name));
+    if (g->ncodecs > 0) {
+        /* Materialize: install eager mat_* stash (decoded at keep-commit while
+         * hot). Fallback codec path covers leaves that somehow skipped stash.
+         * Failed branches were unwound and never decode. */
+        eb_emit(&e, cc_gr_mat_head_text(e.scratch, g->name));
+        for (int ci = 0; ci < g->ncodecs; ci++)
+            eb_emit(&e, cc_gr_mat_case_text(e.scratch, ci + 1, g->codecs[ci]));
+        eb_emit(&e, cc_gr_mat_tail_text(e.scratch));
+    }
+    eb_emit(&e, cc_gr_parse_entry_tail_text(e.scratch));
+    eb_emit(&e, cc_gr_collect_fn_text(e.scratch, g->name));
     }   /* want_build: parse + collect entries */
 
     if (want_dom) {
@@ -1902,28 +1830,27 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
          * CCShapeReg trie; instances carry 16 B value slots only), all
          * else ARRAYS; a container that doesn't pair (key,value) cleanly
          * falls back to an array — never wrong, just not key-addressable. */
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(&e, cc_gr_dynobj_head_text(&a, g->name, g->nrules));
+        eb_emit(&e, cc_gr_dynobj_head_text(e.scratch, g->name, g->nrules));
         for (int r = 0; r < g->nrules; r++)
-            eb_put_cs(&e, cc_gr_dynobj_item_text(&a, r ? "," : "",
+            eb_emit(&e, cc_gr_dynobj_item_text(e.scratch, r ? "," : "",
                                                  rw_is_objlist(g, e.F, e.K, r) ? 1 : 0));
-        eb_put_cs(&e, cc_gr_ftable_close_text(&a));
-        eb_put_cs(&e, cc_gr_vgrow_fn_text(&a, g->name));
-        eb_put_cs(&e, cc_gr_shape_leaf_head_text(&a, g->name));
+        eb_emit(&e, cc_gr_ftable_close_text(e.scratch));
+        eb_emit(&e, cc_gr_vgrow_fn_text(e.scratch, g->name));
+        eb_emit(&e, cc_gr_shape_leaf_head_text(e.scratch, g->name));
         if (g->ncodecs > 0) {
-            eb_put_cs(&e, cc_gr_shape_leaf_dirty_head_text(&a, g->name));
+            eb_emit(&e, cc_gr_shape_leaf_dirty_head_text(e.scratch, g->name));
             for (int ci = 0; ci < g->ncodecs; ci++)
-                eb_put_cs(&e, cc_gr_shape_leaf_case_text(&a, ci + 1, g->codecs[ci]));
-            eb_put_cs(&e, cc_gr_shape_leaf_dirty_tail_text(&a));
+                eb_emit(&e, cc_gr_shape_leaf_case_text(e.scratch, ci + 1, g->codecs[ci]));
+            eb_emit(&e, cc_gr_shape_leaf_dirty_tail_text(e.scratch));
         }
-        eb_put_cs(&e, cc_gr_shape_leaf_tail_text(&a));
-        eb_put_cs(&e, cc_gr_shape_end_fn_text(&a, g->name, g->nrules));
-        eb_put_cs(&e, cc_gr_dom_entry_text(&a, g->name));
-        cc_arena_free(&a);
+        eb_emit(&e, cc_gr_shape_leaf_tail_text(e.scratch));
+        eb_emit(&e, cc_gr_shape_end_fn_text(e.scratch, g->name, g->nrules));
+        eb_emit(&e, cc_gr_dom_entry_text(e.scratch, g->name));
     }
 
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
+    cc_arena_free(&sc);
     free(F); free(K);
     return out;
 }
@@ -2844,17 +2771,13 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
      * private inline grammar — only reachable-as-function rules are emitted. */
     const char* attr = mark ? "" : "__attribute__((unused)) ";
     if (g->npool > 0 && rw_pool_needed(g)) {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_pool_table_text(&a, g->name, (const unsigned char*)g->pool, g->npool));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_pool_table_text(e->scratch, g->name, (const unsigned char*)g->pool, g->npool));
     }
     if (g->nsets > 0) {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_cs_head_text(&a, g->name, g->nsets));
+        eb_emit(e, cc_gr_cs_head_text(e->scratch, g->name, g->nsets));
         for (int s = 0; s < g->nsets; s++)
-            eb_put_cs(e, cc_gr_cs_row_text(&a, s, g->sets[s]));
-        eb_put_cs(e, cc_gr_ftable_close_text(&a));
-        cc_arena_free(&a);
+            eb_emit(e, cc_gr_cs_row_text(e->scratch, s, g->sets[s]));
+        eb_emit(e, cc_gr_ftable_close_text(e->scratch));
     }
     unsigned char has_np[R_MAX_RULES];
     memset(has_np, 0, sizeof has_np);
@@ -2862,16 +2785,14 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         if (mark && !mark[r]) continue;
         if (rg_leading_pad_rule(g, e->F, e->K, r) >= 0) has_np[r] = 1;
     }
-    { CCArena a = cc_arena_create(32768);
-      for (int r = 0; r < g->nrules; r++) {
-          if (mark && !mark[r]) continue;
-          eb_put_cs(e, cc_gr_matcher_proto_text(&a, attr, g->name, rs_class(g, e->K, r),
-                                                g->rules[r].name, ""));
-          if (has_np[r])
-              eb_put_cs(e, cc_gr_matcher_proto_text(&a, attr, g->name, rs_class(g, e->K, r),
-                                                    g->rules[r].name, "__np"));
-      }
-      cc_arena_free(&a); }
+    for (int r = 0; r < g->nrules; r++) {
+        if (mark && !mark[r]) continue;
+        eb_emit(e, cc_gr_matcher_proto_text(e->scratch, attr, g->name, rs_class(g, e->K, r),
+                                              g->rules[r].name, ""));
+        if (has_np[r])
+            eb_emit(e, cc_gr_matcher_proto_text(e->scratch, attr, g->name, rs_class(g, e->K, r),
+                                                  g->rules[r].name, "__np"));
+    }
     e->mode = 0;
     for (int r = 0; r < g->nrules; r++) {
         if (mark && !mark[r]) continue;
@@ -2879,8 +2800,7 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
         for (int vi = 0; vi < (has_np[r] ? 2 : 1); vi++) {
             int is_np = has_np[r] && vi == 0;
             const char* suf = is_np ? "__np" : "";
-            CCArena a = cc_arena_create(32768);
-            eb_put_cs(e, cc_gr_matcher_head_text(&a, attr, g->name, rs_class(g, e->K, r),
+            eb_emit(e, cc_gr_matcher_head_text(e->scratch, attr, g->name, rs_class(g, e->K, r),
                                                  g->rules[r].name, suf));
             char fail[16];
             snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
@@ -2891,39 +2811,32 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
                 while (g->nodes[body].kind == RN_COLLECT || g->nodes[body].kind == RN_KEEP)
                     body = g->nodes[body].a;
                 rg_emit_node(g, e, g->kids[g->nodes[body].b], fail, lbl, r);
-                eb_put_cs(e, cc_gr_np_call_text(&a, g->name, rs_class(g, e->K, r),
+                eb_emit(e, cc_gr_np_call_text(e->scratch, g->name, rs_class(g, e->K, r),
                                                 g->rules[r].name, fail));
             } else {
                 rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
             }
             e->omit_lead_pad = -1;
             e->last_pad = -1;
-            eb_put_cs(e, cc_gr_x_tail_text(&a, fail));
-            cc_arena_free(&a);
+            eb_emit(e, cc_gr_x_tail_text(e->scratch, fail));
         }
     }
 }
 
 static void rs_emit_x(RG* g, EB* e, int* lbl, int r) {
     e->mode = 2;
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_x_head_text(&a, g->name, g->rules[r].name));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_x_head_text(e->scratch, g->name, g->rules[r].name));
     char fail[16];
     snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
     rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_x_tail_text(&a, fail));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_x_tail_text(e->scratch, fail));
     e->mode = 0;
 }
 
 static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
     if (prule < 0) return;
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, rs_class(g, e->K, prule),
-                                       g->rules[prule].name, fail));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, rs_class(g, e->K, prule),
+                                     g->rules[prule].name, fail));
 }
 
 /* fusable int run: `keep [opt(charset=={'-'}) some(charset=contiguous range
@@ -2984,9 +2897,7 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
     if (t->kind == SK_BIND_INT) {
         int neg;
         if (rs_int_run_shape(g, t->rule, &neg)) {
-            CCArena a = cc_arena_create(32768);
-            eb_put_cs(e, cc_gr_bind_int_run_text(&a, k, neg, cc__fpfx, t->field, fail));
-            cc_arena_free(&a);
+            eb_emit(e, cc_gr_bind_int_run_text(e->scratch, k, neg, cc__fpfx, t->field, fail));
             return;
         }
     }
@@ -2996,45 +2907,33 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
      * path, so the locals are always written. Bigger rules stay calls. */
     int body = g->rules[t->rule].node;
     if (g->nodes[body].kind == RN_KEEP && rg_inline_size(g, g->nodes[body].a, 0) <= 16) {
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_bind_span_inline_text(&a, k));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_bind_span_inline_text(e->scratch, k));
         e->mode = 2;
         rg_emit_node(g, e, body, fail, lbl, t->rule);
         e->mode = 0;
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_bind_span_inline_close_text(&a));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_bind_span_inline_close_text(e->scratch));
     } else {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_bind_span_call_text(&a, k, g->name, g->rules[t->rule].name, fail));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_bind_span_call_text(e->scratch, k, g->name, g->rules[t->rule].name, fail));
     }
     if (t->kind == SK_BIND_INT) {
         /* inline accumulation over the captured span — the matcher already
          * validated the digits; strtoll would copy and re-scan them (and is
          * a strtoll prefix-parse either way: stops at the first non-digit,
          * so `int` over a float span binds its integer part). */
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_bind_int_span_text(&a, k, cc__fpfx, t->field));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_bind_int_span_text(e->scratch, k, cc__fpfx, t->field));
         return;
     }
     if (t->kind == SK_BIND_FLOAT) {
         /* Number text was borrowed by the keep; ffc parses JSON doubles here. */
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_bind_float_span_text(&a, k, cc__fpfx, t->field, fail));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_bind_float_span_text(e->scratch, k, cc__fpfx, t->field, fail));
         return;
     }
     int cd = rs_rule_codec(g, t->rule);
-    { CCArena a = cc_arena_create(32768);
-      if (cd > 0)
-          eb_put_cs(e, cc_gr_bind_slice_codec_text(&a, k, cc__fpfx, t->field,
-                                                   g->codecs[cd - 1], fail));
-      else
-          eb_put_cs(e, cc_gr_bind_slice_borrow_text(&a, k, cc__fpfx, t->field));
-      cc_arena_free(&a); }
+    if (cd > 0)
+        eb_emit(e, cc_gr_bind_slice_codec_text(e->scratch, k, cc__fpfx, t->field,
+                                                 g->codecs[cd - 1], fail));
+    else
+        eb_emit(e, cc_gr_bind_slice_borrow_text(e->scratch, k, cc__fpfx, t->field));
 }
 
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail);
@@ -3163,9 +3062,7 @@ typedef struct {
 
 static void rw_wacc_flush_put(EB* e, WAcc* w, int md) {
     if (w->nlit == 0) return;
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_wflush_text(&a, md, w->lit, w->nlit));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_wflush_text(e->scratch, md, w->lit, w->nlit));
     w->nlit = 0;
 }
 
@@ -3184,9 +3081,7 @@ static void rw_wacc_lit_node(const RG* g, EB* e, WAcc* w, int md, int nd) {
 static void rw_emit_wint(EB* e, WAcc* w, int* lbl, int md, const char* expr, int is_unsigned) {
     int k = (*lbl)++;
     if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_wint_text(&a, k, md, expr, is_unsigned));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_wint_text(e->scratch, k, md, expr, is_unsigned));
 }
 
 /* slice-shaped payload through a leaf rule: pre-lits, bytes (encoded when the
@@ -3200,9 +3095,7 @@ static void rw_emit_wleaf(const RG* g, EB* e, WAcc* w, int* lbl, int md,
     /* only the chk+encoder arm consumes a label — allocate conditionally so
      * the emitted label sequence is unchanged */
     { int k = (enc && md == RW_CHK) ? (*lbl)++ : 0;
-      CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_wleaf_body_text(&a, md, k, enc, pexpr, lexpr));
-      cc_arena_free(&a); }
+      eb_emit(e, cc_gr_wleaf_body_text(e->scratch, md, k, enc, pexpr, lexpr)); }
     for (int i = 0; i < lf->npost; i++) rw_wacc_lit_node(g, e, w, md, lf->post[i]);
 }
 
@@ -3228,9 +3121,7 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
         {
             int k = (*lbl)++;
             if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-            { CCArena a = cc_arena_create(32768);
-              eb_put_cs(e, cc_gr_wfloat_text(&a, k, md, t->field));
-              cc_arena_free(&a); }
+            eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, t->field));
         }
         for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
         break;
@@ -3272,9 +3163,7 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
     case SK_BIND_FLOAT: {
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_wfloat_text(&a, k, md, t->field));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, t->field));
         break;
     }
     case SK_BIND_SLICE: {
@@ -3287,16 +3176,12 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
     }
     case SK_BIND_BYTES:
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_wbytes_text(&a, md, t->field));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_wbytes_text(e->scratch, md, t->field));
         break;
     case SK_BIND_ITEMS: {   /* count-driven */
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_witems_text(&a, k, md, t->field, t->etype));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_witems_text(e->scratch, k, md, t->field, t->etype));
         break;
     }
     case SK_NARROW_MEMBERS: {
@@ -3328,9 +3213,7 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         unsigned char b = (unsigned char)nw->open_b;
         rw_wacc_bytes(e, w, md, &b, 1);
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_wnarrow_list_text(&a, k, md, t->field, t->etype, nw->sep_b));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_wnarrow_list_text(e->scratch, k, md, t->field, t->etype, nw->sep_b));
         b = (unsigned char)nw->close_b;
         rw_wacc_bytes(e, w, md, &b, 1);
         break;
@@ -3378,82 +3261,74 @@ static const char* rs_gk(const STerm* t) {
 static void rs_emit_get(SS* ss, EB* e, const char* name) {
     int order[S_MAX_TERMS]; int cnt = 0;
     for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_ftable_head_text(&a, name, cnt > 0 ? cnt : 1));
+    eb_emit(e, cc_gr_ftable_head_text(e->scratch, name, cnt > 0 ? cnt : 1));
     for (int i = 0; i < cnt; i++) {
         const STerm* t = &ss->terms[order[i]];
         int is_items = t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST;
         if (is_items)
-            eb_put_cs(e, cc_gr_ftable_row_items_text(&a, t->field, rs_gk(t), name, t->etype));
+            eb_emit(e, cc_gr_ftable_row_items_text(e->scratch, t->field, rs_gk(t), name, t->etype));
         else
-            eb_put_cs(e, cc_gr_ftable_row_text(&a, t->field, rs_gk(t), name));
+            eb_emit(e, cc_gr_ftable_row_text(e->scratch, t->field, rs_gk(t), name));
     }
-    if (cnt == 0) eb_put_cs(e, cc_gr_ftable_empty_row_text(&a));
-    eb_put_cs(e, cc_gr_ftable_close_text(&a));
-    eb_put_cs(e, cc_gr_field_fn_head_text(&a, name));
+    if (cnt == 0) eb_emit(e, cc_gr_ftable_empty_row_text(e->scratch));
+    eb_emit(e, cc_gr_ftable_close_text(e->scratch));
+    eb_emit(e, cc_gr_field_fn_head_text(e->scratch, name));
     {
         unsigned char done[S_MAX_TERMS] = {0};
         for (int i = 0; i < cnt; i++) {
             if (done[i]) continue;
             size_t L = strlen(ss->terms[order[i]].field);
-            eb_put_cs(e, cc_gr_get_case_text(&a, (int)L));
+            eb_emit(e, cc_gr_get_case_text(e->scratch, (int)L));
             for (int j = i; j < cnt; j++) {
                 const STerm* t = &ss->terms[order[j]];
                 if (done[j] || strlen(t->field) != L) continue;
                 done[j] = 1;
-                eb_put_cs(e, cc_gr_field_hit_text(&a, t->field, (int)L, name, j));
+                eb_emit(e, cc_gr_field_hit_text(e->scratch, t->field, (int)L, name, j));
             }
-            eb_put_cs(e, cc_gr_get_break_text(&a));
+            eb_emit(e, cc_gr_get_break_text(e->scratch));
         }
     }
-    eb_put_cs(e, cc_gr_switch_end_ret0_text(&a));
+    eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
     /* compiled get: dispatch straight to member reads — the field table is
      * the reflective face, this is the fast one */
-    eb_put_cs(e, cc_gr_get_fn_head_text(&a, name));
+    eb_emit(e, cc_gr_get_fn_head_text(e->scratch, name));
     {
         unsigned char done[S_MAX_TERMS] = {0};
         for (int i = 0; i < cnt; i++) {
             if (done[i]) continue;
             size_t L = strlen(ss->terms[order[i]].field);
-            eb_put_cs(e, cc_gr_get_case_text(&a, (int)L));
+            eb_emit(e, cc_gr_get_case_text(e->scratch, (int)L));
             for (int j = i; j < cnt; j++) {
                 const STerm* t = &ss->terms[order[j]];
                 if (done[j] || strlen(t->field) != L) continue;
                 done[j] = 1;
-                eb_put_cs(e, cc_gr_get_hit_open_text(&a, t->field, (int)L, rs_gk(t), name, j));
-                eb_put_cs(e, cc_gr_get_present_text(&a, ss->presence, j));
+                eb_emit(e, cc_gr_get_hit_open_text(e->scratch, t->field, (int)L, rs_gk(t), name, j));
+                eb_emit(e, cc_gr_get_present_text(e->scratch, ss->presence, j));
                 {
                     int vk = t->kind == SK_BIND_INT ? 0
                            : t->kind == SK_BIND_FLOAT ? 1
                            : (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) ? 2 : 3;
-                    eb_put_cs(e, cc_gr_get_value_text(&a, vk, t->field));
+                    eb_emit(e, cc_gr_get_value_text(e->scratch, vk, t->field));
                 }
-                eb_put_cs(e, cc_gr_get_hit_close_text(&a));
+                eb_emit(e, cc_gr_get_hit_close_text(e->scratch));
             }
-            eb_put_cs(e, cc_gr_get_break_text(&a));
+            eb_emit(e, cc_gr_get_break_text(e->scratch));
         }
     }
-    eb_put_cs(e, cc_gr_switch_end_ret0_text(&a));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
 }
 
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
     for (int md = RW_MEASURE; md <= RW_CHK; md++) {
         WAcc w;
         memset(&w, 0, sizeof w);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_write_head_text(&a, md, name));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_write_head_text(e->scratch, md, name));
         for (int i = 0; i < ss->nbody; i++)
             rw_emit_wterm(ss, g, e, &w, lbl, md, ss->body[i]);
         if (md != RW_MEASURE) rw_wacc_flush_put(e, &w, md);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_write_tail_text(&a, md, w.cfix));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_write_tail_text(e->scratch, md, w.cfix));
     }
-    { CCArena a = cc_arena_create(32768);
-      eb_put_cs(e, cc_gr_write_entry_text(&a, name));
-      cc_arena_free(&a); }
+    eb_emit(e, cc_gr_write_entry_text(e->scratch, name));
 }
 
 static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* fail) {
@@ -3465,43 +3340,41 @@ static void rw_emit_pads(RG* g, EB* e, const int* pads, int npads, const char* f
 static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     const RNarrow* w = &t->nw;
     int k = (*lbl)++;
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_byte_check_text(&a, w->open_b, fail));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, w->open_b, fail));
     rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
-    eb_put_cs(e, cc_gr_loop_open_text(&a, w->close_b));
+    eb_emit(e, cc_gr_loop_open_text(e->scratch, w->close_b));
     rw_emit_pads(g, e, w->mpad_a, w->nmpad_a, fail);
-    eb_put_cs(e, cc_gr_key_span_text(&a, k, g->name, g->rules[w->key_rule].name, fail));
+    eb_emit(e, cc_gr_key_span_text(e->scratch, k, g->name, g->rules[w->key_rule].name, fail));
     rw_emit_pads(g, e, w->mpad_b, w->nmpad_b, fail);
-    eb_put_cs(e, cc_gr_kv_check_text(&a, w->kv_b, fail));
-    eb_put_cs(e, cc_gr_key_switch_open_text(&a, k));
+    eb_emit(e, cc_gr_kv_check_text(e->scratch, w->kv_b, fail));
+    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
     {
         unsigned char done[S_MAX_KEYS] = {0};
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
             size_t L = strlen(ki->key);
-            eb_put_cs(e, cc_gr_key_case_text(&a, (int)L));
+            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
             for (int j = i; j < t->k_cnt; j++) {
                 const SKey* kj = &ss->keys[t->kidx[j]];
                 if (done[j] || strlen(kj->key) != L) continue;
                 done[j] = 1;
-                eb_put_cs(e, cc_gr_key_memcmp_open_text(&a, k, (const unsigned char*)kj->key, (int)L));
+                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
                 rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
                 rs_emit_term(ss, g, e, lbl, kj->term, fail);
                 rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-                eb_put_cs(e, cc_gr_key_break_text(&a));
+                eb_emit(e, cc_gr_key_break_text(e->scratch));
             }
-            eb_put_cs(e, cc_gr_key_goto_dflt_text(&a, k));
+            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
         }
     }
-    eb_put_cs(e, cc_gr_key_default_text(&a, k));
-    eb_put_cs(e, cc_gr_pad_call6_text(&a, g->name, rs_class(g, e->K, w->val_rule),
+    eb_emit(e, cc_gr_key_default_text(e->scratch, k));
+    eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, w->val_rule),
                                       g->rules[w->val_rule].name, fail));
-    eb_put_cs(e, cc_gr_key_loop_end_text(&a, k));
-    eb_put_cs(e, cc_gr_lvec_sep_close_text(&a, w->sep_b));
+    eb_emit(e, cc_gr_key_loop_end_text(e->scratch, k));
+    eb_emit(e, cc_gr_lvec_sep_close_text(e->scratch, w->sep_b));
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
-    eb_put_cs(e, cc_gr_byte_check_text(&a, w->close_b, fail));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, w->close_b, fail));
 }
 
 /* narrowed list: array shape from the rule, elements parsed as the schema
@@ -3510,108 +3383,96 @@ static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const ch
     const RNarrow* w = &t->nw;
     int k = (*lbl)++;
     const char* T = t->etype;
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_lvec_head_text(&a, k, T, fail));
-    eb_put_cs(e, cc_gr_byte_check_text(&a, w->open_b, fail));
+    eb_emit(e, cc_gr_lvec_head_text(e->scratch, k, T, fail));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, w->open_b, fail));
     rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
-    eb_put_cs(e, cc_gr_loop_open_text(&a, w->close_b));
-    eb_put_cs(e, cc_gr_lvec_grow_text(&a, k, T, fail));
+    eb_emit(e, cc_gr_loop_open_text(e->scratch, w->close_b));
+    eb_emit(e, cc_gr_lvec_grow_text(e->scratch, k, T, fail));
     rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-    eb_put_cs(e, cc_gr_lvec_fill_text(&a, k, T, fail));
+    eb_emit(e, cc_gr_lvec_fill_text(e->scratch, k, T, fail));
     rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-    eb_put_cs(e, cc_gr_lvec_sep_close_text(&a, w->sep_b));
+    eb_emit(e, cc_gr_lvec_sep_close_text(e->scratch, w->sep_b));
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
-    eb_put_cs(e, cc_gr_byte_check_text(&a, w->close_b, fail));
-    eb_put_cs(e, cc_gr_lvec_store_text(&a, k, cc__fpfx, t->field));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, w->close_b, fail));
+    eb_emit(e, cc_gr_lvec_store_text(e->scratch, k, cc__fpfx, t->field));
 }
 
 static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->fo, fail));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, ss->fo, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_put_cs(e, cc_gr_loop_open_text(&a, ss->fc));
-    eb_put_cs(e, cc_gr_key_span_text(&a, k, g->name, g->rules[ss->rfkey].name, fail));
+    eb_emit(e, cc_gr_loop_open_text(e->scratch, ss->fc));
+    eb_emit(e, cc_gr_key_span_text(e->scratch, k, g->name, g->rules[ss->rfkey].name, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_put_cs(e, cc_gr_kv_check_text(&a, ss->fkv, fail));
+    eb_emit(e, cc_gr_kv_check_text(e->scratch, ss->fkv, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
     /* key dispatch: switch on length, memcmp chain within a length class */
-    eb_put_cs(e, cc_gr_key_switch_open_text(&a, k));
+    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
     {
         unsigned char done[S_MAX_KEYS] = {0};
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
             size_t L = strlen(ki->key);
-            eb_put_cs(e, cc_gr_key_case_text(&a, (int)L));
+            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
             for (int j = i; j < t->k_cnt; j++) {
                 const SKey* kj = &ss->keys[t->kidx[j]];
                 if (done[j] || strlen(kj->key) != L) continue;
                 done[j] = 1;
-                eb_put_cs(e, cc_gr_key_memcmp_open_text(&a, k, (const unsigned char*)kj->key, (int)L));
+                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
                 rs_emit_term(ss, g, e, lbl, kj->term, fail);
-                eb_put_cs(e, cc_gr_key_break_text(&a));
+                eb_emit(e, cc_gr_key_break_text(e->scratch));
             }
-            eb_put_cs(e, cc_gr_key_goto_dflt_text(&a, k));
+            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
         }
     }
-    eb_put_cs(e, cc_gr_key_default_text(&a, k));
+    eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     if (ss->rfelse >= 0)
-        eb_put_cs(e, cc_gr_pad_call6_text(&a, g->name, rs_class(g, e->K, ss->rfelse),
+        eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, ss->rfelse),
                                           g->rules[ss->rfelse].name, fail));
     else
-        eb_put_cs(e, cc_gr_unknown_member_text(&a, fail));
-    eb_put_cs(e, cc_gr_key_loop_end_text(&a, k));
+        eb_emit(e, cc_gr_unknown_member_text(e->scratch, fail));
+    eb_emit(e, cc_gr_key_loop_end_text(e->scratch, k));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_put_cs(e, cc_gr_lvec_sep_open_text(&a, ss->fs));
+    eb_emit(e, cc_gr_lvec_sep_open_text(e->scratch, ss->fs));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    eb_put_cs(e, cc_gr_lvec_loop_close_text(&a));
-    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->fc, fail));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_lvec_loop_close_text(e->scratch));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, ss->fc, fail));
 }
 
 static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
      * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_bytes_term_text(&a, k, cc__fpfx, t->cfield, t->field, fail));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_bytes_term_text(e->scratch, k, cc__fpfx, t->cfield, t->field, fail));
 }
 
 static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_items_counted_text(&a, k, t->etype, cc__fpfx, t->field,
+    eb_emit(e, cc_gr_items_counted_text(e->scratch, k, t->etype, cc__fpfx, t->field,
                                           t->cfield, t->cap, fail));
-    cc_arena_free(&a);
 }
 
 static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     const char* T = t->etype;
-    CCArena a = cc_arena_create(32768);
-    eb_put_cs(e, cc_gr_lvec_head_text(&a, k, T, fail));
-    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->io_, fail));
+    eb_emit(e, cc_gr_lvec_head_text(e->scratch, k, T, fail));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, ss->io_, fail));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_put_cs(e, cc_gr_loop_open_text(&a, ss->ic_));
-    eb_put_cs(e, cc_gr_lvec_grow_text(&a, k, T, fail));
-    eb_put_cs(e, cc_gr_lvec_fill_text(&a, k, T, fail));
+    eb_emit(e, cc_gr_loop_open_text(e->scratch, ss->ic_));
+    eb_emit(e, cc_gr_lvec_grow_text(e->scratch, k, T, fail));
+    eb_emit(e, cc_gr_lvec_fill_text(e->scratch, k, T, fail));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_put_cs(e, cc_gr_lvec_sep_open_text(&a, ss->is_));
+    eb_emit(e, cc_gr_lvec_sep_open_text(e->scratch, ss->is_));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_put_cs(e, cc_gr_lvec_loop_close_text(&a));
-    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->ic_, fail));
-    eb_put_cs(e, cc_gr_lvec_store_text(&a, k, cc__fpfx, t->field));
-    cc_arena_free(&a);
+    eb_emit(e, cc_gr_lvec_loop_close_text(e->scratch));
+    eb_emit(e, cc_gr_byte_check_text(e->scratch, ss->ic_, fail));
+    eb_emit(e, cc_gr_lvec_store_text(e->scratch, k, cc__fpfx, t->field));
 }
 
 static void rs_emit_presence(const SS* ss, EB* e, int ti) {
     if (ss->presence && ss->bindbit[ti] >= 0) {
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_presence_text(&a, ss->bindbit[ti]));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_presence_text(e->scratch, ss->bindbit[ti]));
     }
 }
 
@@ -3621,18 +3482,14 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     case SK_LIT:
         /* bounds-driven failure = INCOMPLETE (the frame ran past the bytes
          * given); content-driven = malformed. Exactly decidable here. */
-        { CCArena a = cc_arena_create(32768);
-          if (t->litlen == 1)
-              eb_put_cs(e, cc_gr_lit1_term_text(&a, (int)t->lit[0], fail));
-          else
-              eb_put_cs(e, cc_gr_litn_term_text(&a, t->lit, t->litlen, fail));
-          cc_arena_free(&a); }
+        if (t->litlen == 1)
+            eb_emit(e, cc_gr_lit1_term_text(e->scratch, (int)t->lit[0], fail));
+        else
+            eb_emit(e, cc_gr_litn_term_text(e->scratch, t->lit, t->litlen, fail));
         break;
     case SK_RULE:
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, rs_class(g, e->K, t->rule),
-                                           g->rules[t->rule].name, fail));
-          cc_arena_free(&a); }
+        eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, rs_class(g, e->K, t->rule),
+                                         g->rules[t->rule].name, fail));
         break;
     case SK_BIND_SLICE:
     case SK_BIND_INT:
@@ -3664,29 +3521,27 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
          * else. Recursion is bounded: self-referential variants ride the
          * items depth counter. */
         int defv = -1;
-        CCArena a = cc_arena_create(32768);
-        eb_put_cs(e, cc_gr_union_head_text(&a, fail));
+        eb_emit(e, cc_gr_union_head_text(e->scratch, fail));
         for (int vi = 0; vi < ss->nuv; vi++) {
             if (ss->uv[vi].db < 0) { defv = vi; continue; }
-            eb_put_cs(e, cc_gr_union_case_text(&a, ss->uv[vi].db, cc__sname, ss->uv[vi].name));
+            eb_emit(e, cc_gr_union_case_text(e->scratch, ss->uv[vi].db, cc__sname, ss->uv[vi].name));
             snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[vi].name);
             for (int j = 0; j < ss->uv[vi].nt; j++)
                 rs_emit_term(ss, g, e, lbl, ss->uv[vi].t[j], fail);
             cc__fpfx[0] = '\0';
-            eb_put_cs(e, cc_gr_union_break_text(&a));
+            eb_emit(e, cc_gr_union_break_text(e->scratch));
         }
         if (defv >= 0) {
-            eb_put_cs(e, cc_gr_union_default_text(&a, cc__sname, ss->uv[defv].name));
+            eb_emit(e, cc_gr_union_default_text(e->scratch, cc__sname, ss->uv[defv].name));
             snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[defv].name);
             for (int j = 0; j < ss->uv[defv].nt; j++)
                 rs_emit_term(ss, g, e, lbl, ss->uv[defv].t[j], fail);
             cc__fpfx[0] = '\0';
-            eb_put_cs(e, cc_gr_union_break_text(&a));
+            eb_emit(e, cc_gr_union_break_text(e->scratch));
         } else {
-            eb_put_cs(e, cc_gr_union_no_default_text(&a, fail));
+            eb_emit(e, cc_gr_union_no_default_text(e->scratch, fail));
         }
-        eb_put_cs(e, cc_gr_union_close_text(&a));
-        cc_arena_free(&a);
+        eb_emit(e, cc_gr_union_close_text(e->scratch));
         break;
     }
     }
@@ -3725,6 +3580,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     SS* ss = (SS*)calloc(1, sizeof(SS));
     RG* g = NULL; RFirst* F = NULL; RKeeps* K = NULL;
     char* out = NULL; size_t len = 0, cap = 0;
+    /* piece scratch: stack root, heap overflow only for oversized pieces.
+     * Declared before any `goto done` so the free at done: is always safe
+     * (cc_arena_free releases overflow extents only; the root is stack). */
+    CC_ARENA_STACK(sc, 32768);
     if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
     ss->b = body; ss->n = body_len; ss->line0 = line;
     ss->uterm = -1;
@@ -3910,18 +3769,16 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1 };
+        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
         int lbl = 0;
         unsigned char local_xdone[R_MAX_RULES];
         unsigned char* xdone = reg ? reg->x_done : local_xdone;
         memset(local_xdone, 0, sizeof local_xdone);
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(&e, cc_gr_schema_manifest_text(&a, name, line,
-                        reg ? "use " : "inline rules", reg ? ss->usename : "",
-                        rs_formatable(ss, g)
-                            ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
-                            : ""));
-          cc_arena_free(&a); }
+        eb_emit(&e, cc_gr_schema_manifest_text(e.scratch, name, line,
+                      reg ? "use " : "inline rules", reg ? ss->usename : "",
+                      rs_formatable(ss, g)
+                          ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
+                          : ""));
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
@@ -3996,58 +3853,54 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 ss->presence = conditional && cnt > 0 && cnt <= 64;
             }
             for (int i = 0; i < cnt; i++) ss->bindbit[order[i]] = i;
-            CCArena a = cc_arena_create(32768);
             if (ss->uterm >= 0) {
-                eb_put_cs(&e, cc_gr_enum_open_text(&a));
+                eb_emit(&e, cc_gr_enum_open_text(e.scratch));
                 for (int vi = 0; vi < ss->nuv; vi++)
-                    eb_put_cs(&e, cc_gr_enum_item_text(&a, vi ? ", " : "", name, ss->uv[vi].name));
-                eb_put_cs(&e, cc_gr_enum_close_text(&a, name));
+                    eb_emit(&e, cc_gr_enum_item_text(e.scratch, vi ? ", " : "", name, ss->uv[vi].name));
+                eb_emit(&e, cc_gr_enum_close_text(e.scratch, name));
             }
             {
                 int need_ffc = 0;
                 for (int i = 0; i < cnt && !need_ffc; i++)
                     if (ss->terms[order[i]].kind == SK_BIND_FLOAT) need_ffc = 1;
-                if (need_ffc) eb_put_cs(&e, cc_gr_ffc_include_text(&a));
+                if (need_ffc) eb_emit(&e, cc_gr_ffc_include_text(e.scratch));
             }
-            eb_put_cs(&e, cc_gr_struct_open_text(&a, name));
+            eb_emit(&e, cc_gr_struct_open_text(e.scratch, name));
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
                 int vk = t->kind == SK_BIND_INT ? 0
                        : t->kind == SK_BIND_FLOAT ? 1
                        : (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES) ? 2
                        : t->cap > 0 ? 3 : 4;
-                eb_put_cs(&e, cc_gr_member_text(&a, vk, t->etype, t->field, t->cap));
+                eb_emit(&e, cc_gr_member_text(e.scratch, vk, t->etype, t->field, t->cap));
             }
             if (ss->presence)
-                eb_put_cs(&e, cc_gr_presence_member_text(&a));
+                eb_emit(&e, cc_gr_presence_member_text(e.scratch));
             if (ss->uterm >= 0) {
-                eb_put_cs(&e, cc_gr_union_decl_open_text(&a, name));
+                eb_emit(&e, cc_gr_union_decl_open_text(e.scratch, name));
                 for (int vi = 0; vi < ss->nuv; vi++) {
-                    eb_put_cs(&e, cc_gr_variant_open_text(&a));
+                    eb_emit(&e, cc_gr_variant_open_text(e.scratch));
                     for (int j = 0; j < ss->uv[vi].nt; j++) {
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
                         if (t->kind == SK_BIND_INT)
-                            eb_put_cs(&e, cc_gr_umember_text(&a, 0, t->etype, t->field, 0));
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 0, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_FLOAT)
-                            eb_put_cs(&e, cc_gr_umember_text(&a, 1, t->etype, t->field, 0));
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 1, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
-                            eb_put_cs(&e, cc_gr_umember_text(&a, 2, t->etype, t->field, 0));
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 2, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_ITEMS && t->cap > 0)
-                            eb_put_cs(&e, cc_gr_umember_text(&a, 3, t->etype, t->field, t->cap));
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 3, t->etype, t->field, t->cap));
                         else if (t->kind == SK_BIND_ITEMS)
-                            eb_put_cs(&e, cc_gr_umember_text(&a, 4, t->etype, t->field, 0));
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 4, t->etype, t->field, 0));
                     }
-                    eb_put_cs(&e, cc_gr_variant_close_text(&a, ss->uv[vi].name));
+                    eb_emit(&e, cc_gr_variant_close_text(e.scratch, ss->uv[vi].name));
                 }
-                eb_put_cs(&e, cc_gr_union_decl_close_text(&a));
+                eb_emit(&e, cc_gr_union_decl_close_text(e.scratch));
             }
-            if (cnt == 0 && ss->uterm < 0) eb_put_cs(&e, cc_gr_empty_member_text(&a));
-            eb_put_cs(&e, cc_gr_struct_close_text(&a, name));
-            cc_arena_free(&a);
+            if (cnt == 0 && ss->uterm < 0) eb_emit(&e, cc_gr_empty_member_text(e.scratch));
+            eb_emit(&e, cc_gr_struct_close_text(e.scratch, name));
         }
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(&e, cc_gr_fill_head_text(&a, name));
-          cc_arena_free(&a); }
+        eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
         /* zero the struct only when some bind is conditional (inside a
          * fields dispatch): a body whose binds are all unconditional terms
          * assigns every member on the success path — missing-member zeroing
@@ -4058,9 +3911,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 if (ss->terms[ti].kind == SK_FIELDS ||
                     ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
             if (conditional) {
-                CCArena a = cc_arena_create(32768);
-                eb_put_cs(&e, cc_gr_fill_zero_text(&a));
-                cc_arena_free(&a);
+                eb_emit(&e, cc_gr_fill_zero_text(e.scratch));
             }
         }
         {
@@ -4068,13 +3919,9 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             snprintf(fail, sizeof(fail), "Lz%d", lbl++);
             for (int i = 0; i < ss->nbody; i++)
                 rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
-            { CCArena a = cc_arena_create(32768);
-              eb_put_cs(&e, cc_gr_fill_tail_text(&a, fail));
-              cc_arena_free(&a); }
+            eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
         }
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(&e, cc_gr_parse_fn_text(&a, name));
-          cc_arena_free(&a); }
+        eb_emit(&e, cc_gr_parse_fn_text(e.scratch, name));
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
          * and framed streams call this in a loop instead of requiring p == n */
         /* the streaming face, in the house Result idiom — the SAME contract
@@ -4089,9 +3936,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
          * Bounds-vs-content is decided exactly at product terms (literals,
          * fused ints, bytes, counted items); matcher-tier failures report
          * Err(PARSE) conservatively. */
-        { CCArena a = cc_arena_create(32768);
-          eb_put_cs(&e, cc_gr_stream_face_text(&a, name));
-          cc_arena_free(&a); }
+        eb_emit(&e, cc_gr_stream_face_text(e.scratch, name));
         /* instance UFCS (`r.next(&out)`, `r.at_end()`, `v.to_str(&a)`): the
          * engine registers the schema and Reader types natively — users
          * never write a registration */
@@ -4141,9 +3986,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                  * slot arm exists in the _Generic) and the language's
                  * `x.to_str(arena)` idiom. Measure once, allocate exactly,
                  * write unchecked — no retry loop, no transient waste. */
-                CCArena a = cc_arena_create(32768);
-                eb_put_cs(&e, cc_gr_tostr_fn_text(&a, name));
-                cc_arena_free(&a);
+                eb_emit(&e, cc_gr_tostr_fn_text(e.scratch, name));
             }
         }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
@@ -4153,6 +3996,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         snprintf(cc__schema_reg[cc__schema_nreg++], S_NAME, "%s", name);
 
 done:
+    cc_arena_free(&sc);
     free(ss); free(g); free(F); free(K);
     return out;
 }
