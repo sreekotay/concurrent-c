@@ -66,7 +66,7 @@ endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
 # Note: src/tools/ is excluded - those are standalone utilities with their own main()
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/% src/preprocess/grammar_stub.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
@@ -109,6 +109,10 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
+# Stage-1 bootstrap variant: grammar engines stubbed (see BOOTSTRAP SHAPE)
+LOWER_HEADERS1_SRCS := $(subst src/preprocess/grammar_rules.c,src/preprocess/grammar_stub.c,$(LOWER_HEADERS_SRCS))
+LOWER_HEADERS1_OBJS := $(LOWER_HEADERS1_SRCS:%.c=$(OBJDIR)/%.o)
+LOWER_HEADERS1_BINARY := $(OUT_BINDIR)/lower_headers_stage1
 LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)
 
 # Lowered headers output directory
@@ -122,9 +126,14 @@ all: $(CCC_SCRIPT) $(WRAPPER) $(LOWER_HEADERS_STAMP)
 .PHONY: lower-headers
 lower-headers: $(LOWER_HEADERS_STAMP)
 
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+# The stamp uses the STAGE-1 tool (grammar stubbed): stdlib headers contain
+# no @grammar, and stage-1 is buildable from raw .cch includes alone — which
+# makes the whole graph acyclic and truly clean-buildable.  (Previously the
+# stamp needed the FULL tool while several of its objects latently needed
+# the stamp's output; clean trees only built by ordering luck.)
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS1_BINARY) $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
-	@$(LOWER_HEADERS_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
+	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
 # CC-authored compiler internals: src/preprocess/emit/*.cch are ENGINE
@@ -132,27 +141,40 @@ $(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS) $(wildca
 # by the SAME shared passes as every user header and compiled into ccc.
 # Engine source is user CC — a lowering gap is a bug, not a boundary.
 #
-# BOOTSTRAP SHAPE (lower_headers itself links grammar_rules.c, so the tool
-# cannot be a hard prerequisite of headers grammar_rules.c includes): the
-# lowered .h is CHECKED IN next to its .cch (emit_tpl precedent).  When the
-# tool is already built, editing the .cch regenerates the .h in place on
-# the next make; on a fresh tree the checked-in copy bootstraps the tool.
+# BOOTSTRAP SHAPE (two-stage; nothing generated is checked in): the full
+# lower_headers links grammar_rules.c, whose emitter text is itself the
+# CC being lowered — so a STAGE-1 lower_headers links grammar_stub.c
+# instead (five seam symbols; @grammar hard-errors, which is also the
+# guard that engine sources never declare grammars).  Stage 1 lowers
+# src/preprocess/emit/*.cch into $(ENGINE_GEN_DIR); the real
+# grammar_rules.o compiles against that; the full tool and ccc follow.
+# The cost is one extra tool link, paid once per install/update.
 ENGINE_CCH_DIR := src/preprocess/emit
 ENGINE_CCH := $(wildcard $(ENGINE_CCH_DIR)/*.cch)
-ENGINE_HDRS := $(ENGINE_CCH:.cch=.h)
+ENGINE_GEN_DIR := ../out/cc/genh
+ENGINE_GEN_HDRS := $(patsubst $(ENGINE_CCH_DIR)/%.cch,$(ENGINE_GEN_DIR)/%.h,$(ENGINE_CCH))
 
-$(ENGINE_CCH_DIR)/%.h: $(ENGINE_CCH_DIR)/%.cch
-	@if [ -x $(LOWER_HEADERS_BINARY) ]; then \
-	  $(LOWER_HEADERS_BINARY) $(ENGINE_CCH_DIR) $(ENGINE_CCH_DIR) > /dev/null; \
-	else \
-	  echo "warning: $(LOWER_HEADERS_BINARY) not built yet; using checked-in $@ (rerun make after this build if $< changed)"; \
-	  touch $@; \
-	fi
+$(LOWER_HEADERS1_BINARY): $(LOWER_HEADERS1_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS1_OBJS) $(LDLIBS)
+
+$(ENGINE_GEN_DIR)/%.h: $(ENGINE_CCH_DIR)/%.cch $(LOWER_HEADERS1_BINARY)
+	@mkdir -p $(ENGINE_GEN_DIR)
+	@$(LOWER_HEADERS1_BINARY) $(ENGINE_CCH_DIR) $(ENGINE_GEN_DIR) > /dev/null
 
 .PHONY: engine-headers
-engine-headers: $(ENGINE_HDRS)
+engine-headers: $(ENGINE_GEN_HDRS)
 
-$(OBJDIR)/src/preprocess/grammar_rules.o: $(ENGINE_HDRS)
+# The full tool must agree with stage 1 on the engine headers (it only
+# wouldn't if an engine .cch tripped the stage-1 stub, which hard-errors).
+.PHONY: engine-headers-verify
+engine-headers-verify: $(ENGINE_GEN_HDRS) $(LOWER_HEADERS_BINARY)
+	@rm -rf $(ENGINE_GEN_DIR).verify && mkdir -p $(ENGINE_GEN_DIR).verify
+	@$(LOWER_HEADERS_BINARY) $(ENGINE_CCH_DIR) $(ENGINE_GEN_DIR).verify > /dev/null
+	@diff -r $(ENGINE_GEN_DIR) $(ENGINE_GEN_DIR).verify && echo "engine headers: stage-1 == full tool"
+
+$(OBJDIR)/src/preprocess/grammar_rules.o: $(ENGINE_GEN_HDRS)
+$(OBJDIR)/src/preprocess/grammar_rules.o: CFLAGS += -I$(ENGINE_GEN_DIR)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)

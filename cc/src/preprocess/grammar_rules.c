@@ -1077,10 +1077,11 @@ static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
 
 /* The emitter's TEXT is CC-AUTHORED: every piece lives in
  * src/preprocess/emit/grammar_emit.cch (user CC — @string templates,
- * CCString, arenas), lowered by the shared header passes at compiler-build
- * time and compiled in.  Included here, above the EB type, because EB
+ * CCString, arenas), lowered at build time by the STAGE-1 lower_headers
+ * into out/cc/genh/ (nothing generated is checked in; see the BOOTSTRAP
+ * SHAPE note in the Makefile).  Included above the EB type because EB
  * carries the CC scratch arena the pieces build in. */
-#include "emit/grammar_emit.h"
+#include "grammar_emit.h"
 
 /* last_pad / omit_lead_pad: absorb adjacent identical pads so authors can
  * write natural `value: [ws … ws]` + `member: [ws …]` without stacked skips.
