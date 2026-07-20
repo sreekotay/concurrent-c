@@ -164,6 +164,25 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
         }
         fprintf(stderr, "CC_DEBUG_STUB_NODES: %s: nodes=%d arenas=%d\n",
                 original_path ? original_path : "<string>", root->node_count, arenas);
+        /* Nesting-depth report: the checker recurses the child graph, so a
+         * parent-chain leak (missed record_end) shows up here as a depth
+         * near the node count instead of the syntactic nesting. */
+        {
+            int maxd = 0, maxi = -1;
+            for (int i = 0; i < root->node_count; i++) {
+                int d = 0;
+                for (int p = nn[i].parent; p >= 0 && p < root->node_count && d <= root->node_count; p = nn[p].parent) d++;
+                if (d > maxd) { maxd = d; maxi = i; }
+            }
+            fprintf(stderr, "CC_DEBUG_STUB_NODES: max parent depth=%d at node %d\n", maxd, maxi);
+            if (maxi >= 0) {
+                int c = 0;
+                fprintf(stderr, "  deepest chain (node(kind,line), nearest first):");
+                for (int p = maxi; p >= 0 && p < root->node_count && c < 48; p = nn[p].parent, c++)
+                    fprintf(stderr, " %d(k%d,L%d)", p, nn[p].kind, nn[p].line_start);
+                fprintf(stderr, "%s\n", c >= 48 ? " ..." : "");
+            }
+        }
         /* =2: verify byte offsets by slicing the parsed text directly —
          * off_* address source_code (the buffer TCC lexed), NOT the
          * original file; that is the whole point of carrying them. */

@@ -1237,6 +1237,44 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
         }
     }
 
+    /* FAIL LOUDLY: cc__walk recurses the child graph, so its native-stack
+     * depth equals the deepest parent chain.  Legitimate syntactic nesting
+     * is well under 400; anything past that is a recorder bug (a missed
+     * record_end leaks node-stack entries and chains SIBLINGS ever deeper —
+     * exactly how a function-definition leak once drove depth to the number
+     * of functions in the TU and segfaulted at -O2).  Diagnose it instead
+     * of overflowing the stack.  (CC_DEBUG_STUB_NODES prints the chain.) */
+    {
+        int maxd = 0, maxi = -1;
+        int* depth = (int*)calloc((size_t)n, sizeof(int));
+        if (depth) {
+            for (int i = 0; i < n; i++) {
+                int p = nodes[i].parent;
+                depth[i] = (p >= 0 && p < i) ? depth[p] + 1 : 0;
+                if (depth[i] > maxd) { maxd = depth[i]; maxi = i; }
+            }
+            free(depth);
+        }
+        if (maxd > 400) {
+            StubNodeView sn;
+            memset(&sn, 0, sizeof(sn));
+            sn.file = ctx->input_path;
+            sn.line_start = (maxi >= 0) ? nodes[maxi].line_start : 1;
+            sn.col_start = 1;
+            cc__emit_err_cat_fmt(ctx, &sn, CC_ERR_SYNTAX,
+                                 "internal: stub AST nesting depth %d exceeds checker limit "
+                                 "(node-stack leak in the recorder?)", maxd);
+            ctx->errors++;
+            for (int i = 0; i < n; i++) free(kids[i].child);
+            free(kids);
+            free(closure_spawned);
+            free(closure_escapes);
+            free(idx_map);
+            free(owned_nodes);
+            return -1;
+        }
+    }
+
     CCScope scopes[256];
     int scope_n = 0;
     memset(scopes, 0, sizeof(scopes));

@@ -70,13 +70,24 @@ What the enhancement carries:
 Offsets address the PARSE buffer (which the root retains as
 `parse_buffer`); edits target the codegen buffer. Phase 2 closes that gap.
 
-Known pre-existing bug (surfaced by this work, NOT caused by it — main
-reproduces byte-for-byte): a function-pointer MEMBER call in user code
-(`c->cb(4)` where `cb` is a struct field, with the prelude included)
-sends the checker's `walk` into unbounded recursion → stack overflow.
-The UFCS probe classifies any `expr->name(` as a UFCS candidate and
-drops the receiver; somewhere downstream the stub-node parent chain
-cycles. Fix belongs to the checker/UFCS-classification cleanup in phase 3.
+FIXED (was: known pre-existing bug): a function-pointer MEMBER call in
+user code (`c->cb(4)` with the prelude) crashed the release compiler.
+Two distinct bugs, both in the recorder/classifier:
+  1. The UFCS probe classified any `expr->name(` as UFCS, dropped the
+     receiver, and emitted a call to a nonexistent free function.  Rule
+     now: a CALLABLE field (function pointer / function type) is plain C
+     field access; a non-callable field does not block UFCS (`p.x()`
+     with int field x still calls the Point_x accessor).
+  2. Every function DEFINITION leaked a recorder node-stack entry (the
+     `tok == '{'` branch broke out of the declarator loop without
+     record_end), so all later nodes nested one level deeper — checker
+     recursion depth hit O(#functions) (690 for a 12-line file) and
+     overflowed the 8MB stack at -O2 (~12KB/frame after inlining).
+     Depth is 9 after the fix.  The VT_JMP (for-init) early returns
+     leaked the DECL node the same way; also fixed.
+Guards added: cc_check_ast fails loudly (internal error, not a segfault)
+if nesting depth exceeds 400; CC_DEBUG_STUB_NODES prints max parent depth
+and the deepest chain.  Regression test: fnptr_member_call_smoke.
 
 ## Inventory (full survey 2026-07-20)
 
