@@ -388,6 +388,8 @@ typedef struct {
     int col_start;
     int line_end;
     int col_end;
+    long off_start;     /* parse-buffer offsets (exact under the diet invariant) */
+    long off_end;
     const char* callee; /* identifier */
     int occ_1based;
     int arity; /* 1 or 2 */
@@ -564,6 +566,8 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
             .col_start = n[i].col_start,
             .line_end = n[i].line_end,
             .col_end = n[i].col_end,
+            .off_start = n[i].off_start,
+            .off_end = n[i].off_end,
             .callee = n[i].aux_s1,
             .occ_1based = 1,
             .arity = 0,
@@ -650,12 +654,25 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
     int sn = 0;
     for (int i = 0; i < call_n; i++) {
         if (!calls[i].arity) continue;
-        /* Range based on lines [line_start, line_end]. */
-        size_t rs = cc__offset_of_line_1based(in_src, in_len, calls[i].line_start);
-        size_t re = cc__offset_of_line_1based(in_src, in_len, calls[i].line_end + 1);
+        /* Search window: EXACT node span under the diet invariant (the
+         * callee-name + occurrence scan below stays the arbiter, but the
+         * window it searches is now the node's own bytes, so line-drift
+         * cannot bind it to a same-named call elsewhere).  Line-range
+         * fallback for roots without the invariant. */
+        size_t rs = cc_pass_node_exact_off(root, calls[i].off_start, in_len);
+        size_t re = cc_pass_node_exact_end_off(root, calls[i].off_end, in_len);
+        int occ = calls[i].occ_1based;
+        if (rs != (size_t)-1 && re != (size_t)-1 && re > rs) {
+            /* The exact window holds exactly this call — the per-line
+             * occurrence rank would skip past the only occurrence. */
+            occ = 1;
+        } else {
+            rs = cc__offset_of_line_1based(in_src, in_len, calls[i].line_start);
+            re = cc__offset_of_line_1based(in_src, in_len, calls[i].line_end + 1);
+        }
         if (re > in_len) re = in_len;
         size_t nm_s = 0, lp = 0, rp_end = 0;
-        if (!cc__find_nth_callee_call_span_in_range(in_src, rs, re, calls[i].callee, calls[i].occ_1based, &nm_s, &lp, &rp_end))
+        if (!cc__find_nth_callee_call_span_in_range(in_src, rs, re, calls[i].callee, occ, &nm_s, &lp, &rp_end))
             continue;
         spans[sn++] = (CCClosureCallSpan){
             .name_start = nm_s,

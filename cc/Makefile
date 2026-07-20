@@ -129,7 +129,16 @@ all: $(CCC_SCRIPT) $(WRAPPER) $(LOWER_HEADERS_STAMP)
 # reverse-checks). NOTE: placed AFTER `all` — an earlier revision sat
 # before it and became make's default goal, silently building nothing.
 TCC_PATCH_STAMP := $(TCC_INC)/.cc_patches_applied
-$(TCC_PATCH_STAMP): $(wildcard ../third_party/tcc-patches/000*.patch)
+# The stamp keys on the patch set AND the patched tree files: a submodule
+# checkout/reset rewrites the tree (fresh mtimes) without touching the patch,
+# and without these prereqs make would happily link a half-patched libtcc
+# against CC objects built for the patched layout (audit finding).  The apply
+# script is idempotent and touches the stamp last, so a completed apply is
+# newer than every prereq and the rule stays quiescent.
+$(TCC_PATCH_STAMP): $(wildcard ../third_party/tcc-patches/000*.patch) \
+                    $(wildcard $(TCC_INC)/tcc.h $(TCC_INC)/tccgen.c \
+                               $(TCC_INC)/tccpp.c $(TCC_INC)/libtcc.c \
+                               $(TCC_INC)/cc_ast_record.h)
 	@cd .. && bash scripts/apply_tcc_patches.sh
 	@cd $(TCC_INC) && ([ -f config.mak ] || ./configure) && \
 	  (grep -q CONFIG_cc_ext config.mak || echo 'CONFIG_cc_ext=yes' >> config.mak)

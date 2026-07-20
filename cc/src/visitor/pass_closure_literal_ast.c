@@ -2551,11 +2551,37 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
      * spans with heuristics is how closures silently bound to the wrong
      * source text, so we refuse instead. */
     if (!use_markers && idx_n > 0) {
-        fprintf(stderr,
-                "cc: internal error: closure marker/node count mismatch "
-                "(markers=%d closures=%d) in %s — a closure producer did not "
-                "emit its /*CC_CLO:N*/ marker\n",
-                marker_n, idx_n, ctx->input_path ? ctx->input_path : "<input>");
+        const char* path = ctx->input_path ? ctx->input_path : "<input>";
+        if (marker_n < idx_n) {
+            /* More AST closures than markers in the buffer: the extras were
+             * materialized by MACRO EXPANSION — a marker comment cannot
+             * survive CPP token replay (comments are stripped when a
+             * #define body is tokenized), so a closure literal written
+             * inside a macro definition can never carry its identity.
+             * This is a language limitation, not a compiler bug: say so,
+             * and point at the expansion sites (node line/col attribute to
+             * the invocation). */
+            fprintf(stderr,
+                    "cc: error: %s: %d closure literal(s) come from macro "
+                    "expansion; closure literals inside #define bodies are "
+                    "not supported\n",
+                    path, idx_n - marker_n);
+            fprintf(stderr,
+                    "  hint: define the closure at the use site, or make the "
+                    "macro take the closure as a parameter\n");
+            for (int k = 0; k < idx_n; k++) {
+                const NodeView* cn = &n[idxs[k]];
+                fprintf(stderr, "  note: closure at %s:%d\n",
+                        cn->file ? cn->file : path, cn->line_start);
+            }
+        } else {
+            fprintf(stderr,
+                    "cc: internal error: closure marker/node count mismatch "
+                    "(markers=%d closures=%d) in %s — a closure producer did "
+                    "not emit its /*CC_CLO:N*/ marker, or #if-skip pruning "
+                    "miscounted\n",
+                    marker_n, idx_n, path);
+        }
         free(idxs);
         return -1;
     }

@@ -136,7 +136,6 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
 }
 
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
-static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
 typedef enum CCPhase3Stage CCPhase3Stage;
 static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
@@ -1530,97 +1529,6 @@ static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, 
     if (s) cc__cg_sb_append(out, out_len, out_cap, s, strlen(s));
 }
 
-static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    size_t last_emit = 0;
-    while (i < n) {
-        i = cc_skip_ws_and_comments(src, n, i);
-        if (i >= n) break;
-        if (src[i] == '"' || src[i] == '\'') {
-            char q = src[i++];
-            while (i < n) {
-                if (src[i] == '\\' && i + 1 < n) {
-                    i += 2;
-                    continue;
-                }
-                if (src[i] == q) {
-                    i++;
-                    break;
-                }
-                i++;
-            }
-            continue;
-        }
-        if (!cc_is_ident_start(src[i])) {
-            i++;
-            continue;
-        }
-
-        size_t ident_start = i;
-        while (i < n && cc_is_ident_char(src[i])) i++;
-        size_t ident_end = i;
-        if (ident_end - ident_start <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
-
-        size_t j = cc_skip_ws_and_comments(src, n, ident_end);
-        if (j >= n || src[j] != '(') continue;
-
-        size_t ident_len = ident_end - ident_start;
-        const char* parser_method = NULL;
-        size_t suffix_len = 0;
-        if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
-            parser_method = "unwrap_or";
-            suffix_len = 10;
-        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_is_err", 7) == 0) {
-            parser_method = "is_err";
-            suffix_len = 7;
-        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_is_ok", 6) == 0) {
-            parser_method = "is_ok";
-            suffix_len = 6;
-        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_unwrap", 7) == 0) {
-            parser_method = "unwrap";
-            suffix_len = 7;
-        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_error", 6) == 0) {
-            parser_method = "error";
-            suffix_len = 6;
-        } else {
-            continue;
-        }
-
-        size_t paren_end = 0;
-        if (!cc_find_matching_paren(src, n, j, &paren_end)) continue;
-
-        /* Skip helper declarations/definitions like:
-           CCResult_T_E_error(CCResult_T_E r);
-           We only want to rewrite expression call sites. */
-        {
-            size_t p = cc_skip_ws_and_comments(src, n, j + 1);
-            if (p < paren_end && cc_is_ident_start(src[p])) {
-                size_t first_tok_end = p + 1;
-                while (first_tok_end < paren_end && cc_is_ident_char(src[first_tok_end])) first_tok_end++;
-                p = cc_skip_ws_and_comments(src, n, first_tok_end);
-                if (p < paren_end && (cc_is_ident_start(src[p]) || src[p] == '*')) {
-                    i = paren_end + 1;
-                    continue;
-                }
-            }
-        }
-
-        cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
-        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "__cc_parser_result_");
-        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, parser_method);
-        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "_");
-        cc__cg_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_len - suffix_len);
-        last_emit = ident_end;
-    }
-
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
 
 static int cc__find_matching_paren_codegen(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
     /* Find the `)` that matches the `(` at `lpar`, skipping inert
@@ -3603,6 +3511,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
      * source) still get CC_*_DECL_ARENA emitted in the final .c. */
     cc_emit_plan_apply_comptime_instantiations(cc_type_graph_get_global());
 
+    /* src_raw's last use is the comptime hook phase above.  Free it HERE,
+     * not at the function's tail: this function has ~30 early returns with
+     * hand-copied cleanup blocks, and the copies had already diverged —
+     * every error return below this point leaked src_raw (audit finding).
+     * Ending the lifetime at end-of-use makes the later paths structurally
+     * unable to leak it. */
+    free(src_raw);
+    src_raw = NULL;
+
     /* Produced by the closure-literal AST pass (emitted into the output TU). */
     char* closure_protos = NULL;
     size_t closure_protos_len = 0;
@@ -3626,7 +3543,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (!phase3_owned_root) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
-            free(src_raw);
             free(src_all);
             free(closure_protos);
             free(closure_defs);
@@ -4909,8 +4825,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         free(closure_defs);
         if (src_ufcs != src_all) free(src_ufcs);
         free(src_all);
-        free(src_raw);
-    } else {
+        } else {
         // Fallback stub when input is unavailable.
         fprintf(out,
                 "#include \"std/prelude.h\"\n"

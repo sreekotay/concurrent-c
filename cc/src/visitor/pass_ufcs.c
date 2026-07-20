@@ -31,14 +31,6 @@ static int cc__find_ufcs_span_in_range(const char* s,
                                        struct CC__UFCSSpan* out_span);
 static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end);
 static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t out_cap);
-static int cc__rewrite_ufcs_text_fallback(const CCVisitorCtx* ctx,
-                                          const char* in_src,
-                                          size_t in_len,
-                                          char** out_src,
-                                          size_t* out_len);
-static int cc__line_has_await_keyword(const char* line);
-static int cc__line_starts_with_decl_kw(const char* line);
-static size_t cc__count_lines_to_offset(const char* s, size_t n, size_t off);
 
 static void cc__trim_span(const char** start, const char** end) {
     if (!start || !end || !*start || !*end) return;
@@ -94,180 +86,6 @@ static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t o
     }
 }
 
-/* Cheap line-level detector for the `await` keyword.  Used by the text fallback
- * to mirror what the AST path discovers via parent traversal: if a line
- * contains a real `await ` token (not part of an identifier, string, or
- * comment) before the UFCS separator, we treat the call as await-context so
- * channel ops lower to the task-returning variants. */
-static int cc__line_has_await_keyword(const char* line) {
-    if (!line) return 0;
-    size_t n = strlen(line);
-    CCInertScan s;
-    cc_inert_scan_init(&s, NULL);
-    /* `line` is a single in-buffer line slice; not the start of a file, so a
-     * leading `#` here would be code (preprocessor directives never reach this
-     * fallback path).  Disable the `#` heuristic to preserve byte-equivalent
-     * behavior with the previous hand-rolled scanner. */
-    s.at_line_start = 0;
-    for (size_t i = 0; i < n; ) {
-        if (cc_inert_scan_step(&s, line, n, &i)) continue;
-        if (line[i] != 'a' || i + 5 > n) { i++; continue; }
-        if (memcmp(line + i, "await", 5) != 0) { i++; continue; }
-        /* Word boundary: preceding char (if any) and following char must not
-         * be identifier chars. */
-        if (i > 0 && cc__is_ident_char_char(line[i - 1])) { i++; continue; }
-        char nx = line[i + 5];
-        if (cc__is_ident_char_char(nx)) { i++; continue; }
-        return 1;
-    }
-    return 0;
-}
-
-/* Detect lines that look like a declaration introducer (typedef, struct/union
- * forward decl, etc).  These never carry executable UFCS, and producing a
- * spurious "unresolved UFCS" error from the fallback for such a line would be
- * a regression vs. the AST path. */
-static int cc__line_starts_with_decl_kw(const char* line) {
-    if (!line) return 0;
-    while (*line == ' ' || *line == '\t') line++;
-    static const char* kws[] = { "typedef", "struct", "union", "enum", "extern", "static", "#" };
-    for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++) {
-        size_t kl = strlen(kws[i]);
-        if (strncmp(line, kws[i], kl) == 0 &&
-            (line[kl] == '\0' || line[kl] == ' ' || line[kl] == '\t' || line[kl] == '(')) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static size_t cc__count_lines_to_offset(const char* s, size_t n, size_t off) {
-    size_t lines = 1;
-    size_t end = off < n ? off : n;
-    for (size_t i = 0; i < end; i++) {
-        if (s[i] == '\n') lines++;
-    }
-    return lines;
-}
-
-static int cc__rewrite_ufcs_text_fallback(const CCVisitorCtx* ctx,
-                                          const char* in_src,
-                                          size_t in_len,
-                                          char** out_src,
-                                          size_t* out_len) {
-    if (!in_src || !out_src || !out_len) return 0;
-    *out_src = NULL;
-    *out_len = 0;
-
-    size_t out_cap = in_len + 1;
-    char* out = (char*)malloc(out_cap);
-    if (!out) return -1;
-    size_t out_n = 0;
-    int changed = 0;
-
-    for (size_t line_start = 0; line_start < in_len; ) {
-        size_t line_end = line_start;
-        while (line_end < in_len && in_src[line_end] != '\n') line_end++;
-        size_t line_len = line_end - line_start;
-        int has_nl = (line_end < in_len && in_src[line_end] == '\n') ? 1 : 0;
-
-        char* line = (char*)malloc(line_len + 1);
-        if (!line) {
-            free(out);
-            return -1;
-        }
-        memcpy(line, in_src + line_start, line_len);
-        line[line_len] = '\0';
-
-        const char* emit = line;
-        char* rewritten = NULL;
-        const char* trim = line;
-        while (*trim == ' ' || *trim == '\t' || *trim == '\r') trim++;
-        if (*trim != '#') {
-            size_t rew_cap = line_len * 2 + 256;
-            rewritten = (char*)malloc(rew_cap);
-            if (!rewritten) {
-                free(line);
-                free(out);
-                return -1;
-            }
-            int is_under_await = cc__line_has_await_keyword(line);
-            cc_ufcs_set_source_context(in_src, line_start);
-            /* Use the full rewrite entry point so await-context lowers channel
-             * ops to the task-returning variants, matching the AST path.  We
-             * pass recv_type_is_ptr=0 / recv_type=NULL because the text path
-             * has no AST hint; the rewriter falls back to the type registry
-             * (which is now seeded with pointer-ness for Map<K,V>). */
-            int rc = cc_ufcs_rewrite_line_full(line, rewritten, rew_cap,
-                                               is_under_await,
-                                               /*recv_type_is_ptr=*/0,
-                                               /*recv_type=*/NULL);
-            cc_ufcs_set_source_context(NULL, 0);
-            if (rc == CC_UFCS_REWRITE_UNRESOLVED && !cc__line_starts_with_decl_kw(line)) {
-                /* Mirror the AST path's hard-error behavior so a strictly
-                 * unresolved UFCS in fallback territory (typically a closure
-                 * body or macro argument the AST couldn't see into) does not
-                 * silently slip through to the host C compiler with a bogus
-                 * `recv.method(args)` lowering. */
-                char rel[1024];
-                const char* file = "<input>";
-                if (ctx && ctx->input_path) {
-                    file = cc_path_rel_to_repo(ctx->input_path, rel, sizeof(rel));
-                }
-                size_t lineno = cc__count_lines_to_offset(in_src, in_len, line_start);
-                cc_pass_error_cat(file, (int)lineno, 1, CC_ERR_TYPE,
-                                  "cannot resolve UFCS call (text fallback)");
-                cc_pass_note(file, (int)lineno, 1, "offending line: %s", line);
-                cc_pass_note(file, (int)lineno, 1,
-                             "hint: register an exact or wildcard owner via "
-                             "cc_type_register, or call the lowered function explicitly");
-                free(rewritten);
-                free(line);
-                free(out);
-                return -1;
-            }
-            if (rc == CC_UFCS_REWRITE_OK && strcmp(rewritten, line) != 0) {
-                if (getenv("CC_DEBUG_UFCS_FALLBACK")) {
-                    fprintf(stderr, "[ufcs-fb] BEFORE: %s\n[ufcs-fb] AFTER:  %s\n", line, rewritten);
-                }
-                emit = rewritten;
-                changed = 1;
-            }
-        }
-
-        size_t emit_len = strlen(emit);
-        if (out_n + emit_len + (size_t)has_nl + 1 > out_cap) {
-            size_t new_cap = (out_cap * 2 > out_n + emit_len + (size_t)has_nl + 1)
-                           ? out_cap * 2
-                           : out_n + emit_len + (size_t)has_nl + 1;
-            char* next = (char*)realloc(out, new_cap);
-            if (!next) {
-                free(rewritten);
-                free(line);
-                free(out);
-                return -1;
-            }
-            out = next;
-            out_cap = new_cap;
-        }
-        memcpy(out + out_n, emit, emit_len);
-        out_n += emit_len;
-        if (has_nl) out[out_n++] = '\n';
-
-        free(rewritten);
-        free(line);
-        line_start = line_end + (size_t)has_nl;
-    }
-
-    out[out_n] = '\0';
-    if (!changed) {
-        free(out);
-        return 0;
-    }
-    *out_src = out;
-    *out_len = out_n;
-    return 1;
-}
 
 static int cc__is_ident_start_char(char c) {
     return isalpha((unsigned char)c) || c == '_';
@@ -643,35 +461,12 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                            const CCVisitorCtx* ctx,
                            CCEditBuffer* eb) {
     if (!root || !ctx || !ctx->input_path || !eb || !eb->src) return 0;
-    if (!root->nodes || root->node_count <= 0) {
-        /* Even with no AST nodes the text-only fallback may want to run. */
-        if (!getenv("CC_UFCS_TEXT_FALLBACK")) return 0;
-    }
+    if (!root->nodes || root->node_count <= 0) return 0;
 
     cc_ufcs_set_symbols(ctx->symbols);
 
     const char* in_src = eb->src;
     size_t in_len = eb->src_len;
-
-    /* CC_UFCS_TEXT_FALLBACK debug path: run the legacy whole-buffer text
-     * rewriter and emit a single coarse edit.  Mutually exclusive with
-     * batched mode (would collide); intended only for AST-resolver
-     * debugging where bypassing the AST path is the whole point. */
-    if (getenv("CC_UFCS_TEXT_FALLBACK")) {
-        char* fallback = NULL;
-        size_t fallback_len = 0;
-        int fr = cc__rewrite_ufcs_text_fallback(ctx, in_src, in_len, &fallback, &fallback_len);
-        cc_ufcs_set_symbols(NULL);
-        if (fr < 0) { free(fallback); return -1; }
-        if (fr <= 0 || !fallback) { free(fallback); return 0; }
-        if (fallback_len == in_len && memcmp(fallback, in_src, in_len) == 0) {
-            free(fallback);
-            return 0;
-        }
-        int rc = cc_edit_buffer_add(eb, 0, in_len, fallback, 100, "ufcs");
-        free(fallback);
-        return rc == 0 ? 1 : -1;
-    }
 
     typedef CCNodeView NodeView;
     const NodeView* n = (const NodeView*)root->nodes;
@@ -831,11 +626,11 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
          * just off_start - shift.  The member bytes are still verified —
          * arithmetic alone is never trusted; a miss falls through to the
          * candidate resolver. */
-        if (root->parse_src_shift >= 0 && nodes[i].off_start >= 0) {
-            long so = nodes[i].off_start - root->parse_src_shift;
-            if (so >= root->parse_src_valid_from && (size_t)so < in_len &&
-                cc__verify_member_at(in_src, in_len, (size_t)so, nodes[i].method)) {
-                size_t sep = (size_t)so;
+        {
+            size_t so = cc_pass_node_exact_off(root, nodes[i].off_start, in_len);
+            if (so != (size_t)-1 &&
+                cc__verify_member_at(in_src, in_len, so, nodes[i].method)) {
+                size_t sep = so;
                 size_t ln_lo = sep;
                 while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
                 size_t mp = sep + (in_src[sep] == '.' ? 1 : 2);

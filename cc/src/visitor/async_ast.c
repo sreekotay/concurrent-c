@@ -69,27 +69,28 @@ static int cc__is_async_owner(const CCASTRoot* root,
 /* REPARSE DIET payoff: when the root advertises an exact parse↔source
  * offset mapping (parse_src_shift/valid_from — see ast.h), node spans come
  * straight from the recorder's token-exact byte offsets instead of the
- * physical (line,col) walk.  Set at pass entry; -1 disables (fallback to
- * the legacy line/col mapping, e.g. when a coordinate-breaking transform
- * fired for this reparse). */
-static long g_aa_off_shift = -1;
-static long g_aa_off_valid_from = 0;
-
-static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
+ * physical (line,col) walk.  The arithmetic lives in ONE place
+ * (pass_common.h cc_pass_node_exact_off / _end_off); these funnels only
+ * add the line/col fallback.  Root is threaded explicitly — an earlier
+ * revision armed file-scope globals at pass entry and never disarmed
+ * them (audit finding). */
+static size_t cc__node_start_off(const CCASTRoot* root, const char* src,
+                                 size_t len, const NodeView* nd) {
     if (!nd) return 0;
-    if (g_aa_off_shift >= 0 && nd->off_start >= 0) {
-        long so = nd->off_start - g_aa_off_shift;
-        if (so >= g_aa_off_valid_from && (size_t)so < len) return (size_t)so;
+    {
+        size_t so = cc_pass_node_exact_off(root, nd->off_start, len);
+        if (so != (size_t)-1) return so;
     }
     if (nd->line_start <= 0) return 0;
     return cc__offset_of_line_col_1based(src, len, nd->line_start, nd->col_start > 0 ? nd->col_start : 1);
 }
 
-static size_t cc__node_end_off(const char* src, size_t len, const NodeView* nd) {
+static size_t cc__node_end_off(const CCASTRoot* root, const char* src,
+                               size_t len, const NodeView* nd) {
     if (!nd) return 0;
-    if (g_aa_off_shift >= 0 && nd->off_end >= 0) {
-        long eo = nd->off_end - g_aa_off_shift;
-        if (eo >= g_aa_off_valid_from && (size_t)eo <= len) return (size_t)eo;
+    {
+        size_t eo = cc_pass_node_exact_end_off(root, nd->off_end, len);
+        if (eo != (size_t)-1) return eo;
     }
     if (nd->line_end <= 0) return 0;
     return cc__offset_of_line_col_1based(src, len, nd->line_end, nd->col_end > 0 ? nd->col_end : 1);
@@ -1297,8 +1298,8 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
 
     /* Prefer node span slicing. With our pipeline, async lowering runs on a freshly reparsed TU,
        so (line,col) spans should match `src`. Fall back to line slicing only if spans are missing. */
-    size_t ss = cc__node_start_off(src, src_len, &n[stmt_idx]);
-    size_t se = cc__node_end_off(src, src_len, &n[stmt_idx]);
+    size_t ss = cc__node_start_off(root, src, src_len, &n[stmt_idx]);
+    size_t se = cc__node_end_off(root, src, src_len, &n[stmt_idx]);
     if (!(se > ss && se <= src_len)) {
         int ls = n[stmt_idx].line_start > 0 ? n[stmt_idx].line_start : 1;
         int le = n[stmt_idx].line_end > 0 ? n[stmt_idx].line_end : ls;
@@ -1582,7 +1583,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         /* If the statement start column is missing, spans are not usable enough to safely
            slice the statement text. Prefer falling back to brace-bounded text parsing. */
         if (n[i].col_start <= 0) continue;
-        refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
+        refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(root, src, src_len, &n[i]) };
     }
 
     /* 2) contents under BLOCK's DECL child: decl-items + stmts */
@@ -1595,7 +1596,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
             if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             if (n[i].kind == CC_AST_NODE_STMT) {
                 if (n[i].col_start <= 0) continue;
-                refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
+                refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(root, src, src_len, &n[i]) };
             }
         }
     }
@@ -1611,8 +1612,8 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
        In that case, recover by slicing the block text and splitting on top-level semicolons. */
     if (ref_n == 0) {
         /* Prefer exact column spans when available (reparse stub-AST matches current rewritten source). */
-        size_t ss = cc__node_start_off(src, src_len, &n[block_idx]);
-        size_t se = cc__node_end_off(src, src_len, &n[block_idx]);
+        size_t ss = cc__node_start_off(root, src, src_len, &n[block_idx]);
+        size_t se = cc__node_end_off(root, src, src_len, &n[block_idx]);
         if (!(se > ss && se <= src_len)) {
             int ls = n[block_idx].line_start > 0 ? n[block_idx].line_start : 1;
             int le = n[block_idx].line_end > 0 ? n[block_idx].line_end : ls;
@@ -2918,11 +2919,6 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
     *out_len = 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
-    /* Arm the exact offset mapping for this root (see cc__node_start_off). */
-    g_aa_off_shift = root->parse_src_shift;
-    g_aa_off_valid_from = root->parse_src_valid_from;
-    if (getenv("CC_ASYNC_NO_EXACT_OFFSETS")) g_aa_off_shift = -1;
-
     const NodeView* n = (const NodeView*)root->nodes;
 
     /* Diagnose await outside @async and unsupported await contexts early. */
@@ -3039,8 +3035,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 if (n[b].kind != CC_AST_NODE_BLOCK) continue;
                 if (!cc_pass_node_in_tu(root, ctx, n[b].file)) continue;
                 if (!cc__node_is_descendant_of(n, b, i)) continue;
-                size_t bs = cc__node_start_off(in_src, in_len, &n[b]);
-                size_t be = cc__node_end_off(in_src, in_len, &n[b]);
+                size_t bs = cc__node_start_off(root, in_src, in_len, &n[b]);
+                size_t be = cc__node_end_off(root, in_src, in_len, &n[b]);
                 if (!(be > bs && be <= in_len)) {
                     int bls = n[b].line_start > 0 ? n[b].line_start : 1;
                     int ble = n[b].line_end > 0 ? n[b].line_end : bls;

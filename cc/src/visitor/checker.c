@@ -208,16 +208,6 @@ static void cc__emit_note_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, co
     fprintf(stderr, "\n");
 }
 
-static void cc__check_spawn_block_on_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
-    (void)ctx; (void)buf; (void)n;
-    /* Removed: too many false positives. Runtime detection handles real deadlocks. */
-}
-
-static void cc__check_nursery_block_on_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
-    (void)ctx; (void)buf; (void)n;
-    /* Removed: too many false positives. Runtime detection handles real deadlocks. */
-}
-
 static int cc__call_has_unique_flag(const StubNodeView* nodes, const ChildList* kids, int call_idx) {
     if (!nodes || !kids) return 0;
     const ChildList* cl = &kids[call_idx];
@@ -942,20 +932,6 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         return -1;
                     }
 
-                    /* Heuristic warning for spawn()+cc_block_on() footgun. */
-                    cc__check_spawn_block_on_text(ctx, buf, got);
-                    if (ctx->errors) {
-                        free(buf);
-                        fclose(f);
-                        return -1;
-                    }
-                    /* Heuristic warning for cc_block_on inside nursery bodies. */
-                    cc__check_nursery_block_on_text(ctx, buf, got);
-                    if (ctx->errors) {
-                        free(buf);
-                        fclose(f);
-                        return -1;
-                    }
                     free(buf);
                 }
             }
