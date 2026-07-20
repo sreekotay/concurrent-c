@@ -1146,51 +1146,21 @@ static int rg_trailing_pad_rule(const RG* g, RFirst* F, RKeeps* K, int rule) {
 
 /* Emit a SWAR 8-byte skip loop for stop-set (T, b1, b2); advances `p` to the
  * first hit or word-past-end. Shared by fused string-body and charset runs. */
-/* Stop set = {b < T} u {b1} u {b2}: emit an arch ladder over the same
- * contract — 16 B/step SSE2 where the host compiler has it, the portable
- * 8 B SWAR otherwise (also what the TCC front-end parses; TCC defines no
- * arch macros). On a hit every arm advances p to the FIRST stop byte.
- * NO NEON ARM by measurement: on Apple Silicon a vld1q/vclt/vshrn +
- * vget_lane movemask arm was a 33% REGRESSION on twitter (median run is
- * ~11 bytes; the vector->GPR lane extract latency dominates short runs,
- * where M-series chews through the 8 B GPR SWAR). Re-adding NEON needs a
- * design that stays in the vector domain (or 8 B NEON), plus on-hardware
- * interleaved numbers — compile-verified is not perf-verified. */
+/* The run-scanner emitter is CC-AUTHORED: cc_gr_swar_run_text lives in
+ * src/preprocess/emit/grammar_emit_swar.cch (user CC — @string templates,
+ * CCString, arenas), lowered by the shared header passes at compiler-build
+ * time and compiled in.  This shim owns the EB append and the scratch
+ * arena; the .cch owns the text.  Emission is byte-identical to the C
+ * emitter it replaced (the port's regression gate). */
+#include "emit/grammar_emit_swar.h"
+
 static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
-    eb_fmt(e, "#if defined(__SSE2__)\n");
-    eb_fmt(e, "    { while (p + 16 <= n) {\n"
-              "        __m128i w%d = _mm_loadu_si128((const __m128i*)(s + p));\n"
-              "        __m128i m%d = _mm_setzero_si128();\n", k, k);
-    if (T > 0)
-        eb_fmt(e, "        m%d = _mm_cmpeq_epi8(_mm_min_epu8(w%d, _mm_set1_epi8((char)%d)), w%d);\n",
-               k, k, T - 1, k);
-    if (b1 >= 0)
-        eb_fmt(e, "        m%d = _mm_or_si128(m%d, _mm_cmpeq_epi8(w%d, _mm_set1_epi8((char)%d)));\n",
-               k, k, k, b1);
-    if (b2 >= 0)
-        eb_fmt(e, "        m%d = _mm_or_si128(m%d, _mm_cmpeq_epi8(w%d, _mm_set1_epi8((char)%d)));\n",
-               k, k, k, b2);
-    eb_fmt(e, "        { int hm%d = _mm_movemask_epi8(m%d);\n"
-              "          if (hm%d) { p += (size_t)__builtin_ctz((unsigned)hm%d); break; } }\n"
-              "        p += 16;\n    } }\n", k, k, k, k);
-    eb_fmt(e, "#else\n");
-    eb_fmt(e, "    { const unsigned long long L%d = 0x0101010101010101ULL, H%d = 0x8080808080808080ULL;\n",
-           k, k);
-    eb_fmt(e, "    while (p + 8 <= n) { unsigned long long w%d; memcpy(&w%d, s + p, 8);\n", k, k);
-    eb_fmt(e, "        unsigned long long m%d = 0;\n", k);
-    if (T > 0)
-        eb_fmt(e, "        m%d |= (w%d - L%d * %d) & ~w%d & H%d;\n", k, k, k, T, k, k);
-    if (b1 >= 0)
-        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-               k, k, b1, k, k, k);
-    if (b2 >= 0)
-        eb_fmt(e, "        { unsigned long long x = w%d ^ (L%d * %d); m%d |= (x - L%d) & ~x & H%d; }\n",
-               k, k, b2, k, k, k);
-    /* On a hit, advance to the first stop byte — don't restart the scalar
-     * walk at the word base (up to 7 double-touches). */
-    eb_fmt(e, "        if (m%d) { p += (size_t)(__builtin_ctzll(m%d) >> 3); break; }\n"
-              "        p += 8;\n    } }\n", k, k);
-    eb_fmt(e, "#endif\n");
+    CCArena a = cc_arena_create(8192);
+    CCString t = cc_gr_swar_run_text(&a, k, T, b1, b2);
+    CCSlice sl = cc_string_as_slice(&t);
+    if (sl.ptr && sl.len)
+        cc_sb_append(e->buf, e->len, e->cap, (const char*)sl.ptr, sl.len);
+    cc_arena_free(&a);
 }
 
 /* C boolean: `s[p]` ∈ charset `cs` — range / tiny equality / bitset. */
