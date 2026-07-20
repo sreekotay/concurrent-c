@@ -88,11 +88,7 @@ static int cc__looks_like_macro_constant(const char* s, size_t n) {
  * real closures latched the recovery scanner onto the comment's `=>`,
  * producing a fake closure descriptor at the comment's text — and the
  * real closure's call site then went unrewritten because its descriptor
- * was misresolved (syscall_kidnap.ccs reproducer).
- *
- * Callers that need to walk backwards from a point have a paired helper
- * (`cc__find_prev_arrow_skipping_inert`) so backward arrow searches
- * (e.g. for closures inside macro arglists) also stay comment-safe. */
+ * was misresolved (syscall_kidnap.ccs reproducer). */
 static size_t cc__find_next_arrow_skipping_inert(const char* src, size_t lim, size_t from) {
     if (!src) return (size_t)-1;
     CCInertScan scan;
@@ -105,121 +101,6 @@ static size_t cc__find_next_arrow_skipping_inert(const char* src, size_t lim, si
         i++;
     }
     return (size_t)-1;
-}
-
-/* Walk backwards from `from-1` looking for the nearest preceding `=>`
- * at the top level of `src[lo..from)`, skipping over C comments and
- * string/char literals.  Returns the offset of the `=` byte, or
- * `(size_t)-1` if none is found.
- *
- * Backward scanning past arbitrary text without first knowing where
- * comments and strings begin is hard: a stray block-comment closer
- * might actually live inside a string literal, etc.  We cheat by
- * walking forward from `lo` once (using the comment-safe helper) and
- * recording every `=>` we see, then return the last one before `from`.  This is O(N) in the search range but only invoked
- * in the rare backward-arrow fallback path for closures inside macro
- * arglists, so the cost is amortised away. */
-static size_t cc__find_prev_arrow_skipping_inert(const char* src, size_t lo, size_t from) {
-    if (!src || from <= lo) return (size_t)-1;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    scan.at_line_start = 0;  /* mid-buffer slice */
-    size_t last_arrow = (size_t)-1;
-    size_t i = lo;
-    while (i + 1 < from) {
-        if (cc_inert_scan_step(&scan, src, from, &i)) continue;
-        if (src[i] == '=' && src[i + 1] == '>') {
-            last_arrow = i;
-            i += 2;
-            continue;
-        }
-        i++;
-    }
-    return last_arrow;
-}
-
-static size_t cc__find_closure_start_from_arrow(const char* src, size_t span_start, size_t arrow_off) {
-    if (!src) return span_start;
-    if (arrow_off <= span_start) return span_start;
-    /* arrow_off points at '=' in '=>'. Walk backwards to find start of params. */
-    size_t j = arrow_off;
-    while (j > span_start && (src[j - 1] == ' ' || src[j - 1] == '\t' || src[j - 1] == '\r' || src[j - 1] == '\n')) j--;
-    if (j <= span_start) return span_start;
-    char prev = src[j - 1];
-    if (prev == ')') {
-        int par = 0;
-        for (size_t k = j; k-- > span_start; ) {
-            char ch = src[k];
-            if (ch == ')') par++;
-            else if (ch == '(') {
-                par--;
-                if (par == 0) return k;
-            }
-        }
-        return span_start;
-    }
-    if (cc__is_ident_char2(prev)) {
-        size_t k = j - 1;
-        while (k > span_start && cc__is_ident_char2(src[k - 1])) k--;
-        return k;
-    }
-    return span_start;
-}
-
-/* Best-effort start offset for closures when stub-AST columns are missing (e.g. closures originating from macro-expanded text). */
-static int cc__closure_start_off_best_effort(const char* src, size_t len,
-                                            int line_start, int line_end, int col_start,
-                                            size_t* out_off, int* out_col_1based) {
-    if (!src || !out_off || line_start <= 0) return 0;
-    size_t lo = cc__offset_of_line_1based(src, len, line_start);
-    if (col_start > 0) {
-        /* Guard against bogus column spans (some macro-origin closures can have garbage col_start). */
-        size_t line_hi = cc__offset_of_line_1based(src, len, line_start + 1);
-        if (line_hi > len) line_hi = len;
-        size_t cand = cc__offset_of_line_col_1based(src, len, line_start, col_start);
-        if (cand < line_hi) {
-            size_t j = cand;
-            while (j < line_hi && (src[j] == ' ' || src[j] == '\t')) j++;
-            /* Heuristic: closure literal starts at '(' (paren params), '@' (@unsafe), or an identifier (single-param form).
-               NOTE: v3 syntax no longer has '[' captures before params - they come after '=>'. */
-            if (j < line_hi && (src[j] == '(' || src[j] == '@' || cc__is_ident_start_char(src[j]))) {
-            *out_off = cand;
-            if (out_col_1based) *out_col_1based = col_start;
-            return 1;
-            }
-        }
-        /* fall through to arrow search */
-    }
-    int le = (line_end > 0) ? line_end : line_start;
-    size_t hi = cc__offset_of_line_1based(src, len, le + 1);
-    if (hi > len) hi = len;
-    if (lo >= hi) return 0;
-    /* Find first '=>' within the span and derive closure start from it.
-     * Comment/string-safe to avoid latching onto `// ... => ...` comments. */
-    size_t arrow = cc__find_next_arrow_skipping_inert(src, hi, lo);
-    if (arrow == (size_t)-1) {
-        /* Fallback: closures inside macro arguments get assigned the line of
-         * the macro call's closing ')' (not where `=>` actually appears in
-         * source). Scan backward from `lo` for the nearest '=>' and derive
-         * the closure start from it. Bounded to avoid crossing statements. */
-        size_t scan_limit = (lo > 4096) ? (lo - 4096) : 0;
-        size_t back_arrow = cc__find_prev_arrow_skipping_inert(src, scan_limit, lo);
-        if (back_arrow == (size_t)-1) return 0;
-        size_t st = cc__find_closure_start_from_arrow(src, scan_limit, back_arrow);
-        *out_off = st;
-        if (out_col_1based) {
-            /* Column is relative to the closure's actual line; compute by
-             * walking back to the preceding newline. */
-            size_t line_lo = st;
-            while (line_lo > 0 && src[line_lo - 1] != '\n') line_lo--;
-            *out_col_1based = 1 + (int)(st - line_lo);
-        }
-        return 1;
-    }
-    size_t st = cc__find_closure_start_from_arrow(src, lo, arrow);
-    *out_off = st;
-    if (out_col_1based) *out_col_1based = 1 + (int)(st - lo);
-    return 1;
 }
 
 /* Best-effort: infer end offset of a closure literal when stub-AST didn't record col_end.
@@ -2439,16 +2320,20 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                             char** out_defs,
                                             size_t* out_defs_len);
 
-/* Public entry point.  Milestone 4b: scan the codegen buffer for the
- * /*CC_CLO:N*\/ closure-ID markers injected at parse-build time, record each
+/* Public entry point.  Scan the codegen buffer for the /*CC_CLO:N*\/
+ * closure-ID markers — injected at parse-build time for user closures and by
+ * every closure SYNTHESIZER (autoblock) for generated ones — record each
  * closure-head offset (the byte just past its marker), then neutralize the
  * marker comments to spaces in a private working copy.  Spaces preserve every
  * byte offset (so the stub-AST line/col spans still line up) while removing the
- * markers from the text the resolver, the @unsafe back-scan, span parsing and
- * the emitted C all see.  The exact offsets are handed to the impl, which uses
- * them in place of the legacy heuristic when the marker count matches the
- * closure-node count.  `CC_NO_CLOSURE_MARKERS` disables the marker path (the
- * impl then falls back to the heuristic). */
+ * markers from the text the @unsafe back-scan, span parsing and the emitted C
+ * all see.
+ *
+ * Markers whose IDs appear in root->skipped_clo_ids are PRUNED: those sat
+ * inside #if-regions that conditional compilation discarded during this
+ * root's parse (TCC's preprocess_skip records them exactly), so they have no
+ * CLOSURE nodes.  After pruning, marker count == closure-node count is an
+ * INVARIANT — the impl fails loudly on mismatch instead of guessing. */
 int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                             const CCVisitorCtx* ctx,
                                             const char* in_src,
@@ -2459,18 +2344,14 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                             size_t* out_protos_len,
                                             char** out_defs,
                                             size_t* out_defs_len) {
-    if (getenv("CC_NO_CLOSURE_MARKERS") || !in_src || in_len == 0) {
+    if (!in_src || in_len == 0) {
         return cc__rewrite_closure_literals_with_nodes_impl(
             root, ctx, in_src, in_len, NULL, 0,
             out_src, out_len, out_protos, out_protos_len, out_defs, out_defs_len);
     }
 
     char* work = (char*)malloc(in_len + 1);
-    if (!work) {
-        return cc__rewrite_closure_literals_with_nodes_impl(
-            root, ctx, in_src, in_len, NULL, 0,
-            out_src, out_len, out_protos, out_protos_len, out_defs, out_defs_len);
-    }
+    if (!work) return -1;
     memcpy(work, in_src, in_len);
     work[in_len] = '\0';
 
@@ -2483,17 +2364,29 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             work[p + 5] == 'C' && work[p + 6] == 'L' && work[p + 7] == 'O' &&
             work[p + 8] == ':') {
             size_t q = p + 9;
-            while (q < in_len && work[q] >= '0' && work[q] <= '9') q++;
+            int id = 0;
+            while (q < in_len && work[q] >= '0' && work[q] <= '9') {
+                id = id * 10 + (work[q] - '0');
+                q++;
+            }
             if (q + 1 < in_len && work[q] == '*' && work[q + 1] == '/') {
                 size_t after = q + 2;
-                if (offs_n == offs_cap) {
-                    int nc = offs_cap ? offs_cap * 2 : 32;
-                    size_t* g = (size_t*)realloc(offs, (size_t)nc * sizeof(size_t));
-                    if (!g) { break; }
-                    offs = g;
-                    offs_cap = nc;
+                int skipped = 0;
+                if (id > 0 && root && root->skipped_clo_ids) {
+                    for (int t = 0; t < root->skipped_clo_count; t++) {
+                        if (root->skipped_clo_ids[t] == id) { skipped = 1; break; }
+                    }
                 }
-                offs[offs_n++] = after;
+                if (!skipped) {
+                    if (offs_n == offs_cap) {
+                        int nc = offs_cap ? offs_cap * 2 : 32;
+                        size_t* g = (size_t*)realloc(offs, (size_t)nc * sizeof(size_t));
+                        if (!g) { free(offs); free(work); return -1; }
+                        offs = g;
+                        offs_cap = nc;
+                    }
+                    offs[offs_n++] = after;
+                }
                 /* Neutralize the marker comment bytes to spaces. */
                 for (size_t b = p; b < after; b++) work[b] = ' ';
                 p = after;
@@ -2636,25 +2529,35 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
     }
     if (idx_n == 0) { free(idxs); return 0; }
 
-    /* Sort by best-effort start offset asc for stable ID assignment. */
-    for (int i = 0; i < idx_n - 1; i++) {
-        for (int j = i + 1; j < idx_n; j++) {
-            size_t ai = 0, aj = 0;
-            int ci = 1, cj = 1;
-            cc__closure_start_off_best_effort(in_src, in_len, n[idxs[i]].line_start, n[idxs[i]].line_end, n[idxs[i]].col_start, &ai, &ci);
-            cc__closure_start_off_best_effort(in_src, in_len, n[idxs[j]].line_start, n[idxs[j]].line_end, n[idxs[j]].col_start, &aj, &cj);
-            if (aj < ai) { int t = idxs[i]; idxs[i] = idxs[j]; idxs[j] = t; }
-        }
-    }
+    /* idxs is already in SOURCE ORDER: the recorder appends nodes in parse
+     * order, and a recursive-descent parse cannot start a later closure
+     * before an earlier one.  (An old best-effort re-sort keyed on the
+     * line/col heuristic could only DAMAGE that order when coordinates
+     * drifted — it's gone with the rest of the heuristic.) */
 
-    /* milestone 4b: use marker offsets when their count matches the closure
-     * node count.  Both lists are in source order (the marker producer scans
-     * the buffer linearly; idxs is sorted by source position above), so the
-     * k-th marker is the k-th closure's exact, comment-safe start offset. */
+    /* Marker k is closure k: the marker producer scans the buffer linearly
+     * and idxs is in source order, so the k-th surviving marker is the k-th
+     * closure's exact, comment-safe start offset. */
     int use_markers = (marker_offs && marker_n == idx_n);
     if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
         fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: markers=%d closures=%d use_markers=%d\n",
                 marker_n, idx_n, use_markers);
+    }
+    /* FAIL LOUDLY: after #if-skip pruning, marker count == closure-node
+     * count is an invariant (parse-build injects a marker per user closure,
+     * every synthesizer marks its generated closures, and TCC reports the
+     * markers conditional compilation discarded).  A mismatch means a
+     * producer forgot its marker or the pruning accounting broke — guessing
+     * spans with heuristics is how closures silently bound to the wrong
+     * source text, so we refuse instead. */
+    if (!use_markers && idx_n > 0) {
+        fprintf(stderr,
+                "cc: internal error: closure marker/node count mismatch "
+                "(markers=%d closures=%d) in %s — a closure producer did not "
+                "emit its /*CC_CLO:N*/ marker\n",
+                marker_n, idx_n, ctx->input_path ? ctx->input_path : "<input>");
+        free(idxs);
+        return -1;
     }
 
     CCClosureDesc* descs = (CCClosureDesc*)calloc((size_t)idx_n, sizeof(CCClosureDesc));
@@ -2666,126 +2569,24 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         d->id = k + 1;
         d->start_line = n[i].line_start;
         d->end_line = n[i].line_end;
-        size_t start_off = 0;
+        /* Exact, comment-safe start offset from the closure-ID marker.
+         * The marker comment has already been neutralized to spaces in
+         * `in_src` by the wrapper, so the @unsafe back-scan and span
+         * parsing below behave exactly as for an unmarked closure.
+         * (The (line,col)+arrow-scan heuristic and its whole-buffer `=>`
+         * recovery fallback are gone: markers are the only identity.) */
+        size_t start_off = marker_offs[k];
         int start_col1 = 1;
-        if (use_markers) {
-            /* Exact, comment-safe start offset from the closure-ID marker.
-             * The marker comment has already been neutralized to spaces in
-             * `in_src` by the wrapper, so the @unsafe back-scan and span
-             * parsing below behave exactly as for an unmarked closure. */
-            start_off = marker_offs[k];
-            if (start_off >= in_len) { cc__free_closure_desc(d); continue; }
+        if (start_off >= in_len) { cc__free_closure_desc(d); continue; }
+        {
             size_t ln_lo = start_off;
             while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
             start_col1 = 1 + (int)(start_off - ln_lo);
-            if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
-                fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d MARKER off=%zu col=%d\n",
-                        d->id, start_off, start_col1);
-            }
-            goto have_start_off;
         }
-        int be_ok = cc__closure_start_off_best_effort(in_src, in_len, n[i].line_start, n[i].line_end, n[i].col_start, &start_off, &start_col1);
-        /* Validate: start_off must actually lead to `=>` within a short
-         * window (accounting for `(params)` and whitespace).  When the AST
-         * line is garbage, cc__closure_start_off_best_effort can resolve via
-         * a backward-arrow scan that lands inside a preceding comment or
-         * matches an already-claimed arrow, producing a "success" offset
-         * that isn't actually a closure head.  Reject those so the text
-         * fallback below can recover.
-         *
-         * We also reject the case where start_off duplicates an
-         * already-claimed descriptor's offset (two AST nodes racing for the
-         * same source closure). */
-        if (be_ok) {
-            size_t scan_lim = start_off + 256;
-            if (scan_lim > in_len) scan_lim = in_len;
-            int has_arrow = 0;
-            int saw_stmt_boundary = 0;
-            CCInertScan rscan;
-            cc_inert_scan_init(&rscan, NULL);
-            rscan.at_line_start = 0;  /* mid-buffer slice */
-            size_t q = start_off;
-            while (q + 1 < scan_lim) {
-                /* Comment- and string-safe: a `// ... => ...` line comment
-                 * between start_off and the closure's real `=>` would
-                 * otherwise be matched as a stmt boundary (no chars
-                 * trigger it, but the loop would then walk past the real
-                 * arrow into the comment text). */
-                if (cc_inert_scan_step(&rscan, in_src, scan_lim, &q)) continue;
-                if (in_src[q] == ';' || in_src[q] == '{' || in_src[q] == '}') {
-                    saw_stmt_boundary = 1;
-                    break;
-                }
-                if (in_src[q] == '=' && in_src[q + 1] == '>') { has_arrow = 1; break; }
-                q++;
-            }
-            if (!has_arrow || saw_stmt_boundary) be_ok = 0;
+        if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
+            fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d MARKER off=%zu col=%d\n",
+                    d->id, start_off, start_col1);
         }
-        if (be_ok) {
-            for (int kk = 0; kk < k; kk++) {
-                if (descs[kk].start_off == start_off) { be_ok = 0; break; }
-            }
-        }
-        if (!be_ok) {
-            /* AST line/col is unreliable here.  This happens when the
-             * reparse prelude pulls in a header whose internal `#line`
-             * directives leave tcc's line counter drifted relative to the
-             * shared source text (e.g. after `#include <ccc/std/prelude.cch>`
-             * with its own `#line N "std/prelude.h"` entries), so the
-             * CLOSURE node lands on a line that is past the end of the
-             * shared buffer — or on a line that resolves to a duplicate of
-             * an already-claimed closure via the backward-arrow fallback.
-             * The AST *count* of CLOSURE nodes is still correct, so we
-             * recover by walking `in_src` forward and picking the first
-             * `() => [...]` head whose derived start isn't already claimed
-             * by a previously-resolved descriptor.  The set of claimed
-             * offsets is small; a linear scan over descs[0..k-1] is fine. */
-            int found = 0;
-            size_t scan = 0;
-            /* Comment/string-safe forward scan.  Without this, a comment
-             * like `// Pattern: (a && b) => exit` between two real
-             * closures would be matched here, the recovery code would
-             * claim a fake closure descriptor pointing into the comment
-             * text, and the REAL closure's call site would be left
-             * unrewritten (syscall_kidnap.ccs repro). */
-            while (scan + 1 < in_len) {
-                size_t arrow = cc__find_next_arrow_skipping_inert(in_src, in_len, scan);
-                if (arrow == (size_t)-1) break;
-                size_t st_guess = cc__find_closure_start_from_arrow(in_src, 0, arrow);
-                if (st_guess < in_len && st_guess + 1 < in_len) {
-                    int claimed = 0;
-                    for (int kk = 0; kk < k; kk++) {
-                        if (descs[kk].start_off == st_guess ||
-                            (descs[kk].start_off <= st_guess && st_guess < descs[kk].end_off)) {
-                            claimed = 1;
-                            break;
-                        }
-                    }
-                    if (!claimed) {
-                        start_off = st_guess;
-                        size_t ln_lo = st_guess;
-                        while (ln_lo > 0 && in_src[ln_lo - 1] != '\n') ln_lo--;
-                        start_col1 = 1 + (int)(st_guess - ln_lo);
-                        found = 1;
-                        break;
-                    }
-                }
-                scan = arrow + 2;
-            }
-            if (!found) {
-                if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
-                    fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d DROPPED line=%d col=%d (no fallback match)\n",
-                            d->id, n[i].line_start, n[i].col_start);
-                }
-                cc__free_closure_desc(d);
-                continue;
-            }
-            if (getenv("CC_DEBUG_CLOSURE_SPANS")) {
-                fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d RECOVERED line=%d->%zu col=%d via text fallback\n",
-                        d->id, n[i].line_start, start_off, start_col1);
-            }
-        }
-have_start_off:
         d->start_col = start_col1 - 1;
         d->end_col = (n[i].col_end > 0) ? (n[i].col_end - 1) : -1;
         d->start_off = start_off;

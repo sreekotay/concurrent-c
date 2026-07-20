@@ -376,6 +376,7 @@ static char* cc__neutralize_comments_for_reparse(const char* src, size_t n) {
      * fall-through behavior on code bytes here is "do nothing",
      * leaving pp bytes verbatim is the same outcome — no semantic
      * change. */
+    int keep_marker = 0; /* current block comment is a /-*CC_CLO:N*-/ marker */
     for (size_t i = 0; i < n; ) {
         size_t before = i;
         int prev_lc = scan.in_line_comment;
@@ -383,12 +384,21 @@ static char* cc__neutralize_comments_for_reparse(const char* src, size_t n) {
         if (cc_inert_scan_step(&scan, src, n, &i)) {
             int touched_comment = prev_lc || prev_bc ||
                                   scan.in_line_comment || scan.in_block_comment;
-            if (touched_comment) {
+            /* Closure-ID markers survive into the reparse buffer: TCC's
+             * lexer drops them like any comment, but preprocess_skip sees
+             * them inside #if-skipped regions and records their IDs so the
+             * closure pass can prune markers whose closures conditional
+             * compilation discarded. */
+            if (!prev_bc && scan.in_block_comment &&
+                before + 9 <= n && memcmp(src + before, "/*CC_CLO:", 9) == 0)
+                keep_marker = 1;
+            if (touched_comment && !keep_marker) {
                 for (size_t k = before; k < i; k++) {
                     char ch = src[k];
                     if (ch != '\n' && ch != '\r' && ch != '\t') out[k] = ' ';
                 }
             }
+            if (!scan.in_block_comment) keep_marker = 0;
             /* String/char/pp regions stay verbatim (already memcpy'd). */
             continue;
         }

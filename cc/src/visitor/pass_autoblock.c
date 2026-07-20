@@ -340,20 +340,7 @@ static int cc__ab_arg_is_string_literal(const char* s, size_t a, size_t b) {
     size_t i = a;
     int segments = 0;
     for (;;) {
-        while (i < b) {
-            char c = s[i];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
-            if (c == '/' && i + 1 < b && s[i + 1] == '/') {
-                i += 2; while (i < b && s[i] != '\n') i++; continue;
-            }
-            if (c == '/' && i + 1 < b && s[i + 1] == '*') {
-                i += 2;
-                while (i + 1 < b && !(s[i] == '*' && s[i + 1] == '/')) i++;
-                if (i + 1 < b) i += 2;
-                continue;
-            }
-            break;
-        }
+        i = cc_skip_ws_and_comments(s, b, i);
         if (i >= b) break;
         if (i + 2 < b && s[i] == 'u' && s[i + 1] == '8' && s[i + 2] == '"') i += 2;
         else if (i + 1 < b && (s[i] == 'L' || s[i] == 'u' || s[i] == 'U') && s[i + 1] == '"') i += 1;
@@ -372,24 +359,7 @@ static int cc__ab_arg_is_string_literal(const char* s, size_t a, size_t b) {
 
 static int cc__ab_only_ws_comments(const char* s, size_t a, size_t b) {
     if (!s) return 0;
-    size_t i = a;
-    while (i < b) {
-        char c = s[i];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
-        if (c == '/' && i + 1 < b && s[i + 1] == '/') {
-            i += 2;
-            while (i < b && s[i] != '\n') i++;
-            continue;
-        }
-        if (c == '/' && i + 1 < b && s[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < b && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            if (i + 1 < b) i += 2;
-            continue;
-        }
-        return 0;
-    }
-    return 1;
+    return cc_skip_ws_and_comments(s, b, a) >= b;
 }
 
 static int cc__is_typed_chan_send_wrapper(const char* name) {
@@ -548,39 +518,28 @@ static const char* cc__select_autoblock_box_type(const char* decl_type, const ch
 }
 
 static size_t cc__scan_call_paren_end(const char* src, size_t len, size_t lparen) {
-    int par = 0, brk = 0, br = 0;
-    int ins = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    char q = 0;
-    if (!src || lparen >= len || src[lparen] != '(') return 0;
-    for (size_t i = lparen + 1; i < len; i++) {
-        char ch = src[i];
-        char ch2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
-        if (ins) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == q) ins = 0;
-            continue;
-        }
-        if (in_chr) {
-            if (ch == '\\' && i + 1 < len) { i++; continue; }
-            if (ch == '\'') in_chr = 0;
-            continue;
-        }
-        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
-        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
-        if (ch == '"') { ins = 1; q = ch; continue; }
-        if (ch == '\'') { in_chr = 1; continue; }
-        if (ch == '(') par++;
-        else if (ch == ')') {
-            if (par == 0 && brk == 0 && br == 0) return i + 1;
-            if (par) par--;
-        } else if (ch == '[') brk++;
-        else if (ch == ']') { if (brk) brk--; }
-        else if (ch == '{') br++;
-        else if (ch == '}') { if (br) br--; }
+    size_t rp = 0;
+    if (!cc_find_matching_paren(src, len, lparen, &rp)) return 0;
+    return rp + 1;
+}
+
+/* Split txt[args_s..args_e) at top-level commas (comment/string/bracket
+ * aware via the shared scanner).  Stores at most `cap` spans; returns the
+ * count stored. */
+static int cc__ab_split_args(const char* txt, size_t args_s, size_t args_e,
+                             size_t* starts, size_t* ends, int cap) {
+    int argc = 0;
+    size_t cur = args_s;
+    size_t k = args_s;
+    if (args_s >= args_e) return 0;
+    while (k < args_e) {
+        k = cc_find_char_top_level(txt, k, args_e, ',');
+        if (k >= args_e) break;
+        if (argc < cap) { starts[argc] = cur; ends[argc] = k; argc++; }
+        cur = ++k;
     }
-    return 0;
+    if (argc < cap) { starts[argc] = cur; ends[argc] = args_e; argc++; }
+    return argc;
 }
 
 static int cc__relocate_call_span_on_line(const char* src,
@@ -1043,31 +1002,11 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                    `tmp = await run_blocking(...); return ...tmp...;` */
                 if (!ret_is_void && !ret_is_structy) {
                     /* Find statement end ';' at top-level from the start of the line. */
-                    size_t endp = lb;
-                    int par = 0, brk = 0, br = 0;
-                    int ins = 0; char q = 0;
-                    int in_lc = 0, in_bc = 0;
-                    for (size_t k = lb; k < in_len; k++) {
-                        char ch = in_src[k];
-                        char ch2 = (k + 1 < in_len) ? in_src[k + 1] : 0;
-                        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-                        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k++; } continue; }
-                        if (ins) { if (ch == '\\' && k + 1 < in_len) { k++; continue; } if (ch == q) ins = 0; continue; }
-                        if (ch == '/' && ch2 == '/') { in_lc = 1; k++; continue; }
-                        if (ch == '/' && ch2 == '*') { in_bc = 1; k++; continue; }
-                        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-                        if (ch == '(') par++;
-                        else if (ch == ')') { if (par) par--; }
-                        else if (ch == '[') brk++;
-                        else if (ch == ']') { if (brk) brk--; }
-                        else if (ch == '{') br++;
-                        else if (ch == '}') { if (br) br--; }
-                        else if (ch == ';' && par == 0 && brk == 0 && br == 0) { endp = k + 1; break; }
-                    }
-                    if (endp > lb && endp <= in_len) {
+                    size_t semi = cc_find_char_top_level(in_src, lb, in_len, ';');
+                    if (semi < in_len) {
                         kind = CC_AB_REWRITE_RETURN_EXPR_CALL;
                         stmt_start = lb;
-                        stmt_end = endp;
+                        stmt_end = semi + 1;
                     }
                 }
             }
@@ -1098,31 +1037,11 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
             if (kind != CC_AB_REWRITE_ASSIGN_CALL) {
                 if (!ret_is_void && !ret_is_structy) {
                     /* Find statement end ';' at top-level from the start of the line. */
-                    size_t endp = lb;
-                    int par = 0, brk = 0, br = 0;
-                    int ins = 0; char q = 0;
-                    int in_lc = 0, in_bc = 0;
-                    for (size_t k = lb; k < in_len; k++) {
-                        char ch = in_src[k];
-                        char ch2 = (k + 1 < in_len) ? in_src[k + 1] : 0;
-                        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
-                        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k++; } continue; }
-                        if (ins) { if (ch == '\\' && k + 1 < in_len) { k++; continue; } if (ch == q) ins = 0; continue; }
-                        if (ch == '/' && ch2 == '/') { in_lc = 1; k++; continue; }
-                        if (ch == '/' && ch2 == '*') { in_bc = 1; k++; continue; }
-                        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-                        if (ch == '(') par++;
-                        else if (ch == ')') { if (par) par--; }
-                        else if (ch == '[') brk++;
-                        else if (ch == ']') { if (brk) brk--; }
-                        else if (ch == '{') br++;
-                        else if (ch == '}') { if (br) br--; }
-                        else if (ch == ';' && par == 0 && brk == 0 && br == 0) { endp = k + 1; break; }
-                    }
-                    if (endp > lb && endp <= in_len) {
+                    size_t semi = cc_find_char_top_level(in_src, lb, in_len, ';');
+                    if (semi < in_len) {
                         kind = CC_AB_REWRITE_ASSIGN_EXPR_CALL;
                         stmt_start = lb;
-                        stmt_end = endp;
+                        stmt_end = semi + 1;
                     }
                 }
             }
@@ -1554,39 +1473,9 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
 
                 size_t arg_starts[16];
                 size_t arg_ends[16];
-                int argc = 0;
-                int par = 0, brk = 0, br = 0;
-                int ins = 0; char q = 0;
-                size_t cur_a = args_s;
-                for (size_t k = args_s; k < args_e; k++) {
-                    char ch = call_txt[k];
-                    if (ins) {
-                        if (ch == '\\' && k + 1 < args_e) { k++; continue; }
-                        if (ch == q) ins = 0;
-                        continue;
-                    }
-                    if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-                    if (ch == '(') par++;
-                    else if (ch == ')') { if (par) par--; }
-                    else if (ch == '[') brk++;
-                    else if (ch == ']') { if (brk) brk--; }
-                    else if (ch == '{') br++;
-                    else if (ch == '}') { if (br) br--; }
-                    else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
-                        if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-                            arg_starts[argc] = cur_a;
-                            arg_ends[argc] = k;
-                            argc++;
-                        }
-                        cur_a = k + 1;
-                    }
-                }
-                if (args_s == args_e) argc = 0;
-                else if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-                    arg_starts[argc] = cur_a;
-                    arg_ends[argc] = args_e;
-                    argc++;
-                }
+                int argc = cc__ab_split_args(call_txt, args_s, args_e,
+                                             arg_starts, arg_ends,
+                                             (int)(sizeof(arg_starts)/sizeof(arg_starts[0])));
 
                 for (int ai = 0; ai < argc; ai++) {
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCAbIntptr __cc_ab_l%d_b%d_a%d = (CCAbIntptr)(%.*s);\n",
@@ -1615,39 +1504,9 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                             size_t args_e = (size_t)(rpar - call_txt);
                             size_t arg_starts[16];
                             size_t arg_ends[16];
-                            int argc = 0;
-                            int par = 0, brk = 0, br = 0;
-                            int ins = 0; char q = 0;
-                            size_t cur_a = args_s;
-                            for (size_t k = args_s; k < args_e; k++) {
-                                char ch = call_txt[k];
-                                if (ins) {
-                                    if (ch == '\\' && k + 1 < args_e) { k++; continue; }
-                                    if (ch == q) ins = 0;
-                                    continue;
-                                }
-                                if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-                                if (ch == '(') par++;
-                                else if (ch == ')') { if (par) par--; }
-                                else if (ch == '[') brk++;
-                                else if (ch == ']') { if (brk) brk--; }
-                                else if (ch == '{') br++;
-                                else if (ch == '}') { if (br) br--; }
-                                else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
-                                    if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-                                        arg_starts[argc] = cur_a;
-                                        arg_ends[argc] = k;
-                                        argc++;
-                                    }
-                                    cur_a = k + 1;
-                                }
-                            }
-                            if (args_s == args_e) argc = 0;
-                            else if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-                                arg_starts[argc] = cur_a;
-                                arg_ends[argc] = args_e;
-                                argc++;
-                            }
+                            int argc = cc__ab_split_args(call_txt, args_s, args_e,
+                                                         arg_starts, arg_ends,
+                                                         (int)(sizeof(arg_starts)/sizeof(arg_starts[0])));
                             for (int ai = 0; ai < argc; ai++) {
                                 cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCAbIntptr __cc_ab_l%d_t_a%d = (CCAbIntptr)(%.*s);\n",
                                                I, reps[ri].line_start, ai,
@@ -1662,7 +1521,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
             /* Task-based auto-blocking: create a CCClosure0 value first, then await the task.
                This avoids embedding multiline `() => { ... }` directly inside `await <expr>` which
                interacts badly with later closure-elision + #line resync. */
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
             {
                 int first_cap = 1;
                 for (int bi = 0; bi < reps[ri].batch_n; bi++) {
@@ -1765,41 +1624,9 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
         /* Split args on top-level commas. */
         size_t arg_starts[16];
         size_t arg_ends[16];
-        int argc = 0;
-        int par = 0, brk = 0, br = 0;
-        int ins = 0; char q = 0;
-        size_t cur_a = args_s;
-        for (size_t k = args_s; k < args_e; k++) {
-            char ch = call_txt[k];
-            if (ins) {
-                if (ch == '\\' && k + 1 < args_e) { k++; continue; }
-                if (ch == q) ins = 0;
-                continue;
-            }
-            if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
-            if (ch == '(') par++;
-            else if (ch == ')') { if (par) par--; }
-            else if (ch == '[') brk++;
-            else if (ch == ']') { if (brk) brk--; }
-            else if (ch == '{') br++;
-            else if (ch == '}') { if (br) br--; }
-            else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
-                if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-                    arg_starts[argc] = cur_a;
-                    arg_ends[argc] = k;
-                    argc++;
-                }
-                cur_a = k + 1;
-            }
-        }
-        /* Last arg (or empty) */
-        if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
-            arg_starts[argc] = cur_a;
-            arg_ends[argc] = args_e;
-            argc++;
-        }
-        /* Handle empty-arg call. */
-        if (args_s == args_e) argc = 0;
+        int argc = cc__ab_split_args(call_txt, args_s, args_e,
+                                     arg_starts, arg_ends,
+                                     (int)(sizeof(arg_starts)/sizeof(arg_starts[0])));
 
         /* Trim whitespace on each arg in-place and note whether the payload
          * is a pure string literal.  Literal args are inlined into the
@@ -1873,7 +1700,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
             /* Emit a CCClosure0 value first (avoid embedding closure literal directly in `await <expr>`),
                then await the task into an intptr temp, then emit the original statement with the call
                replaced by that temp. */
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
             {
                 int first_cap = 1;
                 for (int ai = 0; ai < argc; ai++) {
@@ -1989,7 +1816,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
             {
                 int first_cap = 1;
                 for (int ai = 0; ai < argc; ai++) {
@@ -2009,7 +1836,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
         } else {
             if (reps[ri].kind == CC_AB_REWRITE_RETURN_CALL) {
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
                 {
                     int first_cap = 1;
                     for (int ai = 0; ai < argc; ai++) {
@@ -2039,7 +1866,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                                    I, box_type ? box_type : "void*", reps[ri].line_start);
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s* cc_ab_retp_l%d = &cc_ab_ret_l%d;\n",
                                    I, box_type ? box_type : "void*", reps[ri].line_start, reps[ri].line_start);
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [",
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [",
                                    I, reps[ri].line_start);
                     {
                         int first_cap = 1;
@@ -2069,7 +1896,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                                    I, reps[ri].lhs_name,
                                    reps[ri].line_start);
                 } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
                     {
                         int first_cap = 1;
                         for (int ai = 0; ai < argc; ai++) {
@@ -2108,7 +1935,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                                    I, box_type ? box_type : reps[ri].decl_type, reps[ri].line_start);
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s* cc_ab_retp_l%d = &cc_ab_ret_l%d;\n",
                                    I, box_type ? box_type : reps[ri].decl_type, reps[ri].line_start, reps[ri].line_start);
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [",
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [",
                                    I, reps[ri].line_start);
                     {
                         int first_cap = 1;
@@ -2138,7 +1965,7 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                                    I, decl_emit_type ? decl_emit_type : reps[ri].decl_type, reps[ri].lhs_name,
                                    reps[ri].line_start);
                 } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = /*CC_CLO:0*/() => [", I, reps[ri].line_start);
                     {
                         int first_cap = 1;
                         for (int ai = 0; ai < argc; ai++) {
