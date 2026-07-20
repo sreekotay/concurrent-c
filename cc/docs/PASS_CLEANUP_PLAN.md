@@ -22,27 +22,38 @@ best-effort (line, col) only, so every pass re-derived offsets via
 `cc__offset_of_line_col_1based` line-walking (12 sites in pass_ufcs alone,
 21 in async_ast).
 
-Prototyped in this cycle (patch: `third_party/tcc-patches/0002-cc-ast-byte-offsets.patch`,
-submodule working tree; needs a push to sreekotay/tinycc to land for real):
+LANDED (atomically, the house way): the offset enhancement rides the
+EXISTING rolling-patch mechanism — `third_party/tcc-patches/0001-cc-ext-hooks.patch`
+is the single upstream-mirror→tree diff, applied into the submodule
+working tree by `scripts/apply_tcc_patches.sh` (idempotent), regenerated
+by `scripts/regen_tcc_patches.sh` (root Makefile: tcc-patch-apply /
+tcc-patch-regen / tcc-update-check). The submodule now pins the PRISTINE
+upstream mirror commit (origin/upstream-mob) rather than a fork branch
+with hooks baked in, so:
+  - no pushes to the tinycc fork are ever required — the whole CC delta
+    lives in this repo's patch file;
+  - upstream upgrades follow the documented flow (bump pin → apply →
+    adjust → regen → tcc-update-check) and FAIL LOUDLY at apply time if
+    upstream moved under a hook;
+  - cc/Makefile auto-applies the patch set and builds libtcc on fresh
+    clones (guard rule on libtcc.a; .gitmodules ignores the expected
+    patched-tree dirt).
 
+What the enhancement carries:
 - `cc_tok_off` tracked in the lexer beside `tok_col`: byte offset of the
   current token's start in the top-level in-memory buffer (-1 in nested
   include streams, where buf_ptr is a window).
 - `CCASTStubNode.off_start/off_end` (long): token-exact start for every
   node; exclusive end at the first token after the construct (same
-  best-effort scope as line_end). Refined further at the sites that stamp
-  col_start/col_end.
-- CC-side mirror updates were validated locally, then REVERTED on main:
-  they must land ATOMICALLY with the tinycc patch or a clean clone gets a
-  layout skew between libtcc's node array and the CC-side view (the exact
-  segfault class the prototype hit — the stub layout is mirrored in SIX
-  places: visitor_ast_common.h, pass_common.h, checker.c,
-  pass_closure_calls.c, pass_ufcs.c, visit_codegen.c). The full CC-side
-  diff is preserved in main's history (the "open the span-anchored deep
-  cycle" commit). Consolidating the six mirrors into ONE header with a
-  size assert is part of Phase 1 and removes this hazard class.
-- Validation performed: `CC_DEBUG_STUB_NODES=2` sliced node text straight
-  from the parse buffer by offset — token-exact starts on every node.
+  best-effort scope as line_end). Refined at the col_start/col_end sites.
+- CC-side mirrors carry the fields, and tcc_bridge.c now has a
+  _Static_assert(sizeof CCASTStubNode == sizeof CCNodeView) DRIFT GUARD —
+  the layout is still hand-mirrored in six places (visitor_ast_common.h,
+  pass_common.h, checker.c, pass_closure_calls.c, pass_ufcs.c,
+  visit_codegen.c); consolidation to one header remains a phase-1 item,
+  now compile-time-guarded instead of segfault-guarded.
+- Validation: `CC_DEBUG_STUB_NODES=2` slices node text straight from the
+  parse buffer by offset (token-exact starts; unknown streams report -1).
 
 Offsets address the PARSE buffer (which the root retains as
 `parse_buffer`); edits target the codegen buffer. Phase 2 closes that gap.
@@ -82,13 +93,10 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
 
 ## Phases (each gated: full suite + 5-TU byte-identity + clean bootstrap)
 
-1. **Land the offset substrate — atomically.** Push the TCC patch (needs
-   `sreekotay/tinycc` added to session scope, or apply
-   `0002-cc-ast-byte-offsets.patch` by hand), bump the submodule, and
-   re-apply the CC-side mirror fields IN THE SAME CHANGE (diff preserved
-   in main history). Consolidate the six struct mirrors into
-   pass_common.h alone with a size assert. Add an offsets smoke
-   (CC_DEBUG_STUB_NODES=2 golden).
+1. **Offset substrate: LANDED** (rolling patch + upstream pin, above).
+   Remaining phase-1 items: consolidate the six struct mirrors into
+   pass_common.h alone (the bridge assert already guards drift); add an
+   offsets golden smoke.
 2. **Buffer-bridging map.** The rewriter chain (build_parse_input) emits
    (derived_off ↔ source_off) anchor pairs at every splice — each rewriter
    knows both offsets at splice time. One module answers

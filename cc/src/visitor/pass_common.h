@@ -34,13 +34,22 @@ typedef struct CCNodeView {
     int line_end;       /* 1-based end line */
     int col_start;      /* 1-based start column (0 if unavailable) */
     int col_end;        /* 1-based end column (0 if unavailable) */
+    /* Byte offsets into the parsed buffer (0-based, end exclusive; -1 =
+     * unknown). Exact for in-memory parses — the pipeline's case. Unlike
+     * line/col (original-file coordinates once #line applies), these
+     * address the parse buffer directly: slice text without line-walking. */
+    long off_start;
+    long off_end;
     int aux1;           /* Node-specific auxiliary data */
     int aux2;           /* Node-specific auxiliary data */
     const char* aux_s1; /* Node-specific string (e.g., method name) */
     const char* aux_s2; /* Node-specific string (e.g., type name) */
 } CCNodeView;
 
-/* Node kinds from patched TCC (keep in sync with tcc.h) */
+/* Node kinds from patched TCC (keep in sync with tcc.h).
+ * CC_PASS_COMMON_SKIP_KINDS: for TUs that also include the TCC ext headers,
+ * which define the same enumerators (e.g. tcc_bridge.c's layout assert). */
+#ifndef CC_PASS_COMMON_SKIP_KINDS
 enum {
     CC_AST_NODE_UNKNOWN = 0,
     CC_AST_NODE_DECL = 1,
@@ -74,6 +83,7 @@ enum {
     CC_AST_NODE_ENUM = 29,
     CC_AST_NODE_ENUM_VALUE = 30,
 };
+#endif /* CC_PASS_COMMON_SKIP_KINDS */
 
 /* ============================================================================
  * Path Matching Helpers

@@ -3465,6 +3465,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 int line_end;
                 int col_start;
                 int col_end;
+                long off_start;   /* byte offsets in parse buffer; -1 unknown (layout mirror of tcc.h) */
+                long off_end;
                 int aux1;
                 int aux2;
                 const char* aux_s1;

@@ -25,6 +25,18 @@
 #undef strdup
 #endif
 
+/* DRIFT GUARD: the stub-node layout is mirrored on the CC side (CCNodeView).
+ * A field added on one side without the other reads garbage through the
+ * array stride — caught here at compile time instead of as a segfault.
+ * (visitor_ast_common.h holds a second mirror that cannot be included in
+ * the same TU — same struct tag; phase 1 of PASS_CLEANUP_PLAN consolidates
+ * the mirrors to one header, guarded by this assert.) */
+#define CC_PASS_COMMON_SKIP_KINDS
+#include "visitor/pass_common.h"
+_Static_assert(sizeof(struct CCASTStubNode) == sizeof(CCNodeView),
+               "CCNodeView mirror out of sync with tcc.h CCASTStubNode "
+               "(apply third_party/tcc-patches + rebuild libtcc, or update the mirrors)");
+
 /* The patched TCC should export these. Mark weak so we can still link if the
    extension is absent, and fall back to stubs at runtime. */
 __attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols);
@@ -152,6 +164,24 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
         }
         fprintf(stderr, "CC_DEBUG_STUB_NODES: %s: nodes=%d arenas=%d\n",
                 original_path ? original_path : "<string>", root->node_count, arenas);
+        /* =2: verify byte offsets by slicing the parsed text directly —
+         * off_* address source_code (the buffer TCC lexed), NOT the
+         * original file; that is the whole point of carrying them. */
+        const char* lvl = getenv("CC_DEBUG_STUB_NODES");
+        if (lvl && lvl[0] == '2' && source_code) {
+            size_t srclen = strlen(source_code);
+            int shown = 0;
+            for (int i = 0; i < root->node_count && shown < 24; i++) {
+                if (nn[i].off_start < 0 || nn[i].off_end <= nn[i].off_start) continue;
+                if ((size_t)nn[i].off_end > srclen) continue;
+                long a = nn[i].off_start, b = nn[i].off_end;
+                long w = b - a; if (w > 40) w = 40;
+                fprintf(stderr, "  node[%d] kind=%d L%d:%d off=%ld..%ld |%.*s|\n",
+                        i, nn[i].kind, nn[i].line_start, nn[i].col_start,
+                        a, b, (int)w, source_code + a);
+                shown++;
+            }
+        }
     }
     return root;
 }

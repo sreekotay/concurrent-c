@@ -122,6 +122,23 @@ LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
 all: $(CCC_SCRIPT) $(WRAPPER) $(LOWER_HEADERS_STAMP)
 
+# Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
+# hooks applied into the submodule working tree BEFORE any CC object that
+# includes tcc.h compiles (order-only prereq on the %.o rule), and libtcc
+# rebuilt before anything links against it. Idempotent (the apply script
+# reverse-checks). NOTE: placed AFTER `all` — an earlier revision sat
+# before it and became make's default goal, silently building nothing.
+TCC_PATCH_STAMP := $(TCC_INC)/.cc_patches_applied
+$(TCC_PATCH_STAMP): $(wildcard ../third_party/tcc-patches/000*.patch)
+	@cd .. && bash scripts/apply_tcc_patches.sh
+	@cd $(TCC_INC) && ([ -f config.mak ] || ./configure) && \
+	  (grep -q CONFIG_cc_ext config.mak || echo 'CONFIG_cc_ext=yes' >> config.mak)
+	@touch $@
+ifneq ($(suffix $(TCC_LIB)),.a)
+$(TCC_LIB)/libtcc.a: $(TCC_PATCH_STAMP)
+	@cd $(TCC_LIB) && $(MAKE) libtcc.a libtcc1.a
+endif
+
 # Lower .cch headers to .h files (must run before examples that use generated C)
 .PHONY: lower-headers
 lower-headers: $(LOWER_HEADERS_STAMP)
@@ -154,7 +171,7 @@ ENGINE_CCH := $(wildcard $(ENGINE_CCH_DIR)/*.cch)
 ENGINE_GEN_DIR := ../out/cc/genh
 ENGINE_GEN_HDRS := $(patsubst $(ENGINE_CCH_DIR)/%.cch,$(ENGINE_GEN_DIR)/%.h,$(ENGINE_CCH))
 
-$(LOWER_HEADERS1_BINARY): $(LOWER_HEADERS1_OBJS)
+$(LOWER_HEADERS1_BINARY): $(LOWER_HEADERS1_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS1_OBJS) $(LDLIBS)
 
@@ -205,7 +222,7 @@ $(WRAPPER): $(CCC_SCRIPT)
 	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/ccc" "$$@"' >> $@
 	@chmod +x $@
 
-$(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)
+$(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS_OBJS) $(LDLIBS)
 
@@ -215,7 +232,7 @@ $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	$(CXX) $(CXXFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
 	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
 
-$(OBJDIR)/%.o: %.c
+$(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
