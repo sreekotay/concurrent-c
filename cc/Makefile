@@ -127,6 +127,33 @@ $(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS) $(wildca
 	@$(LOWER_HEADERS_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
+# CC-authored compiler internals: src/preprocess/emit/*.cch are ENGINE
+# sources written in user CC (@string templates, CCString, arenas), lowered
+# by the SAME shared passes as every user header and compiled into ccc.
+# Engine source is user CC — a lowering gap is a bug, not a boundary.
+#
+# BOOTSTRAP SHAPE (lower_headers itself links grammar_rules.c, so the tool
+# cannot be a hard prerequisite of headers grammar_rules.c includes): the
+# lowered .h is CHECKED IN next to its .cch (emit_tpl precedent).  When the
+# tool is already built, editing the .cch regenerates the .h in place on
+# the next make; on a fresh tree the checked-in copy bootstraps the tool.
+ENGINE_CCH_DIR := src/preprocess/emit
+ENGINE_CCH := $(wildcard $(ENGINE_CCH_DIR)/*.cch)
+ENGINE_HDRS := $(ENGINE_CCH:.cch=.h)
+
+$(ENGINE_CCH_DIR)/%.h: $(ENGINE_CCH_DIR)/%.cch
+	@if [ -x $(LOWER_HEADERS_BINARY) ]; then \
+	  $(LOWER_HEADERS_BINARY) $(ENGINE_CCH_DIR) $(ENGINE_CCH_DIR) > /dev/null; \
+	else \
+	  echo "warning: $(LOWER_HEADERS_BINARY) not built yet; using checked-in $@ (rerun make after this build if $< changed)"; \
+	  touch $@; \
+	fi
+
+.PHONY: engine-headers
+engine-headers: $(ENGINE_HDRS)
+
+$(OBJDIR)/src/preprocess/grammar_rules.o: $(ENGINE_HDRS)
+
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
 	@echo "Running build stub test..."

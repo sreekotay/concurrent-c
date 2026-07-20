@@ -1,0 +1,76 @@
+/* CC-AUTHORED EMITTER — the first peel of grammar_rules.c into the
+ * language itself.  This file is user CC (@string templates, CCString,
+ * arenas), lowered at compiler-build time by the SAME shared passes that
+ * lower every user header (lower_headers stage), and compiled into ccc.
+ *
+ * INVARIANT (do not regress it into a dialect): engine source is user CC.
+ * Any construct valid in a .ccs is valid here; a lowering gap is a BUG in
+ * the header-lowering convergence, not a boundary to write around.
+ *
+ * Contract (must emit BYTE-IDENTICAL text to the C emitter it replaces —
+ * that identity is the port's regression gate): the run-scanner for stop
+ * set {b < T} u {b1} u {b2} as an arch ladder — 16 B SSE2 where the host
+ * compiler has it, portable 8 B SWAR otherwise (also what the TCC
+ * front-end parses).  On a hit every arm advances p to the FIRST stop
+ * byte.  No NEON arm by measurement (33% regression on Apple Silicon —
+ * vector->GPR lane-extract latency dominates ~11-byte median runs). */
+#ifndef CC_GRAMMAR_EMIT_SWAR_CCH
+#define CC_GRAMMAR_EMIT_SWAR_CCH
+
+/* Compiler-internal consumers (ccc itself, lower_headers) get the
+ * header-only bodies — same standalone flavor comptime dylibs use — so
+ * no runtime link is required wherever this header lands. */
+#ifndef CC_COMPTIME
+#define CC_COMPTIME 1
+#endif
+
+#include <ccc/cc_arena.cch>
+#include <ccc/std/string.cch>
+
+static inline void cc_gr__cat(CCString* o, CCString piece, CCArena* a) {
+    cc_string_push_slice(o, cc_string_as_slice(&piece), a);
+}
+
+static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int b2) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`#if defined(__SSE2__)
+    { while (p + 16 <= n) {
+        __m128i w${k} = _mm_loadu_si128((const __m128i*)(s + p));
+        __m128i m${k} = _mm_setzero_si128();
+`, a), a);
+    if (T > 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_cmpeq_epi8(_mm_min_epu8(w${k}, _mm_set1_epi8((char)${T - 1})), w${k});
+`, a), a);
+    if (b1 >= 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_or_si128(m${k}, _mm_cmpeq_epi8(w${k}, _mm_set1_epi8((char)${b1})));
+`, a), a);
+    if (b2 >= 0)
+        cc_gr__cat(&o, @string(`        m${k} = _mm_or_si128(m${k}, _mm_cmpeq_epi8(w${k}, _mm_set1_epi8((char)${b2})));
+`, a), a);
+    cc_gr__cat(&o, @string(`        { int hm${k} = _mm_movemask_epi8(m${k});
+          if (hm${k}) { p += (size_t)__builtin_ctz((unsigned)hm${k}); break; } }
+        p += 16;
+    } }
+#else
+    { const unsigned long long L${k} = 0x0101010101010101ULL, H${k} = 0x8080808080808080ULL;
+    while (p + 8 <= n) { unsigned long long w${k}; memcpy(&w${k}, s + p, 8);
+        unsigned long long m${k} = 0;
+`, a), a);
+    if (T > 0)
+        cc_gr__cat(&o, @string(`        m${k} |= (w${k} - L${k} * ${T}) & ~w${k} & H${k};
+`, a), a);
+    if (b1 >= 0)
+        cc_gr__cat(&o, @string(`        { unsigned long long x = w${k} ^ (L${k} * ${b1}); m${k} |= (x - L${k}) & ~x & H${k}; }
+`, a), a);
+    if (b2 >= 0)
+        cc_gr__cat(&o, @string(`        { unsigned long long x = w${k} ^ (L${k} * ${b2}); m${k} |= (x - L${k}) & ~x & H${k}; }
+`, a), a);
+    cc_gr__cat(&o, @string(`        if (m${k}) { p += (size_t)(__builtin_ctzll(m${k}) >> 3); break; }
+        p += 8;
+    } }
+#endif
+`, a), a);
+    return o;
+}
+
+#endif /* CC_GRAMMAR_EMIT_SWAR_CCH */
