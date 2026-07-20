@@ -6,7 +6,7 @@ CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install uninstall
-.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners
+.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
 
@@ -81,6 +81,12 @@ lint:
 # hand-rolled comment/string state machines outside the canonical scanners.
 lint-scanners:
 	@bash scripts/lint_scanners.sh
+
+# Offsets golden smoke (PASS_CLEANUP_PLAN phase 1): the full suite with the
+# UFCS byte-offset self-check FATAL.  Any drift between recorded offsets and
+# the parse buffer fails the run instead of warning.
+test-strict:
+	CC_STRICT_OFFSETS=1 ./tools/cc_test
 
 check-submodules:
 	@./scripts/check_submodule_reachability.sh

@@ -127,9 +127,9 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
 1. **Offset substrate: LANDED** (rolling patch + upstream pin, above),
    including the UFCS member-offset stash, macro-replay -1 semantics,
    parse-buffer retention on the reparse root, and the corpus-wide
-   strict self-check. Mirror consolidation done (PR #83). Remaining:
-   an offsets golden smoke (CI can run the suite with
-   `CC_STRICT_OFFSETS=1` — strict is green today).
+   strict self-check. Mirror consolidation done (PR #83). Golden smoke
+   landed: `make test-strict` runs the full suite with
+   `CC_STRICT_OFFSETS=1` fatal — phase 1 is CLOSED.
 2. **Buffer-bridging map.** The rewriter chain (build_parse_input) emits
    (derived_off ↔ source_off) anchor pairs at every splice — each rewriter
    knows both offsets at splice time. One module answers
