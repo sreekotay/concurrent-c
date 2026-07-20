@@ -942,6 +942,91 @@ static inline CCString cc_gr_union_close_text(CCArena* a) {
 `, a);
 }
 
+/* ---- matcher-tier substrate: pool/charset tables, prototypes, frames ---- */
+static inline CCString cc_gr_pool_table_text(CCArena* a, const char* n,
+                                             const unsigned char* pool, int npool) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`static const unsigned char ${n}__pool[${npool}] = {`, a), a);
+    for (int i = 0; i < npool; i++) {
+        int b = (int)pool[i];
+        cc_gr__cat(&o, @string(`${b},`, a), a);
+    }
+    cc_gr__cat(&o, @string(`};
+`, a), a);
+    return o;
+}
+
+/* compact human description of a charset row, for the emitted table.
+ * The 128-byte/16-slack truncation guard is part of the output contract. */
+static inline CCString cc_gr_cs_desc_text(CCArena* a, const unsigned char* set) {
+    CCString o = cc_string_new();
+    int c = 0;
+    while (c < 256 && o.len + 16 < 128) {
+        if (!((set[c >> 3] >> (c & 7)) & 1)) { c++; continue; }
+        int d = c;
+        while (d + 1 < 256 && ((set[(d + 1) >> 3] >> ((d + 1) & 7)) & 1)) d++;
+        if (o.len > 0)
+            cc_gr__cat(&o, @string(` `, a), a);
+        cc_gr__cat(&o, cc_gr_chr_text(a, c), a);
+        if (d > c) {
+            cc_gr__cat(&o, @string(`-`, a), a);
+            cc_gr__cat(&o, cc_gr_chr_text(a, d), a);
+        }
+        c = d + 1;
+    }
+    return o;
+}
+
+static inline CCString cc_gr_cs_head_text(CCArena* a, const char* n, int nsets) {
+    return @string(`#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+static const unsigned char ${n}__cs[${nsets}][32] = {
+`, a);
+}
+
+static inline CCString cc_gr_cs_row_text(CCArena* a, int s, const unsigned char* set) {
+    CCString o = cc_string_new();
+    CCString desc = cc_gr_cs_desc_text(a, set);
+    cc_gr__cat(&o, @string(`  /* cs${s}: ${desc} */
+  {`, a), a);
+    for (int i = 0; i < 32; i++) {
+        unsigned int v = set[i];
+        cc_gr__cat(&o, @string(`${v},`, a), a);
+    }
+    cc_gr__cat(&o, @string(`},
+`, a), a);
+    return o;
+}
+
+static inline CCString cc_gr_matcher_proto_text(CCArena* a, const char* attr, const char* n,
+                                                const char* cls, const char* r, const char* suf) {
+    return @string(`static ${attr}int ${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io);
+`, a);
+}
+
+static inline CCString cc_gr_matcher_head_text(CCArena* a, const char* attr, const char* n,
+                                               const char* cls, const char* r, const char* suf) {
+    return @string(`static ${attr}int ${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io) {
+    size_t p = *io;
+    (void)s; (void)n;
+`, a);
+}
+
+/* padded-form trampoline: lead pad inline, then the __np body */
+static inline CCString cc_gr_np_call_text(CCArena* a, const char* n, const char* cls,
+                                          const char* r, const char* fail) {
+    return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p)) goto ${fail};
+`, a);
+}
+
+/* pad-rule call carrying the collect context (build mode) */
+static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const char* cls,
+                                               const char* r, const char* fail) {
+    return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p)) goto ${fail};
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
