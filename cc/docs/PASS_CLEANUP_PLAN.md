@@ -110,7 +110,7 @@ comment/string state machines instead of CCInertScan):
 | pass_closure_literal_ast | AST→text | 4 | 0 | (line,col)-tuple closure identity + `=>` forward-scan recovery; `/*CC_CLO:N*/` markers exist but fallback heuristic still live |
 | pass_closure_calls | AST→text | 2 | 0 | |
 | checker | AST-only | 0 | 0 | the reference model |
-| pass_result_unwrap | text | 0 | 0 | disciplined, but flattens handler bodies to ONE physical line purely to protect downstream offset math |
+| pass_result_unwrap | text | 0 | 0 | DONE: the [F11] one-line handler flattening is deleted — bodies splice verbatim (newlines, comments intact); the byte-verified/marker-bound resolvers absorb the line shift.  Byte-identity of emitted C is a NON-GOAL (refactor aid only, per design review) |
 | pass_defer/err/type_syntax | text | 0 | 4 each | pre-parse surface syntax; irreducibly text (no nodes for type syntax) |
 | pass_channel_syntax, unwrap_destroy | text | 0 | 0 | clean |
 
@@ -122,7 +122,8 @@ parse.c (`cc__find_matching_{brace,paren}_parse`, `cc__skip_ws*_parse`),
 ident predicates (`cc__is_ident_*_parse`), private `#line` walker
 (`pass_ufcs.c cc__offset_of_logical_line` vs diag/source_map).
 
-## Phases (each gated: full suite + 5-TU byte-identity + clean bootstrap)
+## Phases (each gated: full suite + strict offsets; 5-TU byte-compare is a
+## refactor AID, not a contract — output-shape improvements may re-baseline)
 
 1. **Offset substrate: LANDED** (rolling patch + upstream pin, above),
    including the UFCS member-offset stash, macro-replay -1 semantics,
@@ -130,11 +131,13 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    strict self-check. Mirror consolidation done (PR #83). Golden smoke
    landed: `make test-strict` runs the full suite with
    `CC_STRICT_OFFSETS=1` fatal — phase 1 is CLOSED.
-2. **Buffer-bridging map.** The rewriter chain (build_parse_input) emits
-   (derived_off ↔ source_off) anchor pairs at every splice — each rewriter
-   knows both offsets at splice time. One module answers
-   `parse_off → codegen_off`; retire per-pass `#line` walking
-   (pass_ufcs's dual-mapper first).
+2. **Buffer bridging: NO ANCHOR MAP.** (Design review: favor less
+   code/patterns.)  The verified-candidate resolver IS the bridge —
+   candidates proposed by `#line` structure, arbitrated by actual bytes.
+   Instrumenting ~10 rewriters to emit anchor pairs would add a module
+   and a pattern for the same answer the bytes already give.  The
+   resolver gets ONE shared home when its second consumer (async_ast)
+   lands, and that's the whole phase.
 3. **Migrate fragile-first:** pass_ufcs resolver DONE — the dual-mapper
    heuristics are dead: `cc__collect_ufcs_edits` now enumerates every
    candidate offset for a node's logical (file,line) (spliced regions can
