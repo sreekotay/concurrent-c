@@ -551,65 +551,6 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
  * verification arbitrate (see cc__span_at_candidate); the old scheme —
  * trust the last logical match, bolt on a raw-physical retry when the span
  * finder disagreed, then accept an unverified "lax" span — is gone. */
-static int cc__file_matches(const char* cur, const char* want) {
-    if (!want || !want[0]) return 1;
-    if (!cur || !cur[0]) return 1;   /* pre-directive prefix: the main file */
-    if (strcmp(cur, want) == 0) return 1;
-    {   /* tolerate absolute-vs-relative spellings: compare basenames */
-        const char* cb = strrchr(cur, '/');
-        const char* wb = strrchr(want, '/');
-        return strcmp(cb ? cb + 1 : cur, wb ? wb + 1 : want) == 0;
-    }
-}
-
-/* Collect EVERY physical offset in s whose #line-derived logical
- * coordinates equal (want_file, want_line).  Candidates come back in
- * buffer order; the caller probes each for the node's actual member
- * bytes.  Returns the number stored (at most cap). */
-static int cc__offsets_of_logical_line_all(const char* s, size_t n,
-                                           const char* want_file, int want_line,
-                                           size_t* out, int cap) {
-    char cur_file[1024] = {0};
-    int cur_line = 1;
-    size_t i = 0;
-    int count = 0;
-    while (i < n) {
-        /* line-start directive? `# <num> ["file"]` or `#line <num> ["file"]` */
-        size_t j = i;
-        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
-        if (j < n && s[j] == '#') {
-            size_t k = j + 1;
-            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
-            if (k + 4 <= n && strncmp(s + k, "line", 4) == 0) k += 4;
-            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
-            if (k < n && s[k] >= '0' && s[k] <= '9') {
-                int ln = 0;
-                while (k < n && s[k] >= '0' && s[k] <= '9') ln = ln * 10 + (s[k++] - '0');
-                while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
-                if (k < n && s[k] == '"') {
-                    size_t fs = ++k, o = 0;
-                    while (k < n && s[k] != '"') k++;
-                    for (size_t m = fs; m < k && o + 1 < sizeof(cur_file); m++)
-                        cur_file[o++] = s[m];
-                    cur_file[o] = '\0';
-                }
-                cur_line = ln;
-                while (i < n && s[i] != '\n') i++;
-                if (i < n) i++;
-                continue;
-            }
-        }
-        if (cur_line == want_line && cc__file_matches(cur_file, want_file) &&
-            count < cap) {
-            out[count++] = i;
-        }
-        while (i < n && s[i] != '\n') i++;
-        if (i < n) i++;
-        cur_line++;
-    }
-    return count;
-}
-
 /* Strict member verification — the resolver's arbiter.  True iff sep_pos
  * holds `.`/`->`, then ws*, the method identifier as a whole token, ws*,
  * `(`.  A candidate that cannot produce these bytes is not the node's
@@ -884,7 +825,7 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         int have_span = 0;
         {
             size_t cand[32];
-            int ncand = cc__offsets_of_logical_line_all(in_src, in_len, nodes[i].file, ls,
+            int ncand = cc_span_logical_line_candidates(in_src, in_len, nodes[i].file, ls,
                                                         cand, 32);
             for (int c = 0; c < ncand; c++) {
                 struct CC__UFCSSpan t;
