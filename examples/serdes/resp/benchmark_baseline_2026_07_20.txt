@@ -1,0 +1,17 @@
+# serdes RESP benchmark baseline — 2026-07-20T10:50Z
+# commit: 41ab663  box: Linux x86-64 container
+== run 1 ==
+resp gen        2581 MB/s   47.12 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp hand       2966 MB/s   54.14 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp enc gen    2674 MB/s   48.62 Mcmd/s
+resp enc hand   2672 MB/s   48.58 Mcmd/s  (dynamic, unchecked)
+== run 2 ==
+resp gen        2584 MB/s   47.18 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp hand       2981 MB/s   54.42 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp enc gen    2688 MB/s   48.87 Mcmd/s
+resp enc hand   2602 MB/s   47.30 Mcmd/s  (dynamic, unchecked)
+== run 3 ==
+resp gen        2589 MB/s   47.26 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp hand       3006 MB/s   54.87 Mcmd/s  (cmds=100000 argbytes=3177780)
+resp enc gen    2640 MB/s   48.00 Mcmd/s
+resp enc hand   2589 MB/s   47.07 Mcmd/s  (dynamic, unchecked)
