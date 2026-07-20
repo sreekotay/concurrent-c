@@ -124,8 +124,18 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    knows both offsets at splice time. One module answers
    `parse_off → codegen_off`; retire per-pass `#line` walking
    (pass_ufcs's dual-mapper first).
-3. **Migrate fragile-first:** pass_ufcs (drop both mapping heuristics; CALL
-   nodes already carry UFCS aux metadata + now exact off_start) →
+3. **Migrate fragile-first:** pass_ufcs resolver DONE — the dual-mapper
+   heuristics are dead: `cc__collect_ufcs_edits` now enumerates every
+   candidate offset for a node's logical (file,line) (spliced regions can
+   materialize one logical line at several physical offsets), probes each
+   for the node's actual member bytes (`cc__span_at_candidate`:
+   column-anchored-per-candidate first, then the occurrence scan), and the
+   last VERIFIED candidate wins.  "Last logical match wins", the bolted-on
+   physical retry, and the unverified "lax" span are deleted, along with
+   the caller-less legacy wholesale rewriter
+   (`cc__rewrite_ufcs_spans_with_nodes`, −260 lines).  The coordinates
+   propose, the bytes dispose.  Still line/col-keyed: candidate generation
+   moves to the phase-2 anchor map when it lands.  Next →
    pass_closure_literal_ast (finish `/*CC_CLO:N*/` marker identity, delete
    the `=>` recovery scan) → pass_autoblock (13 inline SMs → CCInertScan)
    → async_ast (anchoring only; analysis stays) → pass_result_unwrap
