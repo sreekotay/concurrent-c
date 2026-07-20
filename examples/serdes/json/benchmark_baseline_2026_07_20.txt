@@ -1,0 +1,111 @@
+# serdes JSON benchmark baseline — 2026-07-20T10:49Z
+# commit: 41ab663  box: Linux x86-64 container (noisy neighbor; treat ratios within-run only)
+# 3 full ladder runs, interleave-or-don't-believe applies
+== run 1 ==
+== twitter.json  (K=200) ==
+ours   twitter.json   1370 MB/s    460.8 us/parse   98.3% zero-copy (borrow=17787 mat=312)  node=24B
+  yyjson default   1019 MB/s  (copy strings + eager num)
+  yyjson insitu    2118 MB/s  (in-place, no str alloc; incl input memcpy)
+  twitter.json gen match      1520 MB/s     415.6 us/parse
+  twitter.json gen collect    1233 MB/s     512.2 us/parse  (keeps=20208 bytes=377768)
+  twitter.json gen DOM        1275 MB/s     495.4 us/parse
+  twitter.json gen schema     1441 MB/s     438.2 us/parse  (statuses=100 textbytes=30610)
+  json write gen    1931 MB/s  (38075 bytes/iter, statuses=100)
+  json write hand   1940 MB/s  (unchecked single-pass)
+  parse tape      1324 MB/s    476.8 us/parse  node=24B/member-pair=48B
+  parse shapes    1203 MB/s    524.8 us/parse  slot=16B  shapes=147 (25 finalized)  trans-hit=100.00%
+  access tape      32.4 Mlookups/s  (linear pair walk, sum=674640000)
+  access shapes    78.6 Mlookups/s  (per-shape hash, sum=674640000)
+  access shapes   149.6 Mlookups/s  (prepared keys, sum=674640000)
+  access shapes   263.1 Mlookups/s  (inline cache: shape check + slot)
+  dict fallback  deep: shapes=65 dicts=1   wide: shapes=62 dicts=469  (bounded, digests agree)
+  gen tape DOM     1313 MB/s    481.1 us/parse
+  gen shaped DOM    989 MB/s    638.4 us/parse  shapes=147 dicts=0
+  access shaped    211.8 Mlookups/s (prepared keys, sum=674640000)
+== numbers.json  (K=200) ==
+ours   numbers.json    727 MB/s    449.5 us/parse   100.0% zero-copy (borrow=0 mat=0)  node=24B
+  yyjson default    923 MB/s  (copy strings + eager num)
+  yyjson insitu     914 MB/s  (in-place, no str alloc; incl input memcpy)
+  numbers.json gen match       909 MB/s     359.3 us/parse
+  numbers.json gen collect     671 MB/s     487.1 us/parse  (keeps=30000 bytes=296701)
+  numbers.json gen DOM         701 MB/s     466.1 us/parse
+  numbers.json gen schema     (skipped: corpus is not Feed-shaped)
+  write: corpus is not a Feed — skipped
+  parse tape       881 MB/s    370.7 us/parse  node=24B/member-pair=48B
+  parse shapes     880 MB/s    371.2 us/parse  slot=16B  shapes=0 (0 finalized)  trans-hit=100.00%
+  no statuses — access bench skipped
+  gen tape DOM      674 MB/s    485.0 us/parse
+  gen shaped DOM    559 MB/s    584.2 us/parse  shapes=0 dicts=0
+  no statuses
+== run 2 ==
+== twitter.json  (K=200) ==
+ours   twitter.json   1339 MB/s    471.6 us/parse   98.3% zero-copy (borrow=17787 mat=312)  node=24B
+  yyjson default   1047 MB/s  (copy strings + eager num)
+  yyjson insitu    2182 MB/s  (in-place, no str alloc; incl input memcpy)
+  twitter.json gen match      1471 MB/s     429.3 us/parse
+  twitter.json gen collect    1194 MB/s     529.1 us/parse  (keeps=20208 bytes=377768)
+  twitter.json gen DOM        1236 MB/s     510.8 us/parse
+  twitter.json gen schema     1433 MB/s     440.7 us/parse  (statuses=100 textbytes=30610)
+  json write gen    1991 MB/s  (38075 bytes/iter, statuses=100)
+  json write hand   1936 MB/s  (unchecked single-pass)
+  parse tape      1346 MB/s    469.2 us/parse  node=24B/member-pair=48B
+  parse shapes    1206 MB/s    523.8 us/parse  slot=16B  shapes=147 (25 finalized)  trans-hit=100.00%
+  access tape      33.3 Mlookups/s  (linear pair walk, sum=674640000)
+  access shapes    75.3 Mlookups/s  (per-shape hash, sum=674640000)
+  access shapes   144.3 Mlookups/s  (prepared keys, sum=674640000)
+  access shapes   264.2 Mlookups/s  (inline cache: shape check + slot)
+  dict fallback  deep: shapes=65 dicts=1   wide: shapes=62 dicts=469  (bounded, digests agree)
+  gen tape DOM     1313 MB/s    481.1 us/parse
+  gen shaped DOM   1011 MB/s    624.4 us/parse  shapes=147 dicts=0
+  access shaped    212.7 Mlookups/s (prepared keys, sum=674640000)
+== numbers.json  (K=200) ==
+ours   numbers.json    725 MB/s    450.7 us/parse   100.0% zero-copy (borrow=0 mat=0)  node=24B
+  yyjson default    912 MB/s  (copy strings + eager num)
+  yyjson insitu     904 MB/s  (in-place, no str alloc; incl input memcpy)
+  numbers.json gen match       911 MB/s     358.7 us/parse
+  numbers.json gen collect     674 MB/s     485.1 us/parse  (keeps=30000 bytes=296701)
+  numbers.json gen DOM         712 MB/s     458.8 us/parse
+  numbers.json gen schema     (skipped: corpus is not Feed-shaped)
+  write: corpus is not a Feed — skipped
+  parse tape       873 MB/s    374.2 us/parse  node=24B/member-pair=48B
+  parse shapes     871 MB/s    375.3 us/parse  slot=16B  shapes=0 (0 finalized)  trans-hit=100.00%
+  no statuses — access bench skipped
+  gen tape DOM      667 MB/s    489.5 us/parse
+  gen shaped DOM    564 MB/s    578.9 us/parse  shapes=0 dicts=0
+  no statuses
+== run 3 ==
+== twitter.json  (K=200) ==
+ours   twitter.json   1341 MB/s    470.8 us/parse   98.3% zero-copy (borrow=17787 mat=312)  node=24B
+  yyjson default   1057 MB/s  (copy strings + eager num)
+  yyjson insitu    2216 MB/s  (in-place, no str alloc; incl input memcpy)
+  twitter.json gen match      1501 MB/s     420.7 us/parse
+  twitter.json gen collect    1224 MB/s     515.9 us/parse  (keeps=20208 bytes=377768)
+  twitter.json gen DOM        1271 MB/s     496.9 us/parse
+  twitter.json gen schema     1423 MB/s     443.8 us/parse  (statuses=100 textbytes=30610)
+  json write gen    1773 MB/s  (38075 bytes/iter, statuses=100)
+  json write hand   1943 MB/s  (unchecked single-pass)
+  parse tape      1321 MB/s    478.2 us/parse  node=24B/member-pair=48B
+  parse shapes    1207 MB/s    523.2 us/parse  slot=16B  shapes=147 (25 finalized)  trans-hit=100.00%
+  access tape      34.2 Mlookups/s  (linear pair walk, sum=674640000)
+  access shapes    79.7 Mlookups/s  (per-shape hash, sum=674640000)
+  access shapes   148.2 Mlookups/s  (prepared keys, sum=674640000)
+  access shapes   264.7 Mlookups/s  (inline cache: shape check + slot)
+  dict fallback  deep: shapes=65 dicts=1   wide: shapes=62 dicts=469  (bounded, digests agree)
+  gen tape DOM     1236 MB/s    511.0 us/parse
+  gen shaped DOM    962 MB/s    656.4 us/parse  shapes=147 dicts=0
+  access shaped    199.0 Mlookups/s (prepared keys, sum=674640000)
+== numbers.json  (K=200) ==
+ours   numbers.json    714 MB/s    457.6 us/parse   100.0% zero-copy (borrow=0 mat=0)  node=24B
+  yyjson default    858 MB/s  (copy strings + eager num)
+  yyjson insitu     844 MB/s  (in-place, no str alloc; incl input memcpy)
+  numbers.json gen match       863 MB/s     378.5 us/parse
+  numbers.json gen collect     655 MB/s     499.1 us/parse  (keeps=30000 bytes=296701)
+  numbers.json gen DOM         691 MB/s     472.6 us/parse
+  numbers.json gen schema     (skipped: corpus is not Feed-shaped)
+  write: corpus is not a Feed — skipped
+  parse tape       864 MB/s    378.1 us/parse  node=24B/member-pair=48B
+  parse shapes     870 MB/s    375.4 us/parse  slot=16B  shapes=0 (0 finalized)  trans-hit=100.00%
+  no statuses — access bench skipped
+  gen tape DOM      663 MB/s    493.0 us/parse
+  gen shaped DOM    545 MB/s    599.6 us/parse  shapes=0 dicts=0
+  no statuses
