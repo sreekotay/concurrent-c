@@ -13,10 +13,10 @@ index d21f1cad..cfff431b 100644
  -LTCC = $(TOP)/$(LIBTCC)
  
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..da4d71bd 100644
+index 171e3622..c8d591db 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,667 @@
+@@ -66,6 +66,684 @@
  
  #include "tcc.h"
  
@@ -140,7 +140,24 @@ index 171e3622..da4d71bd 100644
 +
 +/* Extract AST result from TCCState and clean up. Returns NULL on allocation failure. */
 +static struct CCASTStubRoot* cc_extract_ast_result(TCCState *s) {
-+    struct CCASTStubRoot *root = tcc_mallocz(sizeof(struct CCASTStubRoot));
++    struct CCASTStubRoot *root;
++    /* FAIL LOUDLY: every record_start must have been closed by parse end.
++       A leaked entry re-parents all later nodes one level deeper (the
++       decl() function-definition leak drove checker recursion to
++       O(#functions) and overflowed the stack at -O2).  Diagnose the net
++       imbalance here, at the source, instead of downstream as a depth
++       anomaly. */
++    if (s->cc_node_stack && s->cc_node_stack_top >= 0) {
++        fprintf(stderr,
++                "cc: internal: AST recorder imbalance: %d node(s) left open "
++                "at parse end (record_start without record_end)\n",
++                s->cc_node_stack_top + 1);
++        if (getenv("CC_STRICT_OFFSETS")) {
++            tcc_delete(s);
++            return NULL;
++        }
++    }
++    root = tcc_mallocz(sizeof(struct CCASTStubRoot));
 +    if (!root) {
 +        tcc_delete(s);
 +        return NULL;
@@ -684,7 +701,7 @@ index 171e3622..da4d71bd 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1399,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1416,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -692,7 +709,7 @@ index 171e3622..da4d71bd 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1621,16 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1638,16 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -710,7 +727,7 @@ index 171e3622..da4d71bd 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..786b04d6 100644
+index e7a2f1e2..8e05c179 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,104 @@ typedef struct TokenSym {
@@ -828,7 +845,7 @@ index e7a2f1e2..786b04d6 100644
      int line_ref;    /* tcc -E: last printed line */
      int ifndef_macro;  /* #ifndef macro / #endif search */
      int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +972,73 @@ struct TCCState {
+@@ -871,6 +972,67 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
@@ -889,12 +906,6 @@ index e7a2f1e2..786b04d6 100644
 +    int cc_parser_mode;
 +    /* CC: when parsing a closure body under nocode_wanted, tolerate unknown identifiers. */
 +    int cc_in_closure_body;
-+    /* CC @ statement context (set by cc_ext_parse_at_stmt, used by block()) */
-+    int cc_at_arena_wrap;
-+    int cc_at_nursery_wrap;
-+    int cc_at_arena_name_tok;
-+    char *cc_at_arena_name_str;
-+    char *cc_at_arena_size_str;
 +    /* CC closure context (saved before '(' is consumed) */
 +    int cc_paren_start_line;
 +    int cc_paren_start_col;
@@ -902,7 +913,7 @@ index e7a2f1e2..786b04d6 100644
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1319,7 @@ struct filespec {
+@@ -1151,6 +1313,7 @@ struct filespec {
  #define TOK_TWODOTS 0xa2 /* C++ token ? */
  #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
  #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
@@ -910,7 +921,7 @@ index e7a2f1e2..786b04d6 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1395,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1389,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -964,7 +975,7 @@ index e7a2f1e2..786b04d6 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1550,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1544,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;
@@ -975,7 +986,7 @@ index e7a2f1e2..786b04d6 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..887c8755 100644
+index 50802edf..4aec9849 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
@@ -2062,7 +2073,7 @@ index 50802edf..887c8755 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7847,76 @@ static void gexpr_decl(void)
+@@ -7142,14 +7847,70 @@ static void gexpr_decl(void)
      }
  }
  
@@ -2074,12 +2085,6 @@ index 50802edf..887c8755 100644
      struct scope o;
      Sym *s;
 +#ifdef CONFIG_CC_EXT
-+    /* Use tcc_state fields for @ context instead of local vars */
-+    tcc_state->cc_at_arena_wrap = 0;
-+    tcc_state->cc_at_nursery_wrap = 0;
-+    tcc_state->cc_at_arena_name_tok = 0;
-+    tcc_state->cc_at_arena_name_str = NULL;
-+    tcc_state->cc_at_arena_size_str = NULL;
 +    /* Statement boundary: drop any stale UFCS coercion window. */
 +    tcc_state->cc_ufcs_result_pending = 0;
 +#endif
@@ -2140,7 +2145,7 @@ index 50802edf..887c8755 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +7927,40 @@ again:
+@@ -7160,24 +7921,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -2181,7 +2186,7 @@ index 50802edf..887c8755 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,12 +7973,33 @@ again:
+@@ -7190,6 +7967,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -2189,33 +2194,7 @@ index 50802edf..887c8755 100644
  
      } else if (t == '{') {
          if (debug_modes)
-             tcc_debug_stabn(tcc_state, N_LBRAC, ind - func_ind);
-         new_scope(&o);
- 
-+#ifdef CONFIG_CC_EXT
-+        /* If this '{' came from an @arena block, inject a dummy arena symbol into scope
-+           so parsing/typechecking can proceed. CC will lower the actual allocation. */
-+        if (tcc_state->cc_at_arena_wrap) {
-+            CType at = int_type;
-+            Sym *ts;
-+            int tok_ccarena = tok_alloc_const("CCArena");
-+            ts = sym_find(tok_ccarena);
-+            if (ts && (ts->type.t & VT_TYPEDEF)) {
-+                at = ts->type;
-+                at.t &= ~VT_TYPEDEF;
-+            }
-+            mk_pointer(&at);
-+            sym_push(tcc_state->cc_at_arena_name_tok ? tcc_state->cc_at_arena_name_tok : tok_alloc_const("arena"),
-+                     &at,
-+                     VT_LOCAL | VT_LVAL,
-+                     0);
-+        }
-+#endif
-+
-         /* handle local labels declarations */
-         while (tok == TOK_LABEL) {
-             do {
-@@ -7211,7 +8015,24 @@ again:
+@@ -7211,7 +7989,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -2240,27 +2219,15 @@ index 50802edf..887c8755 100644
              }
          }
  
-@@ -7223,7 +8044,19 @@ again:
-         else if (!nocode_wanted)
+@@ -7224,6 +8019,7 @@ again:
              check_func_return();
  
-+#ifdef CONFIG_CC_EXT
-+        if (tcc_state->cc_at_arena_wrap) {
-+            cc_ast_record_end(); /* arena */
-+            tcc_state->cc_at_arena_wrap = 0;
-+        }
-+        if (tcc_state->cc_at_nursery_wrap) {
-+            cc_ast_record_end(); /* nursery stmt */
-+            tcc_state->cc_at_nursery_wrap = 0;
-+        }
-+#endif
-+
      } else if (t == TOK_RETURN) {
 +        CC_REC_RETURN();
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +8075,7 @@ again:
+@@ -7242,6 +8038,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -2268,7 +2235,7 @@ index 50802edf..887c8755 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8103,7 @@ again:
+@@ -7269,6 +8066,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -2276,7 +2243,7 @@ index 50802edf..887c8755 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8137,7 @@ again:
+@@ -7302,6 +8100,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -2284,7 +2251,7 @@ index 50802edf..887c8755 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8324,7 @@ again:
+@@ -7488,6 +8287,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -2292,7 +2259,7 @@ index 50802edf..887c8755 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8655,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8618,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -2302,7 +2269,7 @@ index 50802edf..887c8755 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8116,6 +8956,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+@@ -8116,6 +8919,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
              && is_compatible_unqualified_types(type, &vtop->type)) {
          goto one_elem;
  
@@ -2322,7 +2289,7 @@ index 50802edf..887c8755 100644
      } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
          no_oblock = 1;
          if ((flags & DIF_FIRST) || tok == '{') {
-@@ -8672,12 +9525,23 @@ static int decl(int l)
+@@ -8672,12 +9488,23 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -2347,7 +2314,7 @@ index 50802edf..887c8755 100644
              /* skip redundant ';' if not in old parameter decl scope */
              if (tok == ';' && l != VT_CMP) {
                  next();
-@@ -8687,6 +9551,44 @@ static int decl(int l)
+@@ -8687,6 +9514,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2392,7 +2359,7 @@ index 50802edf..887c8755 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8714,8 +9616,10 @@ static int decl(int l)
+@@ -8714,8 +9579,10 @@ static int decl(int l)
                  ; /* enum decl */
              else
                  tcc_warning("useless type defines no instances");
@@ -2404,7 +2371,7 @@ index 50802edf..887c8755 100644
              next();
              continue;
          }
-@@ -8723,8 +9627,68 @@ static int decl(int l)
+@@ -8723,8 +9590,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2474,7 +2441,7 @@ index 50802edf..887c8755 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8810,6 +9774,10 @@ static int decl(int l)
+@@ -8810,6 +9737,10 @@ static int decl(int l)
                          cur_text_section->sh_flags = text_section->sh_flags;
                      gen_function(sym);
                  }
@@ -2485,7 +2452,7 @@ index 50802edf..887c8755 100644
                  break;
              } else {
                  has_init = 0;
-@@ -8832,6 +9800,31 @@ static int decl(int l)
+@@ -8832,6 +9763,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2517,7 +2484,7 @@ index 50802edf..887c8755 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9856,11 @@ static int decl(int l)
+@@ -8863,6 +9819,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2529,7 +2496,7 @@ index 50802edf..887c8755 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8902,15 +9900,26 @@ static int decl(int l)
+@@ -8902,15 +9863,26 @@ static int decl(int l)
                      }
                  }
                  if (tok != ',') {
