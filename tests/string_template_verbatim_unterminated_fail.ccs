@@ -1,0 +1,11 @@
+// An unterminated ${{...}} verbatim span swallows the rest of the file
+// (including the closing backtick), so the template — and the @string —
+// never terminate.  Must be a compile-time error, not silent misparse.
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena a0 = @create(kilobytes(1)) @destroy;
+    CCString s = @string(`bad ${{never closed`, &a0);
+    (void)s;
+    return 0;
+}

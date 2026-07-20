@@ -1,0 +1,62 @@
+// ${{...}} verbatim spans: raw bytes inside a template — no escape
+// interpretation, no interpolation, and (critically) backticks pass through
+// without terminating the literal.  The first `}}` closes the span; to emit
+// text containing `}}`, split it across spans (or lean on the surrounding
+// literal, as below).
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+static CCSlice shout_policy(CCArena *arena, CCSlice tag, CCSlice value) {
+    (void)tag;
+    CCString out = cc_string_new();
+    out.append("<", arena);
+    out.append(value, arena);
+    out.append(">", arena);
+    return cc_string_persist_slice(arena, &out);
+}
+
+int main(void) {
+    CCArena arena_storage = @create(kilobytes(8)) @destroy;
+    CCArena *a = &arena_storage;
+
+    /* backtick emission — the reason this syntax exists */
+    CCString bt = @string(`code: ${{`tpl`}} done`, a);
+    assert(strcmp(cc_string_cstr(&bt, a), "code: `tpl` done") == 0);
+
+    /* raw regime: \n stays two bytes (backslash, n) — unlike template
+     * literals, where it decodes to one */
+    CCString raw = @string(`${{C:\path\n}}`, a);
+    assert(raw.len == 9);
+    assert(strcmp(cc_string_cstr(&raw, a), "C:\\path\\n") == 0);
+
+    /* empty span is legal; `${{}}}` twice is the split idiom for `}}` */
+    CCString split = @string(`a${{}}}${{}}}b`, a);
+    assert(strcmp(cc_string_cstr(&split, a), "a}}b") == 0);
+
+    /* escaped dollar: \${{ is literal text, not a span */
+    CCString esc = @string(`\${{x}}`, a);
+    assert(strcmp(cc_string_cstr(&esc, a), "${{x}}") == 0);
+
+    /* no interpolation inside the span; slots resume after it */
+    int v = 7;
+    CCString mix = @string(`${{${v}}} then ${v}`, a);
+    assert(strcmp(cc_string_cstr(&mix, a), "${v} then 7") == 0);
+
+    /* quotes, braces, and comment-lookalikes are inert inside a span */
+    CCString inert = @string(`${{ "x" { /* not a comment */ // nope }}`, a);
+    assert(strcmp(cc_string_cstr(&inert, a), " \"x\" { /* not a comment */ // nope ") == 0);
+
+    /* policy templates: slots go through the policy, verbatim spans do NOT */
+    CCString pol = @string(shout_policy, `${{`raw`}} ${v}`, a);
+    assert(strcmp(cc_string_cstr(&pol, a), "`raw` <7>") == 0);
+
+    /* multiline span passes newlines through */
+    CCString ml = @string(`${{line1
+line2}}`, a);
+    assert(strcmp(cc_string_cstr(&ml, a), "line1\nline2") == 0);
+
+    printf("string_template_verbatim_smoke: PASS\n");
+    return 0;
+}
