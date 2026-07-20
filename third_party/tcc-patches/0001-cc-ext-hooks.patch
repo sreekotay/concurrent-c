@@ -12,228 +12,11 @@ index d21f1cad..cfff431b 100644
  VPATH = $(TOPSRC)
  -LTCC = $(TOP)/$(LIBTCC)
  
-diff --git a/cc_ast_record.h b/cc_ast_record.h
-new file mode 100644
-index 00000000..aef61d9d
---- /dev/null
-+++ b/cc_ast_record.h
-@@ -0,0 +1,211 @@
-+/* CC AST Recording - included by tccgen.c when CONFIG_CC_EXT is defined */
-+#ifndef CC_AST_RECORD_H
-+#define CC_AST_RECORD_H
-+
-+/* ---- Configuration constants ---- */
-+#define CC_AST_INITIAL_NODES_CAP    64
-+#define CC_AST_INITIAL_STACK_CAP    64
-+#define CC_AST_INITIAL_CALL_CAP     32
-+#define CC_AST_TYPE_BUF_SIZE        256
-+#define CC_AST_STRING_BUF_SIZE      1024
-+
-+/* Flag bit for aux2: if set, line_end was explicitly set and shouldn't be overwritten */
-+#define CC_AST_FLAG_LINE_END_SET (1U << 31)
-+
-+/* Macro to safely access and update current AST node.
-+ * Usage: CC_AST_WITH_NODE(node->aux1 = 42; node->aux_s1 = tcc_strdup("foo");)
-+ * Expands to: { struct CCASTStubNode *node = cc_ast_current_node(); if (node) { ... } } */
-+#define CC_AST_WITH_NODE(code) \
-+    do { struct CCASTStubNode *node = cc_ast_current_node(); if (node) { code } } while(0)
-+
-+/* Byte offset of the current lex position within the top-level parse buffer.
-+ * Exact only for in-memory string compiles (the CC pipeline's case: buffer
-+ * holds the whole source).  -1 when inside a nested include stream (file->prev
-+ * set) or a streaming fd window, where buf_ptr is not a global offset. */
-+static inline long cc_ast_cur_off(void) {
-+    if (!file || file->prev) return -1;
-+    return (long)(file->buf_ptr - file->buffer);
-+}
-+
-+/* Byte offset of column `col` (1-based) on the current line — token-precise
-+ * refinement used at the same sites that stamp col_start/col_end. */
-+static inline long cc_ast_col_off(int col) {
-+    if (!file || file->prev || !file->cc_line_start || col <= 0) return -1;
-+    return (long)(file->cc_line_start - file->buffer) + (col - 1);
-+}
-+
-+static void cc_ast_ensure_tables(void) {
-+    if (!tcc_state) return;
-+    if (!tcc_state->cc_nodes) {
-+        tcc_state->cc_nodes_cap = CC_AST_INITIAL_NODES_CAP;
-+        tcc_state->cc_nodes_count = 0;
-+        tcc_state->cc_nodes = tcc_mallocz(tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
-+    }
-+    if (!tcc_state->cc_node_stack) {
-+        tcc_state->cc_node_stack_cap = CC_AST_INITIAL_STACK_CAP;
-+        tcc_state->cc_node_stack_top = -1;
-+        tcc_state->cc_node_stack = tcc_mallocz(tcc_state->cc_node_stack_cap * sizeof(int));
-+    }
-+}
-+
-+void cc_ast_record_start(int kind) {
-+    cc_ast_ensure_tables();
-+    if (!tcc_state || !tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
-+    
-+    /* Safe realloc for nodes array */
-+    if (tcc_state->cc_nodes_count >= tcc_state->cc_nodes_cap) {
-+        int new_cap = tcc_state->cc_nodes_cap * 2;
-+        struct CCASTStubNode *new_nodes = tcc_realloc(tcc_state->cc_nodes, 
-+            new_cap * sizeof(struct CCASTStubNode));
-+        if (!new_nodes) return; /* realloc failed, bail out safely */
-+        tcc_state->cc_nodes = new_nodes;
-+        tcc_state->cc_nodes_cap = new_cap;
-+    }
-+    
-+    /* Safe realloc for node stack */
-+    if (tcc_state->cc_node_stack_top + 1 >= tcc_state->cc_node_stack_cap) {
-+        int new_cap = tcc_state->cc_node_stack_cap * 2;
-+        int *new_stack = tcc_realloc(tcc_state->cc_node_stack, new_cap * sizeof(int));
-+        if (!new_stack) return; /* realloc failed, bail out safely */
-+        tcc_state->cc_node_stack = new_stack;
-+        tcc_state->cc_node_stack_cap = new_cap;
-+    }
-+    
-+    int parent = (tcc_state->cc_node_stack_top >= 0) ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
-+    int idx = tcc_state->cc_nodes_count++;
-+    tcc_state->cc_nodes[idx].kind = kind;
-+    tcc_state->cc_nodes[idx].parent = parent;
-+    tcc_state->cc_nodes[idx].file = file ? tcc_strdup(file->filename) : NULL;
-+    tcc_state->cc_nodes[idx].line_start = file ? file->line_num : 0;
-+    tcc_state->cc_nodes[idx].line_end = tcc_state->cc_nodes[idx].line_start;
-+    tcc_state->cc_nodes[idx].col_start = 0;
-+    tcc_state->cc_nodes[idx].col_end = 0;
-+    tcc_state->cc_nodes[idx].off_start = (cc_tok_off >= 0) ? cc_tok_off : cc_ast_cur_off();
-+    tcc_state->cc_nodes[idx].off_end = -1;
-+    tcc_state->cc_nodes[idx].aux1 = 0;
-+    tcc_state->cc_nodes[idx].aux2 = 0;
-+    tcc_state->cc_nodes[idx].aux_s1 = NULL;
-+    tcc_state->cc_nodes[idx].aux_s2 = NULL;
-+    tcc_state->cc_node_stack[++tcc_state->cc_node_stack_top] = idx;
-+}
-+
-+void cc_ast_record_end(void) {
-+    if (!tcc_state || !tcc_state->cc_nodes || tcc_state->cc_node_stack_top < 0) return;
-+    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+    if (file && (tcc_state->cc_nodes[idx].aux2 & CC_AST_FLAG_LINE_END_SET) == 0)
-+        tcc_state->cc_nodes[idx].line_end = file->line_num;
-+    {
-+        /* Exclusive end: prefer the start of the token AFTER the construct
-+         * (tight bound); fall back to the raw lex position. */
-+        long off = (cc_tok_off >= 0) ? cc_tok_off : cc_ast_cur_off();
-+        if (off >= 0 && off >= tcc_state->cc_nodes[idx].off_start)
-+            tcc_state->cc_nodes[idx].off_end = off;
-+    }
-+    tcc_state->cc_node_stack_top--;
-+}
-+
-+/* Get pointer to current AST node on stack, or NULL if not available. */
-+static inline struct CCASTStubNode* cc_ast_current_node(void) {
-+    if (!tcc_state || !tcc_state->cc_nodes || tcc_state->cc_node_stack_top < 0)
-+        return NULL;
-+    return &tcc_state->cc_nodes[tcc_state->cc_node_stack[tcc_state->cc_node_stack_top]];
-+}
-+
-+void cc_ast_record_call(int flags) {
-+    cc_ast_ensure_tables();
-+    if (!tcc_state || !tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
-+    cc_ast_record_start(CC_AST_NODE_CALL);
-+    
-+    int callee_tok = (vtop && vtop->sym) ? (vtop->sym->v & ~SYM_FIELD) : 0;
-+    const char *callee_name = callee_tok ? get_tok_str(callee_tok, NULL) : NULL;
-+    int is_ufcs = (tcc_state->cc_ufcs_active && tcc_state->cc_last_member_tok != 0);
-+    int occ = 0;
-+    if (is_ufcs) {
-+        int line = file ? file->line_num : 0;
-+        if (tcc_state->cc_ufcs_seq_line != line) { 
-+            tcc_state->cc_ufcs_seq_line = line; 
-+            tcc_state->cc_ufcs_seq_count = 0; 
-+        }
-+        occ = ++tcc_state->cc_ufcs_seq_count;
-+    }
-+    CC_AST_WITH_NODE(
-+        node->aux1 = callee_tok;
-+        node->aux2 = (flags & 3) | (is_ufcs ? 4 : 0) | (occ << 8);
-+        node->aux_s1 = callee_name ? tcc_strdup(callee_name) : NULL;
-+        node->aux_s2 = (is_ufcs && tcc_state->cc_last_recv_type[0]) ? tcc_strdup(tcc_state->cc_last_recv_type) : NULL;
-+        if (is_ufcs && tcc_state->cc_last_member_line) {
-+            node->line_start = tcc_state->cc_last_member_line;
-+            node->col_start = tcc_state->cc_last_member_col;
-+        } else {
-+            node->col_start = tok_col;
-+        }
-+    );
-+    tcc_state->cc_last_member_tok = tcc_state->cc_last_member_flags = 0;
-+    tcc_state->cc_last_member_col = tcc_state->cc_last_member_line = 0;
-+    
-+    /* Initialize call stack if needed */
-+    if (!tcc_state->cc_call_stack) {
-+        tcc_state->cc_call_stack_cap = CC_AST_INITIAL_CALL_CAP;
-+        tcc_state->cc_call_stack_top = -1;
-+        tcc_state->cc_call_stack = tcc_mallocz(tcc_state->cc_call_stack_cap * sizeof(int));
-+    }
-+    if (tcc_state->cc_call_stack) {
-+        if (tcc_state->cc_call_stack_top + 1 >= tcc_state->cc_call_stack_cap) {
-+            int new_cap = tcc_state->cc_call_stack_cap * 2;
-+            int *new_stack = tcc_realloc(tcc_state->cc_call_stack, new_cap * sizeof(int));
-+            if (!new_stack) return; /* realloc failed, bail out safely */
-+            tcc_state->cc_call_stack = new_stack;
-+            tcc_state->cc_call_stack_cap = new_cap;
-+        }
-+        int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+        tcc_state->cc_call_stack[++tcc_state->cc_call_stack_top] = idx;
-+    }
-+}
-+
-+void cc_ast_record_assign_start(int op_tok) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_ASSIGN);
-+    const char *lhs = (vtop && vtop->sym) ? get_tok_str(vtop->sym->v & ~SYM_FIELD, NULL) : NULL;
-+    const char *op = get_tok_str(op_tok, NULL);
-+    CC_AST_WITH_NODE(
-+        node->aux1 = op_tok;
-+        node->aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
-+        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by cccn parser */
-+        node->col_start = tok_col;
-+        if (op) node->col_end = tok_col + (int)strlen(op);
-+    );
-+}
-+
-+void cc_ast_record_return_start(void) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_RETURN);
-+    CC_AST_WITH_NODE(
-+        node->col_start = tok_col;
-+        node->col_end = tok_col + 6; /* "return" is 6 chars */
-+    );
-+}
-+
-+/* Record a binary expression. Call BEFORE parsing the RHS.
-+ * op_tok is the operator token ('+', '-', '*', etc.) */
-+void cc_ast_record_binary_start(int op_tok) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_BINARY);
-+    CC_AST_WITH_NODE(
-+        node->aux1 = op_tok;
-+        node->col_start = tok_col;
-+    );
-+}
-+
-+/* Record a unary expression.
-+ * op_tok is the operator token ('*', '&', '!', '~', '-', TOK_INC, TOK_DEC)
-+ * is_postfix: 0 for prefix operators, 1 for postfix (++, --) */
-+void cc_ast_record_unary(int op_tok, int is_postfix) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_UNARY);
-+    CC_AST_WITH_NODE(
-+        node->aux1 = op_tok;      /* operator token */
-+        node->aux2 = is_postfix;  /* 0=prefix, 1=postfix */
-+    );
-+}
-+
-+#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..3d43150f 100644
+index 171e3622..677ed782 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,661 @@
+@@ -66,6 +66,662 @@
  
  #include "tcc.h"
  
@@ -266,6 +49,7 @@ index 171e3622..3d43150f 100644
 +    s->cc_last_member_flags = 0;
 +    s->cc_last_member_line = 0;
 +    s->cc_last_member_col = 0;
++    s->cc_last_member_off = -1;
 +    s->cc_last_rparen_line = 0;
 +    s->cc_last_rparen_col = 0;
 +    s->cc_typedef_map = NULL;
@@ -895,7 +679,7 @@ index 171e3622..3d43150f 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1393,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1394,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -903,7 +687,7 @@ index 171e3622..3d43150f 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1615,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1616,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -920,7 +704,7 @@ index 171e3622..3d43150f 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..60494e93 100644
+index e7a2f1e2..0923f173 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,100 @@ typedef struct TokenSym {
@@ -1034,7 +818,7 @@ index e7a2f1e2..60494e93 100644
      int line_ref;    /* tcc -E: last printed line */
      int ifndef_macro;  /* #ifndef macro / #endif search */
      int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +968,65 @@ struct TCCState {
+@@ -871,6 +968,66 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
@@ -1054,6 +838,7 @@ index e7a2f1e2..60494e93 100644
 +    int cc_last_member_flags; /* bit0=syntactic arrow (->), bit1=recv type is pointer */
 +    int cc_last_member_line;
 +    int cc_last_member_col;
++    long cc_last_member_off;  /* CC ext: member-token byte offset (-1 unknown) */
 +    char cc_last_recv_type[128]; /* Receiver type name for UFCS (e.g., "Point", "CCVec_int") */
 +    int cc_last_rparen_line;
 +    int cc_last_rparen_col;
@@ -1100,7 +885,7 @@ index e7a2f1e2..60494e93 100644
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1307,7 @@ struct filespec {
+@@ -1151,6 +1308,7 @@ struct filespec {
  #define TOK_TWODOTS 0xa2 /* C++ token ? */
  #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
  #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
@@ -1108,7 +893,7 @@ index e7a2f1e2..60494e93 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1383,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1384,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -1162,7 +947,7 @@ index e7a2f1e2..60494e93 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1538,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1539,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;
@@ -1173,7 +958,7 @@ index e7a2f1e2..60494e93 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..abcd9358 100644
+index 50802edf..cf910b20 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
@@ -1859,7 +1644,7 @@ index 50802edf..abcd9358 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6139,17 +6576,120 @@ special_math_val:
+@@ -6139,17 +6576,122 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -1874,6 +1659,7 @@ index 50802edf..abcd9358 100644
 +            /* field */
 +            int cc_recv_is_ptr = (tok == TOK_ARROW);
 +            int cc_member_col = tok_col;
++            long cc_member_off = cc_tok_off;
 +            int cc_member_line = file ? file->line_num : 0;
 +            next(); /* consume '.'/'->', now at member identifier */
 +
@@ -1903,6 +1689,7 @@ index 50802edf..abcd9358 100644
 +                int cc_recv_type_is_ptr = cc_recv_is_ptr ? 1 : 0;
 +                tcc_state->cc_last_member_flags = (cc_recv_is_ptr ? 1 : 0) | (cc_recv_type_is_ptr ? 2 : 0);
 +                tcc_state->cc_last_member_col = cc_member_col;
++                tcc_state->cc_last_member_off = cc_member_off;
 +                tcc_state->cc_last_member_line = cc_member_line;
 +                
 +                /* Record receiver type name for UFCS rewriting.
@@ -1984,7 +1771,7 @@ index 50802edf..abcd9358 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,13 +6708,28 @@ special_math_val:
+@@ -6168,13 +6710,28 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -2014,7 +1801,7 @@ index 50802edf..abcd9358 100644
          } else if (tok == '(') {
              SValue ret;
              Sym *sa;
-@@ -6182,6 +6737,8 @@ special_math_val:
+@@ -6182,6 +6739,8 @@ special_math_val:
              TokenString *p, *p2;
  
              /* function call  */
@@ -2023,7 +1810,7 @@ index 50802edf..abcd9358 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6190,6 +6747,53 @@ special_math_val:
+@@ -6190,6 +6749,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -2077,7 +1864,7 @@ index 50802edf..abcd9358 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6264,8 +6868,13 @@ special_math_val:
+@@ -6264,8 +6870,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -2092,7 +1879,7 @@ index 50802edf..abcd9358 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6282,10 +6891,51 @@ special_math_val:
+@@ -6282,10 +6893,51 @@ special_math_val:
                  vrev(n);
              }
  
@@ -2144,7 +1931,7 @@ index 50802edf..abcd9358 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6366,9 +7016,11 @@ static void expr_prod(void)
+@@ -6366,9 +7018,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -2156,7 +1943,7 @@ index 50802edf..abcd9358 100644
      }
  }
  
-@@ -6378,9 +7030,11 @@ static void expr_sum(void)
+@@ -6378,9 +7032,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -2168,7 +1955,7 @@ index 50802edf..abcd9358 100644
      }
  }
  
-@@ -6509,11 +7163,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7165,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -2182,7 +1969,7 @@ index 50802edf..abcd9358 100644
          }
          t = tok;
      }
-@@ -6703,12 +7359,13 @@ static void expr_cond(void)
+@@ -6703,12 +7361,13 @@ static void expr_cond(void)
      }
  }
  
@@ -2197,7 +1984,7 @@ index 50802edf..abcd9358 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6719,6 +7376,7 @@ static void expr_eq(void)
+@@ -6719,6 +7378,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -2205,7 +1992,7 @@ index 50802edf..abcd9358 100644
      }
  }
  
-@@ -7119,7 +7777,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7779,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -2229,7 +2016,7 @@ index 50802edf..abcd9358 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7816,76 @@ static void gexpr_decl(void)
+@@ -7142,14 +7818,76 @@ static void gexpr_decl(void)
      }
  }
  
@@ -2307,7 +2094,7 @@ index 50802edf..abcd9358 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +7896,40 @@ again:
+@@ -7160,24 +7898,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -2348,7 +2135,7 @@ index 50802edf..abcd9358 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,12 +7942,33 @@ again:
+@@ -7190,12 +7944,33 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -2382,7 +2169,7 @@ index 50802edf..abcd9358 100644
          /* handle local labels declarations */
          while (tok == TOK_LABEL) {
              do {
-@@ -7211,7 +7984,24 @@ again:
+@@ -7211,7 +7986,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -2407,7 +2194,7 @@ index 50802edf..abcd9358 100644
              }
          }
  
-@@ -7223,7 +8013,19 @@ again:
+@@ -7223,7 +8015,19 @@ again:
          else if (!nocode_wanted)
              check_func_return();
  
@@ -2427,7 +2214,7 @@ index 50802edf..abcd9358 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +8044,7 @@ again:
+@@ -7242,6 +8046,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -2435,7 +2222,7 @@ index 50802edf..abcd9358 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8072,7 @@ again:
+@@ -7269,6 +8074,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -2443,7 +2230,7 @@ index 50802edf..abcd9358 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8106,7 @@ again:
+@@ -7302,6 +8108,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -2451,7 +2238,7 @@ index 50802edf..abcd9358 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8293,7 @@ again:
+@@ -7488,6 +8295,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -2459,7 +2246,7 @@ index 50802edf..abcd9358 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8624,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8626,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -2469,7 +2256,7 @@ index 50802edf..abcd9358 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8116,6 +8925,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+@@ -8116,6 +8927,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
              && is_compatible_unqualified_types(type, &vtop->type)) {
          goto one_elem;
  
@@ -2489,7 +2276,7 @@ index 50802edf..abcd9358 100644
      } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
          no_oblock = 1;
          if ((flags & DIF_FIRST) || tok == '{') {
-@@ -8672,6 +9494,15 @@ static int decl(int l)
+@@ -8672,6 +9496,15 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -2505,7 +2292,7 @@ index 50802edf..abcd9358 100644
      while (1) {
  
          oldint = 0;
-@@ -8687,6 +9518,44 @@ static int decl(int l)
+@@ -8687,6 +9520,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2550,7 +2337,7 @@ index 50802edf..abcd9358 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8723,8 +9592,68 @@ static int decl(int l)
+@@ -8723,8 +9594,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2620,7 +2407,7 @@ index 50802edf..abcd9358 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8832,6 +9761,31 @@ static int decl(int l)
+@@ -8832,6 +9763,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2652,7 +2439,7 @@ index 50802edf..abcd9358 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9817,11 @@ static int decl(int l)
+@@ -8863,6 +9819,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2664,7 +2451,7 @@ index 50802edf..abcd9358 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8903,14 +9862,22 @@ static int decl(int l)
+@@ -8903,14 +9864,22 @@ static int decl(int l)
                  }
                  if (tok != ',') {
                      if (l == VT_JMP)
@@ -2689,7 +2476,7 @@ index 50802edf..abcd9358 100644
  }
  
 diff --git a/tccpp.c b/tccpp.c
-index e19e8504..e8f23b18 100644
+index e19e8504..803ba05b 100644
 --- a/tccpp.c
 +++ b/tccpp.c
 @@ -32,6 +32,8 @@ ST_DATA int parse_flags;
@@ -2768,7 +2555,18 @@ index e19e8504..e8f23b18 100644
      PARSE2('*', '*', '=', TOK_A_MUL)
      PARSE2('%', '%', '=', TOK_A_MOD)
      PARSE2('^', '^', '=', TOK_A_XOR)
-@@ -3773,6 +3804,12 @@ ST_FUNC void tccpp_new(TCCState *s)
+@@ -3516,6 +3547,10 @@ ST_FUNC void next(void)
+     int t;
+     while (macro_ptr) {
+ redo:
++        /* CC extension: replayed tokens (macro expansion / unget) have no
++         * position in the top-level buffer; a stale offset here would point
++         * at the invocation site's tail, not the construct. */
++        cc_tok_off = -1;
+         t = *macro_ptr;
+         if (TOK_HAS_VALUE(t)) {
+             tok_get(&tok, &macro_ptr, &tokc);
+@@ -3773,6 +3808,12 @@ ST_FUNC void tccpp_new(TCCState *s)
          p = r;
      }
  
@@ -2781,7 +2579,7 @@ index e19e8504..e8f23b18 100644
      /* we add dummy defines for some special macros to speed up tests
         and to have working defined() */
      define_push(TOK___LINE__, MACRO_OBJ, NULL, NULL);
-@@ -3846,7 +3883,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
+@@ -3846,7 +3887,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
  
      if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_NONE) {
          ;

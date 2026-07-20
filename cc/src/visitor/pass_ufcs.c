@@ -983,6 +983,38 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         int le = n[i].line_end;
         if (ls <= 0) continue;
         if (le < ls) le = ls;
+        /* OFFSET SELF-CHECK (fail loudly): a UFCS CALL node's off_start is
+         * the member-token byte offset in root->parse_buffer — the method
+         * name must sit exactly there.  This validates the offset substrate
+         * against the whole corpus before any pass RELIES on offsets; a
+         * mismatch means the lexer-offset capture regressed.  Warns by
+         * default; CC_STRICT_OFFSETS=1 makes it fatal (CI mode). */
+        if (root->parse_buffer && n[i].off_start >= 0 &&
+            (size_t)n[i].off_start < root->parse_buffer_len) {
+            const char* at = root->parse_buffer + n[i].off_start;
+            const char* end = root->parse_buffer + root->parse_buffer_len;
+            const char* q = at;
+            /* the offset anchors the MEMBER CONSTRUCT: `.name` / `->name`
+             * (separator first), bare `name` on the fallback path */
+            if (q < end && *q == '.') q++;
+            else if (q + 1 < end && q[0] == '-' && q[1] == '>') q += 2;
+            while (q < end && (*q == ' ' || *q == '\t')) q++;
+            size_t rem = (size_t)(end - q);
+            size_t ml = strlen(n[i].aux_s1);
+            if (ml > rem || strncmp(q, n[i].aux_s1, ml) != 0) {
+                fprintf(stderr,
+                        "cc: OFFSET SELF-CHECK FAILED: ufcs node %d method '%s' "
+                        "not at parse-buffer off %ld (found '%.24s') [%s:%d-%d]\n",
+                        i, n[i].aux_s1, n[i].off_start,
+                        (size_t)n[i].off_start < root->parse_buffer_len ? at : "",
+                        n[i].file ? n[i].file : "?", ls, le);
+                if (getenv("CC_STRICT_OFFSETS")) {
+                    free(nodes);
+                    cc_ufcs_set_symbols(NULL);
+                    return -1;
+                }
+            }
+        }
         if (node_count == node_cap) {
             int new_cap = node_cap ? node_cap * 2 : 32;
             struct UFCSNode* nn = (struct UFCSNode*)realloc(nodes, (size_t)new_cap * sizeof(*nn));

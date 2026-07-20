@@ -46,17 +46,37 @@ What the enhancement carries:
 - `CCASTStubNode.off_start/off_end` (long): token-exact start for every
   node; exclusive end at the first token after the construct (same
   best-effort scope as line_end). Refined at the col_start/col_end sites.
-- CC-side mirrors carry the fields, and tcc_bridge.c now has a
-  _Static_assert(sizeof CCASTStubNode == sizeof CCNodeView) DRIFT GUARD —
-  the layout is still hand-mirrored in six places (visitor_ast_common.h,
-  pass_common.h, checker.c, pass_closure_calls.c, pass_ufcs.c,
-  visit_codegen.c); consolidation to one header remains a phase-1 item,
-  now compile-time-guarded instead of segfault-guarded.
+- ONE CC-side mirror (`pass_common.h` CCNodeView) with a
+  _Static_assert(sizeof CCASTStubNode == sizeof CCNodeView) DRIFT GUARD
+  in tcc_bridge.c — the six hand-copied layouts are gone (PR #83).
 - Validation: `CC_DEBUG_STUB_NODES=2` slices node text straight from the
   parse buffer by offset (token-exact starts; unknown streams report -1).
+- UFCS CALL nodes stash the MEMBER construct's offset (`cc_last_member_off`,
+  captured at the `.`/`->` separator token, matching the line/col
+  semantics) so `off_start` names the exact edit anchor, not the call head.
+- Macro-replay honesty: tokens replayed from `macro_ptr` (macro expansion,
+  `unget_tok`, saved blocks) have NO position in the top-level buffer, so
+  the lexer stamps `cc_tok_off = -1` for them and `cc_ast_cur_off`/
+  `cc_ast_col_off` refuse to answer while replay is active — unknown beats
+  a stale offset pointing at the invocation's tail. Constructs born inside
+  macro expansion (e.g. UFCS inside `assert(...)`) carry off_start = -1
+  and keep using the text fallback, which is the pre-existing contract
+  (ufcs_macro_arg_smoke exists to pin it).
+- Corpus-wide SELF-CHECK (fail loudly): `cc__collect_ufcs_edits` verifies
+  every UFCS node's method name actually sits at `off_start` in the
+  retained `root->parse_buffer` (separator-anchored). Warns by default;
+  `CC_STRICT_OFFSETS=1` makes it fatal — the full suite passes strict.
 
 Offsets address the PARSE buffer (which the root retains as
 `parse_buffer`); edits target the codegen buffer. Phase 2 closes that gap.
+
+Known pre-existing bug (surfaced by this work, NOT caused by it — main
+reproduces byte-for-byte): a function-pointer MEMBER call in user code
+(`c->cb(4)` where `cb` is a struct field, with the prelude included)
+sends the checker's `walk` into unbounded recursion → stack overflow.
+The UFCS probe classifies any `expr->name(` as a UFCS candidate and
+drops the receiver; somewhere downstream the stub-node parent chain
+cycles. Fix belongs to the checker/UFCS-classification cleanup in phase 3.
 
 ## Inventory (full survey 2026-07-20)
 
@@ -93,10 +113,12 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
 
 ## Phases (each gated: full suite + 5-TU byte-identity + clean bootstrap)
 
-1. **Offset substrate: LANDED** (rolling patch + upstream pin, above).
-   Remaining phase-1 items: consolidate the six struct mirrors into
-   pass_common.h alone (the bridge assert already guards drift); add an
-   offsets golden smoke.
+1. **Offset substrate: LANDED** (rolling patch + upstream pin, above),
+   including the UFCS member-offset stash, macro-replay -1 semantics,
+   parse-buffer retention on the reparse root, and the corpus-wide
+   strict self-check. Mirror consolidation done (PR #83). Remaining:
+   an offsets golden smoke (CI can run the suite with
+   `CC_STRICT_OFFSETS=1` — strict is green today).
 2. **Buffer-bridging map.** The rewriter chain (build_parse_input) emits
    (derived_off ↔ source_off) anchor pairs at every splice — each rewriter
    knows both offsets at splice time. One module answers

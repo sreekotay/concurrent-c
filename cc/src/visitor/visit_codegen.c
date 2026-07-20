@@ -1427,8 +1427,17 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
     if (!root) {
         cc__report_reparse_failure(stage, input_path, src, src_len, prep, pp_len);
+        free(prep);
+    } else if (!root->parse_buffer) {
+        /* Retain the EXACT text TCC lexed: stub-node off_start/off_end
+         * address this buffer, and consumers (offset self-checks, span
+         * migrations) must slice the same bytes the lexer saw.  Ownership
+         * transfers to the root (freed in cc_tcc_bridge_free_ast). */
+        root->parse_buffer = prep;
+        root->parse_buffer_len = pp_len;
+    } else {
+        free(prep);
     }
-    free(prep);
 done:
     if (reg_pushed) cc_type_registry_scope_pop(&reg_scope);
     if (profile_reparse) {
