@@ -1292,6 +1292,7 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     CCTypeRegistryScope reg_scope;
     int reg_pushed = 0;
     char* reparse_clean = NULL;
+    char* prep = NULL;
     char* reparse_surface_sanitized = NULL;
     char* family_rewritten = NULL;
     CCASTRoot* root = NULL;
@@ -1300,11 +1301,21 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     int profile_reparse = (getenv("CC_PROFILE_REPARSE") != NULL);
     double reparse_t0 = profile_reparse ? cc__now_ms() : 0.0;
     if (profile_reparse) g_cc_reparse_count++;
+    /* REPARSE DIET tracker: the sanitizers and comment neutralization are
+     * length-preserving in-place blanking (coordinate-SAFE) and the prelude
+     * is a pure prepend (constant shift).  Only the splicing rewriters can
+     * break the parse-offset ↔ source-offset correspondence; record the
+     * first one that actually fires so the root can advertise an EXACT
+     * shift when none did (root->parse_src_shift). */
+    const char* diet_broken_by = NULL;
+    long diet_shift = -1;
+    long diet_valid_from = 0;   /* src offset after the last splice anchor */
     /* Closure/async edits can reintroduce concrete family UFCS before emit splice. */
     family_rewritten = cc_rewrite_generic_family_ufcs_parser_safe(pp_in, pp_in_len);
     if (family_rewritten) {
         pp_in = family_rewritten;
         pp_in_len = strlen(family_rewritten);
+        if (!diet_broken_by) diet_broken_by = "family_ufcs";
     }
     reparse_clean = cc__neutralize_comments_for_reparse(pp_in, pp_in_len);
     if (reparse_clean) {
@@ -1343,6 +1354,30 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     char* strict_saved = strict_env ? strdup(strict_env) : NULL;
     unsetenv("CC_STRICT_RESULT_UNWRAP");
     char* pp_buf = cc_preprocess_emit_splice(pp_in, pp_in_len, input_path, 1);
+    if (pp_buf && !diet_broken_by) {
+        /* The splice inserts declaration blocks at known anchors and copies
+         * user text verbatim between them, so text after the last anchor
+         * keeps an exact constant-shift mapping.  VERIFY the accounting by
+         * comparing the tail bytes — an accounting bug must degrade to the
+         * line-keyed fallback, never silently corrupt offsets. */
+        size_t sp_anchor = 0;
+        long sp_delta = 0;
+        int sp_rw = 0;
+        cc_pp_get_splice_coord_info(&sp_anchor, &sp_delta, &sp_rw);
+        size_t ob = strlen(pp_buf);
+        if (sp_rw) {
+            diet_broken_by = "include_rewrite";
+        } else if (sp_anchor > pp_in_len ||
+                   (long)ob != (long)pp_in_len + sp_delta ||
+                   memcmp(pp_in + sp_anchor,
+                          pp_buf + (long)sp_anchor + sp_delta,
+                          pp_in_len - sp_anchor) != 0) {
+            diet_broken_by = "emit_splice_accounting";
+        } else {
+            if ((long)sp_anchor > diet_valid_from) diet_valid_from = (long)sp_anchor;
+            diet_shift = sp_delta; /* prelude shift added below */
+        }
+    }
     if (strict_had_env) {
         setenv("CC_STRICT_RESULT_UNWRAP", strict_saved ? strict_saved : "", 1);
     } else {
@@ -1354,15 +1389,10 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     if (reparse_clean) free(reparse_clean);
     if (reparse_surface_sanitized) free(reparse_surface_sanitized);
     if (!pp_buf) goto done;
-    {
-        size_t st_len = 0;
-        char* st = cc__rewrite_chan_send_task_text(NULL, pp_buf, strlen(pp_buf), &st_len);
-        if (st) {
-            free(pp_buf);
-            pp_buf = st;
-            (void)st_len;
-        }
-    }
+    /* (Reparse diet: the chan_send_task text rewrite used to run here on
+     * every reparse.  The parse only needs TCC-parseable text and the
+     * prelude declares cc_channel_send_task — probed corpus-green without
+     * it, so it's gone.  The initial-parse path keeps its own call.) */
     if (strstr(pp_buf, "@defer") || strstr(pp_buf, "@destroy")) {
         char* lifetime_safe = cc__sanitize_lifetime_markers_for_reparse(pp_buf, strlen(pp_buf));
         if (lifetime_safe) {
@@ -1378,17 +1408,21 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
         }
     }
     size_t pp_len = strlen(pp_buf);
-    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
-    free(pp_buf);
-    if (!prep) goto done;
     {
-        char* parser_helpers = cc__rewrite_result_helper_calls_for_parser(prep, pp_len);
-        if (parser_helpers) {
-            free(prep);
-            prep = parser_helpers;
-            pp_len = strlen(prep);
-        }
+        size_t body_len = pp_len;
+        char* prep0 = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
+        free(pp_buf);
+        pp_buf = NULL;
+        if (!prep0) goto done;
+        prep = prep0;
+        /* pure prepend: parse offset = source offset + shift */
+        diet_shift = (diet_shift < 0 ? 0 : diet_shift) + (long)(pp_len - body_len);
     }
+    /* (Reparse diet: the result-helper call rewrite
+     * (CCResult_X_Y_method(...) -> __cc_parser_result_...) used to run on
+     * every reparse and broke offset coordinates in ~every result-using TU.
+     * Probed corpus-green without it — TCC's parse tolerates the direct
+     * helper names — so it's gone from the reparse path.) */
     if (strstr(prep, "__cc_uw_is_err") || strstr(prep, "_is_err")) {
         char* unwrap_safe = cc__sanitize_generated_unwrap_handlers_for_reparse(prep, pp_len);
         if (unwrap_safe) {
@@ -1421,6 +1455,10 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
         size_t l2_len = 0;
         char* l2 = cc_l2_rewrite_all(prep, pp_len, &l2_len);
         if (l2) {
+            if (!diet_broken_by &&
+                (l2_len != pp_len || memcmp(l2, prep, pp_len) != 0)) {
+                diet_broken_by = "l2_rewrite";
+            }
             free(prep);
             prep = l2;
             pp_len = l2_len;
@@ -1435,6 +1473,15 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     reg_pushed = cc_type_registry_scope_push(&reg_scope);
     cc__debug_dump_reparse_source("reparse_prepared", prep, pp_len, input_path);
     root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
+    if (getenv("CC_DEBUG_REPARSE_DIET")) {
+        fprintf(stderr, "CC_REPARSE_DIET: stage=%s %s%s shift=%ld valid_from=%ld path=%s\n",
+                stage ? stage : "?",
+                diet_broken_by ? "BROKEN by " : "EXACT",
+                diet_broken_by ? diet_broken_by : "",
+                diet_broken_by ? -1L : diet_shift,
+                diet_broken_by ? -1L : diet_valid_from,
+                input_path ? input_path : "?");
+    }
     if (!root) {
         cc__report_reparse_failure(stage, input_path, src, src_len, prep, pp_len);
         free(prep);
@@ -1445,6 +1492,8 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
          * transfers to the root (freed in cc_tcc_bridge_free_ast). */
         root->parse_buffer = prep;
         root->parse_buffer_len = pp_len;
+        root->parse_src_shift = diet_broken_by ? -1 : diet_shift;
+        root->parse_src_valid_from = diet_broken_by ? 0 : diet_valid_from;
     } else {
         free(prep);
     }

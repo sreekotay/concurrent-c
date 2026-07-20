@@ -7644,6 +7644,24 @@ char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char
                                      CC_PP_MODE_CANONICAL_ONLY);
 }
 
+/* REPARSE DIET: emit-splice coordinate accounting.  Every splice insertion
+ * lands at a known user-coordinate anchor and user text is copied verbatim
+ * between anchors, so for user text AFTER the last anchor:
+ *     out_off = user_off + delta.
+ * The reparse wrapper (visit_codegen.c) reads this to advertise an EXACT
+ * offset mapping on the AST root instead of falling back to line walking.
+ * `user_text_rewritten` flags the one case where user bytes themselves
+ * changed (system-include lowering) and the anchors are meaningless. */
+static size_t g_cc_pp_splice_last_anchor = 0;
+static long   g_cc_pp_splice_delta = 0;
+static int    g_cc_pp_splice_user_text_rewritten = 0;
+
+void cc_pp_get_splice_coord_info(size_t* last_anchor, long* delta, int* user_rewritten) {
+    if (last_anchor) *last_anchor = g_cc_pp_splice_last_anchor;
+    if (delta) *delta = g_cc_pp_splice_delta;
+    if (user_rewritten) *user_rewritten = g_cc_pp_splice_user_text_rewritten;
+}
+
 char* cc_preprocess_emit_splice(const char* input, size_t input_len, const char* input_path,
                                 int skip_checks) {
     return cc_preprocess_pipeline_ex(input, input_len, input_path, skip_checks, 0,
@@ -7810,10 +7828,14 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
     }
 
     char rel[1024];
+    g_cc_pp_splice_last_anchor = 0;
+    g_cc_pp_splice_delta = 0;
+    g_cc_pp_splice_user_text_rewritten = 0;
     {
         char* lowered_system_use = cc_rewrite_system_cch_includes_to_lowered_headers(use, strlen(use));
         if (lowered_system_use) {
             use = lowered_system_use;
+            g_cc_pp_splice_user_text_rewritten = 1;
         }
         fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
         {
@@ -7835,6 +7857,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
             {
                 size_t cursor = have_container_decls ? container_pos : insert_pos;
                 if (have_container_decls) {
+                    g_cc_pp_splice_last_anchor = container_pos;
                     fwrite(use, 1, container_pos, out);
                     cc_emit_plan_fprint_container_prelude(out, 1,
                         n_vec_ctnr > 0, n_map_ctnr > 0, 0);
@@ -8246,9 +8269,15 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         }
                     }
                     cc_emit_plan_fprint_line_directive(out, use, next_pos, input_path);
+                    if (next_pos > g_cc_pp_splice_last_anchor)
+                        g_cc_pp_splice_last_anchor = next_pos;
                     cursor = next_pos;
                 }
             }
+        }
+        if (mode == CC_PP_MODE_EMIT_SPLICE_ONLY) {
+            fflush(out);
+            g_cc_pp_splice_delta = (long)out_size - (long)strlen(use);
         }
         free(lowered_system_use);
     }

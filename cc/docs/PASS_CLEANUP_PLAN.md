@@ -185,9 +185,30 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    Remaining hand-rolled sites are the recorded baseline (worst:
    preprocess.c's CCScannerState family, which IS a canonical scanner;
    hook_compile.c, lower_header.c, ir.c are the real leftovers).
-5. **Reparse diet (stretch).** With exact offsets + the bridge map, batched
-   stages stop invalidating each other's coordinates; target dropping the
-   5-reparse ceiling.
+5. **Reparse diet: the coordinate leg LANDED** (pulled ahead of async_ast
+   by design review — dissolve the coordinate problem, don't manage it).
+   Findings, all probed corpus-green before deleting:
+   - the three reparse sanitizers + comment neutralization were ALREADY
+     length-preserving in-place blanking (coordinate-safe by construction);
+   - the prelude is a pure prepend (constant shift);
+   - the chan_send_task text rewrite and the result-helper call rewrite
+     were UNNECESSARY at reparse time (TCC parses both forms) — deleted
+     from the reparse path; the result-helper one alone broke coordinates
+     in ~every result-using TU;
+   - the emit-splice chain inserts declaration blocks at KNOWN anchors
+     with user text verbatim between them, so it now reports
+     (last_anchor, delta) — cc_pp_get_splice_coord_info — and the wrapper
+     VERIFIES the accounting with a tail memcmp (an accounting bug
+     degrades to the line fallback, never corrupts silently).
+   The root now advertises the invariant: `parse_src_shift` +
+   `parse_src_valid_from` — node parse-buffer offset X maps EXACTLY to
+   source offset X - shift for src offsets >= valid_from.  Corpus
+   measurement: 930/937 reparses EXACT (99.3%); the 7 broken are real
+   family-UFCS reintroductions (2) and L2 idioms (5), which degrade to
+   the line-keyed fallback by design.
+   REMAINING: async_ast consumes the invariant (slice statements by node
+   offsets when exact, delete its 21 line mappings); then the 5-reparse
+   ceiling itself.
 
 Non-goals: no AST for OUTPUT (text emission stays; the byte-identity gate
 depends on it), no full CC AST rewrite — the stub table + offsets is

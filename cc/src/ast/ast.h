@@ -100,6 +100,18 @@ typedef struct CCASTRoot {
      * before binding markers to CLOSURE nodes. */
     const int* skipped_clo_ids;
     int skipped_clo_count;
+    /* REPARSE DIET invariant: when >= 0, every reparse transform between
+     * the source buffer handed to cc__reparse_source_to_ast_ex and the
+     * text TCC lexed was either length-preserving in-place blanking or
+     * the pure prelude prepend — so a node's parse-buffer offset X maps
+     * EXACTLY to source offset (X - parse_src_shift).  -1 when a
+     * coordinate-breaking transform fired (or for non-reparse roots);
+     * consumers must then fall back to line-keyed resolution.
+     * The mapping holds for source offsets >= parse_src_valid_from (the
+     * emit-splice chain inserts declaration blocks at known anchors; text
+     * BEFORE the last anchor has non-constant displacement). */
+    long parse_src_shift;
+    long parse_src_valid_from;
 } CCASTRoot;
 
 #endif // CC_AST_AST_H

@@ -102,6 +102,11 @@ char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char
 /* Emit-plan splice only; input must already be canonical. */
 char* cc_preprocess_emit_splice(const char* input, size_t input_len, const char* input_path,
                                int skip_checks);
+/* Coordinate accounting for the most recent emit-splice call (reparse diet):
+ * insertions land at known input-coordinate anchors, so for input text AFTER
+ * `last_anchor`, out_off = in_off + delta.  `user_rewritten` = the input
+ * bytes themselves changed (system-include lowering) — anchors meaningless. */
+void cc_pp_get_splice_coord_info(size_t* last_anchor, long* delta, int* user_rewritten);
 
 // Expand a source file through the host C preprocessor so local and stdlib
 // headers appear in one include-expanded stream with line markers preserved.
