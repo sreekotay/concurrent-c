@@ -500,9 +500,114 @@ static inline CCString cc_gr_key_loop_end_text(CCArena* a, int k) {
     return ({ CCArena* __cc_tpl_arena_108 = (a); CCString __cc_tpl_108 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_108, "Ln", 2, __cc_tpl_arena_108); cc__string_slot_push(&__cc_tpl_108, (k), __cc_tpl_arena_108); cc_string_push_buffer(&__cc_tpl_108, ": ;\n    }\n", 10, __cc_tpl_arena_108); __cc_tpl_108; });
 }
 
+/* ---- reflective face: field table, name lookup, compiled get ---- */
+static inline CCString cc_gr_ftable_head_text(CCArena* a, const char* n, int cnt) {
+    return ({ CCArena* __cc_tpl_arena_109 = (a); CCString __cc_tpl_109 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_109, "static const CCGramField ", 25, __cc_tpl_arena_109); cc__string_slot_push(&__cc_tpl_109, (n), __cc_tpl_arena_109); cc_string_push_buffer(&__cc_tpl_109, "__fields[", 9, __cc_tpl_arena_109); cc__string_slot_push(&__cc_tpl_109, (cnt), __cc_tpl_arena_109); cc_string_push_buffer(&__cc_tpl_109, "] = {\n", 6, __cc_tpl_arena_109); __cc_tpl_109; });
+}
+
+static inline CCString cc_gr_ftable_row_items_text(CCArena* a, const char* field,
+                                                   const char* gk, const char* n,
+                                                   const char* etype) {
+    return ({ CCArena* __cc_tpl_arena_110 = (a); CCString __cc_tpl_110 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_110, "    { \"", 7, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (field), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "\", ", 3, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (gk), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, ", (unsigned)offsetof(", 21, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, ", ", 2, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (field), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "), (unsigned)offsetof(", 22, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, ", ", 2, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (field), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "_n), \"", 6, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (etype), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "\" },\n", 5, __cc_tpl_arena_110); __cc_tpl_110; });
+}
+
+static inline CCString cc_gr_ftable_row_text(CCArena* a, const char* field,
+                                             const char* gk, const char* n) {
+    return ({ CCArena* __cc_tpl_arena_111 = (a); CCString __cc_tpl_111 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_111, "    { \"", 7, __cc_tpl_arena_111); cc__string_slot_push(&__cc_tpl_111, (field), __cc_tpl_arena_111); cc_string_push_buffer(&__cc_tpl_111, "\", ", 3, __cc_tpl_arena_111); cc__string_slot_push(&__cc_tpl_111, (gk), __cc_tpl_arena_111); cc_string_push_buffer(&__cc_tpl_111, ", (unsigned)offsetof(", 21, __cc_tpl_arena_111); cc__string_slot_push(&__cc_tpl_111, (n), __cc_tpl_arena_111); cc_string_push_buffer(&__cc_tpl_111, ", ", 2, __cc_tpl_arena_111); cc__string_slot_push(&__cc_tpl_111, (field), __cc_tpl_arena_111); cc_string_push_buffer(&__cc_tpl_111, "), 0, 0 },\n", 11, __cc_tpl_arena_111); __cc_tpl_111; });
+}
+
+static inline CCString cc_gr_ftable_empty_row_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_112 = (a); CCString __cc_tpl_112 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_112, "    { 0, 0, 0, 0, 0 },\n", 23, __cc_tpl_arena_112); __cc_tpl_112; });
+}
+
+static inline CCString cc_gr_ftable_close_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_113 = (a); CCString __cc_tpl_113 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_113, "};\n", 3, __cc_tpl_arena_113); __cc_tpl_113; });
+}
+
+static inline CCString cc_gr_field_fn_head_text(CCArena* a, const char* n) {
+    return ({ CCArena* __cc_tpl_arena_114 = (a); CCString __cc_tpl_114 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_114, "static __attribute__((unused)) const CCGramField* ", 50, __cc_tpl_arena_114); cc__string_slot_push(&__cc_tpl_114, (n), __cc_tpl_arena_114); cc_string_push_buffer(&__cc_tpl_114, "_field(const char* k, size_t kl) {\n    switch (kl) {\n", 53, __cc_tpl_arena_114); __cc_tpl_114; });
+}
+
+static inline CCString cc_gr_get_case_text(CCArena* a, int len) {
+    return ({ CCArena* __cc_tpl_arena_115 = (a); CCString __cc_tpl_115 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_115, "    case ", 9, __cc_tpl_arena_115); cc__string_slot_push(&__cc_tpl_115, (len), __cc_tpl_arena_115); cc_string_push_buffer(&__cc_tpl_115, ":\n", 2, __cc_tpl_arena_115); __cc_tpl_115; });
+}
+
+static inline CCString cc_gr_field_hit_text(CCArena* a, const char* field, int len,
+                                            const char* n, int j) {
+    return ({ CCArena* __cc_tpl_arena_116 = (a); CCString __cc_tpl_116 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_116, "        if (memcmp(k, \"", 23, __cc_tpl_arena_116); cc__string_slot_push(&__cc_tpl_116, (field), __cc_tpl_arena_116); cc_string_push_buffer(&__cc_tpl_116, "\", ", 3, __cc_tpl_arena_116); cc__string_slot_push(&__cc_tpl_116, (len), __cc_tpl_arena_116); cc_string_push_buffer(&__cc_tpl_116, ") == 0) return &", 16, __cc_tpl_arena_116); cc__string_slot_push(&__cc_tpl_116, (n), __cc_tpl_arena_116); cc_string_push_buffer(&__cc_tpl_116, "__fields[", 9, __cc_tpl_arena_116); cc__string_slot_push(&__cc_tpl_116, (j), __cc_tpl_arena_116); cc_string_push_buffer(&__cc_tpl_116, "];\n", 3, __cc_tpl_arena_116); __cc_tpl_116; });
+}
+
+static inline CCString cc_gr_get_break_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_117 = (a); CCString __cc_tpl_117 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_117, "        break;\n", 15, __cc_tpl_arena_117); __cc_tpl_117; });
+}
+
+static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_118 = (a); CCString __cc_tpl_118 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_118, "    }\n    return 0;\n}\n", 22, __cc_tpl_arena_118); __cc_tpl_118; });
+}
+
+/* compiled get: dispatch straight to member reads — the field table is
+ * the reflective face, this is the fast one */
+static inline CCString cc_gr_get_fn_head_text(CCArena* a, const char* n) {
+    return ({ CCArena* __cc_tpl_arena_119 = (a); CCString __cc_tpl_119 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_119, "static __attribute__((unused)) int ", 35, __cc_tpl_arena_119); cc__string_slot_push(&__cc_tpl_119, (n), __cc_tpl_arena_119); cc_string_push_buffer(&__cc_tpl_119, "_get(const ", 11, __cc_tpl_arena_119); cc__string_slot_push(&__cc_tpl_119, (n), __cc_tpl_arena_119); cc_string_push_buffer(&__cc_tpl_119, "* v, const char* k, CCGramValue* out) {\n    size_t kl = strlen(k);\n    (void)v;\n    switch (kl) {\n", 98, __cc_tpl_arena_119); __cc_tpl_119; });
+}
+
+static inline CCString cc_gr_get_hit_open_text(CCArena* a, const char* field, int len,
+                                               const char* gk, const char* n, int j) {
+    return ({ CCArena* __cc_tpl_arena_120 = (a); CCString __cc_tpl_120 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_120, "        if (memcmp(k, \"", 23, __cc_tpl_arena_120); cc__string_slot_push(&__cc_tpl_120, (field), __cc_tpl_arena_120); cc_string_push_buffer(&__cc_tpl_120, "\", ", 3, __cc_tpl_arena_120); cc__string_slot_push(&__cc_tpl_120, (len), __cc_tpl_arena_120); cc_string_push_buffer(&__cc_tpl_120, ") == 0) {\n            out->kind = ", 34, __cc_tpl_arena_120); cc__string_slot_push(&__cc_tpl_120, (gk), __cc_tpl_arena_120); cc_string_push_buffer(&__cc_tpl_120, ";\n            out->field = &", 28, __cc_tpl_arena_120); cc__string_slot_push(&__cc_tpl_120, (n), __cc_tpl_arena_120); cc_string_push_buffer(&__cc_tpl_120, "__fields[", 9, __cc_tpl_arena_120); cc__string_slot_push(&__cc_tpl_120, (j), __cc_tpl_arena_120); cc_string_push_buffer(&__cc_tpl_120, "];\n", 3, __cc_tpl_arena_120); __cc_tpl_120; });
+}
+
+static inline CCString cc_gr_get_present_text(CCArena* a, int presence, int j) {
+    if (presence)
+        return ({ CCArena* __cc_tpl_arena_121 = (a); CCString __cc_tpl_121 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_121, "            out->present = (int)((v->cc__set >> ", 48, __cc_tpl_arena_121); cc__string_slot_push(&__cc_tpl_121, (j), __cc_tpl_arena_121); cc_string_push_buffer(&__cc_tpl_121, ") & 1);\n", 8, __cc_tpl_arena_121); __cc_tpl_121; });
+    return ({ CCArena* __cc_tpl_arena_122 = (a); CCString __cc_tpl_122 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_122, "            out->present = 1;\n", 30, __cc_tpl_arena_122); __cc_tpl_122; });
+}
+
+/* vk: 0 int, 1 float, 2 items, 3 slice */
+static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* field) {
+    if (vk == 0)
+        return ({ CCArena* __cc_tpl_arena_123 = (a); CCString __cc_tpl_123 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_123, "            out->i = v->", 24, __cc_tpl_arena_123); cc__string_slot_push(&__cc_tpl_123, (field), __cc_tpl_arena_123); cc_string_push_buffer(&__cc_tpl_123, ";\n", 2, __cc_tpl_arena_123); __cc_tpl_123; });
+    if (vk == 1)
+        return ({ CCArena* __cc_tpl_arena_124 = (a); CCString __cc_tpl_124 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_124, "            out->f = v->", 24, __cc_tpl_arena_124); cc__string_slot_push(&__cc_tpl_124, (field), __cc_tpl_arena_124); cc_string_push_buffer(&__cc_tpl_124, ";\n", 2, __cc_tpl_arena_124); __cc_tpl_124; });
+    if (vk == 2)
+        return ({ CCArena* __cc_tpl_arena_125 = (a); CCString __cc_tpl_125 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_125, "            out->items = v->", 28, __cc_tpl_arena_125); cc__string_slot_push(&__cc_tpl_125, (field), __cc_tpl_arena_125); cc_string_push_buffer(&__cc_tpl_125, "; out->items_n = v->", 20, __cc_tpl_arena_125); cc__string_slot_push(&__cc_tpl_125, (field), __cc_tpl_arena_125); cc_string_push_buffer(&__cc_tpl_125, "_n;\n", 4, __cc_tpl_arena_125); __cc_tpl_125; });
+    return ({ CCArena* __cc_tpl_arena_126 = (a); CCString __cc_tpl_126 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_126, "            out->s = v->", 24, __cc_tpl_arena_126); cc__string_slot_push(&__cc_tpl_126, (field), __cc_tpl_arena_126); cc_string_push_buffer(&__cc_tpl_126, ";\n", 2, __cc_tpl_arena_126); __cc_tpl_126; });
+}
+
+static inline CCString cc_gr_get_hit_close_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_127 = (a); CCString __cc_tpl_127 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_127, "            return 1;\n        }\n", 32, __cc_tpl_arena_127); __cc_tpl_127; });
+}
+
+/* ---- tagged-union first-byte dispatch (`one of`) ---- */
+static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
+    return ({ CCArena* __cc_tpl_arena_128 = (a); CCString __cc_tpl_128 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_128, "    if (p >= n) { *cc_inc = 1; goto ", 36, __cc_tpl_arena_128); cc__string_slot_push(&__cc_tpl_128, (fail), __cc_tpl_arena_128); cc_string_push_buffer(&__cc_tpl_128, "; }\n    if (cc_depth > 128) goto ", 33, __cc_tpl_arena_128); cc__string_slot_push(&__cc_tpl_128, (fail), __cc_tpl_arena_128); cc_string_push_buffer(&__cc_tpl_128, ";\n    switch (s[p]) {\n", 22, __cc_tpl_arena_128); __cc_tpl_128; });
+}
+
+static inline CCString cc_gr_union_case_text(CCArena* a, int db,
+                                             const char* sname, const char* vname) {
+    CCString c = cc_gr_chr_text(a, db);
+    return ({ CCArena* __cc_tpl_arena_129 = (a); CCString __cc_tpl_129 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_129, "    case ", 9, __cc_tpl_arena_129); cc__string_slot_push(&__cc_tpl_129, (db), __cc_tpl_arena_129); cc_string_push_buffer(&__cc_tpl_129, ": /*", 4, __cc_tpl_arena_129); cc__string_slot_push(&__cc_tpl_129, (c), __cc_tpl_arena_129); cc_string_push_buffer(&__cc_tpl_129, "*/ {\n        out->kind = ", 25, __cc_tpl_arena_129); cc__string_slot_push(&__cc_tpl_129, (sname), __cc_tpl_arena_129); cc_string_push_buffer(&__cc_tpl_129, "_", 1, __cc_tpl_arena_129); cc__string_slot_push(&__cc_tpl_129, (vname), __cc_tpl_arena_129); cc_string_push_buffer(&__cc_tpl_129, ";\n", 2, __cc_tpl_arena_129); __cc_tpl_129; });
+}
+
+static inline CCString cc_gr_union_break_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_130 = (a); CCString __cc_tpl_130 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_130, "        break; }\n", 17, __cc_tpl_arena_130); __cc_tpl_130; });
+}
+
+static inline CCString cc_gr_union_default_text(CCArena* a,
+                                                const char* sname, const char* vname) {
+    return ({ CCArena* __cc_tpl_arena_131 = (a); CCString __cc_tpl_131 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_131, "    default: {\n        out->kind = ", 35, __cc_tpl_arena_131); cc__string_slot_push(&__cc_tpl_131, (sname), __cc_tpl_arena_131); cc_string_push_buffer(&__cc_tpl_131, "_", 1, __cc_tpl_arena_131); cc__string_slot_push(&__cc_tpl_131, (vname), __cc_tpl_arena_131); cc_string_push_buffer(&__cc_tpl_131, ";\n", 2, __cc_tpl_arena_131); __cc_tpl_131; });
+}
+
+static inline CCString cc_gr_union_no_default_text(CCArena* a, const char* fail) {
+    return ({ CCArena* __cc_tpl_arena_132 = (a); CCString __cc_tpl_132 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_132, "    default: goto ", 18, __cc_tpl_arena_132); cc__string_slot_push(&__cc_tpl_132, (fail), __cc_tpl_arena_132); cc_string_push_buffer(&__cc_tpl_132, ";\n", 2, __cc_tpl_arena_132); __cc_tpl_132; });
+}
+
+static inline CCString cc_gr_union_close_text(CCArena* a) {
+    return ({ CCArena* __cc_tpl_arena_133 = (a); CCString __cc_tpl_133 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_133, "    }\n", 6, __cc_tpl_arena_133); __cc_tpl_133; });
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
-    return ({ CCArena* __cc_tpl_arena_109 = (a); CCString __cc_tpl_109 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_109, "static int ", 11, __cc_tpl_arena_109); cc__string_slot_push(&__cc_tpl_109, (n), __cc_tpl_arena_109); cc_string_push_buffer(&__cc_tpl_109, "_match(const char* s, size_t n) {\n    size_t p = 0;\n    if (!", 61, __cc_tpl_arena_109); cc__string_slot_push(&__cc_tpl_109, (n), __cc_tpl_arena_109); cc_string_push_buffer(&__cc_tpl_109, "__ENTRY_M((const unsigned char*)s, n, &p)) return 0;\n    return p == n;\n}\n", 74, __cc_tpl_arena_109); __cc_tpl_109; });
+    return ({ CCArena* __cc_tpl_arena_134 = (a); CCString __cc_tpl_134 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_134, "static int ", 11, __cc_tpl_arena_134); cc__string_slot_push(&__cc_tpl_134, (n), __cc_tpl_arena_134); cc_string_push_buffer(&__cc_tpl_134, "_match(const char* s, size_t n) {\n    size_t p = 0;\n    if (!", 61, __cc_tpl_arena_134); cc__string_slot_push(&__cc_tpl_134, (n), __cc_tpl_arena_134); cc_string_push_buffer(&__cc_tpl_134, "__ENTRY_M((const unsigned char*)s, n, &p)) return 0;\n    return p == n;\n}\n", 74, __cc_tpl_arena_134); __cc_tpl_134; });
 }
 
 /* ---- schema streaming face: try_read / read / Reader cursor ----
@@ -519,7 +624,7 @@ static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
  * speaks the language's own idiom (the result rewriter runs after the
  * grammar seam). */
 static inline CCString cc_gr_stream_face_text(CCArena* a, const char* n) {
-    return ({ CCArena* __cc_tpl_arena_110 = (a); CCString __cc_tpl_110 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_110, "static bool !>(CCError) ", 24, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "_try_read(const char* s0, size_t n,\n        size_t* pos, CCArena* arena, ", 73, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "* out) {\n    size_t p = *pos;\n    int cc_i0 = 0;\n    if (p >= n) return cc_ok(false);   /* clean end at frame boundary */\n    if (", 130, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0, 0)) {\n        *pos = p;\n        return cc_ok(true);\n    }\n    if (cc_i0) return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, \"", 177, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, ": incomplete frame\"));\n    return cc_err(CC_ERROR(CC_ERR_PARSE, \"", 65, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, ": malformed input\"));\n}\nstatic int ", 35, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "_read(const char* s0, size_t n, size_t* pos, CCArena* arena, ", 61, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "* out) {\n    int cc_i0 = 0;\n    return ", 39, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0, 0);\n}\ntypedef struct ", 82, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader {\n    const char* s; size_t n; size_t pos; CCArena* arena;\n} ", 68, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader;\nstatic ", 15, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader ", 7, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "_reader(const char* s, size_t n, CCArena* arena) {\n    ", 55, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader r; r.s = s; r.n = n; r.pos = 0; r.arena = arena; return r;\n}\nstatic int ", 79, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader_next(", 12, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader* r, ", 11, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "* out) {\n    if (r->pos >= r->n) return 0;\n    int cc_i0 = 0;\n    return ", 73, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0, 0);\n}\nstatic int ", 90, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader_at_end(const ", 20, __cc_tpl_arena_110); cc__string_slot_push(&__cc_tpl_110, (n), __cc_tpl_arena_110); cc_string_push_buffer(&__cc_tpl_110, "Reader* r) { return r->pos == r->n; }\n", 38, __cc_tpl_arena_110); __cc_tpl_110; });
+    return ({ CCArena* __cc_tpl_arena_135 = (a); CCString __cc_tpl_135 = cc_string_new(); cc_string_push_buffer(&__cc_tpl_135, "static bool !>(CCError) ", 24, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "_try_read(const char* s0, size_t n,\n        size_t* pos, CCArena* arena, ", 73, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "* out) {\n    size_t p = *pos;\n    int cc_i0 = 0;\n    if (p >= n) return cc_ok(false);   /* clean end at frame boundary */\n    if (", 130, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "__fill((const unsigned char*)s0, n, &p, arena, out, &cc_i0, 0)) {\n        *pos = p;\n        return cc_ok(true);\n    }\n    if (cc_i0) return cc_err(CC_ERROR(CC_ERR_WOULD_BLOCK, \"", 177, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, ": incomplete frame\"));\n    return cc_err(CC_ERROR(CC_ERR_PARSE, \"", 65, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, ": malformed input\"));\n}\nstatic int ", 35, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "_read(const char* s0, size_t n, size_t* pos, CCArena* arena, ", 61, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "* out) {\n    int cc_i0 = 0;\n    return ", 39, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "__fill((const unsigned char*)s0, n, pos, arena, out, &cc_i0, 0);\n}\ntypedef struct ", 82, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader {\n    const char* s; size_t n; size_t pos; CCArena* arena;\n} ", 68, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader;\nstatic ", 15, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader ", 7, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "_reader(const char* s, size_t n, CCArena* arena) {\n    ", 55, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader r; r.s = s; r.n = n; r.pos = 0; r.arena = arena; return r;\n}\nstatic int ", 79, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader_next(", 12, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader* r, ", 11, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "* out) {\n    if (r->pos >= r->n) return 0;\n    int cc_i0 = 0;\n    return ", 73, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "__fill((const unsigned char*)r->s, r->n, &r->pos, r->arena, out, &cc_i0, 0);\n}\nstatic int ", 90, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader_at_end(const ", 20, __cc_tpl_arena_135); cc__string_slot_push(&__cc_tpl_135, (n), __cc_tpl_arena_135); cc_string_push_buffer(&__cc_tpl_135, "Reader* r) { return r->pos == r->n; }\n", 38, __cc_tpl_arena_135); __cc_tpl_135; });
 }
 
 #endif /* CC_GRAMMAR_EMIT_CCH */

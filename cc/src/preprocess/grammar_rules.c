@@ -3653,77 +3653,63 @@ static const char* rs_gk(const STerm* t) {
 static void rs_emit_get(SS* ss, EB* e, const char* name) {
     int order[S_MAX_TERMS]; int cnt = 0;
     for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
-    eb_fmt(e, "static const CCGramField %s__fields[%d] = {\n", name, cnt > 0 ? cnt : 1);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_ftable_head_text(&a, name, cnt > 0 ? cnt : 1));
     for (int i = 0; i < cnt; i++) {
         const STerm* t = &ss->terms[order[i]];
         int is_items = t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST;
         if (is_items)
-            eb_fmt(e, "    { \"%s\", %s, (unsigned)offsetof(%s, %s), "
-                      "(unsigned)offsetof(%s, %s_n), \"%s\" },\n",
-                   t->field, rs_gk(t), name, t->field, name, t->field, t->etype);
+            eb_put_cs(e, cc_gr_ftable_row_items_text(&a, t->field, rs_gk(t), name, t->etype));
         else
-            eb_fmt(e, "    { \"%s\", %s, (unsigned)offsetof(%s, %s), 0, 0 },\n",
-                   t->field, rs_gk(t), name, t->field);
+            eb_put_cs(e, cc_gr_ftable_row_text(&a, t->field, rs_gk(t), name));
     }
-    if (cnt == 0) eb_fmt(e, "    { 0, 0, 0, 0, 0 },\n");
-    eb_fmt(e, "};\n");
-    eb_fmt(e, "static __attribute__((unused)) const CCGramField* %s_field(const char* k, size_t kl) {\n"
-              "    switch (kl) {\n", name);
+    if (cnt == 0) eb_put_cs(e, cc_gr_ftable_empty_row_text(&a));
+    eb_put_cs(e, cc_gr_ftable_close_text(&a));
+    eb_put_cs(e, cc_gr_field_fn_head_text(&a, name));
     {
         unsigned char done[S_MAX_TERMS] = {0};
         for (int i = 0; i < cnt; i++) {
             if (done[i]) continue;
             size_t L = strlen(ss->terms[order[i]].field);
-            eb_fmt(e, "    case %d:\n", (int)L);
+            eb_put_cs(e, cc_gr_get_case_text(&a, (int)L));
             for (int j = i; j < cnt; j++) {
                 const STerm* t = &ss->terms[order[j]];
                 if (done[j] || strlen(t->field) != L) continue;
                 done[j] = 1;
-                eb_fmt(e, "        if (memcmp(k, \"%s\", %d) == 0) return &%s__fields[%d];\n",
-                       t->field, (int)L, name, j);
+                eb_put_cs(e, cc_gr_field_hit_text(&a, t->field, (int)L, name, j));
             }
-            eb_fmt(e, "        break;\n");
+            eb_put_cs(e, cc_gr_get_break_text(&a));
         }
     }
-    eb_fmt(e, "    }\n    return 0;\n}\n");
+    eb_put_cs(e, cc_gr_switch_end_ret0_text(&a));
     /* compiled get: dispatch straight to member reads — the field table is
      * the reflective face, this is the fast one */
-    eb_fmt(e, "static __attribute__((unused)) int %s_get(const %s* v, const char* k, CCGramValue* out) {\n"
-              "    size_t kl = strlen(k);\n    (void)v;\n"
-              "    switch (kl) {\n", name, name);
+    eb_put_cs(e, cc_gr_get_fn_head_text(&a, name));
     {
         unsigned char done[S_MAX_TERMS] = {0};
         for (int i = 0; i < cnt; i++) {
             if (done[i]) continue;
             size_t L = strlen(ss->terms[order[i]].field);
-            eb_fmt(e, "    case %d:\n", (int)L);
+            eb_put_cs(e, cc_gr_get_case_text(&a, (int)L));
             for (int j = i; j < cnt; j++) {
                 const STerm* t = &ss->terms[order[j]];
                 if (done[j] || strlen(t->field) != L) continue;
                 done[j] = 1;
-                eb_fmt(e, "        if (memcmp(k, \"%s\", %d) == 0) {\n"
-                          "            out->kind = %s;\n"
-                          "            out->field = &%s__fields[%d];\n",
-                       t->field, (int)L, rs_gk(t), name, j);
-                if (ss->presence)
-                    eb_fmt(e, "            out->present = (int)((v->cc__set >> %d) & 1);\n", j);
-                else
-                    eb_fmt(e, "            out->present = 1;\n");
-                if (t->kind == SK_BIND_INT)
-                    eb_fmt(e, "            out->i = v->%s;\n", t->field);
-                else if (t->kind == SK_BIND_FLOAT)
-                    eb_fmt(e, "            out->f = v->%s;\n", t->field);
-                else if (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST)
-                    eb_fmt(e, "            out->items = v->%s; out->items_n = v->%s_n;\n",
-                           t->field, t->field);
-                else
-                    eb_fmt(e, "            out->s = v->%s;\n", t->field);
-                eb_fmt(e, "            return 1;\n        }\n");
+                eb_put_cs(e, cc_gr_get_hit_open_text(&a, t->field, (int)L, rs_gk(t), name, j));
+                eb_put_cs(e, cc_gr_get_present_text(&a, ss->presence, j));
+                {
+                    int vk = t->kind == SK_BIND_INT ? 0
+                           : t->kind == SK_BIND_FLOAT ? 1
+                           : (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) ? 2 : 3;
+                    eb_put_cs(e, cc_gr_get_value_text(&a, vk, t->field));
+                }
+                eb_put_cs(e, cc_gr_get_hit_close_text(&a));
             }
-            eb_fmt(e, "        break;\n");
+            eb_put_cs(e, cc_gr_get_break_text(&a));
         }
     }
-    eb_fmt(e, "    }\n    return 0;\n}\n");
+    eb_put_cs(e, cc_gr_switch_end_ret0_text(&a));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
@@ -3953,32 +3939,29 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
          * else. Recursion is bounded: self-referential variants ride the
          * items depth counter. */
         int defv = -1;
-        eb_fmt(e, "    if (p >= n) { *cc_inc = 1; goto %s; }\n", fail);
-        eb_fmt(e, "    if (cc_depth > 128) goto %s;\n", fail);
-        eb_fmt(e, "    switch (s[p]) {\n");
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_union_head_text(&a, fail));
         for (int vi = 0; vi < ss->nuv; vi++) {
             if (ss->uv[vi].db < 0) { defv = vi; continue; }
-            char cb[16];
-            eb_fmt(e, "    case %d: /*%s*/ {\n        out->kind = %s_%s;\n",
-                   ss->uv[vi].db, rw_chr(ss->uv[vi].db, cb), cc__sname, ss->uv[vi].name);
+            eb_put_cs(e, cc_gr_union_case_text(&a, ss->uv[vi].db, cc__sname, ss->uv[vi].name));
             snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[vi].name);
             for (int j = 0; j < ss->uv[vi].nt; j++)
                 rs_emit_term(ss, g, e, lbl, ss->uv[vi].t[j], fail);
             cc__fpfx[0] = '\0';
-            eb_fmt(e, "        break; }\n");
+            eb_put_cs(e, cc_gr_union_break_text(&a));
         }
         if (defv >= 0) {
-            eb_fmt(e, "    default: {\n        out->kind = %s_%s;\n",
-                   cc__sname, ss->uv[defv].name);
+            eb_put_cs(e, cc_gr_union_default_text(&a, cc__sname, ss->uv[defv].name));
             snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[defv].name);
             for (int j = 0; j < ss->uv[defv].nt; j++)
                 rs_emit_term(ss, g, e, lbl, ss->uv[defv].t[j], fail);
             cc__fpfx[0] = '\0';
-            eb_fmt(e, "        break; }\n");
+            eb_put_cs(e, cc_gr_union_break_text(&a));
         } else {
-            eb_fmt(e, "    default: goto %s;\n", fail);
+            eb_put_cs(e, cc_gr_union_no_default_text(&a, fail));
         }
-        eb_fmt(e, "    }\n");
+        eb_put_cs(e, cc_gr_union_close_text(&a));
+        cc_arena_free(&a);
         break;
     }
     }
