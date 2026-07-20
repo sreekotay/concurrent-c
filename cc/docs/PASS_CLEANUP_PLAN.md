@@ -32,13 +32,17 @@ submodule working tree; needs a push to sreekotay/tinycc to land for real):
   node; exclusive end at the first token after the construct (same
   best-effort scope as line_end). Refined further at the sites that stamp
   col_start/col_end.
-- CC-side mirrors updated. NOTE: the stub layout was mirrored in SIX
-  places (visitor_ast_common.h, pass_common.h, checker.c,
-  pass_closure_calls.c, pass_ufcs.c, visit_codegen.c) — adding a field
-  segfaulted until all were found. Consolidating to ONE mirror header with
-  a static_assert on sizeof is part of Phase 1.
-- Validation: `CC_DEBUG_STUB_NODES=2` slices node text straight from the
-  parse buffer by offset.
+- CC-side mirror updates were validated locally, then REVERTED on main:
+  they must land ATOMICALLY with the tinycc patch or a clean clone gets a
+  layout skew between libtcc's node array and the CC-side view (the exact
+  segfault class the prototype hit — the stub layout is mirrored in SIX
+  places: visitor_ast_common.h, pass_common.h, checker.c,
+  pass_closure_calls.c, pass_ufcs.c, visit_codegen.c). The full CC-side
+  diff is preserved in main's history (the "open the span-anchored deep
+  cycle" commit). Consolidating the six mirrors into ONE header with a
+  size assert is part of Phase 1 and removes this hazard class.
+- Validation performed: `CC_DEBUG_STUB_NODES=2` sliced node text straight
+  from the parse buffer by offset — token-exact starts on every node.
 
 Offsets address the PARSE buffer (which the root retains as
 `parse_buffer`); edits target the codegen buffer. Phase 2 closes that gap.
@@ -78,11 +82,13 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
 
 ## Phases (each gated: full suite + 5-TU byte-identity + clean bootstrap)
 
-1. **Land the offset substrate.** Push the TCC patch (needs
+1. **Land the offset substrate — atomically.** Push the TCC patch (needs
    `sreekotay/tinycc` added to session scope, or apply
-   `0002-cc-ast-byte-offsets.patch` by hand), bump the submodule.
-   Consolidate the six struct mirrors into pass_common.h alone with a
-   size assert. Add an offsets smoke (CC_DEBUG_STUB_NODES=2 golden).
+   `0002-cc-ast-byte-offsets.patch` by hand), bump the submodule, and
+   re-apply the CC-side mirror fields IN THE SAME CHANGE (diff preserved
+   in main history). Consolidate the six struct mirrors into
+   pass_common.h alone with a size assert. Add an offsets smoke
+   (CC_DEBUG_STUB_NODES=2 golden).
 2. **Buffer-bridging map.** The rewriter chain (build_parse_input) emits
    (derived_off ↔ source_off) anchor pairs at every splice — each rewriter
    knows both offsets at splice time. One module answers
