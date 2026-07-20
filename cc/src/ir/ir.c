@@ -425,34 +425,7 @@ static size_t cc_ir_find_rhs_end(const char* s, size_t n, size_t from) {
  * the semicolon position, or `n` if not found.  Respects comments,
  * string literals, and bracket nesting. */
 static size_t cc_ir_find_top_level_semi(const char* s, size_t n, size_t from) {
-    int par = 0, brk = 0, br = 0;
-    int in_lc = 0, in_bc = 0;
-    int ins = 0; char q = 0;
-    for (size_t i = from; i < n; i++) {
-        char c  = s[i];
-        char c2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') { in_bc = 0; i++; }
-            continue;
-        }
-        if (ins) {
-            if (c == '\\' && i + 1 < n) { i++; continue; }
-            if (c == q) ins = 0;
-            continue;
-        }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
-        if (c == '(') { par++; continue; }
-        if (c == '[') { brk++; continue; }
-        if (c == '{') { br++;  continue; }
-        if (c == ')') { if (par > 0) par--; continue; }
-        if (c == ']') { if (brk > 0) brk--; continue; }
-        if (c == '}') { if (br  > 0) br--;  continue; }
-        if (par == 0 && brk == 0 && br == 0 && c == ';') return i;
-    }
-    return n;
+    return cc_find_char_top_level(s, from, n, ';');
 }
 
 /* Result of the forward tail scan.  Only valid when `recognized == 1`. */
