@@ -1027,6 +1027,159 @@ static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const 
 `, a);
 }
 
+/* ---- schema driver pieces: manifest, struct decl, fill/parse frames ---- */
+static inline CCString cc_gr_schema_manifest_text(CCArena* a, const char* n, int line,
+                                                  const char* u1, const char* u2,
+                                                  const char* fmtline) {
+    return @string(`/* @grammar(schema) ${n} (line ${line}): ${u1}${u2}. API:
+ *   typedef struct ${n} (+ ${n}Reader cursor)
+ *   cc_parse(${n}, s, n, arena, &out)   / ${n}.parse(...)  -> ${n}_parse
+ *   cc_read(${n}, s, n, &pos, arena, &out) / ${n}.read(...) -> ${n}_read
+ *   cc_reader(${n}, s, n, arena) / ${n}.reader(...)        -> ${n}_reader
+ *   cc_next / cc_at_end / r.next(&out) / r.at_end()    -> ${n}Reader_next/_at_end
+ *   cc_get(T, &v, "field", &out) / v.get(...)          -> T_get + T__fields table
+${fmtline} */
+`, a);
+}
+
+static inline CCString cc_gr_enum_open_text(CCArena* a) {
+    return @string(`typedef enum { `, a);
+}
+
+static inline CCString cc_gr_enum_item_text(CCArena* a, const char* sep,
+                                            const char* n, const char* vname) {
+    return @string(`${sep}${n}_${vname}`, a);
+}
+
+static inline CCString cc_gr_enum_close_text(CCArena* a, const char* n) {
+    return @string(` } ${n}Kind;
+`, a);
+}
+
+static inline CCString cc_gr_ffc_include_text(CCArena* a) {
+    return @string(`#include <ccc/vendor/ffc.h>
+`, a);
+}
+
+static inline CCString cc_gr_struct_open_text(CCArena* a, const char* n) {
+    return @string(`typedef struct ${n} {
+`, a);
+}
+
+/* vk: 0 int, 1 float, 2 slice, 3 cap-array, 4 arena pointer */
+static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
+                                         const char* field, int cap) {
+    if (vk == 0) return @string(`    long long ${field};
+`, a);
+    if (vk == 1) return @string(`    double ${field};
+`, a);
+    if (vk == 2) return @string(`    CCSlice ${field};
+`, a);
+    if (vk == 3) return @string(`    ${T} ${field}[${cap}]; size_t ${field}_n;
+`, a);
+    return @string(`    ${T}* ${field}; size_t ${field}_n;
+`, a);
+}
+
+/* union-variant member: deeper indent, self-references need `struct` */
+static inline CCString cc_gr_umember_text(CCArena* a, int vk, const char* T,
+                                          const char* field, int cap) {
+    if (vk == 0) return @string(`            long long ${field};
+`, a);
+    if (vk == 1) return @string(`            double ${field};
+`, a);
+    if (vk == 2) return @string(`            CCSlice ${field};
+`, a);
+    if (vk == 3) return @string(`            ${T} ${field}[${cap}]; size_t ${field}_n;
+`, a);
+    return @string(`            struct ${T}* ${field}; size_t ${field}_n;
+`, a);
+}
+
+static inline CCString cc_gr_presence_member_text(CCArena* a) {
+    return @string(`    unsigned long long cc__set;   /* presence bitmap, bit i = field i */
+`, a);
+}
+
+static inline CCString cc_gr_union_decl_open_text(CCArena* a, const char* n) {
+    return @string(`    ${n}Kind kind;
+    union {
+`, a);
+}
+
+static inline CCString cc_gr_variant_open_text(CCArena* a) {
+    return @string(`        struct {
+`, a);
+}
+
+static inline CCString cc_gr_variant_close_text(CCArena* a, const char* vname) {
+    return @string(`        } ${vname};
+`, a);
+}
+
+static inline CCString cc_gr_union_decl_close_text(CCArena* a) {
+    return @string(`    } u;
+`, a);
+}
+
+static inline CCString cc_gr_empty_member_text(CCArena* a) {
+    return @string(`    char cc__empty;
+`, a);
+}
+
+static inline CCString cc_gr_struct_close_text(CCArena* a, const char* n) {
+    return @string(`} ${n};
+`, a);
+}
+
+static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n) {
+    return @string(`static int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
+        CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
+    (void)cc_inc; (void)cc_depth;
+    size_t p = *io;
+    (void)arena;
+`, a);
+}
+
+static inline CCString cc_gr_fill_zero_text(CCArena* a) {
+    return @string(`    memset(out, 0, sizeof *out);
+`, a);
+}
+
+static inline CCString cc_gr_fill_tail_text(CCArena* a, const char* fail) {
+    return @string(`    *io = p;
+    return 1;
+${fail}:
+    return 0;
+}
+`, a);
+}
+
+static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
+    return @string(`static int ${n}_parse(const char* s0, size_t n, CCArena* arena, ${n}* out) {
+    const unsigned char* s = (const unsigned char*)s0;
+    size_t p = 0;
+    { int cc_i0 = 0;
+    if (!${n}__fill(s, n, &p, arena, out, &cc_i0, 0)) return 0; }
+    return p == n;
+}
+`, a);
+}
+
+/* CCString face: measure once, allocate exactly, write unchecked */
+static inline CCString cc_gr_tostr_fn_text(CCArena* a, const char* n) {
+    return @string(`static __attribute__((unused)) CCString ${n}_to_str(const ${n}* v, CCArena* arena) {
+    CCString s = cc_string_new();
+    size_t need = ${n}__wmeasure(v);
+    char* buf = (char*)cc_arena_alloc_local(arena, need ? need : 1, 1);
+    if (!buf) return s;
+    ${n}__wput(v, buf);
+    cc_string_push_buffer(&s, buf, (uint32_t)need, arena);
+    return s;
+}
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
