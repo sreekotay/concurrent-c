@@ -13,50 +13,10 @@
 #include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
 #include "util/text.h"
-#include "util/text.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_unwrap_destroy.h"
 #include "util/path.h"
-
-static int cc__match_kw_parse(const char* src, size_t n, size_t pos, const char* kw) {
-    size_t klen = strlen(kw);
-    if (pos + klen > n) return 0;
-    if (memcmp(src + pos, kw, klen) != 0) return 0;
-    if (pos > 0 && (isalnum((unsigned char)src[pos - 1]) || src[pos - 1] == '_')) return 0;
-    if (pos + klen < n && (isalnum((unsigned char)src[pos + klen]) || src[pos + klen] == '_')) return 0;
-    return 1;
-}
-
-static size_t cc__skip_ws_parse(const char* src, size_t n, size_t i) {
-    while (i < n && isspace((unsigned char)src[i])) i++;
-    return i;
-}
-
-static int cc__find_matching_brace_parse(const char* src, size_t len, size_t lbrace, size_t* out_rbrace) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lbrace; i < len; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '{') depth++;
-        else if (c == '}') {
-            depth--;
-            if (depth == 0) {
-                *out_rbrace = i;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
 
 char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
     char* out;
@@ -77,14 +37,14 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
         if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
         if (c == '"') { in_str = 1; continue; }
         if (c == '\'') { in_chr = 1; continue; }
-        if (c != '@' || !cc__match_kw_parse(src, n, i + 1, "comptime")) continue;
+        if (c != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) continue;
         {
             size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc__skip_ws_parse(src, n, kw_end);
+            size_t body_l = cc_skip_ws_len(src, n, kw_end);
             size_t body_r;
             if (body_l >= n) continue;
             if (src[body_l] == '{') {
-                if (!cc__find_matching_brace_parse(src, n, body_l, &body_r)) continue;
+                if (!cc_find_matching_brace(src, n, body_l, &body_r)) continue;
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
                 }
@@ -99,9 +59,9 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
                 }
                 if (lpar) {
                     if (!cc_find_matching_paren(src, n, lpar, &rpar)) continue;
-                    p = cc__skip_ws_parse(src, n, rpar + 1);
+                    p = cc_skip_ws_len(src, n, rpar + 1);
                     if (p < n && src[p] == '{') {
-                        if (!cc__find_matching_brace_parse(src, n, p, &body_r)) continue;
+                        if (!cc_find_matching_brace(src, n, p, &body_r)) continue;
                         end = body_r;
                     } else {
                         for (; p < n; p++) {
@@ -182,61 +142,6 @@ static char* cc__neutralize_comments_preserve_layout_parse(const char* src, size
     return out;
 }
 
-static int cc__is_ident_start_parse(char c) {
-    return isalpha((unsigned char)c) || c == '_';
-}
-
-static int cc__is_ident_char_parse(char c) {
-    return isalnum((unsigned char)c) || c == '_';
-}
-
-static size_t cc__skip_ws_and_comments_parse(const char* src, size_t n, size_t i) {
-    while (i < n) {
-        if (isspace((unsigned char)src[i])) {
-            i++;
-            continue;
-        }
-        if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
-            i += 2;
-            while (i < n && src[i] != '\n') i++;
-            continue;
-        }
-        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
-            if (i + 1 < n) i += 2;
-            continue;
-        }
-        break;
-    }
-    return i;
-}
-
-static int cc__find_matching_paren_parse(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lpar; i < len; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') depth++;
-        else if (c == ')') {
-            depth--;
-            if (depth == 0) {
-                *out_rpar = i;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -245,7 +150,7 @@ static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, s
 
     if (!src || n == 0) return NULL;
     while (i < n) {
-        i = cc__skip_ws_and_comments_parse(src, n, i);
+        i = cc_skip_ws_and_comments(src, n, i);
         if (i >= n) break;
         if (src[i] == '"' || src[i] == '\'') {
             char q = src[i++];
@@ -262,13 +167,13 @@ static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, s
             }
             continue;
         }
-        if (!cc__is_ident_start_parse(src[i])) {
+        if (!cc_is_ident_start(src[i])) {
             i++;
             continue;
         }
 
         size_t ident_start = i;
-        while (i < n && cc__is_ident_char_parse(src[i])) i++;
+        while (i < n && cc_is_ident_char(src[i])) i++;
         size_t ident_end = i;
         size_t ident_len = ident_end - ident_start;
         const char* parser_method = NULL;
@@ -278,7 +183,7 @@ static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, s
 
         if (ident_len <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
 
-        j = cc__skip_ws_and_comments_parse(src, n, ident_end);
+        j = cc_skip_ws_and_comments(src, n, ident_end);
         if (j >= n || src[j] != '(') continue;
 
         if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
@@ -300,15 +205,15 @@ static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, s
             continue;
         }
 
-        if (!cc__find_matching_paren_parse(src, n, j, &paren_end)) continue;
+        if (!cc_find_matching_paren(src, n, j, &paren_end)) continue;
 
         {
-            size_t p = cc__skip_ws_and_comments_parse(src, n, j + 1);
-            if (p < paren_end && cc__is_ident_start_parse(src[p])) {
+            size_t p = cc_skip_ws_and_comments(src, n, j + 1);
+            if (p < paren_end && cc_is_ident_start(src[p])) {
                 size_t first_tok_end = p + 1;
-                while (first_tok_end < paren_end && cc__is_ident_char_parse(src[first_tok_end])) first_tok_end++;
-                p = cc__skip_ws_and_comments_parse(src, n, first_tok_end);
-                if (p < paren_end && (cc__is_ident_start_parse(src[p]) || src[p] == '*')) {
+                while (first_tok_end < paren_end && cc_is_ident_char(src[first_tok_end])) first_tok_end++;
+                p = cc_skip_ws_and_comments(src, n, first_tok_end);
+                if (p < paren_end && (cc_is_ident_start(src[p]) || src[p] == '*')) {
                     i = paren_end + 1;
                     continue;
                 }

@@ -6,7 +6,7 @@ CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install uninstall
-.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules
+.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
 
@@ -76,6 +76,11 @@ fmt:
 
 lint:
 	@./scripts/lint.sh
+
+# Scanner-hygiene ratchet (PASS_CLEANUP_PLAN phase 4): fails on new
+# hand-rolled comment/string state machines outside the canonical scanners.
+lint-scanners:
+	@bash scripts/lint_scanners.sh
 
 check-submodules:
 	@./scripts/check_submodule_reachability.sh
