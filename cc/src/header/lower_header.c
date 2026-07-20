@@ -7,6 +7,9 @@
 
 #include "lower_header.h"
 
+#include "util/text.h"
+#include "util/text_scan.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -132,22 +135,17 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0, last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    /* Headers are lowered before any CC construct can live in a directive
+     * body; keeping '#' lines code-visible matches the old scanner. */
+    scan.at_line_start = 0;
+
     while (i < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
+
         /* Detect T!>(E) pattern */
         if (c == '!' && c2 == '>') {
             size_t sigil_pos = i;
@@ -158,28 +156,14 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
             
             /* Must find '(' */
             if (j < n && src[j] == '(') {
-                j++;  /* skip '(' */
-                
-                /* Skip whitespace inside parens */
-                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
-                
-                /* Find matching ')' */
-                size_t err_start = j;
-                int paren_depth = 1;
-                int in_s = 0, in_c = 0;
-                while (j < n && paren_depth > 0) {
-                    char ch = src[j];
-                    if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
-                    if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
-                    if (ch == '"') { in_s = 1; j++; continue; }
-                    if (ch == '\'') { in_c = 1; j++; continue; }
-                    if (ch == '(') paren_depth++;
-                    else if (ch == ')') paren_depth--;
-                    if (paren_depth > 0) j++;
-                }
-                
-                if (paren_depth == 0) {
-                    size_t err_end = j;
+                size_t lp = j;
+                size_t rp = 0;
+                if (cc_find_matching_paren(src, n, lp, &rp)) {
+                    size_t err_start = lp + 1;
+                    while (err_start < rp && (src[err_start] == ' ' || src[err_start] == '\t' ||
+                                              src[err_start] == '\n' || src[err_start] == '\r')) err_start++;
+                    size_t err_end = rp;
+                    j = rp;
                     
                     /* Trim trailing whitespace from error type */
                     while (err_end > err_start && (src[err_end - 1] == ' ' || src[err_end - 1] == '\t' ||
@@ -251,24 +235,18 @@ static char* cc__strip_generic_factory_blocks_header(const char* src, size_t n) 
     const size_t kwlen_ext = sizeof(kw_ext) - 1;
     char* out = NULL;
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     int found = 0;
     if (!src || n == 0) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0; /* '#' lines stay code-visible, as before */
     while (i < n) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         size_t mlen = 0;
         if (c == 'C') {
             if (i + kwlen_ext <= n && memcmp(src + i, kw_ext, kwlen_ext) == 0 &&
@@ -285,30 +263,18 @@ static char* cc__strip_generic_factory_blocks_header(const char* src, size_t n) 
             while (p < n && isspace((unsigned char)src[p])) p++;
             if (p >= n || src[p] != '(') { i++; continue; }
             /* skip the (Name[, K]) parameter list */
-            int pdepth = 0;
-            for (; p < n; ++p) {
-                if (src[p] == '(') pdepth++;
-                else if (src[p] == ')') { pdepth--; if (pdepth == 0) { p++; break; } }
+            {
+                size_t prp = 0;
+                if (!cc_find_matching_paren(src, n, p, &prp)) { i++; continue; }
+                p = prp + 1;
             }
             while (p < n && isspace((unsigned char)src[p])) p++;
             if (p >= n || src[p] != '{') { i++; continue; }
             size_t body_l = p, body_r = 0;
-            int depth = 0, ls = 0, lcb = 0, st = 0, ch = 0;
-            for (p = body_l; p < n; ++p) {
-                char d = src[p];
-                char d2 = (p + 1 < n) ? src[p + 1] : 0;
-                if (lcb) { if (d == '\n') lcb = 0; continue; }
-                if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
-                if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
-                if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
-                if (d == '/' && d2 == '/') { lcb = 1; p++; continue; }
-                if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
-                if (d == '"') { st = 1; continue; }
-                if (d == '\'') { ch = 1; continue; }
-                if (d == '{') { depth++; continue; }
-                if (d == '}') { depth--; if (depth == 0) { body_r = p; break; } }
+            if (!cc_find_matching_brace(src, n, body_l, &body_r) || body_r <= body_l) {
+                free(out);
+                return NULL;
             }
-            if (body_r <= body_l) { free(out); return NULL; }
             for (size_t k = i; k <= body_r; ++k)
                 if (out[k] != '\n') out[k] = ' ';
             found = 1;

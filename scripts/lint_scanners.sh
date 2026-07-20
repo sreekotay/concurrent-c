@@ -18,10 +18,10 @@ PATTERN='in_bc\b|in_block_comment'
 baseline() {
 cat <<'EOF'
 cc/src/comptime/executor.c 3
-cc/src/comptime/hook_compile.c 15
+cc/src/comptime/hook_compile.c 3
 cc/src/comptime/symbols.c 3
-cc/src/header/lower_header.c 13
-cc/src/ir/ir.c 12
+cc/src/header/lower_header.c 7
+cc/src/ir/ir.c 8
 cc/src/parser/parse.c 7
 cc/src/preprocess/emit_plan.c 9
 cc/src/preprocess/preprocess.c 72

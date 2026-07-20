@@ -1,5 +1,8 @@
 #include "hook_compile.h"
 
+#include "util/text.h"
+#include "util/text_scan.h"
+
 #include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -105,71 +108,15 @@ static int cc__parse_ident(const char* src, size_t n, size_t* io_pos, char* out,
     return len > 0;
 }
 
-static int cc__find_matching_paren(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lpar; i < len; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '(') depth++;
-        else if (c == ')') {
-            depth--;
-            if (depth == 0) {
-                *out_rpar = i;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
 
-static int cc__find_matching_brace(const char* src, size_t len, size_t lbrace, size_t* out_rbrace) {
-    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = lbrace; i < len; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < len) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '{') depth++;
-        else if (c == '}') {
-            depth--;
-            if (depth == 0) {
-                *out_rbrace = i;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
 
-static int cc__match_keyword(const char* src, size_t n, size_t pos, const char* kw) {
-    size_t klen = strlen(kw);
-    if (!src || !kw || pos + klen > n) return 0;
-    if (memcmp(src + pos, kw, klen) != 0) return 0;
-    if (pos > 0 && (isalnum((unsigned char)src[pos - 1]) || src[pos - 1] == '_')) return 0;
-    if (pos + klen < n && (isalnum((unsigned char)src[pos + klen]) || src[pos + klen] == '_')) return 0;
-    return 1;
-}
 
 static int cc__chunk_is_comptime_fn(const char* src, size_t start, size_t end) {
     size_t i = start;
     if (!src || end <= start) return 0;
     while (i < end) {
         if (src[i] != '@') { i++; continue; }
-        if (!cc__match_keyword(src, end, i + 1, "comptime")) { i++; continue; }
+        if (!cc_match_ident_kw(src, end, i + 1, "comptime")) { i++; continue; }
         {
             size_t p = cc__skip_ws(src, end, i + 1 + strlen("comptime"));
             if (p < end && src[p] != '{') return 1;
@@ -183,7 +130,7 @@ static void cc__emit_chunk_stripped(char** out, size_t* out_len, size_t* out_cap
                                     const char* src, size_t start, size_t end) {
     size_t i = start;
     while (i < end) {
-        if (src[i] == '@' && cc__match_keyword(src, end, i + 1, "comptime")) {
+        if (src[i] == '@' && cc_match_ident_kw(src, end, i + 1, "comptime")) {
             size_t p = cc__skip_ws(src, end, i + 1 + strlen("comptime"));
             if (p < end && src[p] != '{') {
                 cc__hc_sb_append(out, out_len, out_cap, src + p, end - p);
@@ -212,26 +159,22 @@ static int cc__chunk_contains_at(const char* src, size_t start, size_t end) {
  * user's main() body, which the hook dylib never needs anyway).  Legitimate
  * pointer-member calls via `->` are left alone. */
 static int cc__chunk_contains_ufcs_shaped_call(const char* src, size_t start, size_t end) {
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src || end <= start) return 0;
-    for (size_t i = start; i < end; ++i) {
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0; /* mid-buffer chunk */
+    for (size_t i = start; i < end; ) {
+        if (cc_inert_scan_step(&scan, src, end, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < end) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c != '.') continue;
+        if (c != '.') { i++; continue; }
+        size_t dot = i;
+        i++; /* every path below continues past this '.' */
         /* Not a '.' if part of '->', '..', or a numeric literal. */
-        if (i > start && src[i - 1] == '-') continue;
-        if (c2 == '.') continue;
+        if (dot > start && src[dot - 1] == '-') continue;
+        if (dot + 1 < end && src[dot + 1] == '.') continue;
         /* LHS must be an identifier ending just before this '.'. */
         {
-            size_t lhs_end = i;
+            size_t lhs_end = dot;
             size_t lhs = lhs_end;
             while (lhs > start) {
                 char p = src[lhs - 1];
@@ -250,7 +193,7 @@ static int cc__chunk_contains_ufcs_shaped_call(const char* src, size_t start, si
         }
         /* RHS must be identifier then '(' (possibly with whitespace). */
         {
-            size_t j = i + 1;
+            size_t j = dot + 1;
             size_t id_start = j;
             while (j < end) {
                 char p = src[j];
@@ -267,35 +210,24 @@ static int cc__chunk_contains_ufcs_shaped_call(const char* src, size_t start, si
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
     char* out;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan scan;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
-    for (size_t i = 0; i < n; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c != '@' || !cc__match_keyword(src, n, i + 1, "comptime")) continue;
-        {
-            size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc__skip_ws(src, n, kw_end);
-            size_t body_r;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_brace(src, n, body_l, &body_r)) continue;
+    cc_inert_scan_init(&scan, NULL);
+    for (size_t i = 0; i < n; ) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+        size_t body_l = 0, body_r = 0;
+        if (src[i] == '@' && cc_match_comptime_block(src, n, i, &body_l, &body_r)) {
             for (size_t j = i; j <= body_r; ++j) {
                 if (out[j] != '\n' && out[j] != '\r') out[j] = ' ';
             }
-            i = body_r;
+            i = body_r + 1;
+            continue;
         }
+        i++;
     }
     return out;
 }
@@ -373,7 +305,7 @@ static void cc__emit_top_level_filtered(char** out,
                 if (c == ')') { if (depth > 0) depth--; if (depth == 0) saw_top_paren_close = 1; continue; }
                 if (c == '{' && depth == 0) {
                     size_t body_r = 0;
-                    if (!cc__find_matching_brace(src, n, j, &body_r)) { return; }
+                    if (!cc_find_matching_brace(src, n, j, &body_r)) { return; }
                     if (!saw_top_paren_close) { j = body_r; continue; }
                     {
                         int drop_at = cc__chunk_contains_at(src, start, body_r + 1) &&
@@ -445,7 +377,7 @@ static int cc__emit_lambda_definition(char** out,
     p = cc__skip_ws(expr_src, expr_len, 0);
     if (p >= expr_len || expr_src[p] != '(') return -1;
     lpar = p;
-    if (!cc__find_matching_paren(expr_src, expr_len, lpar, &rpar)) return -1;
+    if (!cc_find_matching_paren(expr_src, expr_len, lpar, &rpar)) return -1;
     p = lpar + 1;
     while (p < rpar) {
         p = cc__skip_ws(expr_src, rpar, p);
@@ -477,7 +409,7 @@ static int cc__emit_lambda_definition(char** out,
     cc__hc_sb_append_cstr(out, out_len, out_cap, ") ");
     if (expr_src[body_s] == '{') {
         size_t body_r = 0;
-        if (!cc__find_matching_brace(expr_src, expr_len, body_s, &body_r)) return -1;
+        if (!cc_find_matching_brace(expr_src, expr_len, body_s, &body_r)) return -1;
         cc__hc_sb_append(out, out_len, out_cap, expr_src + body_s, body_r + 1 - body_s);
         cc__hc_sb_append_cstr(out, out_len, out_cap, "\n");
         return 0;

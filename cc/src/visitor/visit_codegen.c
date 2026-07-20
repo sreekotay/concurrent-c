@@ -135,7 +135,6 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
     return 0;
 }
 
-static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n);
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
@@ -2130,64 +2129,6 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
 
 
 
-static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
-    char* out = NULL;
-    CCInertScan scan;
-    if (!src) return NULL;
-    out = (char*)malloc(n + 1);
-    if (!out) return NULL;
-    memcpy(out, src, n);
-    out[n] = '\0';
-    cc_inert_scan_init(&scan, NULL);
-    for (size_t i = 0; i < n; ) {
-        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
-        char c = src[i];
-        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) { i++; continue; }
-        {
-            size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
-            size_t body_r;
-            if (body_l >= n) { i++; continue; }
-            if (src[body_l] == '{') {
-                if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
-                for (size_t k = i; k <= body_r; ++k) {
-                    if (out[k] != '\n') out[k] = ' ';
-                }
-                i = body_r + 1;
-                continue;
-            }
-            {
-                size_t p = body_l, lpar = 0, rpar = 0, end = 0;
-                for (; p < n; p++) {
-                    if (src[p] == '(') { lpar = p; break; }
-                }
-                if (lpar) {
-                    if (!cc__find_matching_paren_codegen(src, n, lpar, &rpar)) { i++; continue; }
-                    p = cc__skip_ws_codegen(src, n, rpar + 1);
-                    if (p < n && src[p] == '{') {
-                        if (!cc__find_matching_brace_codegen(src, n, p, &body_r)) { i++; continue; }
-                        end = body_r;
-                    } else {
-                        for (; p < n; p++) {
-                            if (src[p] == ';') { end = p; break; }
-                        }
-                        if (!end) { i++; continue; }
-                    }
-                } else {
-                    for (; p < n; p++) {
-                        if (src[p] == ';') { end = p; break; }
-                    }
-                    if (!end) { i++; continue; }
-                }
-                for (size_t k = i; k <= end; ++k) {
-                    if (out[k] != '\n') out[k] = ' ';
-                }
-                i = end + 1;
-            }
-        }
-    }
-    return out;
-}
 
 /* Cosmetic: drop spaces/tabs that sit immediately before each '\n' (and at
  * EOF).  Blanking `@comptime` constructs to spaces (to keep byte offsets and
