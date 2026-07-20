@@ -171,10 +171,17 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    the `=>` recovery scan) → pass_autoblock (13 inline SMs → CCInertScan)
    → async_ast (anchoring only; analysis stays) → pass_result_unwrap
    (drop the one-physical-line flattening).
-4. **Scanner consolidation.** One canonical scan module; delete the
-   parse.c/preprocess.c duplicates; PASS_INVENTORY rules #1/#2 become
-   lint-greppable (CI check: no new `in_block_comment` locals outside the
-   shared scanner).
+4. **Scanner consolidation: LANDED.** parse.c's seven private duplicates
+   (match_kw / skip_ws / skip_ws_and_comments / matching brace + paren /
+   ident predicates) are deleted in favor of the util/text.h canonicals
+   (preprocess.c's template-scanner duplicates went in PR #83).  The
+   ratchet lint exists: `make lint-scanners`
+   (scripts/lint_scanners.sh) fails on any NEW `in_bc`/`in_block_comment`
+   state machine or growth over the per-file baseline — shrink counts by
+   lowering the baseline in the same commit; it only turns one way.
+   Remaining hand-rolled sites are the recorded baseline (worst:
+   preprocess.c's CCScannerState family, which IS a canonical scanner;
+   hook_compile.c, lower_header.c, ir.c are the real leftovers).
 5. **Reparse diet (stretch).** With exact offsets + the bridge map, batched
    stages stop invalidating each other's coordinates; target dropping the
    5-reparse ceiling.
