@@ -14,12 +14,6 @@ typedef struct CCNodeView {
     int line_end;
     int col_start;
     int col_end;
-    /* Byte offsets into the parsed buffer (0-based, end exclusive; -1 =
-     * unknown). Exact for in-memory parses — the pipeline's case. Unlike
-     * line/col (original-file coordinates once #line applies), these
-     * address the parse buffer directly: slice text without line-walking. */
-    long off_start;
-    long off_end;
     int aux1;
     int aux2;
     const char* aux_s1;
