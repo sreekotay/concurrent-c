@@ -212,9 +212,22 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    falling back to the (line,col) walk otherwise
    (CC_ASYNC_NO_EXACT_OFFSETS reverts for A/B).  Corpus cross-validation:
    output byte-identical under both mechanisms.
-   REMAINING: delete the direct line-mapping call sites that bypass the
-   funnel (the mutated-`cur` buffer scans can't use parse offsets and
-   stay line-keyed by design); then the 5-reparse ceiling itself.
+   FOLLOW-UP LANDED: the last two coordinate breakers (the parser-safe
+   family-UFCS rewrite and the L2 prelude rewrite) probed corpus-green at
+   reparse time — parser mode tolerates both idiom families — and are
+   deleted from the reparse path.  **100% of corpus reparses (937/937)
+   now carry the exact offset mapping.**  The remaining direct
+   line-mapping sites in async_ast are last-resort fallbacks behind
+   structural search + offset helpers (correct layering), and the
+   mutated-`cur` buffer scans stay line-keyed by design.
+
+   5-REPARSE CEILING: measured and CLOSED as not-worth-it.  Reparses
+   cost ~6%% of compile wall-clock (16.7ms of 250ms on an async smoke;
+   44.6ms of 773ms on the twitter grammar TU).  Collapsing stages would
+   trade real structural clarity (each stage reparses because the
+   PREVIOUS stage's edits change the AST it needs) for single-digit
+   wall-clock — against the less-code principle.  Revisit only if
+   profile data changes.
 
 Non-goals: no AST for OUTPUT (text emission stays; the byte-identity gate
 depends on it), no full CC AST rewrite — the stub table + offsets is

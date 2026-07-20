@@ -1294,7 +1294,6 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     char* reparse_clean = NULL;
     char* prep = NULL;
     char* reparse_surface_sanitized = NULL;
-    char* family_rewritten = NULL;
     CCASTRoot* root = NULL;
     const char* pp_in = src;
     size_t pp_in_len = src_len;
@@ -1311,12 +1310,10 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     long diet_shift = -1;
     long diet_valid_from = 0;   /* src offset after the last splice anchor */
     /* Closure/async edits can reintroduce concrete family UFCS before emit splice. */
-    family_rewritten = cc_rewrite_generic_family_ufcs_parser_safe(pp_in, pp_in_len);
-    if (family_rewritten) {
-        pp_in = family_rewritten;
-        pp_in_len = strlen(family_rewritten);
-        if (!diet_broken_by) diet_broken_by = "family_ufcs";
-    }
+    /* (Reparse diet: the parser-safe family-UFCS rewrite used to run here
+     * for concrete family UFCS reintroduced by closure/async edits — but
+     * parser mode tolerates those forms.  Probed corpus-green without it,
+     * including the two files that actually fired it; deleted.) */
     reparse_clean = cc__neutralize_comments_for_reparse(pp_in, pp_in_len);
     if (reparse_clean) {
         pp_in = reparse_clean;
@@ -1385,7 +1382,6 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     }
     free(strict_saved);
     cc_unwrap_destroy_set_symbols(NULL);
-    if (family_rewritten) free(family_rewritten);
     if (reparse_clean) free(reparse_clean);
     if (reparse_surface_sanitized) free(reparse_surface_sanitized);
     if (!pp_buf) goto done;
@@ -1451,19 +1447,11 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * reparse pipeline is a parallel route to the same TCC parser
      * — any idiom TCC rejects on the initial parse will reject
      * here too.  Runs just before `cc_tcc_bridge_parse_string_to_ast`. */
-    {
-        size_t l2_len = 0;
-        char* l2 = cc_l2_rewrite_all(prep, pp_len, &l2_len);
-        if (l2) {
-            if (!diet_broken_by &&
-                (l2_len != pp_len || memcmp(l2, prep, pp_len) != 0)) {
-                diet_broken_by = "l2_rewrite";
-            }
-            free(prep);
-            prep = l2;
-            pp_len = l2_len;
-        }
-    }
+    /* (Reparse diet: the L2 prelude rewriter used to run here on every
+     * reparse "because TCC would reject the same idioms it rejects on the
+     * initial parse" — but the reparse runs in parser mode, which tolerates
+     * them.  Probed corpus-green without it, including the l2_rewriter_*
+     * tests that exercise those idioms; deleted.) */
 
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
