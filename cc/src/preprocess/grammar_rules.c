@@ -434,7 +434,6 @@ static const char* rw_chr(int b, char buf[16]);
 static void rs_esc(char* dst, size_t dstsz, const unsigned char* src, int len);
 static void rw_mark_rule(const RG* g, int r, unsigned char* mark);
 static int rw_pool_needed(const RG* g);
-static void rw_cs_desc(const unsigned char* set, char* out, size_t sz);
 void cc__grammar_note_ufcs_type(const char* type_name);
 
 /* Is `p` (already ws-skipped) sitting on the next rule header `ident :` ? */
@@ -1762,21 +1761,17 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     if (g->npool > 0 && (want_match || want_build) && rw_pool_needed(g)) {
         /* only multi-byte literals read the pool at runtime; otherwise it
          * carries nothing but compile-time name strings — emit nothing */
-        eb_fmt(&e, "static const unsigned char %s__pool[%d] = {", g->name, g->npool);
-        for (int i = 0; i < g->npool; i++) eb_fmt(&e, "%d,", (int)(unsigned char)g->pool[i]);
-        eb_fmt(&e, "};\n");
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(&e, cc_gr_pool_table_text(&a, g->name, (const unsigned char*)g->pool, g->npool));
+        cc_arena_free(&a);
     }
     if (g->nsets > 0 && (want_match || want_build)) {
-        eb_fmt(&e, "#if defined(__SSE2__)\n#include <emmintrin.h>\n#endif\n");
-        eb_fmt(&e, "static const unsigned char %s__cs[%d][32] = {\n", g->name, g->nsets);
-        for (int s = 0; s < g->nsets; s++) {
-            char desc[128];
-            rw_cs_desc(g->sets[s], desc, sizeof desc);
-            eb_fmt(&e, "  /* cs%d: %s */\n  {", s, desc);
-            for (int i = 0; i < 32; i++) eb_fmt(&e, "%u,", (unsigned)g->sets[s][i]);
-            eb_fmt(&e, "},\n");
-        }
-        eb_fmt(&e, "};\n");
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(&e, cc_gr_cs_head_text(&a, g->name, g->nsets));
+        for (int s = 0; s < g->nsets; s++)
+            eb_put_cs(&e, cc_gr_cs_row_text(&a, s, g->sets[s]));
+        eb_put_cs(&e, cc_gr_ftable_close_text(&a));
+        cc_arena_free(&a);
     }
     /* Sharing is semantics-driven. Three classes per rule:
      *   skipped — every reference inlined (aliases, tiny pure bodies): no
@@ -4171,19 +4166,13 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         unsigned char local_xdone[R_MAX_RULES];
         unsigned char* xdone = reg ? reg->x_done : local_xdone;
         memset(local_xdone, 0, sizeof local_xdone);
-        eb_fmt(&e, "/* @grammar(schema) %s (line %d): %s%s. API:\n"
-                   " *   typedef struct %s (+ %sReader cursor)\n"
-                   " *   cc_parse(%s, s, n, arena, &out)   / %s.parse(...)  -> %s_parse\n"
-                   " *   cc_read(%s, s, n, &pos, arena, &out) / %s.read(...) -> %s_read\n"
-                   " *   cc_reader(%s, s, n, arena) / %s.reader(...)        -> %s_reader\n"
-                   " *   cc_next / cc_at_end / r.next(&out) / r.at_end()    -> %sReader_next/_at_end\n"
-                   " *   cc_get(T, &v, \"field\", &out) / v.get(...)          -> T_get + T__fields table\n"
-                   "%s */\n",
-               name, line, reg ? "use " : "inline rules", reg ? ss->usename : "",
-               name, name, name, name, name, name, name, name, name, name, name, name,
-               rs_formatable(ss, g)
-                   ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
-                   : "");
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(&e, cc_gr_schema_manifest_text(&a, name, line,
+                        reg ? "use " : "inline rules", reg ? ss->usename : "",
+                        rs_formatable(ss, g)
+                            ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
+                            : ""));
+          cc_arena_free(&a); }
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
@@ -4258,64 +4247,58 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 ss->presence = conditional && cnt > 0 && cnt <= 64;
             }
             for (int i = 0; i < cnt; i++) ss->bindbit[order[i]] = i;
+            CCArena a = cc_arena_create(32768);
             if (ss->uterm >= 0) {
-                eb_fmt(&e, "typedef enum { ");
+                eb_put_cs(&e, cc_gr_enum_open_text(&a));
                 for (int vi = 0; vi < ss->nuv; vi++)
-                    eb_fmt(&e, "%s%s_%s", vi ? ", " : "", name, ss->uv[vi].name);
-                eb_fmt(&e, " } %sKind;\n", name);
+                    eb_put_cs(&e, cc_gr_enum_item_text(&a, vi ? ", " : "", name, ss->uv[vi].name));
+                eb_put_cs(&e, cc_gr_enum_close_text(&a, name));
             }
             {
                 int need_ffc = 0;
                 for (int i = 0; i < cnt && !need_ffc; i++)
                     if (ss->terms[order[i]].kind == SK_BIND_FLOAT) need_ffc = 1;
-                if (need_ffc) eb_fmt(&e, "#include <ccc/vendor/ffc.h>\n");
+                if (need_ffc) eb_put_cs(&e, cc_gr_ffc_include_text(&a));
             }
-            eb_fmt(&e, "typedef struct %s {\n", name);
+            eb_put_cs(&e, cc_gr_struct_open_text(&a, name));
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
-                if (t->kind == SK_BIND_INT)
-                    eb_fmt(&e, "    long long %s;\n", t->field);
-                else if (t->kind == SK_BIND_FLOAT)
-                    eb_fmt(&e, "    double %s;\n", t->field);
-                else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
-                    eb_fmt(&e, "    CCSlice %s;\n", t->field);
-                else if (t->cap > 0)
-                    eb_fmt(&e, "    %s %s[%d]; size_t %s_n;\n", t->etype, t->field, t->cap, t->field);
-                else
-                    eb_fmt(&e, "    %s* %s; size_t %s_n;\n", t->etype, t->field, t->field);
+                int vk = t->kind == SK_BIND_INT ? 0
+                       : t->kind == SK_BIND_FLOAT ? 1
+                       : (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES) ? 2
+                       : t->cap > 0 ? 3 : 4;
+                eb_put_cs(&e, cc_gr_member_text(&a, vk, t->etype, t->field, t->cap));
             }
             if (ss->presence)
-                eb_fmt(&e, "    unsigned long long cc__set;   /* presence bitmap, bit i = field i */\n");
+                eb_put_cs(&e, cc_gr_presence_member_text(&a));
             if (ss->uterm >= 0) {
-                eb_fmt(&e, "    %sKind kind;\n    union {\n", name);
+                eb_put_cs(&e, cc_gr_union_decl_open_text(&a, name));
                 for (int vi = 0; vi < ss->nuv; vi++) {
-                    eb_fmt(&e, "        struct {\n");
+                    eb_put_cs(&e, cc_gr_variant_open_text(&a));
                     for (int j = 0; j < ss->uv[vi].nt; j++) {
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
                         if (t->kind == SK_BIND_INT)
-                            eb_fmt(&e, "            long long %s;\n", t->field);
+                            eb_put_cs(&e, cc_gr_umember_text(&a, 0, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_FLOAT)
-                            eb_fmt(&e, "            double %s;\n", t->field);
+                            eb_put_cs(&e, cc_gr_umember_text(&a, 1, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
-                            eb_fmt(&e, "            CCSlice %s;\n", t->field);
+                            eb_put_cs(&e, cc_gr_umember_text(&a, 2, t->etype, t->field, 0));
                         else if (t->kind == SK_BIND_ITEMS && t->cap > 0)
-                            eb_fmt(&e, "            %s %s[%d]; size_t %s_n;\n",
-                                   t->etype, t->field, t->cap, t->field);
+                            eb_put_cs(&e, cc_gr_umember_text(&a, 3, t->etype, t->field, t->cap));
                         else if (t->kind == SK_BIND_ITEMS)
-                            eb_fmt(&e, "            struct %s* %s; size_t %s_n;\n",
-                                   t->etype, t->field, t->field);
+                            eb_put_cs(&e, cc_gr_umember_text(&a, 4, t->etype, t->field, 0));
                     }
-                    eb_fmt(&e, "        } %s;\n", ss->uv[vi].name);
+                    eb_put_cs(&e, cc_gr_variant_close_text(&a, ss->uv[vi].name));
                 }
-                eb_fmt(&e, "    } u;\n");
+                eb_put_cs(&e, cc_gr_union_decl_close_text(&a));
             }
-            if (cnt == 0 && ss->uterm < 0) eb_fmt(&e, "    char cc__empty;\n");
-            eb_fmt(&e, "} %s;\n", name);
+            if (cnt == 0 && ss->uterm < 0) eb_put_cs(&e, cc_gr_empty_member_text(&a));
+            eb_put_cs(&e, cc_gr_struct_close_text(&a, name));
+            cc_arena_free(&a);
         }
-        eb_fmt(&e, "static int %s__fill(const unsigned char* s, size_t n, size_t* io,\n"
-                   "        CCArena* arena, %s* out, int* cc_inc, int cc_depth) {\n"
-                   "    (void)cc_inc; (void)cc_depth;\n"
-                   "    size_t p = *io;\n    (void)arena;\n", name, name);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(&e, cc_gr_fill_head_text(&a, name));
+          cc_arena_free(&a); }
         /* zero the struct only when some bind is conditional (inside a
          * fields dispatch): a body whose binds are all unconditional terms
          * assigns every member on the success path — missing-member zeroing
@@ -4325,22 +4308,24 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             for (int ti = 0; ti < ss->nterms && !conditional; ti++)
                 if (ss->terms[ti].kind == SK_FIELDS ||
                     ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
-            if (conditional)
-                eb_fmt(&e, "    memset(out, 0, sizeof *out);\n");
+            if (conditional) {
+                CCArena a = cc_arena_create(32768);
+                eb_put_cs(&e, cc_gr_fill_zero_text(&a));
+                cc_arena_free(&a);
+            }
         }
         {
             char fail[16];
             snprintf(fail, sizeof(fail), "Lz%d", lbl++);
             for (int i = 0; i < ss->nbody; i++)
                 rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
-            eb_fmt(&e, "    *io = p;\n    return 1;\n%s:\n    return 0;\n}\n", fail);
+            { CCArena a = cc_arena_create(32768);
+              eb_put_cs(&e, cc_gr_fill_tail_text(&a, fail));
+              cc_arena_free(&a); }
         }
-        eb_fmt(&e, "static int %s_parse(const char* s0, size_t n, CCArena* arena, %s* out) {\n"
-                   "    const unsigned char* s = (const unsigned char*)s0;\n"
-                   "    size_t p = 0;\n"
-                   "    { int cc_i0 = 0;\n"
-                   "    if (!%s__fill(s, n, &p, arena, out, &cc_i0, 0)) return 0; }\n"
-                   "    return p == n;\n}\n", name, name, name);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(&e, cc_gr_parse_fn_text(&a, name));
+          cc_arena_free(&a); }
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
          * and framed streams call this in a loop instead of requiring p == n */
         /* the streaming face, in the house Result idiom — the SAME contract
@@ -4407,15 +4392,9 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                  * slot arm exists in the _Generic) and the language's
                  * `x.to_str(arena)` idiom. Measure once, allocate exactly,
                  * write unchecked — no retry loop, no transient waste. */
-                eb_fmt(&e, "static __attribute__((unused)) CCString %s_to_str(const %s* v, CCArena* arena) {\n"
-                           "    CCString s = cc_string_new();\n"
-                           "    size_t need = %s__wmeasure(v);\n"
-                           "    char* buf = (char*)cc_arena_alloc_local(arena, need ? need : 1, 1);\n"
-                           "    if (!buf) return s;\n"
-                           "    %s__wput(v, buf);\n"
-                           "    cc_string_push_buffer(&s, buf, (uint32_t)need, arena);\n"
-                           "    return s;\n"
-                           "}\n", name, name, name, name);
+                CCArena a = cc_arena_create(32768);
+                eb_put_cs(&e, cc_gr_tostr_fn_text(&a, name));
+                cc_arena_free(&a);
             }
         }
         cc_sb_append(e.buf, e.len, e.cap, "", 1);
