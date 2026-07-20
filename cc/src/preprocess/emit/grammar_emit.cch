@@ -799,6 +799,149 @@ static inline CCString cc_gr_key_loop_end_text(CCArena* a, int k) {
 `, a);
 }
 
+/* ---- reflective face: field table, name lookup, compiled get ---- */
+static inline CCString cc_gr_ftable_head_text(CCArena* a, const char* n, int cnt) {
+    return @string(`static const CCGramField ${n}__fields[${cnt}] = {
+`, a);
+}
+
+static inline CCString cc_gr_ftable_row_items_text(CCArena* a, const char* field,
+                                                   const char* gk, const char* n,
+                                                   const char* etype) {
+    return @string(`    { "${field}", ${gk}, (unsigned)offsetof(${n}, ${field}), (unsigned)offsetof(${n}, ${field}_n), "${etype}" },
+`, a);
+}
+
+static inline CCString cc_gr_ftable_row_text(CCArena* a, const char* field,
+                                             const char* gk, const char* n) {
+    return @string(`    { "${field}", ${gk}, (unsigned)offsetof(${n}, ${field}), 0, 0 },
+`, a);
+}
+
+static inline CCString cc_gr_ftable_empty_row_text(CCArena* a) {
+    return @string(`    { 0, 0, 0, 0, 0 },
+`, a);
+}
+
+static inline CCString cc_gr_ftable_close_text(CCArena* a) {
+    return @string(`};
+`, a);
+}
+
+static inline CCString cc_gr_field_fn_head_text(CCArena* a, const char* n) {
+    return @string(`static __attribute__((unused)) const CCGramField* ${n}_field(const char* k, size_t kl) {
+    switch (kl) {
+`, a);
+}
+
+static inline CCString cc_gr_get_case_text(CCArena* a, int len) {
+    return @string(`    case ${len}:
+`, a);
+}
+
+static inline CCString cc_gr_field_hit_text(CCArena* a, const char* field, int len,
+                                            const char* n, int j) {
+    return @string(`        if (memcmp(k, "${field}", ${len}) == 0) return &${n}__fields[${j}];
+`, a);
+}
+
+static inline CCString cc_gr_get_break_text(CCArena* a) {
+    return @string(`        break;
+`, a);
+}
+
+static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
+    return @string(`    }
+    return 0;
+}
+`, a);
+}
+
+/* compiled get: dispatch straight to member reads — the field table is
+ * the reflective face, this is the fast one */
+static inline CCString cc_gr_get_fn_head_text(CCArena* a, const char* n) {
+    return @string(`static __attribute__((unused)) int ${n}_get(const ${n}* v, const char* k, CCGramValue* out) {
+    size_t kl = strlen(k);
+    (void)v;
+    switch (kl) {
+`, a);
+}
+
+static inline CCString cc_gr_get_hit_open_text(CCArena* a, const char* field, int len,
+                                               const char* gk, const char* n, int j) {
+    return @string(`        if (memcmp(k, "${field}", ${len}) == 0) {
+            out->kind = ${gk};
+            out->field = &${n}__fields[${j}];
+`, a);
+}
+
+static inline CCString cc_gr_get_present_text(CCArena* a, int presence, int j) {
+    if (presence)
+        return @string(`            out->present = (int)((v->cc__set >> ${j}) & 1);
+`, a);
+    return @string(`            out->present = 1;
+`, a);
+}
+
+/* vk: 0 int, 1 float, 2 items, 3 slice */
+static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* field) {
+    if (vk == 0)
+        return @string(`            out->i = v->${field};
+`, a);
+    if (vk == 1)
+        return @string(`            out->f = v->${field};
+`, a);
+    if (vk == 2)
+        return @string(`            out->items = v->${field}; out->items_n = v->${field}_n;
+`, a);
+    return @string(`            out->s = v->${field};
+`, a);
+}
+
+static inline CCString cc_gr_get_hit_close_text(CCArena* a) {
+    return @string(`            return 1;
+        }
+`, a);
+}
+
+/* ---- tagged-union first-byte dispatch (`one of`) ---- */
+static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
+    return @string(`    if (p >= n) { *cc_inc = 1; goto ${fail}; }
+    if (cc_depth > 128) goto ${fail};
+    switch (s[p]) {
+`, a);
+}
+
+static inline CCString cc_gr_union_case_text(CCArena* a, int db,
+                                             const char* sname, const char* vname) {
+    CCString c = cc_gr_chr_text(a, db);
+    return @string(`    case ${db}: /*${c}*/ {
+        out->kind = ${sname}_${vname};
+`, a);
+}
+
+static inline CCString cc_gr_union_break_text(CCArena* a) {
+    return @string(`        break; }
+`, a);
+}
+
+static inline CCString cc_gr_union_default_text(CCArena* a,
+                                                const char* sname, const char* vname) {
+    return @string(`    default: {
+        out->kind = ${sname}_${vname};
+`, a);
+}
+
+static inline CCString cc_gr_union_no_default_text(CCArena* a, const char* fail) {
+    return @string(`    default: goto ${fail};
+`, a);
+}
+
+static inline CCString cc_gr_union_close_text(CCArena* a) {
+    return @string(`    }
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
