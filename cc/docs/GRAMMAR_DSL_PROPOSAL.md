@@ -221,17 +221,30 @@ and there is NO small-doc cliff: the DSL's specialized C holds a steady
 fraction of the fastest scalar reader at every size people actually hit,
 while keeping the size/memory/borrow advantages above. Gen match == hand
 (~1.5-1.6 GB/s) in the same window.
-**Engine-in-CC port (dogfooding invariant):** the emitter is being ported
-from printf-style C (`eb_fmt`) to CC itself —
-`cc/src/preprocess/emit/grammar_emit.cch`, plain CC using `@string`
-templates + CCString, lowered by `lower_headers` with the lowered `.h`
-CHECKED IN beside it (bootstrap: the tool links grammar_rules.c, so it
-cannot be a hard prereq; `make engine-headers` regenerates). The
-regression gate is BYTE-IDENTICAL emitted C across 5 reference TUs
+**Engine-in-CC port (dogfooding invariant) — COMPLETE:** every byte of
+text the @grammar engine emits now originates in CC itself —
+`cc/src/preprocess/emit/grammar_emit.cch` (~174 text functions, plain CC
+using `@string` templates + CCString), lowered by `lower_headers` with
+the lowered `.h` CHECKED IN beside it (bootstrap: the tool links
+grammar_rules.c, so it cannot be a hard prereq; `make engine-headers`
+regenerates). `eb_fmt` — the printf appender the emitter was built on —
+is DELETED; grammar_rules.c retains analysis, recursion, mode logic, and
+piece sequencing only. The regression gate held at every step:
+BYTE-IDENTICAL emitted C across 5 reference TUs
 (bench_grammar/bench_write/bench_resp + union and shaped-DOM smokes).
-Ported so far: run-scanner ladder, number fast path, tape-node API, tape
-substrate, match entry, schema streaming face. INVARIANT: engine source
-is user-visible CC — any construct the header-lowering path can't take is
+Port order: run-scanner ladder, number fast path, tape-node API, tape
+substrate, match entry, schema streaming face, write tier (flush/int/
+float/leaf/bytes/items/lists + writer frames), schema read tier (binds,
+items, key dispatch, reflection, unions), matcher substrate (tables,
+frames, pads), schema driver (manifest, struct decl, fill/parse/to_str),
+rules recursive core (literals, charsets, refs, keeps, collects, ALT
+dispatch + cascade, opt/any/some backtracking frames), rules driver
+(manifest, codec/dynobj tables, rule frames, parse/collect/dom entries,
+shaped-DOM substrate). Method lesson pinned along the way: a deleted C
+helper still referenced elsewhere linked FINE incrementally (stale
+binary) and only failed from clean — verification now checks make's
+exit status, not just its output. INVARIANT: engine source is
+user-visible CC — any construct the header-lowering path can't take is
 a convergence bug, not a boundary.
 **`${{...}}` verbatim template spans (language addition driven by the
 port):** inside any backtick template (`@string`, `@emit`), `${{` opens a
