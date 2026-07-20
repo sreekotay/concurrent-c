@@ -1463,7 +1463,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
    TCC extensions are available, because the output C is compiled by the host compiler. */
 /* cc__read_entire_file / cc__write_temp_c_file are implemented in visitor_fileutil.c */
 
-/* UFCS span rewrite lives in pass_ufcs.c now (cc__rewrite_ufcs_spans_with_nodes). */
+/* UFCS span rewrite lives in pass_ufcs.c now (cc__collect_ufcs_edits). */
 
 /* Helper to append to a string buffer */
 static void cc__cg_sb_append(char** out, size_t* out_len, size_t* out_cap, const char* s, size_t len) {
