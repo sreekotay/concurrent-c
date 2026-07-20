@@ -485,6 +485,249 @@ static inline CCString cc_gr_write_entry_text(CCArena* a, const char* n) {
 `, a);
 }
 
+/* ---- schema read tier: leaf term text generators ----
+ * These carry only scalar/string parameters; recursion, key-dispatch
+ * loops, and pad interleaving stay with the C drivers.  pfx is the
+ * union-variant field prefix ("" or "u.<variant>."). */
+
+/* extractor head/tail: G__x_R captures a span (xa,xb) + dirty flag */
+static inline CCString cc_gr_x_head_text(CCArena* a, const char* g, const char* r) {
+    return @string(`static int ${g}__x_${r}(const unsigned char* s, size_t n, size_t* io,
+        size_t* xa, size_t* xb, int* xdr) {
+    size_t p = *io;
+    (void)s; (void)n;
+    *xdr = 0;
+`, a);
+}
+
+static inline CCString cc_gr_x_tail_text(CCArena* a, const char* fail) {
+    return @string(`    *io = p; return 1;
+${fail}:
+    return 0;
+}
+`, a);
+}
+
+/* matcher/pad call: G__<class>_<rule>(s, n, &p) or fail */
+static inline CCString cc_gr_pad_call_text(CCArena* a, const char* g, const char* cls,
+                                           const char* r, const char* fail) {
+    return @string(`    if (!${g}__${cls}_${r}(s, n, &p)) goto ${fail};
+`, a);
+}
+
+/* fused int run: ONE accumulate-while-scan loop, no second conversion
+ * pass, no charset loads — the hand-parser inner loop, derived */
+static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
+                                               const char* pfx, const char* field,
+                                               const char* fail) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`    { long long v${k} = 0; size_t d${k};
+`, a), a);
+    if (neg)
+        cc_gr__cat(&o, @string(`      int ng${k} = 0;
+      if (p < n && s[p] == '-') { ng${k} = 1; p++; }
+`, a), a);
+    cc_gr__cat(&o, @string(`      d${k} = p;
+      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++)
+          v${k} = v${k} * 10 + (s[p] - '0');
+      if (p == d${k}) { if (p >= n) *cc_inc = 1; goto ${fail}; }
+`, a), a);
+    if (neg)
+        cc_gr__cat(&o, @string(`      out->${pfx}${field} = ng${k} ? -v${k} : v${k}; }
+`, a), a);
+    else
+        cc_gr__cat(&o, @string(`      out->${pfx}${field} = v${k}; }
+`, a), a);
+    return o;
+}
+
+/* span-bind openers: call the extractor, or set up locals for an inline
+ * expansion (the C driver recurses rg_emit_node between open and close) */
+static inline CCString cc_gr_bind_span_call_text(CCArena* a, int k, const char* g,
+                                                 const char* r, const char* fail) {
+    return @string(`    { size_t xa${k}, xb${k}; int xd${k};
+      if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) goto ${fail};
+`, a);
+}
+
+static inline CCString cc_gr_bind_span_inline_text(CCArena* a, int k) {
+    return @string(`    { size_t xa${k}, xb${k}; int xd${k} = 0;
+      { size_t* xa = &xa${k}; size_t* xb = &xb${k}; int* xdr = &xd${k};
+        (void)xa; (void)xb; (void)xdr;
+`, a);
+}
+
+/* int over the captured span: matcher validated the digits already */
+static inline CCString cc_gr_bind_int_span_text(CCArena* a, int k,
+                                                const char* pfx, const char* field) {
+    return @string(`      (void)xd${k};
+      { long long v${k} = 0; size_t q${k} = xa${k}; int ng${k} = 0;
+        if (q${k} < xb${k} && s[q${k}] == '-') { ng${k} = 1; q${k}++; }
+        for (; q${k} < xb${k} && s[q${k}] >= '0' && s[q${k}] <= '9'; q${k}++)
+            v${k} = v${k} * 10 + (s[q${k}] - '0');
+        out->${pfx}${field} = ng${k} ? -v${k} : v${k}; } }
+`, a);
+}
+
+/* float over the captured span: ffc parses JSON doubles */
+static inline CCString cc_gr_bind_float_span_text(CCArena* a, int k, const char* pfx,
+                                                  const char* field, const char* fail) {
+    return @string(`      (void)xd${k};
+      { ffc_parse_options o${k}; o${k}.format = FFC_PRESET_JSON; o${k}.decimal_point = '.';
+        double v${k} = 0.0;
+        ffc_result r${k} = ffc_from_chars_double_options(
+            (const char*)(s + xa${k}), (const char*)(s + xb${k}), &v${k}, o${k});
+        if (r${k}.outcome != FFC_OUTCOME_OK) goto ${fail};
+        out->${pfx}${field} = v${k}; } }
+`, a);
+}
+
+/* slice bind closers: clean spans borrow raw, dirty spans decode through
+ * the rule's codec (same provenance contract as the collect/DOM tiers) */
+static inline CCString cc_gr_bind_slice_codec_text(CCArena* a, int k, const char* pfx,
+                                                   const char* field, const char* codec,
+                                                   const char* fail) {
+    return @string(`      if (!xd${k}) out->${pfx}${field} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
+      else if (!${codec}((const char*)(s + xa${k}), xb${k} - xa${k}, &out->${pfx}${field}, arena)) goto ${fail};
+    }
+`, a);
+}
+
+static inline CCString cc_gr_bind_slice_borrow_text(CCArena* a, int k,
+                                                    const char* pfx, const char* field) {
+    return @string(`      (void)xd${k};
+      out->${pfx}${field} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
+    }
+`, a);
+}
+
+/* counted opaque payload: exactly out->cfield bytes, borrowed */
+static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* pfx,
+                                             const char* cfield, const char* field,
+                                             const char* fail) {
+    return @string(`    { long long L${k} = out->${pfx}${cfield};
+      if (L${k} < 0) goto ${fail};
+      if ((unsigned long long)L${k} > (unsigned long long)(n - p)) { *cc_inc = 1; goto ${fail}; }
+      out->${pfx}${field} = cc_slice_from_buffer((void*)(s + p), (size_t)L${k});
+      p += (size_t)L${k}; }
+`, a);
+}
+
+/* count-driven items: cap > 0 fills the struct's INLINE array (zero
+ * alloc; larger count is a protocol error), else exact-size allocation */
+static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T,
+                                                const char* pfx, const char* field,
+                                                const char* cfield, int cap,
+                                                const char* fail) {
+    if (cap > 0)
+        return @string(`    { long long C${k} = out->${pfx}${cfield};
+      if (C${k} < 0 || C${k} > ${cap}) goto ${fail};
+      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
+      for (long long i${k} = 0; i${k} < C${k}; i${k}++)
+          if (!${T}__fill(s, n, &p, arena, &out->${pfx}${field}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
+      out->${pfx}${field}_n = (size_t)C${k}; }
+`, a);
+    return @string(`    { long long C${k} = out->${pfx}${cfield};
+      if (C${k} < 0) goto ${fail};
+      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
+      size_t cap${k} = C${k} > 0 ? (size_t)C${k} : 1;
+      ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
+      if (!v${k}) goto ${fail};
+      for (long long i${k} = 0; i${k} < C${k}; i${k}++)
+          if (!${T}__fill(s, n, &p, arena, &v${k}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
+      out->${pfx}${field} = v${k}; out->${pfx}${field}_n = (size_t)C${k}; }
+`, a);
+}
+
+/* growable element-vector pieces, shared by the delimited items form and
+ * the narrowed list form (the drivers interleave pads between them) */
+static inline CCString cc_gr_lvec_head_text(CCArena* a, int k, const char* T, const char* fail) {
+    return @string(`    { size_t cap${k} = 8, cnt${k} = 0;
+    ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
+    if (!v${k}) goto ${fail};
+`, a);
+}
+
+static inline CCString cc_gr_byte_check_text(CCArena* a, int b, const char* fail) {
+    return @string(`    if (!(p < n && s[p] == ${b})) goto ${fail};
+    p++;
+`, a);
+}
+
+static inline CCString cc_gr_loop_open_text(CCArena* a, int b) {
+    return @string(`    if (p < n && s[p] != ${b}) {
+    for (;;) {
+`, a);
+}
+
+static inline CCString cc_gr_lvec_grow_text(CCArena* a, int k, const char* T, const char* fail) {
+    return @string(`    if (cnt${k} == cap${k}) {
+        ${T}* nv${k} = (${T}*)cc_arena_realloc(arena, arena, v${k},
+            cap${k} * sizeof(${T}), cap${k} * 2 * sizeof(${T}), _Alignof(${T}));
+        if (!nv${k}) goto ${fail};
+        v${k} = nv${k}; cap${k} *= 2;
+    }
+`, a);
+}
+
+static inline CCString cc_gr_lvec_fill_text(CCArena* a, int k, const char* T, const char* fail) {
+    return @string(`    if (!${T}__fill(s, n, &p, arena, &v${k}[cnt${k}], cc_inc, cc_depth + 1)) goto ${fail};
+    cnt${k}++;
+`, a);
+}
+
+/* separator handling: the narrowed form has no pads inside the sep arm
+ * (one piece); the delimited items form pads after the sep (split) */
+static inline CCString cc_gr_lvec_sep_close_text(CCArena* a, int b) {
+    return @string(`    if (p < n && s[p] == ${b}) { p++; continue; }
+    break;
+    }
+    }
+`, a);
+}
+
+static inline CCString cc_gr_lvec_sep_open_text(CCArena* a, int b) {
+    return @string(`    if (p < n && s[p] == ${b}) { p++;
+`, a);
+}
+
+static inline CCString cc_gr_lvec_loop_close_text(CCArena* a) {
+    return @string(`    continue; }
+    break;
+    }
+    }
+`, a);
+}
+
+static inline CCString cc_gr_lvec_store_text(CCArena* a, int k,
+                                             const char* pfx, const char* field) {
+    return @string(`    out->${pfx}${field} = v${k}; out->${pfx}${field}_n = cnt${k}; }
+`, a);
+}
+
+static inline CCString cc_gr_presence_text(CCArena* a, int bit) {
+    return @string(`    out->cc__set |= 1ULL << ${bit};
+`, a);
+}
+
+/* literal terms: bounds-driven failure = INCOMPLETE, content = malformed */
+static inline CCString cc_gr_lit1_term_text(CCArena* a, int b, const char* fail) {
+    CCString c = cc_gr_chr_text(a, b);
+    return @string(`    if (p >= n) { *cc_inc = 1; goto ${fail}; }
+    if (s[p] != ${b} /*${c}*/) goto ${fail};
+    p++;
+`, a);
+}
+
+static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit, int len,
+                                            const char* fail) {
+    CCString esc = cc_gr_esc_text(a, lit, len);
+    return @string(`    if (p + ${len} > n) { *cc_inc = 1; goto ${fail}; }
+    if (memcmp(s + p, "${esc}", ${len}) != 0) goto ${fail};
+    p += ${len};
+`, a);
+}
+
 /* ---- rules-tier match entry ---- */
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {

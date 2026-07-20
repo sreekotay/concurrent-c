@@ -3183,21 +3183,24 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
 
 static void rs_emit_x(RG* g, EB* e, int* lbl, int r) {
     e->mode = 2;
-    eb_fmt(e, "static int %s__x_%s(const unsigned char* s, size_t n, size_t* io,\n"
-              "        size_t* xa, size_t* xb, int* xdr) {\n"
-              "    size_t p = *io;\n    (void)s; (void)n;\n    *xdr = 0;\n",
-           g->name, g->rules[r].name);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_x_head_text(&a, g->name, g->rules[r].name));
+      cc_arena_free(&a); }
     char fail[16];
     snprintf(fail, sizeof(fail), "Lf%d", (*lbl)++);
     rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
-    eb_fmt(e, "    *io = p; return 1;\n%s:\n    return 0;\n}\n", fail);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_x_tail_text(&a, fail));
+      cc_arena_free(&a); }
     e->mode = 0;
 }
 
 static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
     if (prule < 0) return;
-    eb_fmt(e, "    if (!%s__%s_%s(s, n, &p)) goto %s;\n",
-           g->name, rs_class(g, e->K, prule), g->rules[prule].name, fail);
+    { CCArena a = cc_arena_create(32768);
+      eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, rs_class(g, e->K, prule),
+                                       g->rules[prule].name, fail));
+      cc_arena_free(&a); }
 }
 
 /* fusable int run: `keep [opt(charset=={'-'}) some(charset=contiguous range
@@ -3258,18 +3261,9 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
     if (t->kind == SK_BIND_INT) {
         int neg;
         if (rs_int_run_shape(g, t->rule, &neg)) {
-            eb_fmt(e, "    { long long v%d = 0; size_t d%d;\n", k, k);
-            if (neg)
-                eb_fmt(e, "      int ng%d = 0;\n"
-                          "      if (p < n && s[p] == '-') { ng%d = 1; p++; }\n", k, k);
-            eb_fmt(e, "      d%d = p;\n"
-                      "      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++)\n"
-                      "          v%d = v%d * 10 + (s[p] - '0');\n"
-                      "      if (p == d%d) { if (p >= n) *cc_inc = 1; goto %s; }\n", k, k, k, k, fail);
-            if (neg)
-                eb_fmt(e, "      out->%s%s = ng%d ? -v%d : v%d; }\n", cc__fpfx, t->field, k, k, k);
-            else
-                eb_fmt(e, "      out->%s%s = v%d; }\n", cc__fpfx, t->field, k);
+            CCArena a = cc_arena_create(32768);
+            eb_put_cs(e, cc_gr_bind_int_run_text(&a, k, neg, cc__fpfx, t->field, fail));
+            cc_arena_free(&a);
             return;
         }
     }
@@ -3279,58 +3273,43 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
      * path, so the locals are always written. Bigger rules stay calls. */
     int body = g->rules[t->rule].node;
     if (g->nodes[body].kind == RN_KEEP && rg_inline_size(g, g->nodes[body].a, 0) <= 16) {
-        eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d = 0;\n"
-                  "      { size_t* xa = &xa%d; size_t* xb = &xb%d; int* xdr = &xd%d;\n"
-                  "        (void)xa; (void)xb; (void)xdr;\n",
-               k, k, k, k, k, k);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_bind_span_inline_text(&a, k));
+          cc_arena_free(&a); }
         e->mode = 2;
         rg_emit_node(g, e, body, fail, lbl, t->rule);
         e->mode = 0;
         eb_fmt(e, "      }\n");
     } else {
-        eb_fmt(e, "    { size_t xa%d, xb%d; int xd%d;\n"
-                  "      if (!%s__x_%s(s, n, &p, &xa%d, &xb%d, &xd%d)) goto %s;\n",
-               k, k, k, g->name, g->rules[t->rule].name, k, k, k, fail);
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_bind_span_call_text(&a, k, g->name, g->rules[t->rule].name, fail));
+        cc_arena_free(&a);
     }
     if (t->kind == SK_BIND_INT) {
         /* inline accumulation over the captured span — the matcher already
          * validated the digits; strtoll would copy and re-scan them (and is
          * a strtoll prefix-parse either way: stops at the first non-digit,
          * so `int` over a float span binds its integer part). */
-        eb_fmt(e, "      (void)xd%d;\n"
-                  "      { long long v%d = 0; size_t q%d = xa%d; int ng%d = 0;\n"
-                  "        if (q%d < xb%d && s[q%d] == '-') { ng%d = 1; q%d++; }\n"
-                  "        for (; q%d < xb%d && s[q%d] >= '0' && s[q%d] <= '9'; q%d++)\n"
-                  "            v%d = v%d * 10 + (s[q%d] - '0');\n"
-                  "        out->%s%s = ng%d ? -v%d : v%d; } }\n",
-               k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, k, cc__fpfx, t->field, k, k, k);
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_bind_int_span_text(&a, k, cc__fpfx, t->field));
+        cc_arena_free(&a);
         return;
     }
     if (t->kind == SK_BIND_FLOAT) {
         /* Number text was borrowed by the keep; ffc parses JSON doubles here. */
-        eb_fmt(e, "      (void)xd%d;\n"
-                  "      { ffc_parse_options o%d; o%d.format = FFC_PRESET_JSON; o%d.decimal_point = '.';\n"
-                  "        double v%d = 0.0;\n"
-                  "        ffc_result r%d = ffc_from_chars_double_options(\n"
-                  "            (const char*)(s + xa%d), (const char*)(s + xb%d), &v%d, o%d);\n"
-                  "        if (r%d.outcome != FFC_OUTCOME_OK) goto %s;\n"
-                  "        out->%s%s = v%d; } }\n",
-               k, k, k, k, k, k, k, k, k, k, k, fail, cc__fpfx, t->field, k);
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_bind_float_span_text(&a, k, cc__fpfx, t->field, fail));
+        cc_arena_free(&a);
         return;
     }
     int cd = rs_rule_codec(g, t->rule);
-    if (cd > 0) {
-        /* clean spans borrow raw; dirty spans decode through the rule's codec
-         * (same provenance contract as the collect/DOM tiers) */
-        eb_fmt(e, "      if (!xd%d) out->%s%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n"
-                  "      else if (!%s((const char*)(s + xa%d), xb%d - xa%d, &out->%s%s, arena)) goto %s;\n"
-                  "    }\n",
-               k, cc__fpfx, t->field, k, k, k, g->codecs[cd - 1], k, k, k, cc__fpfx, t->field, fail);
-    } else {
-        eb_fmt(e, "      (void)xd%d;\n"
-                  "      out->%s%s = cc_slice_from_buffer((void*)(s + xa%d), xb%d - xa%d);\n    }\n",
-               k, cc__fpfx, t->field, k, k, k);
-    }
+    { CCArena a = cc_arena_create(32768);
+      if (cd > 0)
+          eb_put_cs(e, cc_gr_bind_slice_codec_text(&a, k, cc__fpfx, t->field,
+                                                   g->codecs[cd - 1], fail));
+      else
+          eb_put_cs(e, cc_gr_bind_slice_borrow_text(&a, k, cc__fpfx, t->field));
+      cc_arena_free(&a); }
 }
 
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail);
@@ -3824,26 +3803,20 @@ static void rs_emit_narrow_list(RG* g, EB* e, int* lbl, const STerm* t, const ch
     const RNarrow* w = &t->nw;
     int k = (*lbl)++;
     const char* T = t->etype;
-    eb_fmt(e, "    { size_t cap%d = 8, cnt%d = 0;\n"
-              "    %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
-              "    if (!v%d) goto %s;\n",
-           k, k, T, k, T, k, T, T, k, fail);
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->open_b, fail);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_lvec_head_text(&a, k, T, fail));
+    eb_put_cs(e, cc_gr_byte_check_text(&a, w->open_b, fail));
     rw_emit_pads(g, e, w->lpad, w->nlpad, fail);
-    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", w->close_b);
-    eb_fmt(e, "    if (cnt%d == cap%d) {\n"
-              "        %s* nv%d = (%s*)cc_arena_realloc(arena, arena, v%d,\n"
-              "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
-              "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
-           k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
+    eb_put_cs(e, cc_gr_loop_open_text(&a, w->close_b));
+    eb_put_cs(e, cc_gr_lvec_grow_text(&a, k, T, fail));
     rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc, cc_depth + 1)) goto %s;\n    cnt%d++;\n",
-           T, k, k, fail, k);
+    eb_put_cs(e, cc_gr_lvec_fill_text(&a, k, T, fail));
     rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-    eb_fmt(e, "    if (p < n && s[p] == %d) { p++; continue; }\n    break;\n    }\n    }\n", w->sep_b);
+    eb_put_cs(e, cc_gr_lvec_sep_close_text(&a, w->sep_b));
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", w->close_b, fail);
-    eb_fmt(e, "    out->%s%s = v%d; out->%s%s_n = cnt%d; }\n", cc__fpfx, t->field, k, cc__fpfx, t->field, k);
+    eb_put_cs(e, cc_gr_byte_check_text(&a, w->close_b, fail));
+    eb_put_cs(e, cc_gr_lvec_store_text(&a, k, cc__fpfx, t->field));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
@@ -3899,72 +3872,44 @@ static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
      * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
-    eb_fmt(e, "    { long long L%d = out->%s%s;\n"
-              "      if (L%d < 0) goto %s;\n"
-              "      if ((unsigned long long)L%d > (unsigned long long)(n - p)) { *cc_inc = 1; goto %s; }\n"
-              "      out->%s%s = cc_slice_from_buffer((void*)(s + p), (size_t)L%d);\n"
-              "      p += (size_t)L%d; }\n",
-           k, cc__fpfx, t->cfield, k, fail, k, fail, cc__fpfx, t->field, k, k);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_bytes_term_text(&a, k, cc__fpfx, t->cfield, t->field, fail));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
-    const char* T = t->etype;
-    if (t->cap > 0) {
-        /* comptime cap: elements fill the struct's INLINE array — no
-         * allocation at all; a larger count is a protocol error */
-        eb_fmt(e, "    { long long C%d = out->%s%s;\n"
-                  "      if (C%d < 0 || C%d > %d) goto %s;\n"
-                  "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
-                  "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
-                  "          if (!%s__fill(s, n, &p, arena, &out->%s%s[i%d], cc_inc, cc_depth + 1)) goto %s;\n"
-                  "      out->%s%s_n = (size_t)C%d; }\n",
-               k, cc__fpfx, t->cfield, k, k, t->cap, fail, k, fail,
-               k, k, k, k, T, cc__fpfx, t->field, k, fail, cc__fpfx, t->field, k);
-        return;
-    }
-    /* the count is data: exact-size allocation, no realloc, no delimiters */
-    eb_fmt(e, "    { long long C%d = out->%s%s;\n"
-              "      if (C%d < 0) goto %s;\n"
-              "      if ((unsigned long long)C%d > n - p) { *cc_inc = 1; goto %s; }\n"
-              "      size_t cap%d = C%d > 0 ? (size_t)C%d : 1;\n"
-              "      %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
-              "      if (!v%d) goto %s;\n"
-              "      for (long long i%d = 0; i%d < C%d; i%d++)\n"
-              "          if (!%s__fill(s, n, &p, arena, &v%d[i%d], cc_inc, cc_depth + 1)) goto %s;\n"
-              "      out->%s%s = v%d; out->%s%s_n = (size_t)C%d; }\n",
-           k, cc__fpfx, t->cfield, k, fail, k, fail, k, k, k, T, k, T, k, T, T, k, fail,
-           k, k, k, k, T, k, k, fail, cc__fpfx, t->field, k, cc__fpfx, t->field, k);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_items_counted_text(&a, k, t->etype, cc__fpfx, t->field,
+                                          t->cfield, t->cap, fail));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
     int k = (*lbl)++;
     const char* T = t->etype;
-    eb_fmt(e, "    { size_t cap%d = 8, cnt%d = 0;\n"
-              "    %s* v%d = (%s*)cc_arena_alloc_local(arena, cap%d * sizeof(%s), _Alignof(%s));\n"
-              "    if (!v%d) goto %s;\n",
-           k, k, T, k, T, k, T, T, k, fail);
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->io_, fail);
+    CCArena a = cc_arena_create(32768);
+    eb_put_cs(e, cc_gr_lvec_head_text(&a, k, T, fail));
+    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->io_, fail));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_fmt(e, "    if (p < n && s[p] != %d) {\n    for (;;) {\n", ss->ic_);
-    eb_fmt(e, "    if (cnt%d == cap%d) {\n"
-              "        %s* nv%d = (%s*)cc_arena_realloc(arena, arena, v%d,\n"
-              "            cap%d * sizeof(%s), cap%d * 2 * sizeof(%s), _Alignof(%s));\n"
-              "        if (!nv%d) goto %s;\n        v%d = nv%d; cap%d *= 2;\n    }\n",
-           k, k, T, k, T, k, k, T, k, T, T, k, fail, k, k, k);
-    eb_fmt(e, "    if (!%s__fill(s, n, &p, arena, &v%d[cnt%d], cc_inc, cc_depth + 1)) goto %s;\n    cnt%d++;\n",
-           T, k, k, fail, k);
+    eb_put_cs(e, cc_gr_loop_open_text(&a, ss->ic_));
+    eb_put_cs(e, cc_gr_lvec_grow_text(&a, k, T, fail));
+    eb_put_cs(e, cc_gr_lvec_fill_text(&a, k, T, fail));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_fmt(e, "    if (p < n && s[p] == %d) { p++;\n", ss->is_);
+    eb_put_cs(e, cc_gr_lvec_sep_open_text(&a, ss->is_));
     rs_emit_pad(g, e, ss->ripad, fail);
-    eb_fmt(e, "    continue; }\n    break;\n    }\n    }\n");
-    eb_fmt(e, "    if (!(p < n && s[p] == %d)) goto %s;\n    p++;\n", ss->ic_, fail);
-    eb_fmt(e, "    out->%s%s = v%d; out->%s%s_n = cnt%d; }\n", cc__fpfx, t->field, k, cc__fpfx, t->field, k);
+    eb_put_cs(e, cc_gr_lvec_loop_close_text(&a));
+    eb_put_cs(e, cc_gr_byte_check_text(&a, ss->ic_, fail));
+    eb_put_cs(e, cc_gr_lvec_store_text(&a, k, cc__fpfx, t->field));
+    cc_arena_free(&a);
 }
 
 static void rs_emit_presence(const SS* ss, EB* e, int ti) {
-    if (ss->presence && ss->bindbit[ti] >= 0)
-        eb_fmt(e, "    out->cc__set |= 1ULL << %d;\n", ss->bindbit[ti]);
+    if (ss->presence && ss->bindbit[ti] >= 0) {
+        CCArena a = cc_arena_create(32768);
+        eb_put_cs(e, cc_gr_presence_text(&a, ss->bindbit[ti]));
+        cc_arena_free(&a);
+    }
 }
 
 static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fail) {
@@ -3973,23 +3918,18 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
     case SK_LIT:
         /* bounds-driven failure = INCOMPLETE (the frame ran past the bytes
          * given); content-driven = malformed. Exactly decidable here. */
-        if (t->litlen == 1) {
-            char cb[16];
-            eb_fmt(e, "    if (p >= n) { *cc_inc = 1; goto %s; }\n"
-                      "    if (s[p] != %d /*%s*/) goto %s;\n    p++;\n",
-                   fail, (int)t->lit[0], rw_chr((int)t->lit[0], cb), fail);
-        } else {
-            char esc[128];
-            rs_esc(esc, sizeof esc, t->lit, t->litlen);
-            eb_fmt(e, "    if (p + %d > n) { *cc_inc = 1; goto %s; }\n"
-                      "    if (memcmp(s + p, \"%s\", %d) != 0) goto %s;\n"
-                      "    p += %d;\n",
-                   t->litlen, fail, esc, t->litlen, fail, t->litlen);
-        }
+        { CCArena a = cc_arena_create(32768);
+          if (t->litlen == 1)
+              eb_put_cs(e, cc_gr_lit1_term_text(&a, (int)t->lit[0], fail));
+          else
+              eb_put_cs(e, cc_gr_litn_term_text(&a, t->lit, t->litlen, fail));
+          cc_arena_free(&a); }
         break;
     case SK_RULE:
-        eb_fmt(e, "    if (!%s__%s_%s(s, n, &p)) goto %s;\n",
-               g->name, rs_class(g, e->K, t->rule), g->rules[t->rule].name, fail);
+        { CCArena a = cc_arena_create(32768);
+          eb_put_cs(e, cc_gr_pad_call_text(&a, g->name, rs_class(g, e->K, t->rule),
+                                           g->rules[t->rule].name, fail));
+          cc_arena_free(&a); }
         break;
     case SK_BIND_SLICE:
     case SK_BIND_INT:
