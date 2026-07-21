@@ -113,16 +113,12 @@ void cc_pp_get_splice_coord_info(size_t* last_anchor, long* delta, int* user_rew
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_include_expanded(const char* input_path);
 
-// Phase 1: build the canonical CC source buffer consumed by comptime.
+// Build the include-expanded CC source buffer consumed by comptime registration
+// discovery (type registrations, UFCS hooks). Line markers are preserved.
 //
-// This is intentionally NOT the final lowered-C form. Callers should treat the
-// returned buffer as the normalized CC program that phase 2 ("execute
-// comptime") will inspect/evaluate before any host-C-facing lowering happens.
-//
-// Current implementation: include-expanded CC source with line markers
-// preserved. This is a transitional substrate; the abstraction exists so we
-// can later replace it with a richer canonical preprocessed-CC form without
-// changing parser/codegen callers.
+// This intentionally does NOT run phase-1 sugar lowering: registrations live in
+// already-lowered header harvest / user @comptime text. The main TU still gets
+// full phase-1 via build_parse_input.
 //
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_comptime_source(const char* input_path);

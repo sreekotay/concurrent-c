@@ -29,7 +29,7 @@ Inside `cc__apply_phase3_host_lowering_passes` (used by the normal preprocess-to
 7. `cc__rewrite_result_constructors`
 8. ... (remaining phase-3 passes)
 
-Earlier in phase 2 (`cc__canonicalize_cc_for_comptime` / the type-syntax pass), the result-function name registry is populated: each `T !> (E) NAME(...)` declaration that the type-syntax pass recognizes is added to the registry via `cc_result_fn_registry_add`. The registry is then consulted by the slice-7 scan at the end of `cc__rewrite_result_unwrap`.
+Earlier in phase 1 (`build_parse_input` / the type-syntax pass), the result-function name registry is populated: each `T !> (E) NAME(...)` declaration that the type-syntax pass recognizes is added to the registry via `cc_result_fn_registry_add`. The registry is then consulted by the slice-7 scan at the end of `cc__rewrite_result_unwrap`.
 
 ### In `cc/src/visitor/visit_codegen.c`
 

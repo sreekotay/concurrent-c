@@ -11201,43 +11201,13 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     return 0;
 }
 
-static char* cc__canonicalize_cc_for_comptime(const char* input,
-                                              size_t input_len,
-                                              const char* input_path) {
-    CCPassChain chain;
-    char* out = NULL;
-    if (!input || input_len == 0) return NULL;
-
-    /* Phase 1 should normalize CC surface syntax into a more canonical CC
-       program, but stop short of parser stubs or host-C survival lowering.
-       Keep this deliberately conservative while comptime execution still grows:
-       normalize type/syntax sugar, not final C-facing mechanics. */
-    cc_result_spec_table_reset(&cc__result_specs);
-    cc_result_spec_table_set_global(&cc__result_specs);
-    if (!cc_type_graph_ensure_global_cleared()) return NULL;
-
-    cc_pass_chain_init(&chain, input, input_len);
-    if (cc_pass_chain_apply(&chain, cc__rewrite_link_directives(chain.src, chain.len)) < 0) goto cleanup;
-    if (cc__apply_phase1_canonical_passes(&chain, input_path, 0) != 0) goto cleanup;
-
-    out = strdup(chain.src);
-cleanup:
-    cc_pass_chain_free(&chain);
-    return out;
-}
-
 char* cc_preprocess_comptime_source(const char* input_path) {
-    char* expanded = NULL;
-    char* canonical = NULL;
     if (!input_path || !input_path[0]) return NULL;
-    /* Phase 1: canonicalize source for comptime.
-       Current stage starts from the include-expanded CC source stream, then
-       applies a conservative set of CC-to-CC normalization passes. Keep this
-       behind a dedicated helper so phase 2 (execute/evaluate comptime) is
-       decoupled from the eventual choice of canonical CC representation. */
-    expanded = cc_preprocess_include_expanded(input_path);
-    if (!expanded) return NULL;
-    canonical = cc__canonicalize_cc_for_comptime(expanded, strlen(expanded), input_path);
-    free(expanded);
-    return canonical;
+    /* Registration / UFCS discovery scans @comptime registration text from the
+       include-expanded stream (user file + harvested header bodies). That text
+       is already host-C / lowered .h content — running full phase-1 sugar
+       lowering over the expanded prelude was the dominant emit-c cost and is
+       not required for collecting cc_type_register / UFCS hooks.
+       Surface sugar for the main TU still goes through build_parse_input. */
+    return cc_preprocess_include_expanded(input_path);
 }

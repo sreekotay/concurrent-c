@@ -239,6 +239,11 @@ void cc_tcc_bridge_free_ast(CCASTRoot* root) {
         root->codegen_buffer = NULL;
         root->codegen_buffer_len = 0;
     }
+    if (root->comptime_buffer) {
+        free(root->comptime_buffer);
+        root->comptime_buffer = NULL;
+        root->comptime_buffer_len = 0;
+    }
     free(root);
 }
 #else

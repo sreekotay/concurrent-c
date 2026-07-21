@@ -93,6 +93,11 @@ typedef struct CCASTRoot {
     /* Canonical CC buffer for visit_codegen (pre-cpp-expand). */
     char*  codegen_buffer;
     size_t codegen_buffer_len;
+    /* Authoritative include-expanded comptime discovery buffer (regs/UFCS).
+     * Built once in parse.c; visit_codegen borrows it instead of re-expanding.
+     * Owned by the root; freed in cc_tcc_bridge_free_ast. */
+    char*  comptime_buffer;
+    size_t comptime_buffer_len;
     /* Closure-ID markers (/ *CC_CLO:N* /) that sat inside #if-skipped
      * regions of THIS parse — their closure literals were discarded by
      * conditional compilation and have no AST nodes.  Borrowed from the

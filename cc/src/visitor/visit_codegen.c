@@ -3493,6 +3493,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_all = NULL;
     char* src_raw = NULL;
     char* src_regs = NULL;
+    int src_regs_owned = 0;       /* 0 when borrowing root->comptime_buffer */
     char* src_ufcs = NULL;        /* aliases src_all until a rewrite fires */
     size_t src_ufcs_len = 0;
     char* closure_protos = NULL;  /* closure-literal pass output */
@@ -3516,13 +3517,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc__read_entire_file(ctx->input_path, &src_raw, &src_raw_len);
     }
     if (src_all && src_len && ctx && ctx->symbols) {
-        src_regs = cc_preprocess_comptime_source(ctx->input_path);
+        /* Prefer the authoritative buffer stashed at parse time. */
+        if (root->comptime_buffer && root->comptime_buffer_len) {
+            src_regs = root->comptime_buffer;
+        } else {
+            src_regs = cc_preprocess_comptime_source(ctx->input_path);
+            src_regs_owned = src_regs != NULL;
+        }
     }
 
     src_ufcs = src_all;
     src_ufcs_len = src_len;
     const char* reg_src = src_regs ? src_regs : src_all;
-    size_t reg_src_len = src_regs ? strlen(src_regs) : src_len;
+    size_t reg_src_len = src_regs
+        ? (src_regs_owned ? strlen(src_regs) : root->comptime_buffer_len)
+        : src_len;
     const char* hook_src = src_raw ? src_raw : src_all;
     size_t hook_src_len = src_raw ? src_raw_len : src_len;
 
@@ -3589,7 +3598,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
     }
-    free(src_regs);
+    if (src_regs_owned) free(src_regs);
     src_regs = NULL;
 
     /* Replay explicit @comptime cc_instantiate_* requests (track C1) into the
@@ -4758,7 +4767,7 @@ fail:
     if (src_ufcs && src_ufcs != src_all) free(src_ufcs);
     free(src_all);
     free(src_raw);
-    free(src_regs);
+    if (src_regs_owned) free(src_regs);
     free(closure_protos);
     free(closure_defs);
     free(container_decl_buf);

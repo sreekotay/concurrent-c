@@ -573,7 +573,7 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache] [--clean]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -581,7 +581,7 @@ int main(int argc, char** argv) {
     int verbose = 0;
     int list_only = 0;
     int jobs = 6;
-    int use_cache = 0;
+    int use_cache = 1; /* default on; cold runs reuse shared concurrent_c.o / .c outs */
     int clean = 0;
     int build_timeout_sec = 300;
     int run_timeout_sec = 10;
@@ -589,6 +589,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
+        if (strcmp(argv[i], "--no-cache") == 0) { use_cache = 0; continue; }
         if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
         if (strcmp(argv[i], "--build-timeout") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--build-timeout requires a value\n"); return 2; }
@@ -625,6 +626,11 @@ int main(int argc, char** argv) {
     {
         const char* env = getenv("CC_TEST_USE_CACHE");
         if (env && strcmp(env, "1") == 0) use_cache = 1;
+        if (env && strcmp(env, "0") == 0) use_cache = 0;
+    }
+    {
+        const char* env = getenv("CC_TEST_NO_CACHE");
+        if (env && strcmp(env, "1") == 0) use_cache = 0;
     }
     {
         const char* env = getenv("CC_TEST_CLEAN");
@@ -768,11 +774,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (pid == 0) {
-            pid_t me = getpid();
+            /* Stem-stable dirs so incremental cache hits across jobs (stems are
+             * unique across tests/; see discovery comment above). */
             char out_dir[512];
             char bin_dir[512];
-            snprintf(out_dir, sizeof(out_dir), "out/.cc_test/%d", (int)me);
-            snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%d", (int)me);
+            snprintf(out_dir, sizeof(out_dir), "out/.cc_test/%s", stem);
+            snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%s", stem);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
             int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache, build_timeout_sec, run_timeout_sec);

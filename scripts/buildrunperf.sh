@@ -29,13 +29,13 @@ usage() {
 Usage: buildrunperf.sh [options] [source.ccs]
 
 Loop build (+ optional run) on one Concurrent-C source and report timing stats.
-Defaults to tests/string_template_smoke.ccs × 200 with --no-cache (matches cc_test).
+Defaults to tests/string_template_smoke.ccs × 200 with --no-cache (cold emit/link).
 
 Options:
   --iters N            Measured iterations (default: 200)
   --warmup N           Warmup iterations, not counted (default: 3)
-  --no-cache           Full rebuild every iteration (default, cc_test behavior)
-  --use-cache          Use incremental build cache
+  --no-cache           Full rebuild every iteration (default for this script)
+  --use-cache          Use incremental build cache (cc_test default)
   --no-run             Build only; skip executing the binary
   --no-breakdown       Skip one-shot emit-c vs clang+link split
   --profile-hotspots [SEC]

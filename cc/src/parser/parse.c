@@ -295,9 +295,9 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     file_buf[got] = '\0';
     fclose(f);
 
-    /* Phase 1 -> 2: build canonical CC for comptime, then collect the current
-       comptime-visible effects (today: type registrations) from that source
-       before phase 3 lowers the main TU for TCC/host-C consumption. */
+    /* Phase 1 -> 2: include-expand once for comptime discovery, collect type
+       registrations, then stash the buffer on the AST root so visit_codegen
+       reuses it for UFCS (no second cc -E / phase-1 over the prelude). */
     char* reg_src = cc_preprocess_comptime_source(input_path);
     const char* use_src = reg_src ? reg_src : file_buf;
     size_t use_len = reg_src ? strlen(reg_src) : got;
@@ -319,10 +319,10 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
             return -1;
         }
     }
-    free(reg_src);
 
     CCBuildParseInput prep = {0};
     if (cc_build_parse_input(file_buf, got, input_path, symbols, 0, &prep) != 0) {
+        free(reg_src);
         free(file_buf);
         return -1;
     }
@@ -400,9 +400,13 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     if (root) {
         root->original_path = input_path;
         root->lowered_is_temp = 0;
+        root->comptime_buffer = reg_src;
+        root->comptime_buffer_len = reg_src ? use_len : 0;
+        reg_src = NULL;
         *out_root = root;
         return 0;
     }
+    free(reg_src);
     return -1;
 #endif
     // Fallback: dummy AST so the pipeline keeps running when hooks are absent.
