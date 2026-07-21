@@ -2,7 +2,16 @@
 
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
-**Last updated**: 2026-06-01 (drift audit vs code: line counts, phantom/retired passes, omitted passes) — prior: 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
+**Last updated**: 2026-07-20 (invariant #8 rewritten — closure markers are now the ONLY identity) — prior: 2026-06-01 (drift audit vs code: line counts, phantom/retired passes, omitted passes), 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
+
+> **2026-07 span-anchored-passes cycle:** per-pass line counts and fragility
+> notes below are the 2026-06-01 snapshot; the July cycle (recorder byte
+> offsets on stub nodes, the reparse-diet exact-offset invariant
+> `parse_src_shift`/`parse_src_valid_from`, marker-only closure identity,
+> shared offset helpers in `pass_common.h`, scanner-debt paydown +
+> `make lint-scanners` ratchet, `make test-strict`) is chronicled in
+> [`PASS_CLEANUP_PLAN.md`](../../docs/PASS_CLEANUP_PLAN.md), which wins on
+> conflict.
 
 > **WHY this many passes? WHY this split between text and AST?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §2 (the four constraints) and §3 (the three architectural layers). The Phase 1–9 numbering below is an artifact of how the code grew; the three layers in ARCHITECTURE.md are the right mental model.
 
@@ -102,19 +111,17 @@ these rules.
    priority argument trips TCC's stub-AST — drop the priority
    and rely on the registry being insertion-order-agnostic.
 
-8. **Closure-identity ratchet.**  Do NOT add new callers of
-   `cc__closure_start_off_best_effort` or the descriptor
-   "recovery" branch in `pass_closure_literal_ast.c`.  Both are
-   heuristic fallbacks for a deeper problem: closures are
-   matched between passes by `(line_start, line_end, col_start)`,
-   which drifts whenever a reparse pulls in a header with
-   `#line` directives.  The right fix is stable closure-IDs
-   injected as `/*CC_CLO:N*/` markers before TCC parses — see
-   the "Stable closure-IDs" milestone (#4b) in
-   `COMPILER_CLEANUP_STATUS.md`.  Until that ships, new closure-
-   walking code should compare full `(file, line, col, end)`
-   tuples (never a single coord) and bail loudly on ambiguous
-   matches rather than picking the "best" one.
+8. **Closure identity IS the `/*CC_CLO:N*/` marker.**  (Landed:
+   the old best-effort resolver and its recovery branch are
+   deleted — 2026-07-20.)  Every closure-literal producer MUST
+   emit a marker (parse-build does it for user closures;
+   autoblock marks its synthesized wrappers), and after
+   `#if`-skip pruning the marker count MUST equal the in-TU
+   closure-node count — a mismatch is a hard error, never a
+   heuristic retry.  Do NOT add coordinate-matching or text-scan
+   fallbacks for closure identity, and do NOT add a disable knob
+   (`CC_NO_CLOSURE_MARKERS` was removed as a footgun).  New
+   closure producers must either emit a marker or fail loudly.
 
 If your change can't follow these rules, the right move is to
 update the helpers (`text_scan.h`, `text.h`, `type_registry.h`)

@@ -7651,7 +7651,15 @@ char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char
  * The reparse wrapper (visit_codegen.c) reads this to advertise an EXACT
  * offset mapping on the AST root instead of falling back to line walking.
  * `user_text_rewritten` flags the one case where user bytes themselves
- * changed (system-include lowering) and the anchors are meaningless. */
+ * changed (system-include lowering) and the anchors are meaningless.
+ * `delta` can be NEGATIVE (a splice may also drop text, e.g. consumed
+ * directives) — consumers must not assume growth.
+ * REENTRANCY: process globals, reset at the top of each emit-splice run
+ * and read by the caller immediately after it returns.  The compiler is
+ * single-threaded per TU; a nested emit-splice call between run and read
+ * would clobber these — don't introduce one.  The wrapper's tail memcmp
+ * verifies the accounting regardless, so a violation degrades to the
+ * line-keyed fallback rather than corrupting offsets. */
 static size_t g_cc_pp_splice_last_anchor = 0;
 static long   g_cc_pp_splice_delta = 0;
 static int    g_cc_pp_splice_user_text_rewritten = 0;

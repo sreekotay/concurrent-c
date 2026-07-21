@@ -201,6 +201,11 @@ engine-headers-verify: $(ENGINE_GEN_HDRS) $(LOWER_HEADERS_BINARY)
 
 $(OBJDIR)/src/preprocess/grammar_rules.o: $(ENGINE_GEN_HDRS)
 $(OBJDIR)/src/preprocess/grammar_rules.o: CFLAGS += -I$(ENGINE_GEN_DIR)
+# The engine headers #include <ccc/*.h> from $(OUT_INCLUDE), which only the
+# lower-headers stamp produces — without this prereq a CLEAN tree fails
+# ("ccc/cc_arena.h: No such file") and incremental trees build by ordering
+# luck only.  Still acyclic: stage-1 → stamp → grammar_rules.o → full tool.
+$(OBJDIR)/src/preprocess/grammar_rules.o: $(LOWER_HEADERS_STAMP)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
