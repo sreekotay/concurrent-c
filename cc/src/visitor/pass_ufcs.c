@@ -671,7 +671,20 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                 }
             }
         }
-        if (!have_span) continue;
+        if (!have_span) {
+            /* No probe could locate this node in the edit buffer.  This is
+             * NOT always a bug: template lowering (`@string` interpolation)
+             * duplicates expressions in the parse buffer, producing phantom
+             * higher-occ nodes with no source-line counterpart.  It was,
+             * however, also the only symptom of the sanitizer line-eating
+             * skew (the redis UFCS dead band) — that class is now caught
+             * structurally by cc__check_sanitize_line_parity(), so a debug
+             * trace suffices here. */
+            if (getenv("CC_DEBUG_UFCS_NODES"))
+                fprintf(stderr, "[cc:ufcs-skip] no-span method=%s line=%d occ=%d\n",
+                        nodes[i].method, ls, nodes[i].occurrence_1based);
+            continue;
+        }
         if (sp.end > in_len || sp.start >= sp.end) continue;
 
         sp.end = cc__ufcs_extend_chain_end(in_src, in_len, sp.end);
@@ -683,7 +696,12 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                 break;
             }
         }
-        if (covered) continue;
+        if (covered) {
+            if (getenv("CC_DEBUG_UFCS_NODES"))
+                fprintf(stderr, "[cc:ufcs-skip] covered method=%s line=%d span=%zu..%zu\n",
+                        nodes[i].method, ls, sp.start, sp.end);
+            continue;
+        }
 
         size_t expr_len = sp.end - sp.start;
         size_t out_cap = expr_len * 2 + 256;
@@ -734,6 +752,10 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             cc_pass_note(file, nodes[i].line_start, col,
                          "hint: UFCS dispatch is strict; register an exact or wildcard owner, or call the lowered function explicitly");
             err = -1;
+        } else if (rewrite_rc != CC_UFCS_REWRITE_OK) {
+            if (getenv("CC_DEBUG_UFCS_NODES"))
+                fprintf(stderr, "[cc:ufcs-skip] rewrite-rc=%d method=%s line=%d expr=%.60s\n",
+                        rewrite_rc, nodes[i].method, ls, expr);
         } else if (rewrite_rc == CC_UFCS_REWRITE_OK) {
             if (cc_edit_buffer_add(eb, sp.start, sp.end, out_buf, 100, "ufcs") == 0) {
                 edits_added++;

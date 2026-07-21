@@ -1,34 +1,51 @@
 # UFCS: registered-type method calls unresolved in one band of a large TU
 
-**Status:** open.  **Found:** 2026-07-21, redis write-family refactor.
+**Status:** FIXED (root cause was not UFCS).  **Found:** 2026-07-21, redis
+write-family refactor.  **Fixed:** 2026-07-21.
 
-In `real_projects/redis/redis_idiomatic.ccs` (at the commit introducing
-receiver-first `redis_conn_*` write helpers), method spellings on a
-registered type (`RedisConn*`, registered with only a `.destroy` hook)
-lower correctly at some sites and are left as raw C member accesses at
-others — the host compiler then fails with
-`'RedisConn' has no member named 'flush_out'`.
+## Symptom
 
-The split is POSITIONAL, not semantic: `conn->write_reply(...)` /
-`conn->flush_out()` lower fine inside `drain_pipeline_batch` and
-`handle_client` (~line 1700), while the SAME methods on the SAME
-receiver name/type fail throughout the write-family bodies
-(~lines 1387–1466) and `redis_conn_write_reply_now`.
+In `real_projects/redis/redis_idiomatic.ccs`, method spellings on a
+registered type (`RedisConn*`) lowered correctly at some sites and were
+left as raw C member accesses at others — the host compiler then failed
+with `'RedisConn' has no member named 'flush_out'`.  The split was
+POSITIONAL: the same method on the same receiver name/type failed in one
+band of the file and lowered fine elsewhere.
 
-Ruled out by minimal probes (both lower correctly in a small TU):
-- receiver is a function parameter (vs local / member expr);
-- method call inside a same-family (`widget_*`) function body;
-- snake_case callee-name resolution for hookless registrations.
+## Root cause
 
-Repro: check out the redis file at this commit, flip any one of the
-plain `redis_conn_write_bytes(conn, ...)` calls inside
-`redis_conn_write_reply` back to `conn->write_bytes(...)`, rebuild.
+`cc__sanitize_generated_unwrap_handlers_for_reparse` (visit_codegen.c)
+blanks lowered `!>` handler bodies before feeding a buffer to a reparse.
+The blanking loop is newline-preserving, but the ` (void)0;` placeholder
+stamp was a fixed `memcpy` at `{`+1.  Multi-line handlers open with
+`{\n`, so the stamp overwrote that newline — the reparse input shrank by
+one line per multi-line handler.
 
-Workaround in tree: implementation bodies use plain calls; method
-spelling kept at protocol-level call sites (which lower correctly).
+TCC recorder lines from that reparse then ran N low versus the edit
+buffer.  Where the exact-offset path was unavailable, the line-keyed
+UFCS fallback probed the wrong physical line, found no span, and
+silently skipped the node — the method call survived to the emitted C as
+a raw member access.  The "band" was exactly the region where eaten
+newlines had accumulated between the last `#line` anchor and the site.
 
-Suspicion to check first: whatever bounds the UFCS collector's node
-coverage or var-type registration in that specific band of this large
-TU (the band sits between the mem-stats fprintf block and
-`redis_conn_create`) — possibly an inert-scan state desync or a
-collector early-out that a smaller TU never reaches.
+## Fix (all in the same change)
+
+- All placeholder stamps in the reparse sanitizers go through
+  `cc__cg_stamp_pos()`, which finds a newline-free window — a multi-line
+  handler keeps its line count.  Same hardening applied to the
+  statement-unwrap sanitizer's `return 0` / `= {0}` / `= 0` stamps.
+- `cc__check_sanitize_line_parity()` wraps every reparse-sanitizer call
+  site: any line-count change is now a fatal internal error at compile
+  time instead of a silent coordinate skew.
+- The UFCS collect loop's no-span skip is a loud warning always, fatal
+  under `CC_STRICT_OFFSETS=1` (CI runs with it).
+- Pinned by `scripts/test_reparse_sanitize.sh` (asserts on the reparse
+  dump of `tests/ufcs_below_multiline_unwrap_smoke.ccs` that multi-line
+  handlers keep their `{`-adjacent newline) plus that smoke test.
+
+## Lesson
+
+The failure needed a large TU: small TUs lower UFCS on the initial AST
+with exact offsets, so the skewed-reparse path never fires.  Line-count
+neutrality of reparse rewrites is now enforced by the compiler itself
+rather than by convention.

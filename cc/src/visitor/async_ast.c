@@ -2695,7 +2695,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int else_state = cc__alloc_state(e);
             int after_state = cc__alloc_state(e);
 
-            cc__emit_line_fmt(e, "int __cc_if_c%d = (%s);", then_state, cond3);
+            cc__emit_line_fmt(e, "int __cc_if_c%d = (%s) ? 1 : 0;", then_state, cond3);
             cc__emit_line_fmt(e, "__f->__st = __cc_if_c%d ? %d : %d;",
                               then_state,
                               then_state,
@@ -2772,7 +2772,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                     free(cond3);
                     cond3 = cond3_norm;
                 }
-                cc__emit_line_fmt(e, "int __cc_wh_c%d = (%s);", cond_state, cond3);
+                cc__emit_line_fmt(e, "int __cc_wh_c%d = (%s) ? 1 : 0;", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_wh_c%d ? %d : %d;", cond_state, body_state, after_state);
                 cc__emit_line(e, "continue;");
                 free(cond3);
@@ -2845,7 +2845,7 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                     free(cond3);
                     cond3 = cond3_norm;
                 }
-                cc__emit_line_fmt(e, "int __cc_for_c%d = (%s);", cond_state, cond3);
+                cc__emit_line_fmt(e, "int __cc_for_c%d = (%s) ? 1 : 0;", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_for_c%d ? %d : %d;", cond_state, body_state, after_state);
                 cc__emit_line(e, "continue;");
                 free(cond3);

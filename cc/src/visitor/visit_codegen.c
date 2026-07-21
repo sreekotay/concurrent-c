@@ -516,6 +516,24 @@ static int cc__cg_consume_postfix_cc_suffix_chain(const char* src, size_t n,
     return 1;
 }
 
+/* Reparse-input sanitizers blank regions newline-preservingly, then stamp a
+   tiny placeholder so the result still parses. The stamp must never land on a
+   '\n'/'\r': overwriting one shrinks the reparse input by a line, and every
+   recorder line below runs low (this was the UFCS dead-band bug). Returns the
+   first index in [lo, hi - need] where `need` consecutive bytes are
+   newline-free, or (size_t)-1 when no such window exists. */
+static size_t cc__cg_stamp_pos(const char* buf, size_t lo, size_t hi, size_t need) {
+    if (hi < need) return (size_t)-1;
+    for (size_t j = lo; j + need <= hi; j++) {
+        int ok = 1;
+        for (size_t k = j; k < j + need; k++) {
+            if (buf[k] == '\n' || buf[k] == '\r') { ok = 0; break; }
+        }
+        if (ok) return j;
+    }
+    return (size_t)-1;
+}
+
 static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t n) {
     char* out = NULL;
     int changed = 0;
@@ -587,19 +605,26 @@ static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t 
             for (size_t k = r; k < suffix_end; k++) {
                 if (out[k] != '\n' && out[k] != '\r') out[k] = ' ';
             }
-            if (r + 2 < suffix_end) out[r + 1] = '0';
+            if (r + 2 < suffix_end) {
+                size_t j = cc__cg_stamp_pos(out, r + 1, suffix_end - 1, 1);
+                if (j != (size_t)-1) out[j] = '0';
+            }
         } else if (has_assign && (has_lifetime || looks_like_decl_init)) {
             for (size_t k = eq + 1; k < suffix_end; k++) {
                 if (out[k] != '\n' && out[k] != '\r') out[k] = ' ';
             }
             if (looks_like_decl_init) {
                 if (eq + 4 < suffix_end) {
-                    out[eq + 2] = '{';
-                    out[eq + 3] = '0';
-                    out[eq + 4] = '}';
+                    size_t j = cc__cg_stamp_pos(out, eq + 2, suffix_end, 3);
+                    if (j != (size_t)-1) {
+                        out[j] = '{';
+                        out[j + 1] = '0';
+                        out[j + 2] = '}';
+                    }
                 }
             } else if (eq + 2 < suffix_end) {
-                out[eq + 2] = '0';
+                size_t j = cc__cg_stamp_pos(out, eq + 2, suffix_end, 1);
+                if (j != (size_t)-1) out[j] = '0';
             }
         } else if (has_assign) {
             for (size_t k = i; k < suffix_end; k++) {
@@ -704,7 +729,15 @@ static char* cc__sanitize_generated_unwrap_handlers_for_reparse(const char* src,
         for (size_t k = b + 1; k < rbrace; k++) {
             if (out[k] != '\n' && out[k] != '\r') out[k] = ' ';
         }
-        if (b + 9 < rbrace) memcpy(out + b + 1, " (void)0;", 9);
+        /* Multi-line handlers open with "{\n"; a fixed stamp at b+1 would
+           overwrite that newline, shrinking the reparse input by one line per
+           handler and skewing every recorder line below it (the UFCS dead-band
+           bug). Stamp in the first newline-free window instead; a blanked
+           "{ }" parses fine if no window exists. */
+        if (b + 9 < rbrace) {
+            size_t j = cc__cg_stamp_pos(out, b + 1, rbrace, 9);
+            if (j != (size_t)-1) memcpy(out + j, " (void)0;", 9);
+        }
         changed = 1;
         i = rbrace;
     }
@@ -713,6 +746,31 @@ static char* cc__sanitize_generated_unwrap_handlers_for_reparse(const char* src,
         return NULL;
     }
     return out;
+}
+
+/* Every reparse-input sanitizer must be line-neutral: recorder lines from
+   the reparse AST are matched back against the edit buffer by line number,
+   so a single lost newline silently skews every node below it. Enforce the
+   invariant at the call sites — a violation is a compiler bug and must fail
+   the build, not mis-lower code. Returns `sanitized` on success; aborts the
+   sanitize (returns NULL, caller keeps the original) never — parity failure
+   is fatal. */
+static char* cc__check_sanitize_line_parity(const char* orig, size_t orig_len,
+                                            char* sanitized, const char* what) {
+    if (!sanitized) return NULL;
+    size_t a = 0, b = 0;
+    for (size_t i = 0; i < orig_len; i++) a += (orig[i] == '\n');
+    for (const char* p = sanitized; *p; p++) b += (*p == '\n');
+    if (a != b) {
+        fprintf(stderr,
+                "cc: internal error: reparse sanitizer '%s' changed line count "
+                "(%zu -> %zu newlines); recorder coordinates below the first "
+                "divergence would silently skew\n",
+                what, a, b);
+        free(sanitized);
+        exit(1);
+    }
+    return sanitized;
 }
 
 static int cc__cg_chan_recv_expr_char(char c) {
@@ -1313,20 +1371,29 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * for concrete family UFCS reintroduced by closure/async edits — but
      * parser mode tolerates those forms.  Probed corpus-green without it,
      * including the two files that actually fired it; deleted.) */
-    reparse_clean = cc__neutralize_comments_for_reparse(pp_in, pp_in_len);
+    reparse_clean = cc__check_sanitize_line_parity(
+        pp_in, pp_in_len,
+        cc__neutralize_comments_for_reparse(pp_in, pp_in_len),
+        "neutralize_comments");
     if (reparse_clean) {
         pp_in = reparse_clean;
         pp_in_len = strlen(reparse_clean);
     }
     {
-        char* safe_unwrap = cc__sanitize_statement_unwraps_for_reparse(pp_in, pp_in_len);
+        char* safe_unwrap = cc__check_sanitize_line_parity(
+            pp_in, pp_in_len,
+            cc__sanitize_statement_unwraps_for_reparse(pp_in, pp_in_len),
+            "statement_unwraps");
         if (safe_unwrap) {
             reparse_surface_sanitized = safe_unwrap;
             pp_in = reparse_surface_sanitized;
             pp_in_len = strlen(reparse_surface_sanitized);
         }
         if (strstr(pp_in, "@defer") || strstr(pp_in, "@destroy")) {
-            char* lifetime_safe = cc__sanitize_lifetime_markers_for_reparse(pp_in, pp_in_len);
+            char* lifetime_safe = cc__check_sanitize_line_parity(
+                pp_in, pp_in_len,
+                cc__sanitize_lifetime_markers_for_reparse(pp_in, pp_in_len),
+                "lifetime_markers");
             if (lifetime_safe) {
                 free(reparse_surface_sanitized);
                 reparse_surface_sanitized = lifetime_safe;
@@ -1409,14 +1476,20 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * prelude declares cc_channel_send_task — probed corpus-green without
      * it, so it's gone.  The initial-parse path keeps its own call.) */
     if (strstr(pp_buf, "@defer") || strstr(pp_buf, "@destroy")) {
-        char* lifetime_safe = cc__sanitize_lifetime_markers_for_reparse(pp_buf, strlen(pp_buf));
+        char* lifetime_safe = cc__check_sanitize_line_parity(
+            pp_buf, strlen(pp_buf),
+            cc__sanitize_lifetime_markers_for_reparse(pp_buf, strlen(pp_buf)),
+            "lifetime_markers(post-splice)");
         if (lifetime_safe) {
             free(pp_buf);
             pp_buf = lifetime_safe;
         }
     }
     if (strstr(pp_buf, "__cc_uw_is_err") || strstr(pp_buf, "_is_err")) {
-        char* unwrap_safe = cc__sanitize_generated_unwrap_handlers_for_reparse(pp_buf, strlen(pp_buf));
+        char* unwrap_safe = cc__check_sanitize_line_parity(
+            pp_buf, strlen(pp_buf),
+            cc__sanitize_generated_unwrap_handlers_for_reparse(pp_buf, strlen(pp_buf)),
+            "unwrap_handlers(post-splice)");
         if (unwrap_safe) {
             free(pp_buf);
             pp_buf = unwrap_safe;
@@ -1439,7 +1512,10 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
      * Probed corpus-green without it — TCC's parse tolerates the direct
      * helper names — so it's gone from the reparse path.) */
     if (strstr(prep, "__cc_uw_is_err") || strstr(prep, "_is_err")) {
-        char* unwrap_safe = cc__sanitize_generated_unwrap_handlers_for_reparse(prep, pp_len);
+        char* unwrap_safe = cc__check_sanitize_line_parity(
+            prep, pp_len,
+            cc__sanitize_generated_unwrap_handlers_for_reparse(prep, pp_len),
+            "unwrap_handlers(prepared)");
         if (unwrap_safe) {
             free(prep);
             prep = unwrap_safe;

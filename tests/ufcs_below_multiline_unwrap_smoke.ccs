@@ -1,0 +1,83 @@
+/* Pins the reparse-sanitizer newline-eating bug (the "UFCS dead band"):
+ * `cc__sanitize_generated_unwrap_handlers_for_reparse` blanks lowered
+ * `!>` handler bodies newline-preservingly, but its ` (void)0;` stamp
+ * used to be a fixed memcpy at `{`+1 — for a MULTI-LINE handler that
+ * overwrote the `{`-adjacent '\n', shrinking the reparse input by one
+ * line per handler.  Recorder lines below then ran N-low vs the edit
+ * buffer, the line-keyed UFCS fallback probed the wrong line, and
+ * registered-type method calls silently failed to lower (redis:
+ * "'RedisConn' has no member named 'write_reply'").
+ *
+ * The failure cascade needs a method call that stays unlowered until a
+ * LATE sanitized reparse, which small TUs don't naturally produce — so
+ * this smoke is belt (functional: multi-line handlers + registered-type
+ * method + async + closure spawn all compose), and the suspenders are:
+ *   - scripts/test_reparse_sanitize.sh asserts on THIS file's reparse
+ *     dump that multi-line handlers keep their `{`-adjacent newline;
+ *   - cc__check_sanitize_line_parity() makes any line-count change by a
+ *     reparse sanitizer a fatal compiler error.
+ */
+#include <stdio.h>
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_closure.cch>
+
+typedef struct Gadget { int n; } Gadget;
+
+@comptime {
+    (void)cc_type_register("Gadget*", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("gadget_free"),
+    });
+}
+
+static void gadget_free(Gadget* g) { free(g); }
+static void gadget_bump(Gadget* g) { g->n++; }
+
+static int !>(CCError) might_fail(int v) {
+    if (v < 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "neg"));
+    return cc_ok(v);
+}
+
+/* MULTI-LINE handler inside an @async body: lowered to a generated
+ * handler whose `{` is followed by '\n' in the late reparse input. */
+@async int work(void) {
+    @errhandler(CCError e) { (void)e; return 99; }
+    int v = might_fail(5) !> {
+        return 98;
+    };
+    return v;
+}
+
+static int use_gadget(Gadget* g) {
+    @errhandler(CCError e) { (void)e; return -1; }
+    int v = might_fail(1) !> {
+        return -1;
+    };
+    g->bump();                     /* must lower: gadget_bump(g) */
+    return g->n + v;
+}
+
+static int g_side = 0;
+static void side_set(int v) { g_side = v; }
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 7; }
+    Gadget* g = calloc(1, sizeof(Gadget));
+    int r = use_gadget(g);
+    CCTaskIntptr t = work();
+    long y = (long)cc_block_on_intptr(t);
+
+    /* Closure spawn below the method call keeps the late closure/async
+     * reparses in play (mirrors the redis TU's pipeline shape). */
+    CCNursery* n = cc_nursery_create(NULL);
+    int seven = 7;
+    n->spawn(() => [seven] { side_set(seven); });
+    cc_nursery_wait(n);
+    cc_nursery_free(n);
+
+    printf("r=%d y=%ld s=%d\n", r, y, g_side);
+    int ok = (r == 2 && y == 5 && g_side == 7);
+    gadget_free(g);
+    return ok ? 0 : 1;
+}
