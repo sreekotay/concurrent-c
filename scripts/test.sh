@@ -18,6 +18,12 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] const-eval selftest FAILED"
     exit 1
   fi
+  # Driver CLI arg-parsing regressions (flag-before-subcommand, build.cc
+  # same-file dedup) — the .ccs harness can't reach argv parsing.
+  if ! sh scripts/test_cli.sh; then
+    echo "[test] CLI selftest FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"
