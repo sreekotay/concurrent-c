@@ -238,11 +238,20 @@ static inline size_t cc_pass_line_indent(const char* src, size_t src_len, int li
 #define CC_ERR_SLICE    "slice"
 #define CC_ERR_TYPE     "type"
 
+/* Every error printed through these helpers bumps a global counter so the
+ * driver can refuse to treat an emit as successful (and refuse to cache it)
+ * when a pass printed an error but "recovered".  Without this, a diagnostic
+ * that leaves the construct unlowered rides the emit cache: cold runs print
+ * it, warm runs silently skip the pass and fail somewhere else entirely. */
+extern long g_cc_pass_error_count;
+static inline long cc_pass_error_count(void) { return g_cc_pass_error_count; }
+
 /* Emit error in gcc/clang format: file:line:col: error: category: message */
 static inline void cc_pass_error(const char* file, int line, int col, const char* fmt, ...) {
     const char* f = file ? file : "<input>";
     int l = (line > 0) ? line : 1;
     int c = (col > 0) ? col : 1;
+    g_cc_pass_error_count++;
     fprintf(stderr, "%s:%d:%d: error: ", f, l, c);
     va_list args;
     va_start(args, fmt);
@@ -252,11 +261,12 @@ static inline void cc_pass_error(const char* file, int line, int col, const char
 }
 
 /* Emit categorized error: file:line:col: error: category: message */
-static inline void cc_pass_error_cat(const char* file, int line, int col, 
+static inline void cc_pass_error_cat(const char* file, int line, int col,
                                      const char* category, const char* fmt, ...) {
     const char* f = file ? file : "<input>";
     int l = (line > 0) ? line : 1;
     int c = (col > 0) ? col : 1;
+    g_cc_pass_error_count++;
     fprintf(stderr, "%s:%d:%d: error: %s: ", f, l, c, category);
     va_list args;
     va_start(args, fmt);

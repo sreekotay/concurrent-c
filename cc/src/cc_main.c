@@ -15,6 +15,7 @@
 #include <ccc/cc_build_helpers.cch>
 #include "driver.h"
 #include "diag/diag.h"
+#include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
 #include "comptime/const_eval.h"
 
@@ -1000,7 +1001,26 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
     } else {
         unsetenv("CC_EMIT_C_INSPECT");
     }
-    return cc_compile_with_config(in_path, out_path, cfg);
+    {
+        /* A pass that prints an error but "recovers" (leaves the construct
+         * unlowered) must not count as a successful emit: the .c would be
+         * cached, and warm reruns would skip the diagnostic entirely and
+         * fail somewhere else (or not at all).  Fail here so no meta is
+         * written and every run reprints the diagnostic. */
+        long pe0 = cc_pass_error_count();
+        int diag0 = cc_diag_error_count();
+        int rc = cc_compile_with_config(in_path, out_path, cfg);
+        long pe = cc_pass_error_count() - pe0;
+        long de = (long)(cc_diag_error_count() - diag0);
+        if (rc == 0 && (pe > 0 || de > 0)) {
+            fprintf(stderr,
+                    "cc: %ld error diagnostic(s) during lowering of %s; "
+                    "failing the build (emitted C not cached)\n",
+                    pe + de, in_path);
+            return -1;
+        }
+        return rc;
+    }
 }
 
 static int cc__compile_c_to_obj(const CCBuildOptions* opt,
