@@ -57,4 +57,22 @@
  * standard form, and document it in the bullet list above. */
 char* cc_l2_rewrite_all(const char* src, size_t src_len, size_t* out_len);
 
+/* IN-PLACE, LENGTH-PRESERVING variant of idiom 2 for the REPARSE path:
+ * blanks the priority argument of `__attribute__((constructor(N)))` /
+ * `destructor(N)` with spaces (`constructor(42)` -> `constructor    `),
+ * so byte offsets are UNCHANGED and the reparse-diet exact-offset
+ * invariant is preserved (see ast.h parse_src_shift).
+ *
+ * Why the reparse path needs this at all: whether TCC ever SEES the
+ * attribute depends on the libc headers in the flattened reparse
+ * prelude — glibc's sys/cdefs.h `#define __attribute__(xyz)`-erases it
+ * for non-GCC compilers (so Linux parses fine with no help), while the
+ * Apple SDK does not (so macOS reparses hit TCC's missing priority
+ * support: "')' expected (got '(')").  Platform-dependent tolerance is
+ * not tolerance; blank the priority everywhere.
+ *
+ * Matching is identical to idiom 2 (conservative, CCInertScan-aware).
+ * Returns the number of priority args blanked (0 = buffer untouched). */
+int cc_l2_blank_ctor_priority_inplace(char* buf, size_t len);
+
 #endif /* CC_L2_REWRITER_H */

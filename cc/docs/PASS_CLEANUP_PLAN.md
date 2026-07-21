@@ -230,9 +230,20 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    async_ast, pass_ufcs, pass_await_normalize, and pass_closure_calls.
    FOLLOW-UP LANDED: the last two coordinate breakers (the parser-safe
    family-UFCS rewrite and the L2 prelude rewrite) probed corpus-green at
-   reparse time — parser mode tolerates both idiom families — and are
-   deleted from the reparse path.  **100% of corpus reparses (937/937)
-   now carry the exact offset mapping.**  The remaining direct
+   reparse time and are deleted from the reparse path.  **100% of corpus
+   reparses (937/937) now carry the exact offset mapping.**
+   CORRECTION (2026-07-21, caught on macOS): the L2 probe was VACUOUSLY
+   green on Linux — glibc's flattened prelude `#define`-erases
+   `__attribute__` for non-GCC compilers, so TCC never saw
+   `constructor(N)` here; the Apple SDK does no such thing and macOS
+   reparses died on it.  Lesson: parser-tolerance probes are only as
+   platform-independent as the prelude's libc headers.  Restored as
+   `cc_l2_blank_ctor_priority_inplace` — length-preserving in-place
+   blanking in the reparse sanitize chain, so the exact-offset invariant
+   is untouched (the offsetof idiom needs nothing: the prelude's own
+   `#define offsetof` covers reparse).  Pinned platform-independently by
+   scripts/test_reparse_sanitize.sh, which asserts on the reparse-input
+   dump rather than on compile success.  The remaining direct
    line-mapping sites in async_ast are last-resort fallbacks behind
    structural search + offset helpers (correct layering), and the
    mutated-`cur` buffer scans stay line-keyed by design.
