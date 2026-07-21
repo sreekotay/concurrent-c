@@ -297,15 +297,10 @@ static size_t u64_decimal_len(uint64_t value) {
     return len;
 }
 
-static size_t resp_integer_encoded_len(int64_t value) {
-    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
-    return 1 + (value < 0 ? 1 : 0) + u64_decimal_len(mag) + 2;
-}
-
-static size_t resp_bulk_header_len(size_t value_len) {
-    return 1 + u64_decimal_len((uint64_t)value_len) + 2;
-}
-
+/* Decimal rendering for DB payloads (INCR/DECR store the value as its
+ * decimal string).  This is NOT wire encoding — every RESP reply byte is
+ * produced by the generated RespGReply/RespGBulkHdr/RespGArrayHdr writers
+ * below. */
 static size_t i64_decimal_len(int64_t value) {
     uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
     return (value < 0 ? 1 : 0) + u64_decimal_len(mag);
@@ -315,52 +310,6 @@ static void encode_i64_decimal_into(char* dst, int64_t value) {
     uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
     size_t pos = i64_decimal_len(value);
     if (value < 0) dst[0] = '-';
-    do {
-        dst[--pos] = (char)('0' + (mag % 10));
-        mag /= 10;
-    } while (mag != 0);
-}
-
-static void resp_encode_integer_into(char* dst, int64_t value) {
-    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
-    size_t digit_len = u64_decimal_len(mag);
-    size_t pos = 1 + (value < 0 ? 1 : 0) + digit_len;
-    dst[0] = ':';
-    if (value < 0) dst[1] = '-';
-    dst[pos] = '\r';
-    dst[pos + 1] = '\n';
-    do {
-        dst[--pos] = (char)('0' + (mag % 10));
-        mag /= 10;
-    } while (mag != 0);
-}
-
-static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
-    uint64_t mag = (uint64_t)value_len;
-    size_t digit_len = u64_decimal_len(mag);
-    size_t pos = 1 + digit_len;
-    dst[0] = '$';
-    dst[1 + digit_len] = '\r';
-    dst[2 + digit_len] = '\n';
-    do {
-        dst[--pos] = (char)('0' + (mag % 10));
-        mag /= 10;
-    } while (mag != 0);
-}
-
-/* Multi-bulk ("*<n>\r\n") header, for array replies (MGET, KEYS) built
- * directly into conn->reply_arena by the owner. */
-static size_t resp_array_header_len(size_t n) {
-    return 1 + u64_decimal_len((uint64_t)n) + 2;
-}
-
-static void resp_encode_array_header_into(char* dst, size_t n) {
-    uint64_t mag = (uint64_t)n;
-    size_t digit_len = u64_decimal_len(mag);
-    size_t pos = 1 + digit_len;
-    dst[0] = '*';
-    dst[1 + digit_len] = '\r';
-    dst[2 + digit_len] = '\n';
     do {
         dst[--pos] = (char)('0' + (mag % 10));
         mag /= 10;
@@ -404,6 +353,58 @@ static void resp_encode_array_header_into(char* dst, size_t n) {
         framed [ #'*' argc: int number "\r\n" args: items RespGArg argc cap 8 ]
         plain  [ text: line "\r\n" ]
     ]
+~~~~}
+
+/* ---- @grammar RESP reply WRITER (parse→format symmetry) ----
+ * The same schema shape as the read side, used in the WRITE projection:
+ * cc_write(RespGReply, &v, dst, cap) returns bytes written (0 = didn't fit
+ * or invalid kind), $len / *n are DERIVED from data.len / items_n on write,
+ * and the self-typed `array` variant recurses.  Every reply byte the server
+ * emits comes from these writers (plus the two header schemas below).
+ *
+ * NIL modeling: RESP2 null bulk is "$-1\r\n" — a bulk HEADER with length
+ * -1 and no payload/trailer.  It cannot be a RespGReply variant: union
+ * dispatch is by each variant's first literal byte, and a `nil` variant's
+ * '$' would collide with `bulk`'s (two variants sharing a dispatch byte is
+ * a schema compile error — see tests/grammar_schema_union_ambiguous_fail).
+ * So nil stays a boundary case, written through RespGBulkHdr with len = -1,
+ * which is exactly what RESP2 says a null bulk IS. */
+@grammar(schema) RespGReply {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
+    ]
+    one of [
+        simple  [ #'+' s: line "\r\n" ]
+        error   [ #'-' msg: line "\r\n" ]
+        integer [ #':' v: int number "\r\n" ]
+        bulk    [ #'$' len: int number "\r\n" data: bytes len "\r\n" ]
+        array   [ #'*' n: int number "\r\n" items: items RespGReply n ]
+    ]
+~~~~}
+
+/* Bulk header alone: "$<len>\r\n".  Two boundary jobs the union cannot do:
+ * nil (len = -1, see above) and streaming a bulk payload larger than
+ * conn->out_buf (schema-written header, then the payload slice). */
+@grammar(schema) RespGBulkHdr {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+~~~~}
+
+/* Multi-bulk header alone: "*<n>\r\n".  MGET interleaves bulk and nil
+ * elements, and nil can't be a RespGReply array item — so its array is
+ * written element-by-element under this schema-written header. */
+@grammar(schema) RespGArrayHdr {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' n: int number "\r\n"
 ~~~~}
 
 static RespParseStatus gen_try_read_args_buffered(RespReader* r,
@@ -523,13 +524,6 @@ static RedisReply reply_integer(int64_t v) {
     return r;
 }
 
-static RedisReply reply_raw(char[:0] s) {
-    RedisReply r;
-    r.kind = REDIS_REPLY_RAW;
-    r.data = s;
-    return r;
-}
-
 /* RAW reply whose bytes were already encoded into conn->reply_arena by the
  * owner (array replies): stabilization sees arena-epoch bytes and skips the
  * copy. */
@@ -540,14 +534,92 @@ static RedisReply reply_raw_slice(CCSlice s) {
     return r;
 }
 
-static char[:0] config_get_reply(char[:] key) {
+/* ---- RedisReply → generated wire writer boundary ----
+ * The transport struct (RedisReply) stays: it crosses the reply channel by
+ * value and RAW carries pre-encoded array replies.  Everything that used to
+ * hand-format wire bytes now converts to RespGReply and goes through
+ * cc_write. */
+@noblock static inline RespGReply wire_bulk(CCSlice data) {
+    RespGReply w;
+    w.kind = RespGReply_bulk;
+    w.u.bulk.len = (long long)data.len; /* derived on write; set for hygiene */
+    w.u.bulk.data = data;
+    return w;
+}
+
+/* RAW and NULL_BULK are boundary kinds: RAW is already wire bytes, and nil
+ * has no RespGReply variant (see the schema comment) — callers handle both
+ * before converting. */
+@noblock static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
+    switch (reply->kind) {
+        case REDIS_REPLY_SIMPLE_STRING:
+            wire->kind = RespGReply_simple;
+            wire->u.simple.s = reply->data;
+            return true;
+        case REDIS_REPLY_ERROR:
+            wire->kind = RespGReply_error;
+            wire->u.error.msg = reply->data;
+            return true;
+        case REDIS_REPLY_INTEGER:
+            wire->kind = RespGReply_integer;
+            wire->u.integer.v = reply->int_value;
+            return true;
+        case REDIS_REPLY_BULK_STRING:
+            *wire = wire_bulk(reply->data);
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Encode one wire reply into reply-batch arena storage.  `cap_hint` is a
+ * capacity guess, not wire math: cc_write's 0-on-didn't-fit catches any
+ * shortfall and the loop doubles.  Bytes live until the client drains or
+ * tears down the batch and resets conn->reply_arena. */
+enum { k_reply_encode_cap_max = 1 << 30 };
+
+@noblock static CCSlice !>(CCError) reply_wire_encode_into_batch(const RespGReply* wire,
+                                                                 CCArena* reply_batch_arena,
+                                                                 size_t cap_hint) {
+    @errhandler(CCError e) { return cc_err(e); }
+    size_t cap = cap_hint < 16 ? 16 : cap_hint;
+    for (;;) {
+        CCSlice out = reply_batch_alloc_slice(reply_batch_arena, cap) !>;
+        size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
+        if (w != 0) {
+            out.len = w;
+            return cc_ok(out);
+        }
+        if (cap >= (size_t)k_reply_encode_cap_max) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
+        }
+        cap *= 2;
+    }
+}
+
+/* CONFIG GET: structured two-element arrays written through the schema
+ * (previously hardcoded wire literals).  Encoded into conn->reply_arena by
+ * the owner, so the reply crosses the channel already stable. */
+static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena) {
+    @errhandler(CCError e) { return cc_err(e); }
+    RespGReply items[2];
+    size_t n = 0;
     if (slice_eq_ignore_case(key, "save")) {
-        return @slice("*2\r\n$4\r\nsave\r\n$0\r\n\r\n");
+        items[0] = wire_bulk(cc_slice_from_cstr("save"));
+        items[1] = wire_bulk(cc_slice_from_cstr(""));
+        n = 2;
+    } else if (slice_eq_ignore_case(key, "appendonly")) {
+        items[0] = wire_bulk(cc_slice_from_cstr("appendonly"));
+        items[1] = wire_bulk(cc_slice_from_cstr("no"));
+        n = 2;
     }
-    if (slice_eq_ignore_case(key, "appendonly")) {
-        return @slice("*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n");
-    }
-    return @slice("*0\r\n");
+    RespGReply arr;
+    arr.kind = RespGReply_array;
+    arr.u.array.n = (long long)n; /* derived on write; set for hygiene */
+    arr.u.array.items = items;
+    arr.u.array.items_n = n;
+    CCSlice out = reply_wire_encode_into_batch(&arr, reply_arena, 64) !>;
+    return cc_ok(reply_raw_slice(out));
 }
 
 static bool !>(CCError) decode_request_shape(CCSlice* args,
@@ -1261,36 +1333,51 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
 
     CCSlice vals[REDIS_ARGV_MAX];
     bool found[REDIS_ARGV_MAX];
-    size_t total = resp_array_header_len(nkeys);
+    /* Capacity hint, not wire math: per-element schema overhead is well
+     * under 24 bytes (nil is 5); cc_write's 0-on-didn't-fit catches any
+     * shortfall below and the loop doubles. */
+    size_t cap = 16;
     for (size_t i = 0; i < nkeys; ++i) {
         RedisValue* cell = db_lookup_live(db, keys[i], now_cache);
         found[i] = cell != NULL;
         if (cell) {
             vals[i] = cell->str.as_slice();
-            total += resp_bulk_header_len(vals[i].len) + vals[i].len + 2;
+            cap += vals[i].len + 24;
         } else {
-            total += 5; /* $-1\r\n */
+            cap += 8;
         }
     }
 
-    CCSlice out = reply_batch_alloc_slice(reply_arena, total) !>;
-    char* dst = (char*)out.ptr;
-    resp_encode_array_header_into(dst, nkeys);
-    dst += resp_array_header_len(nkeys);
-    for (size_t i = 0; i < nkeys; ++i) {
-        if (!found[i]) {
-            memcpy(dst, "$-1\r\n", 5);
-            dst += 5;
-            continue;
+    /* Nil elements keep MGET off the single-array cc_write path (nil has no
+     * RespGReply variant — see the schema comment), so the array is written
+     * element-by-element under a schema-written "*<n>\r\n" header. */
+    for (;;) {
+        CCSlice out = reply_batch_alloc_slice(reply_arena, cap) !>;
+        char* dst = (char*)out.ptr;
+        RespGArrayHdr hdr = { .n = (long long)nkeys };
+        size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
+        bool fit = off != 0;
+        for (size_t i = 0; fit && i < nkeys; ++i) {
+            size_t w;
+            if (found[i]) {
+                RespGReply elem = wire_bulk(vals[i]);
+                w = cc_write(RespGReply, &elem, dst + off, out.len - off);
+            } else {
+                RespGBulkHdr nil = { .len = -1 };
+                w = cc_write(RespGBulkHdr, &nil, dst + off, out.len - off);
+            }
+            fit = w != 0;
+            off += w;
         }
-        size_t hdr = resp_bulk_header_len(vals[i].len);
-        resp_encode_bulk_header_into(dst, vals[i].len);
-        if (vals[i].len > 0) memcpy(dst + hdr, vals[i].ptr, vals[i].len);
-        dst[hdr + vals[i].len] = '\r';
-        dst[hdr + vals[i].len + 1] = '\n';
-        dst += hdr + vals[i].len + 2;
+        if (fit) {
+            out.len = off;
+            return cc_ok(reply_raw_slice(out));
+        }
+        if (cap >= (size_t)k_reply_encode_cap_max) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "mget reply encode overflow"));
+        }
+        cap *= 2; /* re-encode is safe: no map mutation since pass 1 reaped */
     }
-    return cc_ok(reply_raw_slice(out));
 }
 
 static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
@@ -1410,36 +1497,45 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     if (pattern.len > (size_t)k_keys_pattern_max) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR KEYS pattern too long"));
     }
-    if (!db || !db->entries) return cc_ok(reply_raw(@slice("*0\r\n")));
-
     const char* pat = (const char*)pattern.ptr;
     CCSliceHdr k;
     RedisValue v;
 
+    /* Structured array: count pass, fill a RespGReply items vector (bulk
+     * elements borrowing key bytes — safe: no map mutation between the
+     * passes and the encode below), then ONE recursive cc_write. */
+    RespGReply* items = NULL;
     size_t matched = 0;
-    size_t payload = 0;
-    CC_MAP_FOREACH(db->entries, k, v) {
-        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
-        if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
-        matched++;
-        payload += resp_bulk_header_len(k.len) + k.len + 2;
+    size_t cap_hint = 16;
+    if (db && db->entries) {
+        CC_MAP_FOREACH(db->entries, k, v) {
+            if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+            if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+            matched++;
+            cap_hint += k.len + 24;
+        }
+        if (matched > 0) {
+            /* align 8: RespGReply holds pointers/long long, nothing wider */
+            items = (RespGReply*)cc_arena_alloc(reply_arena,
+                                                matched * sizeof(RespGReply), 8);
+            if (!items) {
+                return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode OOM"));
+            }
+            size_t idx = 0;
+            CC_MAP_FOREACH(db->entries, k, v) {
+                if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+                if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+                items[idx++] = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));
+            }
+        }
     }
 
-    size_t total = resp_array_header_len(matched) + payload;
-    CCSlice out = reply_batch_alloc_slice(reply_arena, total) !>;
-    char* dst = (char*)out.ptr;
-    resp_encode_array_header_into(dst, matched);
-    dst += resp_array_header_len(matched);
-    CC_MAP_FOREACH(db->entries, k, v) {
-        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
-        if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
-        size_t hdr = resp_bulk_header_len(k.len);
-        resp_encode_bulk_header_into(dst, k.len);
-        if (k.len > 0) memcpy(dst + hdr, k.ptr, k.len);
-        dst[hdr + k.len] = '\r';
-        dst[hdr + k.len + 1] = '\n';
-        dst += hdr + k.len + 2;
-    }
+    RespGReply arr;
+    arr.kind = RespGReply_array;
+    arr.u.array.n = (long long)matched; /* derived on write; set for hygiene */
+    arr.u.array.items = items;
+    arr.u.array.items_n = matched;
+    CCSlice out = reply_wire_encode_into_batch(&arr, reply_arena, cap_hint) !>;
     return cc_ok(reply_raw_slice(out));
 }
 
@@ -1510,7 +1606,7 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
         case REDIS_CMD_ECHO:
             return cc_ok(reply_bulk(req->argv[0]));
         case REDIS_CMD_CONFIG_GET:
-            return cc_ok(reply_raw(config_get_reply(req->argv[0])));
+            return config_get_reply(req->argv[0], reply_arena);
         case REDIS_CMD_GET:
             return cc_ok(db_get(db, req->argv[0], &now));
         case REDIS_CMD_SET:
@@ -1637,80 +1733,63 @@ static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
     return true;
 }
 
-static char* redis_conn_reserve_out(RedisConn* conn, size_t n) {
-    if (!conn || n == 0 || n > redis_conn_out_buf_bytes) return NULL;
-    if (conn->out_len + n > redis_conn_out_buf_bytes) {
-        if (!conn->flush_out()) return NULL;
+/* One schema-written reply into conn->out_buf.  cc_write's 0-on-didn't-fit
+ * drives the existing buffer discipline: try the remaining space, flush and
+ * retry into the whole buffer, and only a reply bigger than the buffer
+ * itself falls through to streaming (schema-written bulk header, then the
+ * payload slice, then the closing CRLF pair). */
+static bool redis_conn_write_wire_reply(RedisConn* conn, const RespGReply* wire) {
+    size_t w = cc_write(RespGReply, wire, conn->out_buf + conn->out_len,
+                        redis_conn_out_buf_bytes - conn->out_len);
+    if (w == 0) {
+        if (!conn->flush_out()) return false;
+        w = cc_write(RespGReply, wire, conn->out_buf, redis_conn_out_buf_bytes);
     }
-    char* dst = conn->out_buf + conn->out_len;
-    conn->out_len += n;
-    return dst;
+    if (w != 0) {
+        conn->out_len += w;
+        return true;
+    }
+    /* Bigger than the whole out_buf: only bulk payloads can get here
+     * (simple/error carry short static messages; integers are <= 22 bytes).
+     * Anything else oversized is a bug — fail the write loudly. */
+    if (wire->kind != RespGReply_bulk) return false;
+    RespGBulkHdr hdr = { .len = (long long)wire->u.bulk.data.len };
+    size_t hw = cc_write(RespGBulkHdr, &hdr, conn->out_buf, redis_conn_out_buf_bytes);
+    if (hw == 0) return false;
+    conn->out_len = hw; /* buffer is empty after the flush above */
+    return conn->write_bytes(wire->u.bulk.data) &&
+           conn->write_bytes(cc_slice_from_cstr("\r\n"));
+}
+
+/* nil ("$-1\r\n"): the bulk-header schema with len -1 — RESP2's own
+ * definition of a null bulk (no RespGReply variant; see schema comment). */
+static bool redis_conn_write_nil(RedisConn* conn) {
+    RespGBulkHdr nil = { .len = -1 };
+    size_t w = cc_write(RespGBulkHdr, &nil, conn->out_buf + conn->out_len,
+                        redis_conn_out_buf_bytes - conn->out_len);
+    if (w == 0) {
+        if (!conn->flush_out()) return false;
+        w = cc_write(RespGBulkHdr, &nil, conn->out_buf, redis_conn_out_buf_bytes);
+        if (w == 0) return false;
+    }
+    conn->out_len += w;
+    return true;
 }
 
 static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     if (!reply) return false;
     switch (reply->kind) {
         case REDIS_REPLY_RAW:
+            /* already wire bytes (owner-encoded arrays / batch-stabilized) */
             return conn->write_bytes(reply->data);
-        case REDIS_REPLY_SIMPLE_STRING:
-        case REDIS_REPLY_ERROR: {
-            size_t n = reply->data.len + 3;
-            char* dst = conn->reserve_out(n);
-            if (!dst) {
-                char prefix = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
-                CCSlice pfx = cc_slice_from_buffer(&prefix, 1);
-                CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return conn->write_bytes(pfx) &&
-                       conn->write_bytes(reply->data) &&
-                       conn->write_bytes(crlf);
-            }
-            dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
-            if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
-            return true;
-        }
-        case REDIS_REPLY_BULK_STRING: {
-            size_t hdr_len = resp_bulk_header_len(reply->data.len);
-            size_t n = hdr_len + reply->data.len + 2;
-            char* dst = conn->reserve_out(n);
-            if (!dst) {
-                char hdr[32];
-                resp_encode_bulk_header_into(hdr, reply->data.len);
-                CCSlice hdr_s = cc_slice_from_buffer(hdr, hdr_len);
-                CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return conn->write_bytes(hdr_s) &&
-                       conn->write_bytes(reply->data) &&
-                       conn->write_bytes(crlf);
-            }
-            resp_encode_bulk_header_into(dst, reply->data.len);
-            if (reply->data.len > 0) memcpy(dst + hdr_len, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
-            return true;
-        }
-        case REDIS_REPLY_INTEGER: {
-            size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = conn->reserve_out(n);
-            if (dst) {
-                resp_encode_integer_into(dst, reply->int_value);
-                return true;
-            }
-            char buf[32];
-            resp_encode_integer_into(buf, reply->int_value);
-            return conn->write_bytes(cc_slice_from_buffer(buf, n));
-        }
-        case REDIS_REPLY_NULL_BULK: {
-            char* dst = conn->reserve_out(5);
-            if (dst) {
-                memcpy(dst, "$-1\r\n", 5);
-                return true;
-            }
-            return conn->write_bytes(cc_slice_from_cstr("$-1\r\n"));
-        }
+        case REDIS_REPLY_NULL_BULK:
+            return conn->write_nil();
         default:
-            return false;
+            break;
     }
+    RespGReply wire;
+    if (!redis_reply_to_wire(reply, &wire)) return false;
+    return conn->write_wire_reply(&wire);
 }
 
 /* Reply bytes allocated here live until the client drains or tears down the
@@ -1728,61 +1807,35 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     }
     @errhandler(CCError e) { return cc_err(e); }
 
-    switch (reply->kind) {
-        case REDIS_REPLY_RAW: {
-            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, reply->data.len) !>;
-            char* dst = (char*)stable.ptr;
-            if (reply->data.len > 0) memcpy(dst, reply->data.ptr, reply->data.len);
-            reply->data = stable;
-            return cc_ok(true);
-        }
-        case REDIS_REPLY_SIMPLE_STRING:
-        case REDIS_REPLY_ERROR: {
-            size_t n = reply->data.len + 3;
-            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
-            char* dst = (char*)stable.ptr;
-            dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
-            if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
-            reply->kind = REDIS_REPLY_RAW;
-            reply->data = stable;
-            return cc_ok(true);
-        }
-        case REDIS_REPLY_BULK_STRING: {
-            size_t hdr = resp_bulk_header_len(reply->data.len);
-            size_t n = hdr + reply->data.len + 2;
-            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
-            char* dst = (char*)stable.ptr;
-            resp_encode_bulk_header_into(dst, reply->data.len);
-            if (reply->data.len > 0) memcpy(dst + hdr, reply->data.ptr, reply->data.len);
-            dst[n - 2] = '\r';
-            dst[n - 1] = '\n';
-            reply->kind = REDIS_REPLY_RAW;
-            reply->data = stable;
-            return cc_ok(true);
-        }
-        case REDIS_REPLY_INTEGER: {
-            size_t n = resp_integer_encoded_len(reply->int_value);
-            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, n) !>;
-            char* dst = (char*)stable.ptr;
-            resp_encode_integer_into(dst, reply->int_value);
-            reply->kind = REDIS_REPLY_RAW;
-            reply->data = stable;
-            return cc_ok(true);
-        }
-        case REDIS_REPLY_NULL_BULK: {
-            CCSlice src = cc_slice_from_cstr("$-1\r\n");
-            CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, src.len) !>;
-            char* dst = (char*)stable.ptr;
-            memcpy(dst, src.ptr, src.len);
-            reply->kind = REDIS_REPLY_RAW;
-            reply->data = stable;
-            return cc_ok(true);
-        }
-        default:
-            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "unknown reply kind"));
+    if (reply->kind == REDIS_REPLY_RAW) {
+        /* already wire bytes — just move them into batch storage */
+        CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, reply->data.len) !>;
+        if (reply->data.len > 0) memcpy((char*)stable.ptr, reply->data.ptr, reply->data.len);
+        reply->data = stable;
+        return cc_ok(true);
     }
+    if (reply->kind == REDIS_REPLY_NULL_BULK) {
+        /* boundary nil (unreachable today: stabilize passes nil through
+         * untouched) — the bulk-header schema with len -1, like the write
+         * path */
+        RespGBulkHdr nil = { .len = -1 };
+        CCSlice stable = reply_batch_alloc_slice(reply_batch_arena, 8) !>;
+        size_t w = cc_write(RespGBulkHdr, &nil, (char*)stable.ptr, stable.len);
+        if (w == 0) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "nil encode failed"));
+        stable.len = w;
+        reply->kind = REDIS_REPLY_RAW;
+        reply->data = stable;
+        return cc_ok(true);
+    }
+    RespGReply wire;
+    if (!redis_reply_to_wire(reply, &wire)) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "unknown reply kind"));
+    }
+    CCSlice stable = reply_wire_encode_into_batch(&wire, reply_batch_arena,
+                                                  reply->data.len + 32) !>;
+    reply->kind = REDIS_REPLY_RAW;
+    reply->data = stable;
+    return cc_ok(true);
 }
 
 /* Copy only a bulk payload into batch-arena storage.  DB-backed GET can keep

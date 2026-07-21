@@ -12,6 +12,8 @@ Coverage:
   - basics: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX, APPEND/STRLEN/TYPE,
     DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
     DBSIZE/FLUSHDB/FLUSHALL, KEYS glob, CONFIG GET, inline commands
+  - wire parity: byte-exact replies for every RESP shape (simple, error,
+    integer, bulk, empty bulk, nil, empty array, mixed bulk+nil array)
   - expiry: EXPIRE/PEXPIRE/TTL/PTTL/PERSIST semantics + lazy expiration
     observed through GET/EXISTS/DBSIZE/KEYS (short TTLs, minimal sleeps)
   - error paths: non-integer INCR, SETEX with non-positive TTL (connection
@@ -215,6 +217,48 @@ def test_basics(port):
     c.close()
 
 
+def test_wire_parity(port):
+    """Byte-exact wire replies: the generated schema writers (RespGReply /
+    RespGBulkHdr / RespGArrayHdr) must reproduce the retired hand encoders'
+    bytes for every reply shape, including boundary nil and empty arrays."""
+    print("[wire parity]")
+    c = Resp(port)
+    c.cmd("FLUSHALL")
+
+    def expect(name, raw_cmd, want):
+        c.send_raw(raw_cmd)
+        while len(c.buf) < len(want):
+            c._fill()
+        got, c.buf = c.buf[:len(want)], c.buf[len(want):]
+        if got != want:
+            raise AssertionError("%s: got %r, want %r" % (name, got, want))
+        print("  ok %-28s %r" % (name, want))
+
+    expect("simple PONG", encode("PING"), b"+PONG\r\n")
+    expect("bulk PING echo", encode("PING", "hey"), b"$3\r\nhey\r\n")
+    expect("simple OK", encode("SET", "wp:k", "v1"), b"+OK\r\n")
+    expect("bulk GET", encode("GET", "wp:k"), b"$2\r\nv1\r\n")
+    expect("empty-value SET", encode("SET", "wp:e", ""), b"+OK\r\n")
+    expect("empty bulk", encode("GET", "wp:e"), b"$0\r\n\r\n")
+    expect("nil bulk", encode("GET", "wp:missing"), b"$-1\r\n")
+    expect("integer", encode("INCR", "wp:ctr"), b":1\r\n")
+    expect("negative integer", encode("DECRBY", "wp:neg", "7"), b":-7\r\n")
+    expect("TTL missing -2", encode("TTL", "wp:missing"), b":-2\r\n")
+    expect("empty array", encode("KEYS", "wp:nomatch*"), b"*0\r\n")
+    expect("KEYS array", encode("KEYS", "wp:k"), b"*1\r\n$4\r\nwp:k\r\n")
+    expect("MGET bulk+nil", encode("MGET", "wp:k", "wp:missing"),
+           b"*2\r\n$2\r\nv1\r\n$-1\r\n")
+    expect("CONFIG GET save", encode("CONFIG", "GET", "save"),
+           b"*2\r\n$4\r\nsave\r\n$0\r\n\r\n")
+    expect("CONFIG GET appendonly", encode("CONFIG", "GET", "appendonly"),
+           b"*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n")
+    expect("CONFIG GET unknown", encode("CONFIG", "GET", "zzz"), b"*0\r\n")
+    expect("error reply", encode("INCR", "wp:k"),
+           b"-ERR value is not an integer or out of range\r\n")
+    check("wire flush", c.cmd("FLUSHALL"), "OK")
+    c.close()
+
+
 def test_expiry(port):
     print("[expiry]")
     c = Resp(port)
@@ -409,6 +453,7 @@ def main():
     try:
         wait_port(args.port)
         test_basics(args.port)
+        test_wire_parity(args.port)
         test_expiry(args.port)
         test_pipeline(args.port)
         test_teardown_storm(args.port)
