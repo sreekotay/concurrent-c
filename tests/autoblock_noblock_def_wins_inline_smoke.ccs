@@ -1,0 +1,48 @@
+/* Def-wins TU-locally, `static inline` variant:
+ *
+ * TCC defers `static inline` bodies (skip_or_save_block), so the
+ * definition's DECL_ITEM never gets a body BLOCK child in the stub AST
+ * — the structural definition detection is blind here.  This pins the
+ * text-scan fallback in cc__decl_item_is_definition: `@noblock` on a
+ * `static inline` DEFINITION must still beat an unannotated forward
+ * decl.  Same tid oracle as autoblock_noblock_def_wins_smoke.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* Forward decl WITHOUT @noblock — the inline def below carries it. */
+static void record_tid(intptr_t* out_tid);
+
+@async int serve(intptr_t* helper_tid) {
+    /* Def-wins: must NOT be autoblock-wrapped. */
+    record_tid(helper_tid);
+    return 0;
+}
+
+@noblock static inline void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "inline def-wins @noblock: tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid != main_tid) {
+        fprintf(stderr,
+                "inline def-wins @noblock: helper was autoblock-wrapped despite "
+                "@noblock on the static inline definition (helper=%ld main=%ld)\n",
+                (long)helper_tid, (long)main_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

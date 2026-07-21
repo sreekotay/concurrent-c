@@ -1,0 +1,44 @@
+/* Behavior guard for def-wins TU-locally:
+ *
+ * `@noblock` on BOTH the forward declaration and the definition (the
+ * redis-style double annotation that predates the def-wins rule) keeps
+ * working: the call is NOT autoblock-wrapped, and no lying-decl
+ * warning fires (asserted by scripts/test_autoblock_noblock_warn.sh).
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+@noblock static void record_tid(intptr_t* out_tid);
+
+@async int serve(intptr_t* helper_tid) {
+    record_tid(helper_tid);
+    return 0;
+}
+
+@noblock static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "decl+def @noblock: tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid != main_tid) {
+        fprintf(stderr,
+                "decl+def @noblock: helper was autoblock-wrapped "
+                "(helper=%ld main=%ld)\n",
+                (long)helper_tid, (long)main_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

@@ -207,10 +207,10 @@ typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static void redis_conn_destroy(RedisConn* conn);
-@noblock static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
+static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
 /* Defined with the reply path below; the owner's array-reply builders
  * (MGET/KEYS) allocate through it into conn->reply_arena. */
-@noblock static CCSlice !>(CCError) reply_batch_alloc_slice(CCArena* reply_batch_arena, size_t n);
+static CCSlice !>(CCError) reply_batch_alloc_slice(CCArena* reply_batch_arena, size_t n);
 
 /* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
  * BEFORE the registered callee, letting handle_client drain in-flight

@@ -1,0 +1,52 @@
+/* Def-wins TU-locally, lying-decl side:
+ *
+ * A forward declaration promises `@noblock` but the DEFINITION in the
+ * same TU does not carry it.  The definition's (blocking)
+ * classification wins: the call IS autoblock-dispatched to a worker
+ * thread.  The compiler additionally emits a warning naming both the
+ * decl and the def coordinates (asserted by
+ * scripts/test_autoblock_noblock_warn.sh — the run harness only checks
+ * runtime stdout/stderr, not build stderr).
+ *
+ * Observable signal: helper tid != main tid (it was wrapped).
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* Decl PROMISES @noblock ... */
+@noblock static void record_tid(intptr_t* out_tid);
+
+@async int serve(intptr_t* helper_tid) {
+    /* Def wins: this call MUST be autoblock-wrapped (def is blocking). */
+    record_tid(helper_tid);
+    return 0;
+}
+
+/* ... but the definition does NOT carry it. */
+static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "decl-promises/def-breaks: tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid == main_tid) {
+        fprintf(stderr,
+                "decl-promises/def-breaks: call ran inline — the lying decl's "
+                "@noblock won over the blocking definition (tid=%ld)\n",
+                (long)helper_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

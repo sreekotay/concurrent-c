@@ -55,6 +55,11 @@ typedef enum {
  *
  *   1. Call-site annotation wins.  (@blocking/@noblock at the call site)
  *   2. Else callee decl annotation wins.  (@async, @noblock, @blocking)
+ *      NOTE: for @noblock the DEFINITION wins TU-locally — the caller
+ *      pre-resolves callee_attrs via cc__lookup_func_def_attrs before
+ *      consulting this chain, so a def-only @noblock beats an
+ *      unannotated forward decl (and a decl-only @noblock loses to a
+ *      blocking definition, with a lying-decl warning).
  *   3. Else if callee is undecorated CC: inherit the caller's ambient
  *      mode (taken from owner_attrs).
  *   4. Else (FFI / unknown indirect / unresolved): default @blocking.
@@ -225,6 +230,122 @@ static int cc__lookup_func_attrs(const CCASTRoot* root,
         if (out_attrs) *out_attrs = (unsigned int)n[i].aux2;
         return 1;
     }
+    return 0;
+}
+
+/* A function DECL_ITEM is a DEFINITION iff its body BLOCK node was
+ * recorded as a direct child: the patched TCC keeps the definition's
+ * DECL_ITEM open across the body parse (CC_REC_END fires only after
+ * gen_function), while a forward declaration closes at `;` before any
+ * BLOCK can nest under it.  Children are recorded after their parent,
+ * so the scan starts at idx+1.
+ *
+ * Fallback (`static inline` defs): TCC defers inline bodies via
+ * skip_or_save_block, so no BLOCK child is ever recorded under the
+ * DECL_ITEM.  Recover by scanning the source text from the declarator:
+ * a top-level `{` before the top-level `;` means a body follows —
+ * a definition.  (cc_find_char_top_level skips comments, literals and
+ * balanced groups, so the param list `(...)` cannot fool it.) */
+static int cc__decl_item_is_definition(const CCASTRoot* root,
+                                       const NodeView* n,
+                                       int idx,
+                                       const char* src,
+                                       size_t src_len) {
+    if (!root || !n || idx < 0) return 0;
+    for (int j = idx + 1; j < root->node_count; j++) {
+        if (n[j].parent == idx && n[j].kind == 2 /* CC_AST_NODE_BLOCK */) return 1;
+    }
+    if (src && src_len && n[idx].line_start > 0) {
+        size_t at = (n[idx].col_start > 0)
+            ? cc__offset_of_line_col_1based(src, src_len, n[idx].line_start, n[idx].col_start)
+            : cc__offset_of_line_1based(src, src_len, n[idx].line_start);
+        if (at < src_len) {
+            size_t semi = cc_find_char_top_level(src, at, src_len, ';');
+            size_t brace = cc_find_char_top_level(src, at, src_len, '{');
+            if (brace < semi) return 1;
+        }
+    }
+    return 0;
+}
+
+/* "Definition wins TU-locally" (@noblock): find the DEFINITION's attr
+ * bits for `name` in this TU, regardless of what forward declarations
+ * say.  Returns 1 iff a TU-local definition was found; fills
+ * `out_attrs` with the definition's CC_FN_ATTR_* bits and
+ * `out_def_idx` with its node index.  `out_noblock_decl_idx` receives
+ * the node index of a non-definition declaration of `name` that
+ * carries @noblock (TU-local ones preferred, header decls accepted for
+ * diagnostics), or -1 — used to warn when a decl promises @noblock the
+ * definition does not keep. */
+static int cc__lookup_func_def_attrs(const CCASTRoot* root,
+                                     const CCVisitorCtx* ctx,
+                                     const char* name,
+                                     const char* src,
+                                     size_t src_len,
+                                     unsigned int* out_attrs,
+                                     int* out_def_idx,
+                                     int* out_noblock_decl_idx) {
+    if (out_attrs) *out_attrs = 0;
+    if (out_def_idx) *out_def_idx = -1;
+    if (out_noblock_decl_idx) *out_noblock_decl_idx = -1;
+    if (!root || !name) return 0;
+    const NodeView* n = (const NodeView*)root->nodes;
+    int def_idx = -1;
+    int noblock_decl_idx = -1;      /* TU-local lying decl */
+    int noblock_decl_idx_any = -1;  /* fallback: e.g. header decl */
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 12) continue; /* CC_AST_NODE_DECL_ITEM */
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, name) != 0) continue;
+        if (!n[i].aux_s2 || !strchr(n[i].aux_s2, '(')) continue; /* functions only */
+        int in_tu = cc_pass_node_in_tu(root, ctx, n[i].file);
+        if (in_tu && def_idx < 0 &&
+            cc__decl_item_is_definition(root, n, i, src, src_len)) {
+            def_idx = i;
+            continue;
+        }
+        if (((unsigned int)n[i].aux2 & CC_FN_ATTR_NOBLOCK) != 0) {
+            if (in_tu) {
+                if (noblock_decl_idx < 0) noblock_decl_idx = i;
+            } else if (noblock_decl_idx_any < 0) {
+                noblock_decl_idx_any = i;
+            }
+        }
+    }
+    if (def_idx < 0) return 0;
+    if (out_attrs) *out_attrs = (unsigned int)n[def_idx].aux2;
+    if (out_def_idx) *out_def_idx = def_idx;
+    if (out_noblock_decl_idx) {
+        *out_noblock_decl_idx =
+            (noblock_decl_idx >= 0) ? noblock_decl_idx : noblock_decl_idx_any;
+    }
+    return 1;
+}
+
+/* One-shot registry for the lying-decl warning: the pass runs once per
+ * call site and the pipeline reparses the buffer several times, so an
+ * unguarded warning would repeat.  Key is file|fn-name (same TU + same
+ * name == same function), process lifetime. */
+static int cc__noblock_lie_already_warned(const char* file, const char* name) {
+    static char** seen = NULL;
+    static int seen_n = 0;
+    static int seen_cap = 0;
+    const char* f = file ? file : "<input>";
+    const char* nm = name ? name : "?";
+    size_t key_len = strlen(f) + 1 + strlen(nm) + 1;
+    char* key = (char*)malloc(key_len);
+    if (!key) return 0; /* OOM: warn again rather than crash or go silent */
+    snprintf(key, key_len, "%s|%s", f, nm);
+    for (int i = 0; i < seen_n; i++) {
+        if (strcmp(seen[i], key) == 0) { free(key); return 1; }
+    }
+    if (seen_n >= seen_cap) {
+        int nc = seen_cap ? seen_cap * 2 : 16;
+        char** ns = (char**)realloc(seen, (size_t)nc * sizeof(char*));
+        if (!ns) { free(key); return 0; }
+        seen = ns;
+        seen_cap = nc;
+    }
+    seen[seen_n++] = key;
     return 0;
 }
 
@@ -739,6 +860,49 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
         if (!callee_known) {
             if (cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs) == 0) {
                 callee_known = 1;
+            }
+        }
+        /* Definition wins TU-locally (@noblock).  The lookups above read
+         * the FIRST visible declaration, so `@noblock` on the definition
+         * alone was silently insufficient (redis_conn_release_slot: 3x
+         * SET-throughput regression).  When this TU contains the callee's
+         * definition, the definition's @noblock bit overrides whatever the
+         * forward decls say.  Call-site @blocking/@noblock still wins over
+         * everything via site_attrs below (spec §8.2.2 rule 1). */
+        {
+            unsigned int def_attrs = 0;
+            int def_idx = -1;
+            int lying_decl_idx = -1;
+            if (cc__lookup_func_def_attrs(root, ctx, n[i].aux_s1, in_src, in_len,
+                                          &def_attrs, &def_idx, &lying_decl_idx)) {
+                callee_known = 1;
+                if (def_attrs & CC_FN_ATTR_NOBLOCK) {
+                    callee_attrs |= CC_FN_ATTR_NOBLOCK;
+                } else if (callee_attrs & CC_FN_ATTR_NOBLOCK) {
+                    /* Decl promises @noblock, def breaks it: the def's
+                     * (blocking) classification wins; tell the user the
+                     * decl is lying — once per function per TU. */
+                    callee_attrs &= ~(unsigned int)CC_FN_ATTR_NOBLOCK;
+                    if (lying_decl_idx >= 0 &&
+                        !cc__noblock_lie_already_warned(n[def_idx].file, n[i].aux_s1)) {
+                        cc_pass_warning(
+                            n[lying_decl_idx].file, n[lying_decl_idx].line_start,
+                            n[lying_decl_idx].col_start,
+                            "async: declaration of '%s' at %s:%d promises @noblock "
+                            "but its definition at %s:%d does not carry it; the "
+                            "definition wins — calls in this TU are dispatched to "
+                            "the blocking pool",
+                            n[i].aux_s1,
+                            n[lying_decl_idx].file ? n[lying_decl_idx].file : "<input>",
+                            n[lying_decl_idx].line_start,
+                            n[def_idx].file ? n[def_idx].file : "<input>",
+                            n[def_idx].line_start);
+                        cc_pass_note(n[def_idx].file, n[def_idx].line_start,
+                                     n[def_idx].col_start,
+                                     "definition of '%s' is here (no @noblock)",
+                                     n[i].aux_s1);
+                    }
+                }
             }
         }
         /* Phase 3: pull call-site attrs from the @CC_SITE marker

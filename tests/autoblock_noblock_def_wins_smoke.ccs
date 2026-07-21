@@ -1,0 +1,55 @@
+/* Def-wins TU-locally (spec §8.2.2 + autoblock @noblock resolution):
+ *
+ * `@noblock` on a function DEFINITION makes the function @noblock at
+ * every call site in the same TU, even when a forward declaration
+ * visible above the call site does NOT carry the attribute.  Before
+ * this rule, autoblock read the attrs off the nearest/first decl node:
+ * a def-only `@noblock` was silently ignored and the call was still
+ * dispatched to the blocking worker pool (measured 3x SET-throughput
+ * regression in real_projects/redis: redis_conn_release_slot).
+ *
+ * Observable signal (same oracle as call_site_noblock_smoke): the
+ * helper records the tid it actually ran on.  Not wrapped => inline on
+ * the poll thread (== main's tid under cc_block_on).  Wrapped =>
+ * thread-pool worker tid != main tid.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* Forward decl WITHOUT @noblock — the def below carries it. */
+static void record_tid(intptr_t* out_tid);
+
+@async int serve(intptr_t* helper_tid) {
+    /* Def-wins: must NOT be autoblock-wrapped. */
+    record_tid(helper_tid);
+    return 0;
+}
+
+/* Definition carries @noblock — this must win TU-locally. */
+@noblock static void record_tid(intptr_t* out_tid) {
+    *out_tid = (intptr_t)pthread_self();
+}
+
+int main(void) {
+    intptr_t main_tid = (intptr_t)pthread_self();
+    intptr_t helper_tid = 0;
+    (void)cc_block_on(int, serve(&helper_tid));
+    if (helper_tid == 0) {
+        fprintf(stderr, "def-wins @noblock: tid capture failed\n");
+        return 2;
+    }
+    if (helper_tid != main_tid) {
+        fprintf(stderr,
+                "def-wins @noblock: helper was autoblock-wrapped despite "
+                "@noblock on the definition (helper=%ld main=%ld)\n",
+                (long)helper_tid, (long)main_tid);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}
