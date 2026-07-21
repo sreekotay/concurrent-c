@@ -23,13 +23,32 @@ typedef struct RedisConn RedisConn;
 typedef enum RedisCommandKind {
     REDIS_CMD_PING = 0,
     REDIS_CMD_CONFIG_GET,
+    REDIS_CMD_ECHO,
     REDIS_CMD_GET,
     REDIS_CMD_SET,
+    REDIS_CMD_SETNX,
+    REDIS_CMD_SETEX,
+    REDIS_CMD_PSETEX,
+    REDIS_CMD_APPEND,
+    REDIS_CMD_STRLEN,
+    REDIS_CMD_TYPE,
     REDIS_CMD_DEL,
     REDIS_CMD_EXISTS,
     REDIS_CMD_INCR,
+    REDIS_CMD_DECR,
+    REDIS_CMD_INCRBY,
+    REDIS_CMD_DECRBY,
+    REDIS_CMD_MGET,
+    REDIS_CMD_MSET,
     REDIS_CMD_EXPIRE,
+    REDIS_CMD_PEXPIRE,
     REDIS_CMD_TTL,
+    REDIS_CMD_PTTL,
+    REDIS_CMD_PERSIST,
+    REDIS_CMD_DBSIZE,
+    REDIS_CMD_FLUSHDB,
+    REDIS_CMD_FLUSHALL,
+    REDIS_CMD_KEYS,
     /* Concurrent-C: dump arena / mem stats to stderr; reply +OK. */
     REDIS_CMD_CC_MEMLOG,
 } RedisCommandKind;
@@ -43,6 +62,15 @@ typedef enum RedisReplyKind {
     REDIS_REPLY_RAW,
 } RedisReplyKind;
 
+/* Max command arguments AFTER the command word.  Total wire tokens per
+ * command = REDIS_ARGV_MAX + 1, which must match the grammar's `cap`
+ * in redis_idiomatic.ccs (RespGCmd) and every args[] scratch array.
+ * Bounds the variadic commands: DEL/EXISTS/MGET take up to
+ * REDIS_ARGV_MAX keys, MSET up to REDIS_ARGV_MAX/2 pairs. */
+#ifndef REDIS_ARGV_MAX
+#define REDIS_ARGV_MAX 7
+#endif
+
 typedef struct RedisRequest {
     uint64_t conn_id;
     uint64_t request_id;
@@ -50,7 +78,7 @@ typedef struct RedisRequest {
     RedisConn* conn;
     RedisCommandKind kind;
     size_t argc;
-    CCSlice argv[3];
+    CCSlice argv[REDIS_ARGV_MAX];
     /* argv-clone scratch: req->arena wraps argv_buf and heap-spills
      * on overflow.  Pairing kept at the tail so sizeof(RedisRequest)
      * is the exact pool-slot size. */
@@ -70,13 +98,32 @@ static inline const char* redis_command_name(RedisCommandKind kind) {
     switch (kind) {
         case REDIS_CMD_PING: return "PING";
         case REDIS_CMD_CONFIG_GET: return "CONFIG_GET";
+        case REDIS_CMD_ECHO: return "ECHO";
         case REDIS_CMD_GET: return "GET";
         case REDIS_CMD_SET: return "SET";
+        case REDIS_CMD_SETNX: return "SETNX";
+        case REDIS_CMD_SETEX: return "SETEX";
+        case REDIS_CMD_PSETEX: return "PSETEX";
+        case REDIS_CMD_APPEND: return "APPEND";
+        case REDIS_CMD_STRLEN: return "STRLEN";
+        case REDIS_CMD_TYPE: return "TYPE";
         case REDIS_CMD_DEL: return "DEL";
         case REDIS_CMD_EXISTS: return "EXISTS";
         case REDIS_CMD_INCR: return "INCR";
+        case REDIS_CMD_DECR: return "DECR";
+        case REDIS_CMD_INCRBY: return "INCRBY";
+        case REDIS_CMD_DECRBY: return "DECRBY";
+        case REDIS_CMD_MGET: return "MGET";
+        case REDIS_CMD_MSET: return "MSET";
         case REDIS_CMD_EXPIRE: return "EXPIRE";
+        case REDIS_CMD_PEXPIRE: return "PEXPIRE";
         case REDIS_CMD_TTL: return "TTL";
+        case REDIS_CMD_PTTL: return "PTTL";
+        case REDIS_CMD_PERSIST: return "PERSIST";
+        case REDIS_CMD_DBSIZE: return "DBSIZE";
+        case REDIS_CMD_FLUSHDB: return "FLUSHDB";
+        case REDIS_CMD_FLUSHALL: return "FLUSHALL";
+        case REDIS_CMD_KEYS: return "KEYS";
         case REDIS_CMD_CC_MEMLOG: return "CC_MEMLOG";
         default: return "UNKNOWN";
     }

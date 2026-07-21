@@ -8,6 +8,12 @@
  * to use any number of OS threads.  Pipeline depth is bounded by
  * `k_pipeline_reply_cap` (see enum near the reply channel typedef).
  *
+ * Command surface: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX/APPEND/STRLEN,
+ * TYPE, DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
+ * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute deadline
+ * checked on access, no active cycle), DBSIZE, FLUSHDB/FLUSHALL, KEYS
+ * (glob), CONFIG GET, CC.MEMLOG.  Functional smoke: `python3 redis_smoke.py`.
+ *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
  * Memory: CC_REDIS_MEM_REPORT=1 logs Mach footprint, logical_db_live vs
  * mach_phys_footprint, db_dump_mem_stats (per-arena map, key, value slabs).
@@ -24,6 +30,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -68,7 +75,17 @@ static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
-CC_MAP_DECL_ARENA(CCSliceHdr, CCString, RedisDbMap, db_map_hash_key, db_map_eq_key);
+/* DB cell: the string payload plus an absolute expiration deadline.
+ * expires_at_ms == 0 means "no expiry".  Expiration is LAZY: checked on
+ * access (db_lookup_live) and overwritten on write; there is no active
+ * expiry cycle, so an expired-but-untouched key still occupies memory
+ * until the next access, FLUSH*, or teardown. */
+typedef struct RedisValue {
+    CCString str;
+    int64_t expires_at_ms;
+} RedisValue;
+
+CC_MAP_DECL_ARENA(CCSliceHdr, RedisValue, RedisDbMap, db_map_hash_key, db_map_eq_key);
 CC_MAP_DECL_UFCS(RedisDbMap);
 
 static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
@@ -76,7 +93,7 @@ static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
     if (!m) return 0;
     cap = RedisDbMap_cap(m);
     if (cap == 0) return sizeof(*m);
-    return sizeof(*m) + cap * (sizeof(CCSliceHdr) + sizeof(CCString)) + sizeof(uint16_t) * (cap + 4u) + 128u;
+    return sizeof(*m) + cap * (sizeof(CCSliceHdr) + sizeof(RedisValue)) + sizeof(uint16_t) * (cap + 4u) + 128u;
 }
 
 typedef struct RedisDb {
@@ -191,6 +208,9 @@ typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static void redis_conn_destroy(RedisConn* conn);
 @noblock static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
+/* Defined with the reply path below; the owner's array-reply builders
+ * (MGET/KEYS) allocate through it into conn->reply_arena. */
+@noblock static CCSlice !>(CCError) reply_batch_alloc_slice(CCArena* reply_batch_arena, size_t n);
 
 /* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
  * BEFORE the registered callee, letting handle_client drain in-flight
@@ -328,6 +348,25 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
     } while (mag != 0);
 }
 
+/* Multi-bulk ("*<n>\r\n") header, for array replies (MGET, KEYS) built
+ * directly into conn->reply_arena by the owner. */
+static size_t resp_array_header_len(size_t n) {
+    return 1 + u64_decimal_len((uint64_t)n) + 2;
+}
+
+static void resp_encode_array_header_into(char* dst, size_t n) {
+    uint64_t mag = (uint64_t)n;
+    size_t digit_len = u64_decimal_len(mag);
+    size_t pos = 1 + digit_len;
+    dst[0] = '*';
+    dst[1 + digit_len] = '\r';
+    dst[2 + digit_len] = '\n';
+    do {
+        dst[--pos] = (char)('0' + (mag % 10));
+        mag /= 10;
+    } while (mag != 0);
+}
+
 #include "redis_resp.cch"
 
 /* ---- @grammar RESP reader (the ONLY reader: the hand-rolled one is
@@ -336,9 +375,10 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
  * The schema IS the protocol description; parity with the hand reader is
  * pinned by tests/redis_resp_gen_parity_smoke.ccs. The command is a tagged
  * union: '*' dispatches the framed arm, anything else is the inline-command
- * DEFAULT arm. cap 4 = the server's own "unsupported argument count"
- * policy, as an inline array: the parse hot path allocates nothing (the
- * arena parameter of try_read is unused by a fully capped schema).
+ * DEFAULT arm. cap 8 = the server's own "unsupported argument count"
+ * policy (REDIS_ARGV_MAX + 1 wire tokens), as an inline array: the parse
+ * hot path allocates nothing (the arena parameter of try_read is unused
+ * by a fully capped schema).
  *
  * Known divergence from the hand reader (documented, pathological input
  * only): an inline line with a lone CR or LF inside it ("AB\nCD\r\n") is a
@@ -361,7 +401,7 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
         line:   keep [any lchar]
     ]
     one of [
-        framed [ #'*' argc: int number "\r\n" args: items RespGArg argc cap 4 ]
+        framed [ #'*' argc: int number "\r\n" args: items RespGArg argc cap 8 ]
         plain  [ text: line "\r\n" ]
     ]
 ~~~~}
@@ -400,12 +440,39 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     return RESP_PARSE_OK;
 }
 
+/* Command table: name + arity policy in one place.  `argc` counts the
+ * arguments AFTER the command word (bounded by REDIS_ARGV_MAX).  A miss
+ * (unknown name OR wrong arity) is one uniform "ERR unsupported command". */
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
+    if (slice_eq_ignore_case(cmd, "ECHO") && argc == 1) return REDIS_CMD_ECHO;
     if (slice_eq_ignore_case(cmd, "GET") && argc == 1) return REDIS_CMD_GET;
     if (slice_eq_ignore_case(cmd, "SET") && argc == 2) return REDIS_CMD_SET;
-    if (slice_eq_ignore_case(cmd, "DEL") && argc == 1) return REDIS_CMD_DEL;
+    if (slice_eq_ignore_case(cmd, "SETNX") && argc == 2) return REDIS_CMD_SETNX;
+    if (slice_eq_ignore_case(cmd, "SETEX") && argc == 3) return REDIS_CMD_SETEX;
+    if (slice_eq_ignore_case(cmd, "PSETEX") && argc == 3) return REDIS_CMD_PSETEX;
+    if (slice_eq_ignore_case(cmd, "APPEND") && argc == 2) return REDIS_CMD_APPEND;
+    if (slice_eq_ignore_case(cmd, "STRLEN") && argc == 1) return REDIS_CMD_STRLEN;
+    if (slice_eq_ignore_case(cmd, "TYPE") && argc == 1) return REDIS_CMD_TYPE;
+    if (slice_eq_ignore_case(cmd, "DEL") && argc >= 1) return REDIS_CMD_DEL;
+    if (slice_eq_ignore_case(cmd, "EXISTS") && argc >= 1) return REDIS_CMD_EXISTS;
     if (slice_eq_ignore_case(cmd, "INCR") && argc == 1) return REDIS_CMD_INCR;
+    if (slice_eq_ignore_case(cmd, "DECR") && argc == 1) return REDIS_CMD_DECR;
+    if (slice_eq_ignore_case(cmd, "INCRBY") && argc == 2) return REDIS_CMD_INCRBY;
+    if (slice_eq_ignore_case(cmd, "DECRBY") && argc == 2) return REDIS_CMD_DECRBY;
+    if (slice_eq_ignore_case(cmd, "MGET") && argc >= 1) return REDIS_CMD_MGET;
+    if (slice_eq_ignore_case(cmd, "MSET") && argc >= 2 && argc % 2 == 0) return REDIS_CMD_MSET;
+    if (slice_eq_ignore_case(cmd, "EXPIRE") && argc == 2) return REDIS_CMD_EXPIRE;
+    if (slice_eq_ignore_case(cmd, "PEXPIRE") && argc == 2) return REDIS_CMD_PEXPIRE;
+    if (slice_eq_ignore_case(cmd, "TTL") && argc == 1) return REDIS_CMD_TTL;
+    if (slice_eq_ignore_case(cmd, "PTTL") && argc == 1) return REDIS_CMD_PTTL;
+    if (slice_eq_ignore_case(cmd, "PERSIST") && argc == 1) return REDIS_CMD_PERSIST;
+    if (slice_eq_ignore_case(cmd, "DBSIZE") && argc == 0) return REDIS_CMD_DBSIZE;
+    /* FLUSHDB/FLUSHALL accept an optional ASYNC/SYNC token; this server is
+     * single-owner so the flush is always synchronous either way. */
+    if (slice_eq_ignore_case(cmd, "FLUSHDB") && argc <= 1) return REDIS_CMD_FLUSHDB;
+    if (slice_eq_ignore_case(cmd, "FLUSHALL") && argc <= 1) return REDIS_CMD_FLUSHALL;
+    if (slice_eq_ignore_case(cmd, "KEYS") && argc == 1) return REDIS_CMD_KEYS;
     if (slice_eq_ignore_case(cmd, "CC.MEMLOG") && argc == 0) return REDIS_CMD_CC_MEMLOG;
     return (RedisCommandKind)-1;
 }
@@ -457,6 +524,16 @@ static RedisReply reply_integer(int64_t v) {
 }
 
 static RedisReply reply_raw(char[:0] s) {
+    RedisReply r;
+    r.kind = REDIS_REPLY_RAW;
+    r.data = s;
+    return r;
+}
+
+/* RAW reply whose bytes were already encoded into conn->reply_arena by the
+ * owner (array replies): stabilization sees arena-epoch bytes and skips the
+ * copy. */
+static RedisReply reply_raw_slice(CCSlice s) {
     RedisReply r;
     r.kind = REDIS_REPLY_RAW;
     r.data = s;
@@ -575,10 +652,11 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     @defer redis_request_slot_release(&slot);
     RedisRequest* req = slot.req;
 
-    CCSlice args[4] = {0};
+    CCSlice args[1 + REDIS_ARGV_MAX] = {0};
     size_t argc = 0;
     CCError perr = {0};
-    RespParseStatus argc_status = gen_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
+    RespParseStatus argc_status =
+        gen_try_read_args_buffered(it->reader, args, 1 + REDIS_ARGV_MAX, &argc, &perr);
     if (argc_status == RESP_PARSE_INCOMPLETE) {
         return cc_ok(false);
     }
@@ -931,10 +1009,54 @@ static void !>(CCError) db_value_replace(RedisDb* db, CCString* cell, char[:] va
     return cc_ok();
 }
 
-static CCString* db_find_value(RedisDb* db, char[:] key) {
+static RedisValue* db_find_entry(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return NULL;
     CCSliceHdr kh = db_key_hdr_view(key);
     return db->entries->get_ptr(kh);
+}
+
+/* ---- lazy expiration ----
+ * One wall-clock sample per request: execute_request seeds now_cache = -1
+ * and every expiry-aware helper reads through db_req_now, so a request sees
+ * a single consistent "now" (and the no-TTL hot path never touches the
+ * clock).  Deadlines are absolute wall milliseconds; 0 means no expiry. */
+static int64_t redis_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+}
+
+static int64_t db_req_now(int64_t* now_cache) {
+    if (*now_cache < 0) *now_cache = redis_now_ms();
+    return *now_cache;
+}
+
+static bool db_entry_expired(const RedisValue* cell, int64_t* now_cache) {
+    if (cell->expires_at_ms == 0) return false;
+    return db_req_now(now_cache) >= cell->expires_at_ms;
+}
+
+/* Remove one entry outright (value released, key accounted).  The key bytes
+ * stay in the growable key arena until db teardown — same policy as DEL had
+ * from the start (arena keys are not individually freeable). */
+static void db_remove_entry(RedisDb* db, char[:] key, RedisValue* cell) {
+    CCString doomed = cell->str;
+    CCSliceHdr kh = db_key_hdr_view(key);
+    if (!db->entries->del(kh)) return;
+    db_mem_stats_note_key_release(key.len);
+    db_release_value(db, &doomed);
+}
+
+/* THE read path: every command that touches a key goes through here so
+ * expired entries die on first contact (lazy expiration, no active cycle). */
+static RedisValue* db_lookup_live(RedisDb* db, char[:] key, int64_t* now_cache) {
+    RedisValue* cell = db_find_entry(db, key);
+    if (!cell) return NULL;
+    if (db_entry_expired(cell, now_cache)) {
+        db_remove_entry(db, key, cell);
+        return NULL;
+    }
+    return cell;
 }
 
 static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
@@ -945,7 +1067,7 @@ static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
     return cc_ok(stable);
 }
 
-static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCString value) {
+static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, RedisValue value) {
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
@@ -955,62 +1077,124 @@ static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, CCStr
     return cc_ok();
 }
 
-static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
+/* Write path shared by SET/SETEX/PSETEX/MSET (and the create arms of
+ * SETNX/APPEND/INCR).  `expires_at_ms` is the entry's NEW absolute deadline
+ * (0 = none): a plain SET overwriting a key with a TTL clears that TTL,
+ * per redis semantics.  An expired-but-unreaped cell is safe to overwrite
+ * in place — that IS its reap. */
+static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value, int64_t expires_at_ms) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    CCString* cell = db_find_value(db, key);
+    RedisValue* cell = db_find_entry(db, key);
     if (cell) {
-        db_value_replace(db, cell, value) !>;
+        db_value_replace(db, &cell->str, value) !>;
+        cell->expires_at_ms = expires_at_ms;
         return cc_ok(reply_simple("OK"));
     }
 
     CCSliceHdr owned_key = db_clone_key_hdr(db, key) !>;
-    CCString owned_value =
+    CCString owned_str =
         db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed") !>;
+    RedisValue owned_value = { .str = owned_str, .expires_at_ms = expires_at_ms };
 
     db_insert_value(db, owned_key, owned_value) !>(e) {
-        db_release_value(db, &owned_value);
+        db_release_value(db, &owned_value.str);
         return cc_err(e);
     };
     db_mem_stats_note_key_alloc(key.len);
     return cc_ok(reply_simple("OK"));
 }
 
-static RedisReply db_get(RedisDb* db, char[:] key) {
-    CCString* cell = db_find_value(db, key);
+static RedisReply db_get(RedisDb* db, char[:] key, int64_t* now_cache) {
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
     if (!cell) return reply_null();
-    return reply_bulk(cell->as_slice());
+    return reply_bulk(cell->str.as_slice());
 }
 
-static RedisReply db_del(RedisDb* db, char[:] key) {
+/* DEL/EXISTS share the variadic count shape: lazy expiry means a key that
+ * timed out counts as absent for both (lookup_live reaps it first). */
+static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, int64_t* now_cache) {
+    int64_t removed = 0;
     if (!db || !db->entries) return reply_integer(0);
-
-    CCString* cell = db_find_value(db, key);
-    if (!cell) return reply_integer(0);
-    CCString doomed = *cell;
-    CCSliceHdr kh = db_key_hdr_view(key);
-    if (!db->entries->del(kh)) return reply_integer(0);
-    db_mem_stats_note_key_release(key.len);
-    db_release_value(db, &doomed);
-    return reply_integer(1);
+    for (size_t i = 0; i < nkeys; ++i) {
+        RedisValue* cell = db_lookup_live(db, keys[i], now_cache);
+        if (!cell) continue;
+        db_remove_entry(db, keys[i], cell);
+        removed++;
+    }
+    return reply_integer(removed);
 }
 
-static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
+static RedisReply db_exists(RedisDb* db, CCSlice* keys, size_t nkeys, int64_t* now_cache) {
+    int64_t found = 0;
+    for (size_t i = 0; i < nkeys; ++i) {
+        if (db_lookup_live(db, keys[i], now_cache)) found++;
+    }
+    return reply_integer(found);
+}
+
+static RedisReply db_type(RedisDb* db, char[:] key, int64_t* now_cache) {
+    /* Only string values exist in this server. */
+    return reply_simple(db_lookup_live(db, key, now_cache) ? "string" : "none");
+}
+
+static RedisReply db_strlen(RedisDb* db, char[:] key, int64_t* now_cache) {
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
+    return reply_integer(cell ? (int64_t)cell->str.len() : 0);
+}
+
+static RedisReply !>(CCError) db_setnx(RedisDb* db, char[:] key, char[:] value, int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (db_lookup_live(db, key, now_cache)) return cc_ok(reply_integer(0));
+    db_set(db, key, value, 0) !>;
+    return cc_ok(reply_integer(1));
+}
+
+/* APPEND keeps the entry's TTL (in-place value edit, redis semantics).
+ * The combined bytes are staged in the request's own scratch arena, which
+ * outlives execute_request (slot released only after stabilize). */
+static RedisReply !>(CCError) db_append(RedisDb* db,
+                                        char[:] key,
+                                        char[:] suffix,
+                                        CCArena* scratch,
+                                        int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
+    if (!cell) {
+        db_set(db, key, suffix, 0) !>;
+        return cc_ok(reply_integer((int64_t)suffix.len));
+    }
+    CCSlice old = cell->str.as_slice();
+    size_t new_len = old.len + suffix.len;
+    CCSlice combined = cc_arena_alloc_slice_bytes(scratch, new_len);
+    if (new_len > 0 && !combined.ptr) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "append staging OOM"));
+    }
+    if (old.len > 0) memcpy((char*)combined.ptr, old.ptr, old.len);
+    if (suffix.len > 0) memcpy((char*)combined.ptr + old.len, suffix.ptr, suffix.len);
+    db_value_replace(db, &cell->str, combined) !>;
+    return cc_ok(reply_integer((int64_t)new_len));
+}
+
+/* INCR/DECR/INCRBY/DECRBY.  Existing entries keep their TTL (value edit);
+ * a fresh entry starts at `delta` with no TTL. */
+static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, int64_t* now_cache) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    CCString* cell = db_find_value(db, key);
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
 
-    int64_t value = 1;
+    int64_t value = delta;
     if (cell) {
-        int64_t parsed = parse_i64(cell->as_slice()) !> {
+        int64_t parsed = parse_i64(cell->str.as_slice()) !> {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         };
-        if (parsed == INT64_MAX) {
-            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+        if ((delta > 0 && parsed > INT64_MAX - delta) ||
+            (delta < 0 && parsed < INT64_MIN - delta)) {
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR increment or decrement would overflow"));
         }
-        value = parsed + 1;
+        value = parsed + delta;
     }
 
     char buf[32];
@@ -1018,12 +1202,267 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     encode_i64_decimal_into(buf, value);
     char[:] encoded = cc_slice_from_buffer(buf, encoded_len);
     if (cell) {
-        db_value_replace(db, cell, encoded) !>;
+        db_value_replace(db, &cell->str, encoded) !>;
     } else {
-        db_set(db, key, encoded) !>;
+        db_set(db, key, encoded, 0) !>;
     }
 
     return cc_ok(reply_integer(value));
+}
+
+/* EXPIRE/PEXPIRE, already scaled to relative ms.  Non-positive TTL deletes
+ * the key immediately and still answers 1 (redis semantics).  A deadline
+ * past INT64_MAX clamps to "effectively never". */
+static RedisReply db_expire_rel_ms(RedisDb* db, char[:] key, int64_t rel_ms, int64_t* now_cache) {
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
+    if (!cell) return reply_integer(0);
+    if (rel_ms <= 0) {
+        db_remove_entry(db, key, cell);
+        return reply_integer(1);
+    }
+    int64_t now = db_req_now(now_cache);
+    cell->expires_at_ms = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
+    return reply_integer(1);
+}
+
+/* TTL/PTTL: -2 missing key, -1 no expiry, else remaining time (TTL rounds
+ * the millisecond remainder UP, matching redis's second-granularity view). */
+static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, int64_t* now_cache) {
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
+    if (!cell) return reply_integer(-2);
+    if (cell->expires_at_ms == 0) return reply_integer(-1);
+    int64_t rem = cell->expires_at_ms - db_req_now(now_cache);
+    if (rem < 0) rem = 0;
+    return reply_integer(in_ms ? rem : (rem + 999) / 1000);
+}
+
+static RedisReply db_persist(RedisDb* db, char[:] key, int64_t* now_cache) {
+    RedisValue* cell = db_lookup_live(db, key, now_cache);
+    if (!cell || cell->expires_at_ms == 0) return reply_integer(0);
+    cell->expires_at_ms = 0;
+    return reply_integer(1);
+}
+
+/* MGET: one RESP array built directly into conn->reply_arena, so the reply
+ * is already channel-stable.  Two lookup passes on purpose: pass 1 reaps
+ * every expired key (map may mutate), pass 2 re-reads cells against the SAME
+ * cached `now` — deterministically no reaps — so the borrowed value slices
+ * stay valid through the encode (small values are inline in map cells and
+ * would dangle across a delete's entry shuffle). */
+static RedisReply !>(CCError) db_mget(RedisDb* db,
+                                      CCSlice* keys,
+                                      size_t nkeys,
+                                      CCArena* reply_arena,
+                                      int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
+    for (size_t i = 0; i < nkeys; ++i) {
+        (void)db_lookup_live(db, keys[i], now_cache);
+    }
+
+    CCSlice vals[REDIS_ARGV_MAX];
+    bool found[REDIS_ARGV_MAX];
+    size_t total = resp_array_header_len(nkeys);
+    for (size_t i = 0; i < nkeys; ++i) {
+        RedisValue* cell = db_lookup_live(db, keys[i], now_cache);
+        found[i] = cell != NULL;
+        if (cell) {
+            vals[i] = cell->str.as_slice();
+            total += resp_bulk_header_len(vals[i].len) + vals[i].len + 2;
+        } else {
+            total += 5; /* $-1\r\n */
+        }
+    }
+
+    CCSlice out = reply_batch_alloc_slice(reply_arena, total) !>;
+    char* dst = (char*)out.ptr;
+    resp_encode_array_header_into(dst, nkeys);
+    dst += resp_array_header_len(nkeys);
+    for (size_t i = 0; i < nkeys; ++i) {
+        if (!found[i]) {
+            memcpy(dst, "$-1\r\n", 5);
+            dst += 5;
+            continue;
+        }
+        size_t hdr = resp_bulk_header_len(vals[i].len);
+        resp_encode_bulk_header_into(dst, vals[i].len);
+        if (vals[i].len > 0) memcpy(dst + hdr, vals[i].ptr, vals[i].len);
+        dst[hdr + vals[i].len] = '\r';
+        dst[hdr + vals[i].len + 1] = '\n';
+        dst += hdr + vals[i].len + 2;
+    }
+    return cc_ok(reply_raw_slice(out));
+}
+
+static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
+    @errhandler(CCError e) { return cc_err(e); }
+    for (size_t i = 0; i + 1 < argc; i += 2) {
+        db_set(db, args[i], args[i + 1], 0) !>;
+    }
+    return cc_ok(reply_simple("OK"));
+}
+
+/* DBSIZE counts only live entries: expired-but-unreaped cells are skipped
+ * (not deleted — no map mutation during iteration). */
+static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
+    int64_t n = 0;
+    CCSliceHdr k;
+    RedisValue v;
+    if (!db || !db->entries) return reply_integer(0);
+    CC_MAP_FOREACH(db->entries, k, v) {
+        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+        n++;
+    }
+    return reply_integer(n);
+}
+
+/* FLUSHDB/FLUSHALL (one logical DB, so they are the same operation): a
+ * mass-DEL.  Values are released with the usual accounting, then the map is
+ * cleared in one shot; key bytes follow the standing DEL policy (arena-held
+ * until db teardown). */
+static RedisReply db_flush(RedisDb* db) {
+    CCSliceHdr k;
+    RedisValue v;
+    if (!db || !db->entries) return reply_simple("OK");
+    CC_MAP_FOREACH(db->entries, k, v) {
+        db_mem_stats_note_key_release(k.len);
+        db_release_value(db, &v.str);
+    }
+    db->entries->clear();
+    return reply_simple("OK");
+}
+
+/* redis-style glob: '*', '?', '[...]' (with '^' negation and a-b ranges),
+ * '\' escape.  Runs of '*' collapse before the per-position recursion so
+ * depth is bounded by the pattern length. */
+static bool glob_match(const char* p, size_t plen, const char* s, size_t slen) {
+    while (plen > 0) {
+        switch (p[0]) {
+            case '*': {
+                while (plen > 1 && p[1] == '*') { p++; plen--; }
+                if (plen == 1) return true;
+                while (slen > 0) {
+                    if (glob_match(p + 1, plen - 1, s, slen)) return true;
+                    s++;
+                    slen--;
+                }
+                return glob_match(p + 1, plen - 1, s, slen);
+            }
+            case '?':
+                if (slen == 0) return false;
+                s++;
+                slen--;
+                break;
+            case '[': {
+                bool neg = false;
+                bool matched = false;
+                p++;
+                plen--;
+                if (plen > 0 && p[0] == '^') { neg = true; p++; plen--; }
+                while (plen > 0 && p[0] != ']') {
+                    if (p[0] == '\\' && plen >= 2) {
+                        p++;
+                        plen--;
+                        if (slen > 0 && p[0] == s[0]) matched = true;
+                    } else if (plen >= 3 && p[1] == '-' && p[2] != ']') {
+                        char lo = p[0];
+                        char hi = p[2];
+                        if (lo > hi) { char t = lo; lo = hi; hi = t; }
+                        if (slen > 0 && s[0] >= lo && s[0] <= hi) matched = true;
+                        p += 2;
+                        plen -= 2;
+                    } else if (slen > 0 && p[0] == s[0]) {
+                        matched = true;
+                    }
+                    p++;
+                    plen--;
+                }
+                if (neg) matched = !matched;
+                if (slen == 0 || !matched) return false;
+                s++;
+                slen--;
+                break;
+            }
+            case '\\':
+                if (plen >= 2) { p++; plen--; }
+                /* fallthrough: match the escaped byte literally */
+            default:
+                if (slen == 0 || p[0] != s[0]) return false;
+                s++;
+                slen--;
+                break;
+        }
+        if (plen > 0) { p++; plen--; }
+    }
+    return slen == 0;
+}
+
+/* KEYS: full scan, glob filter, one RESP array into conn->reply_arena.
+ * Two passes over the map (size, then encode) with only an arena alloc in
+ * between — no map mutation, so borrowed key bytes stay put.  Expired
+ * entries are skipped, not reaped (no mutation during iteration). */
+static RedisReply !>(CCError) db_keys(RedisDb* db,
+                                      char[:] pattern,
+                                      CCArena* reply_arena,
+                                      int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
+    /* Depth cap for glob_match's recursion (fiber stacks are ~2MiB). */
+    enum { k_keys_pattern_max = 512 };
+    if (pattern.len > (size_t)k_keys_pattern_max) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR KEYS pattern too long"));
+    }
+    if (!db || !db->entries) return cc_ok(reply_raw(@slice("*0\r\n")));
+
+    const char* pat = (const char*)pattern.ptr;
+    CCSliceHdr k;
+    RedisValue v;
+
+    size_t matched = 0;
+    size_t payload = 0;
+    CC_MAP_FOREACH(db->entries, k, v) {
+        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+        if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+        matched++;
+        payload += resp_bulk_header_len(k.len) + k.len + 2;
+    }
+
+    size_t total = resp_array_header_len(matched) + payload;
+    CCSlice out = reply_batch_alloc_slice(reply_arena, total) !>;
+    char* dst = (char*)out.ptr;
+    resp_encode_array_header_into(dst, matched);
+    dst += resp_array_header_len(matched);
+    CC_MAP_FOREACH(db->entries, k, v) {
+        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+        if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+        size_t hdr = resp_bulk_header_len(k.len);
+        resp_encode_bulk_header_into(dst, k.len);
+        if (k.len > 0) memcpy(dst + hdr, k.ptr, k.len);
+        dst[hdr + k.len] = '\r';
+        dst[hdr + k.len + 1] = '\n';
+        dst += hdr + k.len + 2;
+    }
+    return cc_ok(reply_raw_slice(out));
+}
+
+/* Seconds → relative ms for EXPIRE/SETEX, clamped instead of overflowing. */
+static int64_t expire_seconds_to_rel_ms(int64_t seconds) {
+    if (seconds > INT64_MAX / 1000) return INT64_MAX;
+    if (seconds < INT64_MIN / 1000) return INT64_MIN;
+    return seconds * 1000;
+}
+
+/* SETEX/PSETEX: TTL must be strictly positive (redis errors on <= 0). */
+static RedisReply !>(CCError) db_set_with_ttl(RedisDb* db,
+                                              char[:] key,
+                                              char[:] value,
+                                              int64_t rel_ms,
+                                              int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (rel_ms <= 0) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR invalid expire time"));
+    }
+    int64_t now = db_req_now(now_cache);
+    int64_t deadline = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
+    return db_set(db, key, value, deadline);
 }
 
 static int db_preload_key_count(void) {
@@ -1047,28 +1486,98 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
         }
         db_set(db,
                cc_slice_from_buffer(key_buf, (size_t)n),
-               cc_slice_from_buffer((void*)preload_value, sizeof(preload_value) - 1)) !>(e) { return cc_err(e); };
+               cc_slice_from_buffer((void*)preload_value, sizeof(preload_value) - 1),
+               0) !>(e) { return cc_err(e); };
     }
     return cc_ok(true);
 }
 
 /* Owner-private dispatch.  `@noblock`: owner runs on the scheduler poll
- * thread and must not dispatch DB work to the blocking pool. */
-@noblock static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
+ * thread and must not dispatch DB work to the blocking pool.
+ * `reply_arena` is the request's conn->reply_arena: array replies
+ * (MGET/KEYS) are encoded straight into it so they cross the reply channel
+ * without a stabilization copy.  `now` is sampled at most once per request
+ * (see db_req_now). */
+@noblock static RedisReply !>(CCError) execute_request(RedisDb* db,
+                                                       RedisRequest* req,
+                                                       CCArena* reply_arena) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t now = -1;
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
             return cc_ok(reply_simple("PONG"));
+        case REDIS_CMD_ECHO:
+            return cc_ok(reply_bulk(req->argv[0]));
         case REDIS_CMD_CONFIG_GET:
             return cc_ok(reply_raw(config_get_reply(req->argv[0])));
         case REDIS_CMD_GET:
-            return cc_ok(db_get(db, req->argv[0]));
+            return cc_ok(db_get(db, req->argv[0], &now));
         case REDIS_CMD_SET:
-            return db_set(db, req->argv[0], req->argv[1]);
+            return db_set(db, req->argv[0], req->argv[1], 0);
+        case REDIS_CMD_SETNX:
+            return db_setnx(db, req->argv[0], req->argv[1], &now);
+        case REDIS_CMD_SETEX: {
+            int64_t seconds = parse_i64(req->argv[1]) !>;
+            return db_set_with_ttl(db, req->argv[0], req->argv[2],
+                                   expire_seconds_to_rel_ms(seconds), &now);
+        }
+        case REDIS_CMD_PSETEX: {
+            int64_t ms = parse_i64(req->argv[1]) !>;
+            return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &now);
+        }
+        case REDIS_CMD_APPEND:
+            return db_append(db, req->argv[0], req->argv[1], &req->arena, &now);
+        case REDIS_CMD_STRLEN:
+            return cc_ok(db_strlen(db, req->argv[0], &now));
+        case REDIS_CMD_TYPE:
+            return cc_ok(db_type(db, req->argv[0], &now));
         case REDIS_CMD_DEL:
-            return cc_ok(db_del(db, req->argv[0]));
+            return cc_ok(db_del(db, req->argv, req->argc, &now));
+        case REDIS_CMD_EXISTS:
+            return cc_ok(db_exists(db, req->argv, req->argc, &now));
         case REDIS_CMD_INCR:
-            return db_incr(db, req->argv[0]);
+            return db_incrby(db, req->argv[0], 1, &now);
+        case REDIS_CMD_DECR:
+            return db_incrby(db, req->argv[0], -1, &now);
+        case REDIS_CMD_INCRBY: {
+            int64_t delta = parse_i64(req->argv[1]) !>;
+            return db_incrby(db, req->argv[0], delta, &now);
+        }
+        case REDIS_CMD_DECRBY: {
+            int64_t delta = parse_i64(req->argv[1]) !>;
+            if (delta == INT64_MIN) {
+                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
+                                       "ERR decrement would overflow"));
+            }
+            return db_incrby(db, req->argv[0], -delta, &now);
+        }
+        case REDIS_CMD_MGET:
+            return db_mget(db, req->argv, req->argc, reply_arena, &now);
+        case REDIS_CMD_MSET:
+            return db_mset(db, req->argv, req->argc);
+        case REDIS_CMD_EXPIRE: {
+            int64_t seconds = parse_i64(req->argv[1]) !>;
+            return cc_ok(db_expire_rel_ms(db, req->argv[0],
+                                          expire_seconds_to_rel_ms(seconds), &now));
+        }
+        case REDIS_CMD_PEXPIRE: {
+            int64_t ms = parse_i64(req->argv[1]) !>;
+            return cc_ok(db_expire_rel_ms(db, req->argv[0], ms, &now));
+        }
+        case REDIS_CMD_TTL:
+            return cc_ok(db_ttl(db, req->argv[0], false, &now));
+        case REDIS_CMD_PTTL:
+            return cc_ok(db_ttl(db, req->argv[0], true, &now));
+        case REDIS_CMD_PERSIST:
+            return cc_ok(db_persist(db, req->argv[0], &now));
+        case REDIS_CMD_DBSIZE:
+            return cc_ok(db_dbsize(db, &now));
+        case REDIS_CMD_FLUSHDB:
+        case REDIS_CMD_FLUSHALL:
+            return cc_ok(db_flush(db));
+        case REDIS_CMD_KEYS:
+            return db_keys(db, req->argv[0], reply_arena, &now);
         case REDIS_CMD_CC_MEMLOG:
             /* After redis-benchmark: arena slab lines + Mach/logical accounting on stderr. */
             db_dump_mem_stats(db, "cc-memlog");
@@ -1499,7 +2008,7 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
             return 0;
         }
 
-        RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
+        RedisReply reply = execute_request(&db, req, &conn->reply_arena) ?>(e) err_reply(e);
         /* Stabilize BEFORE the slot goes back: the reply may still borrow
          * req->arena bytes (e.g. PING's echo argument). */
         redis_reply_stabilize_for_channel(&reply, &conn->reply_arena) !>;
