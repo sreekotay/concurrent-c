@@ -60,8 +60,8 @@ What the enhancement carries:
   `cc_ast_col_off` refuse to answer while replay is active — unknown beats
   a stale offset pointing at the invocation's tail. Constructs born inside
   macro expansion (e.g. UFCS inside `assert(...)`) carry off_start = -1
-  and keep using the text fallback, which is the pre-existing contract
-  (ufcs_macro_arg_smoke exists to pin it).
+  and resolve via the line-keyed verified-candidate fallback, which is
+  the pre-existing contract (ufcs_macro_arg_smoke exists to pin it).
 - Corpus-wide SELF-CHECK (fail loudly): `cc__collect_ufcs_edits` verifies
   every UFCS node's method name actually sits at `off_start` in the
   retained `root->parse_buffer` (separator-anchored). Warns by default;
@@ -89,7 +89,8 @@ Guards added: cc_check_ast fails loudly (internal error, not a segfault)
 if nesting depth exceeds 400; CC_DEBUG_STUB_NODES prints max parent depth
 and the deepest chain.  Regression test: fnptr_member_call_smoke.
 
-## Inventory (full survey 2026-07-20)
+## Inventory (survey SNAPSHOT 2026-07-20 — the BEFORE picture; the
+## phases below record what has since landed, and win on conflict)
 
 Pipeline: pre-parse text canonicalization (`cc_build_parse_input`: comptime
 prep → phase-1 canonical passes → closure markers → cpp expand → relower →
@@ -105,9 +106,9 @@ comment/string state machines instead of CCInertScan):
 |---|---|---|---|---|
 | pass_ufcs | AST→text | 12 | 0 | private `#line` logical/physical dual-mapper + "last match wins" + physical retry; runs 3× |
 | async_ast | AST→text | 21 | 3 | largest rescanner; 3,713 lines |
-| pass_autoblock | AST→text | 6 | 13 | worst scanner hygiene: zero CCInertScan |
+| pass_autoblock | AST→text | 6 | 13 | DONE since survey: inline SMs delegated to shared scanners (see phase 3; 4 markers remain by design — comment-body readers) |
 | pass_await_normalize | AST→text | 6 | 0 | |
-| pass_closure_literal_ast | AST→text | 4 | 0 | (line,col)-tuple closure identity + `=>` forward-scan recovery; `/*CC_CLO:N*/` markers exist but fallback heuristic still live |
+| pass_closure_literal_ast | AST→text | 4 | 0 | DONE since survey: `/*CC_CLO:N*/` markers are the ONLY identity (fallback heuristic deleted; see phase 3) |
 | pass_closure_calls | AST→text | 2 | 0 | |
 | checker | AST-only | 0 | 0 | the reference model |
 | pass_result_unwrap | text | 0 | 0 | DONE: the [F11] one-line handler flattening is deleted — bodies splice verbatim (newlines, comments intact); the byte-verified/marker-bound resolvers absorb the line shift.  Byte-identity of emitted C is a NON-GOAL (refactor aid only, per design review) |
@@ -154,6 +155,8 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    maps the member separator directly (off_start - parse_src_shift),
    byte-verified; the candidate enumeration is the fallback for exotic
    roots.  Corpus cross-validation: byte-identical output either way.
+   The CC_UFCS_TEXT_FALLBACK whole-buffer diagnostic path is deleted
+   (~230 lines) — the AST resolver is the only path.
    pass_closure_literal_ast DONE — markers are the ONLY closure identity:
    every producer emits /*CC_CLO:N*/ (parse-build for user closures,
    autoblock for its 8 synthesized `() => [...]` wrappers — 47 corpus
@@ -162,11 +165,17 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    (exact conditional-compilation accounting; the reparse buffer now
    preserves CC_CLO comments so TCC can see them), and the closure pass
    prunes those IDs before binding marker k ↔ closure k.  After pruning,
-   count equality is an INVARIANT: mismatch is a hard internal error, not
-   a heuristic retry.  Deleted: the (line,col)+arrow-scan best-effort
+   count equality is an INVARIANT: fewer markers than closures is a USER
+   error (closure literals inside #define bodies — markers cannot survive
+   CPP macro replay — diagnosed with a hint + per-closure notes; regression
+   test closure_in_macro_fail.ccs); more markers than closures is a hard
+   internal error.  Deleted: the (line,col)+arrow-scan best-effort
    resolver, the whole-buffer `=>` recovery scan, the backward-arrow
    scanner, the heuristic re-sort of closure nodes (parse order IS source
-   order), and the CC_NO_CLOSURE_MARKERS escape hatch.
+   order), and the CC_NO_CLOSURE_MARKERS escape hatch.  Honest residue:
+   closure START identity is marker-exact, but END inference still
+   forward-scans (`cc__infer_closure_end_off` finds the `=>` then walks
+   the body extent) — migrating END to recorder offsets is open work.
    pass_autoblock scanner hygiene DONE — the mechanical inline
    comment/string state machines now delegate to the shared scanners
    (cc_skip_ws_and_comments, cc_find_matching_paren,
@@ -213,9 +222,12 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    async_ast now CONSUMES the invariant: its two span primitives
    (cc__node_start_off/cc__node_end_off — the funnel for statement/block
    slicing) return token-exact recorder offsets when the root is exact,
-   falling back to the (line,col) walk otherwise
-   (CC_ASYNC_NO_EXACT_OFFSETS reverts for A/B).  Corpus cross-validation:
-   output byte-identical under both mechanisms.
+   falling back to the (line,col) walk otherwise.  The A/B revert knob
+   (CC_ASYNC_NO_EXACT_OFFSETS) served its validation purpose — corpus
+   output byte-identical under both mechanisms — and is deleted; the
+   offset arithmetic now lives ONLY in pass_common.h
+   (cc_pass_node_exact_off / cc_pass_node_exact_end_off), shared by
+   async_ast, pass_ufcs, pass_await_normalize, and pass_closure_calls.
    FOLLOW-UP LANDED: the last two coordinate breakers (the parser-safe
    family-UFCS rewrite and the L2 prelude rewrite) probed corpus-green at
    reparse time — parser mode tolerates both idiom families — and are
@@ -232,6 +244,25 @@ ident predicates (`cc__is_ident_*_parse`), private `#line` walker
    PREVIOUS stage's edits change the AST it needs) for single-digit
    wall-clock — against the less-code principle.  Revisit only if
    profile data changes.
+
+## Known debt (recorded by the 2026-07-20 cold-read audit; not yet
+## scheduled — fix opportunistically, don't grow it)
+
+- **String-builder triplication:** pass_closure_calls, pass_autoblock and
+  pass_closure_literal_ast each carry a private `cc__append_*` growable-
+  buffer family instead of one shared builder.  Unify next time one of
+  them is touched for real work.
+- **Two await expanders:** pass_await_normalize (statement-position
+  normalization) and async_ast (state-machine lowering) both know how to
+  expand `await` — intentional layering (normalize feeds the machine),
+  but the shared knowledge is undocumented in code; keep the two in sync
+  when the await surface changes.
+- **Closure END inference still arrow-scans** (`cc__infer_closure_end_off`)
+  — see phase 3 note; START identity is marker-exact.
+- **God functions:** `cc_visit_codegen` (~1.5k lines), the
+  pass_closure_literal_ast rewriter (~1k), two async_ast functions
+  (830/622) remain oversized; decompose along existing phase seams when
+  touched — no big-bang rewrite.
 
 Non-goals: no AST for OUTPUT (text emission stays; the byte-identity gate
 depends on it), no full CC AST rewrite — the stub table + offsets is

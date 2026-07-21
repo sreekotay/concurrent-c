@@ -1,6 +1,17 @@
 # Concurrent-C Codegen Pipeline (authoritative)
 
-**Last updated:** 2026-06-01 (drift audit vs code: phantom `cc_preprocess_for_light_reparse` / `cc_preprocess_simple`, orphan passes) — prior: 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
+**Last updated:** 2026-07-20 (pointer to the span-anchored-passes cycle) — prior: 2026-06-01 (drift audit vs code: phantom `cc_preprocess_for_light_reparse` / `cc_preprocess_simple`, orphan passes), 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
+
+> **2026-07 span-anchored-passes cycle:** the pipeline SHAPE below (stage
+> order, reparse barriers, gating) is unchanged and still authoritative.
+> What changed underneath: stub-AST nodes now carry token-exact byte
+> offsets; reparse roots advertise the exact-offset invariant
+> (`parse_src_shift`/`parse_src_valid_from`, 100% of corpus reparses); the
+> reparse path itself was put on a diet (four text rewrites deleted from
+> it — the parser tolerates those forms); closure identity is marker-only;
+> and pass-side coordinate resolution funnels through `pass_common.h`
+> (`cc_pass_node_exact_off`/`cc_pass_node_exact_end_off`) with line-keyed
+> fallback. Details: [`PASS_CLEANUP_PLAN.md`](../../docs/PASS_CLEANUP_PLAN.md).
 
 Authoritative call-site map for `visit_codegen.c` and `parse.c`.
 

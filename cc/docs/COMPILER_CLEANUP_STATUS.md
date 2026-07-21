@@ -365,14 +365,25 @@ count, each closure's start offset is taken verbatim from its marker —
 exact and comment-safe — so the `(line,col)`+forward-`=>`-scan recovery
 path is **not reached** for direct closures (killing the comment-bait
 class of bugs, e.g. `syscall_kidnap.ccs`).  Validated: full suite 489/489
-across 3 stress runs.  `CC_NO_CLOSURE_MARKERS` disables the marker path.
+across 3 stress runs.  (`CC_NO_CLOSURE_MARKERS` disabled the marker path
+at the time; the knob is since removed — see the superseded note below.)
 
-The heuristic + recovery branch is intentionally **retained** as the
+The heuristic + recovery branch was initially **retained** as the
 fallback for *macro-origin* closures: their `=>` appears only after CPP
 expansion (in the parse buffer), never in the never-expanded codegen
 buffer, so no marker can be placed for them and the count-mismatch path
-falls back to the text heuristic.  Fully deleting the heuristic would
-regress macro-generated closures, so it stays.
+falls back to the text heuristic.
+
+**SUPERSEDED 2026-07-20 (span-anchored-passes cycle):** markers are now
+the ONLY closure identity.  Autoblock marks its synthesized wrappers,
+TCC's `preprocess_skip` records marker IDs inside `#if`-skipped regions
+(pruned before binding), and post-pruning count equality is an
+invariant.  The heuristic + recovery branch is **deleted**; macro-origin
+closures are an unsupported construct with a real diagnostic ("closure
+literals inside #define bodies are not supported", with a hint and
+per-closure notes — regression test `closure_in_macro_fail.ccs`), not a
+silent fallback.  `CC_NO_CLOSURE_MARKERS` is removed — identity has no
+disable knob.  See `PASS_CLEANUP_PLAN.md` phase 3.
 
 ---
 

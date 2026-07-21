@@ -356,10 +356,8 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
  * produces exactly one edit, surgical and non-overlapping, so other
  * collectors can run in the same edit buffer without collision.
  *
- * `CC_UFCS_TEXT_FALLBACK=1` (debug only, off by default) preserves the
- * legacy wholesale fallback path — emits a single whole-buffer edit.
- * This is intentionally compatible only with the non-batched pipeline;
- * it exists purely as a diagnostic for AST-resolver regressions.
+ * (The CC_UFCS_TEXT_FALLBACK whole-buffer diagnostic path is deleted —
+ * the AST resolver is the only path.)
  */
 /* AST nodes speak LOGICAL coordinates (TCC honors #line directives), but the
  * buffer being edited may contain large spliced regions (e.g. @grammar
