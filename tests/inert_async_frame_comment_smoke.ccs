@@ -1,0 +1,33 @@
+/* Inert-region smoke for the @async frame collector: declaration-shaped
+ * text inside comments must NEVER be harvested as a local's type.  The
+ * collector slices ONE source line by the local's recorded line number;
+ * that slice can begin mid-block-comment (scan state can't know), and a
+ * short local name like `e` word-matches the "e.g." inside prose.  Found
+ * via redis_idiomatic: the frame struct gained the member
+ * `* req->arena bytes ( e;` and the reparse exploded. */
+#include <ccc/std/prelude.cch>
+
+@async int worker(int[~4 <] rx) {
+    /* the reply may still borrow
+     * req->arena bytes (e.g. an echo argument) — prose that looks like
+     * a declarator: int bogus_decl ( e; */
+    int e = 0;
+    int v = 0;
+    while (cc_io_avail(rx.recv(&v))) {
+        e += v;
+    }
+    return e;
+}
+
+int main(void) {
+    @errhandler(CCError err) { fprintf(stderr, "%s\n", err.message); return 1; }
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    (void)ch;
+    for (int i = 1; i <= 3; i++) (void)tx.send(i);
+    cc_channel_close(tx, cc_io_error(CC_IO_CONNECTION_CLOSED));
+    int sum = cc_block_on(int, worker(rx));
+    printf("inert_async_frame_comment: %s (sum=%d)\n", sum == 6 ? "OK" : "FAIL", sum);
+    return sum == 6 ? 0 : 1;
+}

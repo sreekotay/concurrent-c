@@ -150,14 +150,18 @@ typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
 typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
 
 typedef struct RedisConn {
-    _Atomic size_t refs;
     uint64_t conn_id;
     uint64_t next_request_id;
+    /* Requests accepted by the owner but not yet drained from reply_rx.
+     * Only the client fiber touches this (submit++ / drain--), and the
+     * teardown drain-to-zero uses it as the join condition — see
+     * handle_client's @destroy.  No refcounts: the owner returns each
+     * request's pool slot BEFORE queueing its reply, so "all replies
+     * drained" proves the owner holds nothing of this conn. */
+    size_t inflight;
     /* Per-conn pool of RedisRequest slots.  Each slot is exactly one
      * RedisRequest, with req->arena wrapping the trailing argv_buf
-     * (heap-spills on overflow).  release_request must run BEFORE the
-     * conn->release() that may be last-ref so the pool's backing
-     * arena outlives the slot walk in pool_free. */
+     * (heap-spills on overflow). */
     CCArenaPool req_pool;
     /* Backing storage for reply bytes that cannot safely borrow request/DB
      * memory across the owner-to-client channel handoff. Reset after the
@@ -178,17 +182,16 @@ typedef RedisRequest*[~k_request_chan_cap N:1 >] ReqTx;
 typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
-static RedisConn* redis_conn_addref(RedisConn* conn);
-static RedisConn* redis_conn_release(RedisConn* conn);
+static void redis_conn_destroy(RedisConn* conn);
 static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
-static void redis_conn_release_request(RedisRequest* req);
 
 /* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
- * BEFORE the registered callee, letting handle_client cancel reply_rx
- * ahead of the refcount drop. */
+ * BEFORE the registered callee, letting handle_client drain in-flight
+ * replies to zero ahead of the free — the drain IS the join (one reply
+ * per accepted request, slot returned before each reply is queued). */
 @comptime {
     (void)cc_type_register("RedisConn*", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("redis_conn_release"),
+        .destroy = cc_type_destroy_call("redis_conn_destroy"),
     });
 }
 
@@ -320,9 +323,9 @@ static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
 
 #include "redis_resp.cch"
 
-#ifndef REDIS_RESP_HAND
-/* ---- @grammar RESP reader (the DEFAULT; -DREDIS_RESP_HAND selects the
- * handrolled reader in redis_resp.cch for A/B benching) ----
+/* ---- @grammar RESP reader (the ONLY reader: the hand-rolled one is
+ * retired from the server and lives on solely as the parity oracle in
+ * tests/redis_resp_gen_parity_smoke.ccs) ----
  * The schema IS the protocol description; parity with the hand reader is
  * pinned by tests/redis_resp_gen_parity_smoke.ccs. The command is a tagged
  * union: '*' dispatches the framed arm, anything else is the inline-command
@@ -389,7 +392,6 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     r->start += pos;
     return RESP_PARSE_OK;
 }
-#endif /* !REDIS_RESP_HAND */
 
 static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
     if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
@@ -494,8 +496,8 @@ static bool !>(CCError) decode_request_shape(CCSlice* args,
 
 /* Non-blocking iterator over pipelined requests in the buffered
  * reader.  rr_req_iter_next yields:
- *   ok(true), *out = req  → caller owns req (release via
- *                           redis_conn_release_request).
+ *   ok(true), *out = req  → req is handed to the owner, which returns
+ *                           the slot before queueing the reply.
  *   ok(false)             → buffered bytes exhausted mid-message;
  *                           caller must rr_fill and retry.
  *   err(e)                → parse or allocation error; pool slot
@@ -527,8 +529,11 @@ static void redis_request_slot_release(RedisRequestSlot* slot) {
 static RedisRequest* redis_request_slot_commit(RedisRequestSlot* slot) {
     if (!slot || !slot->conn || !slot->req) return NULL;
     RedisRequest* req = slot->req;
-    /* Commit: req takes a ref on conn; release_request owns both from here. */
-    req->conn = slot->conn->addref();
+    /* Commit: req BORROWS conn.  The borrow is sound structurally: the
+     * owner returns the slot before queueing the reply, and the client
+     * drains every accepted request's reply before destroying the conn
+     * (handle_client @destroy), so conn strictly outlives the request. */
+    req->conn = slot->conn;
     slot->conn = NULL;
     slot->req = NULL;
     return req;
@@ -566,11 +571,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     CCSlice args[4] = {0};
     size_t argc = 0;
     CCError perr = {0};
-#ifdef REDIS_RESP_HAND
-    RespParseStatus argc_status = rr_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
-#else
     RespParseStatus argc_status = gen_try_read_args_buffered(it->reader, args, 4, &argc, &perr);
-#endif
     if (argc_status == RESP_PARSE_INCOMPLETE) {
         return cc_ok(false);
     }
@@ -1314,32 +1315,22 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
     }
     conn->reply_tx = reply_tx;
     conn->reply_rx = reply_rx;
-    atomic_store_explicit(&conn->refs, 1, memory_order_relaxed);
+    conn->inflight = 0;
     conn->conn_id = conn_id;
     conn->next_request_id = 1;
     return conn;
 }
 
 static void redis_conn_destroy(RedisConn* conn) {
-    /* Reached only when the last ref drops, after both handle_client's
-     * ref and every per-request owner ref have been released, so
-     * nothing is in flight and every pool slot has been returned. */
+    /* Reached from handle_client's teardown AFTER the drain-to-zero in
+     * its @destroy body: every accepted request's reply has been drained
+     * (or the owner closed the reply channel and exited), and the owner
+     * returns each slot BEFORE queueing its reply — so nothing anywhere
+     * still points into this conn. */
     cc_arena_free(&conn->reply_arena);
     cc_arena_pool_destroy(&conn->req_pool);
     cc_channel_free(conn->reply_tx);
     free(conn);
-}
-
-static RedisConn* redis_conn_addref(RedisConn* conn) {
-    atomic_fetch_add_explicit(&conn->refs, 1, memory_order_relaxed);
-    return conn;
-}
-
-static RedisConn* redis_conn_release(RedisConn* conn) {
-    if (atomic_fetch_sub_explicit(&conn->refs, 1, memory_order_acq_rel) == 1) {
-        redis_conn_destroy(conn);
-    }
-    return conn;
 }
 
 /* One-shot error-reporting path: serialize directly into conn->out_buf
@@ -1360,16 +1351,28 @@ static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req) {
     cc_arena_pool_free(&conn->req_pool, req);
 }
 
-/* Post-commit release: the request holds an addref'd conn in
- * req->conn.  Reclaim the slot, then release the conn (pool_free
- * must precede release so the pool's backing arena outlives the slot
- * walk). */
-static void redis_conn_release_request(RedisRequest* req) {
-    if (!req) return;
-    RedisConn* conn = req->conn;
-    redis_conn_release_slot(conn, req);
-    if (conn) conn->release();
+/* Teardown drain: one discarded reply per still-in-flight request (the
+ * join that replaces refcounts).  Stops early only if the owner closed
+ * the reply channel — it has exited and holds nothing of this conn. */
+static void redis_conn_drain_inflight(RedisConn* conn) {
+    RedisReply discard = {0};
+    if (!conn) return;
+    while (conn->inflight > 0 &&
+           cc_io_avail(cc_channel_recv(conn->reply_rx, &discard))) {
+        conn->inflight--;
+    }
 }
+
+/* Owner-loop @defer body: return the slot only if the iteration didn't
+ * already (release-before-send nulls `*req` on the success and error
+ * paths; this is the backstop for early exits). */
+static void owner_release_pending(RedisConn* conn, RedisRequest** req) {
+    if (req && *req) {
+        redis_conn_release_slot(conn, *req);
+        *req = NULL;
+    }
+}
+
 
 @noblock static inline bool redis_slice_is_stable_for_reply_batch(CCSlice data,
                                                                   CCArena* reply_batch_arena) {
@@ -1430,14 +1433,6 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
     return REDIS_REPLY_SEND_CLOSED;
 }
 
-@noblock static inline RedisReplySendStatus !>(CCError) redis_conn_send_reply(RedisConn* conn,
-                                                                              RedisReply* reply) {
-    @errhandler(CCError e) { return cc_err(e); }
-    if (!conn || !reply) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "reply send null arg"));
-    redis_reply_stabilize_for_channel(reply, &conn->reply_arena) !>;
-    return cc_ok(redis_conn_queue_reply(conn, reply));
-}
-
 @noblock static inline void reply_release_batch(RedisConn* conn) {
     if (!conn) return;
     /* @nonblocking: cc_arena_reset is synchronous arena bookkeeping. */
@@ -1485,14 +1480,26 @@ static void* redis_reply_copy_into_channel_slot(void* env, intptr_t slot, intptr
         if (!req || !req->conn) continue;
 
         RedisConn* conn = req->conn;
-        @defer redis_conn_release_request(req);
+        /* INVARIANT (what lets RedisConn live without refcounts): the reply
+         * channel is the owner's LAST touch of a conn for each request.
+         * Slot released BEFORE the reply is queued (and before any error
+         * close), so once the client has drained its in-flight replies —
+         * or seen the channel close — the owner provably holds nothing of
+         * this conn and teardown can free it. */
+        @defer owner_release_pending(conn, &req);
         @errhandler(CCError e) {
+            if (req) { redis_conn_release_slot(conn, req); req = NULL; }
             cc_channel_close(conn->reply_tx, cc_io_error(e));
             return 0;
         }
 
         RedisReply reply = execute_request(&db, req) ?>(e) err_reply(e);
-        RedisReplySendStatus reply_status = redis_conn_send_reply(conn, &reply) !>;
+        /* Stabilize BEFORE the slot goes back: the reply may still borrow
+         * req->arena bytes (e.g. PING's echo argument). */
+        redis_reply_stabilize_for_channel(&reply, &conn->reply_arena) !>;
+        redis_conn_release_slot(conn, req);
+        req = NULL;
+        RedisReplySendStatus reply_status = redis_conn_queue_reply(conn, &reply);
         if (reply_status != REDIS_REPLY_SEND_QUEUED) continue;
     }
     return 0;
@@ -1514,10 +1521,11 @@ static RedisPipelineStatus !>(CCError) submit_pipeline_batch(RedisConn* conn,
         conn->next_request_id++;
         CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
         if (cc_is_err(send_res) || !send_res.u.value) {
-            redis_conn_release_request(req);
+            redis_conn_release_slot(conn, req);
             return cc_ok(REDIS_PIPELINE_OWNER_UNAVAILABLE);
         }
         redis_pipeline_batch_accept(batch);
+        conn->inflight++;
     }
 
     return cc_ok(REDIS_PIPELINE_OK);
@@ -1531,6 +1539,7 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
         CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
         if (cc_is_err(recv_res) || !recv_res.u.value) return REDIS_PIPELINE_REPLY_CLOSED;
         batch->replies_pending--;
+        conn->inflight--;
         if (!write_reply(client, conn, &reply)) return REDIS_PIPELINE_WRITE_FAILED;
     }
 
@@ -1543,11 +1552,14 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
  * submit / drain / flush / rr_fill batch (phases labeled inline). */
 @async int handle_client(CCSocket client, ReqTx req_tx, uint64_t conn_id) {
     @defer cc_socket_close(&client);
-    /* Teardown: cancel reply_rx first (unblocks any owner-side send
-     * stuck on a full reply channel), then drop the ref.  Encoded via
-     * the @destroy body plus the registered redis_conn_release. */
+    /* Teardown: DRAIN-TO-ZERO is the join.  Every accepted request owes
+     * exactly one reply, and the owner returns the request's pool slot
+     * BEFORE queueing that reply — so once inflight replies are drained
+     * (or the owner closed the channel and exited) the owner provably
+     * never touches this conn again, and the registered destroy can free
+     * it.  This replaces the old refcount scheme outright. */
     RedisConn* conn = redis_conn_create(conn_id) !> { return 1; }     @destroy {
-        cc_channel_cancel(conn->reply_rx);
+        redis_conn_drain_inflight(conn);
     };
 
     /* Large enough for pipelined redis-benchmark without constant compact moves. */

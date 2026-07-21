@@ -3308,6 +3308,31 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                     ty_text = NULL;
                                 }
                             }
+                            /* Shape check — reject comment/expression shrapnel
+                             * outright: a C type prefix is identifier-led and
+                             * contains only identifier chars, whitespace, and
+                             * '*'.  The one-line slice can start INSIDE a block
+                             * comment (fresh scan state can't know), and the
+                             * line-keyed lookup can drift; either way the bad
+                             * text must degrade to the aux_s2 fallback, never
+                             * reach the frame struct.  (Found via
+                             * redis_idiomatic: local `e` matched the "e.g." in
+                             * a comment and the frame gained the member
+                             * `* req->arena bytes ( e;`.) */
+                            if (ty_text) {
+                                const char* t2 = ty_text;
+                                while (*t2 == ' ' || *t2 == '\t') t2++;
+                                int bad = !((*t2 >= 'a' && *t2 <= 'z') ||
+                                            (*t2 >= 'A' && *t2 <= 'Z') || *t2 == '_');
+                                for (const char* p2 = t2; !bad && *p2; p2++) {
+                                    if (!(cc__is_ident_char(*p2) || *p2 == ' ' ||
+                                          *p2 == '\t' || *p2 == '*')) bad = 1;
+                                }
+                                if (bad) {
+                                    free(ty_text);
+                                    ty_text = NULL;
+                                }
+                            }
                             local_tys[local_n - 1] = ty_text;
                             {
                                 const char* after = hit + nn;
