@@ -3962,7 +3962,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cancel"))) {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
-            int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+            int r = cc__rewrite_defer_syntax_marked(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
             if (r < 0) {
                 if (stmt_async_root) cc_tcc_bridge_free_ast(stmt_async_root);
                 goto fail;
@@ -4185,7 +4185,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cancel")) {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
-            int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+            int r = cc__rewrite_defer_syntax_marked(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
             if (r < 0) {
                 goto fail;
             }
