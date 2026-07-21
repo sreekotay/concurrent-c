@@ -1,8 +1,12 @@
 /*
  * Smoke test for select-cancel/close waiter races.
  *
- * Goal (§8): repeatedly force one @match arm to win while the other arm is
- * cancelled/closed, exercising stale waiter-node paths without deadlock.
+ * Goal (§8): repeatedly force one cc_chan_match_select(...) case to win
+ * while the other case is cancelled/closed, exercising stale waiter-node
+ * paths without deadlock. Pins the runtime select primitive directly
+ * (this used to be spelled with the removed `@match` statement; the body
+ * below reproduces exactly what that rewrite emitted, including the
+ * pre-block cc_is_cancelled() check and cc_current_deadline()).
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
@@ -41,14 +45,31 @@ int main(void) {
             });
 
             @with_deadline(millis(30)) {
-                @match {
-                    case rx_data.recv(&got): {
-                        selected = 1;
+                do { /* select: recv/recv */
+                    size_t __cc_match_idx = (size_t)-1;
+                    int __cc_match_rc = 0;
+                    CCChanMatchCase __cc_match_cases[2];
+                    __cc_match_cases[0] = (CCChanMatchCase){ .ch = (rx_data).raw, .send_buf = NULL, .recv_buf = (void*)(&got), .elem_size = sizeof(*(&got)), .is_send = false };
+                    __cc_match_cases[1] = (CCChanMatchCase){ .ch = (rx_close).raw, .send_buf = NULL, .recv_buf = (void*)(&got), .elem_size = sizeof(*(&got)), .is_send = false };
+                    if (cc_is_cancelled()) {
+                        /* pre-block cancel check: don't enter the select once
+                         * the enclosing deadline scope is already cancelled */
+                    } else {
+                        __cc_match_rc = cc_chan_match_select(__cc_match_cases, 2, &__cc_match_idx, cc_current_deadline());
                     }
-                    case rx_close.recv(&got): {
-                        selected = 2;
+                    switch (__cc_match_idx) {
+                        case 0: {
+                            selected = 1;
+                        }
+                            break;
+                        case 1: {
+                            selected = 2;
+                        }
+                            break;
+                        default: break;
                     }
-                }
+                    (void)__cc_match_rc;
+                } while(0);
             }
         
         }

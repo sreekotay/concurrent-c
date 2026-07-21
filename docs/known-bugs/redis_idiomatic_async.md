@@ -75,7 +75,8 @@ comment bait) live at:
 - `tests/async_param_scan_comment_paren_smoke.ccs` — async_ast
   param-list scan.
 - `tests/match_case_header_comment_bait_smoke.ccs` — `@match`
-  case-header `.recv` / `.send` discrimination.
+  case-header `.recv` / `.send` discrimination. (Deleted 2026-07 along
+  with the `@match` construct itself; the scanner it pinned is gone.)
 - `tests/closure_decl_line_comment_semi_bait_smoke.ccs` —
   pass_closure_calls decl-line `;` / `(` / `=` scan.
 - `tests/autoblock_call_comment_paren_bait_smoke.ccs` —

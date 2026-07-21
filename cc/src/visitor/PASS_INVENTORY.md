@@ -143,7 +143,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | # | Function | Transform | Lines | Notes |
 |---|----------|-----------|-------|-------|
 | P1 | cc__canonicalize_with_deadline_syntax (phase-1) + cc__lower_with_deadline_syntax (phase-3) | `with_deadline(ms)` → CCDeadline scope | ~240 | Control flow. **Corrected 2026-06-01:** lowering lives in `preprocess.c`; the visitor `pass_with_deadline_syntax.c` was a confirmed-orphan and has been deleted (2026-06-01). |
-| P2 | cc__rewrite_match_syntax | `@match` → switch + cc_chan_match_select | ~310 | Channel select |
+| P2 | ~~cc__rewrite_match_syntax~~ → cc__reject_match_syntax | **Removed (2026-07):** the `@match` construct was dropped from the language; the phase-1 slot now rejects the reserved token with a migration error. Callers use `cc_chan_match_select` directly. | ~50 | Channel select (reserved keyword) |
 | P3 | cc__rewrite_slice_types | `T[:]` → CCSlice_T | ~110 | Type syntax |
 | P4 | cc__rewrite_chan_handle_types | `int[~4 >]` → CCChanTx_int | ~510 | Channel types |
 | P5 | cc_rewrite_generic_containers | `CCVec::[T]` → CCVec_T | ~250 | Generic types |
@@ -174,7 +174,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
 | 3 | ~~pass_with_deadline_syntax.c~~ | — | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed (zero callers); `with_deadline` is lowered in `preprocess.c` (P1). |
-| 4 | ~~pass_match_syntax.c~~ | — | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed (zero callers); `@match` is lowered by the static `cc__rewrite_match_syntax` in `preprocess.c` (P2). |
+| 4 | ~~pass_match_syntax.c~~ | — | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed (zero callers). (`@match` itself was removed from the language 2026-07; the preprocess slot P2 now only rejects the reserved token.) |
 
 ### Phase 3: Initial AST Passes (EditBuffer; two-stage batched, 2 reparses max)
 
@@ -427,7 +427,7 @@ All suitable passes have been converted to use the shared `CCScannerState` helpe
 - `cc__rewrite_result_types` (P8)
 - `cc__rewrite_slice_types` (P3)
 - `cc__rewrite_result_star_unwrap` (P10)
-- `cc__rewrite_match_syntax` (P2)
+- `cc__reject_match_syntax` (P2)
 - `cc__rewrite_chan_handle_types` (P4) ✅ 2026-02-01
 - `cc_rewrite_generic_containers` (P5) ✅ 2026-02-01
 - Legacy preprocess UFCS passes removed; UFCS now lowers through the parser/TCC tolerance plus AST-aware UFCS path.

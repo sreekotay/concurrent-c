@@ -132,7 +132,7 @@ different task.
 function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
-(`@async`, `@await`, `@match`, `@defer`, `@cancel`, `@errhandler`,
+(`@async`, `@await`, `@match` (reserved — removed construct), `@defer`, `@cancel`, `@errhandler`,
 `@destroy`, `@with_deadline`, `@comptime`, `@blocking`,
 `@nonblocking`, `@lock`, `@for`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
@@ -215,7 +215,6 @@ bugs.
 | `@cancel`      | Cancel a named `@defer` before it runs                                  | `@cancel cleanup;`                     |
 | `@errhandler`  | Block-scoped default handler for `!>;`                                  | `@errhandler(CCError e) { log(e); }`   |
 | `@err`         | Forward current error to the enclosing handler                          | `@err(e);`                             |
-| `@match`       | Multiplex on channel events / typed variants                            | `@match { case int x = @await ch: … }` |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@lock`        | Acquire mutex, bind guard                                               | `@lock (m) as g { g.data++; }`         |
@@ -243,7 +242,6 @@ bugs.
 | `@scoped type T`                | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                               |
 | `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
 | `@lock (m) as g { }`            | Acquire mutex, bind guard to variable                    | `@lock (m) as guard { guard.data++; }`                   |
-| `@match { case T x = ... }`     | Multiplex on channel events                              | `@match { case int x = @await ch: ... }`                 |
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@for @await (T x : ch) { }`    | Async iteration (consume channel)                        | `@for @await (int x : ch) { process(x); }`               |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
@@ -626,7 +624,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 **Keyword sigil policy (normative):** Every CC-introduced keyword
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
-`@match`, `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
+`@match` (reserved — removed construct), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
 `@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
 `@lock`, `@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`.
 The bare
@@ -1275,7 +1273,7 @@ The central rule: **No scope-bound value may be held across a suspension point.*
 
 ### 4.1 Scope-Bound Types (`@scoped`)
 
-A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (@await, @match, @async call).
+A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (@await, @async call).
 
 **Types that are scope-bound:**
 
@@ -1369,7 +1367,6 @@ A **suspension point** is any program point at which execution of the current ta
 **Suspension points:**
 
 - `@await` expression (any @await)
-- `@match` statement
 - Call to `@async` function
 - Async iteration (`@for @await`) (contains an `@await` per iteration)
 - Call to cancellation-aware channel operation (`recv_cancellable`, `send_cancellable`)
@@ -1890,7 +1887,7 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 }
 ```
 
-**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `@await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
+**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `@await` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
 
 ```c
 @async void!>(Error) good(Arena* scratch) {
@@ -2763,23 +2760,29 @@ unsafe {
 
 replaced_5 Select / Multiplex
 
-`select` waits on multiple channel operations:
+Channel multiplexing is a **library call**, not a statement form: the
+runtime select primitive `cc_chan_match_select(...)` waits on multiple
+channel operations. (The former `@match` statement was removed; the
+keyword stays reserved. See §8.5.1 for the full idiom and the design
+position — one fiber per source is the primary pattern.)
 
 ```c
-int x;
-@match {
-    case ch.recv(&x):        handle(x);
-    case ch.send(v):         sent();
-    case timeout(100ms):     retry();
+int x; int v = 42;
+CCChanMatchCase cases[2];
+cases[0] = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &x, .elem_size = sizeof(x), .is_send = false };
+cases[1] = (CCChanMatchCase){ .ch = tx.raw, .send_buf = &v,  .recv_buf = NULL, .elem_size = sizeof(v), .is_send = true  };
+size_t ready = (size_t)-1;
+int rc = cc_chan_match_select(cases, 2, &ready, cc_current_deadline());
+switch (ready) {
+    case 0: handle(x); break;
+    case 1: sent();    break;
+    default: /* rc = ETIMEDOUT (deadline) or EPIPE (closed) */ break;
 }
 ```
 
-- Works in both sync and `@async` code.
-- In async code, suspends cooperatively.
-- In sync code, blocks the OS thread.
+- Callable from both plain-thread and fiber code; the caller parks until
+  a case is ready or the deadline passes.
 - First ready case wins; if multiple ready, one is chosen non-deterministically.
-
-**Rule:** In `@async` code, `select` is itself a suspension point; channel ops in case headers are implicitly awaited. No explicit `@await` appears in case headers.
 
 **Rule (select readiness on closed):**
 
@@ -2837,16 +2840,15 @@ bool got = recv_timeout(&ch, 100ms, &v);
 int v2;
 bool got2 = @await recv_timeout(&ch, 100ms, &v2);
 
-// Equivalent to:
+// Equivalent to a deadline-bounded runtime select:
 int v3 = 0;
-bool got3 = false;
-@match {
-    case ch.recv(&v3):   { got3 = true; }
-    case timeout(100ms): { got3 = false; }
-}
+CCChanMatchCase c = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &v3, .elem_size = sizeof(v3), .is_send = false };
+size_t ready = (size_t)-1;
+CCDeadline d = cc_deadline_after_ms(100);
+bool got3 = cc_chan_match_select(&c, 1, &ready, &d) == 0;
 ```
 
-**Rule:** `timeout(Duration d)` is a select-only readiness case that becomes ready after duration `d` elapses.
+**Rule:** Timeouts on multiplexed waits are expressed through the deadline parameter of `cc_chan_match_select` (there is no `timeout(...)` readiness case).
 
 **Rule:** `recv_timeout` follows the same dual-mode rules as `recv`: it requires `@await` in `@async` code and blocks in sync code.
 
@@ -2945,7 +2947,7 @@ expects. This is the form used throughout `examples/` and `real_projects/`.
 
 **Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `@await`. They return immediately or have no return value.
 
-**Rule:** Sync channels do not support cancellation-aware variants (`recv_cancellable`, `send_cancellable`). If you need cancellation, use async channels with `@match`.
+**Rule:** Sync channels do not support cancellation-aware variants (`recv_cancellable`, `send_cancellable`). If you need cancellation, use async channels with cancellation-aware variants (§8.5.2).
 
 **RecvStatus enum:**
 
@@ -3739,15 +3741,14 @@ thread.
 ```c
 @async void!>(Error) reader(int[~ <] ch) {
     int x;
-    @match {
-        case ch.recv(&x):
-            process(x);
-        // implicit: case is_cancelled(): return cc_err(Cancelled);
-    }
+    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
+    if (got.is_err()) return cc_err(Cancelled);
+    if (cc_value(got)) process(x);
 }
 ```
 
-Async channels work with `@match` and have implicit cancellation cases.
+Async channels support cancellation-aware variants (`recv_cancellable`,
+`send_cancellable`; §8.5.2).
 
 ---
 
@@ -3775,30 +3776,11 @@ recv_cancellable(rx, &x);                 // ❌ N/A: sync channels don't auto-s
 
 **Rule:** All operations on sync channels do NOT use `@await`. Adding `@await` is a compile error.
 
-**No @match on sync channels:**
-
-```c
-int[~ sync <] rx;
-@match {
-    case rx.recv(&x):  // ❌ ERROR: @match requires async channel
-        process(x);
-}
-```
-
-Sync channels do not work with `@match`.
-
-**Explicit blocking select (rare):**
-
-```c
-@match_blocking {
-    case sync_ch.recv(&x):
-        process(x);
-    case other_sync_ch.send(42):
-        // sent
-}
-```
-
-(Detailed semantics in advanced section.)
+**Multiplexing sync channels (rare):** there is no statement-level
+select. When a single thread must race multiple sync channels, call the
+runtime select primitive directly — `cc_chan_match_select(...)` blocks
+the OS thread until a case is ready or the deadline passes (§8.5.1).
+Prefer one thread/fiber per source.
 
 ---
 
@@ -3902,8 +3884,8 @@ Same error handling semantics; only difference is blocking vs suspending.
 | **Blocks OS thread**     | No                                              | Yes                                                              |
 | **Use in `@async` code** | Yes (primary)                                   | No (use async instead)                                           |
 | **Use in sync code**     | No (use task)                                   | Yes (primary)                                                    |
-| **Works with `@match`**  | Yes                                             | No (`@match_blocking` rare)                                      |
-| **Implicit cancel case** | Yes                                             | No                                                               |
+| **Multiplex via `cc_chan_match_select`** | Yes                             | Yes (blocks OS thread)                                           |
+| **Cancellation-aware variants** | Yes                                      | No                                                               |
 | **Example use**          | Async streams, work queues in nurseries         | Thread coordination, OS thread pools                             |
 
 
@@ -3925,10 +3907,8 @@ CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
 }
 
 @async void consumer() {
-    @match {
-        case int work = @await recv(&work_rx):
-            process(work);
-        // implicit cancel case
+    @for @await (int work : work_rx) {
+        process(work);
     }
 }
 
@@ -3984,19 +3964,15 @@ n->spawn(() => timeout_enforcer());
 
 @async int!>(Error) reader(int[~ <] ch) {
     int x;
-    @match {
-        case ch.recv(&x):
-            return cc_ok(x);
-        // implicit cancel case (timeout will cancel)
-    }
+    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
+    if (got.is_err()) return cc_err(Error.Cancelled);   // timeout cancelled us
+    return cc_ok(x);
 }
 
 @async void!>(Error) timeout_enforcer() {
-    @match {
-        case @await sleep(Duration{5, 0}):
-            return cc_err(void, Error.Timeout);
-        // implicit cancel case
-    }
+    void!>(Cancelled) slept = @await sleep_cancellable(Duration{5, 0});
+    if (slept.is_err()) return cc_ok(void);             // cancelled: work finished first
+    return cc_err(void, Error.Timeout);
 }
 ```
 
@@ -4030,99 +4006,71 @@ The language model does not include a combined send/recv channel handle. A progr
 
 Cancellation is **cooperative but effective**. Tasks respond to cancellation by one of two mechanisms:
 
-1. **Implicit cancellation case in `@match`** — automatic, zero-overhead (PRIMARY)
-2. **Cancellation-aware operation variants** — explicit opt-in for non-select cases (SECONDARY)
+1. **Cancellation-aware operation variants** — explicit opt-in at suspension points (PRIMARY)
+2. **Polling via `cc_is_cancelled()`** — fallback for compute loops (SECONDARY)
 
-This gives cancellation "teeth"—a cancelled task will exit immediately when it reaches a cancellation-aware operation, without requiring manual polling or timeouts everywhere.
+Inside an active `@with_deadline(...)` scope, suspension points are
+already cancellation-aware per **§4.2.2**. This gives cancellation
+"teeth"—a cancelled task will exit immediately when it reaches a
+cancellation-aware operation, without requiring manual polling or
+timeouts everywhere.
 
 ---
 
-#### 8.5.1 Implicit Cancellation Case in `@match`
+#### 8.5.1 Channel Multiplexing without `@match`
 
-**Rule (@match requires async channels):** `@match` works **only with async channel handles** (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`). Sync handles (`T[~ ... sync ... >/<]`) do not support `@match`. If you need to multiplex sync channels, use low-level primitives outside of `@match` (rare).
+The `@match` statement was **removed** from the language. The keyword
+stays reserved: spelling `@match` is a compile error with a migration
+hint (`'@match' was removed; multiplex channels with
+cc_chan_match_select(...) (see spec) or restructure with one fiber per
+source`), and it never falls through to the C parser. What remains is
+the runtime select primitive, an ordinary library call.
 
-**Rule (implicit cancel case):** When `@match` appears inside a cancellable context (nursery, spawned task, or any task that can be cancelled), the compiler implicitly adds a cancellation case:
+**Design position:**
+
+- **Fiber-per-source is the primary idiom.** Instead of one consumer
+  multiplexing N channels, spawn one fiber per source in a nursery and
+  let each block on its own channel. Fibers are cheap; the nursery
+  provides joining, error propagation, and cancellation.
+- **Select is a library call.** When a single consumer genuinely must
+  race multiple sources, call `cc_chan_match_select(...)` directly.
+- **Any future select returns a value** consumed by ordinary control
+  flow (a `switch` on the ready index); it will never be a statement
+  form. There is one branching story in the language.
+
+**Idiom (direct select, with pre-block cancel check and deadline):**
 
 ```c
-@async void!>(Error) worker(int[~ <] ch) {  // async recv handle
-    int x;
-    while (true) {
-        @match {
-            case ch.recv(&x):          // async channel recv, implicitly awaited inside @match
-                process(x);
-            // IMPLICIT (inside cancellable context):
-            // case is_cancelled():
-            //     return cc_err(Cancelled);
-        }
-    }
+int x; int v = 42;
+if (cc_is_cancelled()) {
+    /* observe cancellation before parking */
+    return cc_err(Cancelled);
 }
-
-// Sync channels don't work with @match:
-@async void!>(Error) bad_sync(int[~ sync <] ch) {
-    int x;
-    @match {
-        case ch.recv(&x):  // ❌ ERROR: @match requires async channel
-            process(x);
-    }
+CCChanMatchCase cases[2];
+cases[0] = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &x, .elem_size = sizeof(x), .is_send = false };
+cases[1] = (CCChanMatchCase){ .ch = tx.raw, .send_buf = &v,  .recv_buf = NULL, .elem_size = sizeof(v), .is_send = true  };
+size_t ready = (size_t)-1;
+int rc = cc_chan_match_select(cases, 2, &ready, cc_current_deadline());
+switch (ready) {
+    case 0: process(x); break;      /* rx delivered into x */
+    case 1: /* v sent */ break;
+    default: /* rc = ETIMEDOUT (deadline) or EPIPE (closed) */ break;
 }
 ```
 
-**How it works:**
-
-- `@match` checks all cases, including the implicit cancellation case
-- If the task is cancelled and the cancel case can proceed, the `@match` immediately returns `err(Cancelled)`
-- The task must have a `Cancelled` variant in its error type for implicit return to work
-- If no `Cancelled` variant, the implicit case is a compile error
-
-**Desugaring:**
-
-```c
-@async void!>(Error) worker(int[~ <] ch) {
-    int x;
-    while (true) {
-        @match {
-            case ch.recv(&x):
-                process(x);
-            case is_cancelled():  // implicit
-                return cc_err(Error.Cancelled);
-        }
-    }
-}
-```
-
-**Rule (cancellation-aware error types):** For tasks in a nursery that can be cancelled, define the error type with a `Cancelled` variant:
-
-```c
-enum WorkerError {
-    Cancelled,      // ✅ allows implicit cancel case
-    IoError(...),
-    Timeout,
-}
-
-@async int!>(WorkerError) worker() {
-    @match {
-        case result = async_io():
-            return cc_ok(result);
-        // implicit: case is_cancelled(): return cc_err(WorkerError.Cancelled);
-    }
-}
-```
-
-**Rule (implicit case only in cancellable contexts):** The implicit cancellation case is only added when:
-
-- Inside an `@async` function that is spawned in a nursery
-- Inside a task with a `Cancelled` error variant
-- At a `@match` statement (not other @await operations)
-
-Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get implicit cancel cases.
-
-**Benefit:** Cancelled tasks immediately exit when they hit a `@match`, without requiring manual `is_cancelled()` polls or timeout workarounds.
+- The `cc_is_cancelled()` check runs **before** parking. The select
+  itself is woken by channel readiness or deadline expiry
+  (`cc_current_deadline()` picks up the innermost `@with_deadline`
+  scope); there is no mid-wait cancel routing.
+- `cc_chan_match_select` parks the calling OS thread (or fiber via the
+  scheduler). In fiber code, prefer fiber-per-source over building
+  select loops.
 
 ---
 
 #### 8.5.2 Cancellation-Aware Operation Variants
 
-For operations **outside `@match`** (single @await, channel recv/send, sleep), use explicit cancellation-aware variants.
+For individual suspension points (single @await, channel recv/send, sleep), use explicit cancellation-aware variants.
 
 **Guidance:** Inside an active `@with_deadline(...)` scope, suspension points are already cancellation-aware per **§4.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
 
@@ -4165,7 +4113,7 @@ Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, D
 
 **When to use variants:**
 
-- Outside `@match` (single @await, sleep, recv)
+- At individual suspension points (single @await, sleep, recv)
 - When you need to distinguish cancellation from other completion reasons
 - When you want explicit control over cancellation handling
 
@@ -4173,7 +4121,7 @@ Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, D
 
 #### 8.5.3 Polling-Based Fallback
 
-For cases where neither implicit `@match` nor variants apply, use the polling-based API:
+For cases where cancellation-aware variants don't apply, use the polling-based API:
 
 ```c
 @async void!>(Error) work() {
@@ -4185,7 +4133,7 @@ For cases where neither implicit `@match` nor variants apply, use the polling-ba
 }
 ```
 
-This is still supported but should be rare—most code uses `@match` or variants.
+This is still supported but should be rare—most code uses cancellation-aware variants or deadline scopes.
 
 ---
 
@@ -4195,15 +4143,15 @@ This is still supported but should be rare—most code uses `@match` or variants
 
 - `t.cancel()` sets a cancellation flag on the task
 - The flag is observable via:
-  - Implicit case in `@match` (immediate)
   - `recv_cancellable()` / `send_cancellable()` (immediate)
+  - a pre-block `cc_is_cancelled()` check around `cc_chan_match_select(...)` (§8.5.1)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
 - Outside an active `@with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `@await ch.recv(&x)` keeps waiting). Inside `@with_deadline(...)`, suspension points are cancellation-aware per **§4.2.2** (and may be deferred by `@with_shield`, **§8.5.10**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
-**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `@await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `@with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
+**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use cancellation-aware variants will observe the cancellation immediately. Siblings using plain `@await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `@with_deadline(...)` scope, where suspension points are cancellation-aware per **§4.2.2**).
 
 ---
 
@@ -4224,30 +4172,23 @@ n->spawn(() => timeout_enforcer());
 @async void!>(WorkerError) reader(int[~ <] requests) {
     int req;
     while (true) {
-        @match {
-            case requests.recv(&req):
-                handle_request(req);
-            // implicit: case is_cancelled(): return cc_err(Cancelled);
-        }
+        bool !>(Cancelled) got = @await requests.recv_cancellable(&req);
+        if (got.is_err()) return cc_err(WorkerError.Cancelled);
+        if (!cc_value(got)) return cc_ok(void);   // closed+drained
+        handle_request(req);
     }
 }
 
 @async void!>(WorkerError) writer(int[~ >] responses) {
     for (Response r : response_queue) {
-        @match {
-            case responses.send(r):
-                // sent
-            // implicit: case is_cancelled(): return cc_err(Cancelled);
-        }
+        if (!@await responses.send_cancellable(r)) return cc_err(WorkerError.Cancelled);
     }
 }
 
 @async void!>(WorkerError) timeout_enforcer() {
-    @match {
-        case sleep(Duration{5, 0}):
-            return cc_err(void, WorkerError.Timeout);
-        // implicit: case is_cancelled(): return cc_ok(void);
-    }
+    void!>(Cancelled) slept = @await sleep_cancellable(Duration{5, 0});
+    if (slept.is_err()) return cc_ok(void);       // cancelled: siblings finished first
+    return cc_err(void, WorkerError.Timeout);
 }
 ```
 
@@ -4255,7 +4196,7 @@ n->spawn(() => timeout_enforcer());
 
 1. Timeout enforcer wakes after 5 seconds and returns `err(Timeout)`
 2. Nursery cancels reader and writer (error propagation)
-3. Both reader and writer hit their implicit cancel cases in `@match`
+3. Both reader and writer observe cancellation in their cancellation-aware operations
 4. All three tasks exit, nursery completes with timeout error
 
 **No hanging tasks. No timeouts needed in reader/writer. Clean cancellation propagation.** ✅
@@ -4269,7 +4210,7 @@ n->spawn(() => timeout_enforcer());
 - ✅ Tasks will exit when they reach a cancellation-aware operation
 - ✅ Siblings in a nursery are cancelled when one fails
 - ✅ Error propagates automatically to the nursery
-- ✅ No explicit polling needed (use @match)
+- ✅ No explicit polling needed (use cancellation-aware variants)
 
 **What cancellation does NOT guarantee:**
 
@@ -4278,7 +4219,7 @@ n->spawn(() => timeout_enforcer());
 - ❌ Automatic timeout (use `with_timeout` if needed)
 - ❌ Immediate exit (task exits when it reaches a cancellation point)
 
-**Pattern for guarantee:** Use `@match` with cancellation-aware operations to ensure tasks can be cancelled promptly.
+**Pattern for guarantee:** Use cancellation-aware operations at every long wait to ensure tasks can be cancelled promptly.
 
 ---
 
@@ -4287,23 +4228,21 @@ n->spawn(() => timeout_enforcer());
 **Recommendation:** When designing tasks for a nursery, include `Cancelled` in the error type:
 
 ```c
-// Good: @match implicit cases work
+// Good: cancellation-aware variants can surface Cancelled
 enum TaskError {
-    Cancelled,              // ✅ allows implicit cancel
+    Cancelled,              // ✅ allows cancellation to be reported
     Timeout,
     IoError(IoError),
 }
 
 @async int!>(TaskError) worker() {
     int x;
-    @match {
-        case ch.recv(&x):
-            return cc_ok(x);
-        // implicit: case is_cancelled(): return cc_err(TaskError.Cancelled);
-    }
+    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
+    if (got.is_err()) return cc_err(TaskError.Cancelled);
+    return cc_ok(x);
 }
 
-// Bad: no Cancelled variant, so implicit case can't work
+// Bad: no Cancelled variant, so cancellation can't be reported
 @async int!>(IoError) reader() {
     int x;
     @await ch.recv(&x);  // ❌ can't be cancelled effectively
@@ -4318,12 +4257,12 @@ enum TaskError {
 
 | Scenario                        | Use                             |
 | ------------------------------- | ------------------------------- |
-| Channel recv/send + other waits | `@match` (implicit cancel)      |
+| Racing multiple channels        | one fiber per source; `cc_chan_match_select` + pre-block check when racing is unavoidable |
 | Single operation outside select | `recv_cancellable()` or variant |
 | Edge case fallback              | `is_cancelled()` polling        |
 
 
-**Default:** Use `@match` (simplest, lowest overhead)
+**Default:** one fiber per source; cancellation-aware variants at suspension points
 
 ---
 
@@ -4393,7 +4332,7 @@ Duration deadline_remaining(Deadline d);
 
 - Deadline is **just a timestamp** (u64 nanoseconds); no allocation
 - No separate timeout type; Deadline is the unification
-- Works with `@match` implicitly (cancelled operations fail)
+- Works with cancellation-aware operations (cancelled operations fail) and bounds `cc_chan_match_select` waits via `cc_current_deadline()`
 - Idiomatic for request-scoped deadlines (every request gets one)
 
 ---
@@ -7554,7 +7493,6 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `@noblock`           | Never blocks/allocates                     | Mark pure utilities         |
 | `@latency_sensitive` | No coalescing allowed                      | Mark request handlers       |
 | `@scoped`            | Cannot escape scope                        | Mark safe cross-thread refs |
-| `@match`             | Pattern matching                           | Multiplex on channels       |
 | `spawn`              | Create task                                | Method on `CCNursery`       |
 | `defer`              | Defer cleanup                              | Guarantee execution         |
 | `@await`              | Suspend on async                           | Call @async functions       |
@@ -7650,9 +7588,9 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 }
 ```
 
-**Current behavior (§8.5, §4.2):** Inside an active `@with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
+**Current behavior (§8.5, §4.2):** Inside an active `@with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit cancellation-check scaffolding. The compiler enforces these checks at compilation time (as per §4.2); the runtime behavior is defined in §8.5.
 
-**Possible direction:** Inside an active `@with_deadline()` scope, all @await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `!>` propagation without explicit `@match` scaffolding.
+**Possible direction:** Inside an active `@with_deadline()` scope, all @await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `!>` propagation without explicit cancellation-check scaffolding.
 
 **Motivation:**
 

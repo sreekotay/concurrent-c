@@ -1,0 +1,3 @@
+# `@match` is a reserved (removed) keyword: the compiler must reject it
+# loudly with a migration hint, not let it fall through to TCC.
+error: syntax: '@match' was removed; multiplex channels with cc_chan_match_select(...) (see spec) or restructure with one fiber per source

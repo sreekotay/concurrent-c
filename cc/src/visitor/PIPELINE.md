@@ -122,7 +122,7 @@ perturb AST→source mapping.
 |-----------|--------|
 | ~~`cc_preprocess_simple()`~~ | **Deleted (2026-06-01 audit):** no longer in the tree (was an unused experimental AST path). |
 | ~~`cc/src/visitor/pass_with_deadline_syntax.c`~~ | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed; `with_deadline` is lowered in `preprocess.c` (`cc__canonicalize_with_deadline_syntax` + `cc__lower_with_deadline_syntax`). |
-| ~~`cc/src/visitor/pass_match_syntax.c`~~ | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed; `@match` is lowered by the static `cc__rewrite_match_syntax` in `preprocess.c`. |
+| ~~`cc/src/visitor/pass_match_syntax.c`~~ | **Deleted (2026-06-01):** confirmed-orphan visitor pass removed. (`@match` itself was removed from the language 2026-07; `cc__reject_match_syntax` in `preprocess.c` now rejects the reserved token.) |
 
 ## Diagnostics (M0.5)
 

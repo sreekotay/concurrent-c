@@ -31,7 +31,7 @@ Run an individual benchmark directly:
 | `perf_buffered_ladder.ccs` | Loop vs fiber vs buffered-channel overhead ladder. |
 | `perf_unbuffered_rendezvous_base.ccs` | Contended unbuffered rendezvous throughput and waiter churn. |
 | `perf_zero_copy.ccs` | Payload-size sensitivity from `int` to large structs. |
-| `perf_match_select.ccs` | `@match` / multi-channel select overhead. |
+| `perf_match_select.ccs` | `cc_chan_match_select` multi-channel select overhead. |
 | `channel_contention.ccs` | Cross-channel interference between independent pipelines. |
 | `channel_wake_wave.ccs` | Wake-to-run latency for one parked receiver per worker. |
 | `thundering_herd.ccs` | Latency to wake a single waiter from a large herd. |

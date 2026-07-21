@@ -121,7 +121,7 @@ Survey of CC tokens that TCC's lexer rejects or misreads:
 | `T!>(E)` | `T` `!` `>` `(` ... | P8 `cc__rewrite_result_types` |
 | `int[~4 >]` | `int` `[` `~` `4` `>` `]` — illegal | P4 `cc__rewrite_chan_handle_types` |
 | `Vec<T>` | `Vec` `<` `T` `>` — comparison chain | P5 `cc_rewrite_generic_containers` |
-| `@match` | `@` (illegal in C) | P2 `cc__rewrite_match_syntax` |
+| `@match` (removed 2026-07; reserved) | `@` (illegal in C) | P2 `cc__reject_match_syntax` (migration error) |
 | `with_deadline(ms) { ... }` | identifier + paren + block (no binding) | P1 `cc__rewrite_with_deadline_syntax` |
 | `() => {...}` | parens + `=` + `>` + brace | P11 closure literal lift |
 
@@ -245,7 +245,7 @@ The pipeline is best understood as three layers, not nine phases. (The Phase 1�
 **Status:** Accepted.
 **Date:** 2025.
 
-**Context:** CC's surface tokens (`T[:]`, `T?`, `T!>E`, `int[~4 >]`, `Vec<T>`, `@match`, `=>`) fail TCC's lexer (constraint C2).
+**Context:** CC's surface tokens (`T[:]`, `T?`, `T!>E`, `int[~4 >]`, `Vec<T>`, `=>`) fail TCC's lexer (constraint C2).
 
 **Decision:** Run text-level preprocess passes that rewrite CC syntax to C-shaped tokens *before* TCC parses. Currently 16 passes in [`cc/src/preprocess/preprocess.c`](../src/preprocess/preprocess.c).
 
@@ -367,7 +367,7 @@ Each of these has been considered (some seriously, some only as devil's-advocate
 **Why wrong:**
 
 1. ~1 year of work to reach parity with TCC's parser. C is harder than it looks (typedef disambiguation, K&R declarators, `__attribute__` parsing, declarator grammar, preprocessor edge cases).
-2. The text-preprocess layer **stays anyway**, because CC's surface tokens (`@match`, `with_deadline`, `Vec<T>` generics) are higher-level constructs that even a CC-native parser would want to desugar before parsing the lowered C. A parser for CC tokens just moves the rewrite from "before TCC" to "during CC parser" — same total work, different file.
+2. The text-preprocess layer **stays anyway**, because CC's surface tokens (`with_deadline`, `Vec<T>` generics, `=>` closures) are higher-level constructs that even a CC-native parser would want to desugar before parsing the lowered C. A parser for CC tokens just moves the rewrite from "before TCC" to "during CC parser" — same total work, different file.
 3. The TCC stub-AST is good enough for our typed lowering needs (UFCS, closure_calls). Building a richer AST gains nothing concrete.
 4. We'd lose the upstream TCC bug-fix pipeline. Today we benefit when TCC fixes bugs (and we patch when it doesn't, per ADR-006).
 
