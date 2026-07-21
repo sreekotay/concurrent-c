@@ -464,11 +464,14 @@ int cc__collect_await_normalize_edits(const CCASTRoot* root,
         size_t ins_cap = ind_len * 2 + await_len + 256;
         char* ins = (char*)malloc(ins_cap);
         if (!ins) { free(await_txt); continue; }
+        /* LINE-NEUTRAL: both hoisted statements ride the awaited statement's
+         * own line (no inserted newlines).  The await expression's internal
+         * newlines move here verbatim while the site replacement removes the
+         * same count, so the buffer's line count is unchanged — later passes
+         * (async_ast) and the emitted C keep 1:1 user-line mapping. */
         int wn = 0;
-        wn += snprintf(ins + (size_t)wn, ins_cap - (size_t)wn, "%.*sintptr_t %s = 0;\n",
-                       (int)ind_len, in_src + insert_off, reps[i].tmp);
-        wn += snprintf(ins + (size_t)wn, ins_cap - (size_t)wn, "%.*s%s = %.*s;\n",
-                       (int)ind_len, in_src + insert_off, reps[i].tmp, (int)await_len, await_txt);
+        wn += snprintf(ins + (size_t)wn, ins_cap - (size_t)wn, "intptr_t %s = 0; %s = %.*s; ",
+                       reps[i].tmp, reps[i].tmp, (int)await_len, await_txt);
         free(await_txt);
         if (wn <= 0) { free(ins); continue; }
         reps[i].insert_text = ins;

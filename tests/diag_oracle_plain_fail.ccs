@@ -1,0 +1,11 @@
+/* Diagnostics oracle: BASELINE — no CC features above the error.
+ * The .compile_err pins the EXACT user-file line:col of the diagnostic;
+ * any sourcemap drift in the plain path breaks this test. */
+#include <stdio.h>
+
+int main(void) {
+    int x = 1;
+    x += cc_diag_oracle_undeclared(x);   /* line 8 */
+    printf("%d\n", x);
+    return 0;
+}

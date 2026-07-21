@@ -1,0 +1,12 @@
+/* Diagnostics oracle: CC-frontend error coordinates (not host-cc).
+ * A naked `!>;` with no @errhandler in scope must be diagnosed at the
+ * line of the unwrap, in the user file. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;   /* line 9 */
+    (void)ch;
+    return 0;
+}

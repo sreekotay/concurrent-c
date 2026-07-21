@@ -3420,6 +3420,31 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
              * (the walker was brittle when closures sat inside `if`/`for`
              * blocks because `static` decls are not allowed at block
              * scope per C99 6.7.1). */
+            /* LINE-NEUTRAL: the literal spans N source lines but the make-
+             * call is one line.  Pad the replacement with the missing
+             * newlines so every line below keeps its user coordinate —
+             * the emitted C has no #line resync here, and the collapse
+             * used to shift all following diagnostics up by N-1 lines
+             * (oracle: diag_oracle_closure_fail).  The pad is inside the
+             * call EXPRESSION (before the caller's closing paren), which
+             * C allows. */
+            {
+                size_t span_nl = 0, call_nl = 0;
+                for (size_t b = d->start_off; b < d->end_off; b++)
+                    if (in_src[b] == '\n') span_nl++;
+                for (const char* c2 = call; *c2; c2++)
+                    if (*c2 == '\n') call_nl++;
+                if (span_nl > call_nl) {
+                    size_t cl = strlen(call);
+                    size_t padn = span_nl - call_nl;
+                    char* padded = (char*)realloc(call, cl + padn + 1);
+                    if (padded) {
+                        memset(padded + cl, '\n', padn);
+                        padded[cl + padn] = '\0';
+                        call = padded;
+                    }
+                }
+            }
             edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
         } else {
             free(call);

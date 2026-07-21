@@ -1,0 +1,3 @@
+# Oracle: exact user-file coordinates for a host-compiler diagnostic with
+# no CC features above the error line (baseline #line sourcemap fidelity).
+diag_oracle_plain_fail.ccs:8:10: error: implicit declaration of function 'cc_diag_oracle_undeclared'

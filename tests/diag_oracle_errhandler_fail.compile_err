@@ -1,0 +1,3 @@
+# Oracle: @errhandler + `!> @destroy` above the error must not shift the
+# reported line (the defer prologue used to drift diagnostics by +2..+3).
+diag_oracle_errhandler_fail.ccs:12:13: error: implicit declaration of function 'cc_diag_oracle_undeclared'

@@ -1,0 +1,2 @@
+# Oracle: CC-frontend diagnostics carry exact user-file coordinates.
+diag_oracle_ccfront_fail.ccs:9:1: error: syntax: '!>;' at expression position requires an enclosing '@errhandler' in scope
