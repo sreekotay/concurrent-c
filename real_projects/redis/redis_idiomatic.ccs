@@ -1118,10 +1118,10 @@ static bool redis_conn_flush_out(RedisConn* conn) {
 static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
     if (!conn || data.len == 0) return true;
     if (data.len > redis_conn_out_buf_bytes) {
-        return redis_conn_flush_out(conn) && write_all(conn->sock, data);
+        return conn->flush_out() && write_all(conn->sock, data);
     }
     if (conn->out_len + data.len > redis_conn_out_buf_bytes) {
-        if (!redis_conn_flush_out(conn)) return false;
+        if (!conn->flush_out()) return false;
     }
     memcpy(conn->out_buf + conn->out_len, data.ptr, data.len);
     conn->out_len += data.len;
@@ -1131,7 +1131,7 @@ static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
 static char* redis_conn_reserve_out(RedisConn* conn, size_t n) {
     if (!conn || n == 0 || n > redis_conn_out_buf_bytes) return NULL;
     if (conn->out_len + n > redis_conn_out_buf_bytes) {
-        if (!redis_conn_flush_out(conn)) return NULL;
+        if (!conn->flush_out()) return NULL;
     }
     char* dst = conn->out_buf + conn->out_len;
     conn->out_len += n;
@@ -1142,18 +1142,18 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     if (!reply) return false;
     switch (reply->kind) {
         case REDIS_REPLY_RAW:
-            return redis_conn_write_bytes(conn, reply->data);
+            return conn->write_bytes(reply->data);
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
             size_t n = reply->data.len + 3;
-            char* dst = redis_conn_reserve_out(conn, n);
+            char* dst = conn->reserve_out(n);
             if (!dst) {
                 char prefix = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
                 CCSlice pfx = cc_slice_from_buffer(&prefix, 1);
                 CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return redis_conn_write_bytes(conn, pfx) &&
-                       redis_conn_write_bytes(conn, reply->data) &&
-                       redis_conn_write_bytes(conn, crlf);
+                return conn->write_bytes(pfx) &&
+                       conn->write_bytes(reply->data) &&
+                       conn->write_bytes(crlf);
             }
             dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
             if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
@@ -1164,15 +1164,15 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
         case REDIS_REPLY_BULK_STRING: {
             size_t hdr_len = resp_bulk_header_len(reply->data.len);
             size_t n = hdr_len + reply->data.len + 2;
-            char* dst = redis_conn_reserve_out(conn, n);
+            char* dst = conn->reserve_out(n);
             if (!dst) {
                 char hdr[32];
                 resp_encode_bulk_header_into(hdr, reply->data.len);
                 CCSlice hdr_s = cc_slice_from_buffer(hdr, hdr_len);
                 CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return redis_conn_write_bytes(conn, hdr_s) &&
-                       redis_conn_write_bytes(conn, reply->data) &&
-                       redis_conn_write_bytes(conn, crlf);
+                return conn->write_bytes(hdr_s) &&
+                       conn->write_bytes(reply->data) &&
+                       conn->write_bytes(crlf);
             }
             resp_encode_bulk_header_into(dst, reply->data.len);
             if (reply->data.len > 0) memcpy(dst + hdr_len, reply->data.ptr, reply->data.len);
@@ -1182,22 +1182,22 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
         }
         case REDIS_REPLY_INTEGER: {
             size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = redis_conn_reserve_out(conn, n);
+            char* dst = conn->reserve_out(n);
             if (dst) {
                 resp_encode_integer_into(dst, reply->int_value);
                 return true;
             }
             char buf[32];
             resp_encode_integer_into(buf, reply->int_value);
-            return redis_conn_write_bytes(conn, cc_slice_from_buffer(buf, n));
+            return conn->write_bytes(cc_slice_from_buffer(buf, n));
         }
         case REDIS_REPLY_NULL_BULK: {
-            char* dst = redis_conn_reserve_out(conn, 5);
+            char* dst = conn->reserve_out(5);
             if (dst) {
                 memcpy(dst, "$-1\r\n", 5);
                 return true;
             }
-            return redis_conn_write_bytes(conn, cc_slice_from_cstr("$-1\r\n"));
+            return conn->write_bytes(cc_slice_from_cstr("$-1\r\n"));
         }
         default:
             return false;
@@ -1339,7 +1339,7 @@ static void redis_conn_destroy(RedisConn* conn) {
 /* One-shot error-reporting path: serialize directly into conn->out_buf
  * and flush immediately. */
 static bool redis_conn_write_reply_now(RedisConn* conn, RedisReply reply) {
-    return redis_conn_write_reply(conn, &reply) && redis_conn_flush_out(conn);
+    return conn->write_reply(&reply) && conn->flush_out();
 }
 
 /* Return a pool slot before it's been committed to a RedisRequest
