@@ -47,6 +47,14 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] async line map selftest FAILED"
     exit 1
   fi
+
+  # Warm-cache diagnostic replay: an emit that printed error diagnostics
+  # must fail (and not cache), so reruns reprint the diagnostic instead of
+  # riding the cache past the erroring pass.
+  if ! sh scripts/test_diag_cache_replay.sh; then
+    echo "[test] diag cache replay selftest FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"

@@ -10,6 +10,12 @@
 #include "util/path.h"
 #include "preprocess/cpp_expand.h"
 
+/* Bumped by cc_pass_error / cc_pass_error_cat (pass_common.h); read by the
+ * driver to fail emits that printed errors but "recovered".  Defined here
+ * because this TU is linked into every binary that links the passes
+ * (ccc itself and lower_headers). */
+long g_cc_pass_error_count = 0;
+
 /* ---- Cached, flattened reparse prelude --------------------------------- *
  *
  * The reparse prelude is a compile-time constant whose only inputs are the
