@@ -1,8 +1,16 @@
 # Draft: `@variant` — first-class tagged unions
 
-Status: DRAFT for discussion. Nothing here is implemented; where this
+Status: HISTORICAL DRAFT. Nothing here is implemented; where this
 document disagrees with the shipped compiler, the compiler wins until this
 graduates into the spec proper.
+
+> **Note (2026-07):** the `@match` statement referenced throughout this
+> draft has since been **removed from the language** (the keyword stays
+> reserved). Sections that extend `@match` are superseded: the current
+> variants direction uses **protected projection + a checker-enforced
+> `switch`** over the variant tag — ordinary control flow consuming a
+> value, never a statement form. Channel multiplexing goes through
+> `cc_chan_match_select(...)` directly (spec §8.5.1).
 
 ## 1. Motivation: the language already has three tagged unions
 

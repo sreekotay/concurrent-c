@@ -1,0 +1,24 @@
+/* `@match` was removed from the language (2026-07). The token is reserved:
+ * spelling it must produce the migration diagnostic below, not a mystery
+ * TCC parse error. Multiplexing goes through cc_chan_match_select(...)
+ * directly, or one fiber per source. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    cc_channel_pair(&tx, &rx);
+
+    (void)chan_send(tx, 7);
+
+    int out = 0;
+    @match {
+        case rx.recv(&out): {
+            /* never compiled */
+        }
+    }
+
+    chan_close(tx);
+    chan_free(rx);
+    return 0;
+}

@@ -1721,19 +1721,20 @@ struct ServerConfig {
             // Request-scoped arena (reset per request)
             CCArena req_arena = arena(megabytes(1));
 
-            // Handle one request
-            @match {
-                case ServerAction !>(CCIoError) action = handle_request(&conn, &req_arena, &conn_arena, cfg):
-                    // Check for keep-alive
-                    if (cfg.mode == Http1_KeepAlive && action != Takeover && !has_connection_close_header(action)) {
-                        arena_reset(&req_arena);
-                        continue;  // Loop for next request
-                    } else {
-                        keep_alive = false;  // Close connection
-                    }
-
-                case is_cancelled() | CCIoError err:
-                    keep_alive = false;  // Break on error or cancellation
+            // Handle one request (`@match` was removed from the language;
+            // branch on the Result / cancellation with ordinary control flow)
+            ServerAction !>(CCIoError) action_r = @await handle_request(&conn, &req_arena, &conn_arena, cfg);
+            if (cc_is_cancelled() || action_r.is_err()) {
+                keep_alive = false;  // Break on error or cancellation
+            } else {
+                ServerAction action = cc_value(action_r);
+                // Check for keep-alive
+                if (cfg.mode == Http1_KeepAlive && action != Takeover && !has_connection_close_header(action)) {
+                    arena_reset(&req_arena);
+                    continue;  // Loop for next request
+                } else {
+                    keep_alive = false;  // Close connection
+                }
             }
         }
 
@@ -1753,18 +1754,22 @@ struct ServerConfig {
     with_deadline(deadline_after(cfg.request_timeout)) {
         ServerAction !>(CCIoError) action = cfg.handler(&req, req_arena);
 
-        // Branch on response type
-        @match {
-            case Response resp = action (Reply):
+        // Branch on response type (checker-enforced switch over the
+        // variant tag with protected projection; `@match` was removed)
+        switch (action.tag) {
+            case Reply: {
+                Response resp = action.reply;
                 if (cfg.on_request_end) cfg.on_request_end(&req, &resp, deadline_remaining());
                 @await send_response_to_duplex(conn, &resp) !>(e) return cc_err(e);
                 return cc_ok(resp);  // Return response for keep-alive check
-
-            case ConnHandlerFn takeover_fn = action (Takeover):
+            }
+            case Takeover: {
                 // Handler is taking over the connection
+                ConnHandlerFn takeover_fn = action.takeover;
                 @await takeover_fn(conn, conn_arena) !>(e) return cc_err(e);
                 // Takeover handler called close(); connection finished
                 return cc_err(CCIoError::ConnectionClosed);  // Signal to break keep-alive loop
+            }
         }
     }
 }

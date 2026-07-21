@@ -563,9 +563,9 @@ static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value);
 static void cc__chan_signal_activity(CCChan* ch);
 static void cc__chan_signal_recv_ready(CCChan* ch);
 
-/* Global broadcast condvar for multi-channel select (@match).
+/* Global broadcast condvar for multi-channel select (cc_chan_match_select).
    Simple approach: any channel activity signals this global condvar.
-   Waiters in @match wait on this. Spurious wakeups are handled by retrying. */
+   Select waiters wait on this. Spurious wakeups are handled by retrying. */
 static pthread_mutex_t g_chan_broadcast_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_chan_broadcast_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic int g_select_waiters = 0;  /* Count of threads waiting in select */

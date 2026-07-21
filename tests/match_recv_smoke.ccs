@@ -1,3 +1,8 @@
+/* Pins the runtime channel-select primitive directly: a one-case recv
+ * select via cc_chan_match_select(...). This reproduces exactly what the
+ * removed `@match` statement used to emit (CCChanMatchCase array built
+ * from the handle's .raw channel, select with cc_current_deadline(),
+ * dispatch on the ready index). */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 
@@ -9,11 +14,21 @@ int main(void) {
     (void)chan_send(tx, 7);
 
     int out = 0;
-    @match {
-        case rx.recv(&out): {
-            // recv already happened via match_select
+    do { /* select: recv */
+        size_t __cc_match_idx = (size_t)-1;
+        int __cc_match_rc = 0;
+        CCChanMatchCase __cc_match_cases[1];
+        __cc_match_cases[0] = (CCChanMatchCase){ .ch = (rx).raw, .send_buf = NULL, .recv_buf = (void*)(&out), .elem_size = sizeof(*(&out)), .is_send = false };
+        __cc_match_rc = cc_chan_match_select(__cc_match_cases, 1, &__cc_match_idx, cc_current_deadline());
+        switch (__cc_match_idx) {
+            case 0: {
+                // recv already happened via match_select
+            }
+                break;
+            default: break;
         }
-    }
+        (void)__cc_match_rc;
+    } while(0);
 
     assert(out == 7);
     chan_close(tx);

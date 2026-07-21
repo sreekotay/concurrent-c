@@ -93,7 +93,7 @@ Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
 
 If you add new scheduler behaviors, update these invariants and extend the stress tests.
 
-## Channel/select debugging (lock-free + @match)
+## Channel/select debugging (lock-free + cc_chan_match_select)
 
 ### Key invariants (what must stay true)
 - Close stops admission: send must not accept new work after close.

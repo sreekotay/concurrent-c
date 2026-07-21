@@ -1,5 +1,7 @@
 /*
- * @match (multi-channel select) performance benchmark.
+ * cc_chan_match_select (multi-channel select) performance benchmark.
+ * (`@match` was removed from the language; this spells the runtime
+ * select call directly, exactly what the old construct lowered to.)
  * Measures: select latency with different channel counts.
  * 
  * This test validates our signal-based implementation doesn't regress.
@@ -59,14 +61,22 @@ static void bench_two_channel_one_ready(void) {
     for (int i = 0; i < ITERATIONS; i++) {
         tx1.send(i);  /* Only ch1 has data */
         
-        @match {
-            case rx1.recv(&v1): {
-                sum += v1;
+        do { /* select: recv/recv */
+            size_t __cc_match_idx = (size_t)-1;
+            int __cc_match_rc = 0;
+            CCChanMatchCase __cc_match_cases[2];
+            __cc_match_cases[0] = (CCChanMatchCase){ .ch = (rx1).raw, .send_buf = NULL, .recv_buf = (void*)(&v1), .elem_size = sizeof(*(&v1)), .is_send = false };
+            __cc_match_cases[1] = (CCChanMatchCase){ .ch = (rx2).raw, .send_buf = NULL, .recv_buf = (void*)(&v2), .elem_size = sizeof(*(&v2)), .is_send = false };
+            __cc_match_rc = cc_chan_match_select(__cc_match_cases, 2, &__cc_match_idx, cc_current_deadline());
+            switch (__cc_match_idx) {
+                case 0: { sum += v1; }
+                    break;
+                case 1: { sum += v2; }
+                    break;
+                default: break;
             }
-            case rx2.recv(&v2): {
-                sum += v2;
-            }
-        }
+            (void)__cc_match_rc;
+        } while(0);
     }
     
     double elapsed = time_now_ms() - start;
@@ -96,14 +106,22 @@ static void bench_two_channel_alternating(void) {
             tx2.send(i);
         }
         
-        @match {
-            case rx1.recv(&v1): {
-                sum += v1;
+        do { /* select: recv/recv */
+            size_t __cc_match_idx = (size_t)-1;
+            int __cc_match_rc = 0;
+            CCChanMatchCase __cc_match_cases[2];
+            __cc_match_cases[0] = (CCChanMatchCase){ .ch = (rx1).raw, .send_buf = NULL, .recv_buf = (void*)(&v1), .elem_size = sizeof(*(&v1)), .is_send = false };
+            __cc_match_cases[1] = (CCChanMatchCase){ .ch = (rx2).raw, .send_buf = NULL, .recv_buf = (void*)(&v2), .elem_size = sizeof(*(&v2)), .is_send = false };
+            __cc_match_rc = cc_chan_match_select(__cc_match_cases, 2, &__cc_match_idx, cc_current_deadline());
+            switch (__cc_match_idx) {
+                case 0: { sum += v1; }
+                    break;
+                case 1: { sum += v2; }
+                    break;
+                default: break;
             }
-            case rx2.recv(&v2): {
-                sum += v2;
-            }
-        }
+            (void)__cc_match_rc;
+        } while(0);
     }
     
     double elapsed = time_now_ms() - start;
@@ -137,12 +155,28 @@ static void bench_four_channel(void) {
             case 3: tx4.send(i); break;
         }
         
-        @match {
-            case rx1.recv(&v1): sum += v1;
-            case rx2.recv(&v2): sum += v2;
-            case rx3.recv(&v3): sum += v3;
-            case rx4.recv(&v4): sum += v4;
-        }
+        do { /* select: 4x recv */
+            size_t __cc_match_idx = (size_t)-1;
+            int __cc_match_rc = 0;
+            CCChanMatchCase __cc_match_cases[4];
+            __cc_match_cases[0] = (CCChanMatchCase){ .ch = (rx1).raw, .send_buf = NULL, .recv_buf = (void*)(&v1), .elem_size = sizeof(*(&v1)), .is_send = false };
+            __cc_match_cases[1] = (CCChanMatchCase){ .ch = (rx2).raw, .send_buf = NULL, .recv_buf = (void*)(&v2), .elem_size = sizeof(*(&v2)), .is_send = false };
+            __cc_match_cases[2] = (CCChanMatchCase){ .ch = (rx3).raw, .send_buf = NULL, .recv_buf = (void*)(&v3), .elem_size = sizeof(*(&v3)), .is_send = false };
+            __cc_match_cases[3] = (CCChanMatchCase){ .ch = (rx4).raw, .send_buf = NULL, .recv_buf = (void*)(&v4), .elem_size = sizeof(*(&v4)), .is_send = false };
+            __cc_match_rc = cc_chan_match_select(__cc_match_cases, 4, &__cc_match_idx, cc_current_deadline());
+            switch (__cc_match_idx) {
+                case 0: sum += v1;
+                    break;
+                case 1: sum += v2;
+                    break;
+                case 2: sum += v3;
+                    break;
+                case 3: sum += v4;
+                    break;
+                default: break;
+            }
+            (void)__cc_match_rc;
+        } while(0);
     }
     
     double elapsed = time_now_ms() - start;
@@ -157,10 +191,10 @@ static void bench_four_channel(void) {
 }
 
 /* Note: Concurrent select test omitted - capture syntax for channel handles
-   in closures is complex. The sequential tests above cover @match performance. */
+   in closures is complex. The sequential tests above cover select performance. */
 
 int main(void) {
-    printf("perf_match_select: measuring @match select performance\n");
+    printf("perf_match_select: measuring cc_chan_match_select performance\n");
     
     bench_single_channel();
     bench_two_channel_one_ready();
