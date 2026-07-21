@@ -31,6 +31,14 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] reparse sanitize selftest FAILED"
     exit 1
   fi
+  # "Definition wins TU-locally" (@noblock): the lying-decl WARNING lands
+  # on build stderr, which the .ccs harness never asserts for passing
+  # tests — pinned here instead (behavior side is pinned by the
+  # autoblock_noblock_*_smoke tid oracles).
+  if ! sh scripts/test_autoblock_noblock_warn.sh; then
+    echo "[test] autoblock noblock warning selftest FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"
