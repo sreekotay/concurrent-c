@@ -678,11 +678,12 @@ static void cc__emit_always_defers_for_depth_range(char** out, size_t* out_len, 
     }
 }
 
-int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
+static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                             const char* in_src,
                             size_t in_len,
                             char** out_src,
-                            size_t* out_len) {
+                            size_t* out_len,
+                            int line_marks) {
     if (!ctx || !in_src || !out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -1443,18 +1444,41 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 pending_loop_body_open = (size_t)-1;
             }
             cc__append_n(&out, &outl, &outc, &ch, 1);
-            /* LINE-NEUTRAL: the prologue rides the `{` line.  Inserting it
-             * as its own lines shifted every diagnostic below by +2/+1 in
-             * any function with top-level defers (which @destroy makes
-             * nearly all of them) — the emitted C has no #line resync, so
-             * host-compiler errors drifted off the user's lines. */
-            if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional && !fn_scope.is_void) {
-                cc_sb_append_fmt(&out, &outl, &outc,
-                               " %s __cc_retval_%d; int __cc_ret_set_%d = 0;",
-                               fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
-                changed = 1;
-            } else if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
-                cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0;", fn_scope.cleanup_label_id);
+            /* Prologue on its own lines (human-readable emitted C), with a
+             * masked #line resync so diagnostics below keep exact user
+             * coordinates (unmasked at write time; see visit_codegen.c
+             * cc__unmask_line_directives).  When `line_marks` is off (the
+             * buffer is GENERATED text — closure defs, body relowers —
+             * where newline counts are not user lines), the prologue rides
+             * the `{` line instead: line-neutral beats a wrong anchor. */
+            if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
+                int brace_line = 0;
+                if (line_marks) {
+                    brace_line = 1;
+                    for (size_t b = 0; b < i && b < in_len; b++)
+                        if (in_src[b] == '\n') brace_line++;
+                }
+                if (!fn_scope.is_void) {
+                    if (line_marks) {
+                        cc_sb_append_fmt(&out, &outl, &outc,
+                                       "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %s*/\n",
+                                       fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id,
+                                       brace_line, ctx->input_path ? ctx->input_path : "<cc_input>");
+                    } else {
+                        cc_sb_append_fmt(&out, &outl, &outc,
+                                       " %s __cc_retval_%d; int __cc_ret_set_%d = 0;",
+                                       fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
+                    }
+                } else {
+                    if (line_marks) {
+                        cc_sb_append_fmt(&out, &outl, &outc,
+                                       "\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %s*/\n",
+                                       fn_scope.cleanup_label_id,
+                                       brace_line, ctx->input_path ? ctx->input_path : "<cc_input>");
+                    } else {
+                        cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0;", fn_scope.cleanup_label_id);
+                    }
+                }
                 changed = 1;
             }
             continue;
@@ -1483,6 +1507,25 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
    NOTE: Due to the complexity of defer semantics (scope tracking, multiple injection points),
    this function uses the existing rewrite function and adds a single whole-file edit.
    Returns number of edits added (>= 0), or -1 on error. */
+int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
+                            const char* in_src,
+                            size_t in_len,
+                            char** out_src,
+                            size_t* out_len) {
+    return cc__rewrite_defer_syntax_impl(ctx, in_src, in_len, out_src, out_len, 0);
+}
+
+/* Variant for the MAIN source buffer (1:1 with user lines): the defer
+ * prologue goes on its own lines followed by a masked #line resync, so
+ * emitted C stays human-shaped AND diagnostics stay exact. */
+int cc__rewrite_defer_syntax_marked(const CCVisitorCtx* ctx,
+                                    const char* in_src,
+                                    size_t in_len,
+                                    char** out_src,
+                                    size_t* out_len) {
+    return cc__rewrite_defer_syntax_impl(ctx, in_src, in_len, out_src, out_len, 1);
+}
+
 int cc__collect_defer_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
     if (!ctx || !eb || !eb->src) return 0;
 

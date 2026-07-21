@@ -3420,32 +3420,37 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
              * (the walker was brittle when closures sat inside `if`/`for`
              * blocks because `static` decls are not allowed at block
              * scope per C99 6.7.1). */
-            /* LINE-NEUTRAL: the literal spans N source lines but the make-
-             * call is one line.  Pad the replacement with the missing
-             * newlines so every line below keeps its user coordinate —
-             * the emitted C has no #line resync here, and the collapse
-             * used to shift all following diagnostics up by N-1 lines
-             * (oracle: diag_oracle_closure_fail).  The pad is inside the
-             * call EXPRESSION (before the caller's closing paren), which
-             * C allows. */
+            edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
+            /* The literal spanned N source lines; the make-call is one
+             * line, which would shift every diagnostic below by N-1
+             * (oracle: diag_oracle_closure_fail).  Keep the call on one
+             * clean line and drop a masked #line resync AFTER the
+             * statement's line instead — human-shaped emitted C, exact
+             * coordinates (unmasked at write time).  in_src is 1:1 with
+             * user lines at this stage. */
             {
-                size_t span_nl = 0, call_nl = 0;
+                size_t span_nl = 0;
                 for (size_t b = d->start_off; b < d->end_off; b++)
                     if (in_src[b] == '\n') span_nl++;
-                for (const char* c2 = call; *c2; c2++)
-                    if (*c2 == '\n') call_nl++;
-                if (span_nl > call_nl) {
-                    size_t cl = strlen(call);
-                    size_t padn = span_nl - call_nl;
-                    char* padded = (char*)realloc(call, cl + padn + 1);
-                    if (padded) {
-                        memset(padded + cl, '\n', padn);
-                        padded[cl + padn] = '\0';
-                        call = padded;
+                if (span_nl > 0 && en < (int)(sizeof(edits) / sizeof(edits[0]))) {
+                    size_t nl = d->end_off;
+                    while (nl < in_len && in_src[nl] != '\n') nl++;
+                    int next_line = 1;
+                    for (size_t b = 0; b < nl && b < in_len; b++)
+                        if (in_src[b] == '\n') next_line++;
+                    if (nl < in_len) next_line++; /* marker anchors the line AFTER the stmt */
+                    char mark[1152];
+                    int mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %s*/\n", next_line,
+                                      (ctx && ctx->input_path) ? ctx->input_path : "<cc_input>");
+                    if (mn > 0 && (size_t)mn < sizeof(mark)) {
+                        size_t ins_at = (nl < in_len) ? nl + 1 : in_len;
+                        char* mrepl = strdup(mark);
+                        if (mrepl) {
+                            edits[en++] = (Edit){ .start = ins_at, .end = ins_at, .repl = mrepl };
+                        }
                     }
                 }
             }
-            edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
         } else {
             free(call);
         }

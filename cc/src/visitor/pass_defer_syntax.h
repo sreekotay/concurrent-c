@@ -21,6 +21,15 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                             char** out_src,
                             size_t* out_len);
 
+/* Main-source variant: multi-line prologue + masked #line resync (buffer
+ * must be 1:1 with user lines).  Use the plain variant for GENERATED
+ * buffers (closure defs / body relowers) where a counted anchor would lie. */
+int cc__rewrite_defer_syntax_marked(const CCVisitorCtx* ctx,
+                                    const char* in_src,
+                                    size_t in_len,
+                                    char** out_src,
+                                    size_t* out_len);
+
 /* NEW: Collect @defer edits into EditBuffer without applying.
    Returns number of edits added (>= 0), or -1 on error. */
 int cc__collect_defer_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb);
