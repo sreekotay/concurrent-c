@@ -11,6 +11,9 @@ The supported Concurrent-C Redis variants are:
 
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the single-file idiomatic implementation
+- `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
+  abrupt-disconnect storm); it spawns `out/redis_idiomatic` itself:
+  `python3 redis_smoke.py`
 - `redis_cc/redis_cc.ccs` is the multi-file production port (scaffold)
 - `reply_path_bench.ccs` and `reply_path_threaded_bench.ccs` are explicit reply-path microbench experiments, not server variants
 - `bench_robust.sh` runs an order-randomized, warmup-discarded variant with per-round statistics
