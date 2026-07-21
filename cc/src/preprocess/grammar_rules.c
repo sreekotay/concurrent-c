@@ -3029,9 +3029,33 @@ static int rs_formatable_term(const SS* ss, const RG* g, int ti) {
         return rs_formatable_entries(ss, g, t);
     case SK_NARROW_LIST:
         return 1;
+    case SK_UNION:
+        /* formatable iff every variant's product terms are: the write side
+         * switches on `kind` and each arm is the product writer verbatim */
+        for (int vi = 0; vi < ss->nuv; vi++)
+            for (int j = 0; j < ss->uv[vi].nt; j++)
+                if (!rs_formatable_term(ss, g, ss->uv[vi].t[j])) return 0;
+        return 1;
     default:
         return 0;   /* SK_FIELDS: directive combinators need their own emit rules */
     }
+}
+
+/* first unformatable term inside the union, for the loud per-variant
+ * diagnostic — never a silent skip */
+static int rs_union_unformatable(const SS* ss, const RG* g,
+                                 const char** vname, const char** tdesc) {
+    if (ss->uterm < 0) return 0;
+    for (int vi = 0; vi < ss->nuv; vi++)
+        for (int j = 0; j < ss->uv[vi].nt; j++) {
+            int ti = ss->uv[vi].t[j];
+            if (rs_formatable_term(ss, g, ti)) continue;
+            *vname = ss->uv[vi].name;
+            *tdesc = ss->terms[ti].field[0] ? ss->terms[ti].field
+                   : ss->terms[ti].kind == SK_FIELDS ? "fields [...]" : "<structural>";
+            return 1;
+        }
+    return 0;
 }
 
 static int rs_formatable(const SS* ss, const RG* g) {
@@ -3110,7 +3134,7 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
         RWLeaf lf;
         rw_leaf_shape(g, t->rule, &lf);
         for (int i = 0; i < lf.npre; i++) rw_wacc_lit_node(g, e, w, md, lf.pre[i]);
-        snprintf(pe, sizeof pe, "v->%s", t->field);
+        snprintf(pe, sizeof pe, "v->%s%s", cc__fpfx, t->field);
         rw_emit_wint(e, w, lbl, md, pe, 0);
         for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
         break;
@@ -3122,7 +3146,8 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
         {
             int k = (*lbl)++;
             if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-            eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, t->field));
+            snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+            eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, pe));
         }
         for (int i = 0; i < lf.npost; i++) rw_wacc_lit_node(g, e, w, md, lf.post[i]);
         break;
@@ -3130,8 +3155,8 @@ static void rw_emit_wvalue(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md
     case SK_BIND_SLICE: {
         RWLeaf lf;
         rw_leaf_shape(g, t->rule, &lf);
-        snprintf(pe, sizeof pe, "v->%s.ptr", t->field);
-        snprintf(le, sizeof le, "v->%s.len", t->field);
+        snprintf(pe, sizeof pe, "v->%s%s.ptr", cc__fpfx, t->field);
+        snprintf(le, sizeof le, "v->%s%s.len", cc__fpfx, t->field);
         rw_emit_wleaf(g, e, w, lbl, md, &lf, pe, le);
         break;
     }
@@ -3153,36 +3178,39 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
     case SK_BIND_INT: {
         int dj = rs_derived_from(ss, ti);
         if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
-            snprintf(pe, sizeof pe, "v->%s.len", ss->terms[dj].field);
+            snprintf(pe, sizeof pe, "v->%s%s.len", cc__fpfx, ss->terms[dj].field);
         else if (dj >= 0)
-            snprintf(pe, sizeof pe, "v->%s_n", ss->terms[dj].field);
+            snprintf(pe, sizeof pe, "v->%s%s_n", cc__fpfx, ss->terms[dj].field);
         else
-            snprintf(pe, sizeof pe, "v->%s", t->field);
+            snprintf(pe, sizeof pe, "v->%s%s", cc__fpfx, t->field);
         rw_emit_wint(e, w, lbl, md, pe, dj >= 0);
         break;
     }
     case SK_BIND_FLOAT: {
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, t->field));
+        snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+        eb_emit(e, cc_gr_wfloat_text(e->scratch, k, md, pe));
         break;
     }
     case SK_BIND_SLICE: {
         RWLeaf lf;
         rw_leaf_shape(g, t->rule, &lf);
-        snprintf(pe, sizeof pe, "v->%s.ptr", t->field);
-        snprintf(le, sizeof le, "v->%s.len", t->field);
+        snprintf(pe, sizeof pe, "v->%s%s.ptr", cc__fpfx, t->field);
+        snprintf(le, sizeof le, "v->%s%s.len", cc__fpfx, t->field);
         rw_emit_wleaf(g, e, w, lbl, md, &lf, pe, le);
         break;
     }
     case SK_BIND_BYTES:
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_emit(e, cc_gr_wbytes_text(e->scratch, md, t->field));
+        snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+        eb_emit(e, cc_gr_wbytes_text(e->scratch, md, pe));
         break;
     case SK_BIND_ITEMS: {   /* count-driven */
         int k = (*lbl)++;
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_emit(e, cc_gr_witems_text(e->scratch, k, md, t->field, t->etype));
+        snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+        eb_emit(e, cc_gr_witems_text(e->scratch, k, md, pe, t->etype));
         break;
     }
     case SK_NARROW_MEMBERS: {
@@ -3214,9 +3242,39 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         unsigned char b = (unsigned char)nw->open_b;
         rw_wacc_bytes(e, w, md, &b, 1);
         if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
-        eb_emit(e, cc_gr_wnarrow_list_text(e->scratch, k, md, t->field, t->etype, nw->sep_b));
+        snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+        eb_emit(e, cc_gr_wnarrow_list_text(e->scratch, k, md, pe, t->etype, nw->sep_b));
         b = (unsigned char)nw->close_b;
         rw_wacc_bytes(e, w, md, &b, 1);
+        break;
+    }
+    case SK_UNION: {
+        /* switch on the stored kind; each arm is the product writer over
+         * that variant's terms (fields under the u.<variant>. prefix).
+         * Constant bytes cannot ride the whole-function fold — arms are
+         * exclusive — so each arm settles its own skeleton before `break`.
+         * The DEFAULT-dispatch variant (no leading literal) is an ordinary
+         * case here: its kind is a real enum value. An out-of-range kind
+         * hits the switch default and fails loudly (0, never garbage). */
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        eb_emit(e, cc_gr_wunion_head_text(e->scratch));
+        for (int vi = 0; vi < ss->nuv; vi++) {
+            long cf0 = w->cfix;
+            eb_emit(e, cc_gr_wunion_case_text(e->scratch, cc__sname, ss->uv[vi].name));
+            snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[vi].name);
+            for (int j = 0; j < ss->uv[vi].nt; j++)
+                rw_emit_wterm(ss, g, e, w, lbl, md, ss->uv[vi].t[j]);
+            cc__fpfx[0] = '\0';
+            if (md == RW_MEASURE) {
+                if (w->cfix != cf0)
+                    eb_emit(e, cc_gr_wunion_arm_fix_text(e->scratch, w->cfix - cf0));
+                w->cfix = cf0;
+            } else {
+                rw_wacc_flush_put(e, w, md);
+            }
+            eb_emit(e, cc_gr_wunion_break_text(e->scratch));
+        }
+        eb_emit(e, cc_gr_wunion_default_text(e->scratch));
         break;
     }
     default:
@@ -3972,10 +4030,17 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 (want_tostr || rs_any_method_demand(src, src_len, "write")))
                 want_write = 1;   /* element writers / to_str substrate */
             if ((want_write || want_tostr) && !fmtable) {
-                snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
-                         "but the schema is not formatable yet (directive `fields [...]` has "
-                         "no grammar rule to invert — narrow a rule instead: `G.rule [...]`)",
-                         name, name);
+                const char* vn = NULL;
+                const char* td = NULL;
+                if (rs_union_unformatable(ss, g, &vn, &td))
+                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
+                             "but the schema is not formatable yet (variant '%s': term '%s' "
+                             "has no invertible write form)", name, name, vn, td);
+                else
+                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
+                             "but the schema is not formatable yet (directive `fields [...]` has "
+                             "no grammar rule to invert — narrow a rule instead: `G.rule [...]`)",
+                             name, name);
                 free(out);
                 out = NULL;
                 goto done;
