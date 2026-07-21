@@ -2700,6 +2700,17 @@ int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
                                                      &ir_pp, &ir_pp_len);
         if (ir_rc < 0) { free(cur); return -1; }
         if (ir_rc == 1 && ir_pp) {
+            /* Ledger resync for a non-line-neutral preprocess (no-op when
+             * neutral; see the fixed-point loops below). */
+            size_t sl = 0;
+            char* stamped = cc_ledger_stamp_rewrite(
+                cur, curlen, ir_pp, ir_pp_len,
+                ctx && ctx->input_path ? ctx->input_path : "<cc_input>", &sl);
+            if (stamped) {
+                free(ir_pp);
+                ir_pp = stamped;
+                ir_pp_len = sl;
+            }
             free(cur);
             cur    = ir_pp;
             curlen = ir_pp_len;
@@ -2708,6 +2719,7 @@ int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
     }
 
     if (need_rewrite) {
+        const char* stamp_path = ctx && ctx->input_path ? ctx->input_path : "<cc_input>";
         /* Process `?>` expression operators to fixed point. */
         for (int iter = 0; iter < 64; iter++) {
             char* next = NULL;
@@ -2718,6 +2730,20 @@ int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
                 return -1;
             }
             if (r == 0) break;
+            /* Ledger resync: a multi-line lowering (handler bodies keep the
+             * user's newlines) shifts every user coordinate stamped below
+             * it by later passes (defer prologues, closure #line anchors,
+             * async machine markers).  cc_ledger_stamp_rewrite is a no-op
+             * for line-neutral rewrites. */
+            {
+                size_t sl = 0;
+                char* stamped = cc_ledger_stamp_rewrite(cur, curlen, next, nl, stamp_path, &sl);
+                if (stamped) {
+                    free(next);
+                    next = stamped;
+                    nl = sl;
+                }
+            }
             free(cur);
             cur = next;
             curlen = nl;
@@ -2738,6 +2764,16 @@ int cc__rewrite_result_unwrap_with_options(const CCVisitorCtx* ctx,
                 return -1;
             }
             if (r == 0) break;
+            /* Ledger resync (see the `?>` loop above). */
+            {
+                size_t sl = 0;
+                char* stamped = cc_ledger_stamp_rewrite(cur, curlen, next, nl, stamp_path, &sl);
+                if (stamped) {
+                    free(next);
+                    next = stamped;
+                    nl = sl;
+                }
+            }
             free(cur);
             cur = next;
             curlen = nl;

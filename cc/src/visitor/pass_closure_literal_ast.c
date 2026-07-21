@@ -3125,10 +3125,18 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         const char* mkfn = (d->param_count == 0 ? "cc_closure0_make" : (d->param_count == 1 ? "cc_closure1_make" : "cc_closure2_make"));
 
         if (ctx && ctx->input_path && d->start_line > 0) {
-            char rel[1024];
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %d \"%s\"\n",
-                           d->start_line,
-                           cc_path_rel_to_repo(ctx->input_path, rel, sizeof(rel)));
+            /* The env/drop/make scaffolding below is GENERATED code — do
+             * not map its ~35 lines onto the user file (a literal near EOF
+             * would then map past EOF as the mapping drifts line by line).
+             * Attribute it to the "<cc-closures>" pseudo-file at a
+             * defs-relative physical line; the copied user BODY gets its
+             * own ledger-aware `#line <user> "<input>"` anchor right
+             * before the entry body (see below). */
+            size_t defs_line = 1;
+            for (size_t b = 0; b < defs_len; b++)
+                if (defs[b] == '\n') defs_line++;
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %zu \"<cc-closures>\"\n",
+                           defs_line + 1);
         }
         cc__append_fmt(&defs, &defs_len, &defs_cap,
                        "/* CC closure %d */\n", d->id);
@@ -3320,11 +3328,13 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
 
         char* lowered_body = cc__lower_nested_closures_in_body(k, descs, idx_n);
         if (!lowered_body) lowered_body = strdup(d->body_text);
-        /* Map diagnostics within the closure body back to the original source location. */
+        /* Map diagnostics within the closure body back to the original source
+         * location (ledger-aware user line; see above). */
         {
             char rel[1024];
+            int user_line = cc_user_line_for_offset(in_src, in_len, d->start_off, 1, NULL, NULL);
             cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %d \"%s\"\n",
-                           d->start_line,
+                           user_line,
                            cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)));
         }
         if (lowered_body && lowered_body[0] == '{') {
@@ -3435,9 +3445,10 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 if (span_nl > 0 && en < (int)(sizeof(edits) / sizeof(edits[0]))) {
                     size_t nl = d->end_off;
                     while (nl < in_len && in_src[nl] != '\n') nl++;
-                    int next_line = 1;
-                    for (size_t b = 0; b < nl && b < in_len; b++)
-                        if (in_src[b] == '\n') next_line++;
+                    /* Ledger-aware USER line of the line AFTER the stmt
+                     * (raw newline counts run high below upstream
+                     * expansions like @grammar; honor #line/CC_LN). */
+                    int next_line = cc_user_line_for_offset(in_src, in_len, nl, 1, NULL, NULL);
                     if (nl < in_len) next_line++; /* marker anchors the line AFTER the stmt */
                     char mark[1152];
                     int mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %s*/\n", next_line,

@@ -1,0 +1,10 @@
+# Oracle: coordinates INSIDE an @async state-machine body.  The machine is
+# ~20x the source function's line count and used to carry NO #line
+# accounting, so a diagnostic on this statement was reported at
+# last-directive-above + physical-drift (redis observed file:1964 for a
+# 1717-line file).  The emitter now drops a masked per-statement #line
+# marker (async_ast.c cc__emit_src_line_marker, unmasked at write time),
+# so the host compiler must cite the statement's own source line.
+# Pin file:line; column is emitted-C-dependent, symbol pins the statement.
+diag_oracle_async_body_fail.ccs:8:
+cc_diag_oracle_undeclared_in_async

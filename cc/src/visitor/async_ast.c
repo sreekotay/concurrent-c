@@ -399,7 +399,25 @@ struct Stmt {
     int then_n;
     Stmt* else_st;
     int else_n;
+    int line;       /* 1-based ORIGINAL-source line of the stmt's first token
+                       (0 = unknown).  Valid because every pass upstream of
+                       the async rewrite is line-neutral, so a physical
+                       newline count of the current buffer IS the user line
+                       (same invariant the post-expansion resync relies on;
+                       see the resume_line comment near the fn replacement). */
 };
+
+/* USER line (1-based) of byte offset `off` in `src`: base_line names the
+ * line src[0] sits on (1 for whole-TU buffers); 0 = unknown provenance, in
+ * which case 0 is returned and no marker is ever emitted for the stmt.
+ * Ledger-aware: honors raw `#line` directives and masked CC_LN markers
+ * inside [0, off) — a raw newline count is NOT the user line once an
+ * upstream expansion (e.g. @grammar) inflated the buffer.  See
+ * cc_user_line_for_offset in util/text.h. */
+static int cc__line_at_off(const char* src, size_t off, int base_line) {
+    if (!src || base_line <= 0) return 0;
+    return cc_user_line_for_offset(src, off, off, base_line, NULL, NULL);
+}
 
 static void cc__free_stmt_list(Stmt* st, int n) {
     if (!st) return;
@@ -801,7 +819,7 @@ static int cc__build_simple_stmt_from_text(const char* s, size_t ss, size_t se, 
 }
 
 static int cc__parse_stmt_list_from_text_range(const char* src, size_t len, size_t ss, size_t se,
-                                               Stmt** out_list, int* out_n);
+                                               Stmt** out_list, int* out_n, int base_line);
 
 static int cc__match_kw_at(const char* s, size_t i, size_t end, const char* kw) {
     size_t kl = strlen(kw);
@@ -833,10 +851,10 @@ static size_t cc__scan_simple_stmt_end(const char* src, size_t i, size_t end) {
 }
 
 static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, size_t se,
-                                        Stmt* out, size_t* out_end);
+                                        Stmt* out, size_t* out_end, int base_line);
 
 /* Best-effort parse of `if (...) <stmt> [else <stmt>]` / `else if (...) ...` chains from a source slice. */
-static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end) {
+static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end, int base_line) {
     if (!src || !out || se <= ss) return 0;
     memset(out, 0, sizeof(*out));
     out->kind = ST_IF;
@@ -847,6 +865,7 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
         i++;
     }
     if (i + 1 >= se) return 0;
+    out->line = cc__line_at_off(src, i, base_line);
     /* find '(' */
     while (i < se && src[i] != '(') i++;
     if (i >= se) return 0;
@@ -861,13 +880,13 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
     if (i < se && src[i] == '{') {
         size_t rb = 0;
         if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
-        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n);
+        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n, base_line);
         i = rb + 1;
     } else {
         out->then_st = (Stmt*)calloc(1, sizeof(Stmt));
         out->then_n = 1;
         size_t end0 = se;
-        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0);
+        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0, base_line);
         i = end0;
     }
 
@@ -881,18 +900,18 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
             out->else_st = (Stmt*)calloc(1, sizeof(Stmt));
             out->else_n = 1;
             size_t end_if = se;
-            (void)cc__parse_if_chain_from_text(src, len, i, se, &out->else_st[0], &end_if);
+            (void)cc__parse_if_chain_from_text(src, len, i, se, &out->else_st[0], &end_if, base_line);
             i = end_if;
         } else if (i < se && src[i] == '{') {
             size_t rb = 0;
             if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
-            (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->else_st, &out->else_n);
+            (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->else_st, &out->else_n, base_line);
             i = rb + 1;
         } else {
             out->else_st = (Stmt*)calloc(1, sizeof(Stmt));
             out->else_n = 1;
             size_t end0 = se;
-            (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->else_st[0], &end0);
+            (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->else_st[0], &end0, base_line);
             i = end0;
         }
     }
@@ -901,20 +920,21 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
 }
 
 static int cc__build_stmt_list_from_text_body(const char* src, size_t len, size_t lbrace, size_t rbrace,
-                                              Stmt** out_list, int* out_n) {
+                                              Stmt** out_list, int* out_n, int base_line) {
     if (!src || !out_list || !out_n) return 0;
     *out_list = NULL;
     *out_n = 0;
     if (!(rbrace > lbrace + 1 && rbrace <= len)) return 0;
-    return cc__parse_stmt_list_from_text_range(src, len, lbrace + 1, rbrace, out_list, out_n);
+    return cc__parse_stmt_list_from_text_range(src, len, lbrace + 1, rbrace, out_list, out_n, base_line);
 }
 
-static int cc__parse_while_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end) {
+static int cc__parse_while_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end, int base_line) {
     if (!src || !out || se <= ss) return 0;
     memset(out, 0, sizeof(*out));
     out->kind = ST_WHILE;
     size_t i = ss;
     if (!cc__match_kw_at(src, i, se, "while")) return 0;
+    out->line = cc__line_at_off(src, i, base_line);
     while (i < se && src[i] != '(') i++;
     if (i >= se) return 0;
     size_t lpo = i, rpo = 0;
@@ -925,25 +945,26 @@ static int cc__parse_while_from_text(const char* src, size_t len, size_t ss, siz
     if (i < se && src[i] == '{') {
         size_t rb = 0;
         if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
-        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n);
+        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n, base_line);
         i = rb + 1;
     } else {
         out->then_st = (Stmt*)calloc(1, sizeof(Stmt));
         out->then_n = 1;
         size_t end0 = se;
-        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0);
+        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0, base_line);
         i = end0;
     }
     if (out_end) *out_end = i;
     return 1;
 }
 
-static int cc__parse_for_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end) {
+static int cc__parse_for_from_text(const char* src, size_t len, size_t ss, size_t se, Stmt* out, size_t* out_end, int base_line) {
     if (!src || !out || se <= ss) return 0;
     memset(out, 0, sizeof(*out));
     out->kind = ST_FOR;
     size_t i = ss;
     if (!cc__match_kw_at(src, i, se, "for")) return 0;
+    out->line = cc__line_at_off(src, i, base_line);
     while (i < se && src[i] != '(') i++;
     if (i >= se) return 0;
     size_t lpo = i, rpo = 0;
@@ -969,13 +990,13 @@ static int cc__parse_for_from_text(const char* src, size_t len, size_t ss, size_
     if (i < se && src[i] == '{') {
         size_t rb = 0;
         if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
-        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n);
+        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n, base_line);
         i = rb + 1;
     } else {
         out->then_st = (Stmt*)calloc(1, sizeof(Stmt));
         out->then_n = 1;
         size_t end0 = se;
-        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0);
+        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0, base_line);
         i = end0;
     }
     if (out_end) *out_end = i;
@@ -983,10 +1004,11 @@ static int cc__parse_for_from_text(const char* src, size_t len, size_t ss, size_
 }
 
 static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, size_t se,
-                                        Stmt* out, size_t* out_end) {
+                                        Stmt* out, size_t* out_end, int base_line) {
     if (!out || !src) return 0;
     size_t i = cc__skip_ws_and_comments_bounded(src, len, ss, se);
     if (i >= se) { memset(out, 0, sizeof(*out)); out->kind = ST_SEMI; out->text = strdup(""); if (out_end) *out_end = se; return 1; }
+    int stmt_line = cc__line_at_off(src, i, base_line);
     /* CC extension block-like statements with braces but no trailing ';'.
        We treat these as a single semi-like statement so later lowering passes
        can handle them, but we still need correct statement boundary at the
@@ -1007,6 +1029,7 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
                 if (!cc__find_matching_brace(src, len, k, &rb)) return 0;
                 memset(out, 0, sizeof(*out));
                 out->kind = ST_SEMI;
+                out->line = stmt_line;
                 out->text = cc__dup_slice(src, i, rb + 1);
                 if (!out->text) out->text = strdup("");
                 cc__trim_trailing_semicolon(out->text);
@@ -1020,31 +1043,33 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
         if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
         memset(out, 0, sizeof(*out));
         out->kind = ST_BLOCK;
-        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n);
+        out->line = stmt_line;
+        (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n, base_line);
         if (out_end) *out_end = rb + 1;
         return 1;
     }
     if (cc__match_kw_at(src, i, se, "if")) {
         size_t end_if = se;
-        int ok = cc__parse_if_chain_from_text(src, len, i, se, out, &end_if);
+        int ok = cc__parse_if_chain_from_text(src, len, i, se, out, &end_if, base_line);
         if (out_end) *out_end = end_if;
         return ok;
     }
     if (cc__match_kw_at(src, i, se, "while")) {
         size_t end_w = se;
-        int ok = cc__parse_while_from_text(src, len, i, se, out, &end_w);
+        int ok = cc__parse_while_from_text(src, len, i, se, out, &end_w, base_line);
         if (out_end) *out_end = end_w;
         return ok;
     }
     if (cc__match_kw_at(src, i, se, "for")) {
         size_t end_f = se;
-        int ok = cc__parse_for_from_text(src, len, i, se, out, &end_f);
+        int ok = cc__parse_for_from_text(src, len, i, se, out, &end_f, base_line);
         if (out_end) *out_end = end_f;
         return ok;
     }
     if (cc__match_kw_at(src, i, se, "break")) {
         memset(out, 0, sizeof(*out));
         out->kind = ST_BREAK;
+        out->line = stmt_line;
         size_t e0 = cc__scan_simple_stmt_end(src, i, se);
         if (out_end) *out_end = (e0 < se && src[e0] == ';') ? (e0 + 1) : e0;
         return 1;
@@ -1052,18 +1077,20 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
     if (cc__match_kw_at(src, i, se, "continue")) {
         memset(out, 0, sizeof(*out));
         out->kind = ST_CONTINUE;
+        out->line = stmt_line;
         size_t e0 = cc__scan_simple_stmt_end(src, i, se);
         if (out_end) *out_end = (e0 < se && src[e0] == ';') ? (e0 + 1) : e0;
         return 1;
     }
     size_t e0 = cc__scan_simple_stmt_end(src, i, se);
     (void)cc__build_simple_stmt_from_text(src, i, e0, out);
+    out->line = stmt_line;
     if (out_end) *out_end = (e0 < se && src[e0] == ';') ? (e0 + 1) : e0;
     return 1;
 }
 
 static int cc__parse_stmt_list_from_text_range(const char* src, size_t len, size_t ss, size_t se,
-                                               Stmt** out_list, int* out_n) {
+                                               Stmt** out_list, int* out_n, int base_line) {
     if (!src || !out_list || !out_n) return 0;
     *out_list = NULL;
     *out_n = 0;
@@ -1082,7 +1109,7 @@ static int cc__parse_stmt_list_from_text_range(const char* src, size_t len, size
             memset(&st[n], 0, (size_t)(cap - n) * sizeof(Stmt));
         }
         size_t end0 = se;
-        if (!cc__parse_one_stmt_from_text(src, len, i, se, &st[n], &end0)) { cc__free_stmt_list(st, n); free(st); return 0; }
+        if (!cc__parse_one_stmt_from_text(src, len, i, se, &st[n], &end0, base_line)) { cc__free_stmt_list(st, n); free(st); return 0; }
         n++;
         if (end0 <= i) break;
         i = end0;
@@ -1311,6 +1338,10 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
     char* full = cc__dup_slice(src, ss, se);
     if (!full) full = strdup("");
     const char* kw = n[stmt_idx].aux_s1;
+    /* Buffer-physical line of the stmt (== user line; upstream passes are
+     * line-neutral).  Recorder line_start can be re-pinned to a use-site
+     * after text rewrites, so derive from the resolved offset instead. */
+    out->line = cc__line_at_off(src, ss, 1);
 
     /* Bare compound statement `{ ... }` (recorded as a STMT with a BLOCK child) */
     if (!kw || kw[0] == 0) {
@@ -1411,7 +1442,8 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
             Stmt tmp;
             memset(&tmp, 0, sizeof(tmp));
             size_t end_if = strlen(full);
-            (void)cc__parse_if_chain_from_text(full, strlen(full), 0, strlen(full), &tmp, &end_if);
+            (void)cc__parse_if_chain_from_text(full, strlen(full), 0, strlen(full), &tmp, &end_if,
+                                               cc__line_at_off(src, ss, 1));
             /* move tmp into out */
             *out = tmp;
         }
@@ -1632,7 +1664,8 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         if (lb < bl && cc__find_matching_brace(full, bl, lb, &rb) && rb > lb) {
             Stmt* st = NULL;
             int sn = 0;
-            if (!cc__parse_stmt_list_from_text_range(full, bl, lb + 1, rb, &st, &sn)) { free(full); return 0; }
+            if (!cc__parse_stmt_list_from_text_range(full, bl, lb + 1, rb, &st, &sn,
+                                                     cc__line_at_off(src, ss, 1))) { free(full); return 0; }
             free(full);
             *out_list = st;
             *out_n = sn;
@@ -1650,6 +1683,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         }
     }
 
+    if (ref_n <= 0) return 0; /* also keeps the calloc size provably non-negative */
     Stmt* st = (Stmt*)calloc((size_t)ref_n, sizeof(Stmt));
     if (!st) return 0;
     for (int i = 0; i < ref_n; i++) {
@@ -1663,6 +1697,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
             /* DECL_ITEM pseudo stmt: slice its line-range and truncate at ';' */
             memset(&st[i], 0, sizeof(st[i]));
             st[i].kind = ST_SEMI;
+            st[i].line = n[refs[i].idx].line_start > 0 ? n[refs[i].idx].line_start : 0;
             int ls = n[refs[i].idx].line_start > 0 ? n[refs[i].idx].line_start : 1;
             int le = n[refs[i].idx].line_end > 0 ? n[refs[i].idx].line_end : ls;
             size_t ss = cc__offset_of_line_1based(src, src_len, ls);
@@ -1703,6 +1738,8 @@ typedef struct {
     int break_state[64];
     int cont_state[64];
     int indent; /* spaces for statement indentation inside switch/case */
+    const char* src_path; /* original source path for masked #line markers (NULL = no markers) */
+    int cur_line;         /* line of the source stmt currently being lowered (0 = unknown) */
 } Emit;
 
 static const char* cc__emit_lookup_local_type(const Emit* e, const char* name) {
@@ -1774,6 +1811,20 @@ static void cc__emit_line_fmt(Emit* e, const char* fmt, ...) {
     tmp[sizeof(tmp) - 1] = 0;
     cc__sb_append_cstr(e->out, e->out_len, e->out_cap, tmp);
     cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "\n");
+}
+
+/* Masked #line marker: maps the NEXT emitted physical line to the source
+ * stmt currently being lowered (e->cur_line).  Emitted in the MASKED
+ * same-line-comment form so mid-pipeline passes (reparse/UFCS, which need
+ * logical == physical line addressing) never see a real directive; the
+ * final write unmasks it into `#line N "path"` (cc__unmask_line_directives
+ * in visit_codegen.c).  Statement-granular: generated glue between markers
+ * intentionally inherits the preceding stmt's mapping. */
+static void cc__emit_src_line_marker(Emit* e) {
+    if (!e || !e->out || e->cur_line <= 0 || !e->src_path || !e->src_path[0]) return;
+    cc__emit_indent(e);
+    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "/*CC_LN %d %s*/\n",
+                      e->cur_line, e->src_path);
 }
 
 static int cc__alloc_state(Emit* e) {
@@ -1849,6 +1900,8 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
     cc__emit_line(e, "continue;");
     cc__emit_close_case(e);
     cc__emit_open_case(e, cont_state);
+    /* Continuation code still belongs to the awaiting statement's line. */
+    cc__emit_src_line_marker(e);
     return 1;
 }
 
@@ -2050,7 +2103,9 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
             const char* tail = cc__skip_ws(p + rbrace + 1);
             Stmt* inner = NULL;
             int inner_n = 0;
-            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n)) {
+            /* p[0] sits on the enclosing stmt's line, so cur_line anchors
+             * the slice-relative newline counts back to user lines. */
+            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n, e->cur_line)) {
                 int ok = cc__emit_stmt_list(e, inner, inner_n);
                 cc__free_stmt_list(inner, inner_n);
                 if (!ok) return 0;
@@ -2166,7 +2221,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
             const char* tail = cc__skip_ws(p + rbrace + 1);
             Stmt* inner = NULL;
             int inner_n = 0;
-            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n)) {
+            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n, e->cur_line)) {
                 int ok = cc__emit_stmt_list(e, inner, inner_n);
                 cc__free_stmt_list(inner, inner_n);
                 if (!ok) { if (alloc_p) free(alloc_p); return 0; }
@@ -2662,10 +2717,15 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
     if (!e || !st) return 1;
     for (int i = 0; i < n && e->finished && !*e->finished; i++) {
         const Stmt* s = &st[i];
+        /* One masked #line marker per source statement: host-compiler
+         * diagnostics and debugger lines inside the state machine map back
+         * to the statement's original line. */
+        if (s->line > 0) e->cur_line = s->line;
         if (s->kind == ST_BLOCK) {
             (void)cc__emit_stmt_list(e, s->then_st, s->then_n);
             continue;
         }
+        cc__emit_src_line_marker(e);
         if (s->kind == ST_SEMI || s->kind == ST_RETURN) {
             if (!cc__emit_semi_like(e, s->text ? s->text : "")) return 0;
             continue;
@@ -3139,7 +3199,10 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         int st_n = 0;
         int built = 0;
         if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
-            built = cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n);
+            /* base_line 1: offsets are absolute in `cur`, whose physical
+             * lines are user lines (all passes upstream of the async
+             * rewrite are line-neutral; see the resume_line comment). */
+            built = cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n, 1);
             if (!built) {
                 fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
                 free(cur);
@@ -3599,7 +3662,30 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         char* repl = NULL;
         size_t repl_len = 0, repl_cap = 0;
 
+        /* User line of the fn's first replaced byte — anchors generated
+         * glue (frame struct, poll/drop/ctor headers) at the function
+         * itself instead of whatever #line last governed above.
+         * Ledger-aware (see cc_user_line_for_offset): honors upstream
+         * #line/CC_LN entries, so @grammar-style inflation above the fn
+         * does not shift the anchor.  The governing ledger path (if any)
+         * wins over ctx->input_path — the fn might live in lowered header
+         * text. */
+        int fn_line;
+        char marker_path_buf[1100];
+        const char* marker_path = ctx->input_path ? ctx->input_path : "<cc_input>";
+        {
+            const char* lp = NULL;
+            size_t lpl = 0;
+            fn_line = cc_user_line_for_offset(in_src, in_len, fn->start, 1, &lp, &lpl);
+            if (lp && lpl > 0 && lpl < sizeof(marker_path_buf)) {
+                memcpy(marker_path_buf, lp, lpl);
+                marker_path_buf[lpl] = 0;
+                marker_path = marker_path_buf;
+            }
+        }
+
         /* Frame struct (formatted) */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n", fn_line, marker_path);
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "typedef struct %s {\n", frame_ty);
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  int __st;\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  intptr_t __r;\n");
@@ -3641,6 +3727,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "} %s;\n\n", frame_ty);
 
         /* Poll function (formatted) */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n", fn_line, marker_path);
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
                           "static CCFutureStatus %s(void* __p, intptr_t* __o, int* __e) {\n",
                           poll_fn);
@@ -3672,6 +3759,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             .finished = &finished,
             .loop_depth = 0,
             .indent = 0,
+            .src_path = marker_path,
+            .cur_line = fn_line,
         };
         /* Open initial case 1 using the same helper as all other cases (keeps braces balanced). */
         (void)cc__emit_open_case(&em, 1);
@@ -3683,6 +3772,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             cc__emit_line(&em, "continue;");
             cc__emit_close_case(&em);
         }
+        /* Re-anchor the tail glue at the fn's own line so the mapping never
+         * drifts past the source region the machine came from. */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n", fn_line, marker_path);
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    case 999: {\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      if (__o) *__o = __f->__r;\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      return CC_FUTURE_READY;\n");
@@ -3694,6 +3786,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n\n");
 
         /* Drop function (formatted) */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n", fn_line, marker_path);
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "static void %s(void* __p) {\n", drop_fn);
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)__p;\n", frame_ty, frame_ty);
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  if (!__f) return;\n");
@@ -3704,6 +3797,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n\n");
 
         /* Emit function signature as `CCTaskIntptr name(<params>)` */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n", fn_line, marker_path);
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "CCTaskIntptr %s(%s) {\n", fn->name,
                           (params_text && strlen(params_text) > 0) ? params_text : "void");
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)calloc(1, sizeof(%s));\n", frame_ty, frame_ty, frame_ty);
@@ -3728,23 +3822,27 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
          * diag_oracle_async_fail, observed +112).  The marker is inert for
          * all later passes and becomes a real `#line` at write time
          * (cc__unmask_line_directives in visit_codegen.c).  fn->end is an
-         * offset into the ORIGINAL buffer (reverse iteration), so the user
-         * line is a straight newline count. */
+         * offset into the ORIGINAL buffer (reverse iteration).  The user
+         * line is LEDGER-AWARE (cc_user_line_for_offset): a raw newline
+         * count runs high once an upstream expansion inflated the buffer
+         * (@grammar in redis_idiomatic.ccs: +266 lines), which used to map
+         * everything below an @async fn past EOF.  The recorder's line_end
+         * is NOT usable here: it was observed against a reparse of this
+         * same buffer, so any upstream accounting bug would poison it
+         * identically — the ledger walk at least fails in only one place,
+         * and the diag oracle corpus pins the composed result. */
         {
-            /* Buffer newline count == user line: every pass upstream of the
-             * async rewrite is line-neutral (await_normalize rides the
-             * statement's line; closure collapse pads; defer prologue rides
-             * the brace line).  The recorder's line_end is NOT usable here:
-             * it was observed against a reparse of this same buffer, so any
-             * upstream neutrality bug would poison it identically — the
-             * count at least fails in only one place, and the diag oracle
-             * corpus pins the composed result. */
-            int resume_line = 1;
-            for (size_t b = 0; b < fn->end && b < in_len; b++)
-                if (in_src[b] == '\n') resume_line++;
-            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n",
-                              resume_line,
-                              ctx->input_path ? ctx->input_path : "<cc_input>");
+            const char* rp = ctx->input_path ? ctx->input_path : "<cc_input>";
+            const char* lp = NULL;
+            size_t lpl = 0;
+            int resume_line = cc_user_line_for_offset(in_src, in_len, fn->end, 1, &lp, &lpl);
+            if (lp && lpl > 0) {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %.*s*/\n",
+                                  resume_line, (int)lpl, lp);
+            } else {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n",
+                                  resume_line, rp);
+            }
         }
 
         /* Replace original span */

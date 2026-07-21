@@ -32,6 +32,7 @@ typedef struct {
     int is_async;
     int is_void;
     int has_result_return;
+    int open_line; /* ledger user line of the fn's `{` (0 = unknown) */
     char return_type[256];
     char ok_ctor[320];
     char err_ctor[320];
@@ -1303,6 +1304,15 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                  * human would write). */
                 size_t fn_body_indent = cc__source_line_indent_len(in_src, i);
                 if (fn_body_indent == 0) fn_body_indent = 4; /* belt + suspenders for funcs at col 0 */
+                /* The epilogue is generated glue: anchor it at the fn's
+                 * OPENING line so a function ending near EOF cannot map
+                 * its cleanup lines past the source (the `}` is re-anchored
+                 * to its own line after the epilogue below). */
+                if (line_marks && fn_scope.open_line > 0) {
+                    cc_sb_append_fmt(&out, &outl, &outc, "/*CC_LN %d %s*/\n",
+                                     fn_scope.open_line,
+                                     ctx->input_path ? ctx->input_path : "<cc_input>");
+                }
                 cc_sb_append_fmt(&out, &outl, &outc, "__cc_cleanup_%d:\n", fn_scope.cleanup_label_id);
                 for (int k = defer_counts[1] - 1; k >= 0; k--) {
                     if (defers[1][k].cond == DEFER_ALWAYS) {
@@ -1326,6 +1336,23 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                     cc_sb_append_fmt(&out, &outl, &outc,
                                    "return (__typeof__(__cc_retval_%d)){0};\n",
                                    fn_scope.cleanup_label_id);
+                }
+                /* Masked ledger resync: the epilogue added lines with no
+                 * #line accounting, so everything below the function's `}`
+                 * (including EOF-adjacent functions) would map past the
+                 * source region — anchor the `}` back to its own user
+                 * line.  Same ledger-aware accounting as the prologue. */
+                if (line_marks) {
+                    const char* lp = NULL;
+                    size_t lpl = 0;
+                    int rb_line = cc_user_line_for_offset(in_src, in_len, i, 1, &lp, &lpl);
+                    if (lp && lpl > 0) {
+                        cc_sb_append_fmt(&out, &outl, &outc, "/*CC_LN %d %.*s*/\n",
+                                         rb_line, (int)lpl, lp);
+                    } else {
+                        cc_sb_append_fmt(&out, &outl, &outc, "/*CC_LN %d %s*/\n",
+                                         rb_line, ctx->input_path ? ctx->input_path : "<cc_input>");
+                    }
                 }
                 fn_scope.active = 0;
             } else if (defer_counts[d] > 0) {
@@ -1453,17 +1480,29 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
              * the `{` line instead: line-neutral beats a wrong anchor. */
             if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
                 int brace_line = 0;
+                const char* mark_path = ctx->input_path ? ctx->input_path : "<cc_input>";
+                int mark_path_len = (int)strlen(mark_path);
                 if (line_marks) {
-                    brace_line = 1;
-                    for (size_t b = 0; b < i && b < in_len; b++)
-                        if (in_src[b] == '\n') brace_line++;
+                    /* Ledger-aware user line of the `{` (NOT a raw newline
+                     * count — upstream expansions like @grammar inflate the
+                     * buffer, and their #line/CC_LN entries must be honored
+                     * or this marker stamps a buffer-space line that can
+                     * even point past the source's EOF). */
+                    const char* lp = NULL;
+                    size_t lpl = 0;
+                    brace_line = cc_user_line_for_offset(in_src, in_len, i, 1, &lp, &lpl);
+                    if (lp && lpl > 0) {
+                        mark_path = lp;
+                        mark_path_len = (int)lpl;
+                    }
+                    fn_scope.open_line = brace_line;
                 }
                 if (!fn_scope.is_void) {
                     if (line_marks) {
                         cc_sb_append_fmt(&out, &outl, &outc,
-                                       "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %s*/\n",
+                                       "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %.*s*/\n",
                                        fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id,
-                                       brace_line, ctx->input_path ? ctx->input_path : "<cc_input>");
+                                       brace_line, mark_path_len, mark_path);
                     } else {
                         cc_sb_append_fmt(&out, &outl, &outc,
                                        " %s __cc_retval_%d; int __cc_ret_set_%d = 0;",
@@ -1472,9 +1511,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 } else {
                     if (line_marks) {
                         cc_sb_append_fmt(&out, &outl, &outc,
-                                       "\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %s*/\n",
+                                       "\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %.*s*/\n",
                                        fn_scope.cleanup_label_id,
-                                       brace_line, ctx->input_path ? ctx->input_path : "<cc_input>");
+                                       brace_line, mark_path_len, mark_path);
                     } else {
                         cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0;", fn_scope.cleanup_label_id);
                     }
