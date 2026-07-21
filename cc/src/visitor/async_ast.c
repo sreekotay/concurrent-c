@@ -2941,6 +2941,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         size_t end;
         size_t lbrace;
         size_t rbrace;
+        int end_line;   /* recorder logical (USER) line of the fn's end —
+                           buffer newline counts are NOT user lines once
+                           earlier passes (await_normalize) inserted text */
         char name[128];
         int ret_is_void;
     } AF;
@@ -3061,6 +3064,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         fn.end = e;
         fn.lbrace = lbrace;
         fn.rbrace = rbrace;
+        fn.end_line = (n[i].line_end > 0) ? n[i].line_end
+                                          : (n[i].line_start > 0 ? n[i].line_start : 0);
         strncpy(fn.name, fn_name, sizeof(fn.name) - 1);
         fn.ret_is_void = cc__find_func_ret_is_void(root, ctx, fn_name, n[i].file);
         if (!fn.ret_is_void && n[i].aux_s2 && strstr(n[i].aux_s2, "void") == n[i].aux_s2)
@@ -3691,6 +3696,31 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                           "  return cc_task_intptr_make_poll_ex(%s, NULL, __f, %s);\n",
                           poll_fn, drop_fn);
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n");
+
+        /* Masked #line resync after the expansion: the machine is ~20x the
+         * source function's line count and there is no other accounting, so
+         * every diagnostic below an @async fn drifted by the delta (oracle:
+         * diag_oracle_async_fail, observed +112).  The marker is inert for
+         * all later passes and becomes a real `#line` at write time
+         * (cc__unmask_line_directives in visit_codegen.c).  fn->end is an
+         * offset into the ORIGINAL buffer (reverse iteration), so the user
+         * line is a straight newline count. */
+        {
+            /* Buffer newline count == user line: every pass upstream of the
+             * async rewrite is line-neutral (await_normalize rides the
+             * statement's line; closure collapse pads; defer prologue rides
+             * the brace line).  The recorder's line_end is NOT usable here:
+             * it was observed against a reparse of this same buffer, so any
+             * upstream neutrality bug would poison it identically — the
+             * count at least fails in only one place, and the diag oracle
+             * corpus pins the composed result. */
+            int resume_line = 1;
+            for (size_t b = 0; b < fn->end && b < in_len; b++)
+                if (in_src[b] == '\n') resume_line++;
+            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "/*CC_LN %d %s*/\n",
+                              resume_line,
+                              ctx->input_path ? ctx->input_path : "<cc_input>");
+        }
 
         /* Replace original span */
         size_t rs = fn->start;

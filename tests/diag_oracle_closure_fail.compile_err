@@ -1,0 +1,5 @@
+# Oracle: closure lift must not shift lines below the literal (the call-site
+# collapse is padded line-neutral), and an error INSIDE a hoisted closure
+# body must map to the USER file:line, not a synthetic <cc-closures> file.
+diag_oracle_closure_fail.ccs:13:17: error: implicit declaration of function 'cc_diag_oracle_undeclared_two'
+diag_oracle_closure_fail.ccs:10:21: error: implicit declaration of function 'cc_diag_oracle_undeclared'

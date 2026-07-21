@@ -325,10 +325,12 @@ static void cc__report_reparse_failure(const char* stage,
     int transformed_lines = cc__count_lines_codegen(transformed_src, transformed_len);
     int prepared_lines = cc__count_lines_codegen(prepared_src, prepared_len);
     char* dump_path = cc__write_failed_reparse_dump(stage, transformed_src, transformed_len, input_path);
-    fprintf(stderr, "cc: internal reparse failed during %s for %s\n",
+    fprintf(stderr, "cc: internal error: the compiler's intermediate form failed to re-parse during %s for %s\n",
             (stage && stage[0]) ? stage : "unknown stage",
             shown ? shown : "<input>");
-    fprintf(stderr, "cc: parser diagnostics above refer to transformed compiler output, not raw user source\n");
+    fprintf(stderr, "cc: this is a compiler bug — source that reaches this stage has already parsed once; please report it\n");
+    fprintf(stderr, "cc: the parser diagnostic above maps to user coordinates via #line where possible, but the\n");
+    fprintf(stderr, "cc: failing construct may be compiler-GENERATED text near that line rather than your code\n");
     if (stage && strcmp(stage, "final-UFCS input") == 0 && transformed_src &&
         (strstr(transformed_src, "__typeof__(cc_channel_send(") ||
          strstr(transformed_src, "__typeof__(cc_channel_recv("))) {
@@ -3412,8 +3414,19 @@ static void cc__relower_closure_defs(CCVisitorCtx* ctx, char** defs, size_t* def
 
 /* Copy `buf` dropping every `#line` directive line (whitespace-tolerant).
  * Returns a malloc'd buffer (NULL on OOM) and its length via out_len. */
-static char* cc__strip_line_directives(const char* buf, size_t len, size_t* out_len) {
-    char* out = (char*)malloc(len + 1);
+/* #line directives inside pass-visible buffers break physical-line
+ * addressing (the final UFCS sweep needs logical == physical), but the
+ * EMITTED C needs them for user-line diagnostics inside hoisted closure
+ * bodies.  Resolution: MASK directives to same-line inert comments while
+ * passes run (`#line 12 "f.ccs"` -> `/;*CC_LN 12 f.ccs*;/` sans the
+ * semicolons), then UNMASK at write time.  Line counts are preserved in
+ * both directions, so the mask is coordinate-neutral.  (The old approach
+ * DELETED the directive lines — user diagnostics inside closures then
+ * pointed at a synthetic "<cc-closures>" file; oracle test:
+ * diag_oracle_closure_fail.) */
+static char* cc__mask_line_directives(const char* buf, size_t len, size_t* out_len) {
+    char* out = (char*)malloc(len + len / 2 + 64);
+    size_t cap = len + len / 2 + 64;
     if (!out) { *out_len = 0; return NULL; }
     size_t di = 0;
     for (size_t i = 0; i < len;) {
@@ -3422,23 +3435,111 @@ static char* cc__strip_line_directives(const char* buf, size_t len, size_t* out_
         size_t ss = i;
         while (ss < ln_end && (buf[ss] == ' ' || buf[ss] == '\t')) ss++;
         int is_line_directive = 0;
+        size_t num_start = 0, num_end = 0, path_start = 0, path_end = 0;
         if (ss < ln_end && buf[ss] == '#') {
             size_t ps = ss + 1;
             while (ps < ln_end && (buf[ps] == ' ' || buf[ps] == '\t')) ps++;
             if (ps + 4 <= ln_end && memcmp(buf + ps, "line", 4) == 0 &&
                 (ps + 4 == ln_end || buf[ps + 4] == ' ' || buf[ps + 4] == '\t')) {
-                is_line_directive = 1;
+                size_t q = ps + 4;
+                while (q < ln_end && (buf[q] == ' ' || buf[q] == '\t')) q++;
+                num_start = q;
+                while (q < ln_end && buf[q] >= '0' && buf[q] <= '9') q++;
+                num_end = q;
+                while (q < ln_end && (buf[q] == ' ' || buf[q] == '\t')) q++;
+                if (q < ln_end && buf[q] == '"') {
+                    path_start = q + 1;
+                    size_t e = ln_end;
+                    while (e > path_start && buf[e - 1] != '"') e--;
+                    path_end = (e > path_start) ? e - 1 : path_start;
+                }
+                if (num_end > num_start) is_line_directive = 1;
             }
         }
-        if (!is_line_directive) {
+        size_t need = (ln_end - i) + 32 + (path_end - path_start);
+        if (di + need + 2 > cap) {
+            cap = (di + need + 2) * 2;
+            char* g = (char*)realloc(out, cap);
+            if (!g) { free(out); *out_len = 0; return NULL; }
+            out = g;
+        }
+        if (is_line_directive) {
+            di += (size_t)snprintf(out + di, cap - di, "/*CC_LN %.*s %.*s*/",
+                                   (int)(num_end - num_start), buf + num_start,
+                                   (int)(path_end - path_start), buf + path_start);
+            if (ln_end < len) out[di++] = '\n';
+            i = (ln_end < len) ? ln_end + 1 : ln_end;
+        } else {
             size_t n = (ln_end < len ? ln_end + 1 : ln_end) - i;
             memcpy(out + di, buf + i, n);
             di += n;
             i += n;
-        } else {
-            i = (ln_end < len) ? ln_end + 1 : ln_end;
         }
     }
+    out[di] = '\0';
+    *out_len = di;
+    return out;
+}
+
+/* Inverse of cc__mask_line_directives: `/;*CC_LN N PATH*;/` lines (sans
+ * semicolons) become `#line N "PATH"`.  Returns NULL when no marker was
+ * found (caller keeps the original buffer). */
+static char* cc__unmask_line_directives(const char* buf, size_t len, size_t* out_len) {
+    if (!strstr(buf, "/*CC_LN ")) return NULL; /* buf is NUL-terminated */
+    size_t cap = len + 256;
+    char* out = (char*)malloc(cap);
+    if (!out) return NULL;
+    size_t di = 0;
+    int any = 0;
+    for (size_t i = 0; i < len;) {
+        size_t ln_end = i;
+        while (ln_end < len && buf[ln_end] != '\n') ln_end++;
+        size_t ss = i;
+        while (ss < ln_end && (buf[ss] == ' ' || buf[ss] == '\t')) ss++;
+        int is_marker = 0;
+        size_t num_start = 0, num_end = 0, path_start = 0, path_end = 0;
+        if (ss + 8 <= ln_end && memcmp(buf + ss, "/*CC_LN ", 8) == 0 &&
+            ln_end >= 2 && buf[ln_end - 2] == '*' && buf[ln_end - 1] == '/') {
+            size_t q = ss + 8;
+            num_start = q;
+            while (q < ln_end && buf[q] >= '0' && buf[q] <= '9') q++;
+            num_end = q;
+            if (num_end > num_start && q < ln_end && buf[q] == ' ') {
+                path_start = q + 1;
+                path_end = ln_end - 2;
+                is_marker = 1;
+            } else if (num_end > num_start && q == ln_end - 2) {
+                path_start = path_end = 0;
+                is_marker = 1;
+            }
+        }
+        size_t need = (ln_end - i) + 32;
+        if (di + need + 2 > cap) {
+            cap = (di + need + 2) * 2;
+            char* g = (char*)realloc(out, cap);
+            if (!g) { free(out); return NULL; }
+            out = g;
+        }
+        if (is_marker) {
+            if (path_end > path_start) {
+                di += (size_t)snprintf(out + di, cap - di, "#line %.*s \"%.*s\"",
+                                       (int)(num_end - num_start), buf + num_start,
+                                       (int)(path_end - path_start), buf + path_start);
+            } else {
+                di += (size_t)snprintf(out + di, cap - di, "#line %.*s",
+                                       (int)(num_end - num_start), buf + num_start);
+            }
+            if (ln_end < len) out[di++] = '\n';
+            i = (ln_end < len) ? ln_end + 1 : ln_end;
+            any = 1;
+        } else {
+            size_t n = (ln_end < len ? ln_end + 1 : ln_end) - i;
+            memcpy(out + di, buf + i, n);
+            di += n;
+            i += n;
+        }
+    }
+    if (!any) { free(out); return NULL; }
     out[di] = '\0';
     *out_len = di;
     return out;
@@ -4107,7 +4208,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
              * lifted closure bodies are handled at spawn-time by the closure
              * literal pass anchoring the top-level `#line` before the call. */
             size_t closure_defs_stripped_len = 0;
-            char* closure_defs_stripped = cc__strip_line_directives(
+            char* closure_defs_stripped = cc__mask_line_directives(
                 closure_defs, closure_defs_len, &closure_defs_stripped_len);
             const char* hdr_protos_open  = "\n/* --- CC closure declarations --- */\n";
             const char* hdr_protos_close = "/* --- end closure declarations --- */\n";
@@ -4149,8 +4250,24 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                  * user typedefs between includes and the closure call site. */
                 protos_insert_off = cc_find_protos_insertion_point(src_ufcs, src_ufcs_len);
             }
+            /* Resync marker after the protos block: the block inserts lines
+             * with no #line accounting, shifting every host-compiler
+             * diagnostic below it (oracle: diag_oracle_closure_fail).  The
+             * marker is masked (see cc__mask_line_directives) so passes
+             * still see a directive-free buffer; the write-time unmask
+             * turns it into a real `#line <K> "<input>"`. */
+            char protos_resync[4160];
+            protos_resync[0] = '\0';
+            if (has_protos) {
+                int user_line = 1;
+                for (size_t k = 0; k < protos_insert_off; k++)
+                    if (src_ufcs[k] == '\n') user_line++;
+                snprintf(protos_resync, sizeof(protos_resync),
+                         "/*CC_LN %d %s*/\n", user_line, src_path);
+            }
             size_t add = strlen(hdr_defs_open) + defs_buf_len + 64 + 1;
-            if (has_protos) add += strlen(hdr_protos_open) + closure_protos_len + strlen(hdr_protos_close);
+            if (has_protos) add += strlen(hdr_protos_open) + closure_protos_len +
+                                   strlen(hdr_protos_close) + strlen(protos_resync);
             char* merged = (char*)malloc(src_ufcs_len + add + 1);
             if (merged) {
                 size_t pos = 0;
@@ -4163,6 +4280,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     memcpy(merged + pos, closure_protos, closure_protos_len); pos += closure_protos_len;
                     l = strlen(hdr_protos_close);
                     memcpy(merged + pos, hdr_protos_close, l); pos += l;
+                    l = strlen(protos_resync);
+                    memcpy(merged + pos, protos_resync, l); pos += l;
                     /* [src_ufcs[insert_off..end)] */
                     memcpy(merged + pos, src_ufcs + protos_insert_off,
                            src_ufcs_len - protos_insert_off);
@@ -4701,6 +4820,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         if (cc_emit_plan_splice_comptime_fragments(&src_ufcs, &src_ufcs_len, ctx->input_path) != 0) {
             goto fail;
+        }
+
+        /* WRITE-TIME UNMASK: restore `#line` directives from the masked
+         * `CC_LN` markers (closure-defs anchors + protos-block resync) —
+         * passes needed a directive-free buffer, diagnostics need the
+         * directives.  Line counts are unchanged by construction. */
+        {
+            size_t um_len = 0;
+            char* um = cc__unmask_line_directives(src_ufcs, src_ufcs_len, &um_len);
+            if (um) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = um;
+                src_ufcs_len = um_len;
+            }
         }
 
         /* Final cosmetic pass: src_ufcs is now fully lowered + spliced and is

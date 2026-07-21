@@ -1,0 +1,19 @@
+/* Diagnostics oracle: @async state-machine lowering above the error. */
+#include <ccc/std/prelude.cch>
+
+@async int oracle_echo(int[~4 >] tx, int[~4 <] rx, int v) {
+    if (@await tx.send(v) != 0) return -1;
+    int reply;
+    if (@await rx.recv(&reply) != 0) return -2;
+    return reply;
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int x = cc_diag_oracle_undeclared(7);   /* line 16 */
+    (void)ch; (void)x;
+    return 0;
+}

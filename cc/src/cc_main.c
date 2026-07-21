@@ -2327,6 +2327,12 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     if (!is_tcc) {
         strncat(cmd, " -DCC_ENABLE_XJB_FLOAT_FMT=1", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
+        /* C23 semantics: an undeclared function is a compile error AT THE
+         * USER'S LINE (via #line sourcemaps), not an implicit int that
+         * survives to an opaque linker error naming the lowered .c file.
+         * gcc>=14 / clang>=16 already default to this; pinning the flag
+         * makes the diagnostic identical on older hosts. */
+        strncat(cmd, " -Werror=implicit-function-declaration", sizeof(cmd) - strlen(cmd) - 1);
     }
     // Finally append the compilation inputs/outputs.
     if (c_path && *c_path) {

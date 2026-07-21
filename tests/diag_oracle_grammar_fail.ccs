@@ -1,0 +1,22 @@
+/* Diagnostics oracle: @grammar(schema) splice above the error.  The
+ * grammar lowering splices a large generated parser block; code below
+ * must keep exact user coordinates. */
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) OracleNum {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    n: int number
+~~~~}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+    OracleNum v = {0};
+    size_t pos = 0;
+    (void)OracleNum_parse("42", 2, &pos, &v);
+    int x = cc_diag_oracle_undeclared(9);   /* line 19 */
+    (void)x;
+    return 0;
+}

@@ -1,0 +1,2 @@
+# Oracle: the @grammar(schema) splice above the error keeps exact user lines.
+diag_oracle_grammar_fail.ccs:19:13: error: implicit declaration of function 'cc_diag_oracle_undeclared'

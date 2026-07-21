@@ -1443,13 +1443,18 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 pending_loop_body_open = (size_t)-1;
             }
             cc__append_n(&out, &outl, &outc, &ch, 1);
+            /* LINE-NEUTRAL: the prologue rides the `{` line.  Inserting it
+             * as its own lines shifted every diagnostic below by +2/+1 in
+             * any function with top-level defers (which @destroy makes
+             * nearly all of them) — the emitted C has no #line resync, so
+             * host-compiler errors drifted off the user's lines. */
             if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional && !fn_scope.is_void) {
                 cc_sb_append_fmt(&out, &outl, &outc,
-                               "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n",
+                               " %s __cc_retval_%d; int __cc_ret_set_%d = 0;",
                                fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
                 changed = 1;
             } else if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
-                cc_sb_append_fmt(&out, &outl, &outc, "\n    int __cc_ret_set_%d = 0;\n", fn_scope.cleanup_label_id);
+                cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0;", fn_scope.cleanup_label_id);
                 changed = 1;
             }
             continue;

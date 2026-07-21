@@ -1,0 +1,15 @@
+/* Diagnostics oracle: @errhandler + !> @destroy above the error.
+ * Pins the fix for the errhandler/defer-prologue line drift: the
+ * lowering used to insert prologue lines with no #line resync, shifting
+ * every diagnostic below by +2..+3. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    int x = cc_diag_oracle_undeclared(5);   /* line 12 */
+    (void)tx.send(x);
+    return 0;
+}
