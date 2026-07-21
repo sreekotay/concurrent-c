@@ -183,7 +183,7 @@ typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static void redis_conn_destroy(RedisConn* conn);
-static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
+@noblock static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
 
 /* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
  * BEFORE the registered callee, letting handle_client drain in-flight
@@ -1345,7 +1345,12 @@ static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
  * (i.e. before req->conn was retained).  Frees any heap spill the
  * arena grew and returns the slot to the pool; never touches
  * refcounts. */
-static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req) {
+/* @noblock: pure arena/pool bookkeeping, and it sits on the owner's
+ * per-request hot path (release-before-send) — without the attribute,
+ * autoblock dispatches each call to the blocking pool from the @async
+ * owner loop (measured: SET throughput timer-locked at ~200k ops/s,
+ * 3x down; @noblock restores parity). */
+@noblock static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req) {
     if (!req || !conn) return;
     cc_arena_free(&req->arena);
     cc_arena_pool_free(&conn->req_pool, req);
@@ -1366,7 +1371,7 @@ static void redis_conn_drain_inflight(RedisConn* conn) {
 /* Owner-loop @defer body: return the slot only if the iteration didn't
  * already (release-before-send nulls `*req` on the success and error
  * paths; this is the backstop for early exits). */
-static void owner_release_pending(RedisConn* conn, RedisRequest** req) {
+@noblock static void owner_release_pending(RedisConn* conn, RedisRequest** req) {
     if (req && *req) {
         redis_conn_release_slot(conn, *req);
         *req = NULL;
