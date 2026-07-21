@@ -23,6 +23,153 @@ static inline int cc_is_ident_char(char c) {
     return cc_is_ident_start(c) || (c >= '0' && c <= '9');
 }
 
+/* ---- Directive-aware user-line accounting (the "line ledger") ----
+ *
+ * Mid-pipeline buffers carry a coordinate ledger: raw `#line N "path"`
+ * directives surviving from earlier phases (e.g. the @grammar expansion
+ * brackets) plus masked `CC_LN` same-line comment markers added by phase-3
+ * passes (see cc__mask_line_directives / cc__unmask_line_directives in
+ * visit_codegen.c).  Both forms occupy a whole line, and the line FOLLOWING
+ * a ledger line is user line N of the named file.
+ *
+ * A raw physical newline count is therefore NOT a user line once any
+ * expansion inflated the buffer (redis_idiomatic.ccs: @grammar adds ~266
+ * lines above user line 571, so raw counts there run +266 and eventually
+ * point past EOF).  Every pass that stamps user coordinates into markers
+ * or `#line` directives must consult the ledger via this helper instead.
+ *
+ * Returns the user line (>= 1) of the line containing byte `off`.
+ * `base_line` names the line buf[0] sits on: pass 1 for whole-TU buffers,
+ * or a slice's first-line coordinate for sub-buffer parses.  When the
+ * governing ledger entry names a path, out_path/out_path_len are set to
+ * a slice INTO buf (not NUL-terminated); they are left untouched otherwise.
+ *
+ * Note: ledger lines are recognized by line shape alone (same policy as
+ * cc__unmask_line_directives) — a string literal spelled to look like a
+ * marker AND alone on its line is not defended against. */
+static inline int cc_ledger_parse_line(const char* buf, size_t ls, size_t le,
+                                       long* out_n, const char** out_path, size_t* out_path_len) {
+    size_t ss = ls, q, num_start;
+    while (ss < le && (buf[ss] == ' ' || buf[ss] == '\t')) ss++;
+    /* masked marker: /;*CC_LN N PATH*;/ (sans semicolons), `*;/` at EOL */
+    if (ss + 8 <= le && memcmp(buf + ss, "/*CC_LN ", 8) == 0 &&
+        le >= ss + 2 && buf[le - 2] == '*' && buf[le - 1] == '/') {
+        q = ss + 8;
+        num_start = q;
+        while (q < le && buf[q] >= '0' && buf[q] <= '9') q++;
+        if (q == num_start) return 0;
+        *out_n = strtol(buf + num_start, NULL, 10);
+        if (q < le - 2 && buf[q] == ' ') {
+            *out_path = buf + q + 1;
+            *out_path_len = (le - 2) - (q + 1);
+        }
+        return (q == le - 2) || (q < le - 2 && buf[q] == ' ');
+    }
+    /* raw directive: # ws* line ws+ N [ws+ "PATH"] */
+    if (ss < le && buf[ss] == '#') {
+        q = ss + 1;
+        while (q < le && (buf[q] == ' ' || buf[q] == '\t')) q++;
+        if (q + 4 > le || memcmp(buf + q, "line", 4) != 0) return 0;
+        q += 4;
+        if (q < le && buf[q] != ' ' && buf[q] != '\t') return 0;
+        while (q < le && (buf[q] == ' ' || buf[q] == '\t')) q++;
+        num_start = q;
+        while (q < le && buf[q] >= '0' && buf[q] <= '9') q++;
+        if (q == num_start) return 0;
+        *out_n = strtol(buf + num_start, NULL, 10);
+        while (q < le && (buf[q] == ' ' || buf[q] == '\t')) q++;
+        if (q < le && buf[q] == '"') {
+            size_t ps = q + 1, pe = le;
+            while (pe > ps && buf[pe - 1] != '"') pe--;
+            if (pe > ps) {
+                *out_path = buf + ps;
+                *out_path_len = pe - 1 - ps;
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static inline int cc_user_line_for_offset(const char* buf, size_t len, size_t off, int base_line,
+                                          const char** out_path, size_t* out_path_len) {
+    int ln = (base_line > 0) ? base_line : 1;
+    size_t i = 0;
+    if (!buf) return ln;
+    if (off > len) off = len;
+    while (i < len) {
+        size_t ls = i, le = i;
+        long n = 0;
+        const char* p = NULL;
+        size_t pl = 0;
+        while (le < len && buf[le] != '\n') le++;
+        if (off <= le) break; /* off sits on this (possibly partial) line */
+        if (cc_ledger_parse_line(buf, ls, le, &n, &p, &pl) && n > 0) {
+            ln = (int)n; /* next physical line IS user line n */
+            if (p && out_path && out_path_len) { *out_path = p; *out_path_len = pl; }
+        } else {
+            ln++;
+        }
+        i = le + 1;
+    }
+    return ln;
+}
+
+/* Diff-based ledger stamp for whole-buffer rewrites.  When a once-style
+ * rewrite (old -> new) changed the net physical line count, every user
+ * coordinate stamped below it by a later pass would drift; this returns a
+ * malloc'd copy of `newb` with a masked CC_LN resync inserted at the start
+ * of the line AFTER the changed region (NULL when the rewrite was
+ * line-neutral, buffers are equal, or on OOM — caller keeps `newb`).
+ * The marker's user line is computed from the OLD buffer's ledger, which
+ * is self-consistent up to the change.  fallback_path is used when no
+ * ledger entry governs the site. */
+static inline char* cc_ledger_stamp_rewrite(const char* oldb, size_t oldn,
+                                            const char* newb, size_t newn,
+                                            const char* fallback_path,
+                                            size_t* out_len) {
+    size_t p = 0, s = 0, onl = 0, nnl = 0, e, ins, eo, b, mlen;
+    const char* lp = NULL;
+    size_t lpl = 0;
+    int ul, mn;
+    char mark[1152];
+    char* out;
+    if (!oldb || !newb || !out_len) return NULL;
+    while (p < oldn && p < newn && oldb[p] == newb[p]) p++;
+    if (p == oldn && p == newn) return NULL; /* identical */
+    while (s < oldn - p && s < newn - p && oldb[oldn - 1 - s] == newb[newn - 1 - s]) s++;
+    for (b = p; b < oldn - s; b++)
+        if (oldb[b] == '\n') onl++;
+    for (b = p; b < newn - s; b++)
+        if (newb[b] == '\n') nnl++;
+    if (onl == nnl) return NULL; /* line-neutral rewrite */
+    /* Insertion point in NEW: start of the line after the changed region. */
+    e = newn - s;
+    while (e < newn && newb[e] != '\n') e++;
+    ins = (e < newn) ? e + 1 : newn;
+    /* User line of that next line, from the OLD buffer's ledger. */
+    eo = oldn - s;
+    while (eo < oldn && oldb[eo] != '\n') eo++;
+    ul = cc_user_line_for_offset(oldb, oldn, eo, 1, &lp, &lpl);
+    if (eo < oldn) ul++;
+    if (lp && lpl > 0 && lpl < 1024) {
+        mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %.*s*/\n", ul, (int)lpl, lp);
+    } else {
+        mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %s*/\n", ul,
+                      (fallback_path && fallback_path[0]) ? fallback_path : "<cc_input>");
+    }
+    if (mn <= 0 || (size_t)mn >= sizeof(mark)) return NULL;
+    mlen = (size_t)mn;
+    out = (char*)malloc(newn + mlen + 1);
+    if (!out) return NULL;
+    memcpy(out, newb, ins);
+    memcpy(out + ins, mark, mlen);
+    memcpy(out + ins + mlen, newb + ins, newn - ins);
+    out[newn + mlen] = 0;
+    *out_len = newn + mlen;
+    return out;
+}
+
 /* ---- Positional keyword match ----
  *
  * Word-bounded keyword recognizer used by every raw-text scanner that asks

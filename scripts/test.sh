@@ -39,6 +39,14 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] autoblock noblock warning selftest FAILED"
     exit 1
   fi
+
+  # @async state-machine #line accuracy on the real redis port: async poll
+  # fns must be #line-mapped and no mapped coordinate may pass the source's
+  # EOF (asserts on the emitted C; the diag_oracle corpus pins exact lines).
+  if ! sh scripts/test_async_line_map.sh; then
+    echo "[test] async line map selftest FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"

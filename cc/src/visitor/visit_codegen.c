@@ -917,6 +917,64 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
         cc_edit_buffer_free(&eb);
         return -1;
     }
+    /* LINE-LEDGER SWEEP: any collected edit whose replacement changes the
+     * physical line count (autoblock's multi-line lowering is the main
+     * producer) would silently shift every user coordinate stamped below
+     * it by a later pass (defer prologue markers, closure-def #line
+     * anchors, async machine markers) — redis_idiomatic.ccs drifted +25
+     * lines by main().  Drop a masked resync marker on the line AFTER each
+     * non-neutral edit so ledger-aware accounting (cc_user_line_for_offset)
+     * stays exact.  The marker is inert for passes and becomes a real
+     * `#line` at write time. */
+    {
+        const char* s = *src_io;
+        size_t n = *len_io;
+        int base_count = eb.count; /* edits appended below must not be re-swept */
+        for (int ei = 0; ei < base_count; ei++) {
+            const CCEdit* ed = &eb.edits[ei];
+            size_t span_nl = 0, repl_nl = 0;
+            if (ed->end_off > n || ed->start_off > ed->end_off) continue;
+            for (size_t b = ed->start_off; b < ed->end_off; b++)
+                if (s[b] == '\n') span_nl++;
+            for (const char* r = ed->replacement; r && *r; r++)
+                if (*r == '\n') repl_nl++;
+            if (span_nl == repl_nl) continue;
+            /* Insertion point: start of the line after the edited span. */
+            size_t nl = ed->end_off;
+            while (nl < n && s[nl] != '\n') nl++;
+            size_t ins_at = (nl < n) ? nl + 1 : n;
+            /* Skip if that point sits inside (or splits) another edit. */
+            int clashes = 0;
+            for (int ej = 0; ej < base_count && !clashes; ej++) {
+                if (ej == ei) continue;
+                if (eb.edits[ej].start_off < ins_at && ins_at < eb.edits[ej].end_off) clashes = 1;
+            }
+            if (clashes) continue;
+            /* One marker per insertion point (several edits can end on the
+             * same source line). */
+            for (int ej = base_count; ej < eb.count && !clashes; ej++) {
+                if (eb.edits[ej].start_off == ins_at) clashes = 1;
+            }
+            if (clashes) continue;
+            const char* lp = NULL;
+            size_t lpl = 0;
+            int user_line = cc_user_line_for_offset(s, n, nl, 1, &lp, &lpl);
+            if (nl < n) user_line++; /* marker governs the NEXT line */
+            char mark[1152];
+            int mn;
+            if (lp && lpl > 0 && lpl < 1024) {
+                mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %.*s*/\n", user_line, (int)lpl, lp);
+            } else {
+                mn = snprintf(mark, sizeof(mark), "/*CC_LN %d %s*/\n", user_line,
+                              ctx->input_path ? ctx->input_path : "<cc_input>");
+            }
+            if (mn <= 0 || (size_t)mn >= sizeof(mark)) continue;
+            if (cc_edit_buffer_add(&eb, ins_at, ins_at, mark, 0, "line_ledger_resync") < 0) {
+                cc_edit_buffer_free(&eb);
+                return -1;
+            }
+        }
+    }
     if (eb.count > 0) {
         size_t new_len = 0;
         char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
@@ -4361,13 +4419,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             char protos_resync[4160];
             protos_resync[0] = '\0';
             if (has_protos) {
-                int user_line = 1;
-                for (size_t k = 0; k < protos_insert_off; k++)
-                    if (src_ufcs[k] == '\n') user_line++;
-                snprintf(protos_resync, sizeof(protos_resync),
-                         "/*CC_LN %d %s*/\n", user_line, src_path);
+                /* Ledger-aware user line (honors #line/CC_LN entries above
+                 * the insertion point; a raw newline count runs high below
+                 * upstream expansions like @grammar). */
+                const char* lp = NULL;
+                size_t lpl = 0;
+                int user_line = cc_user_line_for_offset(src_ufcs, src_ufcs_len,
+                                                        protos_insert_off, 1, &lp, &lpl);
+                if (lp && lpl > 0 && lpl < 1024) {
+                    snprintf(protos_resync, sizeof(protos_resync),
+                             "/*CC_LN %d %.*s*/\n", user_line, (int)lpl, lp);
+                } else {
+                    snprintf(protos_resync, sizeof(protos_resync),
+                             "/*CC_LN %d %s*/\n", user_line, src_path);
+                }
             }
-            size_t add = strlen(hdr_defs_open) + defs_buf_len + 64 + 1;
+            size_t add = strlen(hdr_defs_open) + defs_buf_len + 80 + 1;
             if (has_protos) add += strlen(hdr_protos_open) + closure_protos_len +
                                    strlen(hdr_protos_close) + strlen(protos_resync);
             char* merged = (char*)malloc(src_ufcs_len + add + 1);
@@ -4391,17 +4458,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 } else {
                     memcpy(merged + pos, src_ufcs, src_ufcs_len); pos += src_ufcs_len;
                 }
-                {
-                    size_t l = strlen(hdr_defs_open);
-                    memcpy(merged + pos, hdr_defs_open, l); pos += l;
-                }
                 /* Reset TCC's logical-line counter so physical-line == reported-
-                 * line throughout the closure section. */
+                 * line throughout the closure section.  The reset goes BEFORE
+                 * the section header comment: those header lines are generated
+                 * glue, and leaving them under the preceding user-file mapping
+                 * would run the mapped coordinate past the source's EOF. */
                 {
+                    if (pos > 0 && merged[pos - 1] != '\n') merged[pos++] = '\n';
                     int phys_line = 1;
                     for (size_t k = 0; k < pos; k++) if (merged[k] == '\n') phys_line++;
                     int n = snprintf(merged + pos, 64, "#line %d \"<cc-closures>\"\n", phys_line + 1);
                     if (n > 0) pos += (size_t)n;
+                }
+                {
+                    size_t l = strlen(hdr_defs_open);
+                    memcpy(merged + pos, hdr_defs_open, l); pos += l;
                 }
                 memcpy(merged + pos, defs_buf, defs_buf_len); pos += defs_buf_len;
                 merged[pos++] = '\n';

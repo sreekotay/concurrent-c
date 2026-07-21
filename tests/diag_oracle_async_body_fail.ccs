@@ -1,0 +1,19 @@
+/* Diagnostics oracle: coordinates INSIDE an @async state-machine body. */
+#include <ccc/std/prelude.cch>
+
+@async int oracle_body(int[~4 >] tx, int[~4 <] rx, int v) {
+    if (@await tx.send(v) != 0) return -1;
+    int reply;
+    if (@await rx.recv(&reply) != 0) return -2;
+    int x = cc_diag_oracle_undeclared_in_async(reply);   /* line 8 */
+    return x;
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    (void)ch;
+    return 0;
+}
