@@ -1,2 +1,4 @@
 # Oracle: @defer and @string template lowering above the error keep exact lines.
-diag_oracle_defer_template_fail.ccs:10:13: error: implicit declaration of function 'cc_diag_oracle_undeclared'
+# Pin file:line:col + symbol; clang wording varies.
+diag_oracle_defer_template_fail.ccs:10:13: error:
+cc_diag_oracle_undeclared

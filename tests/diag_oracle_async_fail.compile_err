@@ -1,4 +1,6 @@
 # Oracle: an @async state machine (~20x line expansion) above the error must
 # not shift reported lines (masked #line resync after the expansion; the
 # await_normalize inserts are line-neutral so the resume count is exact).
-diag_oracle_async_fail.ccs:16:13: error: implicit declaration of function 'cc_diag_oracle_undeclared'
+# Pin file:line:col + symbol; clang wording varies.
+diag_oracle_async_fail.ccs:16:13: error:
+cc_diag_oracle_undeclared
