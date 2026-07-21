@@ -642,7 +642,21 @@ static inline size_t cc_find_substr_top_level(const char* src, size_t start, siz
 static inline int cc_contains_token_top_level(const char* src, size_t len, const char* needle) {
     if (!src || !needle) return 0;
     size_t nl = strlen(needle);
-    if (nl == 0) return 0;
+    if (nl == 0 || nl > len) return 0;
+    /* Fast reject: if the literal never appears, skip the inert comment/string
+     * walk. Callers use this as an early-out on large buffers (include-expanded
+     * registration text); paying a full inert scan when the needle is absent
+     * was almost as expensive as the rewrite it was meant to avoid. */
+    {
+        int present = 0;
+        for (size_t i = 0; i + nl <= len; ++i) {
+            if (src[i] == needle[0] && memcmp(src + i, needle, nl) == 0) {
+                present = 1;
+                break;
+            }
+        }
+        if (!present) return 0;
+    }
     return cc_find_substr_top_level(src, 0, len, needle, nl) < len;
 }
 

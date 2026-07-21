@@ -3595,6 +3595,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_raw = NULL;
     char* src_regs = NULL;
     int src_regs_owned = 0;       /* 0 when borrowing root->comptime_buffer */
+    int need_phase3_ast = 0;
     char* src_ufcs = NULL;        /* aliases src_all until a rewrite fires */
     size_t src_ufcs_len = 0;
     char* closure_protos = NULL;  /* closure-literal pass output */
@@ -3722,7 +3723,23 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        passes. Run them sequentially with reparsing between changed passes so
        whole-file snapshots do not collide in the shared edit buffer. */
 #ifdef CC_TCC_EXT_AVAILABLE
-    if (src_ufcs && root && root->nodes && root->node_count > 0 && ctx->symbols) {
+    /* Phase-3 AST sync reparse is only useful when a stage will walk the AST.
+     * Skip it (and the staged collectors) when the emit-ready buffer has no
+     * UFCS/async/closure/call-site-mode surface — same gating pattern as the
+     * later statement/async reparses. Initial AST spans are not used for edits
+     * in that case. */
+    need_phase3_ast = src_ufcs && src_ufcs_len && ctx && ctx->symbols &&
+        (cc__has_member_call_candidate(src_ufcs, src_ufcs_len) ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "=>") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@async") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "await") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@nonblocking") ||
+         /* Dump-dir selftests (scripts/test_reparse_sanitize.sh) assert on
+          * reparse_prepared_* output; keep one entry reparse when requested. */
+         getenv("CC_DEBUG_REPARSE_DUMP_DIR") != NULL);
+    if (src_ufcs && root && root->nodes && root->node_count > 0 && need_phase3_ast) {
         const CCASTRoot* phase3_root = root;
         CCASTRoot* phase3_owned_root = NULL;
         int phase3_changed = 0;

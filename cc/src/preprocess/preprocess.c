@@ -8758,22 +8758,229 @@ chain_cleanup:
     return out;
 }
 
-/* Process-local memo for the include-expanded form of a source file.
+/* Process-local memo + on-disk cache for include-expanded source.
  *
- * `cc_preprocess_include_expanded` shells out to the system C preprocessor
- * (`cc -E`) — a full subprocess fork/exec plus a complete preprocess of the
- * file and all of its system/CC includes.  Within one compile the same TU is
- * expanded up to three times (const pass → main-pass parse → visit_codegen),
- * always producing identical output because the file does not change during
- * the build.  Caching the last result by path collapses those redundant
- * subprocess spawns to one.  Calls for a given TU arrive consecutively, so a
- * single-entry cache captures the redundancy; switching files evicts it.
+ * `cc_preprocess_include_expanded` shells out to `cc -E` (~40ms + ~600KB on a
+ * typical prelude TU). Within one process the same path is expanded at most
+ * once (parse stashes the buffer; visit_codegen reuses it). Across processes —
+ * every cold `--no-cache` emit — a disk cache keyed by input/toolchain mtimes
+ * plus `#line` dependency freshness skips the subprocess entirely.
  *
- * The function is pure (reads `input_path`, returns freshly-allocated text),
- * so returning a strdup of the cached buffer is behaviourally identical to a
- * fresh expansion. */
+ * Disable with CC_INCEXP_NO_CACHE=1. Independent of the driver emit cache
+ * (`--no-cache` / CC_NO_CACHE): those force re-emit, not re-expand. */
 static char* cc__incexp_cache_path = NULL;
 static char* cc__incexp_cache_buf = NULL;
+
+static uint64_t cc__incexp_fnv64(const void* data, size_t n, uint64_t seed) {
+    const uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
+    const uint64_t FNV_PRIME = 0x100000001b3ULL;
+    uint64_t h = seed ? seed : FNV_OFFSET;
+    const unsigned char* p = (const unsigned char*)data;
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= FNV_PRIME; }
+    return h;
+}
+
+static int cc__incexp_disk_disabled(void) {
+    const char* e = getenv("CC_INCEXP_NO_CACHE");
+    return (e && e[0] == '1');
+}
+
+static int cc__incexp_mkdir_p(const char* path) {
+    char buf[1024];
+    size_t len = path ? strlen(path) : 0;
+    if (len == 0 || len + 1 >= sizeof(buf)) return -1;
+    memcpy(buf, path, len + 1);
+    for (size_t i = 1; i < len; ++i) {
+        if (buf[i] == '/') {
+            buf[i] = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+            buf[i] = '/';
+        }
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+static int cc__incexp_cache_dir(char* out, size_t out_sz) {
+    const char* home = getenv("HOME");
+    const char* tmp = getenv("TMPDIR");
+    int n;
+    if (home && home[0]) {
+        n = snprintf(out, out_sz, "%s/.cache/concurrent-c/incexp", home);
+    } else if (tmp && tmp[0]) {
+        n = snprintf(out, out_sz, "%s/cc-incexp", tmp);
+    } else {
+        n = snprintf(out, out_sz, "/tmp/cc-incexp");
+    }
+    if (n < 0 || (size_t)n >= out_sz) return -1;
+    return cc__incexp_mkdir_p(out);
+}
+
+static uint64_t cc__incexp_fold_file_sig(uint64_t h, const char* path) {
+    struct stat st;
+    if (!path || !path[0] || stat(path, &st) != 0) {
+        h = cc__incexp_fnv64("|miss=", 6, h);
+        h = cc__incexp_fnv64(path ? path : "", path ? strlen(path) : 0, h);
+        return h;
+    }
+    h = cc__incexp_fnv64(path, strlen(path), h);
+    h = cc__incexp_fnv64(&st.st_mtime, sizeof(st.st_mtime), h);
+    h = cc__incexp_fnv64(&st.st_size, sizeof(st.st_size), h);
+    return h;
+}
+
+static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_root) {
+    uint64_t h = 0;
+    const char* cc_bin = getenv("CC");
+    if (!cc_bin || !cc_bin[0]) cc_bin = "/usr/bin/cc";
+    h = cc__incexp_fold_file_sig(h, input_path);
+    h = cc__incexp_fold_file_sig(h, cc_bin);
+    if (repo_root && repo_root[0]) {
+        char ccc_bin[1100];
+        snprintf(ccc_bin, sizeof(ccc_bin), "%s/cc/bin/.ccc-bin", repo_root);
+        h = cc__incexp_fold_file_sig(h, ccc_bin);
+        h = cc__incexp_fnv64("|inc=", 5, h);
+        h = cc__incexp_fnv64(repo_root, strlen(repo_root), h);
+    }
+    /* Flag bits that change expand command / grammar splice behavior. */
+    h = cc__incexp_fnv64("|v=2|CC_COMPTIME_SCAN", 20, h);
+    return h;
+}
+
+/* Verify a deps sidecar: each line is "mtime_sec\tsize\tpath". */
+static int cc__incexp_deps_fresh(const char* deps_path) {
+    FILE* f = fopen(deps_path, "r");
+    char line[2048];
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        long long mtime = 0, size = 0;
+        char path[1600];
+        struct stat st;
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        if (n == 0) continue;
+        if (sscanf(line, "%lld\t%lld\t%1599[^\n]", &mtime, &size, path) != 3) {
+            fclose(f);
+            return 0;
+        }
+        if (stat(path, &st) != 0 ||
+            (long long)st.st_mtime != mtime ||
+            (long long)st.st_size != size) {
+            fclose(f);
+            return 0;
+        }
+    }
+    fclose(f);
+    return 1;
+}
+
+static char* cc__incexp_disk_load(const char* cache_dir, uint64_t key, size_t* out_len) {
+    char body_path[1280];
+    char deps_path[1280];
+    FILE* f = NULL;
+    char* buf = NULL;
+    long sz = 0;
+    if (!cache_dir || !cache_dir[0]) return NULL;
+    snprintf(body_path, sizeof(body_path), "%s/%016llx.i", cache_dir, (unsigned long long)key);
+    snprintf(deps_path, sizeof(deps_path), "%s/%016llx.deps", cache_dir, (unsigned long long)key);
+    if (!cc__incexp_deps_fresh(deps_path)) return NULL;
+    f = fopen(body_path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    sz = ftell(f);
+    if (sz < 0 || sz > (32L << 20)) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
+    buf[sz] = '\0';
+    fclose(f);
+    if (out_len) *out_len = (size_t)sz;
+    return buf;
+}
+
+/* Record input + unique `# N "path"` / `#line N "path"` markers as deps. */
+static void cc__incexp_disk_store(const char* cache_dir, uint64_t key,
+                                  const char* input_path,
+                                  const char* buf, size_t len) {
+    char body_path[1280];
+    char deps_path[1280];
+    char tmp_body[1300];
+    char tmp_deps[1300];
+    FILE* bf = NULL;
+    FILE* df = NULL;
+    char* paths[256];
+    size_t path_n = 0;
+    if (!cache_dir || !cache_dir[0] || !buf) return;
+
+    snprintf(body_path, sizeof(body_path), "%s/%016llx.i", cache_dir, (unsigned long long)key);
+    snprintf(deps_path, sizeof(deps_path), "%s/%016llx.deps", cache_dir, (unsigned long long)key);
+    snprintf(tmp_body, sizeof(tmp_body), "%s.tmp", body_path);
+    snprintf(tmp_deps, sizeof(tmp_deps), "%s.tmp", deps_path);
+
+    /* Collect dependency paths (input first). */
+    paths[path_n++] = (char*)input_path;
+    {
+        size_t i = 0;
+        while (i < len) {
+            size_t ls = i;
+            while (i < len && buf[i] != '\n') i++;
+            /* cpp markers are `# <num> "path"` or `#line <num> "path"` at bol */
+            if (ls < len && buf[ls] == '#') {
+                size_t p = ls + 1;
+                while (p < i && (buf[p] == ' ' || buf[p] == '\t')) p++;
+                if (p + 4 <= i && memcmp(buf + p, "line", 4) == 0) {
+                    p += 4;
+                    while (p < i && (buf[p] == ' ' || buf[p] == '\t')) p++;
+                }
+                if (p < i && buf[p] >= '0' && buf[p] <= '9') {
+                    while (p < i && buf[p] >= '0' && buf[p] <= '9') p++;
+                    while (p < i && (buf[p] == ' ' || buf[p] == '\t')) p++;
+                    if (p < i && buf[p] == '"') {
+                        size_t q = p + 1;
+                        while (q < i && buf[q] != '"') q++;
+                        if (q < i && q > p + 1 && path_n < (sizeof(paths) / sizeof(paths[0]))) {
+                            size_t pl = q - (p + 1);
+                            char* copy = (char*)malloc(pl + 1);
+                            if (copy) {
+                                memcpy(copy, buf + p + 1, pl);
+                                copy[pl] = '\0';
+                                int dup = 0;
+                                for (size_t k = 0; k < path_n; ++k) {
+                                    if (strcmp(paths[k], copy) == 0) { dup = 1; break; }
+                                }
+                                if (dup) free(copy);
+                                else paths[path_n++] = copy;
+                            }
+                        }
+                    }
+                }
+            }
+            if (i < len) i++;
+        }
+    }
+
+    bf = fopen(tmp_body, "wb");
+    df = fopen(tmp_deps, "w");
+    if (bf && df && fwrite(buf, 1, len, bf) == len) {
+        for (size_t k = 0; k < path_n; ++k) {
+            struct stat st;
+            if (!paths[k] || stat(paths[k], &st) != 0) continue;
+            fprintf(df, "%lld\t%lld\t%s\n",
+                    (long long)st.st_mtime, (long long)st.st_size, paths[k]);
+        }
+        fclose(bf); bf = NULL;
+        fclose(df); df = NULL;
+        if (rename(tmp_body, body_path) != 0) unlink(tmp_body);
+        if (rename(tmp_deps, deps_path) != 0) unlink(tmp_deps);
+    } else {
+        if (bf) fclose(bf);
+        if (df) fclose(df);
+        unlink(tmp_body);
+        unlink(tmp_deps);
+    }
+    for (size_t k = 1; k < path_n; ++k) free(paths[k]);
+}
 
 char* cc_preprocess_include_expanded(const char* input_path) {
     char repo_root[1024];
@@ -8784,10 +8991,39 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     size_t cap = 64 * 1024;
     char tmp_grammar_path[128];
     const char* expand_path;
+    char disk_dir[1024];
+    uint64_t disk_key = 0;
+    int disk_ok = 0;
     if (!input_path || !input_path[0]) return NULL;
     if (cc__incexp_cache_buf && cc__incexp_cache_path &&
         strcmp(cc__incexp_cache_path, input_path) == 0) {
         return strdup(cc__incexp_cache_buf);
+    }
+
+    repo_root[0] = '\0';
+    (void)cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root));
+    disk_dir[0] = '\0';
+    if (!cc__incexp_disk_disabled() && cc__incexp_cache_dir(disk_dir, sizeof(disk_dir)) == 0) {
+        disk_key = cc__incexp_disk_key(input_path, repo_root);
+        disk_ok = 1;
+        {
+            size_t cached_len = 0;
+            char* cached = cc__incexp_disk_load(disk_dir, disk_key, &cached_len);
+            if (cached) {
+                char* dup = strdup(cached);
+                if (dup) {
+                    free(cc__incexp_cache_path);
+                    free(cc__incexp_cache_buf);
+                    cc__incexp_cache_path = strdup(input_path);
+                    if (cc__incexp_cache_path) {
+                        cc__incexp_cache_buf = cached;
+                        return dup;
+                    }
+                    free(dup);
+                }
+                free(cached);
+            }
+        }
     }
     /* @grammar bodies are raw non-C bytes behind a fence; the system cpp
      * would eat any `#`-leading line inside them as a (bad) directive —
@@ -8827,7 +9063,6 @@ char* cc_preprocess_include_expanded(const char* input_path) {
             free(raw);
         }
     }
-    repo_root[0] = '\0';
     /* When expanding the grammar-spliced TEMP copy, quoted includes
      * (`#include "local.cch"`) must still resolve relative to the ORIGINAL
      * file's directory — the temp lives in /tmp. */
@@ -8842,7 +9077,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
                 inc_dir[dl] = '\0';
             }
         }
-        if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
+        if (repo_root[0] || cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
             snprintf(cmd, sizeof(cmd),
                      "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c%s%s%s -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
                      inc_dir[0] ? " -iquote\"" : "", inc_dir[0] ? inc_dir : "", inc_dir[0] ? "\"" : "",
@@ -8918,8 +9153,11 @@ char* cc_preprocess_include_expanded(const char* input_path) {
             }
         }
     }
-    /* Cache as the master copy; hand the caller an independent copy so its
-     * free() never touches the cache. */
+    if (disk_ok) {
+        cc__incexp_disk_store(disk_dir, disk_key, input_path, buf, len);
+    }
+    /* Process-local memo: hand the caller an independent copy so its free()
+     * never touches the cache master. */
     {
         char* dup = strdup(buf);
         if (dup) {

@@ -110,7 +110,9 @@ void cc_pp_get_splice_coord_info(size_t* last_anchor, long* delta, int* user_rew
 
 // Expand a source file through the host C preprocessor so local and stdlib
 // headers appear in one include-expanded stream with line markers preserved.
-// Returns malloc'd string on success, NULL on error. Caller must free().
+// Process-local memo + disk cache (~/.cache/concurrent-c/incexp/); disable
+// disk with CC_INCEXP_NO_CACHE=1. Returns malloc'd string on success, NULL on
+// error. Caller must free().
 char* cc_preprocess_include_expanded(const char* input_path);
 
 // Build the include-expanded CC source buffer consumed by comptime registration
