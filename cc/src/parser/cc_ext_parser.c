@@ -102,7 +102,9 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
     int saved_last_member_col = 0;
     int saved_ufcs_active = 0;
     int saved_ufcs_seq_line = 0;
-    int saved_ufcs_seq_count = 0;
+    unsigned int saved_ufcs_seq_fhash = 0;
+    int saved_ufcs_seq_n = 0;
+    unsigned char saved_ufcs_seq[sizeof ((TCCState*)0)->cc_ufcs_seq];
     char saved_last_recv_type[128] = {0};
 
     if (tcc_state) {
@@ -112,7 +114,11 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
         saved_last_member_col = tcc_state->cc_last_member_col;
         saved_ufcs_active = tcc_state->cc_ufcs_active;
         saved_ufcs_seq_line = tcc_state->cc_ufcs_seq_line;
-        saved_ufcs_seq_count = tcc_state->cc_ufcs_seq_count;
+        saved_ufcs_seq_fhash = tcc_state->cc_ufcs_seq_fhash;
+        saved_ufcs_seq_n = tcc_state->cc_ufcs_seq_n;
+        if (saved_ufcs_seq_n > 0)
+            memcpy(saved_ufcs_seq, tcc_state->cc_ufcs_seq,
+                   (size_t)saved_ufcs_seq_n * sizeof tcc_state->cc_ufcs_seq[0]);
         memcpy(saved_last_recv_type, tcc_state->cc_last_recv_type, sizeof(saved_last_recv_type));
 
         /* UFCS state is expression-scoped. A closure body parsed as an argument must
@@ -125,7 +131,8 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
         tcc_state->cc_last_recv_type[0] = '\0';
         tcc_state->cc_ufcs_active = 0;
         tcc_state->cc_ufcs_seq_line = 0;
-        tcc_state->cc_ufcs_seq_count = 0;
+        tcc_state->cc_ufcs_seq_fhash = 0;
+        tcc_state->cc_ufcs_seq_n = 0;
     }
 
     ++nocode_wanted;
@@ -184,7 +191,11 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
         memcpy(tcc_state->cc_last_recv_type, saved_last_recv_type, sizeof(saved_last_recv_type));
         tcc_state->cc_ufcs_active = saved_ufcs_active;
         tcc_state->cc_ufcs_seq_line = saved_ufcs_seq_line;
-        tcc_state->cc_ufcs_seq_count = saved_ufcs_seq_count;
+        tcc_state->cc_ufcs_seq_fhash = saved_ufcs_seq_fhash;
+        tcc_state->cc_ufcs_seq_n = saved_ufcs_seq_n;
+        if (saved_ufcs_seq_n > 0)
+            memcpy(tcc_state->cc_ufcs_seq, saved_ufcs_seq,
+                   (size_t)saved_ufcs_seq_n * sizeof tcc_state->cc_ufcs_seq[0]);
     }
 }
 
