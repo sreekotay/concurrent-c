@@ -178,11 +178,12 @@ static CCSliceArray cc__create_build_arg_type_slices(CCArena* arena, CCSliceArra
     for (size_t i = 0; i < argv.len; ++i) {
         const char* type_name = NULL;
         char* buf = NULL;
-        if (reg && argv.items[i].len > 0) {
+        if (argv.items[i].len > 0) {
             buf = (char*)cc_arena_alloc(arena, argv.items[i].len + 1, 1);
             if (buf) {
                 memcpy(buf, argv.items[i].ptr, argv.items[i].len);
                 buf[argv.items[i].len] = '\0';
+                /* Literals resolve without a registry; named exprs need one. */
                 type_name = cc_type_registry_resolve_expr_type(reg, buf);
             }
         }

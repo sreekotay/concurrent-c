@@ -924,12 +924,14 @@ const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* 
     size_t len = 0;
     int recv_is_ptr = 0;
     const char* resolved = NULL;
-    if (!reg || !expr) return NULL;
+    if (!expr) return NULL;
     while (*p && isspace((unsigned char)*p)) p++;
     len = strlen(p);
     while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
     if (len == 0 || len >= sizeof(resolved_type)) return NULL;
 
+    /* Literals do not need a registry; keep these working even if the global
+     * type graph has not been installed yet (e.g. pre-canonicalize create). */
     if (p[0] == '"' || (len > 1 && p[0] == 'L' && p[1] == '"')) return "const char*";
     if (p[0] == '\'') return "char";
     if ((len == 4 && memcmp(p, "true", 4) == 0) ||
@@ -950,6 +952,8 @@ const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* 
         }
         return (saw_dot || saw_exp) ? "double" : "int";
     }
+
+    if (!reg) return NULL;
 
     resolved = cc_type_registry_resolve_receiver_expr(reg, p, &recv_is_ptr);
     if (resolved && resolved[0]) return resolved;

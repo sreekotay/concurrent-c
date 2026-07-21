@@ -4,6 +4,7 @@
 #include "../preprocess/cc_closure_markers.h"
 #include "../preprocess/cc_l2_rewriter.h"
 #include "../preprocess/cpp_expand.h"
+#include "../preprocess/type_graph.h"
 #include "../preprocess/type_registry.h"
 #include "../visitor/pass_check_type_of.h"
 #include "../visitor/pass_create.h"
@@ -120,6 +121,11 @@ int cc_build_parse_input(const char* file_buf,
         if (nursery) { free(buf); buf = nursery; got = strlen(buf); }
     }
     if (symbols) {
+        /* Create-arg typing consults the global type registry (literals and
+         * named vars). Install/clear it here: canonicalize would do this later,
+         * but create rewrite runs before that. Previously this was an accidental
+         * side effect of phase-1 over the include-expanded comptime buffer. */
+        if (!cc_type_graph_ensure_global_cleared()) goto fail_buf;
         char* reg = cc_rewrite_registered_type_create_destroy(buf, got, input_path, symbols);
         if (reg == (char*)-1) goto fail_buf;
         if (reg) { free(buf); buf = reg; got = strlen(buf); }
