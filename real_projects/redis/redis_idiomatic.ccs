@@ -170,6 +170,13 @@ typedef struct RedisConn {
     /* Owner → client reply stream (1:1, depth k_pipeline_reply_cap). */
     ReplyTx reply_tx;
     ReplyRx reply_rx;
+    /* The session's socket, set once by handle_client right after create.
+     * The socket is handle_client's stack frame and its @defer close runs
+     * AFTER the conn's @destroy (reverse registration order), so it
+     * strictly outlives the conn.  Owned here so the write family below
+     * are RECEIVER-FIRST conn methods instead of (sock, conn, ...)
+     * threading through every signature. */
+    CCSocket* sock;
     size_t out_len;
     char out_buf[redis_conn_out_buf_bytes];
 } RedisConn;
@@ -1098,55 +1105,55 @@ static bool write_all(CCSocket* sock, CCSlice data) {
     return true;
 }
 
-static bool flush_output_buffer(CCSocket* sock, RedisConn* conn) {
+static bool redis_conn_flush_out(RedisConn* conn) {
     if (!conn || conn->out_len == 0) return true;
     CCSlice data = {
         .ptr = conn->out_buf,
         .len = conn->out_len,
     };
     conn->out_len = 0;
-    return write_all(sock, data);
+    return write_all(conn->sock, data);
 }
 
-static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
+static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
     if (!conn || data.len == 0) return true;
     if (data.len > redis_conn_out_buf_bytes) {
-        return flush_output_buffer(sock, conn) && write_all(sock, data);
+        return redis_conn_flush_out(conn) && write_all(conn->sock, data);
     }
     if (conn->out_len + data.len > redis_conn_out_buf_bytes) {
-        if (!flush_output_buffer(sock, conn)) return false;
+        if (!redis_conn_flush_out(conn)) return false;
     }
     memcpy(conn->out_buf + conn->out_len, data.ptr, data.len);
     conn->out_len += data.len;
     return true;
 }
 
-static char* reserve_output_bytes(CCSocket* sock, RedisConn* conn, size_t n) {
+static char* redis_conn_reserve_out(RedisConn* conn, size_t n) {
     if (!conn || n == 0 || n > redis_conn_out_buf_bytes) return NULL;
     if (conn->out_len + n > redis_conn_out_buf_bytes) {
-        if (!flush_output_buffer(sock, conn)) return NULL;
+        if (!redis_conn_flush_out(conn)) return NULL;
     }
     char* dst = conn->out_buf + conn->out_len;
     conn->out_len += n;
     return dst;
 }
 
-static bool write_reply_structured(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
+static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     if (!reply) return false;
     switch (reply->kind) {
         case REDIS_REPLY_RAW:
-            return buffer_write_bytes(sock, conn, reply->data);
+            return redis_conn_write_bytes(conn, reply->data);
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
             size_t n = reply->data.len + 3;
-            char* dst = reserve_output_bytes(sock, conn, n);
+            char* dst = redis_conn_reserve_out(conn, n);
             if (!dst) {
                 char prefix = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
                 CCSlice pfx = cc_slice_from_buffer(&prefix, 1);
                 CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return buffer_write_bytes(sock, conn, pfx) &&
-                       buffer_write_bytes(sock, conn, reply->data) &&
-                       buffer_write_bytes(sock, conn, crlf);
+                return redis_conn_write_bytes(conn, pfx) &&
+                       redis_conn_write_bytes(conn, reply->data) &&
+                       redis_conn_write_bytes(conn, crlf);
             }
             dst[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
             if (reply->data.len > 0) memcpy(dst + 1, reply->data.ptr, reply->data.len);
@@ -1157,15 +1164,15 @@ static bool write_reply_structured(CCSocket* sock, RedisConn* conn, const RedisR
         case REDIS_REPLY_BULK_STRING: {
             size_t hdr_len = resp_bulk_header_len(reply->data.len);
             size_t n = hdr_len + reply->data.len + 2;
-            char* dst = reserve_output_bytes(sock, conn, n);
+            char* dst = redis_conn_reserve_out(conn, n);
             if (!dst) {
                 char hdr[32];
                 resp_encode_bulk_header_into(hdr, reply->data.len);
                 CCSlice hdr_s = cc_slice_from_buffer(hdr, hdr_len);
                 CCSlice crlf = cc_slice_from_cstr("\r\n");
-                return buffer_write_bytes(sock, conn, hdr_s) &&
-                       buffer_write_bytes(sock, conn, reply->data) &&
-                       buffer_write_bytes(sock, conn, crlf);
+                return redis_conn_write_bytes(conn, hdr_s) &&
+                       redis_conn_write_bytes(conn, reply->data) &&
+                       redis_conn_write_bytes(conn, crlf);
             }
             resp_encode_bulk_header_into(dst, reply->data.len);
             if (reply->data.len > 0) memcpy(dst + hdr_len, reply->data.ptr, reply->data.len);
@@ -1175,30 +1182,26 @@ static bool write_reply_structured(CCSocket* sock, RedisConn* conn, const RedisR
         }
         case REDIS_REPLY_INTEGER: {
             size_t n = resp_integer_encoded_len(reply->int_value);
-            char* dst = reserve_output_bytes(sock, conn, n);
+            char* dst = redis_conn_reserve_out(conn, n);
             if (dst) {
                 resp_encode_integer_into(dst, reply->int_value);
                 return true;
             }
             char buf[32];
             resp_encode_integer_into(buf, reply->int_value);
-            return buffer_write_bytes(sock, conn, cc_slice_from_buffer(buf, n));
+            return redis_conn_write_bytes(conn, cc_slice_from_buffer(buf, n));
         }
         case REDIS_REPLY_NULL_BULK: {
-            char* dst = reserve_output_bytes(sock, conn, 5);
+            char* dst = redis_conn_reserve_out(conn, 5);
             if (dst) {
                 memcpy(dst, "$-1\r\n", 5);
                 return true;
             }
-            return buffer_write_bytes(sock, conn, cc_slice_from_cstr("$-1\r\n"));
+            return redis_conn_write_bytes(conn, cc_slice_from_cstr("$-1\r\n"));
         }
         default:
             return false;
     }
-}
-
-static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    return write_reply_structured(sock, conn, reply);
 }
 
 /* Reply bytes allocated here live until the client drains or tears down the
@@ -1335,10 +1338,8 @@ static void redis_conn_destroy(RedisConn* conn) {
 
 /* One-shot error-reporting path: serialize directly into conn->out_buf
  * and flush immediately. */
-static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
-    bool ok = write_reply(sock, conn, &reply) &&
-              flush_output_buffer(sock, conn);
-    return ok;
+static bool redis_conn_write_reply_now(RedisConn* conn, RedisReply reply) {
+    return redis_conn_write_reply(conn, &reply) && redis_conn_flush_out(conn);
 }
 
 /* Return a pool slot before it's been committed to a RedisRequest
@@ -1536,7 +1537,7 @@ static RedisPipelineStatus !>(CCError) submit_pipeline_batch(RedisConn* conn,
     return cc_ok(REDIS_PIPELINE_OK);
 }
 
-static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* conn, RedisPipelineBatch* batch) {
+static RedisPipelineStatus drain_pipeline_batch(RedisConn* conn, RedisPipelineBatch* batch) {
     if (!batch) return REDIS_PIPELINE_REPLY_CLOSED;
     @defer reply_release_batch(conn);
     while (batch->replies_pending > 0) {
@@ -1545,11 +1546,11 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
         if (cc_is_err(recv_res) || !recv_res.u.value) return REDIS_PIPELINE_REPLY_CLOSED;
         batch->replies_pending--;
         conn->inflight--;
-        if (!write_reply(client, conn, &reply)) return REDIS_PIPELINE_WRITE_FAILED;
+        if (!conn->write_reply(&reply)) return REDIS_PIPELINE_WRITE_FAILED;
     }
 
     /* One socket write for the whole submitted request batch. */
-    if (conn->out_len > 0 && !flush_output_buffer(client, conn)) return REDIS_PIPELINE_WRITE_FAILED;
+    if (conn->out_len > 0 && !conn->flush_out()) return REDIS_PIPELINE_WRITE_FAILED;
     return REDIS_PIPELINE_OK;
 }
 
@@ -1566,6 +1567,7 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
     RedisConn* conn = redis_conn_create(conn_id) !> { return 1; }     @destroy {
         redis_conn_drain_inflight(conn);
     };
+    conn->sock = &client;
 
     /* Large enough for pipelined redis-benchmark without constant compact moves. */
     char read_buf[64 * 1024];
@@ -1579,7 +1581,7 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
         /* Any CCError surfaced via !> in this batch becomes one
          * err_reply and we tear down via the outer @defer. */
         @errhandler(CCError e) {
-            (void)write_reply_now(&client, conn, err_reply(e));
+            (void)conn->write_reply_now(err_reply(e));
             return 0;
         }
 
@@ -1589,14 +1591,13 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
         RedisPipelineStatus submit_status =
             submit_pipeline_batch(conn, req_tx, &req_iter, &batch) !>;
         if (submit_status == REDIS_PIPELINE_OWNER_UNAVAILABLE) {
-            (void)write_reply_now(&client, conn,
-                reply_error("ERR owner channel unavailable"));
+            (void)conn->write_reply_now(reply_error("ERR owner channel unavailable"));
             return 0;
         }
         if (submit_status != REDIS_PIPELINE_OK) return 0;
 
         /* Drain/flush: exactly one RedisReply per submitted request. */
-        RedisPipelineStatus drain_status = drain_pipeline_batch(&client, conn, &batch);
+        RedisPipelineStatus drain_status = drain_pipeline_batch(conn, &batch);
         if (drain_status != REDIS_PIPELINE_OK) return 0;
 
         /* If the socket read already buffered more complete/partial commands
@@ -1607,7 +1608,7 @@ static RedisPipelineStatus drain_pipeline_batch(CCSocket* client, RedisConn* con
         if (redis_pipeline_batch_is_full(&batch) && reader.start < reader.end) continue;
 
         /* rr_fill: park until more bytes arrive or EOF. */
-        bool more = rr_fill(&reader, &client) !>(e) { write_reply_now(&client, conn, io_err_reply(e)); return 0; };
+        bool more = rr_fill(&reader, &client) !>(e) { conn->write_reply_now(io_err_reply(e)); return 0; };
         if (!more) return 0;
     }
 }
