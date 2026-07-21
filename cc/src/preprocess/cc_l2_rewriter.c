@@ -125,9 +125,14 @@ static int cc__l2_try_rewrite_offsetof(const char* src, size_t n, size_t* pi,
  * `*pi` is advanced to just past the closing `))`.
  * ---------------------------------------------------------------- */
 
-static int cc__l2_try_rewrite_ctor_priority(const char* src, size_t n, size_t* pi,
-                                            char** out, size_t* ol, size_t* oc) {
-    size_t i = *pi;
+/* Shared matcher for the ctor/dtor priority idiom.  On match fills the
+ * priority-arg span [prio_open, prio_close] (the `(N)` parens inclusive)
+ * and the position just past the attribute's closing `))`.  Conservative:
+ * any spelling it doesn't recognize is a non-match. */
+static int cc__l2_match_ctor_priority(const char* src, size_t n, size_t i,
+                                      const char** kw_out, size_t* kwn_out,
+                                      size_t* prio_open, size_t* prio_close,
+                                      size_t* attr_end) {
     if (!cc__l2_match_word(src, n, i, "__attribute__", 13)) return 0;
     size_t k = cc__l2_skip_ws(src, n, i + 13);
     /* Need `((` */
@@ -159,9 +164,27 @@ static int cc__l2_try_rewrite_ctor_priority(const char* src, size_t n, size_t* p
         pp++;
     }
     if (pp >= n || src[pp] != ')') return 0;
-    size_t prio_close = pp;            /* position of `)` closing `(N)` */
-    size_t after_prio = cc__l2_skip_ws(src, n, prio_close + 1);
+    size_t pc = pp;                    /* position of `)` closing `(N)` */
+    size_t after_prio = cc__l2_skip_ws(src, n, pc + 1);
     if (after_prio + 1 >= n || src[after_prio] != ')' || src[after_prio + 1] != ')') return 0;
+
+    if (kw_out) *kw_out = kw;
+    if (kwn_out) *kwn_out = kwn;
+    if (prio_open) *prio_open = after_kw;
+    if (prio_close) *prio_close = pc;
+    if (attr_end) *attr_end = after_prio + 2;
+    return 1;
+}
+
+static int cc__l2_try_rewrite_ctor_priority(const char* src, size_t n, size_t* pi,
+                                            char** out, size_t* ol, size_t* oc) {
+    size_t i = *pi;
+    const char* kw = NULL;
+    size_t kwn = 0, prio_open = 0, prio_close = 0, attr_end = 0;
+    if (!cc__l2_match_ctor_priority(src, n, i, &kw, &kwn,
+                                    &prio_open, &prio_close, &attr_end)) return 0;
+    (void)prio_open; (void)prio_close;
+    size_t after_prio = attr_end - 2;
 
     /* Match.  Emit `__attribute__((<kw>))`.  Anything between
      * `((` and `<kw>` (whitespace) we drop; ditto between `<kw>`
@@ -229,4 +252,32 @@ char* cc_l2_rewrite_all(const char* src, size_t src_len, size_t* out_len) {
 oom:
     free(out);
     return NULL;
+}
+
+int cc_l2_blank_ctor_priority_inplace(char* buf, size_t len) {
+    if (!buf) return 0;
+    int blanked = 0;
+
+    CCInertScan s;
+    cc_inert_scan_init(&s, NULL);
+
+    size_t i = 0;
+    while (i < len) {
+        if (cc_inert_scan_step(&s, buf, len, &i)) continue;
+        if (buf[i] == '_') {
+            size_t prio_open = 0, prio_close = 0, attr_end = 0;
+            if (cc__l2_match_ctor_priority(buf, len, i, NULL, NULL,
+                                           &prio_open, &prio_close, &attr_end)) {
+                /* Blank `(N)` inclusive — same byte count, so every
+                 * offset in the buffer is unchanged (reparse-diet safe).
+                 * TCC then sees plain `constructor` / `destructor`. */
+                for (size_t p = prio_open; p <= prio_close; ++p) buf[p] = ' ';
+                blanked++;
+                i = attr_end;
+                continue;
+            }
+        }
+        i++;
+    }
+    return blanked;
 }

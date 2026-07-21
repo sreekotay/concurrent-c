@@ -1332,6 +1332,26 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                 pp_in_len = strlen(reparse_surface_sanitized);
             }
         }
+        /* `__attribute__((constructor(N)))`: the pinned TCC has no priority
+         * support, and whether it ever SEES the attribute is decided by the
+         * prelude's libc headers — glibc #define-erases __attribute__ for
+         * non-GCC compilers (Linux reparses passed by accident), the Apple
+         * SDK does not (macOS reparses died with "')' expected (got '(')").
+         * Blank the priority arg IN PLACE (length-preserving → the exact
+         * offset invariant is untouched) so tolerance is ours, not libc's. */
+        if (strstr(pp_in, "constructor(") || strstr(pp_in, "destructor(")) {
+            char* ctor_safe = (char*)malloc(pp_in_len + 1);
+            if (ctor_safe) {
+                memcpy(ctor_safe, pp_in, pp_in_len + 1);
+                if (cc_l2_blank_ctor_priority_inplace(ctor_safe, pp_in_len) > 0) {
+                    free(reparse_surface_sanitized);
+                    reparse_surface_sanitized = ctor_safe;
+                    pp_in = reparse_surface_sanitized;
+                } else {
+                    free(ctor_safe);
+                }
+            }
+        }
     }
     /* Install the symbol table on the unwrap-destroy pass's ambient slot
      * for the duration of this reparse preprocess.  The preprocess chain

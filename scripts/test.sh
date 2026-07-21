@@ -24,6 +24,13 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
+  # Reparse-input sanitizer regressions (ctor-priority blanking): asserts
+  # on the reparse dump, catching platform-dependent breakage (macOS SDK
+  # vs glibc __attribute__ handling) that pass/fail alone can't see here.
+  if ! sh scripts/test_reparse_sanitize.sh; then
+    echo "[test] reparse sanitize selftest FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"
