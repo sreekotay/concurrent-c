@@ -658,6 +658,13 @@ static const char* choose_build_path(const char* in_path, char* buf, size_t buf_
     int has_input = candidate_input && file_exists(candidate_input);
     int has_cwd = file_exists("build.cc");
     if (has_input && has_cwd) {
+        /* Same file spelled two ways (input dir == cwd, e.g. an absolute
+         * input path in the repo root) is ONE build.cc, not a conflict. */
+        struct stat sa, sb;
+        if (stat(candidate_input, &sa) == 0 && stat("build.cc", &sb) == 0 &&
+            sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) {
+            return candidate_input;
+        }
         if (multiple) *multiple = 1;
         return NULL;
     }
@@ -3951,6 +3958,22 @@ static int cc__selftest_const_eval(int argc, char** argv) {
     }
 }
 
+/* Flags that consume the NEXT argv token as their value.  The subcommand
+ * pre-scan in main() must skip these values so e.g. `-o run` is an output
+ * named "run", never run mode.  Keep in sync with the option loops in
+ * run_build_mode() and default mode. */
+static int cc__flag_takes_value(const char* a) {
+    static const char* v[] = {
+        "-o", "-D", "--build-file", "--out-stem", "--out-dir", "--bin-dir",
+        "--cc-bin", "--cc-flags", "--ld-flags", "--target", "--sysroot",
+        "--obj-out", "--graph-out", "--timeout", "--format",
+    };
+    for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
+        if (strcmp(a, v[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     cc_init_paths(argv[0]);
     cc_diag_init();
@@ -4008,22 +4031,42 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (argc >= 2 && strcmp(argv[1], "build") == 0) {
-        return run_build_mode(argc, argv) == 0 ? 0 : 1;
-    }
-
-    /* `ccc run <file>` is shorthand for `ccc build run <file>` */
-    if (argc >= 2 && strcmp(argv[1], "run") == 0) {
-        /* Rewrite argv: insert "build" before "run" */
-        const char** new_argv = (const char**)malloc((argc + 2) * sizeof(char*));
-        if (!new_argv) { fprintf(stderr, "cc: out of memory\n"); return 1; }
-        new_argv[0] = argv[0];
-        new_argv[1] = "build";
-        for (int i = 1; i < argc; i++) new_argv[i + 1] = argv[i];
-        new_argv[argc + 1] = NULL;
-        int ret = run_build_mode(argc + 1, (char**)new_argv) == 0 ? 0 : 1;
-        free(new_argv);
-        return ret;
+    /* Subcommand detection: `build` / `run` as the FIRST POSITIONAL token,
+     * not just argv[1].  `ccc --keep-c run x.ccs` must parse as run mode —
+     * previously it fell into default mode's legacy `cc <input> <output>`
+     * form with an input literally named "run", which then died on a
+     * nonsense "multiple build.cc files" error (the absolutized fake input
+     * made the root build.cc match itself twice).  Flags and their values
+     * are skipped; the scan stops at the first real positional or "--". */
+    {
+        int sub_idx = 0;
+        for (int i = 1; i < argc; ++i) {
+            const char* a = argv[i];
+            if (strcmp(a, "--") == 0) break;
+            if (a[0] == '-') {
+                if (cc__flag_takes_value(a)) i++;
+                continue;
+            }
+            if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
+            break;
+        }
+        if (sub_idx > 0) {
+            /* Normalize to `ccc build [flags...] [run] ...`: run_build_mode
+             * accepts the step name after options. */
+            const char** new_argv = (const char**)malloc((size_t)(argc + 2) * sizeof(char*));
+            if (!new_argv) { fprintf(stderr, "cc: out of memory\n"); return 1; }
+            int n = 0;
+            new_argv[n++] = argv[0];
+            new_argv[n++] = "build";
+            for (int i = 1; i < argc; i++) {
+                if (i == sub_idx && strcmp(argv[i], "build") == 0) continue; /* inserted above */
+                new_argv[n++] = argv[i];
+            }
+            new_argv[n] = NULL;
+            int ret = run_build_mode(n, (char**)new_argv) == 0 ? 0 : 1;
+            free(new_argv);
+            return ret;
+        }
     }
 
     // Default mode: cc [options] <inputs...> [-o out/bin/<stem>] [--obj-out ...]
