@@ -1,0 +1,33 @@
+// NEGATIVE: WRITE projection of a `one of` union where a variant's term has
+// no invertible write form. Directive-driven items (`items:` open/close/sep)
+// have no grammar rule to invert — the union writer must FAIL LOUDLY at
+// compile time naming the variant and term, never silently skip the arm.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Num {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [some digit]
+    ]
+    v: int number
+~~~~}
+
+@grammar(schema) Pick {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [some digit]
+    ]
+    items: open #'[' close #']' sep #','
+    one of [
+        num  [ #':' v: int number ]
+        list [ #'#' xs: items Num ]
+    ]
+~~~~}
+
+int main(void) {
+    char buf[32];
+    Pick p;
+    (void)p;
+    (void)Pick_write(&p, buf, sizeof buf);
+    return 0;
+}

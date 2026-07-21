@@ -440,6 +440,37 @@ static inline CCString cc_gr_wnarrow_list_text(CCArena* a, int k, int md,
     return o;
 }
 
+/* tagged-union (`one of`) write dispatch: switch on the stored kind, each
+ * arm re-derives its own constant skeleton (arms are exclusive, so measure's
+ * whole-function fold cannot absorb them). An out-of-range kind refuses to
+ * emit anything: the writers return 0 — the same didn't-fit/error value the
+ * checked entry already reports — never garbage bytes. */
+static inline CCString cc_gr_wunion_head_text(CCArena* a) {
+    return @string(`    switch (v->kind) {
+`, a);
+}
+
+static inline CCString cc_gr_wunion_case_text(CCArena* a, const char* sname, const char* vname) {
+    return @string(`    case ${sname}_${vname}: {
+`, a);
+}
+
+static inline CCString cc_gr_wunion_arm_fix_text(CCArena* a, long cfix) {
+    return @string(`    o += ${cfix};   /* variant skeleton */
+`, a);
+}
+
+static inline CCString cc_gr_wunion_break_text(CCArena* a) {
+    return @string(`    break; }
+`, a);
+}
+
+static inline CCString cc_gr_wunion_default_text(CCArena* a) {
+    return @string(`    default: return 0;   /* invalid kind: refuse to emit garbage */
+    }
+`, a);
+}
+
 /* writer-triplet function heads/tails and the checked _write entry.
  * measure's tail folds the whole structural skeleton to ONE constant. */
 static inline CCString cc_gr_write_head_text(CCArena* a, int md, const char* n) {
