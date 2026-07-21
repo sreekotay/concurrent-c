@@ -14,10 +14,10 @@ index d21f1cad..cfff431b 100644
  
 diff --git a/cc_ast_record.h b/cc_ast_record.h
 new file mode 100644
-index 00000000..bc1be827
+index 00000000..00967fa4
 --- /dev/null
 +++ b/cc_ast_record.h
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,264 @@
 +/* CC AST Recording - included by tccgen.c when CONFIG_CC_EXT is defined */
 +#ifndef CC_AST_RECORD_H
 +#define CC_AST_RECORD_H
@@ -143,12 +143,60 @@ index 00000000..bc1be827
 +    int is_ufcs = (tcc_state->cc_ufcs_active && tcc_state->cc_last_member_tok != 0);
 +    int occ = 0;
 +    if (is_ufcs) {
-+        int line = file ? file->line_num : 0;
-+        if (tcc_state->cc_ufcs_seq_line != line) { 
-+            tcc_state->cc_ufcs_seq_line = line; 
-+            tcc_state->cc_ufcs_seq_count = 0; 
++        /* Key the occurrence table on the coordinates the node itself will
++         * carry (member line/col when captured, else the current token),
++         * so `occ` counts on exactly the line the consumer later scans. */
++        int line, col;
++        int have_member = (tcc_state->cc_last_member_line != 0);
++        if (have_member) {
++            line = tcc_state->cc_last_member_line;
++            col = tcc_state->cc_last_member_col;
++        } else {
++            line = file ? file->line_num : 0;
++            col = tok_col;
 +        }
-+        occ = ++tcc_state->cc_ufcs_seq_count;
++        unsigned int fhash = 5381u;
++        if (file) {
++            const unsigned char *fp = (const unsigned char *)file->filename;
++            while (*fp) fhash = fhash * 33u + *fp++;
++        }
++        if (tcc_state->cc_ufcs_seq_line != line ||
++            tcc_state->cc_ufcs_seq_fhash != fhash) {
++            tcc_state->cc_ufcs_seq_line = line;
++            tcc_state->cc_ufcs_seq_fhash = fhash;
++            tcc_state->cc_ufcs_seq_n = 0;
++        }
++        /* occ = 1-based occurrence of THIS method name on the line.  A
++         * repeat of the same method token at the same column is the SAME
++         * source construct duplicated by the compiler (e.g. @string
++         * template lowering duplicates interpolated exprs in the parse
++         * buffer): reuse its occurrence instead of double-counting.
++         * Only trust the column for that dedupe when it is a captured
++         * member coordinate — the tok_col fallback can be degenerate and
++         * must not merge genuine same-name calls. */
++        int same_name = 0, i;
++        for (i = 0; i < tcc_state->cc_ufcs_seq_n; i++) {
++            if (tcc_state->cc_ufcs_seq[i].tok != callee_tok) continue;
++            if (have_member && tcc_state->cc_ufcs_seq[i].col == col) {
++                occ = tcc_state->cc_ufcs_seq[i].occ;
++                break;
++            }
++            same_name++;
++        }
++        if (!occ) {
++            occ = same_name + 1;
++            if (tcc_state->cc_ufcs_seq_n < CC_UFCS_SEQ_MAX) {
++                int n = tcc_state->cc_ufcs_seq_n++;
++                tcc_state->cc_ufcs_seq[n].tok = callee_tok;
++                tcc_state->cc_ufcs_seq[n].col = col;
++                tcc_state->cc_ufcs_seq[n].occ = occ;
++            } else {
++                /* FAIL LOUDLY: past this point same-line dedupe degrades. */
++                fprintf(stderr, "cc: WARNING: UFCS per-line occurrence table "
++                        "overflow (%d entries) at line %d\n",
++                        CC_UFCS_SEQ_MAX, line);
++            }
++        }
 +    }
 +    CC_AST_WITH_NODE(
 +        node->aux1 = callee_tok;
@@ -235,10 +283,10 @@ index 00000000..bc1be827
 +
 +#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..c8d591db 100644
+index 171e3622..00bd204b 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,684 @@
+@@ -66,6 +66,685 @@
  
  #include "tcc.h"
  
@@ -278,7 +326,8 @@ index 171e3622..c8d591db 100644
 +    s->cc_typedef_map_count = 0;
 +    s->cc_typedef_map_cap = 0;
 +    s->cc_ufcs_seq_line = 0;
-+    s->cc_ufcs_seq_count = 0;
++    s->cc_ufcs_seq_fhash = 0;
++    s->cc_ufcs_seq_n = 0;
 +    s->cc_call_stack = NULL;
 +    s->cc_call_stack_top = -1;
 +    s->cc_call_stack_cap = 0;
@@ -923,7 +972,7 @@ index 171e3622..c8d591db 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1416,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1417,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -931,7 +980,7 @@ index 171e3622..c8d591db 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1638,16 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1639,16 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -949,7 +998,7 @@ index 171e3622..c8d591db 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..8e05c179 100644
+index e7a2f1e2..98cf25db 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,104 @@ typedef struct TokenSym {
@@ -1067,7 +1116,7 @@ index e7a2f1e2..8e05c179 100644
      int line_ref;    /* tcc -E: last printed line */
      int ifndef_macro;  /* #ifndef macro / #endif search */
      int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +972,67 @@ struct TCCState {
+@@ -871,6 +972,77 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
@@ -1106,9 +1155,19 @@ index e7a2f1e2..8e05c179 100644
 +    } *cc_typedef_map;
 +    int cc_typedef_map_count;
 +    int cc_typedef_map_cap;
-+    /* CC UFCS disambiguation: per-line occurrence counter for UFCS calls. */
++    /* CC UFCS disambiguation: per-(file,line) occurrence table for UFCS
++       calls.  `occ` recorded into a CALL node's aux2 is the 1-based
++       occurrence of THAT METHOD NAME on the line (the consumer's span
++       probes scan for the Nth `.name(` / `->name(`), NOT the count of
++       member constructs on the line.  Entries also dedupe compiler-
++       duplicated expressions (template lowering duplicates interpolated
++       exprs in the parse buffer): a repeat of the same method token at
++       the same (line,col) reuses the earlier occurrence number. */
++#define CC_UFCS_SEQ_MAX 128
 +    int cc_ufcs_seq_line;
-+    int cc_ufcs_seq_count;
++    unsigned int cc_ufcs_seq_fhash; /* filename hash keying the table's line */
++    int cc_ufcs_seq_n;
++    struct { int tok; int col; int occ; } cc_ufcs_seq[CC_UFCS_SEQ_MAX];
 +    int cc_ufcs_active; /* Set during UFCS call argument parsing */
 +    /* Set right after a UFCS call's gfunc_call completes; consumed by
 +       verify_assign_cast to silently coerce the synthesized int return
@@ -1135,7 +1194,7 @@ index e7a2f1e2..8e05c179 100644
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1313,7 @@ struct filespec {
+@@ -1151,6 +1323,7 @@ struct filespec {
  #define TOK_TWODOTS 0xa2 /* C++ token ? */
  #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
  #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
@@ -1143,7 +1202,7 @@ index e7a2f1e2..8e05c179 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1389,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1399,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -1197,7 +1256,7 @@ index e7a2f1e2..8e05c179 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1544,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1554,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;

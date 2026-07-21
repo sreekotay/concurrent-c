@@ -536,6 +536,37 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
         }
         int occ = (n[i].aux2 >> 8) & 0x00ffffff;
         if (occ <= 0) occ = 1;
+        /* Dedupe compiler-duplicated expressions before probing: template
+         * lowering (@string interpolation) duplicates interpolated exprs in
+         * the parse buffer, so the recorder emits two nodes for ONE source
+         * construct — identical (file, line, col, method).  The recorder
+         * assigns both the same occ; keep only the first here so phantom
+         * twins never reach the span probes (and can't mask a real no-span
+         * failure).  Genuine same-method calls on one line differ in col —
+         * and always in occ, so occ is part of the key: distinct calls with
+         * a degenerate (uncaptured) col must never merge. */
+        {
+            int dup = 0;
+            for (int k = 0; k < node_count; k++) {
+                if (nodes[k].line_start != ls) continue;
+                if (nodes[k].col_start != n[i].col_start) continue;
+                if (nodes[k].occurrence_1based != occ) continue;
+                if (strcmp(nodes[k].method, n[i].aux_s1) != 0) continue;
+                if (!((nodes[k].file == n[i].file) ||
+                      (nodes[k].file && n[i].file &&
+                       strcmp(nodes[k].file, n[i].file) == 0))) continue;
+                dup = 1;
+                break;
+            }
+            if (dup) {
+                if (getenv("CC_DEBUG_UFCS_NODES"))
+                    fprintf(stderr, "[cc:ufcs-dedup] phantom twin dropped "
+                            "file=%s line=%d col=%d method=%s occ=%d\n",
+                            n[i].file ? n[i].file : "?", ls, n[i].col_start,
+                            n[i].aux_s1, occ);
+                continue;
+            }
+        }
         int recv_type_is_ptr = (n[i].aux2 & 2) ? 1 : 0;
         int under_await = 0;
         for (int p = n[i].parent; p >= 0 && p < root->node_count; p = n[p].parent) {
@@ -555,10 +586,10 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             .off_start = n[i].off_start,
         };
         if (getenv("CC_DEBUG_UFCS_NODES")) {
-            fprintf(stderr, "[cc:ufcs-node2] file=%s line=%d..%d method=%s recv=%s occ=%d\n",
-                    n[i].file ? n[i].file : "?", ls, le,
+            fprintf(stderr, "[cc:ufcs-node2] file=%s line=%d..%d col=%d method=%s recv=%s occ=%d off=%ld\n",
+                    n[i].file ? n[i].file : "?", ls, le, n[i].col_start,
                     n[i].aux_s1 ? n[i].aux_s1 : "?",
-                    n[i].aux_s2 ? n[i].aux_s2 : "?", occ);
+                    n[i].aux_s2 ? n[i].aux_s2 : "?", occ, (long)n[i].off_start);
         }
     }
 
