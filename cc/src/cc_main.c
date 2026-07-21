@@ -465,15 +465,23 @@ static void cc_init_paths(const char* argv0) {
         snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
     }
 
-    // Fingerprint the actual compiler binary for cache keys. In dev layout the canonical
-    // compiler now lives at `./cc/bin/ccc`, while `./out/cc/bin/ccc` is kept as a
-    // compatibility wrapper for older scripts.
-    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/ccc", g_repo_root);
+    // Fingerprint the REAL compiler binary for emit/obj cache keys.
+    // `cc/bin/ccc` is a thin shell wrapper that almost never changes on rebuild;
+    // make updates `cc/bin/.ccc-bin`. Keying the wrapper made caches survive
+    // lowering changes (e.g. #105 #line resync) and serve stale .c outputs.
+    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/.ccc-bin", g_repo_root);
     if (!file_exists(g_ccc_sig_path)) {
-        snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+        snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/.ccc-bin", g_repo_root);
         if (!file_exists(g_ccc_sig_path)) {
-            strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
-            g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+            /* Fallback: wrapper / argv0 (installed layouts without a .ccc-bin). */
+            snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/ccc", g_repo_root);
+            if (!file_exists(g_ccc_sig_path)) {
+                snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+                if (!file_exists(g_ccc_sig_path)) {
+                    strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
+                    g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+                }
+            }
         }
     }
     cc_set_out_dir(NULL, NULL);
