@@ -242,12 +242,11 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key,
     RedisValue* cell = db_lookup_live(db, key, now_cache);
     int64_t value = delta;
     if (cell) {
-        int64_t base = cell->num !> {          /* not already a number */
-            int64_t parsed = cell->str.as_slice().to_i64()
+        int64_t base = cell->num ?> ({      /* fallback: parse str arm */
+            cell->str.as_slice().to_i64()
                 !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
                      "ERR value is not an integer or out of range")); };
-            parsed;                             /* handler yields the parse */
-        };
+        });
         value = cc_add_i64_checked(base, delta)
             !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
                  "ERR increment or decrement would overflow")); };
@@ -277,12 +276,14 @@ representation change carried by the type system.
    slice provenance) — accepted; no worse than the hand-written buffer
    dance it replaces. Fixed-arena exhaustion in `@string` still needs its
    loud, defined, tested contract.
-4. **Value-yielding handlers.** Today every `!>` handler DIVERGES
-   (return/goto). The db_incrby demo uses a handler whose last expression
-   yields a substitute value for the projection (`unwrap-or-else`). That
-   is a semantic extension to `!>` and must be specified with the variant
-   work (or the demo rewritten with an early-return shape). It applies to
-   Results identically — arguably a gap the error side already has.
+4. **(Resolved: no value-yielding `!>`.)** The language already has the
+   expression alternative: `?>` (default-value unwrap, `x ?> fallback`).
+   `!>` takes a handler and DIVERGES; `?>` takes a value and SUBSTITUTES —
+   one meaning each. Variant projections extend BOTH uniformly:
+   `v.num !> { diverge }` and `v.num ?> fallback`. Computed fallbacks
+   with their own error exits nest `!>` inside the `?>` fallback
+   expression. (Impl note for phases 1-3: confirm `?>` accepts a
+   statement-expression fallback.)
 5. **Domination analysis scope.** v1 accepts only syntactic domination
    (switch case; directly enclosing `if (v.kind == K)`). Anything cleverer
    (early-return elimination, `&&` chains) waits for evidence from real
