@@ -1,0 +1,33 @@
+/*
+ * Pin test: UFCS method calls on the LAST declarator of a multi-declarator
+ * channel handle declaration (`int[~N >] tx1, tx2;`) must lower correctly.
+ *
+ * Regression: cc_parse_decl_name_and_type treated everything before the last
+ * identifier as the "type", so `tx2` resolved to type "CCChanTx tx1," (and,
+ * via the early type-registry scan, to "int").  The generic UFCS lowering
+ * then emitted `cc_chan_tx tx1,_close(&tx2)` / `int_send(&tx2, i)`, which
+ * failed the phase-3 stage-1 (UFCS) reparse with:
+ *   error: unknown type name 'cc_chan_tx'
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~8 >] tx1, tx2;
+    int[~8 <] rx1, rx2;
+    cc_channel_pair(&tx1, &rx1);
+    cc_channel_pair(&tx2, &rx2);
+
+    tx1.send(1);
+    tx2.send(2);
+
+    int v1 = 0, v2 = 0;
+    rx1.recv(&v1);
+    rx2.recv(&v2);
+
+    printf("sum=%d\n", v1 + v2);
+
+    tx1.close();
+    tx2.close();
+    return 0;
+}

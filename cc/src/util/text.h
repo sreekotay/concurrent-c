@@ -987,6 +987,7 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
     const char* semi = stmt_end;
     const char* name_s = NULL;
     size_t name_n = 0;
+    const char* multi_decl_type_end = NULL;
     const char* cur;
     if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
     out_name[0] = '\0';
@@ -1008,34 +1009,62 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
     }
     if (p >= semi) return;
     cur = p;
-    while (cur < semi) {
-        if (cur + 1 < semi && cur[0] == '/' && cur[1] == '/') {
-            cur += 2;
-            while (cur < semi && *cur != '\n') cur++;
-            continue;
-        }
-        if (cur + 1 < semi && cur[0] == '/' && cur[1] == '*') {
-            cur += 2;
-            while (cur + 1 < semi && !(cur[0] == '*' && cur[1] == '/')) cur++;
-            if (cur + 1 < semi) cur += 2;
-            continue;
-        }
-        if (*cur == '"' || *cur == '\'') {
-            char q = *cur++;
-            while (cur < semi) {
-                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
-                if (*cur == q) { cur++; break; }
-                cur++;
+    /* Multi-declarator support (`T a, b;`): remember the first TOP-LEVEL
+     * comma and the identifier that precedes it (the first declarator), so
+     * the type does not swallow earlier declarators when the LAST declarator
+     * is reported as the name.  Without this, `CCChanTx tx1, tx2;` parsed as
+     * name="tx2", type="CCChanTx tx1," and downstream UFCS lowering composed
+     * garbage callees like `cc_chan_tx tx1,_close(&tx2)`. */
+    {
+        int dpar = 0, dbr = 0, dbrc = 0;
+        const char* first_decl_s = NULL;
+        const char* last_top_ident_s = NULL;
+        int saw_top_comma = 0;
+        while (cur < semi) {
+            if (cur + 1 < semi && cur[0] == '/' && cur[1] == '/') {
+                cur += 2;
+                while (cur < semi && *cur != '\n') cur++;
+                continue;
             }
-            continue;
+            if (cur + 1 < semi && cur[0] == '/' && cur[1] == '*') {
+                cur += 2;
+                while (cur + 1 < semi && !(cur[0] == '*' && cur[1] == '/')) cur++;
+                if (cur + 1 < semi) cur += 2;
+                continue;
+            }
+            if (*cur == '"' || *cur == '\'') {
+                char q = *cur++;
+                while (cur < semi) {
+                    if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                    if (*cur == q) { cur++; break; }
+                    cur++;
+                }
+                continue;
+            }
+            if (*cur == '=' || *cur == ';') break;
+            if (*cur == '(') { dpar++; cur++; continue; }
+            if (*cur == ')') { if (dpar > 0) dpar--; cur++; continue; }
+            if (*cur == '[') { dbr++; cur++; continue; }
+            if (*cur == ']') { if (dbr > 0) dbr--; cur++; continue; }
+            if (*cur == '{') { dbrc++; cur++; continue; }
+            if (*cur == '}') { if (dbrc > 0) dbrc--; cur++; continue; }
+            if (*cur == ',' && dpar == 0 && dbr == 0 && dbrc == 0 && !saw_top_comma) {
+                saw_top_comma = 1;
+                first_decl_s = last_top_ident_s;
+                cur++;
+                continue;
+            }
+            if (!cc_is_ident_start(*cur)) { cur++; continue; }
+            {
+                const char* s = cur++;
+                while (cur < semi && cc_is_ident_char(*cur)) cur++;
+                name_s = s;
+                name_n = (size_t)(cur - s);
+                if (dpar == 0 && dbr == 0 && dbrc == 0) last_top_ident_s = s;
+            }
         }
-        if (*cur == '=' || *cur == ';') break;
-        if (!cc_is_ident_start(*cur)) { cur++; continue; }
-        {
-            const char* s = cur++;
-            while (cur < semi && cc_is_ident_char(*cur)) cur++;
-            name_s = s;
-            name_n = (size_t)(cur - s);
+        if (saw_top_comma && first_decl_s && first_decl_s > p && first_decl_s < name_s) {
+            multi_decl_type_end = first_decl_s;
         }
     }
     if (!name_s || name_n == 0) return;
@@ -1077,7 +1106,7 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
     }
     {
         const char* ty_s = p;
-        const char* ty_e = name_s;
+        const char* ty_e = multi_decl_type_end ? multi_decl_type_end : name_s;
         while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
         while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
         if (ty_e <= ty_s) return;
