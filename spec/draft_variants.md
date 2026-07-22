@@ -89,27 +89,30 @@ Identical to the schema one-of lowering (`Name_<arm>` enum spelling), so a
 schema-generated union and a hand-declared variant with the same arms are
 layout-compatible by construction.
 
-## 4. Construction and accessors
+## 4. Construction: designated initializers, tag auto-filled
 
-Generated per-arm constructors. The idiomatic surface is the TYPE-SCOPED
-DOT form, riding the existing type-scoped UFCS convention (same lowering
-contract as `Tweet.parse(...)` -> `Tweet_parse(...)`):
+No generated constructor functions. (They cannot exist: C's enum constants
+and functions share one identifier namespace, so `RedisValue_num` the tag
+and `RedisValue_num(...)` the constructor would collide. Earlier drafts
+proposing constructors — underscored or type-scoped dot form — are
+superseded.) Construction is the standard C designated initializer naming
+exactly ONE arm; the compiler fills the tag and the `u.` path:
 
 ```c
-RedisValue v = RedisValue.num(42);      /* surface: type-scoped UFCS      */
-RedisValue s = RedisValue.str(cc_string_from(...));
-Signal    hup = Signal.hup();           /* void arm: no payload           */
-/* RedisValue_num(42) etc. remain valid — the lowered/C-interop spelling. */
+RedisValue v = { .num = 42 };
+RedisValue s = { .str = cc_string_from(...) };
+*cell = (RedisValue){ .num = value };   /* transition: old arm dropped */
+
+/* lowers to exactly the by-hand form: */
+(RedisValue){ .kind = RedisValue_num, .u.num = 42 }
 ```
 
-Case labels keep the underscored enum constants in v1
-(`case RedisValue_num:`) — constant-expression position, deliberately the
-raw-C surface; teaching the rewriter that a non-call `RedisValue.num` in
-case position denotes the tag is a purely additive fast-follow if the
-asymmetry grates (recorded in §11).
-
-Raw `v.kind == RedisValue_num` and `v.u.num` remain the C-interop truth
-(as with Result, they're interop detail, not preferred surface style).
+- Naming two arms in one initializer is a compile error citing both arms.
+- Void arms: `Signal s = { .hup = {} };` (empty-braces designator, lowered
+  to tag-only init). The raw `{ .kind = Signal_hup }` also remains valid.
+- `RedisValue_num` (the tag) is thereby the ONLY generated name, with one
+  job: `kind` comparisons and case labels. Raw `v.kind` / `v.u.num` remain
+  the C-interop truth.
 
 ## 5. Consuming a variant: protected projection + checked switch
 
@@ -172,7 +175,7 @@ generalized:
 
 - On scope exit, the destructor of the **active arm** runs, if that arm's
   type has one.
-- Whole-variant assignment (`*cell = RedisValue_num(x)`) first drops the
+- Whole-variant assignment (`*cell = (RedisValue){ .num = x }`) first drops the
   old active arm (if destructor-bearing), then installs the new arm and
   tag. This is the INCR string→int transition in one line.
 - An arm moved out through a projection follows the existing move rules:
@@ -239,9 +242,9 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key,
         value = cc_add_i64_checked(base, delta)
             !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
                  "ERR increment or decrement would overflow")); };
-        *cell = RedisValue_num(value);       /* str arm dropped, int installed */
+        *cell = (RedisValue){ .num = value };  /* str arm dropped, int installed */
     } else {
-        db_set(db, key, RedisValue_num(value), 0) !>;
+        db_set(db, key, (RedisValue){ .num = value }, 0) !>;
     }
     return cc_ok(reply_integer(value));
 }
@@ -284,9 +287,10 @@ representation change carried by the type system.
    a value-producing EXPRESSION (comptime-synthesized event variant,
    consumed by §5's checked switch) — never as a statement. The keyword
    stays reserved.
-7. **Dot-form tags in case labels.** `case RedisValue.num:` (non-call,
-   constant position) as sugar for the enum constant — additive
-   fast-follow; v1 keeps underscored tags in switch.
+7. **(Superseded.)** Dot-form constructors and dot-form tags were dropped
+   with the constructor functions themselves (C namespace collision +
+   magic-namespacing objection); construction is designated-init (§4),
+   tags are the sole generated names.
 8. **Nil arms in wire types.** RESP taught us dispatch-byte collision makes
    `nil` a boundary case there; data-model variants have no dispatch byte,
    so `nil: void;` arms are fine. No rule needed — recording the asymmetry.
