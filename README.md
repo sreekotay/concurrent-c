@@ -259,21 +259,25 @@ CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summ
 
 ### Deadlock Detection
 
-Concurrent-C detects deadlocks at **compile time** (for guaranteed patterns) and **runtime** (for real deadlocks).
+Concurrent-C detects real deadlocks at **runtime**. Compile-time coverage is
+deliberately narrow — two specific checks, nothing more:
 
-#### Compile-time: 100% guaranteed deadlocks → ERROR
+- The retired `@closing(...)` construct (the old guaranteed-deadlock foot-gun)
+  is a hard compile error with a migration hint.
+- `cc_block_on` of a function that has channel ops in a loop and is not marked
+  `@nonblocking` produces a "may deadlock" **warning** (heuristic, not a proof).
+
+There is **no** general compile-time deadlock analysis. In particular, the
+common foot-gun below compiles cleanly and is only caught when it actually
+deadlocks at runtime:
 
 ```c
-int[~4 >] tx;
-int[~4 <] rx;
-CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
-
 CCNursery* producer = cc_nursery_create(NULL) !> @destroy;
 (void)producer->close_on(tx);          // tx closes once producer's tasks finish
 
 producer->spawn(() => [rx] {
     int v;
-    while (cc_io_avail(rx.recv(&v))) { /* ... */ }  // ❌ ERROR: deadlock
+    while (cc_io_avail(rx.recv(&v))) { /* ... */ }  // deadlocks at RUNTIME
 });
 // Consumer waits for close, but close happens AFTER the owning nursery's tasks exit
 ```
@@ -293,7 +297,7 @@ Configure via environment variables:
 - `CC_WORKERS=n` — set number of worker threads (default: CPU count)
 
 Opt-in runtime guard for the closing-nursery drain pattern:
-- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` — enable the runtime check for the nursery-closing deadlock pattern
+- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` — instead of deadlocking, a recv that would wait forever on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` (pinned by `tests/nursery_closing_deadlock_runtime_guard_smoke.ccs`)
 
 ---
 
