@@ -1,6 +1,7 @@
 #include "tcc_bridge.h"
 
 #include "cc_macro_recognizer.h"
+#include "../preprocess/preprocess.h"
 #include "../../../third_party/tcc-patches/tcc_ext_api.h"
 
 #include <stdlib.h>
@@ -57,6 +58,37 @@ static void cc__tcc_stderr_capture_start(int* saved_fd, char* tmppath, size_t tm
     int tmpfd = mkstemp(tmppath);
     if (tmpfd >= 0) { dup2(tmpfd, STDERR_FILENO); close(tmpfd); }
 }
+/* Replay one captured TCC stderr line.  `_Generic` selection failures at
+ * arena-less `@string` sites ("type 'X' does not match any association")
+ * are rewritten into the bounded-template diagnostic naming the offending
+ * interpolation and suggesting an arena (spec/draft_variants.md §9.2);
+ * everything else replays verbatim. */
+static void cc__tcc_stderr_replay_line(const char* buf) {
+    if (strstr(buf, "does not match any association")) {
+        const char* colon = strchr(buf, ':');
+        if (colon) {
+            char* endp = NULL;
+            long line = strtol(colon + 1, &endp, 10);
+            if (endp && *endp == ':' && line > 0 && (size_t)(colon - buf) < 512) {
+                char path[512];
+                size_t plen = (size_t)(colon - buf);
+                memcpy(path, buf, plen);
+                path[plen] = '\0';
+                const char* slots = cc_string_stack_tpl_slots_for(path, (int)line);
+                if (slots) {
+                    fprintf(stderr,
+                            "%.*s error: arena-less @string: interpolation %s has no "
+                            "statically bounded width (allowed: ${int}/${i64}/${u64}/"
+                            "${bool}/${char}); pass an arena: @string(`...`, arena)\n",
+                            (int)(endp - buf + 1), buf, slots);
+                    return;
+                }
+            }
+        }
+    }
+    fputs(buf, stderr);
+}
+
 static void cc__tcc_stderr_capture_end(int saved_fd, const char* tmppath, int parse_failed) {
     if (saved_fd < 0) return;
     fflush(stderr);
@@ -67,7 +99,7 @@ static void cc__tcc_stderr_capture_end(int saved_fd, const char* tmppath, int pa
             FILE* f = fopen(tmppath, "r");
             if (f) {
                 char buf[512];
-                while (fgets(buf, sizeof(buf), f)) fputs(buf, stderr);
+                while (fgets(buf, sizeof(buf), f)) cc__tcc_stderr_replay_line(buf);
                 fclose(f);
             }
         }

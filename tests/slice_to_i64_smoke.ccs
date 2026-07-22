@@ -1,0 +1,186 @@
+/* char[:].to_i64() / .to_u64() / .to_f64() — strict slice-to-number parsing.
+ *
+ * Contract (spec/draft_variants.md §9.1): full-slice consumption, base 10,
+ * empty input is an error, trailing garbage is an error, overflow is a
+ * CC_ERR_INVALID_ARG-class error; composes with `!>`. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int64_t !>(CCError) doubled(char[:] s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t v = s.to_i64() !>;
+    return cc_ok(v * 2);
+}
+
+/* `!>` with a diverging handler (the redis INCR shape). */
+static int64_t parse_or_fallback(char[:] s) {
+    int64_t v = s.to_i64() !> { return -7; };
+    return v;
+}
+
+int main(void) {
+    /* -- to_i64: valid ---------------------------------------------------- */
+    {
+        char[:] s = @slice("12345");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok());
+        assert(r.value() == 12345);
+    }
+    {
+        char[:] s = @slice("0");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok() && r.value() == 0);
+    }
+    {
+        char[:] s = @slice("-1");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok() && r.value() == -1);
+    }
+    {
+        char[:] s = @slice("007");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok() && r.value() == 7);
+    }
+    {
+        char[:] s = @slice("9223372036854775807");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok() && r.value() == INT64_MAX);
+    }
+    {
+        char[:] s = @slice("-9223372036854775808");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_ok() && r.value() == INT64_MIN);
+    }
+
+    /* -- to_i64: overflow (CC_ERR_INVALID_ARG-class) ---------------------- */
+    {
+        char[:] s = @slice("9223372036854775808");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        char[:] s = @slice("-9223372036854775809");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        char[:] s = @slice("99999999999999999999");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+
+    /* -- to_i64: invalid / partial / empty -------------------------------- */
+    {
+        char[:] s = @slice("");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("12a");     /* partial consumption is an error */
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("a12");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("-");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("+5");      /* strict: no '+' sign */
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice(" 5");      /* strict: no whitespace trim */
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("1 2");
+        int64_t !>(CCError) r = s.to_i64();
+        assert(r.is_err());
+    }
+
+    /* -- composes with !> propagation and handlers ------------------------ */
+    {
+        char[:] good = @slice("21");
+        int64_t !>(CCError) d = doubled(good);
+        assert(d.is_ok() && d.value() == 42);
+
+        char[:] bad = @slice("21x");
+        int64_t !>(CCError) e = doubled(bad);
+        assert(e.is_err());
+
+        assert(parse_or_fallback(good) == 21);
+        assert(parse_or_fallback(bad) == -7);
+    }
+
+    /* -- to_u64 ------------------------------------------------------------ */
+    {
+        char[:] s = @slice("18446744073709551615");
+        uint64_t !>(CCError) r = s.to_u64();
+        assert(r.is_ok() && r.value() == UINT64_MAX);
+    }
+    {
+        char[:] s = @slice("18446744073709551616");
+        uint64_t !>(CCError) r = s.to_u64();
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        char[:] s = @slice("-1");      /* no sign on u64 */
+        uint64_t !>(CCError) r = s.to_u64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("");
+        uint64_t !>(CCError) r = s.to_u64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("1x");
+        uint64_t !>(CCError) r = s.to_u64();
+        assert(r.is_err());
+    }
+
+    /* -- to_f64 ------------------------------------------------------------ */
+    {
+        char[:] s = @slice("1.5");
+        double !>(CCError) r = s.to_f64();
+        assert(r.is_ok() && r.value() == 1.5);
+    }
+    {
+        char[:] s = @slice("-2.5e2");
+        double !>(CCError) r = s.to_f64();
+        assert(r.is_ok() && r.value() == -250.0);
+    }
+    {
+        char[:] s = @slice("abc");
+        double !>(CCError) r = s.to_f64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("1.5x");    /* partial consumption is an error */
+        double !>(CCError) r = s.to_f64();
+        assert(r.is_err());
+    }
+    {
+        char[:] s = @slice("");
+        double !>(CCError) r = s.to_f64();
+        assert(r.is_err());
+    }
+
+    printf("slice_to_i64_smoke: PASS\n");
+    return 0;
+}

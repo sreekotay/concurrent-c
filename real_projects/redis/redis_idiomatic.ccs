@@ -256,65 +256,11 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     return true;
 }
 
-static int64_t !>(CCError) parse_i64(char[:] s) {
-    if (s.len == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty integer"));
-    int sign = 1;
-    size_t i = 0;
-    if (((const char*)s.ptr)[0] == '-') {
-        sign = -1;
-        i = 1;
-        if (s.len == 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "bad integer"));
-    }
-
-    uint64_t value = 0;
-    uint64_t limit = (uint64_t)INT64_MAX;
-    if (sign < 0) limit += 1;
-    for (; i < s.len; ++i) {
-        char ch = ((const char*)s.ptr)[i];
-        if (ch < '0' || ch > '9') {
-            return cc_err(CC_ERROR(CC_ERR_PARSE, "bad integer"));
-        }
-        uint64_t digit = (uint64_t)(ch - '0');
-        if (value > limit / 10 ||
-            (value == limit / 10 && digit > (limit % 10))) {
-            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
-        }
-        value = value * 10 + digit;
-    }
-    if (sign < 0) {
-        if (value == (uint64_t)INT64_MAX + 1) return cc_ok(INT64_MIN);
-        return cc_ok(-(int64_t)value);
-    }
-    return cc_ok((int64_t)value);
-}
-
-static size_t u64_decimal_len(uint64_t value) {
-    size_t len = 1;
-    while (value >= 10) {
-        value /= 10;
-        len++;
-    }
-    return len;
-}
-
-/* Decimal rendering for DB payloads (INCR/DECR store the value as its
- * decimal string).  This is NOT wire encoding — every RESP reply byte is
- * produced by the generated RespGReply/RespGBulkHdr/RespGArrayHdr writers
- * below. */
-static size_t i64_decimal_len(int64_t value) {
-    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
-    return (value < 0 ? 1 : 0) + u64_decimal_len(mag);
-}
-
-static void encode_i64_decimal_into(char* dst, int64_t value) {
-    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
-    size_t pos = i64_decimal_len(value);
-    if (value < 0) dst[0] = '-';
-    do {
-        dst[--pos] = (char)('0' + (mag % 10));
-        mag /= 10;
-    } while (mag != 0);
-}
+/* Integer argument parsing is stdlib now: `char[:].to_i64()` (strict
+ * full-slice, overflow -> CC_ERR_INVALID_ARG), and INCR/DECR decimal
+ * re-encoding is the arena-less `@string` bounded-template stack form —
+ * the former parse_i64 / i64_decimal_len / encode_i64_decimal_into hand
+ * helpers are gone. */
 
 #include "redis_resp.cch"
 
@@ -1259,20 +1205,16 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
 
     int64_t value = delta;
     if (cell) {
-        int64_t parsed = parse_i64(cell->str.as_slice()) !> {
+        char[:] cur = cell->str.as_slice();
+        int64_t parsed = cur.to_i64() !> {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         };
-        if ((delta > 0 && parsed > INT64_MAX - delta) ||
-            (delta < 0 && parsed < INT64_MIN - delta)) {
+        value = cc_add_i64_checked(parsed, delta) !> {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR increment or decrement would overflow"));
-        }
-        value = parsed + delta;
+        };
     }
 
-    char buf[32];
-    size_t encoded_len = i64_decimal_len(value);
-    encode_i64_decimal_into(buf, value);
-    char[:] encoded = cc_slice_from_buffer(buf, encoded_len);
+    char[:] encoded = @string(`${value}`);
     if (cell) {
         db_value_replace(db, &cell->str, encoded) !>;
     } else {
@@ -1614,12 +1556,14 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
         case REDIS_CMD_SETNX:
             return db_setnx(db, req->argv[0], req->argv[1], &now);
         case REDIS_CMD_SETEX: {
-            int64_t seconds = parse_i64(req->argv[1]) !>;
+            char[:] secs_arg = req->argv[1];
+            int64_t seconds = secs_arg.to_i64() !>;
             return db_set_with_ttl(db, req->argv[0], req->argv[2],
                                    expire_seconds_to_rel_ms(seconds), &now);
         }
         case REDIS_CMD_PSETEX: {
-            int64_t ms = parse_i64(req->argv[1]) !>;
+            char[:] ms_arg = req->argv[1];
+            int64_t ms = ms_arg.to_i64() !>;
             return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &now);
         }
         case REDIS_CMD_APPEND:
@@ -1637,28 +1581,32 @@ static bool !>(CCError) db_preload_keys(RedisDb* db, int count) {
         case REDIS_CMD_DECR:
             return db_incrby(db, req->argv[0], -1, &now);
         case REDIS_CMD_INCRBY: {
-            int64_t delta = parse_i64(req->argv[1]) !>;
+            char[:] delta_arg = req->argv[1];
+            int64_t delta = delta_arg.to_i64() !>;
             return db_incrby(db, req->argv[0], delta, &now);
         }
         case REDIS_CMD_DECRBY: {
-            int64_t delta = parse_i64(req->argv[1]) !>;
-            if (delta == INT64_MIN) {
+            char[:] delta_arg = req->argv[1];
+            int64_t delta = delta_arg.to_i64() !>;
+            int64_t neg = cc_sub_i64_checked(0, delta) !> {
                 return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
                                        "ERR decrement would overflow"));
-            }
-            return db_incrby(db, req->argv[0], -delta, &now);
+            };
+            return db_incrby(db, req->argv[0], neg, &now);
         }
         case REDIS_CMD_MGET:
             return db_mget(db, req->argv, req->argc, reply_arena, &now);
         case REDIS_CMD_MSET:
             return db_mset(db, req->argv, req->argc);
         case REDIS_CMD_EXPIRE: {
-            int64_t seconds = parse_i64(req->argv[1]) !>;
+            char[:] secs_arg = req->argv[1];
+            int64_t seconds = secs_arg.to_i64() !>;
             return cc_ok(db_expire_rel_ms(db, req->argv[0],
                                           expire_seconds_to_rel_ms(seconds), &now));
         }
         case REDIS_CMD_PEXPIRE: {
-            int64_t ms = parse_i64(req->argv[1]) !>;
+            char[:] ms_arg = req->argv[1];
+            int64_t ms = ms_arg.to_i64() !>;
             return cc_ok(db_expire_rel_ms(db, req->argv[0], ms, &now));
         }
         case REDIS_CMD_TTL:

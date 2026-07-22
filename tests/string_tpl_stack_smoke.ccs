@@ -1,0 +1,87 @@
+/* Arena-less @string — the bounded-template stack form
+ * (spec/draft_variants.md §9.2).
+ *
+ * `@string(`...`)` with no arena is legal iff every interpolation has a
+ * statically boundable max formatted width (integer types, bool, char).
+ * Lowering emits a block-scoped stack buffer sized exactly from the bound
+ * and yields a `char[:]` borrow (NOT a CCString).  The buffer's capacity is
+ * the compile-time bound, observable through the slice's cap. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static void take_slice(char[:] s, const char* want) {
+    assert(s.eq_cstr(want));
+}
+
+int main(void) {
+    /* int interpolation with literals around it */
+    int v = 42;
+    char[:] s = @string(`v=${v}!`);
+    assert(s.eq_cstr("v=42!"));
+    /* sized exactly from the bound: "v=" (2) + int bound (11) + "!" (1) */
+    assert(s.alen == 14);
+
+    /* i64: full-width value fits the 20-byte bound exactly */
+    int64_t big = INT64_MIN;
+    char[:] m = @string(`${big}`);
+    assert(m.eq_cstr("-9223372036854775808"));
+    assert(m.len == 20);
+    assert(m.alen == 20);
+
+    /* u64 max */
+    uint64_t u = UINT64_MAX;
+    char[:] us = @string(`${u}`);
+    assert(us.eq_cstr("18446744073709551615"));
+    assert(us.alen == 20);
+
+    /* bool + char + mixed literals */
+    bool flag = true;
+    char letter = 'x';
+    char[:] mix = @string(`b=${flag} c=${letter}`);
+    assert(mix.eq_cstr("b=true c=x"));
+    bool off = false;
+    char[:] fs = @string(`${off}`);
+    assert(fs.eq_cstr("false"));
+
+    /* literal-only template */
+    char[:] lit = @string(`plain text`);
+    assert(lit.eq_cstr("plain text"));
+
+    /* template escapes decode ('\n' is one byte); $$ stays a literal '$' */
+    char[:] esc = @string(`a\nb$${v}`);
+    assert(esc.len == 6);
+    assert(((const char*)esc.ptr)[1] == '\n');
+    assert(esc.eq_cstr("a\nb$42"));
+
+    /* borrow stays valid for the rest of the block (block-scoped buffer) */
+    char[:] kept = @string(`kept=${v}`);
+    for (int i = 0; i < 3; i++) {
+        char[:] inner = @string(`i=${i}`);
+        assert(inner.len == 3);
+    }
+    assert(kept.eq_cstr("kept=42"));
+
+    /* expression position: passed straight as an argument */
+    take_slice(@string(`arg=${v}`), "arg=42");
+
+    /* two sites in one statement keep separate buffers */
+    {
+        char[:] a = @string(`${v}`);
+        int w = 7;
+        char[:] b = @string(`${w}`);
+        assert(a.eq_cstr("42") && b.eq_cstr("7"));
+    }
+
+    /* the arena form is untouched: same template with an arena yields CCString */
+    {
+        CCArena arena = @create(kilobytes(1)) @destroy;
+        CCString owned = @string(`v=${v}!`, &arena);
+        char[:0] view = owned.as_slice();
+        assert(view.eq_cstr("v=42!"));
+    }
+
+    printf("string_tpl_stack_smoke: PASS\n");
+    return 0;
+}

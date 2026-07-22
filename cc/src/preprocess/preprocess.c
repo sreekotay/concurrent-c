@@ -1297,6 +1297,204 @@ static int cc__rewrite_template_body(char** out,
     return 0;
 }
 
+/* ---- Arena-less `@string(`...`)` slot registry (diagnostics) -----------
+ *
+ * The bounded-template stack form enforces slot boundedness with _Generic
+ * macros that have NO default arm, so an unbounded interpolation surfaces
+ * as TCC's "type 'X' does not match any association" at the @string line.
+ * To turn that into the contract diagnostic ("COMPILE ERROR naming the
+ * offending interpolation and suggesting an arena", spec/draft_variants.md
+ * §9.2), each lowered slot records (file basename, line, slot text) here;
+ * the TCC stderr replay in parser/tcc_bridge.c rewrites matching error
+ * lines via cc_string_stack_tpl_slots_for(). */
+typedef struct CCStackTplSlotNote {
+    char* base;   /* source file basename */
+    int line;
+    char* expr;   /* slot expression text */
+} CCStackTplSlotNote;
+
+static CCStackTplSlotNote* g_stack_tpl_slots = NULL;
+static size_t g_stack_tpl_slot_count = 0;
+static size_t g_stack_tpl_slot_cap = 0;
+
+static const char* cc__stack_tpl_basename(const char* path) {
+    const char* slash;
+    if (!path) return "";
+    slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+void cc_string_stack_tpl_note_slot(const char* file, int line, const char* expr, size_t expr_len) {
+    const char* base = cc__stack_tpl_basename(file);
+    for (size_t k = 0; k < g_stack_tpl_slot_count; k++) {
+        CCStackTplSlotNote* s = &g_stack_tpl_slots[k];
+        if (s->line == line && strcmp(s->base, base) == 0 &&
+            strlen(s->expr) == expr_len && strncmp(s->expr, expr, expr_len) == 0) {
+            return;
+        }
+    }
+    if (g_stack_tpl_slot_count == g_stack_tpl_slot_cap) {
+        size_t new_cap = g_stack_tpl_slot_cap ? g_stack_tpl_slot_cap * 2 : 8;
+        CCStackTplSlotNote* grown =
+            (CCStackTplSlotNote*)realloc(g_stack_tpl_slots, new_cap * sizeof(*grown));
+        if (!grown) return; /* registry is best-effort: raw TCC error still fires */
+        g_stack_tpl_slots = grown;
+        g_stack_tpl_slot_cap = new_cap;
+    }
+    {
+        CCStackTplSlotNote* s = &g_stack_tpl_slots[g_stack_tpl_slot_count];
+        s->base = strdup(base);
+        s->line = line;
+        s->expr = (char*)malloc(expr_len + 1);
+        if (!s->base || !s->expr) {
+            free(s->base);
+            free(s->expr);
+            return;
+        }
+        memcpy(s->expr, expr, expr_len);
+        s->expr[expr_len] = '\0';
+        g_stack_tpl_slot_count++;
+    }
+}
+
+const char* cc_string_stack_tpl_slots_for(const char* file, int line) {
+    static char joined[512];
+    const char* base = cc__stack_tpl_basename(file);
+    size_t used = 0;
+    joined[0] = '\0';
+    for (size_t k = 0; k < g_stack_tpl_slot_count; k++) {
+        CCStackTplSlotNote* s = &g_stack_tpl_slots[k];
+        int wrote;
+        if (s->line != line || strcmp(s->base, base) != 0) continue;
+        wrote = snprintf(joined + used, sizeof(joined) - used, "%s'${%s}'",
+                         used ? " / " : "", s->expr);
+        if (wrote < 0 || (size_t)wrote >= sizeof(joined) - used) break;
+        used += (size_t)wrote;
+    }
+    return used ? joined : NULL;
+}
+
+/* Lower the arena-less bounded-template stack form of `@string`
+ * (spec/draft_variants.md §9.2).  Emits a pure expression:
+ *
+ *   cc__string_stack_slice(
+ *     cc__string_stack_push(
+ *       cc__string_stack_lit(
+ *         cc__string_stack_new((char[K]){0}, K), "v=", 2), (v)))
+ *
+ * with K = <decoded literal bytes> + cc__string_stack_bound((slot)) + ...
+ * — an integer constant expression, so the compound literal is a plain
+ * block-scoped char array sized exactly from the bound; the yielded
+ * CCSlice is a borrow of it (block lifetime, stack provenance).  The
+ * bound/push _Generic macros (std/string.cch) have NO default arm, which
+ * is the boundedness check; see the slot registry above for how the
+ * failure is reported.
+ *
+ * Returns 0 ok, -1 unterminated interpolation, -2 tagged slot (policies
+ * need an arena), -3 unterminated ${{...}} verbatim span. */
+static int cc__emit_string_stack_tpl(char** out, size_t* out_len, size_t* out_cap,
+                                     const char* src, size_t n,
+                                     size_t body_s, size_t body_e,
+                                     const char* input_path, int line) {
+    enum { CC_SSTK_LIT = 0, CC_SSTK_RAW = 1, CC_SSTK_SLOT = 2 };
+    typedef struct { int kind; size_t off; size_t len; } CCStackLink;
+    CCStackLink* links = NULL;
+    size_t link_count = 0, link_cap = 0;
+    size_t lit_total = 0;
+    size_t pos = body_s;
+    int rc = 0;
+    for (;;) {
+        CCTemplatePiece piece;
+        int r = cc_template_next_piece(src, n, body_s, body_e, &pos, &piece);
+        if (r < 0) { rc = r; goto done; }
+        if (r == 0) break;
+        if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) { rc = -2; goto done; }
+        if (piece.lit_len > 0 || (piece.kind == CC_TPL_PIECE_VERBATIM && piece.expr_len > 0) ||
+            piece.kind == CC_TPL_PIECE_SLOT) {
+            size_t need = link_count + 2;
+            if (need > link_cap) {
+                size_t new_cap = link_cap ? link_cap * 2 : 8;
+                CCStackLink* grown;
+                if (new_cap < need) new_cap = need;
+                grown = (CCStackLink*)realloc(links, new_cap * sizeof(*grown));
+                if (!grown) { rc = -1; goto done; }
+                links = grown;
+                link_cap = new_cap;
+            }
+        }
+        if (piece.lit_len > 0) {
+            links[link_count].kind = CC_SSTK_LIT;
+            links[link_count].off = piece.lit_off;
+            links[link_count].len = piece.lit_len;
+            link_count++;
+            lit_total += cc__template_literal_decoded_len(src + piece.lit_off, piece.lit_len);
+        }
+        if (piece.kind == CC_TPL_PIECE_VERBATIM && piece.expr_len > 0) {
+            links[link_count].kind = CC_SSTK_RAW;
+            links[link_count].off = piece.expr_off;
+            links[link_count].len = piece.expr_len;
+            link_count++;
+            lit_total += piece.expr_len;
+        }
+        if (piece.kind == CC_TPL_PIECE_SLOT) {
+            links[link_count].kind = CC_SSTK_SLOT;
+            links[link_count].off = piece.expr_off;
+            links[link_count].len = piece.expr_len;
+            link_count++;
+        }
+    }
+    if (link_count == 0) {
+        cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty()");
+        goto done;
+    }
+    {
+        /* K: exact compile-time bound (integer constant expression). */
+        char* kbuf = NULL;
+        size_t klen = 0, kcap = 0;
+        cc__sb_append_fmt_local(&kbuf, &klen, &kcap, "%zuu", lit_total);
+        for (size_t j = 0; j < link_count; j++) {
+            if (links[j].kind != CC_SSTK_SLOT) continue;
+            cc_sb_append_cstr(&kbuf, &klen, &kcap, " + cc__string_stack_bound((");
+            cc_sb_append(&kbuf, &klen, &kcap, src + links[j].off, links[j].len);
+            cc_sb_append_cstr(&kbuf, &klen, &kcap, "))");
+        }
+        cc_sb_append_cstr(out, out_len, out_cap, "cc__string_stack_slice(");
+        for (size_t j = link_count; j > 0; j--) {
+            cc_sb_append_cstr(out, out_len, out_cap,
+                              links[j - 1].kind == CC_SSTK_SLOT ? "cc__string_stack_push("
+                                                                : "cc__string_stack_lit(");
+        }
+        cc_sb_append_cstr(out, out_len, out_cap, "cc__string_stack_new((char[");
+        cc_sb_append(out, out_len, out_cap, kbuf, klen);
+        cc_sb_append_cstr(out, out_len, out_cap, "]){0}, ");
+        cc_sb_append(out, out_len, out_cap, kbuf, klen);
+        cc_sb_append_cstr(out, out_len, out_cap, ")");
+        free(kbuf);
+    }
+    for (size_t j = 0; j < link_count; j++) {
+        if (links[j].kind == CC_SSTK_SLOT) {
+            cc_sb_append_cstr(out, out_len, out_cap, ", (");
+            cc_sb_append(out, out_len, out_cap, src + links[j].off, links[j].len);
+            cc_sb_append_cstr(out, out_len, out_cap, "))");
+            cc_string_stack_tpl_note_slot(input_path, line, src + links[j].off, links[j].len);
+        } else if (links[j].kind == CC_SSTK_RAW) {
+            cc_sb_append_cstr(out, out_len, out_cap, ", ");
+            cc__append_c_string_raw(out, out_len, out_cap, src + links[j].off, links[j].len);
+            cc__sb_append_fmt_local(out, out_len, out_cap, ", %zu)", links[j].len);
+        } else {
+            cc_sb_append_cstr(out, out_len, out_cap, ", ");
+            cc__append_c_string_escaped(out, out_len, out_cap, src + links[j].off, links[j].len);
+            cc__sb_append_fmt_local(out, out_len, out_cap, ", %zu)",
+                                    cc__template_literal_decoded_len(src + links[j].off,
+                                                                     links[j].len));
+        }
+    }
+    cc_sb_append_cstr(out, out_len, out_cap, ")");
+done:
+    free(links);
+    return rc;
+}
+
 static char* cc__rewrite_string_templates(const char* src, size_t n, const char* input_path) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -1512,7 +1710,10 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 return (char*)-1;
             }
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            if (src[arg1_e] == ')') {
+            if (src[arg1_e] == ')' && !(arg1_s < n && src[arg1_s] == '`')) {
+                /* Non-template forms keep requiring an arena; a backtick
+                 * template with no arena is the bounded stack form
+                 * (spec/draft_variants.md §9.2), handled below. */
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 line, col, "syntax", "@string(...) requires an arena argument");
@@ -1532,6 +1733,30 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                         return (char*)-1;
                     }
                     arg2_s = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                    if (arg2_s < n && src[arg2_s] == ')') {
+                        /* Arena-less bounded-template stack form (§9.2):
+                         * stack buffer sized from the static bound, yields
+                         * a char[:] borrow instead of an owned CCString. */
+                        int tpl_rc = cc__emit_string_stack_tpl(&out, &out_len, &out_cap, src, n,
+                                                               arg1_s + 1, tick_e,
+                                                               input_path, line);
+                        if (tpl_rc != 0) {
+                            char rel[1024];
+                            const char* msg = (tpl_rc == -2)
+                                ? "tagged template slots require @string(policy, `...`, arena)"
+                                : (tpl_rc == -3)
+                                    ? "unterminated ${{...}} verbatim span in @string template"
+                                    : "unterminated interpolation in @string template";
+                            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                            line, col, "syntax", msg);
+                            free(out);
+                            return (char*)-1;
+                        }
+                        rewrite_count++;
+                        last_emit = arg2_s + 1;
+                        i = arg2_s + 1;
+                        continue;
+                    }
                     if (arg2_s >= n || src[arg2_s] != ',') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),

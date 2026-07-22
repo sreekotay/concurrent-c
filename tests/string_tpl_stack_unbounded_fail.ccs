@@ -1,0 +1,11 @@
+/* Arena-less @string with an unbounded interpolation (a slice) must be a
+ * compile error naming the interpolation and suggesting an arena
+ * (spec/draft_variants.md §9.2). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char[:] name = @slice("ada");
+    char[:] s = @string(`name=${name}`);
+    (void)s;
+    return 0;
+}

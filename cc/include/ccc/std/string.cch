@@ -109,6 +109,23 @@ CC_DECL_RESULT_SPEC(CCResult_int64_t_CC_I64ParseError, int64_t, CC_I64ParseError
 CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseError)
 CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
 CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
+
+/* Stdlib-predeclared CCError result specs (owned by std/slice.cch, which
+ * prelude includes first; duplicated here under the same guards so TUs
+ * that include string.cch alone still complete the types referenced by
+ * the per-TU `__cc_uw_*` result arms). */
+#ifndef CCResult_int64_t_CCError_DEFINED
+#define CCResult_int64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CCError, int64_t, CCError)
+#endif
+#ifndef CCResult_uint64_t_CCError_DEFINED
+#define CCResult_uint64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_uint64_t_CCError, uint64_t, CCError)
+#endif
+#ifndef CCResult_double_CCError_DEFINED
+#define CCResult_double_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_double_CCError, double, CCError)
+#endif
 #endif /* !CC_COMPTIME */
 
 // ----------------------- Arena-backed slice helpers -------------------------
@@ -910,6 +927,114 @@ static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
     return data;
 }
 #endif /* CC_COMPTIME */
+
+// ------------- Arena-less @string: bounded-template stack form -------------
+/* Lowering target for `@string(`...`)` with NO arena argument
+ * (spec/draft_variants.md §9.2).  The compiler emits a block-scoped
+ * `(char[K]){0}` compound literal sized exactly from the template's static
+ * bound (literal bytes + per-slot max width from `cc__string_stack_bound`),
+ * chains the pushes below, and yields a `char[:]` BORROW of that buffer
+ * (block lifetime, stack provenance).
+ *
+ * The two `_Generic` macros deliberately have NO default arm: an
+ * interpolation whose type is not statically width-boundable (slices,
+ * strings, floats, pointers, ...) fails _Generic selection, which the
+ * driver reports as "arena-less @string: interpolation '${...}' has no
+ * statically bounded width; ... pass an arena".
+ *
+ * The bound is exact per C type (worst-case decimal width incl. sign);
+ * overflow of the computed bound is impossible by construction, so the
+ * push helpers treat it as a fatal compiler bug and abort LOUDLY. */
+typedef struct CCStringStackBuf {
+    char *buf;
+    uint32_t cap;
+    uint32_t len;
+} CCStringStackBuf;
+
+static inline void cc__string_stack_overflow_abort(size_t need, size_t cap) {
+    fprintf(stderr,
+            "cc fatal: arena-less @string overflowed its computed bound "
+            "(need %zu, cap %zu) - compiler bug\n",
+            need, cap);
+    abort();
+}
+
+static inline CCStringStackBuf cc__string_stack_new(char *buf, size_t cap) {
+    CCStringStackBuf b;
+    b.buf = buf;
+    b.cap = (uint32_t)cap;
+    b.len = 0;
+    return b;
+}
+
+static inline CCStringStackBuf cc__string_stack_lit(CCStringStackBuf b, const char *s, size_t n) {
+    if ((size_t)b.len + n > b.cap) cc__string_stack_overflow_abort((size_t)b.len + n, b.cap);
+    if (n) memcpy(b.buf + b.len, s, n);
+    b.len += (uint32_t)n;
+    return b;
+}
+
+static inline CCStringStackBuf cc__string_stack_u64(CCStringStackBuf b, uint64_t v) {
+    char tmp[20];
+    size_t pos = sizeof(tmp);
+    do {
+        uint64_t q = v / 10;
+        tmp[--pos] = (char)('0' + (v - q * 10));
+        v = q;
+    } while (v != 0);
+    return cc__string_stack_lit(b, tmp + pos, sizeof(tmp) - pos);
+}
+
+static inline CCStringStackBuf cc__string_stack_i64(CCStringStackBuf b, int64_t v) {
+    if (v < 0) {
+        b = cc__string_stack_lit(b, "-", 1);
+        return cc__string_stack_u64(b, (uint64_t)(-(v + 1)) + 1);
+    }
+    return cc__string_stack_u64(b, (uint64_t)v);
+}
+
+static inline CCStringStackBuf cc__string_stack_bool(CCStringStackBuf b, bool v) {
+    return v ? cc__string_stack_lit(b, "true", 4) : cc__string_stack_lit(b, "false", 5);
+}
+
+static inline CCStringStackBuf cc__string_stack_char(CCStringStackBuf b, char v) {
+    return cc__string_stack_lit(b, &v, 1);
+}
+
+static inline CCSlice cc__string_stack_slice(CCStringStackBuf b) {
+    return cc_slice_from_parts(b.buf, b.len, CC_SLICE_ID_UNTRACKED, b.cap);
+}
+
+/* Max formatted width per slot type: worst-case decimal digits + sign
+ * ("false" for bool).  NO default arm — see the header comment above. */
+#define cc__string_stack_bound(x) _Generic((x), \
+    char: 1, \
+    bool: 5, \
+    signed char: 4, \
+    unsigned char: 3, \
+    short: 6, \
+    unsigned short: 5, \
+    int: 11, \
+    unsigned int: 10, \
+    long: 20, \
+    unsigned long: 20, \
+    long long: 20, \
+    unsigned long long: 20)
+
+#define cc__string_stack_push(b, x) _Generic((x), \
+    char: cc__string_stack_char, \
+    bool: cc__string_stack_bool, \
+    signed char: cc__string_stack_i64, \
+    unsigned char: cc__string_stack_u64, \
+    short: cc__string_stack_i64, \
+    unsigned short: cc__string_stack_u64, \
+    int: cc__string_stack_i64, \
+    unsigned int: cc__string_stack_u64, \
+    long: cc__string_stack_i64, \
+    unsigned long: cc__string_stack_u64, \
+    long long: cc__string_stack_i64, \
+    unsigned long long: cc__string_stack_u64 \
+)((b), (x))
 
 // ------------------------- Parse helpers ----------------------------------
 #ifndef CC_COMPTIME
