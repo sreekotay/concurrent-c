@@ -1,0 +1,120 @@
+/* cc_add_i64_checked / cc_sub_i64_checked / cc_mul_i64_checked —
+ * overflow-checked int64 arithmetic returning int64_t !>(CCError)
+ * (spec/draft_variants.md §9.3).  Edges include INT64_MIN. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+
+static int64_t !>(CCError) incr(int64_t base, int64_t delta) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t v = cc_add_i64_checked(base, delta) !>;
+    return cc_ok(v);
+}
+
+/* `!>` with a diverging handler (the redis overflow-guard shape). */
+static int64_t add_or_sentinel(int64_t a, int64_t b) {
+    int64_t v = cc_add_i64_checked(a, b) !> { return -1; };
+    return v;
+}
+
+int main(void) {
+    /* -- add ---------------------------------------------------------- */
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(1, 2);
+        assert(r.is_ok() && r.value() == 3);
+    }
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(INT64_MAX, 0);
+        assert(r.is_ok() && r.value() == INT64_MAX);
+    }
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(INT64_MAX, 1);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(INT64_MIN, -1);
+        assert(r.is_err());
+    }
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(INT64_MIN, INT64_MAX);
+        assert(r.is_ok() && r.value() == -1);
+    }
+    {
+        int64_t !>(CCError) r = cc_add_i64_checked(INT64_MAX, -1);
+        assert(r.is_ok() && r.value() == INT64_MAX - 1);
+    }
+
+    /* -- sub ---------------------------------------------------------- */
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(5, 7);
+        assert(r.is_ok() && r.value() == -2);
+    }
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(INT64_MIN, 1);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(0, INT64_MIN);  /* -INT64_MIN overflows */
+        assert(r.is_err());
+    }
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(INT64_MAX, -1);
+        assert(r.is_err());
+    }
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(0, INT64_MAX);
+        assert(r.is_ok() && r.value() == -INT64_MAX);
+    }
+    {
+        int64_t !>(CCError) r = cc_sub_i64_checked(INT64_MIN, 0);
+        assert(r.is_ok() && r.value() == INT64_MIN);
+    }
+
+    /* -- mul ---------------------------------------------------------- */
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(6, 7);
+        assert(r.is_ok() && r.value() == 42);
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(INT64_MAX, 2);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(INT64_MIN, -1);  /* the classic */
+        assert(r.is_err());
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(-1, INT64_MIN);
+        assert(r.is_err());
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(INT64_MIN, 1);
+        assert(r.is_ok() && r.value() == INT64_MIN);
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(0, INT64_MIN);
+        assert(r.is_ok() && r.value() == 0);
+    }
+    {
+        int64_t !>(CCError) r = cc_mul_i64_checked(3037000500LL, 3037000500LL);
+        assert(r.is_err());
+    }
+
+    /* -- composes with !> ---------------------------------------------- */
+    {
+        int64_t !>(CCError) ok = incr(40, 2);
+        assert(ok.is_ok() && ok.value() == 42);
+        int64_t !>(CCError) bad = incr(INT64_MAX, 1);
+        assert(bad.is_err());
+
+        assert(add_or_sentinel(40, 2) == 42);
+        assert(add_or_sentinel(INT64_MAX, 1) == -1);
+    }
+
+    printf("checked_math_i64_smoke: PASS\n");
+    return 0;
+}

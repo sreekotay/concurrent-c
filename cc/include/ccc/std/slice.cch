@@ -9,6 +9,10 @@
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
+#include <errno.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef CCResult_CCSlice_CCError_DEFINED
@@ -19,6 +23,21 @@ CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCError, CCSlice, CCError)
 #ifndef CCResult_CCSliceHdr_CCError_DEFINED
 #define CCResult_CCSliceHdr_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCSliceHdr_CCError, CCSliceHdr, CCError)
+#endif
+
+#ifndef CCResult_int64_t_CCError_DEFINED
+#define CCResult_int64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CCError, int64_t, CCError)
+#endif
+
+#ifndef CCResult_uint64_t_CCError_DEFINED
+#define CCResult_uint64_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_uint64_t_CCError, uint64_t, CCError)
+#endif
+
+#ifndef CCResult_double_CCError_DEFINED
+#define CCResult_double_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_double_CCError, double, CCError)
 #endif
 
 static inline CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice* src, CCArena* arena) {
@@ -54,6 +73,181 @@ static inline CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr* sr
 
     memcpy(stable.ptr, src->ptr, src->len);
     return cc_ok_CCResult_CCSliceHdr_CCError((CCSliceHdr){ .ptr = stable.ptr, .len = stable.len });
+}
+
+/*
+ * Strict slice-to-number conversions (spec/draft_variants.md §9.1).
+ *
+ * UFCS surface: `s.to_i64()` / `s.to_u64()` / `s.to_f64()` on a `char[:]`.
+ * Contract: the ENTIRE slice must be consumed (trailing bytes are an
+ * error), base 10 only, no whitespace trimming, no '+' sign; the empty
+ * slice is an error; out-of-range values are CC_ERR_INVALID_ARG.
+ */
+
+static inline CCResult_int64_t_CCError cc_slice_to_i64(const CCSlice* s_ptr) {
+    CCSlice s = s_ptr ? *s_ptr : cc_slice_empty();
+    const char* p = (const char*)s.ptr;
+    size_t i = 0;
+    bool neg = false;
+    uint64_t value = 0;
+    uint64_t limit = (uint64_t)INT64_MAX;
+    if (!p || s.len == 0) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_PARSE, "to_i64: empty input"));
+    }
+    if (p[0] == '-') {
+        neg = true;
+        limit += 1;
+        i = 1;
+        if (s.len == 1) {
+            return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_PARSE, "to_i64: not an integer"));
+        }
+    }
+    for (; i < s.len; ++i) {
+        char ch = p[i];
+        uint64_t digit;
+        if (ch < '0' || ch > '9') {
+            return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_PARSE, "to_i64: not an integer"));
+        }
+        digit = (uint64_t)(ch - '0');
+        if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) {
+            return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "to_i64: integer out of range"));
+        }
+        value = value * 10 + digit;
+    }
+    if (neg) {
+        if (value == (uint64_t)INT64_MAX + 1) {
+            return cc_ok_CCResult_int64_t_CCError(INT64_MIN);
+        }
+        return cc_ok_CCResult_int64_t_CCError(-(int64_t)value);
+    }
+    return cc_ok_CCResult_int64_t_CCError((int64_t)value);
+}
+
+static inline CCResult_uint64_t_CCError cc_slice_to_u64(const CCSlice* s_ptr) {
+    CCSlice s = s_ptr ? *s_ptr : cc_slice_empty();
+    const char* p = (const char*)s.ptr;
+    uint64_t value = 0;
+    if (!p || s.len == 0) {
+        return cc_err_CCResult_uint64_t_CCError(CC_ERROR(CC_ERR_PARSE, "to_u64: empty input"));
+    }
+    for (size_t i = 0; i < s.len; ++i) {
+        char ch = p[i];
+        uint64_t digit;
+        if (ch < '0' || ch > '9') {
+            return cc_err_CCResult_uint64_t_CCError(CC_ERROR(CC_ERR_PARSE, "to_u64: not an integer"));
+        }
+        digit = (uint64_t)(ch - '0');
+        if (value > UINT64_MAX / 10 || (value == UINT64_MAX / 10 && digit > UINT64_MAX % 10)) {
+            return cc_err_CCResult_uint64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "to_u64: integer out of range"));
+        }
+        value = value * 10 + digit;
+    }
+    return cc_ok_CCResult_uint64_t_CCError(value);
+}
+
+/* strtod needs a NUL-terminated buffer; slice length is caller controlled,
+ * so bound the stack copy and take a malloc round-trip for pathological
+ * lengths (same policy as cc__slice_parse_buf in string.cch). */
+#ifndef CC_SLICE_TO_F64_STACK_MAX
+#define CC_SLICE_TO_F64_STACK_MAX 256
+#endif
+
+static inline CCResult_double_CCError cc_slice_to_f64(const CCSlice* s_ptr) {
+    CCSlice s = s_ptr ? *s_ptr : cc_slice_empty();
+    char stack_buf[CC_SLICE_TO_F64_STACK_MAX];
+    char* buf;
+    char* end = NULL;
+    double v;
+    bool consumed_all, range;
+    if (!s.ptr || s.len == 0) {
+        return cc_err_CCResult_double_CCError(CC_ERROR(CC_ERR_PARSE, "to_f64: empty input"));
+    }
+    buf = (s.len + 1 <= sizeof(stack_buf)) ? stack_buf : (char*)malloc(s.len + 1);
+    if (!buf) {
+        return cc_err_CCResult_double_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "to_f64: buffer"));
+    }
+    memcpy(buf, s.ptr, s.len);
+    buf[s.len] = '\0';
+    errno = 0;
+    v = strtod(buf, &end);
+    consumed_all = (end == buf + s.len);
+    range = ((v == HUGE_VAL || v == -HUGE_VAL) && errno == ERANGE);
+    if (buf != stack_buf) free(buf);
+    if (!consumed_all) {
+        return cc_err_CCResult_double_CCError(CC_ERROR(CC_ERR_PARSE, "to_f64: not a number"));
+    }
+    if (range) {
+        return cc_err_CCResult_double_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "to_f64: out of range"));
+    }
+    return cc_ok_CCResult_double_CCError(v);
+}
+
+/*
+ * Overflow-checked int64 arithmetic (spec/draft_variants.md §9.3).
+ * Composes with `!>` handlers instead of hand-rolled INT64_MAX-delta
+ * guards.  Overflow is CC_ERR_INVALID_ARG.  Uses __builtin_*_overflow
+ * where the compiler provides it, with a portable fallback.
+ */
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_add_overflow) && __has_builtin(__builtin_sub_overflow) && \
+    __has_builtin(__builtin_mul_overflow)
+#define CC__HAS_OVERFLOW_BUILTINS 1
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 5 && !defined(__TINYC__)
+#define CC__HAS_OVERFLOW_BUILTINS 1
+#endif
+
+static inline CCResult_int64_t_CCError cc_add_i64_checked(int64_t a, int64_t b) {
+    int64_t r;
+#ifdef CC__HAS_OVERFLOW_BUILTINS
+    if (__builtin_add_overflow(a, b, &r)) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked add: overflow"));
+    }
+#else
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked add: overflow"));
+    }
+    r = a + b;
+#endif
+    return cc_ok_CCResult_int64_t_CCError(r);
+}
+
+static inline CCResult_int64_t_CCError cc_sub_i64_checked(int64_t a, int64_t b) {
+    int64_t r;
+#ifdef CC__HAS_OVERFLOW_BUILTINS
+    if (__builtin_sub_overflow(a, b, &r)) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked sub: overflow"));
+    }
+#else
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked sub: overflow"));
+    }
+    r = a - b;
+#endif
+    return cc_ok_CCResult_int64_t_CCError(r);
+}
+
+static inline CCResult_int64_t_CCError cc_mul_i64_checked(int64_t a, int64_t b) {
+    int64_t r;
+#ifdef CC__HAS_OVERFLOW_BUILTINS
+    if (__builtin_mul_overflow(a, b, &r)) {
+        return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked mul: overflow"));
+    }
+#else
+    {
+        bool overflow;
+        if (a > 0) {
+            overflow = (b > 0) ? (a > INT64_MAX / b) : (b < INT64_MIN / a);
+        } else {
+            overflow = (b > 0) ? (a < INT64_MIN / b) : (a != 0 && b < INT64_MAX / a);
+        }
+        if (overflow) {
+            return cc_err_CCResult_int64_t_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "checked mul: overflow"));
+        }
+    }
+    r = a * b;
+#endif
+    return cc_ok_CCResult_int64_t_CCError(r);
 }
 
 #endif /* CC_STD_SLICE_H */

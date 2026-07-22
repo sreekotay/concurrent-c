@@ -1,0 +1,47 @@
+/* Pin @string's behavior when its FIXED-arena destination is exhausted
+ * (cc_arena_fixed_buffer too small for the formatted output).
+ *
+ * Contract (the documented CCString sticky-poison semantics, string.cch):
+ * the builder POISONS instead of truncating — the result is a failed
+ * CCString whose len reads 0 and whose slice view is empty.  No silent
+ * truncation, no partial bytes, and later pushes stay no-ops.  Recovery is
+ * explicit via cc_string_clear(). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    /* Too small for the template output (needs > 24 bytes incl. builder
+     * headers): the @string result must be poisoned, not truncated. */
+    char buf[24];
+    CCArena a = cc_arena_fixed_buffer(buf, sizeof(buf));
+    int v = 123456;
+    CCString s = @string(`value=${v} plus a tail that cannot fit in the fixed arena`, &a);
+
+    assert(cc_string_failed(&s));
+    assert(cc_string_len(&s) == 0);
+    char[:0] view = s.as_slice();
+    assert(view.len == 0);
+    assert(cc_string_cstr(&s, &a) == NULL);
+
+    /* Poison is sticky: further pushes are no-ops, still failed. */
+    assert(cc_string_push_cstr(&s, "more", &a) == NULL);
+    assert(cc_string_failed(&s));
+
+    /* Recovery is explicit: clear() resets to a valid empty string. */
+    assert(cc_string_clear(&s) != NULL);
+    assert(!cc_string_failed(&s));
+    assert(cc_string_len(&s) == 0);
+
+    /* Same fixed arena, output that fits: works and is exact. */
+    char buf2[128];
+    CCArena b = cc_arena_fixed_buffer(buf2, sizeof(buf2));
+    CCString ok = @string(`v=${v}`, &b);
+    assert(!cc_string_failed(&ok));
+    char[:0] okview = ok.as_slice();
+    assert(okview.eq_cstr("v=123456"));
+
+    printf("string_tpl_fixed_arena_exhaustion_smoke: PASS\n");
+    return 0;
+}

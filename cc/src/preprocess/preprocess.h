@@ -161,6 +161,15 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 // source fragment used by later text-based lowering/codegen passes.
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
 
+/* Arena-less `@string(`...`)` slot registry: the template rewrite records
+ * each lowered slot's (file, line, text); the TCC stderr replay uses the
+ * lookup to rewrite "does not match any association" errors into the
+ * bounded-template diagnostic naming the interpolation and suggesting an
+ * arena (spec/draft_variants.md §9.2).  Lookup returns a joined
+ * "'${a}' / '${b}'" list for that file basename + line, or NULL. */
+void cc_string_stack_tpl_note_slot(const char* file, int line, const char* expr, size_t expr_len);
+const char* cc_string_stack_tpl_slots_for(const char* file, int line);
+
 // Lower `CC_GENERIC_FACTORY(Name) { ... }` sugar into a `cc_generic_register`
 // registration plus a `@comptime` factory function. Returns NULL when the
 // source has no occurrence, or (char*)-1 on a malformed header.
