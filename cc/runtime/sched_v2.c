@@ -336,7 +336,19 @@ struct sched_v2_state {
     /* Single global ready queue */
     v2_queue ready_queue;
 
-    /* Fiber free list (lock-free CAS stack) */
+    /* Fiber free list.
+     *
+     * Guarded by free_list_mu.  This was a lock-free Treiber stack, but
+     * the pop path (load head; read head->next; CAS head->next in) has
+     * the classic ABA hole: with no generation tag in the CAS, a thread
+     * preempted between reading `next` and the CAS can — after the head
+     * fiber is popped, reused, and freed back — install a stale `next`
+     * that points at a fiber which is meanwhile LIVE again.  The next
+     * alloc then hands out a live fiber, which double-enqueues it on the
+     * intrusive ready queue (shared `next` link) and corrupts both lists.
+     * A v2_slock costs one uncontended CAS, same as the ready queue's
+     * own lock which is taken on every push/pop anyway. */
+    v2_slock free_list_mu;
     fiber_v2* _Atomic free_list;
     pthread_mutex_t all_fibers_mu;
     fiber_v2* all_fibers;
@@ -856,12 +868,17 @@ static void fiber_v2_entry(mco_coro* co) {
  * ============================================================================ */
 
 static fiber_v2* fiber_v2_alloc(void) {
-    /* Try free list first */
-    fiber_v2* f = atomic_load_explicit(&g_v2.free_list, memory_order_acquire);
-    while (f) {
-        fiber_v2* next = f->next;
-        if (atomic_compare_exchange_weak_explicit(&g_v2.free_list, &f, next,
-                memory_order_release, memory_order_acquire)) {
+    /* Try free list first (see free_list_mu: pop must be ABA-safe). */
+    fiber_v2* f = NULL;
+    if (atomic_load_explicit(&g_v2.free_list, memory_order_acquire)) {
+        v2_slock_lock(&g_v2.free_list_mu);
+        f = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
+        if (f) {
+            atomic_store_explicit(&g_v2.free_list, f->next, memory_order_relaxed);
+        }
+        v2_slock_unlock(&g_v2.free_list_mu);
+    }
+    if (f) {
             f->generation++;
             f->next = NULL;
             /* Keep f->coro as-is: fiber_v2_free left the minicoro allocation
@@ -896,7 +913,6 @@ static fiber_v2* fiber_v2_alloc(void) {
             atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
             V2_STAT_INC(g_v2_fibers_alive);
             return f;
-        }
     }
 
     f = (fiber_v2*)calloc(1, sizeof(fiber_v2));
@@ -961,12 +977,12 @@ static void fiber_v2_free(fiber_v2* f) {
             atomic_fetch_add_explicit(&g_v2_pooled_coros, 1, memory_order_relaxed);
         }
     }
-    fiber_v2* head;
-    do {
-        head = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
-        f->next = head;
-    } while (!atomic_compare_exchange_weak_explicit(&g_v2.free_list, &head, f,
-            memory_order_release, memory_order_relaxed));
+    /* Push under free_list_mu (see the field comment: the lock-free pop
+     * was ABA-unsafe, and push/pop must share the same discipline). */
+    v2_slock_lock(&g_v2.free_list_mu);
+    f->next = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.free_list, f, memory_order_release);
+    v2_slock_unlock(&g_v2.free_list_mu);
 }
 
 /* ============================================================================
@@ -1242,6 +1258,26 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     }
 
     if (mco_status(f->coro) == MCO_DEAD) {
+        /* Snapshot ownership metadata BEFORE publishing done=1.
+         *
+         * The moment done=1 lands, a joiner (cc_block_on / sched_v2_join)
+         * may return, call sched_v2_fiber_release, and push this fiber_v2
+         * back to the pool — and a concurrent spawn may then REUSE it,
+         * repopulating saved_nursery for a brand-new task.  If we read
+         * f->saved_nursery after that recycle, we'd see the NEW task's
+         * nursery, take the worker-frees branch below, and free a LIVE
+         * fiber that is sitting in the ready queue.  fiber_v2_free then
+         * clobbers f->next (the intrusive ready-queue link) with the
+         * free-list link, severing the ready queue: the queue count goes
+         * phantom (workers spin on count>0 with an empty chain), the
+         * recycled fiber is delivered from two lists at once
+         * ("BUG: got fiber in state 0" / mco_resume rc=4 aborts), and
+         * cc_nursery_notify_child_done fires early for a child that never
+         * ran.  Reproduced by tests/hybrid_run_to_completion_smoke.ccs
+         * under parallel suite load (block_on releases t1/t2 into the
+         * pool right before three nursery spawns reuse them). */
+        int worker_frees = cc_v2_worker_frees_mode();
+        CCNursery* adm = worker_frees ? f->saved_nursery : NULL;
         atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
         atomic_store_explicit(&f->done, 1, memory_order_release);
         /* Dekker pair with sched_v2_join waiter: completer stores done then
@@ -1267,19 +1303,17 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
          * owns the release back to the v2 pool.  In classic mode the
          * join+release lives in cc_nursery_wait, so we leave the fiber
          * alone here. */
-        if (cc_v2_worker_frees_mode()) {
-            /* NOTE: admission_nursery is cleared by fiber_v2_entry right
-             * before the coroutine returns, so it is guaranteed NULL by
-             * the time we observe MCO_DEAD here.  saved_nursery holds
-             * the same value as admission_nursery at spawn time and is
-             * only cleared by fiber_v2_free/alloc, so it survives
-             * through entry and is the correct handle to identify a
-             * nursery-owned fiber at completion. */
-            CCNursery* adm = f->saved_nursery;
-            if (adm) {
-                fiber_v2_free(f);
-                cc_nursery_notify_child_done(adm);
-            }
+        /* NOTE: admission_nursery is cleared by fiber_v2_entry right
+         * before the coroutine returns, so it is guaranteed NULL by
+         * the time we observe MCO_DEAD here.  saved_nursery holds
+         * the same value as admission_nursery at spawn time and is
+         * only cleared by fiber_v2_free/alloc, so it survives
+         * through entry and is the correct handle to identify a
+         * nursery-owned fiber at completion.  adm was snapshotted
+         * above, before done=1 could hand the fiber to a joiner. */
+        if (worker_frees && adm) {
+            fiber_v2_free(f);
+            cc_nursery_notify_child_done(adm);
         }
         return;
     }
@@ -2171,6 +2205,7 @@ static void sched_v2_init_impl(void) {
     atomic_store_explicit(&g_v2.running, 1, memory_order_release);
     atomic_store_explicit(&g_v2.idle_workers, 0, memory_order_relaxed);
     v2_queue_init(&g_v2.ready_queue);
+    v2_slock_init(&g_v2.free_list_mu);
     pthread_mutex_init(&g_v2.all_fibers_mu, NULL);
     g_v2.all_fibers = NULL;
     wake_primitive_init(&g_v2.sysmon_wake);
@@ -2734,6 +2769,21 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
          * correlate the parked waiter with its target task. */
         cc__fiber_set_park_obj(f);
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+            /* Re-publish ourselves every pass.  A completer for a PREVIOUS
+             * task that recycled into this fiber_v2 can execute its
+             * exchange(join_waiter_fiber, NULL) late (it runs between
+             * done=1 and its final wake), stealing our registration and
+             * unparking us spuriously.  If we parked again without
+             * re-registering, the REAL completion would find waiter==NULL
+             * and only hit done_wake — which a parked fiber never waits
+             * on — a lost wake.  The store+fence re-runs the Dekker
+             * publish on every iteration, making the spurious unpark
+             * harmless. */
+            atomic_store_explicit(&f->join_waiter_fiber,
+                                  (cc__fiber*)cc__fiber_current(),
+                                  memory_order_release);
+            atomic_thread_fence(memory_order_seq_cst);
+            if (atomic_load_explicit(&f->done, memory_order_acquire)) break;
             cc__fiber_clear_pending_unpark();
             CC_FIBER_PARK_IF(&f->done, 0, "sched_v2_join");
         }
