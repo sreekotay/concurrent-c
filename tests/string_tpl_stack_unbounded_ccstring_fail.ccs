@@ -1,0 +1,13 @@
+/* Arena-less @string with a CCString interpolation must be a compile
+ * error: a CCString's formatted width is runtime data, never statically
+ * bounded (spec/draft_variants.md §9.2).  The arena form accepts CCString
+ * (pinned by tests/string_tpl_arena_unbounded_types_smoke.ccs). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena arena = @create(kilobytes(1)) @destroy;
+    CCString name = @string(`ada`, &arena);
+    char[:] s = @string(`n=${name}`);
+    (void)s;
+    return 0;
+}

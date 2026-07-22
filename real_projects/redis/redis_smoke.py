@@ -431,15 +431,36 @@ def wait_port(port, deadline_s=10.0):
     raise RuntimeError("port %d did not open" % port)
 
 
+def pick_free_port():
+    """Collision-safe port pick for --port 0: bind an ephemeral port, release
+    it, and hand it to the server.  The tiny release->rebind window is
+    acceptable for CI (the kernel avoids immediate ephemeral reuse)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=6397)
+    ap.add_argument("--port", type=int, default=6397,
+                    help="server port; 0 = pick a free ephemeral port "
+                         "(collision-safe for parallel CI; requires spawn mode)")
     ap.add_argument("--server", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..",
         "out", "redis_idiomatic"))
     ap.add_argument("--no-spawn", action="store_true",
                     help="target an already-running server instead of spawning one")
     args = ap.parse_args()
+
+    if args.port == 0:
+        if args.no_spawn:
+            print("--port 0 requires spawn mode (an already-running server "
+                  "has a fixed port)", file=sys.stderr)
+            return 2
+        args.port = pick_free_port()
+        print("[smoke] using free port %d" % args.port)
 
     proc = None
     if not args.no_spawn:

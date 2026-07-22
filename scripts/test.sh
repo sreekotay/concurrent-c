@@ -55,6 +55,26 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] diag cache replay selftest FAILED"
     exit 1
   fi
+
+  # tcc patch-apply stale-state auto-reset (#116): current tree is a no-op,
+  # a stale (old-patch) tree auto-resets and applies, a pristine tree
+  # applies.  Needs the tcc submodule; restores the tree on exit.
+  if [ -e third_party/tcc/.git ]; then
+    if ! bash scripts/test_tcc_patch_apply.sh; then
+      echo "[test] tcc patch apply selftest FAILED"
+      exit 1
+    fi
+  else
+    echo "[test] SKIP tcc patch apply selftest (tcc submodule not initialized)"
+  fi
+
+  # Redis functional smoke (#111 command semantics, #117 wire parity,
+  # #130 pipeline reply ordering): builds the real redis port (cached) and
+  # runs redis_smoke.py once on a collision-safe ephemeral port.
+  if ! sh scripts/test_redis_functional.sh; then
+    echo "[test] redis functional smoke FAILED"
+    exit 1
+  fi
 fi
 
 exec ./tools/cc_test --jobs 4 "$@"

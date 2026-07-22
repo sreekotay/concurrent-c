@@ -1,0 +1,13 @@
+/* Arena-less @string with a float/double interpolation must be a compile
+ * error: floating formats have no entry in the bounded-width _Generic
+ * tables (spec/draft_variants.md §9.2 — allowed slot types are
+ * int/i64/u64/bool/char).  The arena form accepts double (pinned by
+ * tests/string_tpl_arena_unbounded_types_smoke.ccs). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    double ratio = 1.5;
+    char[:] s = @string(`r=${ratio}`);
+    (void)s;
+    return 0;
+}
