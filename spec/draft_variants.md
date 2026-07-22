@@ -91,13 +91,22 @@ layout-compatible by construction.
 
 ## 4. Construction and accessors
 
-Generated per-arm constructors, mirroring `cc_ok`/`cc_err`:
+Generated per-arm constructors. The idiomatic surface is the TYPE-SCOPED
+DOT form, riding the existing type-scoped UFCS convention (same lowering
+contract as `Tweet.parse(...)` -> `Tweet_parse(...)`):
 
 ```c
-RedisValue v = RedisValue_num(42);
-RedisValue s = RedisValue_str(cc_string_from(...));
-Signal    hup = Signal_hup();          /* void arm: no payload */
+RedisValue v = RedisValue.num(42);      /* surface: type-scoped UFCS      */
+RedisValue s = RedisValue.str(cc_string_from(...));
+Signal    hup = Signal.hup();           /* void arm: no payload           */
+/* RedisValue_num(42) etc. remain valid — the lowered/C-interop spelling. */
 ```
+
+Case labels keep the underscored enum constants in v1
+(`case RedisValue_num:`) — constant-expression position, deliberately the
+raw-C surface; teaching the rewriter that a non-call `RedisValue.num` in
+case position denotes the tag is a purely additive fast-follow if the
+asymmetry grates (recorded in §11).
 
 Raw `v.kind == RedisValue_num` and `v.u.num` remain the C-interop truth
 (as with Result, they're interop detail, not preferred surface style).
@@ -275,7 +284,10 @@ representation change carried by the type system.
    a value-producing EXPRESSION (comptime-synthesized event variant,
    consumed by §5's checked switch) — never as a statement. The keyword
    stays reserved.
-7. **Nil arms in wire types.** RESP taught us dispatch-byte collision makes
+7. **Dot-form tags in case labels.** `case RedisValue.num:` (non-call,
+   constant position) as sugar for the enum constant — additive
+   fast-follow; v1 keeps underscored tags in switch.
+8. **Nil arms in wire types.** RESP taught us dispatch-byte collision makes
    `nil` a boundary case there; data-model variants have no dispatch byte,
    so `nil: void;` arms are fine. No rule needed — recording the asymmetry.
 
