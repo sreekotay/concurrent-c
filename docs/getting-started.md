@@ -99,7 +99,9 @@ CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;  // @destroy frees the chann
 
 This nested-nursery shape (consumer outside, producer + `close_on` inside) is the
 deadlock-free close protocol — see `examples/recipe_channel_pipeline.ccs`. Putting the
-consumer in the *same* nursery that closes `tx` is the compile-time deadlock pattern.
+consumer in the *same* nursery that closes `tx` deadlocks: the compiler does NOT catch
+this pattern — the runtime deadlock detector reports it when it happens (or, with
+`CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, the recv fails with `EDEADLK` instead of hanging).
 
 ### Cleanup with `@defer`
 

@@ -106,68 +106,61 @@ If you add new scheduler behaviors, update these invariants and extend the stres
 
 ### Environment flags
 
+These are the flags the runtime actually reads (see `getenv` calls in
+`cc/runtime/channel.c` and `cc/runtime/sched_v2.c`):
+
 | Variable | Description |
 |----------|-------------|
-| `CC_CHAN_DEBUG=1` | Channel operation logs + global debug counter dump on deadlock |
-| `CC_CHAN_DEBUG_VERBOSE=1` | Detailed select/wake/park logging (noisy — can cause timeouts) |
+| `CC_DEADLOCK_ABORT=0` | Continue after deadlock detection instead of exiting 124 (for log capture) |
 | `CC_CHAN_NO_LOCKFREE=1` | Force mutex-based channel path (isolate lock-free bugs) |
-| `CC_DEBUG_DEADLOCK_RUNTIME=1` | Dump all fibers (parked + done) and per-channel state on deadlock |
-| `CC_DEADLOCK_ABORT=0` | Continue after deadlock detection (for log capture) |
-| `CC_DEBUG_JOIN=1` | Log fiber join/unpark operations to stderr |
-| `CC_DEBUG_WAKE=1` | Log wake counter increments |
-| `CC_PARK_DEBUG=1` | Log `park_if` decisions (skip reasons, pending_unpark) |
-
-### Compile-time debug flags
-
-| Flag | Description |
-|------|-------------|
-| `-DCC_DEBUG_SYSMON` | Log sysmon scaling decisions to stderr |
-| `-DCC_DEBUG_FIBER` | Log fiber park/unpark edge cases |
-
-**Note:** The old compile-time `-DCC_DEBUG_DEADLOCK` flag has been replaced by the runtime `CC_DEBUG_DEADLOCK_RUNTIME=1` environment variable. No recompile needed.
+| `CC_CHAN_TRACE_FLOW=1` | Trace channel send/recv flow events to stderr |
+| `CC_CHAN_TRACE_CLOSE=1` | Trace channel close events |
+| `CC_CHAN_TRACE_RECV_EMPTY=1` | Trace recv-on-empty wait/wake transitions |
+| `CC_CHAN_TRACE_REQ_WAKE=1` | Trace requested-wake events |
+| `CC_CHAN_TRACE_OBJ=<ptr>` | Filter the traces above to a single channel object address |
+| `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` | Recv that waits on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` instead of deadlocking |
+| `CC_WORKERS=n` | Set worker thread count |
 
 ### Repro commands (common failures)
 - Select deadlock:  
-  `CC_CHAN_DEBUG=1 CC_CHAN_DEBUG_VERBOSE=1 CC_DEBUG_DEADLOCK_RUNTIME=1 CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run stress/lost_wakeup_hammer.ccs --timeout 5`
+  `CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run stress/lost_wakeup_hammer.ccs --timeout 5`
 - Lock-free recv deadlock (intermittent):  
-  `CC_DEBUG_DEADLOCK_RUNTIME=1 CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run perf/perf_channel_throughput.ccs --timeout 5`
+  `CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run perf/perf_channel_throughput.ccs --timeout 5`
 - Pipeline data loss:  
-  `CC_DEBUG_DEADLOCK_RUNTIME=1 CC_CHAN_DEBUG=1 CC_DEADLOCK_ABORT=0 ./cc/bin/ccc run stress/pipeline_long.ccs --timeout 10`
+  `CC_DEADLOCK_ABORT=0 CC_CHAN_TRACE_FLOW=1 ./cc/bin/ccc run stress/pipeline_long.ccs --timeout 10`
 
 ### Deadlock output example
 
-With `CC_DEBUG_DEADLOCK_RUNTIME=1`:
+The detector runs unconditionally; when all workers stall for ~1s it prints a
+banner like this (and exits 124 unless `CC_DEADLOCK_ABORT=0`):
+
 ```
 ╔══════════════════════════════════════════════════════════════╗
 ║                     DEADLOCK DETECTED                        ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Runtime state:
-  Workers: 8 total (8 base, 0 temp), 8 unavailable
-  Fibers:  2 parked, 4 completed, 6 spawned total, 2 pending
+  V2 workers: 4 total, 4 idle (all idle is the stall signal)
+  V2 fibers:  1 parked internal, 0 parked external-wait, 0 parked deadlock-suppressed
+  Internal parked fibers:
+  (parked) v2_fiber=0x... state=PARKED reason=chan_recv_wait_empty obj=0x... last_thread=1 external_wait_depth=0 suppress_depth=0
+    chan state: ch=0x... cap=1 count=0 lf_count=0 inflight=0 closed=0 ... has_recv_waiters=1 has_send_waiters=0 ...
+  fiber totals: total=2 parked=1 internal_parked=1 skipped_parked=0
 
-Parked fibers (waiting for unpark that will never come):
-  [fiber 1] chan_send: buffer full, waiting for space at channel.c:2355 (obj=0x...)
-  [chan 0x...] cap=8 count=8 closed=0 send_waiters=1 recv_waiters=0
-    dbg: send_calls=10000 recv_calls=10000 enq_ok=9998 deq_ok=9998
-    dbg: direct_send=1 direct_recv=1 recv_rm0=0 ...
-  [fiber 2] chan_recv: buffer empty, waiting for data at channel.c:2798 (obj=0x...)
-  [chan 0x...] cap=8 count=0 closed=0 send_waiters=0 recv_waiters=1
-
-All fibers (every fiber ever created):
-  [fiber 1] state=PARKED  done=0 pending_unpark=0 park_reason=chan_send ...
-  [fiber 2] state=PARKED  done=0 pending_unpark=0 park_reason=chan_recv ...
-  [fiber 3] state=DONE    done=1 pending_unpark=0 park_reason=none ...
+  v2 sched: threads=4 idle=4 ready_queue=0 alive_fibers=2 stall_detect=4 dead_total=0
+  ...
+Aborting with exit code 124. Set CC_DEADLOCK_ABORT=0 to continue.
 ```
 
-### What to look for in logs
-- `direct_send` != `direct_recv` → a direct handoff was written but never consumed. Check `notified == DATA` handling in recv.
-- `recv_wake_no_waiter` > 0 → sender tried to signal a receiver but the wait list was empty. Potential gap in coverage.
-- `send_calls` != `recv_calls` for a closed unbuffered channel → one side exited early (check for `ECANCELED` / nursery cancellation in the loop).
-- `park_reason=chan_recv` with `closed=0` and `count=0` → channel not yet closed, but no data and no sender is running. Likely a lost close notification.
-- `pending_unpark=1` on a `PARKED` fiber → unpark was latched but park committed anyway. This should not happen with `park_if`.
-- Lots of `unpark_skip` in verbose logs → early unpark before a fiber parks (usually benign with `pending_unpark` latch).
-- `CC_CHAN_DEBUG_VERBOSE=1` can slow execution enough to cause timeouts. Use it for targeted debugging, not stress runs.
+Channels created via `cc_chan_pair_create` also get `chan user: name=… site=…:…`
+lines in the dump (the R2 channel metadata), pointing back at the user's
+declaration site.
+
+### What to look for in the dump
+- `reason=chan_recv_wait_empty` with `closed=0` and `count=0` → channel never closed, but no sender is running. Usually the closing-nursery foot-gun (consumer inside the nursery that owns `close_on`) or a producer that exited early.
+- `reason=chan_send_*` with `count == cap` → buffer full and no consumer draining; check consumer lifetime and buffer sizing.
+- `parked external-wait` / `parked deadlock-suppressed` counts are excluded from the verdict — fibers inside `cc_external_wait_enter/leave` / `cc_deadlock_suppress_enter/leave` scopes do not trigger the detector.
+- `inflight` > 0 on a stalled channel → an in-flight lock-free enqueue never completed; that is a runtime bug, not an application bug.
 
 ### Run-all integration
 - `tools/run_all.ccs` writes logs to `tmp/run_all_logs/<test>.{stdout,stderr}.txt`.

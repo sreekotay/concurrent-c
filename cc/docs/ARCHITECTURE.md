@@ -177,7 +177,7 @@ The pipeline is best understood as three layers, not nine phases. (The Phase 1�
 - Closure ID markers (`cc/src/preprocess/cc_closure_markers.c`) — injects `/*CC_CLO:N*/` comments into the **codegen buffer** for stable closure identity. **As of 2026-07-20 markers are the ONLY closure identity:** every producer emits them (parse-build for user closures, autoblock for its synthesized wrappers), TCC's `preprocess_skip` records marker IDs inside `#if`-skipped regions so the closure pass can prune them, and after pruning marker/closure count equality is an invariant. The old `(line,col)`+forward-`=>`-scan heuristic and its recovery branch are **deleted**; macro-origin closures (whose `=>` exists only post-CPP-expand, so no marker can be placed) are an unsupported construct with a real diagnostic — "closure literals inside #define bodies are not supported" — not a silent fallback. There is no disable knob (`CC_NO_CLOSURE_MARKERS` is removed).
 - CPP pre-expand (`cc/src/preprocess/cpp_expand.c`, M7.A) — runs TCC's CPP after text passes so `#include` and macro expansion happens before TCC's second-pass parse. Default-on.
 - Initial parse: `cc_tcc_bridge_parse_string_to_ast` → root stub-AST.
-- Checker: `cc/src/visitor/checker.c` — semantic checks (slice move, provenance, deadlock-by-construction).
+- Checker: `cc/src/visitor/checker.c` — semantic checks (slice move/uniqueness tracking). It performs no deadlock analysis; deadlocks are caught by the runtime detector, not the compiler.
 
 **Reparses:** 1 (the initial parse). Text passes do not reparse.
 

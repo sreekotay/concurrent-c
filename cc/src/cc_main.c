@@ -535,8 +535,6 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --strict-deadlock   Force deadlock heuristics to errors (default; also: CC_STRICT_DEADLOCK=1)\n");
-    fprintf(stderr, "  --no-strict-deadlock  Downgrade deadlock heuristics to warnings for this run\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }
@@ -923,19 +921,10 @@ typedef struct {
     const char* out_dir;
     const char* bin_dir;
     int no_cache;
-    int strict_deadlock;
-    int strict_deadlock_set;
     char** cli_names;
     long long* cli_values;
     size_t cli_count;
 } CCBuildOptions;
-
-static void cc__apply_deadlock_env(const CCBuildOptions* opt) {
-    if (!opt) return;
-    if (opt->strict_deadlock_set) {
-        setenv("CC_STRICT_DEADLOCK", opt->strict_deadlock ? "1" : "0", 1);
-    }
-}
 
 /* Extract -I paths from cc_flags and set CC_USER_INCLUDE_PATH (colon-separated).
    This allows TCC parsing to find user-specified include directories. */
@@ -986,7 +975,6 @@ static void cc__apply_user_include_env(const char* cc_flags) {
 }
 
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
-    cc__apply_deadlock_env(opt);
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
     if (g_emit_c_inspect) {
         if (g_emit_c_inspect_path && g_emit_c_inspect_path[0]) {
@@ -2637,8 +2625,6 @@ static int run_build_mode(int argc, char** argv) {
     int summary = 0;
     CCMode mode = CC_MODE_LINK;
     int no_cache = 0;
-    int strict_deadlock = 0;
-    int strict_deadlock_set = 0;
 
     enum {
         CC_BUILD_STEP_DEFAULT = 0,
@@ -2703,8 +2689,6 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
-        if (strcmp(argv[i], "--strict-deadlock") == 0) { strict_deadlock = 1; strict_deadlock_set = 1; continue; }
-        if (strcmp(argv[i], "--no-strict-deadlock") == 0) { strict_deadlock = 0; strict_deadlock_set = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); goto parse_fail; }
             out_dir = argv[++i];
@@ -2833,14 +2817,6 @@ static int run_build_mode(int argc, char** argv) {
         strncat(combined_cc_flags, def, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
     }
     cc_flags = combined_cc_flags[0] ? combined_cc_flags : cc_flags;
-
-    /* Apply deadlock strictness env (if requested). */
-    if (strict_deadlock_set) {
-        CCBuildOptions tmp = {0};
-        tmp.strict_deadlock = strict_deadlock;
-        tmp.strict_deadlock_set = 1;
-        cc__apply_deadlock_env(&tmp);
-    }
 
     // Apply output directory override before creating/deriving any outputs.
     cc_set_out_dir(out_dir, bin_dir);
@@ -3348,8 +3324,6 @@ static int run_build_mode(int argc, char** argv) {
                 .out_dir = g_out_root,
                 .bin_dir = g_bin_root,
                 .no_cache = no_cache,
-                .strict_deadlock = strict_deadlock,
-                .strict_deadlock_set = strict_deadlock_set,
                 .cli_names = cli_names,
                 .cli_values = cli_values,
                 .cli_count = cli_count,
@@ -3594,8 +3568,6 @@ static int run_build_mode(int argc, char** argv) {
             .out_dir = g_out_root,
             .bin_dir = g_bin_root,
             .no_cache = no_cache,
-            .strict_deadlock = strict_deadlock,
-            .strict_deadlock_set = strict_deadlock_set,
             .cli_names = cli_names,
             .cli_values = cli_values,
             .cli_count = cli_count,
@@ -3911,8 +3883,6 @@ static int run_build_mode(int argc, char** argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
-        .strict_deadlock = strict_deadlock,
-        .strict_deadlock_set = strict_deadlock_set,
         .cli_names = cli_names,
         .cli_values = cli_values,
         .cli_count = cli_count,
@@ -4128,8 +4098,6 @@ int main(int argc, char **argv) {
     int keep_c = 1;
     int verbose = 0;
     int no_cache = 0;
-    int strict_deadlock = 0;
-    int strict_deadlock_set = 0;
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
     char out_stem_buf[128];
@@ -4168,8 +4136,6 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
-        if (strcmp(argv[i], "--strict-deadlock") == 0) { strict_deadlock = 1; strict_deadlock_set = 1; continue; }
-        if (strcmp(argv[i], "--no-strict-deadlock") == 0) { strict_deadlock = 0; strict_deadlock_set = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); usage(argv[0]); return 1; }
             out_dir = argv[++i];
@@ -4219,14 +4185,6 @@ int main(int argc, char **argv) {
         // Positional input.
         if (pos_count >= max_pos) { fprintf(stderr, "cc: too many input files (max %d)\n", max_pos); return 1; }
         pos_args[pos_count++] = argv[i];
-    }
-
-    /* Apply deadlock strictness env (if requested). */
-    if (strict_deadlock_set) {
-        CCBuildOptions tmp = {0};
-        tmp.strict_deadlock = strict_deadlock;
-        tmp.strict_deadlock_set = 1;
-        cc__apply_deadlock_env(&tmp);
     }
 
     // If both are provided, debug wins (safe default).
@@ -4469,8 +4427,6 @@ int main(int argc, char **argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
-        .strict_deadlock = strict_deadlock,
-        .strict_deadlock_set = strict_deadlock_set,
         .cli_names = NULL,
         .cli_values = NULL,
         .cli_count = 0,

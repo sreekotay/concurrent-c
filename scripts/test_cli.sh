@@ -30,4 +30,15 @@ case "$out" in
   *"multiple build.cc"*) fail "same-file build.cc counted as multiple: $out" ;;
 esac
 
+# 3) The strict-deadlock knob was deleted (it was write-only: the driver
+#    setenv'd CC_STRICT_DEADLOCK but nothing ever read it, and the compile-time
+#    deadlock heuristics it claimed to gate do not exist).  Pin that the driver
+#    no longer advertises it and no longer silently accepts the flag.
+if "$CCC" --help 2>&1 | grep -qi -e "strict-deadlock" -e "CC_STRICT_DEADLOCK"; then
+  fail "--help still advertises the deleted strict-deadlock knob"
+fi
+if "$CCC" build --strict-deadlock "$tmp" >/dev/null 2>&1; then
+  fail "deleted flag --strict-deadlock was silently accepted"
+fi
+
 echo "[test_cli] OK"
