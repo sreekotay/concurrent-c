@@ -3407,6 +3407,22 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
     }
 }
 
+/* FIFO INVARIANT (buffered direct handoff): a sender may hand its item
+ * directly to a parked receiver ONLY when the ring is empty.  A receiver's
+ * wait node can be on the list while the ring is non-empty (it registers,
+ * then re-checks; a concurrent enqueue lands in that window).  Handing the
+ * NEW item to that node would deliver it ahead of the OLDER items still in
+ * the ring — the receiver returns the handed value immediately and dequeues
+ * the older ones later, i.e. per-sender FIFO is violated (observed as the
+ * redis_smoke pipeline replies arriving shifted/reordered by one).  The
+ * lf_count load is authoritative for OUR OWN earlier enqueues (same fiber,
+ * program order), which is exactly the ordering channels guarantee; when the
+ * ring is non-empty we skip the handoff and take the enqueue path, whose
+ * post-enqueue signal wakes the parked receiver to drain in ring order. */
+static inline int cc__chan_buffered_handoff_would_reorder(CCChan* ch) {
+    return cc__chan_lf_count(ch) > 0;
+}
+
 static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, const void* value) {
     if (!ch) return 0;
 
@@ -3419,6 +3435,10 @@ static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, c
         int err = ch->rx_error_code;
         pthread_mutex_unlock(&ch->mu);
         return -err;
+    }
+    if (cc__chan_buffered_handoff_would_reorder(ch)) {
+        pthread_mutex_unlock(&ch->mu);
+        return 0;
     }
 
     cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
@@ -3739,7 +3759,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         if (ch->rx_error_closed) return ch->rx_error_code;
         
         /* Direct handoff: if receivers waiting, give item directly to one.
-         * This must be done under lock to coordinate with the fair queue. */
+         * This must be done under lock to coordinate with the fair queue.
+         * FIFO gate: only when the ring is empty — otherwise this item would
+         * overtake older queued items (see
+         * cc__chan_buffered_handoff_would_reorder). */
         if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
             cc__chan_trace_req_wake(ch, "send_direct_handoff_check", value, NULL);
             cc_chan_lock(ch);
@@ -3749,7 +3772,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 return rc2;
             }
             if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
-            cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+            cc__fiber_wait_node* rnode = cc__chan_buffered_handoff_would_reorder(ch)
+                                             ? NULL
+                                             : cc__chan_pop_recv_waiter(ch);
             if (rnode) {
                 /* Direct handoff: helper stores slot, marks notified=DATA,
                  * decrements rv_recv_waiters, and schedules the wake.
@@ -3950,7 +3975,13 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
                 return rc2;
             }
             if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
-            cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+            /* FIFO gate: direct handoff only when the ring is empty, else this
+             * reply would overtake older queued replies (see
+             * cc__chan_buffered_handoff_would_reorder — the redis_smoke
+             * pipeline shift-by-one). Skip to the enqueue path below. */
+            cc__fiber_wait_node* rnode = cc__chan_buffered_handoff_would_reorder(ch)
+                                             ? NULL
+                                             : cc__chan_pop_recv_waiter(ch);
             if (rnode) {
                 cc__chan_build_into(builder, rnode->data, arena);
                 atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
