@@ -209,12 +209,19 @@ Two idiom gaps that stay painful even with variants:
 1. **`char[:].to_i64()` → `int64_t !>(CCError)`** (and `to_u64`, `to_f64`)
    — replaces per-project `parse_i64`. Strict: full-slice consumption,
    overflow → `CC_ERR_INVALID_ARG`-class error.
-2. **(Withdrawn: `@fmt`.)** A stack-destination template form is
-   unnecessary — `cc_arena_fixed_buffer(buf, cap)` + `@string` already
-   compose to zero-allocation caller-buffer formatting, and in practice
-   most format sites already have an arena in scope. Surviving residue:
-   PIN `@string`'s behavior on fixed-arena exhaustion (loud, defined,
-   tested — not silent truncation). No new syntax.
+2. **Arena-less `@string`: the bounded-template stack form.** Omitting
+   the arena is legal iff the template's maximum width is statically
+   boundable (`${int}`/`${i64}`/`${bool}`/`${char}` + literal text).
+   Lowering emits the exact block-scoped `char buf[N]` you'd write by
+   hand, sized by the compiler, and yields a **`char[:]` borrow** with
+   stack provenance (escape flagged where provable). An unbounded
+   interpolation (`${slice}`, ...) without an arena is a COMPILE ERROR
+   naming the interpolation and suggesting an arena. The arena form is
+   unchanged and yields an owned `CCString`; unbounded-but-stack cases
+   use `cc_arena_fixed_buffer`. (This supersedes both the earlier `@fmt`
+   proposal and its withdrawal: same single surface, ergonomics by
+   omission, guarded by boundedness.) Surviving pin regardless:
+   `@string` on FIXED-arena exhaustion must be loud and defined.
 3. **`cc_add_i64_checked(a, b)` → `int64_t !>(CCError)`** (family) —
    overflow-checked arithmetic that composes with `!>` handlers instead of
    hand-rolled `INT64_MAX - delta` guards.
@@ -265,8 +272,11 @@ representation change carried by the type system.
 2. **Multi-field arms.** Schema variants have them (`bulk [len, data]`).
    `@variant` v1 says one type per arm (use a struct); revisit at §8
    unification.
-3. **(Withdrawn with `@fmt`.)** The surviving question is `@string` on
-   fixed-arena exhaustion: must be loud and defined (pin with a test).
+3. **Arena-less `@string` escape checking.** The borrowed slice's stack
+   provenance makes escape detection best-effort (same class as existing
+   slice provenance) — accepted; no worse than the hand-written buffer
+   dance it replaces. Fixed-arena exhaustion in `@string` still needs its
+   loud, defined, tested contract.
 4. **Value-yielding handlers.** Today every `!>` handler DIVERGES
    (return/goto). The db_incrby demo uses a handler whose last expression
    yields a substitute value for the projection (`unwrap-or-else`). That
