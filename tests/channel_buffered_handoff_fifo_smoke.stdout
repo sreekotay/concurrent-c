@@ -1,0 +1,5 @@
+# FIFO order must hold on buffered channels even when senders race a
+# parking receiver (direct handoff gated on empty ring).
+channel_buffered_handoff_fifo_smoke: try_send_into FIFO PASS
+channel_buffered_handoff_fifo_smoke: blocking send FIFO PASS
+channel_buffered_handoff_fifo_smoke: ALL PASS

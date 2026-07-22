@@ -1,0 +1,183 @@
+/*
+ * Buffered-channel FIFO pin: direct handoff must never reorder the stream.
+ *
+ * Root cause pinned here: cc_chan_try_send_into (and cc_chan_send) had a
+ * buffered direct-handoff path that handed the NEW item straight to a parked
+ * receiver's wait node WITHOUT checking that the ring was empty.  A receiver
+ * registers its wait node and then re-checks the ring; a concurrent enqueue
+ * can land in that window, so the node can be on the list while the ring is
+ * non-empty.  Handing item k+1 to that node delivers it before the still
+ * queued item k — per-sender FIFO breaks.  Observed end-to-end as the
+ * redis_smoke 1000-op pipeline replies arriving shifted by one (the reply
+ * channel is exactly this shape: 1:1, cap 16, owner queues replies with
+ * cc_channel_raw_try_send_into while the client fiber parks in recv).
+ *
+ * Phase 1 mirrors that reply channel: cap-16 1:1 channel, >8-byte elements
+ * (ring backend), sender uses cc_channel_raw_try_send_into (EAGAIN = yield
+ * and retry), receiver blocks in cc_channel_recv.  Before the FIFO gate in
+ * cc__chan_buffered_handoff_would_reorder, this phase failed within a few
+ * thousand items on every run (5/5) on a 4-core host.
+ *
+ * Phase 2 pins the same invariant for blocking cc_channel_send (the redis
+ * request channel shape), whose full-buffer fallback path also consults the
+ * direct-handoff check.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+#define CAP 16
+#define N_ITEMS 400000
+
+/* > sizeof(void*) so the ring-queue backend is used (RedisReply shape). */
+typedef struct BigItem {
+    uint64_t seq;
+    uint64_t pad[4];
+} BigItem;
+
+typedef BigItem[~CAP 1:1 >] BigTx;
+typedef BigItem[~CAP 1:1 <] BigRx;
+
+typedef uint64_t[~CAP 1:1 >] U64Tx;
+typedef uint64_t[~CAP 1:1 <] U64Rx;
+
+static cc_atomic_int g_errors = 0;
+
+static void* big_builder(void* env, intptr_t slot, intptr_t arena) {
+    (void)arena;
+    BigItem* it = (BigItem*)slot;
+    it->seq = *(uint64_t*)env;
+    return NULL;
+}
+
+static void big_sender_try_send_into(BigTx tx) {
+    for (uint64_t i = 0; i < N_ITEMS; ++i) {
+        for (;;) {
+            CCClosure2 b = cc_closure2_make(big_builder, &i, NULL);
+            int rc = cc_channel_raw_try_send_into(tx.raw, b, sizeof(BigItem), NULL);
+            if (rc == 0) break;
+            if (rc != EAGAIN) {
+                fprintf(stderr,
+                        "channel_buffered_handoff_fifo_smoke: try_send_into rc=%d at %llu\n",
+                        rc, (unsigned long long)i);
+                cc_atomic_fetch_add(&g_errors, 1);
+                return;
+            }
+            cc_yield();
+        }
+    }
+    cc_channel_close(tx);
+}
+
+static void big_receiver(BigRx rx) {
+    uint64_t expect = 0;
+    BigItem it;
+    memset(&it, 0, sizeof(it));
+    while (cc_io_avail(cc_channel_recv(rx, &it))) {
+        if (it.seq != expect) {
+            if (cc_atomic_load(&g_errors) < 10) {
+                fprintf(stderr,
+                        "channel_buffered_handoff_fifo_smoke: big got seq=%llu want %llu\n",
+                        (unsigned long long)it.seq, (unsigned long long)expect);
+            }
+            cc_atomic_fetch_add(&g_errors, 1);
+            expect = it.seq + 1; /* resync so one inversion reports once */
+            continue;
+        }
+        expect++;
+    }
+    if (expect != N_ITEMS) {
+        fprintf(stderr,
+                "channel_buffered_handoff_fifo_smoke: big drained %llu of %d\n",
+                (unsigned long long)expect, N_ITEMS);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+}
+
+static void u64_sender_blocking(U64Tx tx) {
+    for (uint64_t i = 0; i < N_ITEMS; ++i) {
+        if (!cc_io_avail(cc_channel_send(tx, i))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+    }
+    cc_channel_close(tx);
+}
+
+static void u64_receiver(U64Rx rx) {
+    uint64_t expect = 0;
+    uint64_t v = 0;
+    while (cc_io_avail(cc_channel_recv(rx, &v))) {
+        if (v != expect) {
+            if (cc_atomic_load(&g_errors) < 10) {
+                fprintf(stderr,
+                        "channel_buffered_handoff_fifo_smoke: u64 got %llu want %llu\n",
+                        (unsigned long long)v, (unsigned long long)expect);
+            }
+            cc_atomic_fetch_add(&g_errors, 1);
+            expect = v + 1;
+            continue;
+        }
+        expect++;
+    }
+    if (expect != N_ITEMS) {
+        fprintf(stderr,
+                "channel_buffered_handoff_fifo_smoke: u64 drained %llu of %d\n",
+                (unsigned long long)expect, N_ITEMS);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+}
+
+int main(void) {
+    cc_sched_set_num_workers(4);
+
+    {
+        BigTx tx; BigRx rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx);
+        if (!ch) return 2;
+        @defer ch.free();
+        {
+            CCNursery* n = @create(NULL) @destroy;
+            if (!n) return 3;
+            BigTx txr = tx; BigRx rxr = rx;
+            n->spawn(() => [txr] { big_sender_try_send_into(txr); });
+            n->spawn(() => [rxr] { big_receiver(rxr); });
+        }
+    }
+    if (cc_atomic_load(&g_errors) != 0) {
+        fprintf(stderr,
+                "channel_buffered_handoff_fifo_smoke: try_send_into FIFO FAIL errors=%d\n",
+                (int)cc_atomic_load(&g_errors));
+        return 10;
+    }
+    printf("channel_buffered_handoff_fifo_smoke: try_send_into FIFO PASS\n");
+
+    {
+        U64Tx tx; U64Rx rx;
+        CCChan* ch = cc_channel_pair(&tx, &rx);
+        if (!ch) return 4;
+        @defer ch.free();
+        {
+            CCNursery* n = @create(NULL) @destroy;
+            if (!n) return 5;
+            U64Tx txr = tx; U64Rx rxr = rx;
+            n->spawn(() => [txr] { u64_sender_blocking(txr); });
+            n->spawn(() => [rxr] { u64_receiver(rxr); });
+        }
+    }
+    if (cc_atomic_load(&g_errors) != 0) {
+        fprintf(stderr,
+                "channel_buffered_handoff_fifo_smoke: blocking send FIFO FAIL errors=%d\n",
+                (int)cc_atomic_load(&g_errors));
+        return 11;
+    }
+    printf("channel_buffered_handoff_fifo_smoke: blocking send FIFO PASS\n");
+    printf("channel_buffered_handoff_fifo_smoke: ALL PASS\n");
+    return 0;
+}
