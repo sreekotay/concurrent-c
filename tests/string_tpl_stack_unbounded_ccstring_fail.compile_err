@@ -1,0 +1,2 @@
+interpolation '${name}' has no statically bounded width
+pass an arena

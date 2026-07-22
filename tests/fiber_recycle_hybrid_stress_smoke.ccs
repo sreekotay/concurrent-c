@@ -1,0 +1,118 @@
+/* Bounded stress pin for the #123 fiber-recycle races in sched_v2.c:
+ *
+ *   1. Completer use-after-release: thread_v2_run_fiber's MCO_DEAD branch
+ *      read f->saved_nursery AFTER publishing done=1.  Once done=1 lands, a
+ *      joiner (cc_block_on) may release the fiber and a concurrent spawn may
+ *      recycle it, so the completer could observe the NEW task's nursery,
+ *      take the worker-frees branch, and free a LIVE fiber sitting in the
+ *      ready queue (fiber_v2_free clobbers f->next, severing the queue:
+ *      "BUG: got fiber in state 0" / mco_resume rc=4 / sysmon STALL hang).
+ *   2. Free-list ABA: the fiber pool was a lock-free Treiber stack popped
+ *      via plain f->next read + untagged CAS; a stale CAS could install a
+ *      live fiber as the free-list head, double-allocating it.
+ *
+ * Both need the HYBRID shape: block_on frees fibers into the pool
+ * immediately before nursery spawnhybrid calls recycle them.  The original
+ * carrier (tests/hybrid_run_to_completion_smoke.ccs) runs that shape ~5
+ * fiber lifecycles per process and only tripped under parallel-suite CPU
+ * load (repro 1/200 isolated, 86/1200 under 4-way load, per the #123
+ * commit).  This test makes the gate itself hostile to the bug, bounded:
+ *
+ *   - THREADS=3 loops run the shape concurrently, so pool pop/push and
+ *     fiber recycling race each other (the ABA shape needs concurrent
+ *     pops; the UAF shape needs a joiner+respawn racing the completer).
+ *   - 8 workers on a typical 4-core host oversubscribes the CPUs, so
+ *     completers get preempted inside the done=1 -> saved_nursery window
+ *     without external suite load.
+ *   - ROUNDS=20000 x 3 threads x (2 block_on + 3 spawnhybrid) = 300,000
+ *     fiber lifecycles per run vs ~5 in the original carrier (~60,000x the
+ *     per-run exposure) at ~1.2s wall on a 4-core host; the pre-fix
+ *     runtime fails this test reliably — verified by rebuilding
+ *     cc/runtime/sched_v2.c from add6223~1: 5/5 runs failed ("BUG: got
+ *     fiber in state 0/4" then hang), see docs/testing-matrix.md.
+ *   - Results are summed through joins and an atomic so corruption shows
+ *     up as a wrong count even when it doesn't abort; a hang is caught by
+ *     the harness's 10s run timeout.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+#include <pthread.h>
+#include <stdio.h>
+
+#define THREADS 3
+#define ROUNDS 20000
+
+static cc_atomic_int g_hybrid_sum = 0;
+
+static void* doubler(void* arg) {
+    return (void*)((intptr_t)arg * 2);
+}
+
+static void* loop_body(void* arg) {
+    (void)arg;
+    long long join_sum = 0;
+    for (int r = 1; r <= ROUNDS; r++) {
+        /* Two joiner-owned fibers: block_on releases them into the pool the
+         * moment done=1 is visible — the recycle bait. */
+        CCTask t1 = cc_fiber_spawn_task_v2(doubler, (void*)(intptr_t)r);
+        CCTask t2 = cc_fiber_spawn_task_v2(doubler, (void*)(intptr_t)(r + 1));
+        join_sum += (long long)cc_block_on_intptr(t1);
+        join_sum += (long long)cc_block_on_intptr(t2);
+        /* Immediately recycle the just-freed fibers as nursery-owned
+         * (worker-frees) hybrids: pre-fix, a stalled completer for t1/t2
+         * could observe the hybrid's nursery and free a live fiber. */
+        {
+            CCNursery* n = @create(NULL) @destroy;
+            if (!n) { fprintf(stderr, "FAIL: nursery create\n"); return (void*)1; }
+            for (int k = 0; k < 3; k++) {
+                if (n->spawnhybrid(() => {
+                        cc_atomic_fetch_add(&g_hybrid_sum, 1);
+                    }) != 0) {
+                    fprintf(stderr, "FAIL: spawnhybrid r=%d k=%d\n", r, k);
+                    return (void*)1;
+                }
+            }
+        }
+    }
+    /* sum over r of 2r + 2(r+1) = 4*sum(r) + 2*ROUNDS */
+    long long want = 4LL * ((long long)ROUNDS * (ROUNDS + 1) / 2) + 2LL * ROUNDS;
+    if (join_sum != want) {
+        fprintf(stderr, "FAIL: join_sum=%lld want=%lld\n", join_sum, want);
+        return (void*)1;
+    }
+    return NULL;
+}
+
+int main(void) {
+    /* Oversubscribe: more workers than a 4-core CI box has CPUs, so
+     * completers are preempted inside the race window without needing
+     * external suite load. */
+    cc_sched_set_num_workers(8);
+    cc_atomic_store(&g_hybrid_sum, 0);
+
+    pthread_t th[THREADS];
+    for (int i = 0; i < THREADS; i++) {
+        if (pthread_create(&th[i], NULL, loop_body, NULL) != 0) {
+            fprintf(stderr, "FAIL: pthread_create\n");
+            return 2;
+        }
+    }
+    int rc = 0;
+    for (int i = 0; i < THREADS; i++) {
+        void* ret = NULL;
+        pthread_join(th[i], &ret);
+        if (ret != NULL) rc = 1;
+    }
+    if (rc) return 1;
+
+    int got = cc_atomic_load(&g_hybrid_sum);
+    int want = THREADS * ROUNDS * 3;
+    if (got != want) {
+        fprintf(stderr, "FAIL: hybrid_sum=%d want=%d\n", got, want);
+        return 1;
+    }
+    printf("fiber recycle hybrid stress: OK (%d lifecycles)\n",
+           THREADS * ROUNDS * 5);
+    return 0;
+}
