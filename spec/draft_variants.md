@@ -209,10 +209,12 @@ Two idiom gaps that stay painful even with variants:
 1. **`char[:].to_i64()` → `int64_t !>(CCError)`** (and `to_u64`, `to_f64`)
    — replaces per-project `parse_i64`. Strict: full-slice consumption,
    overflow → `CC_ERR_INVALID_ARG`-class error.
-2. **`@fmt(buf, `...template...`)` → `char[:]`** — `@string`'s
-   stack/borrowed-destination sibling: formats into a caller buffer,
-   returns the written slice, never allocates. Overflow contract is FAIL
-   LOUDLY: debug trap; not silent truncation (§10.3).
+2. **(Withdrawn: `@fmt`.)** A stack-destination template form is
+   unnecessary — `cc_arena_fixed_buffer(buf, cap)` + `@string` already
+   compose to zero-allocation caller-buffer formatting, and in practice
+   most format sites already have an arena in scope. Surviving residue:
+   PIN `@string`'s behavior on fixed-arena exhaustion (loud, defined,
+   tested — not silent truncation). No new syntax.
 3. **`cc_add_i64_checked(a, b)` → `int64_t !>(CCError)`** (family) —
    overflow-checked arithmetic that composes with `!>` handlers instead of
    hand-rolled `INT64_MAX - delta` guards.
@@ -252,7 +254,7 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key,
 
 The hot path (existing int cell) does no parsing and no text encoding;
 rendering moves to the read boundary (GET on a `.num` cell formats at
-reply time via `@fmt`). Wire behavior is unchanged — this is a storage
+reply time via `@string` into the reply arena). Wire behavior is unchanged — this is a storage
 representation change carried by the type system.
 
 ## 11. Open questions
@@ -263,10 +265,8 @@ representation change carried by the type system.
 2. **Multi-field arms.** Schema variants have them (`bulk [len, data]`).
    `@variant` v1 says one type per arm (use a struct); revisit at §8
    unification.
-3. **`@fmt` overflow.** Draft says debug-trap. Alternative: return
-   `char[:] !>(CCError)`; rejected for v1 — formatting an int into a
-   sized-right buffer failing is a programmer error, not an environment
-   condition.
+3. **(Withdrawn with `@fmt`.)** The surviving question is `@string` on
+   fixed-arena exhaustion: must be loud and defined (pin with a test).
 4. **Value-yielding handlers.** Today every `!>` handler DIVERGES
    (return/goto). The db_incrby demo uses a handler whose last expression
    yields a substitute value for the projection (`unwrap-or-else`). That
