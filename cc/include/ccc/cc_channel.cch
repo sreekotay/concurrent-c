@@ -135,8 +135,12 @@ int cc_chan_is_ordered(CCChan* ch);
  * struct) into `out`.  The caller is responsible for sizing `out` correctly
  * (sizeof(*out_ptr) in the lowered call, i.e. sizeof(T) where T is the element type).
  *
- * Ordered channels always hold CCTask values internally (elem_size ==
- * sizeof(CCTask)), which is enforced by the cc_channel_pair lowering pass.
+ * Channels with the runtime is_ordered flag are task-handle channels: they
+ * hold CCTask values internally (elem_size == sizeof(CCTask)), which is
+ * enforced by the cc_channel_pair lowering pass.  A DATA channel declared
+ * `ordered` does NOT set the runtime flag — the attribute is a per-sender
+ * FIFO contract marker and the channel uses the normal machinery, so the
+ * unordered branch below is the data path.
  */
 #include <string.h>
 static inline CCResult_bool_CCIoError cc__chan_recv_ordered(CCChanRx rx, void* out, size_t out_sz) {
