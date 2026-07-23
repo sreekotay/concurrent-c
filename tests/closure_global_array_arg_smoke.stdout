@@ -1,0 +1,2 @@
+idx=7 macro_sum=10 num_sum=100
+closure_global_array_arg_smoke: PASS
