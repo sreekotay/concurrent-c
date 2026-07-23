@@ -150,15 +150,43 @@ static void cc__emit_ret_cleanup_begin(char** out, size_t* out_len, size_t* out_
     cc_sb_append_fmt(out, out_len, out_cap, "__cc_retval_%d = (", id);
 }
 
-/* `close` is ");" for plain assign, "));" for cc_ok_into / cc_err_into. */
+/* `close` is ");" for plain assign, "));" for cc_ok_into / cc_err_into.
+ *
+ * The three cleanup statements (`__cc_retval = (...)`, `__cc_ret_set = 1`,
+ * `goto __cc_cleanup`) are the lowering of a SINGLE source `return` and are
+ * emitted on ONE physical line so the whole blob maps to exactly the
+ * return's source line via the CC_LN marker the caller stamps ahead of it.
+ * Spreading them over three physical lines with no per-line ledger entry
+ * inflated the buffer +2 lines per return; for a `return` near end-of-file
+ * (e.g. the final `return 0;` in redis_idiomatic's `main`) that pushed the
+ * trailing physical lines' #line mapping past the source's EOF. */
 static void cc__emit_ret_cleanup_end(char** out, size_t* out_len, size_t* out_cap,
                                      int id, size_t indent, const char* close) {
+    (void)indent;
     cc__append_str(out, out_len, out_cap, close ? close : ");");
-    cc__append_str(out, out_len, out_cap, "\n");
+    cc_sb_append_fmt(out, out_len, out_cap, " __cc_ret_set_%d = 1;", id);
+    cc_sb_append_fmt(out, out_len, out_cap, " goto __cc_cleanup_%d;", id);
+}
+
+/* Stamp a masked CC_LN ledger marker ahead of a return-cleanup blob so the
+ * blob maps to the return's true source line.  No-op unless the current
+ * output line is whitespace-only (a marker mid-line is neither a valid
+ * ledger entry nor valid C) and the ledger yielded a real user line and
+ * path.  `indent` matches the blob's indent for readability only. */
+static void cc__emit_ret_line_marker(char** out, size_t* out_len, size_t* out_cap,
+                                     size_t indent, int user_line,
+                                     const char* path, size_t path_len) {
+    size_t k;
+    if (user_line <= 0 || !path || path_len == 0 || path_len >= 1024) return;
+    k = *out_len;
+    while (k > 0 && (*out)[k - 1] != '\n') {
+        char c = (*out)[k - 1];
+        if (c != ' ' && c != '\t' && c != '\r') return; /* mid-line: skip */
+        k--;
+    }
     cc__append_missing_indent_to(out, out_len, out_cap, indent);
-    cc_sb_append_fmt(out, out_len, out_cap, "__cc_ret_set_%d = 1;\n", id);
-    cc__append_missing_indent_to(out, out_len, out_cap, indent);
-    cc_sb_append_fmt(out, out_len, out_cap, "goto __cc_cleanup_%d;", id);
+    cc_sb_append_fmt(out, out_len, out_cap, "/*CC_LN %d %.*s*/\n",
+                     user_line, (int)path_len, path);
 }
 
 static void cc__emit_ret_ok_cleanup_begin(char** out, size_t* out_len, size_t* out_cap, int id) {
@@ -902,7 +930,16 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             size_t expr_end = stmt_end - 1; /* exclude ';' */
             while (expr_end > expr_start && (in_src[expr_end - 1] == ' ' || in_src[expr_end - 1] == '\t' || in_src[expr_end - 1] == '\n')) expr_end--;
             int has_expr = (expr_end > expr_start);
-            
+
+            /* User line (and governing path) of this `return`, from the
+             * buffer's #line/CC_LN ledger — used to stamp a resync marker
+             * ahead of the cleanup blob so its lowered form maps to the
+             * return's true source line rather than to whatever physical
+             * offset the accumulated expansion above it reached. */
+            const char* ret_lp = NULL;
+            size_t ret_lpl = 0;
+            int ret_user_line = cc_user_line_for_offset(in_src, in_len, i, 1, &ret_lp, &ret_lpl);
+
             if (is_if_ctl) {
                 cc__append_str(&out, &outl, &outc, "{\n");
             }
@@ -926,6 +963,8 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
 
                 if (use_fn_cleanup) {
                     size_t synth_indent = cc__suggest_statement_indent(out, outl);
+                    cc__emit_ret_line_marker(&out, &outl, &outc, synth_indent,
+                                             ret_user_line, ret_lp, ret_lpl);
                     if (has_expr && nested_has_conditional) {
                         cc__append_str(&out, &outl, &outc, "{ __typeof__(");
                         cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
