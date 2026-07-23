@@ -1,0 +1,46 @@
+/*
+ * SHAPE-T7 residual — raw T* field on a channel: still_expressible.
+ *
+ * Slice path is prevented (channel-stable-borrow). Pointer-in-struct
+ * send still compiles — that is the miss.
+ *
+ * Demo: send then recv before free (no crash). free-before-recv is
+ * equally well-formed today.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Msg {
+    char* p;
+    size_t n;
+} Msg;
+
+int main(void) {
+    char* heap = (char*)malloc(8);
+    if (!heap) return 1;
+    memcpy(heap, "payload!", 8);
+    Msg m = { .p = heap, .n = 8 };
+
+    Msg[~4 >] tx;
+    Msg[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    /* Still well-formed: raw pointer field crosses the channel. */
+    if (!cc_io_avail(cc_channel_send(tx, m))) return 3;
+
+    Msg got = {0};
+    if (!cc_io_avail(cc_channel_recv(rx, &got))) return 4;
+    if (got.n != 8 || !got.p || memcmp(got.p, "payload!", 8) != 0) return 5;
+
+    free(heap);
+    /* Bug-shaped (also still compiles if moved above recv):
+     *   free(heap); then use got.p */
+
+    printf("shape-t7-pointer-channel-send: still_expressible "
+           "(T* field send; needs non-slice Send lattice)\n");
+    return 0;
+}
