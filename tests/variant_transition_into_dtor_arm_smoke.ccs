@@ -1,0 +1,30 @@
+/* Pin: transitioning INTO a destructor-bearing arm via whole-variant
+ * assignment must drop the resource exactly once. The transition emits a
+ * move-through temp `__cc_vtN` copied into the LHS; a scope-exit drop on
+ * that temp would free the LHS's live payload (double-free). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+static int g_frees = 0;
+typedef struct Handle { int id; } Handle;
+static void handle_free(Handle* h) { (void)h; g_frees++; }
+static Handle handle_make(int id) { return (Handle){ .id = id }; }
+
+@comptime {
+    (void)cc_type_register("Handle", (CCTypeHooks){ .destroy = cc_type_destroy_call("handle_free") });
+}
+
+@variant Box { h: Handle; n: int64_t; };
+
+static int transition_then_exit(void) {
+    Box b = { .n = 0 };
+    b = { .h = handle_make(1) };   /* into dtor arm; b dropped once at scope exit */
+    return b.n ?> 0;               /* force a use; not the h arm */
+}
+
+int main(void) {
+    (void)transition_then_exit();
+    printf("frees=%d\n", g_frees);
+    return g_frees == 1 ? 0 : 1;   /* exactly one free, not two */
+}
