@@ -2,9 +2,13 @@
  *
  * Handles:
  *   - cc_channel_pair(&tx, &rx) -> cc_channel_pair_create_returning(...) (both forms)
- *     The 'ordered' flag on rx channels is preserved; ordered channels use
- *     sizeof(CCTask) as elem_size so `cc_channel_send_task(...)` and ordered recv
- *     agree on wire size.
+ *     `ordered` on the rx is one delivery-order property applied per payload
+ *     kind (spec/concurrent-c-channel.md "Ordered channels"): task-handle
+ *     channels (CCTask element type, or a tx fed via the send_task family)
+ *     use sizeof(CCTask) as elem_size and set the runtime is_ordered flag so
+ *     `cc_channel_send_task(...)` and ordered recv agree on wire size; data
+ *     channels keep the declared element size and the normal send/recv
+ *     machinery (the attribute is a per-sender-FIFO contract marker).
  *   - T[~ ... >] -> CCChanTx
  *   - T[~ ... <] -> CCChanRx  (T[~ ... ordered <] also becomes CCChanRx;
  *     ordered is a runtime flag on the channel, not a distinct type)

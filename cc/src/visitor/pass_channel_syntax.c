@@ -926,6 +926,83 @@ static int cc__elem_type_implies_take(const char* elem_ty, const char** out_elem
     return 0;
 }
 
+/* Is this element type the task-handle type itself?  `CCTask[~N ordered <]`
+ * is unambiguously a task-handle channel. */
+static int cc__ordered_elem_is_task(const char* elem_ty) {
+    if (!elem_ty || !*elem_ty) return 0;
+    return strcmp(elem_ty, "CCTask") == 0 ||
+           strcmp(elem_ty, "CCTaskIntptr") == 0 ||
+           strcmp(elem_ty, "Task") == 0;
+}
+
+/* Does this TU send tasks into the channel handle `name`?
+ *
+ * `ordered` is one delivery-order property applied to the channel's payload
+ * kind (spec/concurrent-c-channel.md "Ordered channels"): task-handle
+ * channels carry CCTask values (elem_size == sizeof(CCTask), typed recv
+ * awaits each handle), while data channels keep the declared element type
+ * and the normal send/recv machinery.  A task-handle channel's element type
+ * is spelled as the task's RESULT type (`intptr_t[~8 ordered <]`,
+ * `int !>(CCIoError)[~8 ordered <]`), so the declaration alone cannot
+ * distinguish the two payload kinds — what does is the send side: task
+ * handles only enter a channel through the send_task family.  Scan the TU
+ * for `cc_channel_send_task[_hybrid](name, ...)` or the UFCS forms
+ * `name.send_task[_hybrid](...)` / `name->send_task[_hybrid](...)`. */
+static int cc__chan_tx_has_task_send(const char* buf, size_t len, const char* name) {
+    size_t nm = name ? strlen(name) : 0;
+    size_t i = 0;
+    CCInertScan scan;
+    if (!buf || len == 0 || nm == 0) return 0;
+    cc_inert_scan_init(&scan, NULL);
+
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, buf, len, &i)) continue;
+        char c = buf[i];
+
+        /* Raw form: cc_channel_send_task[_hybrid]( name , */
+        if (c == 'c' && i + 20 <= len && memcmp(buf + i, "cc_channel_send_task", 20) == 0 &&
+            (i == 0 || !cc__is_ident_char_local2(buf[i - 1]))) {
+            size_t p = i + 20;
+            if (p + 7 <= len && memcmp(buf + p, "_hybrid", 7) == 0) p += 7;
+            if (p < len && cc__is_ident_char_local2(buf[p])) { i++; continue; }
+            while (p < len && (buf[p] == ' ' || buf[p] == '\t' || buf[p] == '\n' || buf[p] == '\r')) p++;
+            if (p >= len || buf[p] != '(') { i++; continue; }
+            p++;
+            while (p < len && (buf[p] == ' ' || buf[p] == '\t' || buf[p] == '\n' || buf[p] == '\r')) p++;
+            if (p + nm <= len && memcmp(buf + p, name, nm) == 0 &&
+                (p + nm == len || !cc__is_ident_char_local2(buf[p + nm]))) {
+                size_t q = p + nm;
+                while (q < len && (buf[q] == ' ' || buf[q] == '\t' || buf[q] == '\n' || buf[q] == '\r')) q++;
+                if (q < len && buf[q] == ',') return 1;
+            }
+            i++;
+            continue;
+        }
+
+        /* UFCS form: name.send_task / name->send_task (optional _hybrid) */
+        if (c == name[0] && i + nm <= len && memcmp(buf + i, name, nm) == 0 &&
+            (i == 0 || !cc__is_ident_char_local2(buf[i - 1])) &&
+            (i + nm == len || !cc__is_ident_char_local2(buf[i + nm]))) {
+            size_t p = i + nm;
+            while (p < len && (buf[p] == ' ' || buf[p] == '\t')) p++;
+            if (p < len && buf[p] == '.') p++;
+            else if (p + 1 < len && buf[p] == '-' && buf[p + 1] == '>') p += 2;
+            else { i++; continue; }
+            while (p < len && (buf[p] == ' ' || buf[p] == '\t')) p++;
+            if (p + 9 <= len && memcmp(buf + p, "send_task", 9) == 0) {
+                size_t q = p + 9;
+                if (q + 7 <= len && memcmp(buf + q, "_hybrid", 7) == 0) q += 7;
+                if (q >= len || !cc__is_ident_char_local2(buf[q])) return 1;
+            }
+            i++;
+            continue;
+        }
+
+        i++;
+    }
+    return 0;
+}
+
 char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                                           const char* src,
                                           size_t len,
@@ -1188,12 +1265,39 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 const char* elem_sz_expr = "0";
                 int allow_take = cc__elem_type_implies_take(elem_ty, &elem_sz_expr);
 
-                /* Ordered channels store CCTask values internally, regardless of the
-                   declared element type. Override elem_size so cc_channel_send_task and the
-                   ordered recv helper always agree on the wire size. */
+                /* `ordered` is one delivery-order property applied to the
+                 * channel's payload kind (spec/concurrent-c-channel.md
+                 * "Ordered channels"):
+                 *
+                 * - Task-handle channels store CCTask values internally
+                 *   (element type declares the task RESULT type).  Override
+                 *   elem_size so cc_channel_send_task and the ordered recv
+                 *   helper agree on the wire size, and set the runtime
+                 *   is_ordered flag so typed recv awaits each handle.
+                 *
+                 * - Data channels keep the declared element size and the
+                 *   normal send/recv machinery — the attribute is a contract
+                 *   marker (per-sender FIFO, which the buffered backend
+                 *   already delivers; pinned by
+                 *   tests/channel_buffered_handoff_fifo_smoke.ccs and
+                 *   tests/chan_ordered_data_smoke.ccs).  Passing the runtime
+                 *   flag here would break the channel: plain typed sends
+                 *   would be rejected on elem-size mismatch and recv would
+                 *   misinterpret payloads as CCTask handles.
+                 *
+                 * Task-machinery selection: CCTask element type, or a tx
+                 * handle this TU feeds via the send_task family. */
+                int ordered_task = 0;
                 if (rx_ordered) {
-                    elem_sz_expr = "sizeof(CCTask)";
-                    allow_take = 0;
+                    ordered_task = cc__ordered_elem_is_task(elem_ty) ||
+                                   cc__chan_tx_has_task_send(src, len, tx_name);
+                    if (!ordered_task && alt_buf) {
+                        ordered_task = cc__chan_tx_has_task_send(alt_buf, alt_len, tx_name);
+                    }
+                    if (ordered_task) {
+                        elem_sz_expr = "sizeof(CCTask)";
+                        allow_take = 0;
+                    }
                 }
 
                 const char* topo_enum = "CC_CHAN_TOPO_DEFAULT";
@@ -1240,7 +1344,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     snprintf(repl, sizeof(repl),
                              "/* cc_channel_pair */ cc_channel_pair_create_named(%s, %s, %d, %s, %d, %s, %d, &%s, %s, \"%s\", __FILE__, __LINE__)",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg,
+                             (tx_mode == 1) ? 1 : 0, topo_enum, ordered_task ? 1 : 0, tx_name, rx_arg,
                              diag_name);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                     /* `p` points one past the closing `)`. */
@@ -1261,7 +1365,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                              "if (!__cc_ch) { fprintf(stderr, \"CC: cc_channel_pair failed\\n\"); abort(); } "
                              "} while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg,
+                             (tx_mode == 1) ? 1 : 0, topo_enum, ordered_task ? 1 : 0, tx_name, rx_arg,
                              diag_name);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                     /* Statement form: consume through the trailing `;` (at
