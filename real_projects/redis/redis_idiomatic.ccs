@@ -179,13 +179,11 @@ static inline void redis_pipeline_batch_accept(RedisPipelineBatch* batch) {
 /* DELIVERY-ORDER CONTRACT: pipelined replies MUST arrive in submission
  * order (RESP maps the i-th reply to the i-th request), and default
  * channels promise no order (spec/concurrent-c-channel.md "Delivery
- * order") — this channel should be declared `ordered`.  It is NOT:
- * `ordered` on a DATA channel parses but repoints the pair's element
- * size at CCTask, so the first plain send fails at runtime — see
- * docs/known-bugs/ordered-data-channel-elem-size.md.  Until that is
- * fixed we ride the current backend's de-facto per-sender FIFO. */
+ * order") — so the receive endpoint is declared `ordered`: per-sender
+ * FIFO on a data channel (spec "Ordered channels"), which with the
+ * single owner sender is total reply order. */
 typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
-typedef RedisReply[~k_pipeline_reply_cap 1:1 <] ReplyRx;
+typedef RedisReply[~k_pipeline_reply_cap 1:1 ordered <] ReplyRx;
 
 typedef struct RedisConn {
     uint64_t conn_id;
@@ -223,12 +221,12 @@ typedef struct RedisConn {
  * signatures don't have to spell out the channel type.  Clients hand a
  * RedisRequest* across ReqTx; the owner drains from ReqRx and replies
  * on the request's originating conn->reply_rx. */
-/* Same delivery-order contract (and the same blocked `ordered`
- * declaration — see the ReplyTx/ReplyRx comment): the owner must execute
- * a connection's requests in submission order, which is exactly the
- * ordered data-channel per-sender FIFO guarantee. */
+/* Same delivery-order contract as ReplyRx: the owner must execute a
+ * connection's requests in submission order, which is exactly the
+ * ordered data-channel per-sender FIFO guarantee — so the receive
+ * endpoint is declared `ordered`. */
 typedef RedisRequest*[~k_request_chan_cap N:1 >] ReqTx;
-typedef RedisRequest*[~k_request_chan_cap N:1 <] ReqRx;
+typedef RedisRequest*[~k_request_chan_cap N:1 ordered <] ReqRx;
 
 static RedisConn* redis_conn_create(uint64_t conn_id);
 static void redis_conn_destroy(RedisConn* conn);
@@ -2295,7 +2293,7 @@ int main(int argc, char** argv) {
      * structurally (it doesn't resolve typedefs), so declare in raw
      * form here and rely on the ReqTx/ReqRx aliases everywhere else. */
     RedisRequest*[~k_request_chan_cap N:1 >] req_tx;
-    RedisRequest*[~k_request_chan_cap N:1 <] req_rx;
+    RedisRequest*[~k_request_chan_cap N:1 ordered <] req_rx;
     CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
 
     CCListener* ln_ptr = &ln;

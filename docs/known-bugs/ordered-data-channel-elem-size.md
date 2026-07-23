@@ -1,69 +1,73 @@
 # `ordered` on a DATA channel: accepted at parse, first plain send fails at runtime
 
-**Status:** OPEN.  **Found:** 2026-07-23, redis @variant conversion
+**Status:** FIXED.  **Found:** 2026-07-23, redis @variant conversion
 (declaring the reply/request channels `ordered` per the channel spec's
-delivery-order rule).
+delivery-order rule).  **Fixed:** 2026-07-23.
 
 ## Symptom
 
 The channel spec (spec/concurrent-c-channel.md "Ordered channels",
 spec/concurrent-c-spec-complete.md §7.2/§7.4) defines `ordered` for
-**data channels** as per-sender FIFO.  The parser accepts `ordered` on a
+**data channels** as per-sender FIFO.  The parser accepted `ordered` on a
 data-channel rx endpoint (`T[~N 1:1 ordered <]`, `T*[~N N:1 ordered <]`
 — element types other than CCTask), but the very first plain typed send
-on the paired tx fails at runtime.  Nothing is delivered; a server built
-this way answers every request with its owner-unavailable error.
+on the paired tx failed at runtime.  Nothing was delivered; a server
+built this way answered every request with its owner-unavailable error.
 
-## Minimized repro
+## Root cause
 
-```c
-#include <ccc/std/prelude.cch>
-#include <stdio.h>
+The shipped `ordered` implementation was task-handle-only.  The
+pair-creation lowering (`cc__rewrite_channel_pair_calls_text`,
+cc/src/visitor/pass_channel_syntax.c) treated EVERY `ordered` rx as a
+task-handle channel: it overrode the pair's elem size to
+`sizeof(CCTask)`, cleared `allow_take`, and set the runtime `is_ordered`
+flag.  A plain typed data send then called into the channel with
+`sizeof(T) != sizeof(CCTask)` and was rejected (`cc_chan_ensure_buf`
+elem-size mismatch → EINVAL), so the first send failed;
+`cc_chan_try_send_into` rejected ordered channels outright; and the
+ordered recv helper (`cc__chan_recv_ordered`,
+cc/include/ccc/cc_channel.cch) awaited every received value as a CCTask,
+so even a size-matched payload would have been misinterpreted.
 
-int main(void) {
-    int x = 1;
-    int*[~8 N:1 >] tx;
-    int*[~8 N:1 ordered <] rx;
-    cc_channel_pair(&tx, &rx);
-    CCResult_bool_CCIoError sr = cc_channel_send(tx, &x);   /* fails */
-    if (cc_is_err(sr) || !sr.u.value) { printf("send failed\n"); return 2; }
-    return 0;
-}
-```
+## Fix
 
-Prints `send failed` (same with a by-value struct payload and
-`cc_channel_raw_try_send_into`, which returns EINVAL explicitly for
-ordered channels — runtime channel.c `cc_chan_try_send_into`).
+`ordered` is one delivery-order property applied to the channel's
+payload kind (spec "Ordered channels"), and the pair lowering now
+selects the task machinery only for channels that actually carry task
+handles:
 
-## Root cause (located, not fixed — compiler/runtime change required)
+- Task-handle channels — element type is `CCTask` itself, or the paired
+  tx is fed via the send_task family in the TU
+  (`cc_channel_send_task[_hybrid](tx, ...)` or UFCS
+  `tx.send_task[_hybrid](...)`; a task channel's element type is spelled
+  as the task's RESULT type, so the declaration alone cannot identify
+  it) — keep the exact previous lowering: elem size `sizeof(CCTask)`,
+  `allow_take = 0`, runtime `is_ordered = 1` (typed recv awaits each
+  handle; FIFO on handles).
+- Data channels lower to the NORMAL data-channel machinery: declared
+  element size, plain send/recv, runtime `is_ordered = 0`.  The
+  attribute is the per-sender FIFO contract marker; the backend's
+  buffered path already delivers per-sender FIFO (the direct-handoff
+  path is gated by `cc__chan_buffered_handoff_would_reorder`, pinned by
+  `tests/channel_buffered_handoff_fifo_smoke.ccs`).
 
-The shipped `ordered` implementation is task-handle-only:
+See `cc__ordered_elem_is_task` / `cc__chan_tx_has_task_send` and the
+`ordered_task` selection in cc/src/visitor/pass_channel_syntax.c.
 
-- `cc/src/visitor/pass_channel_syntax.c` (pair-creation lowering):
-  "Ordered channels store CCTask values internally, regardless of the
-  declared element type" — when `rx_ordered` it overrides the pair's
-  elem size to `sizeof(CCTask)` and clears `allow_take`.
-- A plain typed data send then calls into the channel with
-  `sizeof(T) != sizeof(CCTask)` and is rejected (elem-size mismatch),
-  so the first send fails.
-- The ordered recv helper (`cc__chan_recv_ordered`,
-  cc/include/ccc/cc_channel.cch) treats every received value as a
-  CCTask and awaits it, so even a size-matched payload would be
-  misinterpreted.
+Pinned by `tests/chan_ordered_data_smoke.ccs` (struct payload send/recv
+through `T[~N 1:1 ordered <]` incl. `cc_channel_raw_try_send_into`, the
+minimized `int*[~N N:1 ordered <]` repro, and a 50k-item FIFO stream
+assertion).  Task-handle `ordered` behavior is unchanged
+(`tests/ordered_channel_smoke.ccs`,
+`tests/ordered_channel_spawned_sender_smoke.ccs`,
+`tests/send_task_hybrid_smoke.ccs` all pass as-is).
+`real_projects/redis/redis_idiomatic.ccs` now declares its reply/request
+rx endpoints `ordered` (the former workaround comments are gone).
 
-The data-channel arm of the spec'd `ordered` contract ("per-sender
-FIFO") is unimplemented; only task-handle channels
-(`cc_channel_send_task`) work.  Either the runtime should implement the
-data-channel flag (per-sender FIFO is already the de-facto behavior of
-the current backend), or the pair lowering should reject `ordered` on a
-non-CCTask element type at compile time instead of breaking the channel
-at runtime.
+## Lesson
 
-## Workaround
-
-`real_projects/redis/redis_idiomatic.ccs` keeps its reply/request
-channels undeclared (default) with a comment citing this bug: the
-current backend happens to preserve per-sender FIFO on buffered data
-channels (the handoff path is gated by
-`cc__chan_buffered_handoff_would_reorder`), but per the spec that is an
-implementation property, not a contract.
+An attribute that names a contract ("what flows arrives in order") must
+not be welded to one implementation of that contract.  The lowering
+keyed a runtime representation change (CCTask wire format) off a purely
+declarative marker, so declaring the documented guarantee on a data
+channel silently swapped its wire format and broke the first send.

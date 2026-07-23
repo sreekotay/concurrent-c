@@ -1,0 +1,216 @@
+/*
+ * `ordered` on a DATA channel is a delivery-order contract marker, not a
+ * different runtime path (spec/concurrent-c-channel.md "Ordered channels":
+ * data channels = per-sender FIFO; task-handle channels = FIFO on CCTask
+ * handles).
+ *
+ * Root cause pinned here (docs/known-bugs/ordered-data-channel-elem-size.md,
+ * closed): the cc_channel_pair lowering treated EVERY `ordered` rx as a
+ * task-handle channel — it repointed the pair's elem size at sizeof(CCTask)
+ * and set the runtime is_ordered flag, so the very first plain typed send
+ * failed with an elem-size mismatch (and cc_chan_try_send_into returned
+ * EINVAL outright).  The fix selects the task machinery only for channels
+ * that actually carry task handles (CCTask element type, or a tx whose TU
+ * uses the send_task family); a data-element `ordered` channel lowers to the
+ * normal data-channel machinery with the declared element size.
+ *
+ * Phase 1: struct payload (> sizeof(void*), ring backend — the RedisReply
+ *          shape) through a 1:1 ordered channel: plain typed send, raw
+ *          try_send_into, then recv both and verify the bytes.
+ * Phase 2: pointer payload (the known-bug minimized repro shape,
+ *          int*[~8 N:1 ordered <]): first plain send must succeed.
+ * Phase 3: FIFO stream assertion: one sender, 50k sequenced structs through
+ *          an ordered 1:1 channel; the receiver must observe 0..N-1 in
+ *          exact order (per-sender FIFO; with a single sender that is total
+ *          order).
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+#define FIFO_CAP 16
+#define FIFO_ITEMS 50000
+
+/* > sizeof(void*) so the ring-queue backend is used (RedisReply shape). */
+typedef struct OrderedMsg {
+    uint64_t seq;
+    uint64_t tag;
+    uint64_t pad[3];
+} OrderedMsg;
+
+typedef OrderedMsg[~FIFO_CAP 1:1 >] MsgTx;
+typedef OrderedMsg[~FIFO_CAP 1:1 ordered <] MsgRx;
+
+static cc_atomic_int g_errors = 0;
+
+/* -----------------------------------------------------------------------
+ * Phase 1: struct payload, plain send + raw try_send_into, recv both
+ * ----------------------------------------------------------------------- */
+static void* msg_builder(void* env, intptr_t slot, intptr_t arena) {
+    (void)arena;
+    OrderedMsg* dst = (OrderedMsg*)slot;
+    *dst = *(OrderedMsg*)env;
+    return NULL;
+}
+
+static int test_struct_payload(void) {
+    OrderedMsg[~4 1:1 >] tx;
+    OrderedMsg[~4 1:1 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) { printf("FAIL struct: pair create\n"); return 0; }
+
+    OrderedMsg m;
+    memset(&m, 0, sizeof(m));
+    m.seq = 7;
+    m.tag = 0xabcdef01u;
+
+    if (!cc_io_avail(cc_channel_send(tx, m))) {
+        printf("FAIL struct: first plain send on ordered data channel\n");
+        cc_chan_free(ch);
+        return 0;
+    }
+
+    OrderedMsg m2;
+    memset(&m2, 0, sizeof(m2));
+    m2.seq = 8;
+    m2.tag = 0x1234u;
+    {
+        CCClosure2 b = cc_closure2_make(msg_builder, &m2, NULL);
+        int rc = cc_channel_raw_try_send_into(tx.raw, b, sizeof(OrderedMsg), NULL);
+        if (rc != 0) {
+            printf("FAIL struct: try_send_into rc=%d on ordered data channel\n", rc);
+            cc_chan_free(ch);
+            return 0;
+        }
+    }
+
+    OrderedMsg got;
+    memset(&got, 0, sizeof(got));
+    if (!cc_io_avail(cc_channel_recv(rx, &got)) || got.seq != 7 || got.tag != 0xabcdef01u) {
+        printf("FAIL struct: recv #1 (seq=%llu tag=%llx)\n",
+               (unsigned long long)got.seq, (unsigned long long)got.tag);
+        cc_chan_free(ch);
+        return 0;
+    }
+    if (!cc_io_avail(cc_channel_recv(rx, &got)) || got.seq != 8 || got.tag != 0x1234u) {
+        printf("FAIL struct: recv #2 (seq=%llu tag=%llx)\n",
+               (unsigned long long)got.seq, (unsigned long long)got.tag);
+        cc_chan_free(ch);
+        return 0;
+    }
+
+    cc_chan_free(ch);
+    return 1;
+}
+
+/* -----------------------------------------------------------------------
+ * Phase 2: known-bug minimized repro shape (pointer element, N:1)
+ * ----------------------------------------------------------------------- */
+static int test_pointer_payload(void) {
+    int x = 41;
+    int*[~8 N:1 >] tx;
+    int*[~8 N:1 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) { printf("FAIL ptr: pair create\n"); return 0; }
+
+    int* p = &x;
+    if (!cc_io_avail(cc_channel_send(tx, p))) {
+        printf("FAIL ptr: first plain send on ordered data channel\n");
+        cc_chan_free(ch);
+        return 0;
+    }
+
+    int* q = NULL;
+    if (!cc_io_avail(cc_channel_recv(rx, &q)) || q != &x || *q != 41) {
+        printf("FAIL ptr: recv\n");
+        cc_chan_free(ch);
+        return 0;
+    }
+
+    cc_chan_free(ch);
+    return 1;
+}
+
+/* -----------------------------------------------------------------------
+ * Phase 3: FIFO stream assertion (single sender => total order)
+ * ----------------------------------------------------------------------- */
+static void fifo_sender(MsgTx tx) {
+    OrderedMsg m;
+    memset(&m, 0, sizeof(m));
+    for (uint64_t i = 0; i < FIFO_ITEMS; ++i) {
+        m.seq = i;
+        m.tag = i ^ 0x5a5a5a5au;
+        if (!cc_io_avail(cc_channel_send(tx, m))) {
+            fprintf(stderr, "chan_ordered_data_smoke: fifo send failed at %llu\n",
+                    (unsigned long long)i);
+            cc_atomic_fetch_add(&g_errors, 1);
+            cc_channel_close(tx); /* FAIL LOUDLY, not a receiver hang */
+            return;
+        }
+    }
+    cc_channel_close(tx);
+}
+
+static void fifo_receiver(MsgRx rx) {
+    uint64_t expect = 0;
+    OrderedMsg m;
+    memset(&m, 0, sizeof(m));
+    while (cc_io_avail(cc_channel_recv(rx, &m))) {
+        if (m.seq != expect || m.tag != (m.seq ^ 0x5a5a5a5au)) {
+            if (cc_atomic_load(&g_errors) < 10) {
+                fprintf(stderr, "chan_ordered_data_smoke: got seq=%llu want %llu\n",
+                        (unsigned long long)m.seq, (unsigned long long)expect);
+            }
+            cc_atomic_fetch_add(&g_errors, 1);
+            expect = m.seq + 1; /* resync so one inversion reports once */
+            continue;
+        }
+        expect++;
+    }
+    if (expect != FIFO_ITEMS) {
+        fprintf(stderr, "chan_ordered_data_smoke: drained %llu of %d\n",
+                (unsigned long long)expect, FIFO_ITEMS);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+}
+
+static int test_fifo_stream(void) {
+    MsgTx tx;
+    MsgRx rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) { printf("FAIL fifo: pair create\n"); return 0; }
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) { cc_chan_free(ch); return 0; }
+        MsgTx txr = tx;
+        MsgRx rxr = rx;
+        n->spawn(() => [txr] { fifo_sender(txr); });
+        n->spawn(() => [rxr] { fifo_receiver(rxr); });
+    }
+    cc_chan_free(ch);
+    if (cc_atomic_load(&g_errors) != 0) {
+        printf("FAIL fifo: %d order errors\n", (int)cc_atomic_load(&g_errors));
+        return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    cc_sched_set_num_workers(4);
+
+    int ok = 1;
+    if (!test_struct_payload())  { ok = 0; }
+    if (!test_pointer_payload()) { ok = 0; }
+    if (!test_fifo_stream())     { ok = 0; }
+
+    if (ok) {
+        printf("chan_ordered_data_smoke: PASS\n");
+    }
+    return ok ? 0 : 1;
+}
