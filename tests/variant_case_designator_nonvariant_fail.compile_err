@@ -1,0 +1,1 @@
+variant_case_designator_nonvariant_fail.ccs:14:14: error: designator case label '.a' requires a switch on a @variant subject — 'x' does not resolve to a variant

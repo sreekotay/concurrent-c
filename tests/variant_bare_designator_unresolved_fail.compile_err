@@ -1,0 +1,2 @@
+variant_bare_designator_unresolved_fail.ccs:14:14: error: bare designator '.a' cannot be resolved from context (no variant type governs this comparison/assignment)
+note: compare against a variant tag

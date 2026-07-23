@@ -1,0 +1,10 @@
+/* Fail oracle: duplicate arm names in a @variant declaration. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    num: int64_t;
+    num: int;
+};
+
+int main(void) { return 0; }

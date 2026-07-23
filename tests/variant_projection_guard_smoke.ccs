@@ -1,0 +1,45 @@
+/* Protected projection via dominating kind checks (spec/draft_variants.md
+ * §5a): a projection is legal when dominated by an enclosing
+ * `case Name_arm:` / `case .arm:` of a switch on the same subject, or a
+ * directly enclosing `if (v.kind == Name_arm)` — both the underscored tag
+ * and the interop spelling work as guards.  `.kind` itself is a read-only
+ * pseudo-member and reads fine everywhere. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 41 };
+
+    /* if-guard with the underscored tag */
+    if (v.kind == RedisValue_num) {
+        v.num += 1;                        /* projection as lvalue */
+    }
+    if (v.kind != RedisValue_num) return 1;
+
+    /* if-guard on a pointer receiver */
+    RedisValue* p = &v;
+    int64_t got = 0;
+    if (p->kind == RedisValue_num) {
+        got = p->num;
+    }
+    if (got != 42) return 2;
+
+    /* case-domination (interop label spelling) */
+    switch (v.kind) {
+        case RedisValue_num:
+            got = v.num + 1;
+            break;
+        case RedisValue_txt:
+            return 3;
+    }
+    if (got != 43) return 4;
+
+    printf("ok\n");
+    return 0;
+}

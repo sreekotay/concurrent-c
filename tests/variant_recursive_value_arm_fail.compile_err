@@ -1,0 +1,1 @@
+variant_recursive_value_arm_fail.ccs:8:11: error: @variant 'Node': arm 'next' contains 'Node' by value — recursive arms must go through a pointer or slice (e.g. 'Node*' or 'Node[:]')

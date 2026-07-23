@@ -1,0 +1,16 @@
+/* Fail oracle: a bare designator in a trapped expression position where no
+ * comparison partner / assignment target resolves a variant type is a
+ * clear error (spec §5a amendment). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+int main(void) {
+    int x = 3;
+    if (x == .a) return 1;
+    return 0;
+}

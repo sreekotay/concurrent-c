@@ -1,0 +1,2 @@
+variant_arm_keyword_fail.ccs:8:5: error: @variant 'V': arm name 'int' is a C keyword
+pick another spelling

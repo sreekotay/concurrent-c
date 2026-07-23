@@ -1,0 +1,1 @@
+variant_unknown_arm_case_fail.ccs:15:14: error: variant 'V' has no arm '.strr' (arms: str, num) — did you mean '.str'?

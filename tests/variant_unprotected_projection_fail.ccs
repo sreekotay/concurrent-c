@@ -1,0 +1,17 @@
+/* Fail oracle: an unprotected projection is a compile error with the spec
+ * §5 wording, naming the arm and the three remedies (dominating check,
+ * !> handler, ?> fallback). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    str: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .num = 1 };
+    int64_t x = v.num;
+    (void)x;
+    return 0;
+}

@@ -1,0 +1,18 @@
+/* Fail oracle: non-exhaustive variant switch — the error names EVERY
+ * missing arm and mentions the `default:` opt-out (spec §5b). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+    c: int;
+};
+
+int main(void) {
+    V v = { .a = 1 };
+    switch (v) {
+        case .a: break;
+    }
+    return 0;
+}

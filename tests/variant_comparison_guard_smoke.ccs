@@ -1,0 +1,39 @@
+/* Bare designator in comparison position (spec/draft_variants.md §5a,
+ * amendment): `if (v.kind == .num)` — the designator is resolved by the
+ * comparison partner's type and the comparison counts as a domination
+ * guard for the projection, exactly like the spelled-out tag.  Both
+ * operand orders work; `!=` resolves too (but does not dominate). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 42 };
+    RedisValue* p = &v;
+
+    if (v.kind == .num) {                 /* designator on the right */
+        if (v.num != 42) return 1;
+    } else {
+        return 2;
+    }
+
+    if (.num == p->kind) {                /* designator on the left, ptr */
+        if (p->num != 42) return 3;
+    } else {
+        return 4;
+    }
+
+    if (v.kind != .txt) {                 /* != resolves the designator too */
+        /* (no projection here: != is not a dominating check) */
+    } else {
+        return 5;
+    }
+
+    printf("ok\n");
+    return 0;
+}

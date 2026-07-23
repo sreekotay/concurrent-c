@@ -1,0 +1,1 @@
+variant_init_two_arms_fail.ccs:12:21: error: variant 'V' initializer names two arms '.a' and '.b' — a variant holds exactly one active arm

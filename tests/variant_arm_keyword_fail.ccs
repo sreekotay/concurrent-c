@@ -1,0 +1,12 @@
+/* Fail oracle: arm names become enum/union member names, so C keywords are
+ * rejected at parse (spec/draft_variants.md §3: `int:` is an error — spell
+ * it `num:`). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    int: int64_t;
+    txt: const char*;
+};
+
+int main(void) { return 0; }

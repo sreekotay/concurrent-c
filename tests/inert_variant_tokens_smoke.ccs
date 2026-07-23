@@ -1,0 +1,42 @@
+/* Inert-region smoke for the @variant token family (PASS_INVENTORY rule 3):
+ * `@variant`, designator case labels, braced assignment, bare designators,
+ * and projections spelled inside block comments, line comments, string
+ * literals, and #define bodies must NOT trigger the variant passes.
+ *
+ * Inert appearances (block comment):
+ *   @variant Ghost { boo: int; }
+ *   switch (g) { case .boo: g = { .boo = 1 }; }
+ *   if (g.kind == .boo) x = g.boo ?> 0;
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+// inert in a line comment: @variant Ghost2 { boo: void; };  case .boo:
+static const char* g_str =
+    "@variant Ghost3 { boo: int; }; switch (v) { case .boo: break; } v.kind = 9;";
+
+/* A #define body carrying variant-ish tokens must stay untouched (the
+ * macro is never expanded). */
+#define GHOST_DECL @variant Ghost4 { boo: int; };
+#define GHOST_USE(v) ((v).boo ?> 0)
+
+@variant Real {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    if (strlen(g_str) < 10) return 1;
+    Real v = { .num = 5 };
+    switch (v) {
+        case .num:
+            if (v.num != 5) return 2;
+            break;
+        case .txt:
+            return 3;
+    }
+    printf("ok\n");
+    return 0;
+}

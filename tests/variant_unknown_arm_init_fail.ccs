@@ -1,0 +1,15 @@
+/* Fail oracle: unknown arm in a designated initializer — the message lists
+ * the valid arms and suggests the nearest one. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    str: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .nun = 1 };
+    (void)v;
+    return 0;
+}

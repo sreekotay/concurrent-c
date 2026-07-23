@@ -1,0 +1,15 @@
+/* Fail oracle: naming two arms in one initializer is a compile error citing
+ * both arms (spec/draft_variants.md §4). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+int main(void) {
+    V v = { .a = 1, .b = 2 };
+    (void)v;
+    return 0;
+}
