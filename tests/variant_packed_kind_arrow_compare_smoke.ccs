@@ -1,0 +1,26 @@
+/* Pin: `ptr->kind == .arm` (the portable tag comparison, spec §5) must
+ * resolve on a PACKED variant. The partner-span walk used to break at the
+ * '>' of '->', truncating `v->kind` to `kind`; on unpacked that accidentally
+ * matched the struct's own `kind` field, masking the bug. A packed variant
+ * (opaque bytes, no kind field) with NO unpacked twin in the TU is the
+ * discriminating case. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/string.cch>
+#include <stdio.h>
+
+@variant(packed) PV { s: CCString; n: int64_t; };
+
+static int probe(PV* v) {
+    if (v->kind == .n) return 10;      /* arrow partner, designator right */
+    if (.s == v->kind) return 20;      /* flipped */
+    if (v->kind != .s) return 30;      /* != form */
+    return 0;
+}
+
+int main(void) {
+    PV a = { .n = 7 };
+    PV b = { .s = cc_string_from_slice(NULL, cc_slice_from_cstr("x")) };
+    int r = probe(&a) + probe(&b);     /* a=.n -> 10 ; b=.s -> 20 */
+    printf("r=%d\n", r);
+    return r == 30 ? 0 : 1;
+}
