@@ -7,7 +7,7 @@ int main(void) {
     int a = 6;
     int b = 7;
 
-    CCClosure2 c = (int x, int y) => { *gp = x + y; };
+    CCClosure2 c = @unsafe (int x, int y) => { *gp = x + y; };
 
     {
         CCNursery* __cc_nursery86 = @create(NULL) @destroy;

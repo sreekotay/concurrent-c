@@ -1263,7 +1263,8 @@ static int cc__walk(int idx,
 
             if (saw_arena_alloc_ptr && !v->is_slice) {
                 const char* an = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
-                if (an) {
+                CCSliceVar* av = an ? cc__scopes_lookup(scopes, *io_scope_n, an) : NULL;
+                if (an && av && av->is_arena) {
                     v->is_arena_ptr = 1;
                     v->arena_name = an;
                 }
