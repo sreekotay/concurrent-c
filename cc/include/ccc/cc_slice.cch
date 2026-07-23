@@ -329,11 +329,8 @@ static inline CCSlice cc_slice_trim_right(CCSlice* s) {
 }
 static inline CCSlice CCSlice_trim_right(CCSlice* s) { return cc_slice_trim_right(s); }
 
-static inline char cc_slice_at(CCSlice* s, size_t idx) {
-    if (!s || idx >= s->len || !s->ptr) return 0;
-    return ((char*)s->ptr)[idx];
-}
-static inline char CCSlice_at(CCSlice* s, size_t idx) { return cc_slice_at(s, idx); }
+/* Indexed get/set live in <ccc/std/slice.cch> as Result-returning
+ * `cc_slice_at` / `cc_slice_get_checked` / `cc_slice_set` (no soft-zero at). */
 
 static inline CCSlice cc__slice_sub_ptr(CCSlice* s, size_t start, size_t end) {
     return s ? cc__slice_sub_value(*s, start, end) : cc_slice_empty();

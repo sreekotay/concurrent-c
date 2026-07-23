@@ -197,6 +197,41 @@ static inline CCResult_double_CCError cc_slice_to_f64(const CCSlice* s_ptr) {
 #define CC__HAS_OVERFLOW_BUILTINS 1
 #endif
 
+/*
+ * Checked slice index (all builds): OOB / null → CC_ERR_INVALID_ARG.
+ * Soft-zero `at` is gone. Raw `s.ptr[i]` remains an untracked Gap.
+ */
+static inline CCResult_char_CCError cc_slice_get_checked(CCSlice* s, size_t idx) {
+    if (!s || !s->ptr || idx >= s->len) {
+        return cc_err_CCResult_char_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice get: index out of bounds"));
+    }
+    return cc_ok_CCResult_char_CCError(((char*)s->ptr)[idx]);
+}
+static inline CCResult_char_CCError CCSlice_get_checked(CCSlice* s, size_t idx) {
+    return cc_slice_get_checked(s, idx);
+}
+
+/* Idiomatic read: `s.at(i) !>` — same Result path as get_checked. */
+static inline CCResult_char_CCError cc_slice_at(CCSlice* s, size_t idx) {
+    return cc_slice_get_checked(s, idx);
+}
+static inline CCResult_char_CCError CCSlice_at(CCSlice* s, size_t idx) {
+    return cc_slice_at(s, idx);
+}
+
+static inline CCResult_bool_CCError cc_slice_set(CCSlice* s, size_t idx, char c) {
+    if (!s || !s->ptr || idx >= s->len) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice set: index out of bounds"));
+    }
+    ((char*)s->ptr)[idx] = c;
+    return cc_ok_CCResult_bool_CCError(true);
+}
+static inline CCResult_bool_CCError CCSlice_set(CCSlice* s, size_t idx, char c) {
+    return cc_slice_set(s, idx, c);
+}
+
 static inline CCResult_int64_t_CCError cc_add_i64_checked(int64_t a, int64_t b) {
     int64_t r;
 #ifdef CC__HAS_OVERFLOW_BUILTINS

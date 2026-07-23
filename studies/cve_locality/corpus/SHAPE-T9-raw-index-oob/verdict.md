@@ -1,19 +1,13 @@
 # Verdict
 
-- **Primary:** `still_expressible`
+- **Primary:** `mitigated`
 - **Family:** `locality`
-- **needs_language:** `checked-index-write` — Result-ize or ban OOB
-  writes through slice pointers; optional debug trap
+- **needs_language:** —
 - **Rationale:**
-  Schema `bytes len` and Heartbleed-shaped parses are prevented. Soft
-  `CCSlice.at` avoids OOB *reads* by returning 0. The residual write shape
-  still compiles:
-
-      char[:] s = …;
-      ((char*)s.ptr)[s.len] = 'x';   /* still well-formed */
-
-  Safe Rust claim A rejects that. Concurrent-C backlog, not `rust_unsafe`
-  parity.
-- **What would change the verdict:** Checked slice write API as the only
-  well-formed path (or debug/compiler ban on raw indexed stores) →
-  toward `prevented` / `mitigated`.
+  Protected byte-slice index ops (`at` / `get_checked` / `set`) return
+  `CC_ERR_INVALID_ARG` on out-of-bounds in all builds — no soft-zero `at`,
+  no debug/release split. That matches safe Rust’s checked-index claim-A
+  spirit on the idiomatic surface. Raw `s.ptr[i] =` past `len` still
+  compiles (Gap), same class as Rust `get_unchecked` / `unsafe`.
+- **What would change the verdict:** Checker ban on indexed stores through
+  slice `.ptr` → toward `prevented`.

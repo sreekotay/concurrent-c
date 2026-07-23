@@ -74,12 +74,15 @@ from `verdict.md` files only.
 studies/cve_locality/
   README.md
   taxonomy.md               # T1–T10 including serdes + variant
-  summary.md
+  summary.md                # tallies + full scorecard table
+  claim-a.md                # short Rust claim-A narrative
   corpus/
     _template/
     CVE-…/
     SHAPE-…/              # optional class exemplar (e.g. T2 stack escape)
 ```
+
+See [claim-a.md](claim-a.md) for the claim-A headline without the full table.
 
 
 ## Relation to real projects

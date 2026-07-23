@@ -152,6 +152,10 @@ CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
 #define CCResult_bool_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_bool_CCError, bool, CCError)
 #endif
+#ifndef CCResult_char_CCError_DEFINED
+#define CCResult_char_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_char_CCError, char, CCError)
+#endif
 #ifndef CCResult_size_t_CCError_DEFINED
 #define CCResult_size_t_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCError, size_t, CCError)

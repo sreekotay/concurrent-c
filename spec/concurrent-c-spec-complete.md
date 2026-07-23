@@ -4716,15 +4716,21 @@ str msg = format(&arena, "Hello {}! Score: {}", name, score);
 ```c
 // Normative
 size_t len(T[:] s);
-T at(T[:] s, int index);
 T[:] slice(T[:] s, int start, int end);
 T* ptr(T[:] s);
 
+// Byte-slice checked index (CCSlice / char[:]) — Result in all builds
+char !>(CCError) at(CCSlice *s, size_t index);           /* = get_checked */
+char !>(CCError) get_checked(CCSlice *s, size_t index);
+bool !>(CCError) set(CCSlice *s, size_t index, char c);
+
 // UFCS
-size_t  s.len();
-T       s.at(int i);
-T[:]    s.slice(int start, int end);
-T*      s.ptr();
+size_t           s.len();
+char !>(CCError) s.at(size_t i);
+char !>(CCError) s.get_checked(size_t i);
+bool !>(CCError) s.set(size_t i, char c);
+T[:]             s.slice(int start, int end);
+T*               s.ptr();
 ```
 
 #### 9.2.2 Query Methods
@@ -4774,7 +4780,7 @@ for (T x : slice) { ... }
 
 // Enumeration (with index)
 for (int i = 0; i < slice.len(); i++) {
-    T item = slice.at(i);
+    char item = slice.at((size_t)i) !>;   /* byte slices; Result-checked */
 }
 ```
 
@@ -4967,7 +4973,7 @@ s[..end]         // elements [0, end)
 s[..]            // equivalent to s
 ```
 
-**Rule:** Slice indexing and subslicing perform bounds checks in debug builds; out-of-bounds is a runtime error in debug and undefined behavior in release.
+**Rule (checked-index):** Protected byte-slice index ops (`at` / `get_checked` / `set`) return `CC_ERR_INVALID_ARG` on out-of-bounds or null in **all** builds — no debug/release split. Raw `.ptr` indexing and unchecked C stores are outside this surface (Gap). Subslice ops that cannot form a valid range yield an empty view.
 
 **String literals:**
 

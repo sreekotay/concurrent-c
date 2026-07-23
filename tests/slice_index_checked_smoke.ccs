@@ -1,0 +1,40 @@
+/* Checked slice index: get/set/at return CCError on OOB in all builds. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    char buf[4] = {'a', 'b', 'c', 'd'};
+    char[:] s = cc_slice_from_buffer(buf, 4);
+
+    {
+        char !>(CCError) r = s.at(0);
+        assert(r.is_ok() && r.value() == 'a');
+    }
+    {
+        bool !>(CCError) r = s.set(1, 'X');
+        assert(r.is_ok() && r.value());
+        char !>(CCError) g = s.get_checked(1);
+        assert(g.is_ok() && g.value() == 'X');
+    }
+    {
+        char !>(CCError) r = s.at(4);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        bool !>(CCError) r = s.set(4, 'Z');
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+
+    @errhandler(CCError e) {
+        assert(e.kind == CC_ERR_INVALID_ARG);
+        printf("slice_index_checked_smoke: ok\n");
+        return 0;
+    }
+    char bad = s.at(99) !>;
+    (void)bad;
+    printf("FAIL: OOB at should have taken errhandler\n");
+    return 1;
+}

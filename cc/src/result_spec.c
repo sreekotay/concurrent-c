@@ -25,6 +25,7 @@ static const struct {
 static const char* cc__core_builtin_result_types[] = {
     "int_CCError",
     "bool_CCError",
+    "char_CCError",
     "size_t_CCError",
     "voidptr_CCError",
     "charptr_CCError",
@@ -51,6 +52,8 @@ static const CCStdlibPredeclaredResult cc__stdlib_predeclared_result_specs[] = {
     { "CCResult_CCDirIterptr_CCIoError",     "CCDirIter*", "CCIoError",       "CCDirIterptr",   "CCIoError" },
     { "CCResult_CCDirEntry_CCIoError",       "CCDirEntry", "CCIoError",       "CCDirEntry",     "CCIoError" },
     { "CCResult_bool_CCIoError",             "bool",     "CCIoError",         "bool",           "CCIoError" },
+    { "CCResult_bool_CCError",               "bool",     "CCError",           "bool",           "CCError" },
+    { "CCResult_char_CCError",               "char",     "CCError",           "char",           "CCError" },
     { "CCResult_int64_t_CCError",            "int64_t",  "CCError",           "int64_t",        "CCError" },
     { "CCResult_uint64_t_CCError",           "uint64_t", "CCError",           "uint64_t",       "CCError" },
     { "CCResult_double_CCError",             "double",   "CCError",           "double",         "CCError" },

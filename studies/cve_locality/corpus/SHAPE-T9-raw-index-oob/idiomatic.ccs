@@ -1,25 +1,34 @@
 /*
- * SHAPE-T9 — raw index OOB write: still_expressible.
+ * SHAPE-T9 — indexed OOB: MITIGATED on the checked surface.
  *
- * Schema / at() help reads and wire length. Raw ptr[i]= past len still
- * compiles — that is the miss (not executed here).
+ * Idiomatic: s.at(i) !> / s.set(i, c) !> return CCError on OOB.
+ * Escape (still compiles): ((char*)s.ptr)[s.len] = 'x';
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
-#include <string.h>
 
 int main(void) {
     char buf[4] = {'a', 'b', 'c', 'd'};
     char[:] s = cc_slice_from_buffer(buf, 4);
 
-    /* Soft read: past-end at() returns 0, does not trap. */
-    if (s.at(4) != 0) return 1;
+    @errhandler(CCError e) {
+        if (e.kind != CC_ERR_INVALID_ARG) {
+            fprintf(stderr, "unexpected: %s\n", e.message);
+            return 2;
+        }
+        printf("shape-t9-raw-index-oob: mitigated "
+               "(checked at/set; raw ptr[i]= remains Gap)\n");
+        return 0;
+    }
 
-    /* Bug-shaped (still compiles if uncommented):
-     *   ((char*)s.ptr)[s.len] = 'x';
-     */
+    bool wrote = s.set(1, 'B') !>;
+    if (!wrote) return 3;
+    char c = s.at(1) !>;
+    if (c != 'B') return 4;
 
-    printf("shape-t9-raw-index-oob: still_expressible "
-           "(raw ptr[i]= past len; needs checked-index-write)\n");
-    return 0;
+    /* OOB — Result error, all builds. */
+    char bad = s.at(4) !>;
+    (void)bad;
+    printf("FAIL: OOB should have erred\n");
+    return 1;
 }

@@ -111,7 +111,6 @@ size_t cc_slice_len(CCSlice *s);
 CCSlice cc_slice_trim(CCSlice *s);
 CCSlice cc_slice_trim_left(CCSlice *s);
 CCSlice cc_slice_trim_right(CCSlice *s);
-char cc_slice_at(CCSlice *s, size_t idx);
 CCSlice cc_slice_sub(CCSlice s, size_t start, size_t end);
 bool cc_slice_starts_with(CCSlice *s, CCSlice prefix);
 bool cc_slice_ends_with(CCSlice *s, CCSlice suffix);
@@ -121,12 +120,14 @@ bool cc_slice_eq_cstr(CCSlice *s, const char *cstr);
 
 An invalid `cc_slice_sub` range returns an empty slice. A subslice clears
 uniqueness, preserves transferability, and marks a view that does not cover the
-full allocation as a subslice. `cc_slice_at` returns zero for an invalid index.
-The index functions report absence through `found`.
+full allocation as a subslice. `cc_slice_get` reports absence through its
+`bool` return (non-Result C twin). The index-of helpers report absence through
+`found`.
 
-Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `at`, `sub`,
+Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
 `starts_with`, `ends_with`, `eq`, `eq_cstr`, and `destroy` to the corresponding
-`CCSlice_*` or `cc_slice_*` function.
+`CCSlice_*` or `cc_slice_*` function. Checked index UFCS (`at`, `get_checked`,
+`set`) is documented under arena-backed slice operations below.
 
 ### Arena-backed slice operations
 
@@ -135,7 +136,16 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `at`, `sub`,
 ```c
 CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena *arena);
 CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *arena);
+
+/* Checked index — same Result/error in all builds (no debug/release split). */
+char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
+char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* alias of get_checked */
+bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 ```
+
+Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
+`at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
+outside this surface.
 
 `<ccc/std/string.cch>` provides:
 
