@@ -1,0 +1,1 @@
+cannot cc_arena_free arena 'buf' while a nursery task holds a borrow from it

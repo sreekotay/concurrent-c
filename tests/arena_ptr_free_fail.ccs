@@ -1,0 +1,17 @@
+/* Fail: cannot free() an arena-allocated pointer (owned-buffer-child-free-ban). */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    CCArena buf = cc_arena_heap(kilobytes(4));
+    char* base = cc_arena_alloc_T_count(char, &buf, 64);
+    if (!base) return 1;
+    memset(base, 'x', 64);
+
+    /* ERROR: child free of owner-filled arena buffer */
+    free(base);
+
+    cc_arena_free(&buf);
+    return 0;
+}

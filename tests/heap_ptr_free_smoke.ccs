@@ -1,0 +1,14 @@
+/* Smoke: malloc pointers may still be free()'d (Gap / C folklore). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* p = (char*)malloc(32);
+    if (!p) return 1;
+    memset(p, 'z', 32);
+    free(p);
+    printf("heap_ptr_free_smoke: ok\n");
+    return 0;
+}

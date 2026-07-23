@@ -33,7 +33,7 @@ typedef struct {
     const char* arena_name;    /* borrowed ident of owning arena (or pointer to it) */
     int borrow_end_line;       /* last line of enclosing block (flat scopes) */
     int epoch_pinned;          /* arena: spawn captured a borrow from this arena */
-    int pin_end_line;          /* arena: reset forbidden through this line */
+    int pin_end_line;          /* arena: epoch-end forbidden through this line */
     int move_only;
     int moved;
     int pending_move;
@@ -412,7 +412,8 @@ static int cc__closure_captures_arena_slice_view(int closure_idx,
                 for (int i = 0; i < locals_n; i++) if (strcmp(locals[i], nm) == 0) is_local = 1;
                 if (!is_local) {
                     CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, nm);
-                    if (v && v->is_slice && v->is_arena_slice_view && v->arena_name) {
+                    if (v && v->arena_name &&
+                        ((v->is_slice && v->is_arena_slice_view) || v->is_arena_ptr)) {
                         if (out_arena_name) *out_arena_name = v->arena_name;
                         return 1;
                     }
@@ -427,10 +428,44 @@ static int cc__closure_captures_arena_slice_view(int closure_idx,
     return 0;
 }
 
-static int cc__call_is_arena_epoch_bump(const char* name) {
+/* Arena ops that end/invalidate the current provenance epoch. */
+static int cc__call_is_arena_epoch_end(const char* name) {
     if (!name) return 0;
     return strcmp(name, "cc_arena_reset") == 0 ||
-           strcmp(name, "cc_arena_restore") == 0;
+           strcmp(name, "cc_arena_restore") == 0 ||
+           strcmp(name, "cc_arena_free") == 0 ||
+           strcmp(name, "cc_arena_destroy") == 0 ||
+           strcmp(name, "cc_arena_detach") == 0 ||
+           strcmp(name, "cc_arena_pool_detach") == 0;
+}
+
+/* UFCS short names that may be arena epoch-end when the receiver is a CCArena. */
+static int cc__call_maybe_arena_ufcs_epoch_end(const char* name) {
+    if (!name) return 0;
+    return strcmp(name, "reset") == 0 ||
+           strcmp(name, "restore") == 0 ||
+           strcmp(name, "free") == 0 ||
+           strcmp(name, "destroy") == 0 ||
+           strcmp(name, "detach") == 0;
+}
+
+/* Deleters that must not run on non-owning arena borrows / arena pointers. */
+static int cc__call_is_buffer_deleter(const char* name) {
+    if (!name) return 0;
+    if (strcmp(name, "free") == 0) return 1;
+    if (strcmp(name, "cfree") == 0) return 1;
+    if (strcmp(name, "cc_slice_destroy") == 0) return 1;
+    if (strcmp(name, "CCSlice_destroy") == 0) return 1;
+    if (strcmp(name, "CCSliceUnique_destroy") == 0) return 1;
+    if (strcmp(name, "destroy") == 0) return 1; /* UFCS on slice */
+    return 0;
+}
+
+static int cc__var_is_non_owning_arena_buffer(const CCSliceVar* v) {
+    if (!v) return 0;
+    if (v->is_arena_ptr) return 1;
+    if (v->is_slice && v->is_arena_slice_view && !v->move_only && !v->moved) return 1;
+    return 0;
 }
 
 static int cc__call_is_nursery_spawn(const char* name) {
@@ -696,40 +731,126 @@ static int cc__walk_call(int idx,
     const StubNodeView* n = &nodes[idx];
     if (!n->aux_s1) return 0;
 
-    /* Same-fiber / lexical: reset/restore while an arena borrow is still in scope.
-       Also honors spawn pins recorded on the arena var (capture-as-pin). */
-    if (cc__call_is_arena_epoch_bump(n->aux_s1)) {
+    /* Same-fiber / lexical: epoch-end (reset/restore/free/destroy/detach) while an
+       arena borrow is still in scope. Also honors spawn pins (capture-as-pin). */
+    {
+        int is_epoch_end = cc__call_is_arena_epoch_end(n->aux_s1);
+        if (!is_epoch_end && cc__call_maybe_arena_ufcs_epoch_end(n->aux_s1)) {
+            const char* maybe = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+            CCSliceVar* av = maybe ? cc__scopes_lookup(scopes, *io_scope_n, maybe) : NULL;
+            if (av && av->is_arena) is_epoch_end = 1;
+        }
+        if (is_epoch_end) {
+            const ChildList* cl = &kids[idx];
+            for (int i = 0; i < cl->len; i++) {
+                if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+            }
+            const char* aname = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+            if (aname) {
+                CCSliceVar* arena_v = cc__scopes_lookup(scopes, *io_scope_n, aname);
+                /* Prefer the owning arena name when the call names an arena_ptr. */
+                if (arena_v && !arena_v->is_arena && arena_v->arena_name) {
+                    aname = arena_v->arena_name;
+                    arena_v = cc__scopes_lookup(scopes, *io_scope_n, aname);
+                }
+                if (arena_v && arena_v->is_arena) {
+                    int is_reset =
+                        strcmp(n->aux_s1, "cc_arena_reset") == 0 ||
+                        strcmp(n->aux_s1, "cc_arena_restore") == 0 ||
+                        strcmp(n->aux_s1, "reset") == 0 ||
+                        strcmp(n->aux_s1, "restore") == 0;
+                    /* Lexical live-borrow ban is reset/restore only: free/destroy at
+                       end of the same block is idiomatic (view is done; NLL-ish). */
+                    if (is_reset &&
+                        cc__scopes_live_arena_borrow_at(scopes, *io_scope_n, aname, n->line_start)) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot %s arena '%s' while a derived slice borrow is still in scope",
+                                             n->aux_s1, aname);
+                        fprintf(stderr, "  note: arena provenance epoch would invalidate live borrows (CVE-2017-13245 class)\n");
+                        fprintf(stderr, "  hint: end the borrow's scope before reset, or materialize into a unique/stable slice\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                    /* Spawn pin bans all epoch-end ops (including free/destroy/detach). */
+                    if (arena_v->epoch_pinned && n->line_start <= arena_v->pin_end_line) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot %s arena '%s' while a nursery task holds a borrow from it",
+                                             n->aux_s1, aname);
+                        fprintf(stderr, "  note: capturing an arena borrow into a spawn pins that arena epoch until the nursery scope ends\n");
+                        fprintf(stderr, "  hint: join/end the nursery before reset/destroy, or capture a materialized unique slice\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                }
+            }
+            return 0;
+        }
+    }
+
+    /* owned-buffer-child-free-ban: only the owning scope may delete.
+       Ban free/destroy on arena-allocated pointers and non-unique arena slice views. */
+    if (cc__call_is_buffer_deleter(n->aux_s1)) {
         const ChildList* cl = &kids[idx];
         for (int i = 0; i < cl->len; i++) {
             if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
         }
-        const char* aname = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
-        if (aname) {
-            if (cc__scopes_live_arena_borrow_at(scopes, *io_scope_n, aname, n->line_start)) {
-                cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
-                                     "cannot %s arena '%s' while a derived slice borrow is still in scope",
-                                     n->aux_s1, aname);
-                fprintf(stderr, "  note: arena provenance epoch would invalidate live borrows (CVE-2017-13245 class)\n");
-                fprintf(stderr, "  hint: end the borrow's scope before reset, or materialize into a unique/stable slice\n");
-                ctx->errors++;
-                return -1;
+        {
+            /* Arena UFCS free/destroy: allowed when not pinned (handled above). */
+            const char* aname = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+            CCSliceVar* av = aname ? cc__scopes_lookup(scopes, *io_scope_n, aname) : NULL;
+            if (av && av->is_arena &&
+                (strcmp(n->aux_s1, "free") == 0 || strcmp(n->aux_s1, "destroy") == 0)) {
+                return 0;
             }
-            CCSliceVar* arena_v = cc__scopes_lookup(scopes, *io_scope_n, aname);
-            if (arena_v && arena_v->is_arena && arena_v->epoch_pinned &&
-                n->line_start <= arena_v->pin_end_line) {
-                cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
-                                     "cannot %s arena '%s' while a nursery task holds a borrow from it",
-                                     n->aux_s1, aname);
-                fprintf(stderr, "  note: capturing an arena slice into a spawn pins that arena epoch until the nursery scope ends\n");
-                fprintf(stderr, "  hint: join/end the nursery before reset, or capture a materialized unique slice\n");
-                ctx->errors++;
-                return -1;
+        }
+        int st[256];
+        int sp = 0;
+        st[sp++] = idx;
+        while (sp > 0) {
+            int cur = st[--sp];
+            const StubNodeView* cn = &nodes[cur];
+            if (cn->kind == CC_STUB_IDENT && cn->aux_s1) {
+                if (strcmp(cn->aux_s1, n->aux_s1) == 0) {
+                    /* skip callee */
+                } else {
+                    CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, cn->aux_s1);
+                    if (cc__var_is_non_owning_arena_buffer(v)) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot free/destroy non-owning borrow '%s'",
+                                             cn->aux_s1);
+                        fprintf(stderr,
+                                "  note: only the owning scope (arena @destroy / unique T[:!]) may delete "
+                                "(owned-buffer-child-free-ban)\n");
+                        fprintf(stderr,
+                                "  hint: pass a job descriptor; let the owner destroy the arena or unique slice\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                    /* Non-unique slices (even non-arena): destroy is owner-only. */
+                    if (v && v->is_slice && !v->move_only && !v->moved &&
+                        (strcmp(n->aux_s1, "cc_slice_destroy") == 0 ||
+                         strcmp(n->aux_s1, "CCSlice_destroy") == 0 ||
+                         strcmp(n->aux_s1, "destroy") == 0)) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot destroy non-unique slice '%s'",
+                                             cn->aux_s1);
+                        fprintf(stderr,
+                                "  note: cc_slice_destroy / @destroy applies to unique T[:!] owners\n");
+                        fprintf(stderr,
+                                "  hint: use a unique slice, or let the allocating arena own cleanup\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                }
             }
+            const ChildList* k = &kids[cur];
+            for (int j = 0; j < k->len && sp < (int)(sizeof(st) / sizeof(st[0])); j++)
+                st[sp++] = k->child[j];
         }
         return 0;
     }
 
-    /* Nursery spawn: if any arg is (or builds a closure from) an arena slice,
+    /* Nursery spawn: if any arg is (or builds a closure from) an arena borrow,
        pin that arena until the nursery handle's enclosing block ends.
        Closures may still be CC_STUB_CLOSURE here, or already `cc_closure_*_make`. */
     if (n->aux_s1 && (cc__call_is_nursery_spawn(n->aux_s1) || strcmp(n->aux_s1, "spawn") == 0)) {
@@ -754,7 +875,8 @@ static int cc__walk_call(int idx,
                 if (cc__call_is_nursery_spawn(nm)) continue;
                 if (strncmp(nm, "cc_closure_", 11) == 0) continue;
                 CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, nm);
-                if (v && v->is_arena_slice_view && v->arena_name && !pinned_arena) {
+                if (v && v->arena_name && !pinned_arena &&
+                    (v->is_arena_slice_view || v->is_arena_ptr)) {
                     pinned_arena = v->arena_name;
                 }
                 if (v && v->is_nursery && !nursery_name) {
@@ -1016,7 +1138,15 @@ static int cc__walk_assign(int idx,
                 } else if (lhs_v && !has_move_marker) {
                     lhs_v->move_only = 0;
                 }
+                if (lhs_v && rhs_v->is_arena_slice_view) {
+                    lhs_v->is_arena_slice_view = 1;
+                    lhs_v->arena_name = rhs_v->arena_name;
+                }
             }
+        }
+        if (lhs_v && rhs_v && !saw_member && rhs_v->is_arena_ptr) {
+            lhs_v->is_arena_ptr = 1;
+            lhs_v->arena_name = rhs_v->arena_name;
         }
     }
 
@@ -1189,7 +1319,7 @@ static int cc__walk(int idx,
             /* Find a candidate RHS identifier in the initializer (best-effort). */
             (void)cc__subtree_find_first_ident_matching_scope(nodes, kids, idx, scopes, *io_scope_n, v->name, &copy_from);
 
-            /* Copy rule for decl initializers: `CCSlice t = s;` */
+            /* Copy rule for decl initializers: `CCSlice t = s;` / `char* p = bytes;` */
             if (copy_from && copy_from != v->name) {
                 CCSliceVar* rhs = cc__scopes_lookup(scopes, *io_scope_n, copy_from);
                 /* If we see assignment from an existing slice var, treat this decl as slice too
@@ -1197,6 +1327,10 @@ static int cc__walk(int idx,
                 if (rhs && rhs->is_slice) v->is_slice = 1;
                 if (rhs && rhs->is_arena_slice_view) {
                     v->is_arena_slice_view = 1;
+                    v->arena_name = rhs->arena_name;
+                }
+                if (rhs && rhs->is_arena_ptr) {
+                    v->is_arena_ptr = 1;
                     v->arena_name = rhs->arena_name;
                 }
                 int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
@@ -1675,8 +1809,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     }
 
     /* Post-check: nursery spawn that captures an arena borrow pins that arena's
-       epoch until the nursery's enclosing block ends — reset/restore in that
-       window is a compile error (even if the original slice local left scope). */
+       epoch until the nursery's enclosing block ends — epoch-end ops in that
+       window are a compile error (even if the original slice local left scope). */
     if (closure_spawned && ctx->errors == 0) {
         for (int i = 0; i < n; i++) {
             if (nodes[i].kind != CC_STUB_CLOSURE) continue;
@@ -1749,12 +1883,23 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
 
             for (int r = 0; r < n; r++) {
                 if (nodes[r].kind != CC_STUB_CALL) continue;
-                if (!cc__call_is_arena_epoch_bump(nodes[r].aux_s1)) continue;
+                int is_end = cc__call_is_arena_epoch_end(nodes[r].aux_s1);
+                if (!is_end && cc__call_maybe_arena_ufcs_epoch_end(nodes[r].aux_s1)) {
+                    const char* maybe = cc__subtree_arena_ref_name(nodes, kids, r, scopes, scope_n);
+                    CCSliceVar* av = maybe ? cc__scopes_lookup(scopes, scope_n, maybe) : NULL;
+                    if (av && av->is_arena) is_end = 1;
+                }
+                if (!is_end) continue;
                 if (nodes[r].line_start < spawn_line) continue;
                 if (nodes[r].line_start > pin_end_line) continue;
                 const char* rname = cc__subtree_arena_ref_name(nodes, kids, r, scopes, scope_n);
+                if (!rname) continue;
+                {
+                    CCSliceVar* rv = cc__scopes_lookup(scopes, scope_n, rname);
+                    if (rv && !rv->is_arena && rv->arena_name) rname = rv->arena_name;
+                }
                 if (!rname || strcmp(rname, aname) != 0) continue;
-                /* Reset must sit under the pin block (or nested inside it). */
+                /* Epoch-end must sit under the pin block (or nested inside it). */
                 int under = 0;
                 int p = r;
                 while (p >= 0) {
@@ -1766,8 +1911,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                 cc__emit_err_cat_fmt(ctx, &nodes[r], CC_ERR_SLICE,
                                      "cannot %s arena '%s' while a nursery task holds a borrow from it",
                                      nodes[r].aux_s1, aname);
-                fprintf(stderr, "  note: capturing an arena slice into a spawn pins that arena epoch until the nursery scope ends\n");
-                fprintf(stderr, "  hint: join/end the nursery before reset, or capture a materialized unique slice\n");
+                fprintf(stderr, "  note: capturing an arena borrow into a spawn pins that arena epoch until the nursery scope ends\n");
+                fprintf(stderr, "  hint: join/end the nursery before reset/destroy, or capture a materialized unique slice\n");
                 ctx->errors++;
                 break;
             }

@@ -1,0 +1,17 @@
+/* Fail: free() on alias of arena pointer is still banned. */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    CCArena buf = cc_arena_heap(kilobytes(4));
+    char* bytes = cc_arena_alloc_T_count(char, &buf, 32);
+    if (!bytes) return 1;
+    char* base = bytes;
+    memset(base, 'y', 32);
+
+    free(base);
+
+    cc_arena_free(&buf);
+    return 0;
+}

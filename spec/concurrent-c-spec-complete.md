@@ -591,11 +591,13 @@ spawn_thread(() => {
 
 **Rule (arena slice capture):** Arena slices can be captured if the compiler can prove the arena outlives the thread/task. In practice, this means the arena must be declared in an enclosing scope that joins the thread/task before the arena is freed **or reset**.
 
-**Rule (arena epoch pin on capture):** Capturing a non-unique arena-backed slice into a nursery/thread task **pins** that arena's provenance epoch until the nursery (or equivalent join scope) ends. While the pin is live, `cc_arena_reset` / `cc_arena_restore` of that arena is a compile-time error. Materialize into a unique/stable slice (or `@unsafe`) to escape the pin.
+**Rule (arena epoch pin on capture):** Capturing a non-unique arena-backed slice or arena-allocated pointer into a nursery/thread task **pins** that arena's provenance epoch until the nursery (or equivalent join scope) ends. While the pin is live, epoch-ending ops on that arena (`cc_arena_reset` / `cc_arena_restore` / `cc_arena_free` / `cc_arena_destroy` / `cc_arena_detach`) are a compile-time error. Materialize into a unique/stable slice (or `@unsafe`) to escape the pin.
 
-**Rule (arena reset with live borrow):** `cc_arena_reset` / `cc_arena_restore` is a compile-time error when a derived arena slice borrow of that arena is still within its lexical enclosing block. End the borrow's scope before reset, or copy into another arena / unique slice first.
+**Rule (arena reset with live borrow):** `cc_arena_reset` / `cc_arena_restore` is a compile-time error when a derived arena slice borrow of that arena is still within its lexical enclosing block. End the borrow's scope before reset, or copy into another arena / unique slice first. Owner `free` / `destroy` at end of the same block after the last use remains well-formed.
 
 **Rule (channel-stable-borrow):** Channel send of a non-unique arena-backed slice view is a compile-time error. The payload may outlive the arena epoch that minted the view. Materialize into a unique slice, a static/canonical slice, or channel-bound batch storage (`send_into` / copy into the receiver's arena) before send. Unique (`T[:!]` / `adopt` / `recv`) and static slices may be sent.
+
+**Rule (owned-buffer-child-free-ban):** `free` / `cc_slice_destroy` / `@destroy` on a non-owning arena-allocated pointer or non-unique arena slice view is a compile-time error. Only the owning scope may delete: arena `@destroy` / `cc_arena_free`, or unique `T[:!]` destruction. Untracked heap (`malloc`) remains outside this rule.
 
 **Rule (pointer-alias capture mutation):** Value-capturing `T* p = &local` into a task/thread closure and then writing through `*p` / `p->field` is a compile-time error (same class as mutating a reference capture). Use `Atomic` / `Mutex`, capture by reference under those wrappers, or `@unsafe`.
 

@@ -1,0 +1,24 @@
+/* Fail: destroy arena while spawn holds an arena-allocated pointer. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+
+    CCArena buf = cc_arena_heap(kilobytes(4));
+    char* base = cc_arena_alloc_T_count(char, &buf, 64);
+    if (!base) return 1;
+    memset(base, 'x', 64);
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [base] {
+            (void)base[0];
+        });
+        cc_arena_destroy(&buf); /* ERROR: pin via arena_ptr capture */
+    }
+    return 0;
+}

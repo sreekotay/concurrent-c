@@ -1,0 +1,1 @@
+cannot cc_arena_destroy arena 'buf' while a nursery task holds a borrow from it
