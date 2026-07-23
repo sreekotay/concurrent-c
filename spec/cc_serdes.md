@@ -13,12 +13,13 @@ sections below remain design intent (marked **Future**).
 > [`cc/docs/GRAMMAR_DSL_PROPOSAL.md`](../cc/docs/GRAMMAR_DSL_PROPOSAL.md) for the
 > seam; this document specifies the **SERDES engine's** semantics.
 
-### Implementation status (Jul 2026)
+### Implementation status
 
 | Surface | In tree today | Notes |
 | ------- | ------------- | ----- |
 | `@grammar(rules)` | **Live** | Builtin engine in `cc/src/preprocess/grammar_rules.c` |
 | `@grammar(schema)` | **Live** | Same file; parse + write, narrowing, `use` / `include` factories |
+| `one of` (tagged unions) | **Live** | Parse **and** write: `cc_write` / `cc_format` / UFCS `to_str` (see Schema → `one of`) |
 | Pad absorption / `__np` | **Live** | Normative for stacked whitespace (see Whitespace and padding) |
 | FIRST / SWAR / string-fuse | **Live** | Emitter lowering; not a dialect feature |
 | `to` / `thru` | Rejected at parse | Reserved; not implemented |
@@ -261,8 +262,8 @@ Example:
 Typical rule-oriented entry points:
 
 ```c
-char[:][:] tokens = cc_collect(src, arena, CssRules.tokenize) ?>(e) return cc_err(e);
-bool ok = cc_match(src, CssRules.ident) ?>(e) return cc_err(e);
+char[:][:] tokens = cc_collect(src, arena, CssRules.tokenize) !>(e) return cc_err(e);
+bool ok = cc_match(src, CssRules.ident) !>(e) return cc_err(e);
 ```
 
 **Rule:** `@grammar(rules) Name { ... }` introduces a named rule namespace.
@@ -348,6 +349,21 @@ Schema adds:
 - schema-driven formatting
 - provenance-aware storage semantics
 
+### `one of` (tagged unions)
+
+An alternation schema declares its variants with `one of [...]`. The generated type is a tagged union — `typedef enum { Name_<variant>, … } NameKind;` plus `struct Name { NameKind kind; union { … } u; }` — and participates in **both** directions.
+
+**Write projection (normative).** `Name_write(&v, buf, cap)` — and its faces `cc_write`, `cc_format`, and UFCS `v.to_str(&arena)` — switches on `kind`; each arm emits its variant's product terms exactly as the product writer would:
+
+- Leading literals become bytes; primitive fields format canonically.
+- **Length and count fields are derived on write.** A field consumed as a length/count on parse (`len: int … data: bytes len`, `n: int … items: items T n`) is re-derived from the data (`data.len`, `items_n`); the stored field value is ignored. Parse→write round-trips are byte-exact even when stored counts have been mutated.
+- **Self-typed `items` recurse** through the same writer (e.g. a RESP array of replies writes each element via the element writer).
+- A variant with no leading literal (a default arm) writes its terms like any other.
+- **Out-of-range `kind` emits nothing:** the writer returns 0 bytes and `cc_format` yields the empty string. Never partial or garbled output.
+- **Insufficient capacity emits nothing:** if the full output does not fit in `cap`, the writer returns 0; output exactly at `cap` fits.
+
+**Per-variant formatability (normative).** If any variant contains a term with no invertible write form (for example directive-driven `items:` open/close/sep collection), generating the write projection is a **compile error** naming the variant and the term (`variant 'list': term 'xs'`). The writer never silently skips an arm.
+
 ---
 
 ## `cc_parse` and `cc_format`
@@ -359,14 +375,14 @@ Optional parse options may be supplied at the call site, for example borrowing
 hints where legal:
 
 ```c
-RespBulkString s = cc_parse(src, arena, RespBulkString, .borrow_from_src) ?>(e) return cc_err(e);
+RespBulkString s = cc_parse(src, arena, RespBulkString, .borrow_from_src) !>(e) return cc_err(e);
 ```
 
 `cc_format(value, arena, Type)` formats a schema value into **canonical** bytes,
 returning a string-like output type chosen by the language/library contract:
 
 ```c
-CCString out = cc_format(v, arena, RespValue) ?>(e) return cc_err(e);
+CCString out = cc_format(v, arena, RespValue) !>(e) return cc_err(e);
 ```
 
 The concrete return type of `cc_parse` (pointer vs value vs arena-backed handle)
