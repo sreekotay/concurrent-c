@@ -22,3 +22,5 @@ Each serious domain tends to ship **two layers**:
 Keeping that split clear preserves headroom: the idiomatic file teaches the skeleton; the full port proves the skeleton scales.
 
 Normative definitions of the primitives and lowering live in `spec/concurrent-c-spec-complete.md`.
+
+**Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.

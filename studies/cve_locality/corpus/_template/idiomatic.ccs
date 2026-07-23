@@ -1,0 +1,14 @@
+/*
+ * Shape reconstruction — not a port of the vulnerable project.
+ *
+ * Show the ownership / nursery / channel structure that idiomatic CC
+ * would use for the same actors. Keep it minimal and preferably
+ * buildable: `ccc build run studies/cve_locality/corpus/.../idiomatic.ccs`
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    printf("TODO: reconstruct shape for this CVE\n");
+    return 0;
+}
