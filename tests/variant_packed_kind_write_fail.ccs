@@ -1,0 +1,16 @@
+/* No-raw-access oracle (spec §11 / §5): `.kind` is a read-only pseudo-member
+ * on every layout — writing it is a compile error.  On a packed variant there
+ * is no tag field at all; the tag changes only via construction/transition. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant(packed) V {
+    str: CCString;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .num = 5 };
+    v.kind = V_str;           /* tag is read-only: rejected */
+    return 0;
+}

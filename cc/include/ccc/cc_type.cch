@@ -274,10 +274,26 @@ typedef struct {
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 
+/* Niche descriptor (spec/draft_variants.md §11).  A type declares a bit
+ * pattern a valid instance is guaranteed never to exhibit — an (offset,
+ * width, sentinel) triple over its storage — so a `@variant(packed)` arm of
+ * this type can donate that pattern to carry the discriminant.  `size`/`align`
+ * pin the type's footprint for the packing engine (and become `_Static_assert`s
+ * in the emitted C). */
+typedef struct {
+    int has_niche;
+    unsigned size;
+    unsigned align;
+    unsigned offset;
+    unsigned width;
+    unsigned long long sentinel;
+} CCTypeNicheHook;
+
 typedef struct {
     CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
+    CCTypeNicheHook niche;
 } CCTypeHooks;
 
 static inline CCTypeCreateHook cc_type_create_call(const char* callee) {
@@ -315,6 +331,19 @@ static inline CCTypeDestroyHook cc_type_destroy_hooks(const char* pre_callee, co
     CCTypeDestroyHook hook = {0};
     hook.pre_callee = pre_callee;
     hook.callee = callee;
+    return hook;
+}
+
+static inline CCTypeNicheHook cc_type_niche(unsigned size, unsigned align,
+                                            unsigned offset, unsigned width,
+                                            unsigned long long sentinel) {
+    CCTypeNicheHook hook = {0};
+    hook.has_niche = 1;
+    hook.size = size;
+    hook.align = align;
+    hook.offset = offset;
+    hook.width = width;
+    hook.sentinel = sentinel;
     return hook;
 }
 

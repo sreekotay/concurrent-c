@@ -1,0 +1,37 @@
+/* Inferred-niche unit (spec/draft_variants.md §11): a raw-pointer arm donates
+ * the null pattern (offset 0, pointer-width, sentinel 0) with no per-type
+ * declaration, and a `void` arm needs no niche of its own.  A packed
+ * { some: int*; none: void } therefore packs into one pointer word: `some`
+ * holds a (non-null) pointer, `none` stamps the null sentinel. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant(packed) OptPtr {
+    some: int*;
+    none: void;
+};
+
+int main(void) {
+    _Static_assert(sizeof(OptPtr) == sizeof(void*),
+                   "pointer + void packs into a single pointer word");
+
+    int x = 77;
+    OptPtr a = { .some = &x };
+    if (a.kind != OptPtr_some) return 1;
+    int* p = a.some ?> (int*)0;
+    if (!p || *p != 77) return 2;
+
+    OptPtr b = { .none = {} };
+    if (b.kind != OptPtr_none) return 3;
+
+    int hits = 0;
+    switch (b) {
+        case .some: return 4;
+        case .none: hits = 1; break;
+    }
+    if (!hits) return 5;
+
+    printf("ok\n");
+    return 0;
+}

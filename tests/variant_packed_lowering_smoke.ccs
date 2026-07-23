@@ -1,0 +1,48 @@
+/* @variant(packed) niche-packing smoke (spec/draft_variants.md §11).
+ *
+ * Pins the packed footprint against its honest unpacked twin: a declared
+ * niche in CCString's `cap` field (offset 12, width 4) lets a
+ * { str: CCString; num: int64_t } variant pack the discriminant into bytes
+ * the `num` payload never touches — so the packed value is exactly
+ * sizeof(CCString) = 16 bytes, versus 24 for the tagged unpacked twin.
+ *
+ * The portable dialect works unchanged on the packed layout: designated-init
+ * construction, `.kind` read (compiler-emitted decode), subject-switch with
+ * `case .arm:` labels, and protected projection. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant(packed) PackedRV {
+    str: CCString;
+    num: int64_t;
+};
+
+@variant UnpackedRV {          /* honest tagged twin */
+    str: CCString;
+    num: int64_t;
+};
+
+int main(void) {
+    _Static_assert(sizeof(PackedRV) == 16, "packed RedisValue-shape must be 16 bytes");
+    _Static_assert(sizeof(UnpackedRV) == 24, "unpacked twin carries a tag word: 24 bytes");
+
+    PackedRV v = { .num = 42 };
+    if (v.kind != PackedRV_num) return 1;
+    int64_t n = v.num ?> -1;
+    if (n != 42) return 2;
+
+    CCArena arena = cc_arena_create(4096);
+    PackedRV s = { .str = cc_string_from("hi", &arena) };
+    if (s.kind != PackedRV_str) return 3;
+
+    int seen = 0;
+    switch (s) {
+        case .str: seen = 1; break;
+        case .num: return 4;
+    }
+    if (!seen) return 5;
+
+    printf("ok\n");
+    return 0;
+}

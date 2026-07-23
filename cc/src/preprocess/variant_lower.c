@@ -82,6 +82,12 @@ typedef struct {
     char destroy[128];          /* registered destroy callee ("" = none) */
     int destroy_takes_value;    /* arm type is a pointer: pass u.arm, not &u.arm */
     int decl_line;
+    /* Packed-layout facts (spec §11).  Resolved only for @variant(packed). */
+    int sized;                  /* size/align known at compile time */
+    unsigned size, align;
+    int has_niche;              /* this arm's type donates a niche */
+    unsigned niche_off, niche_width;
+    unsigned long long niche_sentinel;
 } CCVaArm;
 
 typedef struct {
@@ -90,6 +96,15 @@ typedef struct {
     CCVaArm arms[CC_VA_MAX_ARMS];
     int narms;
     int has_drop;
+    /* Packing plan (spec §11).  is_packed=1 for @variant(packed); when the
+     * plan proves a lossless niche, donor_arm is the niche-donating arm and
+     * (niche_off, niche_width, niche_sentinel) is the discriminant location:
+     * niche == sentinel decodes to the (single) non-donor arm, else donor. */
+    int is_packed;
+    unsigned packed_size;
+    int donor_arm;
+    unsigned niche_off, niche_width;
+    unsigned long long niche_sentinel;
 } CCVaDef;
 
 static _Thread_local CCVaDef g_va[CC_VA_MAX_VARIANTS];
@@ -97,6 +112,11 @@ static _Thread_local int g_va_n = 0;
 static _Thread_local int g_va_tmp_id = 0;
 
 size_t cc_variant_registry_count(void) { return (size_t)g_va_n; }
+
+/* Is variant vi a proven-packed variant (opaque byte layout, §11)? */
+static int cc__va_is_packed(int vi) {
+    return vi >= 0 && vi < g_va_n && g_va[vi].is_packed && g_va[vi].donor_arm >= 0;
+}
 
 static int cc__va_find(const char* s, size_t len) {
     for (int i = 0; i < g_va_n; i++) {
@@ -594,6 +614,298 @@ static void cc__va_line_of(const char* s, size_t off, int* out_line) {
     *out_line = line;
 }
 
+/* ==================================================================== */
+/* Packing engine (spec §11): niche resolution + lossless packing proof   */
+/* ==================================================================== */
+
+/* Normalize an arm type into a lookup key: collapse whitespace, drop
+ * `const`/`volatile`/`struct`/`enum`/`union` qualifier tokens.  Returns the
+ * trailing-`*` count (pointer depth) via *out_ptr. */
+static void cc__va_type_key(const char* type, char* key, size_t keysz, int* out_ptr) {
+    char toks[8][40];
+    int ntok = 0;
+    int ptr = 0;
+    size_t i = 0, tl = strlen(type);
+    while (i < tl) {
+        while (i < tl && (isspace((unsigned char)type[i]))) i++;
+        if (i >= tl) break;
+        if (type[i] == '*') { ptr++; i++; continue; }
+        size_t a = i;
+        while (i < tl && (isalnum((unsigned char)type[i]) || type[i] == '_')) i++;
+        if (i == a) { i++; continue; } /* skip stray punctuation */
+        size_t l = i - a;
+        if ((l == 5 && memcmp(type + a, "const", 5) == 0) ||
+            (l == 8 && memcmp(type + a, "volatile", 8) == 0) ||
+            (l == 6 && memcmp(type + a, "struct", 6) == 0) ||
+            (l == 4 && memcmp(type + a, "enum", 4) == 0) ||
+            (l == 5 && memcmp(type + a, "union", 5) == 0)) continue;
+        if (ntok < 8) {
+            if (l >= sizeof(toks[0])) l = sizeof(toks[0]) - 1;
+            memcpy(toks[ntok], type + a, l);
+            toks[ntok][l] = '\0';
+            ntok++;
+        }
+    }
+    size_t o = 0;
+    key[0] = '\0';
+    for (int k = 0; k < ntok; k++) {
+        int m = snprintf(key + o, keysz - o, "%s%s", k ? " " : "", toks[k]);
+        if (m < 0 || (size_t)m >= keysz - o) break;
+        o += (size_t)m;
+    }
+    if (out_ptr) *out_ptr = ptr;
+}
+
+/* Primitive size/align table (LP64).  Returns 1 and fills *sz/*al on a hit. */
+static int cc__va_prim_size(const char* key, unsigned* sz, unsigned* al) {
+    struct { const char* name; unsigned size; } tab[] = {
+        { "char", 1 }, { "signed char", 1 }, { "unsigned char", 1 },
+        { "int8_t", 1 }, { "uint8_t", 1 }, { "_Bool", 1 }, { "bool", 1 },
+        { "short", 2 }, { "short int", 2 }, { "unsigned short", 2 },
+        { "int16_t", 2 }, { "uint16_t", 2 },
+        { "int", 4 }, { "signed", 4 }, { "signed int", 4 }, { "unsigned", 4 },
+        { "unsigned int", 4 }, { "int32_t", 4 }, { "uint32_t", 4 }, { "float", 4 },
+        { "long", 8 }, { "unsigned long", 8 }, { "long int", 8 },
+        { "long long", 8 }, { "unsigned long long", 8 }, { "long long int", 8 },
+        { "int64_t", 8 }, { "uint64_t", 8 }, { "double", 8 },
+        { "size_t", 8 }, { "ssize_t", 8 }, { "ptrdiff_t", 8 },
+        { "intptr_t", 8 }, { "uintptr_t", 8 },
+    };
+    for (size_t i = 0; i < sizeof(tab) / sizeof(tab[0]); i++) {
+        if (strcmp(tab[i].name, key) == 0) {
+            *sz = tab[i].size;
+            *al = tab[i].size; /* natural alignment for these scalar types */
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Resolve an arm's compile-time layout facts (size/align + donated niche).
+ * Returns 1 when the size is known, 0 when it cannot be proven. */
+static int cc__va_arm_layout(CCSymbolTable* sym, CCVaArm* arm) {
+    arm->sized = 0;
+    arm->has_niche = 0;
+    if (arm->is_void) { arm->size = 0; arm->align = 1; arm->sized = 1; return 1; }
+    char key[160];
+    int ptr = 0;
+    cc__va_type_key(arm->type, key, sizeof(key), &ptr);
+    if (ptr > 0) {
+        /* Inferred niche: a raw pointer arm donates the null pattern
+         * (offset 0, width = pointer size, sentinel 0). */
+        arm->size = 8;
+        arm->align = 8;
+        arm->sized = 1;
+        arm->has_niche = 1;
+        arm->niche_off = 0;
+        arm->niche_width = 8;
+        arm->niche_sentinel = 0;
+        return 1;
+    }
+    unsigned sz = 0, al = 0;
+    if (cc__va_prim_size(key, &sz, &al)) {
+        arm->size = sz;
+        arm->align = al;
+        arm->sized = 1;
+        return 1;
+    }
+    if (sym) {
+        unsigned nsz = 0, nal = 0, noff = 0, nw = 0;
+        unsigned long long nsent = 0;
+        if (cc_symbols_lookup_type_niche(sym, key, &nsz, &nal, &noff, &nw, &nsent) == 0) {
+            arm->size = nsz;
+            arm->align = nal ? nal : 1;
+            arm->sized = 1;
+            arm->has_niche = 1;
+            arm->niche_off = noff;
+            arm->niche_width = nw;
+            arm->niche_sentinel = nsent;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Prove a lossless niche packing for def, or leave donor_arm = -1.
+ * Prints a diagnostic and returns -1 on an unpackable declaration; returns 0
+ * on success (donor_arm set) or when packing is not requested. */
+static int cc__va_plan_packing(CCSymbolTable* sym, CCVaDef* def,
+                               const char* src, size_t n, const char* path, size_t at) {
+    def->donor_arm = -1;
+    if (!def->is_packed) return 0;
+
+    /* All arm sizes must be known at compile time. */
+    unsigned maxsz = 0;
+    for (int a = 0; a < def->narms; a++) {
+        if (!cc__va_arm_layout(sym, &def->arms[a])) {
+            cc__va_err(src, n, path, at,
+                       "@variant(packed) '%s': cannot compute the size of arm '%s' (type '%s') — packed layout requires every arm's size at compile time; give the type a declared niche via cc_type_register(\".niche = cc_type_niche(...)\") or drop '(packed)'",
+                       def->name, def->arms[a].name, def->arms[a].type);
+            return -1;
+        }
+        if (def->arms[a].size > maxsz) maxsz = def->arms[a].size;
+    }
+    def->packed_size = maxsz ? maxsz : 1;
+
+    /* A single niche sentinel distinguishes exactly two groups (donor vs the
+     * one non-donor arm), so niche packing needs at most two arms. */
+    if (def->narms > 2) {
+        cc__va_err(src, n, path, at,
+                   "@variant(packed) '%s': niche packing distinguishes only two arms (a niche donor and one other), but '%s' has %d arms — a single sentinel cannot tag them all",
+                   def->name, def->name, def->narms);
+        return -1;
+    }
+    if (def->narms == 1) {
+        /* Degenerate: one arm, tag is constant.  Donor = arm 0 (no niche
+         * needed to decode; kind is always arm 0). */
+        def->donor_arm = 0;
+        def->niche_off = 0;
+        def->niche_width = 0;
+        def->niche_sentinel = 0;
+        return 0;
+    }
+
+    /* Two arms: pick a donor D whose niche region is free in the other arm O
+     * (O's payload [0, size(O)) must not overlap [off, off+width)). */
+    for (int d = 0; d < 2; d++) {
+        int o = 1 - d;
+        CCVaArm* D = &def->arms[d];
+        CCVaArm* O = &def->arms[o];
+        if (!D->has_niche) continue;
+        if ((unsigned)O->size <= D->niche_off) {
+            def->donor_arm = d;
+            def->niche_off = D->niche_off;
+            def->niche_width = D->niche_width;
+            def->niche_sentinel = D->niche_sentinel;
+            return 0;
+        }
+    }
+
+    /* No donor: name both arms and the bytes they contend for. */
+    cc__va_err(src, n, path, at,
+               "@variant(packed) '%s' cannot be niche-packed: arm '%s' (%s, %u bytes) and arm '%s' (%s, %u bytes) both require the low bytes and neither donates a free niche the other can leave untouched — remove '(packed)' or give one arm's type a declared niche above its payload",
+               def->name,
+               def->arms[0].name, def->arms[0].type, def->arms[0].size,
+               def->arms[1].name, def->arms[1].type, def->arms[1].size);
+    return -1;
+}
+
+static int cc__va_is_packed_def(const CCVaDef* def) {
+    return def->is_packed && def->donor_arm >= 0;
+}
+
+/* Fixed-width unsigned type spelling for a niche of `width` bytes. */
+static const char* cc__va_niche_uint(unsigned width) {
+    switch (width) {
+        case 1: return "uint8_t";
+        case 2: return "uint16_t";
+        case 4: return "uint32_t";
+        default: return "uint64_t";
+    }
+}
+
+/* Emit the packed lowering (opaque byte struct + encode/decode accessors +
+ * drop, spec §11).  Returns a newline-padded malloc'd replacement for
+ * src[at..after+1], or NULL on failure. */
+static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
+                                         size_t at, size_t after, CCSymbolTable* sym) {
+    const char* v = def->name;
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    int d = def->donor_arm;
+    const char* nut = cc__va_niche_uint(def->niche_width);
+
+    /* enum */
+    cc_sb_append_fmt(&out, &ol, &oc, "typedef enum { ");
+    for (int a = 0; a < def->narms; a++)
+        cc_sb_append_fmt(&out, &ol, &oc, "%s%s_%s", a ? ", " : "", v, def->arms[a].name);
+    cc_sb_append_fmt(&out, &ol, &oc, " } %sKind;", v);
+    /* opaque byte struct */
+    cc_sb_append_fmt(&out, &ol, &oc, " typedef struct %s { unsigned char __cc_p[%u]; } %s;",
+                     v, def->packed_size, v);
+    /* static asserts pinning size/niche assumptions */
+    for (int a = 0; a < def->narms; a++) {
+        if (def->arms[a].is_void) continue;
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         " _Static_assert(sizeof(%s) <= %u, \"packed variant '%s' arm '%s' does not fit its packed footprint\");",
+                         def->arms[a].type, def->packed_size, v, def->arms[a].name);
+    }
+    if (def->narms == 2 && def->arms[d].has_niche) {
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         " _Static_assert(%u + %u <= %u, \"packed variant '%s' niche region overflows its footprint\");",
+                         def->niche_off, def->niche_width, def->packed_size, v);
+    }
+    /* decode: kind */
+    cc_sb_append_fmt(&out, &ol, &oc,
+                     " static inline %sKind %s__cc_kind(const %s* __v) {", v, v, v);
+    if (def->narms == 1) {
+        cc_sb_append_fmt(&out, &ol, &oc, " (void)__v; return %s_%s; }", v, def->arms[0].name);
+    } else {
+        int o = 1 - d;
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         " %s __n; __builtin_memcpy(&__n, __v->__cc_p + %u, %u);"
+                         " return __n == (%s)%lluULL ? %s_%s : %s_%s; }",
+                         nut, def->niche_off, def->niche_width,
+                         nut, def->niche_sentinel,
+                         v, def->arms[o].name, v, def->arms[d].name);
+    }
+    /* per-arm getters (payload arms) + setters */
+    for (int a = 0; a < def->narms; a++) {
+        CCVaArm* arm = &def->arms[a];
+        if (!arm->is_void) {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             " static inline %s %s__cc_get_%s(const %s* __v) {"
+                             " %s __x; __builtin_memcpy(&__x, __v->__cc_p, sizeof(%s)); return __x; }",
+                             arm->type, v, arm->name, v, arm->type, arm->type);
+        }
+        /* setter */
+        if (arm->is_void) {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             " static inline %s %s__cc_set_%s(void) {"
+                             " %s __r; __builtin_memset(__r.__cc_p, 0, sizeof(%s));",
+                             v, v, arm->name, v, v);
+        } else {
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             " static inline %s %s__cc_set_%s(%s __x) {"
+                             " %s __r; __builtin_memset(__r.__cc_p, 0, sizeof(%s));"
+                             " __builtin_memcpy(__r.__cc_p, &__x, sizeof(%s));",
+                             v, v, arm->name, arm->type, v, v, arm->type);
+        }
+        if (a != d && def->narms == 2) {
+            /* non-donor arm stamps the niche sentinel */
+            cc_sb_append_fmt(&out, &ol, &oc,
+                             " %s __s = (%s)%lluULL; __builtin_memcpy(__r.__cc_p + %u, &__s, %u);",
+                             nut, nut, def->niche_sentinel, def->niche_off, def->niche_width);
+        }
+        cc_sb_append_fmt(&out, &ol, &oc, " return __r; }");
+    }
+    /* drop */
+    if (def->has_drop) {
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         " static inline void %s__cc_drop(%s* __v) { switch (%s__cc_kind(__v)) {",
+                         v, v, v);
+        for (int a = 0; a < def->narms; a++) {
+            CCVaArm* arm = &def->arms[a];
+            if (!arm->destroy[0]) continue;
+            if (arm->destroy_takes_value)
+                cc_sb_append_fmt(&out, &ol, &oc,
+                                 " case %s_%s: { %s __t = %s__cc_get_%s(__v); %s(__t); } break;",
+                                 v, arm->name, arm->type, v, arm->name, arm->destroy);
+            else
+                cc_sb_append_fmt(&out, &ol, &oc,
+                                 " case %s_%s: { %s __t = %s__cc_get_%s(__v); %s(&__t); } break;",
+                                 v, arm->name, arm->type, v, arm->name, arm->destroy);
+        }
+        cc_sb_append_fmt(&out, &ol, &oc, " default: break; } }");
+        if (sym) {
+            char drop_name[160];
+            snprintf(drop_name, sizeof(drop_name), "%s__cc_drop", v);
+            (void)cc_symbols_set_type_destroy_call(sym, v, drop_name);
+        }
+    }
+    return cc__va_pad_repl(src, at, after + 1, out, &ol, &oc);
+}
+
 char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input_path) {
     g_va_n = 0;           /* per-TU registry: reset unconditionally */
     g_va_tmp_id = 0;
@@ -656,14 +968,6 @@ char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input
             memcpy(vname, src + name_a, l);
             vname[l] = '\0';
         }
-        if (packed) {
-            cc__va_err(src, n, input_path, at,
-                       "@variant(packed) '%s' is not implemented yet (spec §12 packed representation is a later phase) — remove '(packed)' to use the unpacked layout",
-                       vname);
-            nerr++;
-            i = name_b;
-            continue;
-        }
         if (depth != 0) {
             cc__va_err(src, n, input_path, at,
                        "@variant '%s' must be declared at file scope", vname);
@@ -705,6 +1009,8 @@ char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input
         }
         CCVaDef* def = &g_va[g_va_n];
         memset(def, 0, sizeof(*def));
+        def->is_packed = packed;
+        def->donor_arm = -1;
         snprintf(def->name, sizeof(def->name), "%s", vname);
         snprintf(def->kindname, sizeof(def->kindname), "%sKind", vname);
         int arm_errs = 0;
@@ -852,7 +1158,21 @@ char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input
             continue;
         }
 
+        /* Packed variants: prove a lossless niche packing (or refuse). */
+        if (cc__va_plan_packing(sym, def, src, n, input_path, at) < 0) {
+            nerr++;
+            i = after + 1;
+            continue;
+        }
+
         /* Compose the lowering (single physical line + newline padding). */
+        if (cc__va_is_packed_def(def)) {
+            char* out = cc__va_emit_packed_lowering(def, src, at, after, sym);
+            if (!out || cc__va_edit_add(&edits, at, after + 1, out) != 0) nerr++;
+            g_va_n++;
+            i = after + 1;
+            continue;
+        }
         {
             char* out = NULL;
             size_t ol = 0, oc = 0;
@@ -1255,8 +1575,17 @@ static int cc__va_rewrite_ctor_braces(const char* s, size_t n, const char* path,
                        arm->name, def->name, arm->name);
             return -1;
         }
-        cc_sb_append_fmt(&out_sb, &ol, &oc, "%s{ .kind = %s_%s }",
+        if (cc__va_is_packed_def(def))
+            cc_sb_append_fmt(&out_sb, &ol, &oc, "%s%s__cc_set_%s()",
+                             prefix ? prefix : "", def->name, arm->name);
+        else
+            cc_sb_append_fmt(&out_sb, &ol, &oc, "%s{ .kind = %s_%s }",
+                             prefix ? prefix : "", def->name, arm->name);
+    } else if (cc__va_is_packed_def(def)) {
+        cc_sb_append_fmt(&out_sb, &ol, &oc, "%s%s__cc_set_%s(",
                          prefix ? prefix : "", def->name, arm->name);
+        cc_sb_append(&out_sb, &ol, &oc, s + arm_val_a, arm_val_b - arm_val_a);
+        cc_sb_append_cstr(&out_sb, &ol, &oc, ")");
     } else {
         cc_sb_append_fmt(&out_sb, &ol, &oc, "%s{ .kind = %s_%s, .u.%s = ",
                          prefix ? prefix : "", def->name, arm->name, arm->name);
@@ -2053,7 +2382,15 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
         const CCVaDef* def = &g_va[vi];
         size_t mlen = mem_b - mem_a;
 
-        /* `.u` raw interop: skip entirely (and skip the whole .u.x chain). */
+        /* Compiler-internal members of the emitted lowering (e.g. the packed
+         * byte store `__v->__cc_p`) are not user projections — skip them so
+         * the decls-pass output re-scanned here is inert. */
+        if (mlen >= 4 && memcmp(s + mem_a, "__cc", 4) == 0) { i = mem_b; continue; }
+
+        /* `.u` raw interop: skip entirely (and skip the whole .u.x chain).
+         * For packed variants, user-written raw `.u` was already diagnosed by
+         * the earlier packed-raw-access step; any `.u` reaching here is a
+         * compiler-generated projection lowered for later materialization. */
         if (mlen == 1 && s[mem_a] == 'u') { i = mem_b; continue; }
 
         /* `.kind` pseudo-member: read ok, write = error. */
@@ -2438,6 +2775,149 @@ static int cc__va_step_defers(const char* s, size_t n, const char* path, CCVaEdi
 }
 
 /* ==================================================================== */
+/* Uses step: packed raw-access guard (spec §11)                         */
+/* ==================================================================== */
+
+/* A @variant(packed) has no exposed `.u` union and no writable `.kind` tag.
+ * Diagnose user-written raw `.u` access on packed variants here, BEFORE the
+ * projection step lowers protected arm reads to `.u.arm` (so the two `.u`
+ * spellings never collide).  `.kind` writes are diagnosed generically by the
+ * projection step (packed and unpacked alike). */
+static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* path, CCVaEdits* ed) {
+    (void)ed;
+    int nerr = 0;
+    int any_packed = 0;
+    for (int v = 0; v < g_va_n; v++) if (cc__va_is_packed(v)) any_packed = 1;
+    if (!any_packed) return 0;
+
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        char c = s[i];
+        size_t acc, mem_a;
+        int is_arrow = 0;
+        if (c == '.') {
+            size_t q = cc__va_back_ws(s, i);
+            if (!(q > 0 && (cc_is_ident_char(s[q - 1]) || s[q - 1] == ')' || s[q - 1] == ']'))) { i++; continue; }
+            if (i + 1 >= n || !cc_is_ident_start(s[i + 1])) { i++; continue; }
+            acc = i; mem_a = i + 1;
+        } else if (c == '-' && i + 1 < n && s[i + 1] == '>') {
+            if (i + 2 >= n || !cc_is_ident_start(s[i + 2])) { i += 2; continue; }
+            acc = i; is_arrow = 1; mem_a = i + 2;
+        } else { i++; continue; }
+        size_t mem_b = mem_a;
+        while (mem_b < n && cc_is_ident_char(s[mem_b])) mem_b++;
+        if (!(mem_b - mem_a == 1 && s[mem_a] == 'u')) { i = mem_b; continue; }
+        size_t ba, ra, rb;
+        int hops = 0;
+        if (!cc__va_member_base(s, acc, &ba, &ra, &rb, &hops) || hops != 0) { i = mem_b; continue; }
+        int form = 0;
+        int vi = cc__va_resolve_root(s, n, ba, s + ra, rb - ra, &form);
+        if (vi < 0 || form == CC_VA_FORM_KIND || !cc__va_is_packed(vi)) { i = mem_b; continue; }
+        cc__va_err(s, n, path, acc,
+                   "variant '%s' is @variant(packed): it has no exposed '.u' union — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') instead of reaching into the raw representation",
+                   g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
+        nerr++;
+        i = mem_b;
+    }
+    return nerr ? -1 : 0;
+}
+
+/* ==================================================================== */
+/* Uses step: packed materialization (spec §11)                          */
+/* ==================================================================== */
+
+/* Final pass for @variant(packed): the earlier steps produce the canonical
+ * layout-agnostic forms (`v.kind`, `v.u.arm`, tag constants) that the honest
+ * unpacked struct exposes as members.  A packed variant is an opaque byte
+ * blob with no such members, so those forms are rewritten to the emitted
+ * encode/decode accessors:
+ *   (base).kind / (base)->kind   -> Name__cc_kind(&(base) / base)
+ *   (base).u.arm / (base)->u.arm -> Name__cc_get_arm(&(base) / base)
+ * Only bases that resolve to a PROVEN-packed variant are touched; unpacked
+ * variants keep their real members.  Runs once, last, and emits no new
+ * `.kind`/`.u` text, so a single pass suffices. */
+static int cc__va_step_packed_materialize(const char* s, size_t n, const char* path, CCVaEdits* ed) {
+    (void)path;
+    int nerr = 0;
+    /* Only run if some packed variant exists. */
+    int any_packed = 0;
+    for (int v = 0; v < g_va_n; v++) if (cc__va_is_packed(v)) any_packed = 1;
+    if (!any_packed) return 0;
+
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
+    size_t i = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        char c = s[i];
+        size_t acc, mem_a;
+        int is_arrow = 0;
+        if (c == '.') {
+            size_t q = cc__va_back_ws(s, i);
+            if (!(q > 0 && (cc_is_ident_char(s[q - 1]) || s[q - 1] == ')' || s[q - 1] == ']'))) { i++; continue; }
+            if (i + 1 >= n || !cc_is_ident_start(s[i + 1])) { i++; continue; }
+            acc = i; mem_a = i + 1;
+        } else if (c == '-' && i + 1 < n && s[i + 1] == '>') {
+            if (i + 2 >= n || !cc_is_ident_start(s[i + 2])) { i += 2; continue; }
+            acc = i; is_arrow = 1; mem_a = i + 2;
+        } else { i++; continue; }
+        size_t mem_b = mem_a;
+        while (mem_b < n && cc_is_ident_char(s[mem_b])) mem_b++;
+        size_t mlen = mem_b - mem_a;
+        int is_kind = (mlen == 4 && memcmp(s + mem_a, "kind", 4) == 0);
+        int is_u = (mlen == 1 && s[mem_a] == 'u');
+        if (!is_kind && !is_u) { i = mem_b; continue; }
+
+        size_t ba, ra, rb;
+        int hops = 0;
+        if (!cc__va_member_base(s, acc, &ba, &ra, &rb, &hops) || hops != 0) { i = mem_b; continue; }
+        int form = 0;
+        int vi = cc__va_resolve_root(s, n, ba, s + ra, rb - ra, &form);
+        if (vi < 0 || form == CC_VA_FORM_KIND || !cc__va_is_packed(vi)) { i = mem_b; continue; }
+        const CCVaDef* def = &g_va[vi];
+
+        if (is_kind) {
+            /* Skip an lvalue write (already diagnosed by the projections step). */
+            size_t f = cc_skip_ws_and_comments(s, n, mem_b);
+            if (f < n && s[f] == '=' && (f + 1 >= n || s[f + 1] != '=')) { i = mem_b; continue; }
+            char* repl = NULL;
+            size_t rl = 0, rc = 0;
+            cc_sb_append_fmt(&repl, &rl, &rc, "%s__cc_kind(", def->name);
+            if (!is_arrow) cc_sb_append_cstr(&repl, &rl, &rc, "&(");
+            cc__va_append_flat(&repl, &rl, &rc, s, ba, acc);
+            cc_sb_append_cstr(&repl, &rl, &rc, is_arrow ? ")" : "))");
+            if (!repl || cc__va_edit_add(ed, ba, mem_b, repl) != 0) nerr++;
+            i = mem_b;
+            continue;
+        }
+        /* is_u: expect `.arm` after `u`. */
+        {
+            size_t f = cc_skip_ws_and_comments(s, n, mem_b);
+            if (f >= n || s[f] != '.') { i = mem_b; continue; }
+            size_t aa = cc_skip_ws_and_comments(s, n, f + 1);
+            size_t ab = aa;
+            while (ab < n && cc_is_ident_char(s[ab])) ab++;
+            if (ab == aa) { i = mem_b; continue; }
+            int ai = cc__va_arm_index(vi, s + aa, ab - aa);
+            if (ai < 0) { i = ab; continue; }
+            char* repl = NULL;
+            size_t rl = 0, rc = 0;
+            cc_sb_append_fmt(&repl, &rl, &rc, "%s__cc_get_%s(", def->name, def->arms[ai].name);
+            if (!is_arrow) cc_sb_append_cstr(&repl, &rl, &rc, "&(");
+            cc__va_append_flat(&repl, &rl, &rc, s, ba, acc);
+            cc_sb_append_cstr(&repl, &rl, &rc, is_arrow ? ")" : "))");
+            if (!repl || cc__va_edit_add(ed, ba, ab, repl) != 0) nerr++;
+            i = ab;
+            continue;
+        }
+    }
+    return nerr ? -1 : 0;
+}
+
+/* ==================================================================== */
 /* Uses driver                                                           */
 /* ==================================================================== */
 
@@ -2457,9 +2937,11 @@ char* cc_rewrite_variant_uses_text(const char* src, size_t n, const char* input_
         { cc__va_step_construct, 0 },
         { cc__va_step_bare_designators, 0 },
         { cc__va_step_switches, 0 },
+        { cc__va_step_packed_raw_access, 0 },
         { cc__va_step_projections, 1 },
         { cc__va_step_transitions, 0 },
         { cc__va_step_defers, 0 },
+        { cc__va_step_packed_materialize, 0 },
     };
     char* owned = NULL;
     const char* cur = src;

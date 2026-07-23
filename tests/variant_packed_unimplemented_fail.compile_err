@@ -1,1 +1,0 @@
-variant_packed_unimplemented_fail.ccs:7:1: error: @variant(packed) 'V' is not implemented yet (spec §12 packed representation is a later phase) — remove '(packed)' to use the unpacked layout

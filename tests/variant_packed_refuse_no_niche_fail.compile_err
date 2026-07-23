@@ -1,0 +1,5 @@
+# The refusal names the variant, both contending arms with their sizes, and
+# the reason (no free niche) — never a silent fallback to the unpacked layout.
+@variant(packed) 'V' cannot be niche-packed
+arm 'a' (const char*, 8 bytes) and arm 'b' (int64_t, 8 bytes)
+neither donates a free niche

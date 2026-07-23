@@ -1,0 +1,109 @@
+/* Semantic-parity oracle (spec/draft_variants.md §2, §11): a @variant(packed)
+ * and its honest unpacked twin are the SAME type modulo representation.  The
+ * two run functions below are structurally identical operation streams — only
+ * the variant type name differs — over construction, `.kind` read, protected
+ * projection, `?>` fallback, subject-switch, whole-variant transition (which
+ * drops the old active arm) and scope-exit drop.  Both append their
+ * observations to a buffer; main asserts the buffers are byte-identical and
+ * the destructor ran the same number of times on each.
+ *
+ * The donor arm's type `Handle` carries BOTH a registered destructor and a
+ * declared niche (tag field at offset 12), so the packed twin is 16 bytes
+ * (== sizeof(Handle)) while the unpacked twin carries a tag word (24). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Handle { char* p; uint32_t gen; uint32_t tag; } Handle;
+
+static int g_drops = 0;
+
+static Handle handle_make(const char* s) {
+    Handle h;
+    h.p = strdup(s);
+    h.gen = 1;
+    h.tag = 1;          /* a live Handle never has tag == 0xFFFFFFFF (the niche) */
+    return h;
+}
+
+static void handle_destroy(Handle* h) {
+    if (!h || !h->p) return;
+    g_drops++;
+    free(h->p);
+    h->p = NULL;
+}
+
+@comptime {
+    (void)cc_type_register("Handle", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("handle_destroy"),
+        .niche = cc_type_niche(16, 8, 12, 4, 0xFFFFFFFF),
+    });
+}
+
+@variant(packed) PCell { h: Handle; num: int64_t; };
+@variant        UCell { h: Handle; num: int64_t; };
+
+static void run_packed(CCArena* a, CCString* out) {
+    PCell c = { .h = handle_make("live") };         /* init into destructor arm */
+    cc_string_push(out, "kind:", a);
+    cc_string_push_int(out, (int64_t)(c.kind == .h), a);
+    if (c.kind == .h) {
+        cc_string_push(out, " h.gen:", a);
+        cc_string_push_int(out, (int64_t)c.h.gen, a);
+    }
+    switch (c) {
+        case .h:   cc_string_push(out, " arm:h", a);   break;
+        case .num: cc_string_push(out, " arm:num", a); break;
+    }
+    c = { .num = 20 };                              /* h -> num: drops Handle once */
+    cc_string_push(out, " final:", a);
+    cc_string_push_int(out, c.num ?> -1, a);
+}
+
+static void run_unpacked(CCArena* a, CCString* out) {
+    UCell c = { .h = handle_make("live") };
+    cc_string_push(out, "kind:", a);
+    cc_string_push_int(out, (int64_t)(c.kind == .h), a);
+    if (c.kind == .h) {
+        cc_string_push(out, " h.gen:", a);
+        cc_string_push_int(out, (int64_t)c.h.gen, a);
+    }
+    switch (c) {
+        case .h:   cc_string_push(out, " arm:h", a);   break;
+        case .num: cc_string_push(out, " arm:num", a); break;
+    }
+    c = { .num = 20 };
+    cc_string_push(out, " final:", a);
+    cc_string_push_int(out, c.num ?> -1, a);
+}
+
+int main(void) {
+    _Static_assert(sizeof(PCell) == 16, "packed twin is niche-packed to 16 bytes");
+    _Static_assert(sizeof(UCell) == 24, "unpacked twin carries a tag word");
+
+    CCArena arena = cc_arena_create(1 << 16);
+
+    g_drops = 0;
+    CCString pbuf = cc_string_new();
+    run_packed(&arena, &pbuf);
+    int pdrops = g_drops;
+
+    g_drops = 0;
+    CCString ubuf = cc_string_new();
+    run_unpacked(&arena, &ubuf);
+    int udrops = g_drops;
+
+    const char* ps = cc_string_cstr(&pbuf, &arena);
+    const char* us = cc_string_cstr(&ubuf, &arena);
+    printf("packed:   %s\n", ps);
+    printf("unpacked: %s\n", us);
+    if (strcmp(ps, us) != 0) { printf("PARITY MISMATCH\n"); return 1; }
+    if (pdrops != udrops) { printf("DROP MISMATCH %d vs %d\n", pdrops, udrops); return 2; }
+    if (pdrops != 1) { printf("expected exactly one drop, got %d\n", pdrops); return 3; }
+
+    printf("ok\n");
+    return 0;
+}

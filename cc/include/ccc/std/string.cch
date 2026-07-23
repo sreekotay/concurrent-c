@@ -83,6 +83,37 @@ static inline void cc__string_poison(CCString *str) {
     if (str) str->len = CC_STRING_LEN_POISON;
 }
 
+/* Declared niche for @variant(packed) (spec/draft_variants.md §11).
+ *
+ * CCString's first word is SSO (inline bytes OR a pointer), so no sentinel
+ * over word 0 is sound.  The niche instead lives in the `cap` field: a valid
+ * CCString never has `cap == CC_STRING_CAP_NICHE`.  Inline cap is
+ * CC_STRING_INLINE_CAP (8); heap cap is a real allocation size grown by
+ * doubling from CC_STRING_INLINE_CAP (cc_string_reserve), so every non-zero
+ * cap is a power of two <= UINT32_MAX.  0xFFFFFFFF is not a power of two and
+ * is therefore unreachable — reserving it as a niche costs no struct space and
+ * is distinct from the `len == UINT32_MAX` poison sentinel (cc_string_failed
+ * stays a len test, orthogonal to the cap niche). */
+#define CC_STRING_CAP_NICHE UINT32_MAX
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(offsetof(CCString, cap) == 12,
+               "CCString cap niche assumes cap at byte offset 12 on 64-bit targets");
+_Static_assert(sizeof(((CCString *)0)->cap) == 4, "CCString cap is 4 bytes wide");
+_Static_assert(CC_STRING_INLINE_CAP != CC_STRING_CAP_NICHE,
+               "the inline cap must never collide with the niche sentinel");
+#endif
+
+#ifdef CC_COMPTIME_SCAN
+/* Register the cap-field niche so a @variant(packed) arm of type CCString
+ * donates it to carry the discriminant.  See spec §11. */
+@comptime {
+    (void)cc_type_register("CCString", (CCTypeHooks){
+        .niche = cc_type_niche(/*size*/16, /*align*/8, /*offset*/12,
+                               /*width*/4, /*sentinel*/0xFFFFFFFF),
+    });
+}
+#endif
+
 // ------------------------- Parse error enums ------------------------------
 typedef enum {
     CC_I64_PARSE_INVALID_CHAR = 1,
