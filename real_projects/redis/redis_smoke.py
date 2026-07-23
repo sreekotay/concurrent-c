@@ -253,6 +253,22 @@ def test_wire_parity(port):
     expect("CONFIG GET appendonly", encode("CONFIG", "GET", "appendonly"),
            b"*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n")
     expect("CONFIG GET unknown", encode("CONFIG", "GET", "zzz"), b"*0\r\n")
+    # int-cell paths: INCR-family cells must render byte-identical text at
+    # every read boundary (GET/STRLEN/TYPE/MGET) and through APPEND, both
+    # for fresh int cells and str->int transitions.
+    expect("int-cell GET after INCR", encode("GET", "wp:ctr"), b"$1\r\n1\r\n")
+    expect("INCRBY on int cell", encode("INCRBY", "wp:ctr", "41"), b":42\r\n")
+    expect("int-cell GET 2-digit", encode("GET", "wp:ctr"), b"$2\r\n42\r\n")
+    expect("int-cell STRLEN", encode("STRLEN", "wp:ctr"), b":2\r\n")
+    expect("int-cell TYPE", encode("TYPE", "wp:ctr"), b"+string\r\n")
+    expect("int-cell negative GET", encode("GET", "wp:neg"), b"$2\r\n-7\r\n")
+    expect("int-cell MGET mix", encode("MGET", "wp:ctr", "wp:missing", "wp:neg"),
+           b"*3\r\n$2\r\n42\r\n$-1\r\n$2\r\n-7\r\n")
+    expect("APPEND after INCR", encode("APPEND", "wp:ctr", "xy"), b":4\r\n")
+    expect("GET after APPEND-on-int", encode("GET", "wp:ctr"), b"$4\r\n42xy\r\n")
+    expect("SET numeric text", encode("SET", "wp:num", "99"), b"+OK\r\n")
+    expect("str->int INCR", encode("INCR", "wp:num"), b":100\r\n")
+    expect("GET after str->int", encode("GET", "wp:num"), b"$3\r\n100\r\n")
     expect("error reply", encode("INCR", "wp:k"),
            b"-ERR value is not an integer or out of range\r\n")
     check("wire flush", c.cmd("FLUSHALL"), "OK")
