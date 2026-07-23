@@ -1,6 +1,6 @@
 # Concurrent-C Fiber Scheduler
 
-Status: draft — partially implemented
+Status: draft specification; the V2 scheduler is the shipped default path.
 
 Normative contract for the fiber scheduler: state machine, ownership, park/wake,
 sysmon duties, and externally observable guarantees. The shipped runtime path
@@ -19,7 +19,8 @@ Hybrid fiber/thread model:
 - **Ready queue**: a single, global, mutex-protected intrusive linked list of
   runnable fibers. All workers drain the same queue.
 - **Sysmon**: one background thread that runs housekeeping on a fixed cadence
-  (syscall-age eviction, deadline wakes, deadlock detection, safety-net wakes).
+  (unchanged-dispatch eviction, deadline wakes, deadlock detection,
+  safety-net wakes).
 
 There are no per-worker local queues, no inboxes, and no work stealing. All
 fiber handoff goes through the ready queue.
@@ -171,7 +172,7 @@ Dispatch of one fiber (`thread_v2_run_fiber`):
 1. CAS `QUEUED → RUNNING`.
 2. Lazy coroutine bind (`mco_create`, in-place `mco_init` for pooled DEAD
    coroutines, or resume a previously parked fiber).
-3. Publish dispatch epoch for sysmon syscall-age detection.
+3. Publish the dispatch epoch for sysmon unchanged-dispatch detection.
 4. `mco_resume(coro)`.
 5. Post-resume:
    - finished → `DEAD` + `done=1`, fence, unpark `join_waiter_fiber`,
@@ -286,7 +287,7 @@ on `join_waiter_fiber`; losers use thread-style `done_wake`.
 
 Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms). Per tick:
 
-1. **Syscall-age eviction.** A worker whose `dispatch_epoch` is unchanged
+1. **Unchanged-dispatch eviction.** A worker whose `dispatch_epoch` is unchanged
    across a tick (and non-zero) has been running the same fiber for at least
    one tick. If the ready queue has backlog and orphans are below
    `V2_ORPHAN_SAFETY_CAP`, replace that worker in place (detach old, bump
@@ -397,7 +398,7 @@ correctness.
 | `CC_V2_WAKE_SKIP_DEPTH=N`        | Skip external wake when pre-push depth ≥ N. 0 always wakes. Default 4.                         |
 | `CC_V2_JOIN_SPIN=N`              | Joiner busy-spin iterations on `done` before parking. Default 0.                               |
 | `CC_V2_CORO_POOL_MAX=N`          | High-water cap for pooled coroutine allocations.                                               |
-| `CC_V2_SYSMON_DETACH=0`          | Disable syscall-age eviction (pool hard-capped at `CC_V2_THREADS`).                            |
+| `CC_V2_SYSMON_DETACH=0`          | Disable unchanged-dispatch eviction (pool hard-capped at `CC_V2_THREADS`).                    |
 | `CC_V2_STATS=1`                  | Enable hot-path stat counters and dump them at exit.                                           |
 | `CC_V2_SYSMON_STATS=1`           | Enable stat counters without atexit dump.                                                      |
 | `CC_DEADLOCK_ABORT=0`            | Print deadlock banner but do not `_exit(124)`.                                                 |
@@ -409,7 +410,6 @@ correctness.
 | `V2_MAX_THREADS`               | 256                             | Cap on active worker slots.                                       |
 | `V2_FIBER_STACK_SIZE`          | 2 MiB (opt) / 8 MiB (debug)     | Per-fiber coroutine stack.                                        |
 | `V2_SYSMON_INTERVAL_MS`        | 20                              | Sysmon tick.                                                      |
-| `V2_SYSMON_SYSCALL_AGE_NS`     | 20 ms                           | Age threshold for in-place worker eviction.                       |
 | `V2_ORPHAN_SAFETY_CAP`         | 4096                            | Max concurrent orphans before eviction is skipped for a tick.     |
 | `SCHED_V2_DEADLOCK_PERSIST_MS` | 1000                            | Latch duration before the detector fires.                         |
 

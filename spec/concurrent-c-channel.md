@@ -9,8 +9,9 @@ Minimal, complete spec for channel state machine, blocking/wake protocol, and co
 - **Unbuffered channel** (`cap == 0`): rendezvous; send blocks until a receiver arrives (and vice versa).
 - **Wait node**: stack-allocated record placed on a channel's waiter list when a fiber/thread blocks.
 - **Direct handoff**: sender copies data directly to a parked receiver's buffer (or vice versa), bypassing the ring buffer.
-- **Fast path**: lock-free CAS enqueue/dequeue with no mutex.
-- **Slow path**: mutex-protected blocking loop with waiter list and park.
+- **Fast path**: the current backend's lock-free enqueue/dequeue path.
+- **Slow path**: the current backend's blocking loop, which combines
+  mutex-protected waiter lists with lock-free queue probes.
 
 ## Correctness goals
 
@@ -29,22 +30,28 @@ Each channel has:
 - Optional `CCIoError` values preserve typed close errors in each direction.
 - `pthread_mutex_t mu`: protects waiter lists, close transitions, and slow-path predicates.
 
-### Ring buffer (buffered channels, `cap > 0`)
+### Current buffered backend (`cap > 0`)
 
-The implementation uses a liblfds711 bounded MPMC queue with power-of-2 capacity.
+The current runtime uses either its native bounded MPMC ring queue or, when
+available and suitable for the element representation, a liblfds711 bounded
+MPMC queue. These choices and their layout are backend descriptions, not user
+guarantees.
 
 - `_Atomic int lfqueue_count`: approximate item count. Incremented after successful enqueue (release), decremented after successful dequeue (release). Used for fast full/empty checks in the slow path. **Approximate**: may lag behind the actual queue state; the CAS on the queue itself is authoritative.
 - `_Atomic int lfqueue_inflight`: count of in-progress lock-free enqueue attempts. Incremented before the CAS, decremented after. Required for close-drain correctness (see Invariant 6).
 
-### Branded fast path
+### Current branded fast path
 
 A channel sets `fast_path_ok = 1` when all of:
 
+- `CC_CHAN_MINIMAL_FAST_PATH` is enabled (the default; `0` disables it)
 - `use_lockfree && cap > 0 && buf != NULL`
-- `elem_size <= sizeof(void*)`
+- `elem_size <= sizeof(void*) || use_ring_queue`
 - `!is_owned && !is_ordered && !is_sync`
 
-The fast path skips the mutex, debug counters, timing, and waiter checks on the hot path. It is the zero-overhead path for tight pipeline loops.
+The current backend uses this brand to skip general-path bookkeeping on the
+hot path. The brand and backend selection are implementation details, not
+channel API guarantees.
 
 ## Notification values
 
@@ -86,14 +93,17 @@ typedef struct cc__fiber_wait_node {
 
 ## Send path
 
-### Fast path (branded, no mutex)
+### Current backend fast-path summary
 
 ```
 cc_chan_send(ch, value, size):
     if (fast_path_ok && size == elem_size) {
-        if (lfds_enqueue(value) == OK) {
+        if (lockfree_enqueue(value) == OK) {
+            fence(seq_cst)
             if (atomic_load(&ch->has_recv_waiters, acquire))
                 signal_recv_waiter(ch);   // takes mu internally
+            if (atomic_load(&ch->thread_recv_waiters, acquire))
+                signal(not_empty);        // under mu
             return 0;
         }
         // buffer full — fall through to slow path
@@ -101,15 +111,21 @@ cc_chan_send(ch, value, size):
     return chan_send_slow(ch, value, size);
 ```
 
-The `has_recv_waiters` check uses `acquire` ordering. Combined with the `release` store in waiter registration, this forms a Dekker pair:
+Here `lockfree_enqueue` denotes the selected lock-free queue backend. The
+`has_recv_waiters` check and the receive waiter's post-publication queue probe
+have a `seq_cst` fence on each side:
 
 ```
 Sender (fast path):                  Receiver (slow path):
   store(data→queue, release)           store(has_recv_waiters=1, release)
+  fence(seq_cst)                       fence(seq_cst)
   load(has_recv_waiters, acquire)      try_dequeue(acquire)
 ```
 
-At least one side will see the other's store. If the sender sees `has_recv_waiters > 0`, it signals; if the receiver's dequeue sees data, it succeeds without parking. There is no case where both miss.
+The paired fences are required for lost-wake freedom on weakly ordered
+machines including ARM64. If the sender sees a waiter, it signals; otherwise
+the receiver's mandatory post-publication probe observes the queue transition
+and does not park.
 
 A false-positive (stale non-zero) just takes the lock unnecessarily — harmless.
 
@@ -117,13 +133,14 @@ A false-positive (stale non-zero) just takes the lock unnecessarily — harmless
 
 `signal_recv_waiter(ch)` runs under `ch->mu`, changes one `NONE` receiver to `SIGNAL`, decrements `has_recv_waiters`, and unparks it without removing it. The receiver removes itself or resets to `NONE` and rearms.
 
-### Slow path (blocking)
+### Current backend slow-path summary
 
 ```
 chan_send_slow(ch, value, size):
     while (1) {
         // --- Attempt phase (no mutex) ---
-        if (atomic_load(&ch->closed, acquire)) return EPIPE;
+        // An unlocked early close observation may avoid work, but is not the
+        // admission linearization point.
 
         if (cap > 0) {
             inflight_inc(ch);
@@ -165,10 +182,21 @@ chan_send_slow(ch, value, size):
             }
         }
 
-        // Append waiter, unlock, park                        // Invariant 2
+        // Publish waiter, unlock, then perform the mandatory Dekker re-check.
         cc__fiber_wait_node node = { .fiber=current, .data=value, .notified=0 };
         list_append(&send_waiters, &node);
         unlock(mu);
+
+        fence(seq_cst);
+        if (try_enqueue_with_admission(ch, value) == 0) {
+            lock(mu);
+            if (node.in_wait_list) list_remove(&send_waiters, &node);
+            unlock(mu);
+            wake_recv_waiter(ch);
+            return 0;
+        }
+
+        // Park only while the published notification remains NONE.
         wait while node.notified == NONE;
 
         // Post-wake
@@ -177,15 +205,29 @@ chan_send_slow(ch, value, size):
         unlock(mu);
 
         if (atomic_load(&node.notified, acquire) == NOTIFY_DATA) return 0;
-        // WOKEN or spurious: loop retries (handles closed, space, etc.)
+        // SIGNAL, CLOSE, or spurious wake: loop and re-check under mu.
     }
 ```
 
-Fiber waits use the scheduler conditional-wait contract in `spec/concurrent-c-scheduler.md`; the notification is checked immediately before parking and observed with acquire ordering. OS threads instead use `pthread_cond_wait(&not_full, &mu)` and retry the predicate after every wake.
+This pseudocode is an abstract summary of the current backend;
+`try_enqueue_with_admission` includes close revalidation and in-flight
+accounting, and queue probes, direct handoff, and notification cleanup have
+additional race checks. The mandatory invariant is publish waiter, execute
+the paired `seq_cst` fence, authoritatively re-check the queue predicate, and
+only then conditionally park. Fiber waits use the scheduler conditional-wait contract in
+`spec/concurrent-c-scheduler.md`; the notification is checked immediately
+before parking and observed with acquire ordering. OS threads use the condvar
+protocol in Invariant 5.
 
 ## Recv path
 
-Mirror of send. Fast path: `lfds_dequeue`, relaxed check of `send_waiters_head`. Slow path: same loop — try dequeue, try direct handoff from send waiter, retry under mu, append, park, post-wake check.
+The current backend mirrors send: lock-free dequeue, a `seq_cst` fence, then an
+acquire observation of `has_send_waiters` before deciding whether to wake a
+sender. A blocking receiver publishes `has_recv_waiters`, executes its paired
+`seq_cst` fence, performs an authoritative dequeue probe, and only parks if
+the queue remains empty and its notification remains `NONE`. A blocking
+sender uses the symmetric publication/fence/enqueue-probe sequence. These
+paired sender/receiver fences are mandatory for ARM64 lost-wake freedom.
 
 For recv, `NOTIFY_DATA` means the sender copied data directly to the receiver's `node->data` buffer.
 
@@ -221,7 +263,10 @@ if (node.in_wait_list) list_remove(&send_waiters, &node);
 unlock(mu);
 
 if (atomic_load(&node.notified, acquire) == NOTIFY_DATA) return 0;
-if (atomic_load(&ch->closed, acquire)) return EPIPE;
+lock(mu);
+is_closed = ch->closed;
+unlock(mu);
+if (is_closed) return EPIPE;
 // Spurious: retry (goto top of loop)
 ```
 
@@ -231,25 +276,25 @@ The mutex is held for the partner check and waiter insertion — no gap where a 
 
 ## Close
 
+The following is an abstract close algorithm. The current backend implements
+the waiter traversal with dedicated wake-all helpers that remove each node,
+perform select arbitration, publish its notification, and batch its wake:
+
 ```
 cc_chan_close(ch):
     lock(mu);
     ch->closed = 1;
-    // Wake all send waiters with CLOSE
-    while (node = pop_send_waiter(ch))
-        atomic_store(&node->notified, CLOSE, release);
-        wake_batch_add(node);
-    // Wake all recv waiters with CLOSE
-    while (node = pop_recv_waiter(ch))
-        atomic_store(&node->notified, CLOSE, release);
-        wake_batch_add(node);
+    cc__chan_wake_all_waiters(ch);
     pthread_cond_broadcast(&not_full);
     pthread_cond_broadcast(&not_empty);
     unlock(mu);
     wake_batch_flush();
 ```
 
-For a select node, each close wake first claims the select group. A successful claim publishes `CLOSE`; a node whose group already has a winner publishes `CANCEL`.
+For a select node, each dedicated helper first tries to claim
+`selected_index`. The winner publishes `CLOSE`; a loser publishes `CANCEL`.
+Both outcomes increment the group's `signaled` sequence before waking so the
+select loop can observe progress and clean up every node.
 
 ### Close-send ordering (public guarantee)
 
@@ -257,24 +302,39 @@ Sends already in the lock-free CAS pipeline when close begins may complete. Afte
 
 ### Close forms and typed results
 
-- `cc_chan_close` closes the send side gracefully. Receivers drain admitted values, then observe `EPIPE`; typed receive returns `Ok(false)`. Further sends fail with `EPIPE`.
-- `cc_chan_close_err` has the same admission, drain, and wake behavior, but receivers observe the supplied errno-style error after draining.
+- `cc_chan_close` closes the transmit side gracefully. Receivers drain
+  admitted values, then observe `EPIPE`; typed receive returns `Ok(false)`.
+  Further sends fail with `EPIPE`.
+- `cc_chan_close_err` has the same admission, drain, and wake behavior, but
+  receivers observe the supplied errno-style error after draining. Blocked and
+  future sends return `EPIPE`; this error closes only the receiver-facing error
+  axis.
 - `cc_chan_rx_close_err` is receive-side-only close. It sets `rx_error_closed`, wakes send waiters with `CLOSE`, and makes pending and future sends return the supplied error. It does not set `closed`, wake receive waiters, or discard queued values; receivers may continue draining.
 - `cc_chan_close_with` closes both sides with one structured `CCIoError`. Non-select waiters and the winning select case wake with `CLOSE`; losing select nodes wake with `CANCEL`. Low-level integer operations return `e.os_code` or `ECANCELED`; typed send and receive operations return the original `Err(e)`, preserving both error kind and OS code.
 - `cc_chan_cancel` is `cc_chan_close_with` using `CC_IO_CANCELLED`.
 
-The shipped typed handle API accepts graceful or structured close on `CCChanTx` and `CCChanRx`. These handle wrappers perform bilateral close. The explicit low-level `cc_chan_rx_close_err` operation provides receive-side-only close.
+Handle `.close()` invokes the transmit-side graceful close, including when
+reached through a generic handle wrapper; it is not bilateral. Bilateral close
+occurs only through `.close_with(e)` or `.cancel()`. Receive-side-only
+rejection is the explicit `cc_chan_rx_close_err` operation.
 
 ## Select / match
 
-1. A `select_wait_group` is created with `_Atomic int selected_index = -1`.
+1. A `select_wait_group` is created with `_Atomic int selected_index = -1`
+   and `_Atomic int signaled = 0`.
 2. For each case, a `cc__fiber_wait_node` is registered on that channel's waiter list (under that channel's mu), with `is_select = 1`, `select_group = &group`, `select_index = i`.
 3. When a channel claims a select waiter, it does `CAS(group->selected_index, -1, node->select_index)`.
    - CAS succeeds: this case won. Set `notified` to `SIGNAL`, `DATA`, or `CLOSE` as appropriate and unpark.
    - CAS fails: another case already won. Set the losing node to `CANCEL`, account the signal in its group, and unpark it so cleanup can finish.
-4. After waking, the select loop checks `group->selected_index` to identify the winner.
-5. The select loop removes **all** nodes from **all** channels (under each channel's mu, checking `in_wait_list`).
-6. The winning case's operation proceeds normally (dequeue, handoff, etc.).
+4. The select loop snapshots `group->signaled`, rechecks `selected_index`, and
+   conditionally parks while `signaled` is unchanged. The sequence closes the
+   wake-before-park window; `selected_index` remains the sole winner
+   arbitration.
+5. After waking, the loop checks `selected_index` and per-node notification.
+   `SIGNAL` and losing `CANCEL` notifications may cause rearm; `DATA` or
+   `CLOSE` resolves the winning case.
+6. The select loop removes **all** nodes from **all** channels (under each channel's mu, checking `in_wait_list`).
+7. The winning case's operation proceeds normally (dequeue, handoff, etc.).
 
 `CANCEL` never denotes a selected case. Cleanup removes every still-linked node under its channel mutex; `in_wait_list` makes cleanup idempotent when a channel wake path already unlinked a node.
 
@@ -315,6 +375,12 @@ Modes are checked in the slow path before blocking. The fast path always attempt
 
 A channel may have an `autoclose_owner` (a nursery). When the nursery exits, it calls `cc_chan_close` on all registered channels. This is a convenience; explicit close works identically.
 
+When `CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, a blocking receive on an empty,
+open autoclose channel from the same owning nursery returns `EDEADLK`. This
+optional runtime diagnostic catches a receive-until-close cycle in which the
+nursery cannot exit to perform its own autoclose. It does not change normal
+autoclose semantics.
+
 ## Invariants
 
 ### Invariant 1: Node list ownership
@@ -330,7 +396,7 @@ A channel may have an `autoclose_owner` (a nursery). When the nursery exits, it 
 
 ### Invariant 2: No missed wakeups
 
-**Correctness relies on the Dekker protocol between the lock-free queue and the `has_send_waiters` / `has_recv_waiters` atomics, plus the scheduler's conditional-wait contract.**
+**Correctness relies on the paired-fence Dekker protocol between the lock-free queue and the `has_send_waiters` / `has_recv_waiters` atomics, plus the scheduler's conditional-wait contract.**
 
 The blocking phase pattern:
 
@@ -342,14 +408,19 @@ lock(mu);
 // 4. Steps 1–3 all failed: append waiter to list
 //    — publishes has_send_waiters or increments has_recv_waiters (release)
 // 5. unlock(mu)
-// 6. Dekker re-check: try enqueue/dequeue once more (acquire via queue CAS)
+// 6. seq_cst fence, then Dekker re-check: try enqueue/dequeue once more
 //    — if succeeds: lock, remove self, signal partner, unlock, return 0
 // 7. conditionally wait while node.notified == NONE
 ```
 
 Steps 1–3 check the predicate under mu. Step 3 (retry-enqueue-under-mu) is an optimization that avoids the append+remove cost when space/data is immediately available.
 
-Step 4 makes the waiter visible via the atomic flag. Step 6 is the critical Dekker re-check: after our `release` store of `has_waiters=1`, we `acquire`-load the queue state. Any concurrent fast-path operation that stored data (release) and then loaded `has_waiters` (acquire) will either: (a) see our flag and signal us, or (b) have stored data that our re-check will see. There is no case where both miss — this is the standard Dekker/Peterson exclusion argument.
+Step 4 makes the waiter visible via the atomic flag. Step 6 is the critical
+Dekker re-check: after the `release` update of `has_waiters`, the waiter
+executes a `seq_cst` fence and probes the queue. The successful lock-free peer
+operation executes the matching `seq_cst` fence before loading
+`has_waiters`. Acquire/release operations alone do not prevent the store/load
+reordering that permits both sides to miss on ARM64.
 
 Step 7 uses the scheduler conditional-wait primitive specified in `spec/concurrent-c-scheduler.md`. If a waker changes `notified` between unlock and park, the wait does not sleep.
 
@@ -374,10 +445,15 @@ Step 7 uses the scheduler conditional-wait primitive specified in `spec/concurre
 
 **OS threads use `pthread_cond_wait` with the same predicate-under-mu pattern.**
 
-- `fiber == NULL` on the wait node means OS thread context.
-- OS threads do not use `FIBER_PARK_IF`. Instead: the blocking loop holds mu, checks the predicate, and calls `pthread_cond_wait(&condvar, &mu)` which atomically releases mu and sleeps.
+- OS-thread callers do not use `FIBER_PARK_IF` or register a fiber wait node.
+  Their blocking loop holds `mu`, checks the predicate, and calls
+  `pthread_cond_wait(&condvar, &mu)`, which atomically releases `mu` and
+  sleeps.
 - On wake, the loop re-acquires mu and retries (handles spurious wakes).
-- OS threads do NOT go on the fiber waiter list for targeted wake. They wait on shared condvars (`not_empty`, `not_full`). The waiter list is fiber-only (and select bookkeeping).
+- OS threads do not go on the fiber waiter lists. Receive-side lock-free
+  condvar waiters publish `thread_recv_waiters` around the `not_empty` wait;
+  successful enqueues observe that counter and signal `not_empty`. Senders use
+  `not_full`.
 - Waker calls `pthread_cond_signal` for single wake. Close calls `pthread_cond_broadcast` to wake all.
 
 ### Invariant 6: `lfqueue_inflight` and close-drain
@@ -398,9 +474,18 @@ Channel blocking uses the conditional-wait and unpark contract in `spec/concurre
 - **Close state**: transitions occur under `ch->mu`; blocking paths recheck under that mutex. Lock-free admission races are resolved by `lfqueue_inflight` and close-drain rather than by treating the early `closed` check as the linearization point.
 - **`lfqueue_count`**: `fetch_add/sub` with `release` on update; `load_acquire` on read.
 - **`lfqueue_inflight`**: `fetch_add/sub` with `relaxed` (only used under the close-drain spin, which has its own ordering via `lfqueue_count`).
-- **`has_send_waiters`**: boolean publication of an unnotified send waiter. **`has_recv_waiters`**: count of linked receive waiters with `notified == NONE`. Both use release updates under `mu` and acquire fast-path reads, forming the Dekker pair in Invariant 2. Wait-list pointers are plain and mutex-protected.
+- **`has_send_waiters`**: boolean publication of an unnotified send waiter.
+  **`has_recv_waiters`**: count of linked receive waiters with
+  `notified == NONE`. Both use release updates under `mu`, paired `seq_cst`
+  fences, and acquire fast-path reads as specified by Invariant 2. Wait-list
+  pointers are plain and mutex-protected.
+- **`thread_recv_waiters`**: OS-thread receivers currently waiting on
+  `not_empty`; release counter updates and acquire sender reads avoid taking
+  `mu` when no thread receiver needs a condvar signal.
 - **`in_wait_list`**: plain `int`, only accessed under `ch->mu`. NOT atomic.
 - **`select_group.selected_index`**: transitions via `CAS_acq_rel`.
+- **`select_group.signaled`**: release-incremented wake sequence, observed with
+  acquire ordering by conditional park.
 
 ## Implementation files
 

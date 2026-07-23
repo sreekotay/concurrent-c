@@ -69,33 +69,9 @@ family-specific mappings are listed below.
 
 ## Slices
 
-`<ccc/cc_slice.cch>` defines the slice ABI:
-
-```c
-typedef struct {
-    void *ptr;
-    size_t len;
-    uint64_t id;
-    size_t alen;
-} CCSlice;
-
-typedef CCSlice CCSliceUnique;
-typedef CCSlice CCSliceShared;
-
-typedef struct {
-    void *ptr;
-    size_t len;
-} CCSliceHdr;
-
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-```
-
-`ptr` addresses the first byte, `len` is the view length, `id` carries
-provenance flags, and `alen` is the available length from `ptr` to the end of
-the backing allocation. `CCSliceHdr` is an untracked pointer-length view.
+The language specification defines the `CCSlice`, `CCSliceUnique`,
+`CCSliceShared`, and `CCSliceHdr` ABI and ownership rules. The standard library
+also uses `CCSliceArray`, a pointer-length sequence of `CCSlice` values.
 
 Construction and lifetime functions are:
 
@@ -154,11 +130,16 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `at`, `sub`,
 
 ### Arena-backed slice operations
 
-`<ccc/std/slice.cch>` and `<ccc/std/string.cch>` provide:
+`<ccc/std/slice.cch>` provides:
 
 ```c
 CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena *arena);
 CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *arena);
+```
+
+`<ccc/std/string.cch>` provides:
+
+```c
 CCSlice cc_slice_clone(CCArena *arena, CCSlice s);
 char *cc_slice_c_str(CCArena *arena, CCSlice s);
 CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice delim);
@@ -262,10 +243,18 @@ void cc_string_release_heap(CCString *str);
 void cc_string_release(CCString *str, CCArena *arena);
 ```
 
-`cc_string_from` accepts `CCSlice`, C strings, `CCString` values and pointers,
-character and integer scalar types, `float`, `double`, and `bool`.
-`cc_string_push` and `cc_string_append` accept slices, C strings, and
-`CCString` values and pointers.
+`cc_string_from` has `_Generic` associations for `CCSlice`, `char *`,
+`const char *`, `CCString`, `CCString *`, `const CCString *`, `char`,
+`signed char`, `unsigned char`, `short`, `unsigned short`, `int`, `unsigned`,
+`long`, `unsigned long`, `long long`, `unsigned long long`, `float`, `double`,
+and `bool`.
+
+The push/append scalar dispatch has `_Generic` associations for `char`,
+`signed char`, `unsigned char`, `short`, `unsigned short`, `int`, `unsigned`,
+`long`, `unsigned long`, `long long`, `unsigned long long`, `float`, `double`,
+and `bool`. These append decimal integers, one character for `char`, `true` or
+`false` for `bool`, and floating-point text. The same dispatch also accepts
+`CCSlice`, C strings, and `CCString` values and pointers.
 
 The builder stores short values inline and stores larger values in arena-owned
 storage. A growth failure poisons the string. On a poisoned string,
@@ -279,11 +268,16 @@ Scalar conversion helpers have the form:
 CCString <scalar-type>_to_str(<scalar-type> value, CCArena *arena);
 ```
 
-The shipped scalar families cover `char`, signed and unsigned integer types,
-fixed-width integer types, `intptr_t`, `uintptr_t`, `float`, `double`, and
-`bool`. Integer formatting is decimal, boolean formatting is `true` or
-`false`, and floating-point formatting uses `%g` unless the optional
-XJB formatter is enabled.
+The named helpers are `char_to_str`, `signed_char_to_str`,
+`unsigned_char_to_str`, `short_to_str`, `unsigned_short_to_str`, `int_to_str`,
+`unsigned_to_str`, `long_to_str`, `unsigned_long_to_str`, `long_long_to_str`,
+`unsigned_long_long_to_str`, the `int8_t` through `uint64_t` fixed-width
+families, `intptr_t_to_str`, `uintptr_t_to_str`, `float_to_str`,
+`double_to_str`, and `bool_to_str`. The `intptr_t` and `uintptr_t` helpers are
+direct per-type entry points; they are not distinct associations in
+`cc_string_from`. Integer formatting is decimal, boolean formatting is `true`
+or `false`, and floating-point formatting uses `%g` unless the optional XJB
+formatter is enabled.
 
 ## File and buffered I/O
 
@@ -331,12 +325,14 @@ CCResult_size_t_CCIoError cc_file_tell(CCFile *file);
 CCResult_size_t_CCIoError cc_file_size(CCFile *file);
 ```
 
-`cc_file_open` returns zero on success and an errno value on failure.
+`cc_file_open` returns zero on success and `-1` on failure. The failure's
+`errno` remains available separately.
 `cc_file_close` ignores close errors. Value-returning reads return an empty
 slice at EOF. The `_into` read forms return `ok(true)` when they write an
 output value and `ok(false)` at EOF. `cc_file_read_line` includes the newline
 when one is read. `cc_file_write` and `cc_file_write_buf` return the number of
-bytes written.
+bytes written. `cc_file_size` returns `Ok(0)` for a non-seekable stream and
+does not change the current position.
 
 `CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
 
@@ -382,23 +378,19 @@ int cc_async_wait_deadline(CCAsyncHandle *handle, const CCDeadline *deadline);
 void cc_async_cancel(CCAsyncHandle *handle);
 ```
 
-Submission functions return zero when the operation is accepted and an errno
-value otherwise. Completion writes operation results into caller-provided
-storage and sends an errno-compatible completion code through the handle.
+Submission functions return the channel submission result. Completion writes
+operation results into caller-provided storage and sends the operation's
+completion code through the handle. In particular, `cc_file_open_async`
+completes with the actual `cc_file_open` result, including `-1` on open
+failure; this code is not an errno value.
 
 ```c
 int cc_file_open_async(CCExec *ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle *handle);
-int cc_file_open_async_deadline(CCExec *ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
-int cc_file_close_async_deadline(CCExec *ex, CCFile *file, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_async(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
-int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_write_async(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle);
-int cc_file_write_async_deadline(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle, const CCDeadline *deadline);
 ```
 
 ### Path helpers
@@ -414,7 +406,8 @@ CCSlice cc_path_basename(CCArena *arena, CCSlice path);
 ```
 
 The returned `join`, `dirname`, and `basename` slices are NUL-terminated and
-arena-backed. The path separator is `/`.
+arena-backed. These helpers implement POSIX path syntax only:
+`cc_path_sep()` is `/`, and `cc_path_is_abs` recognizes only a leading `/`.
 
 ## Collections
 
@@ -459,7 +452,8 @@ Vector UFCS maps these method names to the generated family with `&vec`.
 `CCVec_char` and `CCVec_size_t` are predefined. `CC_VEC_FOREACH` iterates in
 increasing index order.
 
-`CC_VEC_DECL_HEAP(T, Name)` declares the heap-backed family with `init`, `free`,
+`CC_VEC_DECL_HEAP(T, Name)` declares the heap-backed family with
+`Name Name_init(void)`, `free`,
 `reserve`, `push`, `push_ptr`, `pop`, `get`, `get_ptr`, `at_grow`, `clear`,
 `len`, `cap`, `begin`, `end`, and `data`.
 
@@ -498,9 +492,16 @@ Map UFCS maps `insert`, `put`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
 `clear`, and `destroy` to the generated family. `CC_MAP_FOREACH` exposes each
 entry without defining a stable traversal order.
 
-The convenience declarations `CC_MAP_DECL_INT`, `CC_MAP_DECL_U64`, and
-`CC_MAP_DECL_SLICE` provide hash and equality functions for `int`, `uint64_t`,
-and `CCSlice` keys.
+The convenience declarations are:
+
+```c
+#define CC_MAP_DECL_INT(V, Name)   CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
+#define CC_MAP_DECL_U64(V, Name)   CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
+#define CC_MAP_DECL_SLICE(V, Name) CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
+```
+
+Their `_FULL(V, Name, OptV_ignored)` forms expand to the same generated family
+and ignore the final argument.
 
 ### Hash helpers
 
@@ -559,7 +560,8 @@ CCGlobResult cc_glob(CCArena *arena, const char *pattern);
 bool cc_glob_match(const char *pattern, const char *name);
 ```
 
-`cc_dir_next` returns `CC_IO_EOF` after the final entry. Entry names and glob
+After the final entry, `cc_dir_next` returns
+`Err((CCIoError){ .kind = CC_IO_OTHER, .os_code = 0 })`. Entry names and glob
 paths are allocated in the supplied arena. `cc_dir_create` does not create
 parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and recursive
 `**`; `cc_glob_match` matches a single name with `*` and `?`.
@@ -637,7 +639,8 @@ int cc_process_id(const CCProcess *process);
 ```
 
 `try_wait` returns `CC_IO_BUSY` while the process runs. Timed waits report an
-`ETIMEDOUT` OS code when their timeout expires.
+`ETIMEDOUT` OS code when their timeout expires. A negative timeout waits
+without a time bound.
 
 Piped I/O and capture functions are:
 
@@ -665,6 +668,9 @@ int cc_process_output_exit_code(const CCProcessOutput *output);
 bool cc_process_output_success(const CCProcessOutput *output);
 ```
 
+`cc_process_output_success` is true exactly when the process exited normally
+and its exit code is zero.
+
 Environment functions are:
 
 ```c
@@ -673,7 +679,8 @@ CCResult_bool_CCIoError cc_env_set(const char *name, const char *value);
 CCResult_bool_CCIoError cc_env_unset(const char *name);
 ```
 
-`cc_env_get` returns an empty slice when the variable is absent.
+`cc_env_get` returns an empty slice when the variable is absent or its arena
+allocation fails.
 
 ### Command builder
 
@@ -713,7 +720,8 @@ CCResult_int_CCIoError cc_command_status(CCCommand *command);
 ```
 
 `CCCommand` UFCS maps method names to `cc_command_*` and passes the receiver by
-address.
+address. `cc_command_status` disables stdout and stderr capture, waits for the
+process, and returns `Ok(status.exit_code)` for any completed process.
 
 ## Futures and tasks
 
@@ -925,7 +933,21 @@ CCIpAddr cc_ip_parse(const char *text, size_t len, CCNetError *out_err);
 
 `cc_dns_lookup` returns an arena-backed contiguous sequence of `CCIpAddr`
 values represented by `CCSlice`. `<ccc/std/dns.cch>` also declares
-`cc_dns_lookup`; callers use this linked implementation.
+`cc_dns_lookup`; callers use this linked implementation. It additionally
+declares the family selector and reverse lookup:
+
+```c
+typedef enum CCDnsFamily {
+    CC_DNS_ANY = 0,
+    CC_DNS_IPV4 = 4,
+    CC_DNS_IPV6 = 6
+} CCDnsFamily;
+
+CCSlice cc_dns_lookup_family(CCArena *arena, const char *hostname, size_t hostname_len, CCDnsFamily family, CCNetError *out_err);
+CCSlice cc_dns_reverse(CCArena *arena, const CCIpAddr *addr, CCNetError *out_err);
+```
+
+The shipped runtime does not define these two extension functions.
 
 ## HTTP
 
@@ -1071,8 +1093,9 @@ const CCTlsInfo *cc_tls_info(const CCTlsConn *conn);
 
 The caller-provided I/O buffer remains valid for the connection lifetime and
 has at least `CC_TLS_IOBUF_SIZE` bytes. `cc_tls_connect_addr` allocates this
-buffer from `conn_arena`. Session-info slices belong to `info_arena`.
-TLS does not define `_async` callees.
+buffer from `conn_arena`. TLS does not define `_async` callees.
+`cc_tls_info` is a stub and always returns null; no session-info
+slices are available through it.
 
 Certificate-loading entry points are:
 
@@ -1081,6 +1104,9 @@ CCTlsCertChain *cc_tls_load_cert_chain(CCArena *arena, const char *path, size_t 
 CCTlsPrivateKey *cc_tls_load_private_key(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
 CCTlsTrustAnchors *cc_tls_load_trust_anchors(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
 ```
+
+These certificate-loading functions are stubs. Each returns null and writes
+`CC_NET_OTHER` to `out_err`.
 
 ## Portable atomics
 

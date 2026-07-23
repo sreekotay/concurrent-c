@@ -7,7 +7,7 @@ A C preprocessor that extends C syntax with first-class concurrency, desugaring 
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
-> **Status:** implemented — specification tests are normative.
+> **Status:** partially implemented. A surface is shipped only where this specification identifies an implementation-backed API or lowering; unsupported spellings are rejected.
 
 This specification defines:
 
@@ -122,9 +122,9 @@ point. The compiler lowers `@async` to an explicit frame and poll function.
 
 ```c
 @async int echo(CCChanTx tx, CCChanRx rx, int v) {
-    if (@await tx.send(v) != 0)       return -1;
+    if (!cc_io_avail(@await tx.send(v))) return -1;
     int reply;
-    if (@await rx.recv(&reply) != 0)  return -2;
+    if (!cc_io_avail(@await rx.recv(&reply))) return -2;
     return reply;
 }
 ```
@@ -225,7 +225,6 @@ bugs.
 | `@noblock`     | Compatibility spelling for `@nonblocking`                              | `@noblock f();` — see §8.2          |
 | `@latency_sensitive` | Disable dispatch coalescing for this `@async` fn                  | `@async @latency_sensitive void h() {}`|
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
-| `@for`         | Async iteration over a channel                                          | `@for @await (int x : ch) { … }`       |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
 | `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
 | `unsafe`       | (Bare) disable safety checks in a block                                 | `unsafe { ptr_cast(); }`               |
@@ -243,7 +242,6 @@ bugs.
 | `@scoped type T`                | Type tied to lexical scope (cannot escape)               | `@scoped type Guard::[T];`                               |
 | `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
-| `@for @await (T x : ch) { }`    | Async iteration (consume channel)                        | `@for @await (int x : ch) { process(x); }`               |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) { }`          | Block-scoped default handler for `!>;` / `@err`          | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
 
@@ -302,8 +300,8 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 
 | Form                              | Purpose                                                  | Example                                                         |
 | --------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
-| `@with_deadline(d) { }`           | Apply deadline to block; `@await` inside is cancel-aware. | `@with_deadline(seconds(5)) { @await op(); }`                    |
-| `@with_deadline(d) as handle { }` | Same, with inspectable `CCDeadline` handle inside block. | `@with_deadline(seconds(5)) as dl { if (dl.remaining() < …) …}` |
+| `@with_deadline(ms) { }`           | Make a relative deadline current for operations that consult it. | `@with_deadline(seconds(5)) { cc_chan_match_select(..., cc_current_deadline()); }` |
+| `@with_deadline(ms) as handle { }` | Same, with the active `CCDeadline*` bound inside the block. | `@with_deadline(seconds(5)) as dl { if (cc_deadline_expired(dl)) break; }` |
 
 
 ### Library Functions
@@ -325,6 +323,7 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 | `cc_current_deadline()`   | Handle of current `@with_deadline` scope | `CCDeadline* dl = cc_current_deadline();` |
 | `cc_deadline_expired(dl)` | Polling check on a deadline handle     | `if (cc_deadline_expired(dl)) break;`     |
 | `cc_cancel()` / `cc_is_cancelled()` | §8.5.3 fallback: target the bare current deadline scope | `while (!cc_is_cancelled()) { ... }` |
+| `cc_io_avail(res)` | True exactly for `ok(true)` channel results | `while (cc_io_avail(rx.recv(&x))) { ... }` |
 
 
 ### Result Methods (UFCS)
@@ -452,7 +451,7 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 
 **Move-only types:**
 
-- `Task::[T]` (represents unique computation)
+- `CCTaskIntptr` (owns one pollable computation)
 - `Map::[K,V]` (arena-backed, unique ownership)
 - `T!>(E)` where `T` or `E` is move-only
 
@@ -550,8 +549,8 @@ char[:] stack_slice = buf[:];
 // Channel send: OK (deep-copies bytes into channel buffer)
 @await ch.send(stack_slice);
 
-// Thread closure: ERROR (closure copies slice struct, ptr points to dead stack)
-spawn_thread(() => {
+// Spawned task: ERROR (closure copies slice struct, ptr points to dead stack)
+n->spawn(() => {
     use(stack_slice);  // BAD: stack_slice.ptr points to caller's stack frame
 });
 ```
@@ -560,7 +559,7 @@ spawn_thread(() => {
 
 1. It does not contain pointers to stack memory (which dies when the spawning function returns)
 2. It does not contain pointers to arena memory that may be freed before the thread/task completes
-3. It is not a scope-bound handle (`LockGuard`, `AsyncGuard`, `ThreadGroup`, `Scope`)
+3. It is not a scope-bound handle registered by a synchronization or resource library
 
 **Capture eligibility table:**
 
@@ -575,10 +574,9 @@ spawn_thread(() => {
 | Stack slices             | **No**                         | Frame dies on return                        |
 | Unique slices (`recv()`) | Yes                            | Owned, no external pointer                  |
 | `Map::[K,V]`               | Yes iff contents capturable    | Move-only; moved into closure               |
-| `Task::[T]`                | Yes                            | Can be awaited from any thread              |
+| `CCTaskIntptr`             | Yes                            | Explicit poll/drop ownership                |
 | Channels                 | Yes                            | Thread-safe handles                         |
-| `LockGuard::[T]`           | **No**                         | Scope-bound                                 |
-| `AsyncGuard::[T]`          | **No**                         | Scope-bound                                 |
+| Registered scope-bound synchronization handle | **No**             | Scope-bound                                 |
 | `ThreadGroup`            | **No**                         | Must be used in creating thread             |
 | `Scope`                  | **No**                         | Stack-bound capability                      |
 | Raw pointers             | Yes                            | But safety is caller's responsibility       |
@@ -600,7 +598,7 @@ spawn_thread(() => {
 
 **Rule (owned-buffer-child-free-ban):** `free` / `cc_slice_destroy` / `@destroy` on a non-owning arena-allocated pointer or non-unique arena slice view is a compile-time error. Only the owning scope may delete: arena `@destroy` / `cc_arena_free`, or unique `T[:!]` destruction. Untracked heap (`malloc`) remains outside this rule.
 
-**Rule (pointer-alias capture mutation):** Value-capturing `T* p = &local` into a task/thread closure and then writing through `*p` / `p->field` is a compile-time error (same class as mutating a reference capture). Use `Atomic` / `Mutex`, capture by reference under those wrappers, or `@unsafe`.
+**Rule (pointer-alias capture mutation):** Value-capturing `T* p = &local` into a task/thread closure and then writing through `*p` / `p->field` is a compile-time error (same class as mutating a reference capture). Use the shipped `cc_atomic_*` surface, a registered synchronization library, or `@unsafe`.
 
 ```c
 void ok_pattern() {
@@ -652,7 +650,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 **Keyword sigil policy (normative):** Every CC-introduced keyword
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
-`@match` (reserved — removed construct), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
+`@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
 `@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
 `@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`.
 The bare
@@ -1037,9 +1035,10 @@ stmt ::= … call '!>' [ '(' ident ')' ] [ body ] '@destroy' '{' D '}' ';'
        | … call '?>' [ '(' ident ')' ] rhs  '@destroy' '{' D '}' ';'
        | … call '!>' [ '(' ident ')' ] [ body ] '@destroy' ';'
        | … call '?>' [ '(' ident ')' ] rhs  '@destroy' ';'
+       | type ident '=' expr '@destroy' [ '{' D '}' ] ';'
 ```
 
-Semantics: `EXPR !> BODY @destroy { D }` is exactly `(EXPR !> BODY) @sdestroy { D }` — on the success path of the unwrap, `D` is scheduled to run at scope exit in reverse-declaration order (i.e., as if `@defer { D };` followed the statement). On the error path, the handler body / divergent RHS has already left the scope, so `D` does not run. For `?> … @destroy { D }`, both branches yield a bound value, so `D` runs at scope exit unconditionally.
+Semantics: on the success path of `EXPR !> BODY @destroy { D }`, `D` is scheduled to run at scope exit in reverse-declaration order, as if a declaration-bound `@defer { D };` followed the declaration. On the error path, the handler body or divergent RHS has already left the scope, so `D` does not run. For `?> … @destroy { D }`, both branches yield a bound value, so `D` runs at scope exit unconditionally.
 
 Any binder introduced by the host statement (e.g., the LHS of a declaration like `T* p = CALL() !> … @destroy { use(p); };`) is in scope inside `D` because `D` expands to a `@defer` in the surrounding block.
 
@@ -1054,6 +1053,11 @@ Bodyless `@destroy` requires a registered pre-destroy or destroy hook and emits
 only those hooks. If no hook is known, compilation fails at `@destroy`.
 An explicit body remains valid without a registered hook and lowers to the
 declaration-bound deferred body.
+
+The same declared-type hook lookup applies to a direct initializer such as
+`CCArena a = cc_arena_heap(n) @destroy;`; an unwrap operator is not required
+when the initializer is infallible. Pointer declarations pass the pointer value
+to a registered hook, while value declarations pass the object's address.
 
 **Nullable pointers.** Both operators also consume pointer-typed operands. For a pointer-typed `EXPR`, the failure condition is `EXPR == NULL` instead of the result's error arm. On failure, a `CCError` is synthesized with `kind == CC_ERR_NULL` and a compile-time-constant message of the form `NULL returned from <call expression> at <file>:<line>`; the binder forms (`!>(e)`, `?>(e)`) bind that synthesized error. Every form and rule above applies unchanged:
 
@@ -1366,9 +1370,8 @@ A **suspension point** is any program point at which execution of the current ta
 
 - `@await` expression (any @await)
 - Call to `@async` function
-- Async iteration (`@for @await`) (contains an `@await` per iteration)
-- Call to cancellation-aware channel operation (`recv_cancellable`, `send_cancellable`)
-- Call to `block_on()` (rare, explicit blocking)
+- A suspending `send`, `send_take`, or `recv` in an `@async` body
+- Call to `cc_block_on` / `cc_block_on_intptr` (explicit blocking)
 
 **Non-suspension points** (safe to hold scope-bound values):
 
@@ -1499,6 +1502,9 @@ This section defines the allocation model and lifetime boundaries:
 - **Arena API** — creation, allocation, lifecycle
 - **§5.1 `@defer`** — scoped cleanup
 - **§5.2 Scoped arena lifetimes** — ordinary lexical scopes with `@destroy`
+
+`spec/draft_alloc_strategy.md` specifies the implemented heap-overflow,
+per-allocation release, reallocation, and checkpoint-gating contract.
 
 ---
 
@@ -1663,12 +1669,13 @@ d.block_max = 0;  // unbounded growth beyond the initial user buffer
 ```c
 CCArena a = cc_arena_heap(megabytes(1));
 char[:] s = arena_alloc(char, &a, 100);
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
-spawn_thread(() => {
+n->spawn(() => {
     use(s);  // OK: a still alive
 });
 
-cc_arena_free(&a);  // BUG: thread may still be using s
+cc_arena_free(&a);  // BUG: spawned task may still be using s
 ```
 
 **Design Rationale:**
@@ -1812,28 +1819,6 @@ void!>(IoError) process(char[:] path, CCArena* out) {
 }
 ```
 
-**Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see §4.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `@await` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
-
-```c
-@async void!>(Error) good(Arena* scratch) {
-    // ✅ CORRECT: defer within sync scope, not across suspension
-    {
-        @defer cleanup: cc_arena_free(scratch);
-        char[:] data = sync_read(scratch);
-        process(data);
-    }
-    
-    // defer has already run
-    @await io_operation();
-}
-
-@async void!>(Error) bad(CCArena* scratch) {
-    @defer cleanup: cc_arena_free(scratch);
-    // ❌ ERROR: defer is @scoped and cannot be held across @await
-    // @await io_operation();
-}
-```
-
 ---
 
 ### 5.2 Scoped Arena Lifetimes
@@ -1888,15 +1873,12 @@ headers and the focused scheduler specification.
 
 ---
 
-### 6.1 Thread API
+### 6.1 Thread and task closures
 
-OS threads are for CPU parallelism.
-
-```c
-Thread spawn_thread(void (*fn)(void));   // spawn with function pointer
-Thread spawn_thread(() => { ... });      // spawn with closure
-void   Thread.join();                    // wait for completion
-```
+The language does not ship a `Thread` / `spawn_thread` family. Direct OS
+threading uses the platform C API. `CCNursery.spawn` is the shipped structured
+task surface. The capture rules below apply to spawned task closures and to
+thread adapters supplied by a library.
 
 **Rule (captures in thread closures):** Capturing a variable `v` into a thread closure is allowed iff:
 
@@ -1940,7 +1922,9 @@ This prevents data races while allowing explicit shared state through safe wrapp
 
 **For most applications, use `CCNursery` (§8.1) instead of the APIs in this section.**
 
-Direct OS thread control is rarely needed. For details on `ThreadGroup` and `spawn_thread` for NUMA/affinity/CPU-pinning use cases, see **Appendix D: Advanced Runtime Control**.
+Direct OS thread control is rarely needed. Concrete thread entry points and
+platform-specific affinity controls are library APIs, not Appendix D ABI
+commitments. Appendix D specifies stable data and call layouts.
 
 ---
 
@@ -2020,8 +2004,9 @@ The channel result model is uniform:
   failure as defined by that operation.
 
 `ok(false)` never means timeout, cancellation, or an application payload
-error. Cancellation-aware operations use `err(Cancelled)`. Deadline-aware
-operations use an error carrying `ETIMEDOUT`. A channel whose element type is
+error. Cancellation observed by a channel operation is
+`err(cc_io_from_errno(ECANCELED))`; deadline expiry is
+`err(cc_io_from_errno(ETIMEDOUT))`. A channel whose element type is
 itself `T!>(E)` carries that application result as the payload written to
 `out`; it does not merge the payload's tag with the channel-operation result.
 
@@ -2192,7 +2177,9 @@ CCChan* sync_results_ch = cc_channel_pair(&sync_results_tx, &sync_results_rx);
 // Async channel: must use @await
 int!>(ParseError) r;
 bool !>(CCIoError) got = @await results_rx.recv(&r);
-if (!got) {
+if (cc_is_err(got)) {
+    handle_io_error(cc_error(got));
+} else if (!cc_value(got)) {
     // channel closed+drained
 } else if (r.ok) {
     int v = r.value;   // application success
@@ -2203,7 +2190,9 @@ if (!got) {
 // Sync channel: no @await
 int!>(ParseError) r2;
 bool !>(CCIoError) got2 = sync_results_rx.recv(&r2);
-if (!got2) {
+if (cc_is_err(got2)) {
+    handle_io_error(cc_error(got2));
+} else if (!cc_value(got2)) {
     // channel closed+drained
 } else if (r2.ok) {
     int v = r2.value;
@@ -2489,28 +2478,19 @@ struct Duration {
 
 **Timeouts:**
 
-Timeouts are defined via `select`:
+Timeout-bounded channel waits use the deadline argument of
+`cc_chan_match_select`:
 
 ```c
-// In sync code:
-int v;
-bool got = recv_timeout(&ch, 100ms, &v);
-
-// In async code:
-int v2;
-bool got2 = @await recv_timeout(&ch, 100ms, &v2);
-
-// Equivalent to a deadline-bounded runtime select:
-int v3 = 0;
-CCChanMatchCase c = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &v3, .elem_size = sizeof(v3), .is_send = false };
+int v = 0;
+CCChanMatchCase c = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &v, .elem_size = sizeof(v), .is_send = false };
 size_t ready = (size_t)-1;
 CCDeadline d = cc_deadline_after_ms(100);
-bool got3 = cc_chan_match_select(&c, 1, &ready, &d) == 0;
+int rc = cc_chan_match_select(&c, 1, &ready, &d);
+if (rc == ETIMEDOUT) handle_timeout();
 ```
 
 **Rule:** Timeouts on multiplexed waits are expressed through the deadline parameter of `cc_chan_match_select` (there is no `timeout(...)` readiness case).
-
-**Rule:** `recv_timeout` follows the same dual-mode rules as `recv`: it requires `@await` in `@async` code and blocks in sync code.
 
 ---
 
@@ -2537,19 +2517,10 @@ bool !>(CCIoError) sent_take = @await send_take(tx, slice);
 void close(tx);                         // idempotent
 void close(rx);
 
-// Cancellation-aware variants (must @await)
-bool !>(Cancelled) sent = @await send_cancellable(tx, value);
-T y;
-bool !>(Cancelled) got = @await recv_cancellable(&rx, &y);
-
 // Non-blocking (no @await, either context)
-bool ok = try_send(&tx, value);        // returns false if full/closed, never awaits
-T!>(RecvStatus) x = try_recv(&rx);        // returns immediately
-
-// Timeout (must @await)
-T z;
-bool !>(CCIoError) got_timed = @await recv_timeout(&rx, &z, Duration d);
-// ok(false)=closed+drained; err(ETIMEDOUT)=deadline expired
+bool !>(CCIoError) sent_now = try_send(tx, value);
+T y;
+bool !>(CCIoError) got_now = try_recv(rx, &y);
 
 // === SYNC CHANNELS (int[~ ... sync ... >] / int[~ ... sync ... <]) ===
 // All operations block, no @await allowed
@@ -2570,11 +2541,8 @@ void close(&stx);
 void close(&srx);
 
 // Non-blocking (no @await, either context)
-bool ok = try_send(&stx, value);        // returns false if full/closed
-T!>(RecvStatus) x = try_recv(&srx);        // returns immediately
-
-// Timeout (blocks up to duration, no @await)
-T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
+bool !>(CCIoError) sent_now = try_send(stx, value);
+T y; bool !>(CCIoError) got_now = try_recv(srx, &y);
 ```
 
 **Operations Comparison:**
@@ -2585,18 +2553,15 @@ T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
 | `send(ch, v)`             | `@await send(...)` ✅                                 | `send(...)` ✅ (blocks)    | `send(...)` ✅                                      |
 | `recv(ch)`                | `@await recv(...)` ✅                                 | `recv(...)` ✅ (blocks)    | `recv(...)` ✅                                      |
 | `send_take(ch, s)`        | `@await send_take(...)` ✅                            | `send_take(...)` ✅        | `send_take(...)` ✅                                 |
-| `send_cancellable(ch, v)` | `@await send_cancellable(...)` ✅                     | `send_cancellable(...)` ✅ | N/A ❌                                              |
-| `recv_cancellable(ch)`    | `@await recv_cancellable(...)` ✅                     | `recv_cancellable(...)` ✅ | N/A ❌                                              |
 | `try_send(ch, v)`         | `try_send(...)` ✅                                   | `try_send(...)` ✅         | `try_send(...)` ✅                                  |
 | `try_recv(ch)`            | `try_recv(...)` ✅                                   | `try_recv(...)` ✅         | `try_recv(...)` ✅                                  |
-| `recv_timeout(ch, d)`     | `@await recv_timeout(...)` ✅                         | `recv_timeout(...)` ✅     | `recv_timeout(...)` ✅                              |
 | `close(ch)`               | `close(...)` ✅                                      | `close(...)` ✅            | `close(...)` ✅                                     |
 | `subscribe(ch)`           | `subscribe(...)` ✅                                  | `subscribe(...)` ✅        | `subscribe(...)` ✅                                 |
 
 
 **Rule (`@await` marks suspension points, not channel flavor):** `@await` is
 required on suspending channel operations (`send()`, `recv(&out)`,
-`send_take()`, `recv_cancellable()`, `send_cancellable()`, `recv_timeout()`)
+`send_take()`)
 **inside `@async` function bodies** — the state-machine lowering must know its
 suspension points explicitly. Omitting `@await` there is a compile error
 (diagnosed as "channel operation must be awaited in @async function").
@@ -2607,17 +2572,14 @@ same operations are called **without** `@await` and block the caller: a fiber
 parks and the scheduler proceeds; a plain thread blocks, as a C programmer
 expects. This is the form used throughout `examples/` and `real_projects/`.
 
-**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `@await` in any context. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `@await` is a compile error.
+**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `@await` in any context. These include `send()`, `recv(&out)`, and `send_take()`. Adding `@await` is a compile error.
 
 **Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `@await`. They return immediately or have no return value.
 
-**Rule:** Sync channels do not support cancellation-aware variants (`recv_cancellable`, `send_cancellable`). If you need cancellation, use async channels with cancellation-aware variants (§8.5.2).
-
-**RecvStatus enum:**
-
-```c
-enum RecvStatus { WouldBlock, Closed }
-```
+`try_send` and `try_recv(&out)` return `bool !>(CCIoError)` with the same
+`ok(true)` / `ok(false)` / `err(e)` meanings as `send` and `recv`. They return
+immediately; an unavailable open channel is reported as
+`err(cc_io_from_errno(EAGAIN))`.
 
 **Rule (send_take conditional move):** `send_take` consumes the slice only on
 `ok(true)`. On `ok(false)` or `err(e)`, the caller retains ownership.
@@ -2637,8 +2599,8 @@ if (cc_is_err(sent) || !cc_value(sent)) {
 ```c
 char[:] x;
 bool !>(CCIoError) got = @await ch.recv(&x);  // on ok(true): x owns unique slice
-bool ok = @await dst.send_take(x);
-if (ok) {
+bool !>(CCIoError) sent = @await dst.send_take(x);
+if (cc_io_avail(sent)) {
     // x is now invalid, ownership transferred
     use(x);  // ERROR: use after move
 } else {
@@ -2656,11 +2618,8 @@ bool !>(CCIoError) got = @await src.recv(&u);   // on ok(true): u owns unique sl
 use(u);                                        // OK: u still owns the buffer
 ```
 
-- `try_recv` returns `ok(value)` if a value is available
-- `try_recv` returns `err(RecvStatus.WouldBlock)` if the channel is empty but open
-- `try_recv` returns `err(RecvStatus.Closed)` if the channel is closed **and** drained
-
-**Note (try_recv vs recv):** Both `recv(&out)` and `try_recv()` return values from a closed channel as long as buffered values remain. The "closed" status is only reported after all buffered values have been drained. `recv(&out)` signals this via `ok(false)`; `try_recv()` signals it via `err(Closed)`.
+Both `recv(&out)` and `try_recv(&out)` return buffered values after close.
+After the buffer drains, both report `ok(false)`.
 
 **Note (schematic signatures):** Signatures use `T[~ ... >]`* / `T[~ ... <]`* as shorthand for the channel handle family. The actual type system uses the full channel handle type including capacity, mode, topology, and direction:
 
@@ -2668,7 +2627,14 @@ use(u);                                        // OK: u still owns the buffer
 // Full type signatures (what the compiler sees):
 bool !>(CCIoError) send::[T, N, Topo](T[~N Topo >]* ch, T value);       // send-only
 bool !>(CCIoError) recv::[T, N, Topo](T[~N Topo <]* ch, T* out);      // recv-only
+bool !>(CCIoError) try_send::[T, N, Topo](T[~N Topo >]* ch, T value);
+bool !>(CCIoError) try_recv::[T, N, Topo](T[~N Topo <]* ch, T* out);
 ```
+
+`cc_io_avail(r)` is the shipped convenience predicate for
+`bool !>(CCIoError)`: it is exactly `cc_is_ok(r) && cc_value(r)`. It is useful
+for loops that intentionally stop on either close or error; code that must
+distinguish those cases checks `cc_is_err(r)` first.
 
 Capacity `N` and topology `Topo` are erased at runtime (all use the same implementation), but the type system enforces view restrictions at compile time.
 
@@ -2858,15 +2824,15 @@ return;  // Clean exit, no manual drain needed
 
 ## 8. Concurrency
 
-Concurrent-C provides a single, unified concurrency primitive: the **nursery** (`CCNursery`, §8.1). A nursery is a scope-bound handle that manages task spawning, error propagation, and cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
+Concurrent-C provides a single, unified concurrency primitive: the **nursery** (`CCNursery`, §8.1). A nursery is a scope-bound handle that manages task spawning, joining, and explicit cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
 
 This section specifies:
 
 - **§8.1 Structured Concurrency with `CCNursery`** — the primary pattern for all concurrent work
 - **§8.2 Blocking and Non-Blocking Call Edges** — how `@blocking` / `@noblock` (function-level and call-site) determine the mode of each call edge from an `@async` body
-- **§8.3 Tasks** — lazy async computations (`Task::[T].start()` is discouraged; use `CCNursery` instead)
+- **§8.3 Tasks** — `CCTaskIntptr` frame/poll/drop ownership
 - **§8.4 Channels in Async vs Sync** — context-sensitive channel operations
-- **§8.5 Cancellation** — cooperative task cancellation, automatically propagated through nurseries
+- **§8.5 Cancellation** — operation-specific cooperative cancellation and deadlines
 - **§8.6 Streaming** — channel-based producers
 - **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
@@ -2900,7 +2866,8 @@ UFCS on the explicit nursery handle.
 - Tasks spawned on `n` are children of `n`.
 - The nursery's `@destroy` waits for all children to complete before returning.
 - Child task handles cannot outlive the nursery's scope (compile-time error if they escape).
-- If any child fails, all siblings are cancelled and the nursery's `@destroy` returns the first error via the enclosing error-handling context.
+- `cc_nursery_wait(n)` joins every child and returns the first nonzero child
+  error it records; it does not cancel siblings.
 - Peer tasks cannot wait on each other (compile-time error).
 
 ---
@@ -2917,6 +2884,12 @@ CCNursery* inner = cc_nursery_create(outer) !> @destroy;
 ```
 
 The `!>` operator consumes the result: on success, the value is bound; on error, control transfers to the enclosing `@errhandler` (§3.1). The trailing `@destroy` is a `@defer`-shaped destructor (§5.1) that joins children on scope exit.
+
+Nursery cleanup invokes `cc_nursery_wait` as a pre-destroy hook and discards
+its `int` return value. It does not forward a child error to `@errhandler` or
+`!>`. Code that must observe a child error calls `cc_nursery_wait(n)`
+explicitly, checks the returned integer before leaving the scope, and then
+allows the registered cleanup to free the nursery.
 
 ---
 
@@ -2944,14 +2917,16 @@ The compiler enforces the following normative rules:
 code observes it through `cc_nursery_is_cancelled(n)`, `cc_cancelled()`, or a
 wait that explicitly observes the current nursery. Nursery wait still joins
 every admitted child before teardown returns. A child return value does not
-implicitly define a language-wide error fan-out policy; the spawn wrapper and
-library API determine how task errors are reported.
+cancel peers; the spawn wrapper and library API determine how task errors are
+reported.
 
 ```c
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 n->spawn(() => ok_task());
 n->spawn(() => failing_task());     // returns cc_err(E)
-// At scope exit: ok_task is cancelled, cleanup completes, error forwarded.
+int child_err = cc_nursery_wait(n);
+if (child_err != 0) return map_child_error(child_err);
+// The sibling runs to completion unless code explicitly calls cc_nursery_cancel.
 ```
 
 ---
@@ -2973,6 +2948,9 @@ producers->spawn(() => producer(tx));
 
 The producer nursery joins producers, closes `tx`, and frees itself. The outer
 nursery can then join the consumer after it drains to `ok(false)`.
+
+The pre-destroy hook discards the integer returned by `cc_nursery_wait`; its
+purpose here is ordering, not error forwarding.
 
 Use nested nurseries to sequence producer-close before consumer-drain:
 
@@ -3018,8 +2996,8 @@ A nursery guarantees:
 - No child outlives its nursery's scope.
 - No forgotten-join deadlocks (impossible syntactically).
 - No cyclic peer waits (impossible syntactically).
-- Deterministic error fan-out to siblings.
-- Deterministic cancellation propagation on error.
+- First recorded child error returned by an explicit `cc_nursery_wait`.
+- Explicit cooperative cancellation through `cc_nursery_cancel`.
 - Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C).
 
 A nursery does **not** guarantee:
@@ -3204,9 +3182,9 @@ extern @nonblocking size_t strlen(const char* s);       // FFI + explicit @nonbl
 }
 ```
 
-Concrete C lowering for each edge mode — including the
-`CCRunBlockingHandle` ABI and the per-state frame layout — is
-normative and specified in **Appendix J.1.1**.
+Concrete C lowering for each edge mode uses
+`cc_run_blocking_task_intptr`, a `CCTaskIntptr` child slot, and the common
+poll/drop contract specified in **Appendix J.1.1**.
 
 #### 8.2.7 FFI default and soundness
 
@@ -3270,48 +3248,27 @@ annotations; call edges are resolved pointwise.
 
 ### 8.3 Tasks
 
-**Positioning:** Use `Task::[T]` for single async computations that produce one result; use nurseries + channels for coordinated, multi-task work with backpressure.
+An `@async` call constructs a poll-based `CCTaskIntptr`. The constructor,
+frame, poll, and drop ABI is defined once in Appendix J.1 and J.5.
 
 ```c
 @async int work(int x) {
     return x + 1;
 }
 
-Task::[int] t = work(5);    // created, not running
-int v = @await t;          // starts + waits
-```
-
-**Detached work:**
-
-```c
-@async void log_event(Event e) {
-    @await write_to_log(e);
+CCTaskIntptr t = work(5);
+intptr_t value = 0;
+int err = 0;
+while (cc_task_intptr_poll(&t, &value, &err) == CC_FUTURE_PENDING) {
+    cc_yield();
 }
-
-log_event(evt).start();  // fire and forget
+cc_task_intptr_free(&t);
 ```
 
-**Rule:** Detached tasks may only capture values proven to outlive the detach.
-
-**Task lifecycle:**
-
-
-| Operation                          | Behavior                                     |
-| ---------------------------------- | -------------------------------------------- |
-| `Task::[T] t = fn(args)`             | Creates task, does not start                 |
-| `@await t`                          | Starts (if needed) + waits for result        |
-| `t.start()`                        | Starts detached, returns immediately         |
-| `@await t` after `.start()`         | Joins detached task, returns result          |
-| `@await t` after previous `@await t` | Returns cached result (double-@await is safe) |
-
-
-**Rule (double-@await):** Awaiting an already-completed task returns the cached result immediately.
-
-**Rule (detached task errors):** If a detached task returns `T!>(E)` with an error and is never awaited, the error is silently discarded.
-
-**Rule (Task**** ABI):** `Task::[T]` is an opaque handle. Its internal representation is implementation-defined.
-
-**Recommendation:** Prefer `CCNursery` spawning (§8.1) over detached tasks (`Task::[T].start()`) unless explicit detachment is required. Structured concurrency is safer and prevents lifetime footguns.
+Source `@await` stores the child task in the parent frame and drives the same
+poll contract. The owner calls `cc_task_intptr_free` exactly once; freeing
+invokes the frame drop callback. Use `CCNursery` for structured groups of tasks
+and the C task APIs in `<ccc/cc_sched.cch>` at explicit runtime boundaries.
 
 ---
 
@@ -3417,9 +3374,6 @@ CCChan* ch = cc_channel_pair(&tx, &rx);
 int x;
 bool !>(CCIoError) got = @await recv(rx, &x);          // suspends until received
 bool !>(CCIoError) ok = @await send(tx, 42);           // suspends until sent
-int y;
-bool !>(Cancelled) got2 = @await recv_cancellable(rx, &y);
-bool !>(Cancelled) ok2 = @await send_cancellable(tx, 42);
 
 // Inside an @async function, bare ops are an error
 recv(rx, &x);                             // ❌ ERROR: must be awaited in @async function
@@ -3441,14 +3395,16 @@ thread.
 ```c
 @async void!>(Error) reader(int[~ <] ch) {
     int x;
-    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
-    if (got.is_err()) return cc_err(Cancelled);
+    bool !>(CCIoError) got = @await ch.recv(&x);
+    if (cc_is_err(got) && cc_error(got).os_code == ECANCELED)
+        return cc_err(Error_Canceled);
+    if (cc_is_err(got)) return cc_err(Error_Io);
     if (cc_value(got)) process(x);
 }
 ```
 
-Async channels support cancellation-aware variants (`recv_cancellable`,
-`send_cancellable`; §8.5.2).
+Channel operations that observe nursery cancellation report
+`cc_io_from_errno(ECANCELED)`; there is no separate cancellation result type.
 
 ---
 
@@ -3467,7 +3423,6 @@ cc_channel_pair(&tx, &rx);
 int x;
 bool !>(CCIoError) got = recv(rx, &x);    // blocks OS thread
 bool !>(CCIoError) ok = send(tx, 42);     // blocks OS thread
-recv_cancellable(rx, &x);                 // ❌ N/A: sync channels don't auto-support cancellation
 
 // Cannot use @await
 @await recv(rx, &x);                  // ❌ ERROR: cannot @await sync channel
@@ -3492,15 +3447,17 @@ Function signatures make clear what context is required:
 // Clearly async
 @async int!>(Error) async_reader(int[~ <] ch) {
     int x = 0;
-    bool ok = @await recv(ch, &x);  // obvious: must @await
-    if (!ok) return cc_err(Error_EOF);
+    bool !>(CCIoError) got = @await recv(ch, &x);
+    if (cc_is_err(got)) return cc_err(Error_Io);
+    if (!cc_value(got)) return cc_err(Error_EOF);
     return cc_ok(x);
 }
 
 // Clearly sync (blocks)
 void sync_worker(int[~ sync <] requests) {
-    int req = recv(&requests);  // obvious: blocks
-    process(req);
+    int req;
+    bool !>(CCIoError) got = recv(requests, &req);
+    if (cc_io_avail(got)) process(req);
 }
 
 // Caller knows exactly what to do based on channel type
@@ -3517,20 +3474,23 @@ When refactoring a sync function to async, the compiler enforces correctness:
 ```c
 // Original: sync
 void sync_handler(int[~ sync <] requests) {
-    int req = recv(&requests);
-    process(req);
+    int req;
+    bool !>(CCIoError) got = recv(requests, &req);
+    if (cc_io_avail(got)) process(req);
 }
 
 // Refactored to async with wrong channel type:
 @async void async_handler(int[~ sync <] requests) {
-    // int req = recv(&requests);  // ❌ ERROR: cannot @await, but needs to
+    // bool !>(CCIoError) got = @await recv(requests, &req);
+    // ERROR: sync channel operations cannot be awaited
     // This won't compile—we need to change the channel type
 }
 
 // Refactored correctly:
 @async void async_handler(int[~ <] requests) {
-    int req = @await recv(&requests);  // ✅ CORRECT
-    process(req);
+    int req;
+    bool !>(CCIoError) got = @await recv(requests, &req);
+    if (cc_io_avail(got)) process(req);
 }
 ```
 
@@ -3585,7 +3545,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 | **Use in `@async` code** | Yes (primary)                                   | No (use async instead)                                           |
 | **Use in sync code**     | No (use task)                                   | Yes (primary)                                                    |
 | **Multiplex via `cc_chan_match_select`** | Yes                             | Yes (blocks OS thread)                                           |
-| **Cancellation-aware variants** | Yes                                      | No                                                               |
+| **Cancellation result** | `err(cc_io_from_errno(ECANCELED))` when observed      | `err(cc_io_from_errno(ECANCELED))` when observed                  |
 | **Example use**          | Async streams, work queues in nurseries         | Thread coordination, OS thread pools                             |
 
 
@@ -3607,7 +3567,8 @@ CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
 }
 
 @async void consumer() {
-    @for @await (int work : work_rx) {
+    int work;
+    while (cc_io_avail(@await work_rx.recv(&work))) {
         process(work);
     }
 }
@@ -3618,65 +3579,25 @@ n->spawn(() => consumer());
 // cc_channel_free(work_ch) is scheduled on the @destroy of the channel pair above.
 ```
 
-**Pattern 2: Thread Pool (Sync)**
+**Pattern 2: Async with Deadline**
 
 ```c
-int[~ sync >] requests_tx;
-int[~ sync <] requests_rx;
-CCChan* req_ch = cc_channel_pair(&requests_tx, &requests_rx);
-
-int[~ sync >] responses_tx;
-int[~ sync <] responses_rx;
-CCChan* resp_ch = cc_channel_pair(&responses_tx, &responses_rx);
-
-void worker_thread() {
-    while (true) {
-        int req = recv(&requests_rx);  // blocks
-        int resp = process(req);
-        send(&responses_tx, resp);  // blocks
-    }
-}
-
-void main() {
-    Thread t = spawn_thread(worker_thread);
-    
-    // Send request
-    send(&requests_tx, 42);
-    
-    // Get response
-    int resp = recv(&responses_rx);
-    
-    t.join();
-    
-    cc_channel_free(req_ch);
-    cc_channel_free(resp_ch);
-}
-```
-
-No `@await` anywhere in worker_thread. Blocks OS thread as expected.
-
-**Pattern 3: Async with Timeout (using cancellation)**
-
-```c
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-n->spawn(() => reader(requests));
-n->spawn(() => timeout_enforcer());
-
 @async int!>(Error) reader(int[~ <] ch) {
     int x;
-    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
-    if (got.is_err()) return cc_err(Error.Cancelled);   // timeout cancelled us
+    bool !>(CCIoError) got = @await ch.recv(&x);
+    if (cc_is_err(got)) return cc_err(Error.Io);
+    if (!cc_value(got)) return cc_err(Error.Eof);
     return cc_ok(x);
 }
 
-@async void!>(Error) timeout_enforcer() {
-    void!>(Cancelled) slept = @await sleep_cancellable(Duration{5, 0});
-    if (slept.is_err()) return cc_ok(void);             // cancelled: work finished first
-    return cc_err(void, Error.Timeout);
+@with_deadline(seconds(5)) {
+    size_t ready;
+    int rc = cc_chan_match_select(cases, ncases, &ready, cc_current_deadline());
+    if (rc == ETIMEDOUT) return cc_err(Error.Timeout);
 }
 ```
 
-No manual polling or timeouts in reader. Cancellation handles it.
+Only operations that consult the current deadline observe its expiry.
 
 ---
 
@@ -3733,8 +3654,8 @@ The selected index is consumed with ordinary C control flow.
 ```c
 int x; int v = 42;
 if (cc_is_cancelled()) {
-    /* observe cancellation before parking */
-    return cc_err(Cancelled);
+    /* current deadline scope was cancelled */
+    return cc_err(cc_io_from_errno(ECANCELED));
 }
 CCChanMatchCase cases[2];
 cases[0] = (CCChanMatchCase){ .ch = rx.raw, .send_buf = NULL, .recv_buf = &x, .elem_size = sizeof(x), .is_send = false };
@@ -3758,74 +3679,43 @@ switch (ready) {
 
 ---
 
-#### 8.5.2 Cancellation-Aware Operation Variants
+#### 8.5.2 Operation-Specific Observation
 
-For individual suspension points (single @await, channel recv/send, sleep), use explicit cancellation-aware variants.
+The shipped channel surface is `send`, `send_take`, and `recv`, each returning
+`bool !>(CCIoError)`. When one of these operations observes cancellation, it
+returns `err(cc_io_from_errno(ECANCELED))`. There is no separate cancellation result
+type and no second channel-operation family.
 
-These variants explicitly opt an operation into nursery/task cancellation.
-They do not replace deadline-aware variants and do not imply that unrelated
-suspension points observe cancellation.
-
-```c
-// Channels
-bool !>(Cancelled) recv_cancellable(T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
-bool !>(Cancelled) send_cancellable(T[~ >]* tx, T value);
-
-// Tasks
-T!>(Cancelled) @await task_cancellable::[T](Task::[T!>(Cancelled)] t);
-
-// Sleep
-Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
-
-// Timing
-Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, Duration d);
-```
-
-**Example (non-select context):**
-
-```c
-@async void!>(Error) reader(int[~] ch) {
-    while (true) {
-        int x;
-        bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
-
-        if (got.is_err()) {
-            Cancelled err = got.error();
-            if (err == Cancelled) return cc_ok(void);   // task was cancelled
-            return cc_err(void, err);
-        }
-
-        if (!cc_value(got)) return cc_ok(void);         // channel closed+drained
-        process(x);
-    }
-}
-```
-
-**Rule:** Cancellation-aware variants return `err(Cancelled)` (or equivalent error) if the task is cancelled, allowing the caller to decide how to respond. This is strictly opt-in—use the variant only if you want to observe cancellation.
-
-**When to use variants:**
-
-- At individual suspension points (single @await, sleep, recv)
-- When you need to distinguish cancellation from other completion reasons
-- When you want explicit control over cancellation handling
+`cc_chan_match_select(cases, n, &ready, deadline)` observes the supplied
+deadline's clock expiry and returns `ETIMEDOUT`. It does not route an explicit
+deadline cancellation into a parked select. Poll `cc_is_cancelled()` before
+parking when explicit cancellation must be observed. An `@await` around an
+unrelated task does not become cancellation-aware merely because a deadline or
+nursery is in scope.
 
 ---
 
 #### 8.5.3 Polling-Based Fallback
 
-For cases where cancellation-aware variants don't apply, use the polling-based API:
+Nursery state and deadline-scope state use different polling APIs:
 
 ```c
-@async void!>(Error) work() {
+while (!cc_cancelled()) {
+    do_nursery_work();
+}
+
+@with_deadline(seconds(5)) {
     while (!cc_is_cancelled()) {
-        int x = @await long_operation();
-        process(x);
+        do_deadline_scoped_work();
     }
-    return cc_err(Cancelled);
 }
 ```
 
-This is still supported but should be rare—most code uses cancellation-aware variants or deadline scopes.
+`cc_cancelled()` polls the current nursery's cancellation state;
+`cc_nursery_is_cancelled(n)` polls a named nursery. The zero-argument
+`cc_is_cancelled()` language macro polls the current `@with_deadline` scope.
+The underlying C function `cc_is_cancelled(const CCDeadline*)` polls an
+explicit deadline. These names are not interchangeable.
 
 ---
 
@@ -3835,179 +3725,67 @@ No cancellation source forcibly interrupts C code or performs stack unwinding.
 `cc_task_cancel` requests cancellation of a concrete task handle;
 `cc_nursery_cancel` requests cancellation of nursery children. The runtime may
 wake parked work to permit observation, but the operation still determines the
-reported result. No static rule requires a task's result error type to contain
-a particular `Cancelled` variant.
+reported result. Channel cancellation is represented by
+`cc_io_from_errno(ECANCELED)`.
 
 ---
 
-#### 8.5.5 Real-World Pattern: Timeout Enforcer
+#### 8.5.5 Deadline-Bounded Multiplexing
 
 ```c
-enum WorkerError {
-    Cancelled,
-    Timeout,
-    IoError(IoError),
-}
-
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-n->spawn(() => reader(requests));
-n->spawn(() => writer(responses));
-n->spawn(() => timeout_enforcer());
-
-@async void!>(WorkerError) reader(int[~ <] requests) {
-    int req;
-    while (true) {
-        bool !>(Cancelled) got = @await requests.recv_cancellable(&req);
-        if (got.is_err()) return cc_err(WorkerError.Cancelled);
-        if (!cc_value(got)) return cc_ok(void);   // closed+drained
-        handle_request(req);
-    }
-}
-
-@async void!>(WorkerError) writer(int[~ >] responses) {
-    for (Response r : response_queue) {
-        bool !>(Cancelled) sent = @await responses.send_cancellable(r);
-        if (cc_is_err(sent)) return cc_err(WorkerError.Cancelled);
-        if (!cc_value(sent)) return cc_ok(void);
-    }
-}
-
-@async void!>(WorkerError) timeout_enforcer() {
-    void!>(Cancelled) slept = @await sleep_cancellable(Duration{5, 0});
-    if (slept.is_err()) return cc_ok(void);       // cancelled: siblings finished first
-    return cc_err(void, WorkerError.Timeout);
-}
+CCDeadline d = cc_deadline_after_ms(5000);
+size_t ready = (size_t)-1;
+int rc = cc_chan_match_select(cases, ncases, &ready, &d);
+if (rc == ETIMEDOUT) return cc_err(WorkerError_Timeout);
+if (rc == ECANCELED) return cc_err(WorkerError_Canceled);
+if (rc != 0) return cc_err(WorkerError_Io);
+dispatch_case(ready);
 ```
-
-**What happens:**
-
-1. Timeout enforcer wakes after 5 seconds and returns `err(Timeout)`
-2. Nursery cancels reader and writer (error propagation)
-3. Both reader and writer observe cancellation in their cancellation-aware operations
-4. All three tasks exit, nursery completes with timeout error
-
-**No hanging tasks. No timeouts needed in reader/writer. Clean cancellation propagation.** ✅
-
----
 
 #### 8.5.6 Guarantees and Limitations
 
-**What cancellation guarantees:**
-
-- ✅ Tasks will exit when they reach a cancellation-aware operation
-- ✅ Siblings in a nursery are cancelled when one fails
-- ✅ Error propagates automatically to the nursery
-- ✅ No explicit polling needed (use cancellation-aware variants)
-
-**What cancellation does NOT guarantee:**
-
-- ❌ Preemption of blocking operations (non-cancellation-aware awaits keep waiting)
-- ❌ Stack unwinding (no destructors or cleanup on cancel)
-- ❌ Automatic timeout (use `with_timeout` if needed)
-- ❌ Immediate exit (task exits when it reaches a cancellation point)
-
-**Pattern for guarantee:** Use cancellation-aware operations at every long wait to ensure tasks can be cancelled promptly.
-
----
-
-#### 8.5.7 Error Type Design
-
-**Recommendation:** When designing tasks for a nursery, include `Cancelled` in the error type:
-
-```c
-// Good: cancellation-aware variants can surface Cancelled
-enum TaskError {
-    Cancelled,              // ✅ allows cancellation to be reported
-    Timeout,
-    IoError(IoError),
-}
-
-@async int!>(TaskError) worker() {
-    int x;
-    bool !>(Cancelled) got = @await ch.recv_cancellable(&x);
-    if (got.is_err()) return cc_err(TaskError.Cancelled);
-    return cc_ok(x);
-}
-
-// Bad: no Cancelled variant, so cancellation can't be reported
-@async int!>(IoError) reader() {
-    int x;
-    @await ch.recv(&x);  // ❌ can't be cancelled effectively
-    return cc_ok(x);
-}
-```
-
----
-
-#### 8.5.8 Comparison: Implicit vs Explicit
-
-
-| Scenario                        | Use                             |
-| ------------------------------- | ------------------------------- |
-| Racing multiple channels        | one fiber per source; `cc_chan_match_select` + pre-block check when racing is unavoidable |
-| Single operation outside select | `recv_cancellable()` or variant |
-| Edge case fallback              | `is_cancelled()` polling        |
-
-
-**Default:** one fiber per source; cancellation-aware variants at suspension points
+- Cancellation never preempts running C code or unwinds the stack.
+- Nursery child failure does not request sibling cancellation.
+- Nursery cancellation must be requested explicitly.
+- A wait exits promptly only if that wait observes the relevant source.
+- Channel operations report observed cancellation as
+  `cc_io_from_errno(ECANCELED)`.
+- Deadline-aware operations report clock expiry as `ETIMEDOUT`.
+- Code that uses `cc_io_avail` intentionally treats error and graceful close as
+  the same loop-termination condition; inspect the result when that distinction
+  matters.
 
 ---
 
 #### 8.5.9 Deadline Primitive (Timeout Abstraction)
 
-For request handling and other time-bounded operations, a simple `Deadline` type makes timeout patterns idiomatic and consistent.
-
-**Type (minimal):**
+The shipped deadline API is:
 
 ```c
-// Opaque type: stores absolute deadline timestamp (nanoseconds since epoch)
-typedef struct Deadline Deadline;
-```
-
-**Factory Functions (in <std/time.cch>):**
-
-```c
-// Create deadline relative to now
-Deadline deadline_after(Duration d);
-
-// Create deadline at absolute timestamp
-Deadline deadline_at(u64 timestamp_ns);
-
-// Check if deadline has been exceeded
-bool deadline_exceeded(Deadline d);
-
-// Get remaining time (0 if exceeded, negative means already passed)
-Duration deadline_remaining(Deadline d);
+CCDeadline cc_deadline_none(void);
+CCDeadline cc_deadline_after_ms(uint64_t ms);
+bool cc_deadline_expired(const CCDeadline* d);
+void cc_cancel(CCDeadline* d);
 ```
 
 **Usage Pattern:**
 
 ```c
-@async Response!>(IoError) http_handler(Request* req, Arena* req_arena) {
-    Deadline deadline = deadline_after(seconds(5));
-    
-    // Wrap deadline-sensitive operations
-    @with_deadline(deadline) {
-        char[:] parsed = parse(req.body);
-        DbResult result = @await db_query(parsed) !>(e) return cc_err(e);
-        Response resp = build_response(result, req_arena);
-        @await send_response(req.fd, &resp) !>(e) return cc_err(e);
-    }
-    // Deadline-aware operations return their timeout result.
+@with_deadline(seconds(5)) as active {
+    if (cc_deadline_expired(active)) return cc_err(Error_Timeout);
+    int rc = cc_chan_match_select(cases, ncases, &ready,
+                                  cc_current_deadline());
+    if (rc == ETIMEDOUT) return cc_err(Error_Timeout);
 }
-
-// Or on individual operations:
-// (Optional) A standard-library helper MAY provide per-operation timeout sugar,
-// but it is not part of the core language surface. The canonical form is
-// `@with_deadline(...) { ... }` around the relevant region.
 ```
 
 **Semantics:**
 
-- `@with_deadline(d) { ... }` pushes `d` as the current deadline while the
-  block executes and restores the previous deadline on every exit.
-- `@with_deadline(d) as handle { ... }` binds the active `CCDeadline` for
-  explicit inspection inside the block.
+- `@with_deadline(ms) { ... }` constructs a deadline relative to the current
+  clock with `cc_deadline_after_ms(ms)`, pushes it while the block executes,
+  and restores the previous deadline on every exit.
+- `@with_deadline(ms) as handle { ... }` binds a `CCDeadline*` to that active
+  deadline for explicit inspection inside the block.
 - Expiry is observed only by operations that accept or consult that deadline.
 - `cc_cancel(&d)` and clock expiry make the same `CCDeadline` object expired;
   neither action cancels an unrelated nursery.
@@ -4018,12 +3796,9 @@ A child observes a deadline only when the task/nursery construction API copies
 or passes that deadline into the child context. Lexical nesting alone does not
 invent descendant cancellation. Observation follows §4.2.2.
 
-**Design Notes:**
-
-- Deadline is **just a timestamp** (u64 nanoseconds); no allocation
-- No separate timeout type; Deadline is the unification
-- Works with cancellation-aware operations (cancelled operations fail) and bounds `cc_chan_match_select` waits via `cc_current_deadline()`
-- Idiomatic for request-scoped deadlines (every request gets one)
+`@with_deadline` supplies ambient state; it does not inject checks into every
+`@await`. Use `cc_deadline_expired` for an explicit poll or pass
+`cc_current_deadline()` to an operation that accepts a deadline.
 
 ---
 
@@ -4075,7 +3850,8 @@ Streaming uses explicit channel parameters:
 // Per-item errors: each item can independently fail
 @async void parse_nums(char[:][~]* in, int!>(ParseError)[~]* out) {
     defer out.close();
-    @for @await (char[:] line : in) {
+    char[:] line;
+    while (cc_io_avail(@await in.recv(&line))) {
         @await out.send(parse_int(line));
     }
 }
@@ -4086,53 +3862,38 @@ Streaming uses explicit channel parameters:
 ### 8.7 Runtime API
 
 ```c
-// Internal Scope (created implicitly in @async functions for batching/wrapping)
-struct Scope {
-    @async T!>(E) run_blocking::[T, E](() => T!>(E));  // (internal) run closure on thread pool
-    void cancel();                                 // (internal) cancel all spawned work
-    bool cancelled();                              // (internal) check cancellation
-}
-
 // Task control
-Task::[T] task = async_fn(args);         // lazy, not started
-void   Task::[T].start();                // begin execution (detached)
-T      @await Task::[T];                  // suspend until complete
-void   Task::[T].cancel();               // request cooperative cancellation
+CCTaskIntptr task = async_fn(args);
+CCFutureStatus cc_task_intptr_poll(CCTaskIntptr* task,
+                                   intptr_t* out, int* err);
+void cc_task_intptr_cancel(CCTaskIntptr* task);
+void cc_task_intptr_free(CCTaskIntptr* task);
+intptr_t cc_block_on_intptr(CCTaskIntptr task);
 
-// Cancellation-aware variants (observe cancellation when awaited)
-T!>(Cancelled)   @await task_cancellable::[T](Task::[T!>(Cancelled)] t);
-bool !>(Cancelled) recv_cancellable::[T](T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
-bool !>(Cancelled) send_cancellable::[T](T[~ >]* tx, T value);
-Task::[void!>(Cancelled)] sleep_cancellable(Duration d);
-Task::[T!>(Cancelled)] with_timeout_cancellable::[T](Task::[T!>(Cancelled)] t, Duration d);
+// Nursery cancellation
+void cc_nursery_cancel(CCNursery* n);
+bool cc_nursery_is_cancelled(const CCNursery* n);
+bool cc_cancelled(void);  // current nursery
 
-// Cancellation polling (valid only in @async functions)
-bool   is_cancelled();
+// Deadline cancellation and polling
+void cc_cancel(CCDeadline* d);
+bool cc_is_cancelled(const CCDeadline* d);
+CCDeadline* cc_current_deadline(void);
+bool cc_deadline_expired(const CCDeadline* d);
 
-// Timing
-Task::[void] sleep(Duration d);
-Task::[T!>(E)] with_timeout::[T, E](Task::[T!>(E)] t, Duration d);
-
-// Sync bridge (can block)
-T block_on::[T](Task::[T] t);    // run task to completion, blocking
-
-// Duration literals
-1ns, 1us, 1ms, 1s, 1m, 1h
 ```
 
-**Rule:** `with_timeout` requires error type `E` to have a `Timeout` variant.
+**Rule:** `cc_block_on_intptr` blocks the OS thread and consumes the task. It is
+used at synchronous runtime boundaries, not from an `@async` frame.
 
-**Rule:** `is_cancelled()` is only valid inside `@async` functions.
-
-**Rule:** `block_on` can block the OS thread. It is most commonly used at sync boundaries outside of `@async` code. For sync-to-async bridging within `@async` code, use implicit nursery wrapping or structured concurrency patterns.
-
-**Rule (block_on re-entrancy):** `block_on()` must not be called from a worker
+**Rule (blocking-join re-entrancy):** `cc_block_on` and
+`cc_block_on_intptr` must not be called from a worker
 executing a `cc_run_blocking_task_intptr` task or from any thread currently
 executing runtime-managed tasks.
 
 **Detection and behavior:**
 
-- **Debug builds:** Runtime detects re-entrant `block_on` and traps with diagnostic error.
+- **Debug builds:** Runtime detects a re-entrant blocking join and traps with a diagnostic.
 - **Release builds:** Undefined behavior (likely deadlock or scheduler corruption).
 
 **Example (WRONG):**
@@ -4143,8 +3904,8 @@ executing runtime-managed tasks.
 }
 
 void g() {
-    Task::[int] t = async_work();
-    int result = block_on(t);   // ERROR: block_on called from threadpool thread!
+    CCTaskIntptr t = async_work();
+    int result = (int)cc_block_on_intptr(t); // ERROR: blocking join on pool worker
 }
 ```
 
@@ -4152,17 +3913,17 @@ void g() {
 
 ```c
 @async void f() {
-    // Option 1: avoid block_on entirely by using @await
+    // Option 1: avoid a blocking join by using @await
     int result = @await async_work();  // preferred
     
-    // Option 2: move block_on to sync boundary
-    // (don't call block_on from inside @async, even via nesting)
+    // Option 2: move cc_block_on_intptr to a sync boundary
+    // (do not call it from inside @async, even via nesting)
 }
 
-// CORRECT: call block_on from sync context (not inside @async or run_blocking)
+// CORRECT: block at a sync boundary (not inside @async or run_blocking)
 void sync_boundary() {
-    Task::[int] t = async_work();
-    int result = block_on(t);  // OK: called from actual sync context
+    CCTaskIntptr t = async_work();
+    int result = (int)cc_block_on_intptr(t); // OK at a sync boundary
     use(result);
 }
 ```
@@ -4171,12 +3932,13 @@ void sync_boundary() {
 
 #### 8.7.1 Deadlock Detection
 
-**Problem:** `block_on` creates a single-task execution context. If that task performs a channel operation that blocks waiting for a peer (send on full buffer, recv on empty buffer), the program deadlocks because no other task can run to unblock it.
+**Problem:** A single-task `cc_block_on` context can deadlock if its task waits
+on a channel peer that is not running.
 
 ```c
 // DEADLOCK: buffer=4, sends=5, no concurrent consumer
 int[~4 >] tx;
-block_on(producer(tx, 5));  // Hangs forever on 5th send
+cc_block_on(void, producer(tx, 5));  // Hangs forever on 5th send
 ```
 
 **Contract:** Deadlock detection is a **runtime** service. Compile-time coverage is deliberately narrow — exactly two checks.
@@ -4565,7 +4327,8 @@ Blocking and stalling operations provide no cancellation or progress guarantees.
   - complete normally after cancellation is requested
   - fail with an error unrelated to cancellation
   - continue running on the blocking executor thread even after the task is cancelled
-- Programs requiring strict latency bounds must avoid stalling operations in critical paths and may need explicit timeouts (e.g., `with_timeout_cancellable`)
+- Programs requiring strict latency bounds must avoid stalling operations in
+  critical paths and use operation-specific deadline APIs.
 
 #### 8.8.9 Interaction with Nurseries
 
@@ -4579,18 +4342,8 @@ blocking checks.
 
 ---
 
-**Deadlock detection:**
-
-```c
-// Debug runtime maintains:
-// - Count of runnable tasks
-// - Count of tasks blocked on channel operations
-// - Wait graph: (task_id, channel_id, operation, timestamp)
-```
-
-**Rule (deadlock trap):** If there are tasks blocked on channel operations and no runnable tasks, the runtime triggers a deadlock trap with a diagnostic report.
-
-**Rule:** Runtime deadlock detection runs in the scheduler's sysmon tick and is **on by default** in all builds. On detection the runtime prints a diagnostic dump and `_exit(124)`; set `CC_DEADLOCK_ABORT=0` to downgrade the abort to a warning. The compile-time checks are the two defined in §8.7.1.
+Deadlock detection, diagnostics, exclusions, and the
+`CC_DEADLOCK_ABORT` control are specified in §8.7.1.
 
 ---
 
@@ -4611,13 +4364,13 @@ Error handling in `@async` functions and nurseries uses the operators defined in
 }
 ```
 
-**Propagation from a nursery child.**
+**An error in the parent while a nursery is live.**
 
 ```c
 @async int!>(IoError) process(char[:] url) {
     CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => subtask_a(url));
-    int v = (@await subtask_b(url)) !>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
+    int v = (@await subtask_b(url)) !>(e) return cc_err(e);  // cleanup joins; it does not cancel siblings
     return cc_ok(0);
 }
 ```
@@ -4732,7 +4485,10 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 **Registration rules (normative):**
 
 - Registrations appear in ordinary `@comptime { ... }` code.
-- The current implementation discovers registrations by scanning `@comptime` source text. `cc_type_register(...)` itself is a compile-time marker API and returns `0`.
+- Registration discovery runs over the preprocessed translation unit, including
+  included `.cch` headers, before type-owned lowering uses the registry.
+  `cc_type_register(...)` is a compile-time marker API and returns `0`; see
+  §14.5 for pipeline ordering.
 - `type_name` must be a string literal naming either an exact concrete type such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
 - The second argument must be a hooks object literal, typically `(CCTypeHooks){ ... }`.
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
@@ -5184,7 +4940,6 @@ Traditional C `for(;;)` is unchanged.
 
 ```c
 for (T x : slice) { ... }       // range-for over slice
-@for @await (T x : ch) { ... }    // async iteration over channel
 ```
 
 **Range-for lowering:**
@@ -5198,28 +4953,8 @@ for (size_t __i = 0; __i < slice.len; __i++) {
 }
 ```
 
-**`@for @await` lowering:**
-
-```c
-// @for @await (T x : expr) { BODY }
-// lowers to:
-while (true) {
-    T x;
-    bool !>(CCIoError) __got = @await expr.next(&x);
-    if (!cc_value(__got)) break;   // ok(false) indicates end-of-stream (EOF)
-    BODY
-}
-```
-
-**Rules (async iteration):**
-
-- `next(&out)` returning `ok(false)` indicates end-of-stream (EOF, closed+drained).
-- Errors propagate normally via the `bool !>(E)` result.
-- Suspension points inside async iteration are subject to **§4.2.2** and **§8.5.10**.
-
-**`@for @await` on pointers:**
-
-`@for @await (T x : c)` accepts `c` of type `T[~...]` or `T[~...]`*. Pointer form is implicitly dereferenced.
+`@for @await` is rejected. Async channel iteration uses an explicit
+`while (cc_io_avail(@await rx.recv(&value)))` loop.
 
 **Slicing:**
 
@@ -5324,7 +5059,7 @@ For thread/task closures, captured values must also be capturable (see §2.2).
 
 ```c
 auto x = 42;                // int
-auto t = work();            // Task::[T] where work returns @async T
+auto t = work();            // CCTaskIntptr where work is @async
 auto it = iter(&m);         // MapIter::[K, V]
 ```
 
@@ -5373,7 +5108,7 @@ if (e is IoError.Other(code)) { use(code); }
 
 **Built-in generic types:**
 
-- `Task::[T]` — async task result
+- `CCTaskIntptr` — pollable async task handle
 - `CCVec::[T]` — dynamic array
 - `Map::[K, V]` — hash map
 - `T[~... >]` / `T[~... <]` — channel handles for element type T
@@ -5385,7 +5120,6 @@ if (e is IoError.Other(code)) { use(code); }
 - `Arena` — memory arena
 - `Scope` — (internal) structured concurrency handle created implicitly in @async functions
 - `Ordering` — memory ordering enum (`relaxed`, `acquire`, `release`, `acq_rel`, `seq_cst`)
-- `RecvStatus` — non-blocking recv status enum (`WouldBlock`, `Closed`)
 - `Duration` — time span (secs + nanos)
 
 ---
@@ -5548,9 +5282,12 @@ Functions marked `@comptime` can be evaluated at compile time:
 }
 ```
 
-**Rule:** `@comptime` functions may only call other `@comptime` functions, use `@comptime`-safe operations (arithmetic, comparisons, control flow), and access `@comptime` values.
-
-**Rule:** `@comptime` functions cannot perform I/O, allocate memory, or have side effects.
+**Rule:** A function used to produce a constant expression may only call other
+constant-evaluable functions and use constant-evaluable operations. A staged
+function invoked by an executing `@comptime {}` block or generic factory may
+call C ABI functions available to the compile-time translation unit, including
+arena allocation, registration, emission, and file I/O. Those effects occur
+during translation and cannot be projected as live runtime pointers.
 
 **Rule:** `@comptime` functions can also be called at runtime (they are valid runtime functions too).
 
@@ -5669,7 +5406,10 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 
 - `@comptime` blocks are also the place where libraries publish compile-time registrations such as `cc_type_register(...)`.
 - Registrations must work from ordinary source files and ordinary included headers. User code must not need special registration-only macros or source guards.
-- A conforming implementation may preprocess and canonicalize CC source before executing compile-time registration code, and may use hidden ephemeral lowered headers or equivalent internal forms while collecting registrations from the full translation unit.
+- The implementation preprocesses and canonicalizes the full translation unit,
+  including included `.cch` headers, before executing compile-time registration
+  code. Hidden ephemeral lowered headers or equivalent internal forms may be
+  used while collecting registrations.
 - The observable rule is source-first: registrations written in normal CC source participate in the same build without requiring a separate user-maintained registration artifact.
 
 **Pipeline note (informative):** One valid implementation strategy is:
@@ -5963,10 +5703,11 @@ unsafe {
 
 // Casting away sendability
 struct NonSendable { pthread_t tid; };
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 unsafe {
     NonSendable ns = get_non_sendable();
-    spawn_thread(() => { use(ns); });  // ERROR still: closure escapes
+    n->spawn(() => { use(ns); });  // ERROR still: closure escapes
 }
 ```
 
@@ -6156,7 +5897,6 @@ The following must be diagnosed at compile time:
 | Syntax errors                                                 | Invalid Concurrent-C syntax                                                                                          | §11         |
 | Result unwrap                                                 | `.value`/`.error` on wrong branch                                                                                    | §3.1        |
 | Use after move                                                | Accessing move-only value after transfer                                                                             | §2.1        |
-| Guard across suspension                                       | Guard held across `@await` or `run_blocking`                                                                          | §8.8        |
 | Unsafe adoption                                               | `adopt()` outside `unsafe {}`                                                                                        | §10.2, Appendix A.2 |
 | Result unwrap — missing default                               | `expr ?>` / `expr ?>(e)` with nothing on RHS                                                                         | §3.1        |
 | Result unwrap — '?>' misuse for error handling                | `?>` RHS is a divergent statement, a `{ ... }` block, or the bare `?>;` shorthand; use `!>` for error-handling logic | §3.1        |
@@ -6543,7 +6283,7 @@ Bits 0–60: allocation_id  (0 = static/untracked)
 
 ```c
 struct Duration {
-    int64_t secs;     // 8 bytes (seconds since epoch)
+    int64_t secs;     // 8 bytes (relative seconds)
     int32_t nanos;    // 4 bytes (nanoseconds, 0–999999999)
     // 4 bytes padding
 };
@@ -6554,12 +6294,11 @@ struct Duration {
 
 `**@async` function lowering:**
 
-`@async` functions lower to state-machine generators. The exact ABI is implementation-defined, but:
-
-- `Task::[T]` is an opaque pointer-sized handle (typically a `void`* pointing to heap-allocated state)
-- The state includes registers (local variables), current PC, and result storage
-- Calling an `@async` function allocates and initializes state but does not start execution
-- Execution begins on first `@await` of the returned task
+`@async` functions lower according to Appendix J.1: a constructor returns
+`CCTaskIntptr`, which owns a heap frame, poll callback, and drop callback. The
+frame contains state, lifted parameters and locals, result storage, and child
+task slots. Progress occurs when the task is polled; the poll callback returns
+`CC_FUTURE_PENDING`, `CC_FUTURE_READY`, or `CC_FUTURE_ERR`.
 
 **Channel operations:**
 
@@ -6788,47 +6527,14 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 
 ---
 
-### Pattern 4: Connection Lifetime Template (Handshake → Serve → Teardown)
-
-This pattern is the recommended template for long-lived connections (WebSocket, gRPC streaming, custom protocols).
-
-**Strong recommendation:** Structure connections into three phases:
-
-1. **Handshake phase:** short, deadline-bounded
-2. **Serve phase:** potentially long-lived; structured as reader+writer tasks in a nursery (“first error/close cancels siblings”)
-3. **Teardown phase:** bounded, shielded cleanup to perform protocol-correct closes
-
-```c
-@async void!>(IoError) handle_conn(Duplex* conn, Arena* conn_arena) {
-    // 1) Handshake (short deadline)
-    @with_deadline(deadline_after(seconds(3))) {
-        @await protocol_handshake(conn, conn_arena) !>(e) return cc_err(e);
-    }
-
-    // 2) Serve (long-lived). Any child failure/close cancels siblings;
-    //    the nursery's @destroy joins all children.
-    CCNursery* serve = cc_nursery_create(NULL) !> @destroy;
-    serve->spawn(() => reader_task(conn, conn_arena));
-    serve->spawn(() => writer_task(conn, conn_arena));
-
-    // 3) Teardown (bounded, shielded)
-    @with_shield {
-        @await protocol_close(conn) !>(e) return cc_err(e);              // best-effort protocol close
-        @await drain_with_timeout(conn, ms(200)) !>(e) return cc_err(e); // bounded drain/flush if applicable
-    }
-
-    return cc_ok(void);
-}
-```
-
----
-
-### Pattern 5: Bidi Stream “First-Close Wins”
+### Pattern 4: Bidi Stream “First-Close Wins”
 
 For bidi protocols, the default rule SHOULD be:
 
-- Any close/error in reader OR writer cancels the sibling task
-- Teardown happens exactly once, in one place, and is bounded + shielded
+- Reader and writer report close/error through an explicit shared shutdown
+  channel or explicit `cc_nursery_cancel`
+- Teardown happens exactly once, in one place, and each blocking operation is
+  bounded by an API that accepts the current deadline
 
 This avoids “both sides race to close” bugs and makes shutdown reviewable.
 
@@ -6842,7 +6548,8 @@ Prefer layered deadlines:
 
 - **Handshake deadlines:** short `@with_deadline` around negotiation (TLS/WS upgrade/initial headers)
 - **Idle/heartbeat deadlines:** renewed on activity (timer task + cancellation, or per-iteration short deadline)
-- **Teardown deadlines:** short, bounded shutdown/drain inside `@with_shield`
+- **Teardown deadlines:** short, bounded shutdown/drain through
+  deadline-aware operations
 
 This keeps deadlines precise and prevents “everything is always under a deadline” from becoming the default mental model.
 
@@ -6864,7 +6571,6 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `@await`              | Suspend on async                           | Call @async functions       |
 | `CCNursery`          | Structured concurrency                     | Scope with tasks            |
 | `@with_deadline`      | Apply timeout                              | Enforce deadline            |
-| `@with_shield`        | Suppress deadline cancellation observation | Bounded teardown/cleanup    |
 
 
 ### Type Sugar
@@ -6980,9 +6686,8 @@ constructs a `CCTaskIntptr` in the frame and uses the J.1 child-poll contract.
 A blocking edge is rewritten to the shipped `cc_run_blocking_task_intptr(...)`
 task-family call, stored in a child slot, and polled through the same
 `cc_task_intptr_poll` path as any other await. Return storage is lifted onto the
-frame when it remains live. No `CCRunBlockingHandle`,
-`cc_run_blocking_submit`, waker parameter, or `cc_run_blocking_take_*` ABI is
-part of this lowering.
+frame when it remains live. This common `CCTaskIntptr` poll/drop path is the
+complete blocking-edge task ABI.
 
 Sync functions do not receive frame/poll lowering. Call-site mode markers are
 removed from emitted C after the selected direct or task-wrapped call is
@@ -7029,7 +6734,9 @@ maps cancellation or expiry to its own documented result as required by
 
 - **Moved values:** If a move-only value is moved, the frame field becomes invalidated (compiler marks it with `__moved_flag` or similar). Subsequent use is a compile error (move checker detects in type system).
 - **Views (non-owning slices):** Views remain valid as long as the data they reference is valid. Compiler uses borrow checker to ensure views don't outlive their source.
-- **Arena-allocated buffers:** Remain valid as long as arena is not reset. The compiler cannot prove arena reset points at compile time, so this remains a logic contract. `@scoped` guards (like locks) prevent holding references across suspension points (compiler enforces).
+- **Arena-allocated buffers:** Remain valid as long as the arena is not reset.
+  The compiler cannot prove every reset point, so undetected violations remain
+  a logic error.
 - **Adopted buffers:** Drop glue calls the deleter when frame is destroyed or field is overwritten.
 
 **Drop:** The emitted drop callback frees every owned child task slot and the
@@ -7039,50 +6746,7 @@ runs according to its `@defer` / `@destroy` control-flow placement. There is no
 
 ---
 
-### J.4 @for @await Lowering (One Await Per Iteration)
-
-**Rule:** `for @await` must lower to exactly one `@await` per loop iteration, with no hidden buffering or double-@await.
-
-**Lowering:**
-
-```c
-for @await (char[:] chunk in req.body) {
-    process(chunk);
-}
-```
-
-Desugars to:
-
-```c
-{
-    AsyncIterator::[char[:]] iter = req.body;
-    while (true) {
-        char[:] !>(IoError) next_result = @await iter.next(arena);
-
-        if (next_result.is_ok()) {
-            char[:] chunk = next_result.value();
-            if (chunk.len == 0) break;   // EOF: empty slice
-            // Chunk is valid here; process it
-            process(chunk);
-            // No re-evaluation of condition; straight back to @await
-        } else {
-            // Error; exit loop
-            break;
-        }
-    }
-}
-```
-
-**Key constraints:**
-
-- Exactly one `@await` per iteration (at `iter.next()`)
-- `next_result` variable is allocated on frame; reused each iteration
-- Compiler must not buffer or cache results across iterations
-- If `next_result` is an error, propagate with `!>` or handle the error branch; loop does not continue
-
----
-
-### J.5 Readable C Mapping
+### J.4 Readable C Mapping
 
 **Principle:** Generated C should be "readable conventional C", not compiler magic. A developer should be able to understand the lowered C without specialized knowledge.
 
@@ -7134,7 +6798,7 @@ Desugars to:
 
 ---
 
-### J.6 Task and Scheduler Integration
+### J.5 Task and Scheduler Integration
 
 `CCTaskIntptr` owns the frame/drop pair created by an `@async` constructor and
 the poll callback that advances it.
@@ -7156,18 +6820,16 @@ the task. Readiness does not itself transfer frame ownership away from the task.
 
 ---
 
-## Summary: ABI Stability Locks
+## Lowering commitments
 
 
-| Component           | Lowering                                         | Status           |
+| Component           | Lowering                                         | Contract         |
 | ------------------- | ------------------------------------------------ | ---------------- |
-| @async functions    | Stackless state machines (switch + goto)         | ✅ Normative      |
-| Cancellation/deadline observation | Operation-specific runtime checks | ✅ Normative |
-| Slice ownership     | Frame-local; borrow checker enforces             | ✅ Normative      |
-| @for @await          | One @await per iteration                          | ✅ Normative      |
-| Interface ABI       | Two-pointer layout {void*, vtable*}              | ✅ Normative      |
-| Readable C          | Named structs, labeled states, explicit cleanups | ✅ Principle      |
-| --emit-c-only       | Lowered-C output with source mapping             | ✅ Implemented    |
+| @async functions    | Stackless state machines (switch + goto)         | Normative        |
+| Cancellation/deadline observation | Operation-specific runtime checks | Normative |
+| Slice ownership     | Frame-local; borrow checker enforces             | Normative        |
+| Readable C          | Named structs, labeled states, explicit cleanups | Design principle |
+| --emit-c-only       | Lowered-C output with source mapping             | Shipped          |
 
 
 These rules prevent ABI surprises and ensure the implementation can generate boring, understandable C code.

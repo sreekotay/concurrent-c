@@ -1,6 +1,6 @@
 # `@variant` Tagged Unions
 
-Status: draft — implemented
+Status: implemented
 
 ## Declaration and default layout
 
@@ -147,7 +147,8 @@ switches on the active tag and destroys only that arm. Destructor-bearing local
 variants are dropped on normal scope exit and early return.
 
 A whole-variant transition drops the old active arm exactly once before
-installing the replacement. A same-arm transition follows the same rule.
+installing the replacement. A same-arm transition follows the same drop path.
+If the old arm has no registered destructor, that path is a no-op.
 Moving an arm with `cc_move` follows the ordinary move rules: the moved source
 arm is dead, and the variant must be replaced before any later read.
 
@@ -172,7 +173,8 @@ semantics.
 
 ## Packed layout
 
-`@variant(packed)` opts a two-arm variant into compiler-proved niche packing:
+`@variant(packed)` accepts at most two arms and opts the variant into
+compiler-proved niche packing:
 
 ```c
 @variant(packed) OptionalPtr {
@@ -181,10 +183,12 @@ semantics.
 };
 ```
 
-The packed representation stores the discriminant in a bit pattern that a
-donor arm cannot hold. Niches are either inferred from pointer null/alignment
-properties and payload-less arms, or declared by a type's registered niche
-descriptor. Payload bits are not stolen.
+The packed representation uses one sentinel distinction: a bit pattern that a
+donor arm cannot hold distinguishes it from the other arm. Three or more arms
+are a compile-time error because one sentinel cannot encode them. Niches are
+either inferred from pointer null/alignment properties and payload-less arms,
+or declared by a type's registered niche descriptor. Payload bits are not
+stolen.
 
 Packing is accepted only when every arm size is known and a lossless niche plan
 exists. The compiler rejects unsupported arm counts or an unprovable layout;

@@ -19,8 +19,9 @@ Representative correctness pins:
 - `tests/deadlock_suppress_scope_smoke.ccs`
 - `tests/external_wait_scope_smoke.ccs`
 - `tests/v2_deadline_cancel_smoke.ccs`
-- Stress under `stress/` (e.g. `work_stealing_race.ccs`, `join_init_race.ccs`,
-  `minimal_spawn_race.ccs`, `fiber_spawn_join_tight.ccs`)
+- Stress under `stress/` (e.g. legacy-named `work_stealing_race.ccs`, which
+  exercises the global ready-queue race, plus `join_init_race.ccs`,
+  `minimal_spawn_race.ccs`, and `fiber_spawn_join_tight.ccs`)
 - Broad suite: `tools/run_all.ccs`
 
 Performance comparison surface:
@@ -35,7 +36,7 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_V2_THREADS` / `CC_WORKERS` — worker count
 - `CC_V2_TARGET_ACTIVE`, `CC_V2_SPIN_BEFORE_PARK`, `CC_V2_WAKE_SKIP_DEPTH`
 - `CC_V2_JOIN_SPIN`, `CC_V2_PARK_EXTRAS_AT_STARTUP`, `CC_V2_CORO_POOL_MAX`
-- `CC_V2_SYSMON_DETACH=0` — disable syscall-age worker eviction
+- `CC_V2_SYSMON_DETACH=0` — disable unchanged-dispatch worker eviction
 - `CC_V2_STATS=1` / `CC_V2_SYSMON_STATS=1` — counters
 - `CC_DEADLOCK_ABORT=0` — deadlock banner without `_exit(124)`
 
@@ -44,6 +45,16 @@ Optional diagnostics (when present in the linked runtime):
 - `CC_WORKER_GAP_STATS`, `CC_WORKER_GAP_STATS_DUMP`, `CC_WORKER_GAP_STATS_LIVE`
 - `CC_TASK_WAIT_STATS`, `CC_TASK_WAIT_STATS_DUMP`
 - `CC_DEBUG_WAKE`, `CC_DEBUG_DEADLOCK_RUNTIME`, `CC_DEBUG_SYSMON`
+
+Additional live implementation knobs are non-normative and may change:
+
+- `CC_SCHED_STATS=1` — populate legacy scheduler diagnostic counters
+- `CC_V3_SPEC_ASSERT=1` — enable scheduler-boundary assertion checks
+- `CC_CHAN_MINIMAL_FAST_PATH=0` — disable the branded minimal channel path
+- `CC_NURSERY_WORKER_FREES=0` — use the classic nursery join/wait cleanup path
+
+For the current `CC_CHAN_*` tracing and isolation flags, see
+`docs/debugging.md` under “Channel/select debugging.”
 
 Use the smallest flag set that answers the question; verbose tracing changes
 timing.
@@ -74,6 +85,7 @@ scheduler experiments.
 Targeted:
 
 ```sh
+# Despite its legacy name, this targets the global ready-queue race.
 ./out/cc/bin/ccc run --timeout 10 ./stress/work_stealing_race.ccs
 ./out/cc/bin/ccc run --timeout 10 ./stress/minimal_spawn_race.ccs
 ./out/cc/bin/ccc run --timeout 10 ./tests/deadlock_suppress_scope_smoke.ccs

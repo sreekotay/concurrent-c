@@ -2,6 +2,9 @@
 
 Status: implemented
 
+`cc/include/ccc/cc_grammar.cch` is authoritative for the generated macro
+surface and C signatures described here.
+
 ## Grammar engine seam
 
 `@grammar(engine) Name {sentinel ... sentinel}` captures the fenced body
@@ -27,19 +30,27 @@ The built-in SERDES engines are `rules` and `schema`:
 ~~~~}
 ```
 
-Grammar files are compile-time factories. `include "path"` copies rules from a
-file, `include Name` copies a rules grammar declared earlier in the translation
-unit, and a local rule overrides an included rule. Among sibling includes, the
-first definition wins. A schema may instead `use Name` or
-`use "path" as Name` and refer to shared rules as `Name.rule`.
+Grammar files are compile-time factories. In a rules block, `include "path"`
+copies rules from a file and `include Name` copies a rules grammar declared
+earlier in the translation unit. In a schema, `rules [ include "path" ]`
+creates a private copy, while `use Name` and `use "path" as Name` share a rules
+factory and require qualified references such as `Name.rule`.
+
+A block-level rule may override a rule copied by an include. Two block-level
+rules with the same name are rejected. Among sibling includes, the first
+definition wins. A nested rules file may override only rules introduced by its
+own includes; it cannot override a rule inherited from a sibling or ancestor
+include.
 
 ## `@grammar(rules)`
 
-`@grammar(rules)` declares named byte recognizers. The first rule declared at
-the outermost include depth is the default entry. Rules compose literals,
-character sets and complements, sequences, ordered choice, references, and
-`some`, `any`, and `opt` repetition. Whitespace is consumed only where the
-grammar declares it.
+`@grammar(rules)` declares named byte recognizers. The default entry is the
+first new, non-shadow rule declared at include depth zero in the block. A local
+override of an included rule does not claim the entry. If the block declares no
+new depth-zero rule, the first entry copied from its includes remains the
+default. Rules compose literals, character sets and complements, sequences,
+ordered choice, references, and `some`, `any`, and `opt` repetition.
+Whitespace is consumed only where the grammar declares it.
 
 `keep` records a matched span, `skip` consumes without output, and `collect`
 forms an interior collection. The generated operations are used as follows:
@@ -71,25 +82,61 @@ over the rule grammar, not separate grammar dialects.
 parse and write projections. A product schema lowers named primitive, slice,
 byte, nested-schema, and repeated-item fields into a generated C struct.
 
-The stable operations are used as follows:
+The stable schema operations are:
 
 ```c
 int parsed = cc_parse(Name, src, len, arena, out);
+int read = cc_read(Name, src, len, pos, arena, out);
+bool !>(CCError) streamed = cc_try_read(Name, src, len, pos, arena, out);
+NameReader reader = cc_reader(Name, src, len, arena);
+int next = cc_next(Name, &reader, out);
+int ended = cc_at_end(Name, &reader);
 size_t written = cc_write(Name, value, dst, capacity);
 CCString text = cc_format(Name, value, arena);
+int found = cc_get(Name, value, field_name, out_value);
+const CCGramField *field = cc_field(Name, field_name, field_name_len);
 ```
 
 `cc_parse` succeeds only when the schema consumes the required input and fills
-the output. Primitive fields are stored as values. Direct contiguous byte
-fields borrow from the source; decoded, normalized, or otherwise transformed
-fields materialize in the arena. Repeated and recursive structures allocate
-their containers in the arena while preserving each leaf's actual provenance.
+the output. `cc_read` parses one value at `*pos`, advances `*pos` on success,
+and returns zero on failure. A reader is a cursor over a source, position, and
+arena. `cc_next` parses and advances one value; it returns zero both at clean
+end and on parse failure. `cc_at_end` is true only when the cursor position
+equals the source length, so it distinguishes clean end from a mid-input
+failure.
+
+`cc_try_read` has streaming Result semantics:
+
+- `Ok(true)` means one value was parsed and `*pos` advanced.
+- `Ok(false)` means clean end at a frame boundary, with `*pos == len`.
+- `Err(CC_ERR_WOULD_BLOCK)` means the available bytes end within a frame;
+  `*pos` is unchanged so the caller can refill and retry.
+- `Err(CC_ERR_PARSE)` means the available bytes establish malformed input.
+
+Primitive fields are stored as values. `float` and `double` fields parse their
+matched numeric spans into floating values. Direct contiguous byte fields
+borrow from the source; decoded, normalized, or otherwise transformed fields
+materialize in the arena. Repeated and recursive structures allocate their
+containers in the arena while preserving each leaf's actual provenance.
+
+`items Elem count cap N` emits an inline `Elem[N]` field and its generated
+count field; parsing does not allocate the item array. A negative count or a
+count greater than `N` is a parse failure. The streaming face reports an
+over-cap count as `Err(CC_ERR_PARSE)`, not `Err(CC_ERR_WOULD_BLOCK)`.
+
+`cc_get` reflects a field by name into `CCGramValue`; `cc_field` returns its
+static `CCGramField` descriptor. Schemas with conditional members carry a
+presence bitmap, so a parsed field can be present even when its value is zero,
+and an absent field remains distinguishable from that value. Product schemas
+report their fields present.
 
 `cc_write` emits the schema's canonical byte structure. It returns the byte
 count on success and zero when the value cannot be emitted or the destination
 capacity is insufficient. Exact capacity is sufficient. `cc_format` uses the
-same writer and returns an arena-backed `CCString`; `value.to_str(arena)` is its
-UFCS form.
+same writer and returns an arena-backed `CCString`. Both `cc_format(Name,
+value, arena)` and `value.to_str(arena)` resolve to the generated
+`Name_to_str`; the grammar engine registers the schema type for UFCS, so no
+user registration is required.
 
 Length and count fields that drive `bytes` or `items` parsing are derived from
 the corresponding value on write. The stored parse-time count does not override
@@ -154,12 +201,16 @@ do not expose partially successful output as success. Write reports failure
 with a zero byte count, and format returns an empty string. Grammar operations
 compose with the language's ordinary result handling at call sites.
 
+`cc_dom(Name, src, len, registry, arena, out)` is the rules engine's shaped-DOM
+projection. It builds `CCShapeVal` objects and arrays using the caller's
+`CCShapeReg`; map-shaped data may use per-instance dictionaries.
+
 ## Lowering
 
 Both engines emit specialized ordinary C. Generated entry points have
-deterministic `Name_operation` names and are also available through the
-`cc_match`, `cc_parse`, `cc_collect`, `cc_dom`, `cc_write`, and `cc_format`
-macros.
+deterministic `Name_operation` names. The stable macro surface is `cc_match`,
+`cc_parse`, `cc_collect`, `cc_dom`, `cc_read`, `cc_try_read`, `cc_reader`,
+`cc_next`, `cc_at_end`, `cc_write`, `cc_format`, `cc_get`, and `cc_field`.
 
 The rules engine computes nullability and FIRST sets, dispatches disjoint
 alternatives by lookahead, fuses eligible character-set loops into SWAR scans,

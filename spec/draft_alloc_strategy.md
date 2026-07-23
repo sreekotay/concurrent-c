@@ -1,6 +1,14 @@
 # `CCArena` Allocation Strategy
 
-Status: draft — implemented
+Status: implemented
+
+## Scope
+
+The [main language specification](concurrent-c-spec-complete.md#5-arenas)
+defines arena creation, growth policy, lifetime, slice provenance, and
+checkpoint language semantics. This document defines the shipped individual
+release and explicit heap-overflow strategy. Its checkpoint section states the
+runtime behavior required by the main specification.
 
 ## Ownership handle
 
@@ -21,6 +29,11 @@ CCArena growable =
 `CC_ARENA_FIXED` limits allocation to the root block.
 `CC_ARENA_GROWABLE` permits an unbounded chain of heap-owned extents. A value
 greater than one bounds the total block count.
+
+When the current block cannot satisfy an allocation and both ordinary growth
+and explicit heap overflow are unavailable, allocation returns `NULL`. In
+particular, exhaustion of a fixed arena with heap overflow disabled returns
+`NULL`.
 
 ## Heap overflow
 
@@ -53,10 +66,13 @@ allocation in the current slab resets its bump offset, making the slab reusable.
 A recognized double release or live-count mismatch returns `false` and reports
 a diagnostic.
 
-When heap overflow is enabled, a pointer outside the arena's slab chain is
-treated as an overflow allocation, freed with `free`, and removed from overflow
-accounting. Because this path has no per-allocation ownership table, passing a
-foreign, stale, or already released pointer violates the caller contract.
+When heap overflow is enabled, a pointer outside the arena's slab chain takes
+the permissive overflow path: `free(ptr)` is performed and the available size
+information is removed from overflow accounting. This path has no
+per-allocation ownership table and cannot verify ownership. The caller must
+pass a live overflow allocation obtained through the same arena. Passing a
+foreign, stale, or already released pointer, including a double release, is
+undefined behavior even if `cc_arena_release` returns `true`.
 
 Any successful individual release makes the current arena epoch
 non-rewindable. Whole-arena `cc_arena_reset`, `cc_arena_free`, and
@@ -76,9 +92,11 @@ CCArenaCheckpoint checkpoint = cc_arena_checkpoint(&arena);
 cc_arena_restore(checkpoint);
 ```
 
-A rewindable checkpoint records the active block, offset, and provenance epoch.
-Restore discards newer growth blocks, restores the saved offset and provenance,
-and invalidates allocations made after the checkpoint.
+A rewindable checkpoint records the active block, offset, and current
+provenance epoch, then advances the arena to a fresh provenance epoch for
+subsequent allocations. Restore discards newer growth blocks and restores the
+saved offset and provenance. Slices minted from the later epoch become stale;
+pre-checkpoint slices retain the restored epoch.
 
 After heap overflow or individual release makes an epoch non-rewindable,
 `cc_arena_checkpoint` returns a null checkpoint with

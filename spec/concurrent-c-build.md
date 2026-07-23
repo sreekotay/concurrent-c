@@ -54,7 +54,19 @@ Within one multi-input invocation, the driver detects repeated basenames and der
 
 `--out-stem NAME` overrides the derived stem for a single input. It is an error with multiple inputs. Explicit `-o`, `--obj-out`, `--out-dir`, and `--bin-dir` remain available when identities must be isolated across separate invocations.
 
-Declarative target builds do not depend on flat source stems. Each target source is compiled under target-specific `out/c/<target>/` and `out/obj/<target>/` paths with a stable path-derived source identity.
+Declarative target builds do not depend on flat source stems. For the default
+output root, each target uses:
+
+```
+out/c/<build-id>/<target>/<source-stem>__<source-path-hash>.c
+out/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.o
+out/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.d
+```
+
+`<build-id>` is a stable hash of the build-file directory. The unit suffix is
+a stable hash of the source path relative to that directory, or of its
+absolute path when it is outside the directory. The selected output root
+replaces `out`.
 
 ## Driver options
 
