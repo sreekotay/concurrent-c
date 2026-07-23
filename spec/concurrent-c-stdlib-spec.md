@@ -303,6 +303,15 @@ String <primitive>.to_str(Arena* a);          // e.g. 42.to_str(&arena)
 
 **Slice Lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
 
+**Failure poison (sticky, normative):** `String` is an owner; a builder step that cannot acquire storage (arena exhaustion — including a too-small fixed-buffer arena — or a size overflow) **poisons** the `String` instead of truncating it. Poisoned semantics:
+
+- Every subsequent `push*` / `append` is a sticky no-op returning `NULL`.
+- `len()` reads 0, `as_slice()` is the empty slice, `cc_string_cstr()` returns `NULL`.
+- `cc_string_failed(&s)` reports the poisoned state (`bool`).
+- `cc_string_clear(&s)` is the explicit recovery: it resets to a valid empty string.
+
+There is no silent truncation and no partial output: a `String` (including one built by `@string(...)` templating into a fixed arena) is either complete or failed. The poison sentinel lives in the existing `len` field, so the 16-byte ABI is unchanged.
+
 **Template slots:** `@string(policy, \`...\`, a)` accepts string-oriented slot expressions (`char*`, `char[:]`, `String`). Non-string values may bridge through the conventional `to_str(a)` UFCS helper when available.
 Backtick template bodies preserve whitespace, indentation, and embedded newlines exactly as written, matching ordinary JavaScript template-literal whitespace behavior (no implicit dedent or trim).
 
@@ -416,6 +425,28 @@ String  char[:].replace(Arena* a, char[:] old, char[:] new);  // Replace all
 String  char[:].repeat(Arena* a, size_t times); // Repeat n times
 ```
 
+##### Strict Conversion Methods (`to_i64` / `to_u64` / `to_f64`)
+
+Strict slice-to-number conversions returning the standard `CCError` result, designed to compose with `!>` / `?>` and `@errhandler`:
+
+```c
+int64_t  !>(CCError) char[:].to_i64();   // lowers to cc_slice_to_i64(&s)
+uint64_t !>(CCError) char[:].to_u64();   // lowers to cc_slice_to_u64(&s)
+double   !>(CCError) char[:].to_f64();   // lowers to cc_slice_to_f64(&s)
+```
+
+**Contract (normative):**
+
+- **Full consumption.** The entire slice must parse; trailing bytes are an error (`"12a"`, `"1.5x"` fail). The empty slice is an error.
+- **Strict form.** Base 10 only. No whitespace trimming (`" 5"` fails). No `'+'` sign (`"+5"` fails). `to_i64` accepts a leading `'-'`; `to_u64` accepts no sign. Leading zeros are accepted (`"007"` → 7). `to_f64` accepts what `strtod` accepts, subject to full consumption.
+- **Error classes.** Malformed or empty input → `CC_ERR_PARSE`. Value out of range (e.g. `"9223372036854775808"` for `to_i64`, `"18446744073709551616"` for `to_u64`, `±HUGE_VAL` with `ERANGE` for `to_f64`) → `CC_ERR_INVALID_ARG`.
+- Boundary values parse exactly: `INT64_MIN`, `INT64_MAX`, `UINT64_MAX`.
+
+```c
+int64_t v = s.to_i64() !> { return -7; };   // handler on bad input
+int64_t w = s.to_i64() ?> 0;                // default on bad input
+```
+
 ##### Parse Methods
 
 ```c
@@ -484,6 +515,29 @@ for (size_t i = 0; i < names.len; i++) {
 #### 1.4 UTF-8 Notes
 
 All strings are UTF-8. Basic operations (split, find, trim on whitespace) work on bytes and are safe for UTF-8. Multi-byte character handling (grapheme clusters, normalization) is deferred to Phase 2 if needed.
+
+---
+
+#### 1.5 Checked Integer Arithmetic (`<std/slice.cch>`)
+
+Overflow-checked `int64_t` arithmetic returning the standard `CCError` result, composing with `!>` / `?>` in place of hand-rolled `INT64_MAX - delta` guards:
+
+```c
+int64_t !>(CCError) cc_add_i64_checked(int64_t a, int64_t b);
+int64_t !>(CCError) cc_sub_i64_checked(int64_t a, int64_t b);
+int64_t !>(CCError) cc_mul_i64_checked(int64_t a, int64_t b);
+```
+
+**Contract (normative):**
+
+- On overflow of the mathematical result outside `[INT64_MIN, INT64_MAX]`, returns an error with `kind == CC_ERR_INVALID_ARG`; otherwise returns the exact result.
+- All edges are defined, including `INT64_MIN`: `sub(0, INT64_MIN)` and `mul(INT64_MIN, -1)` are errors; `add(INT64_MIN, INT64_MAX)` is `-1`; `mul(0, INT64_MIN)` is `0`.
+- Implemented with `__builtin_*_overflow` where available, with a portable fallback; results are identical either way.
+
+```c
+int64_t v = cc_add_i64_checked(base, delta)
+    !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "increment would overflow")); };
+```
 
 ---
 
@@ -2849,6 +2903,7 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | `.replace(a, old, new)` | Replace all |
 | `.split(delim)` | Iterator split |
 | `.split_all(a, delim)` | Collect all |
+| `.to_i64()`, `.to_u64()`, `.to_f64()` | Strict full-consumption conversion (`!>(CCError)`) |
 | `.parse_i64()`, `.parse_f64()`, `.parse_bool()` | Parse |
 
 ### String Builder Methods
@@ -2860,7 +2915,8 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | `.append_if()` | Conditional append |
 | `.as_slice()` | Finalize to view |
 | `.len()`, `.cap()` | Info |
-| `.clear()` | Clear |
+| `.clear()` | Clear (also recovers a poisoned `String`) |
+| `cc_string_failed(&s)` | Check sticky failure poison (§1.2) |
 
 ### File Methods
 

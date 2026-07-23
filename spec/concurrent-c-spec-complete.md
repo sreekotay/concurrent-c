@@ -226,7 +226,7 @@ bugs.
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
 | `@for`         | Async iteration over a channel                                          | `@for @await (int x : ch) { … }`       |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
-| `@string`      | Arena-allocated string / templated string                               | `CCString s = @string("hi", &arena);`  |
+| `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
 | `unsafe`       | (Bare) disable safety checks in a block                                 | `unsafe { ptr_cast(); }`               |
 
 
@@ -294,6 +294,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@await expr`                                            | Suspend until task completes, unwrap result                           | `int result = @await fetch();`            |
 | `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
+| `@string(\`...\`)` (no arena)                            | Bounded-template stack form: block-scoped buffer, yields `char[:]` borrow (§9.1.2) | `char[:] s = @string(\`v=${v}\`);`        |
 
 
 ### Deadline Scope Forms
@@ -1019,6 +1020,24 @@ When the host statement declares a built-in owned type, the destructor body is c
 - `CCArena a = CALL() !> BODY @destroy { D };` runs `D`, then `cc_arena_destroy(&a)` at scope exit.
 
 For any other declared type, no hooks are injected and the suffix is simply `@defer { D };`.
+
+**Nullable pointers.** Both operators also consume pointer-typed operands. For a pointer-typed `EXPR`, the failure condition is `EXPR == NULL` instead of the result's error arm. On failure, a `CCError` is synthesized with `kind == CC_ERR_NULL` and a compile-time-constant message of the form `NULL returned from <call expression> at <file>:<line>`; the binder forms (`!>(e)`, `?>(e)`) bind that synthesized error. Every form and rule above applies unchanged:
+
+- `PTR_EXPR ?> DEFAULT_EXPR` yields the pointer when non-NULL, otherwise `DEFAULT_EXPR` (a pure expression of the pointer's type).
+- Statement- and expression-position `!>` behave per invariant 2; bare `!>;` dispatches the synthesized error to the enclosing `@errhandler`.
+- The `@destroy { D }` success-destructor suffix composes identically.
+- Single evaluation holds: the pointer expression is evaluated exactly once.
+
+Absence is not forced into the protocol: a pointer-typed call used as a plain statement or operand remains ordinary C. The unwrap semantics apply only where `?>` / `!>` are written.
+
+```c
+int*  p = get_ptr()      !> { log("missing"); return 1; }; // NULL -> body (diverges)
+char* s = get_name()     ?> "anonymous";                   // NULL -> default
+char* t = get_name()     !>(e) {                           // e.kind == CC_ERR_NULL,
+    log(e.message);                                        // message names the call site
+    return 1;
+};
+```
 
 ---
 
@@ -2570,7 +2589,12 @@ int[~10 1:N sync <] sync_sub = sync_events.subscribe();  // subscribe to sync
 
 ### 7.2 Ordered Channels and Task Sending
 
-Channels support an `ordered` flag for FIFO result delivery in task-parallel pipelines. Combined with `cc_channel_send_task`, this enables clean producer-consumer patterns.
+The `ordered` attribute is the channel's delivery-order guarantee. It states one property — the order of what flows through the channel is preserved — applied to the channel's payload kind:
+
+- **Data channels:** `ordered` guarantees **per-sender FIFO** delivery. Items from a given sender are received in the order that sender sent them; interleaving between different senders is unspecified.
+- **Task-handle channels** (used with `cc_channel_send_task`): `ordered` guarantees handles are received in **submission order**, not completion order. This is essential for pipelines where output order must match input order (e.g., parallel compression).
+
+**Rule (default channels promise no order):** A channel not declared `ordered` makes **no** delivery-order promise. Code that relies on delivery order must declare the channel `ordered`.
 
 **Ordered channel declaration:**
 
@@ -2578,8 +2602,6 @@ Channels support an `ordered` flag for FIFO result delivery in task-parallel pip
 T[~N ordered >] tx;    // ordered sender
 T[~N ordered <] rx;    // ordered receiver
 ```
-
-The `ordered` flag ensures that `recv` returns results in submission order, not completion order. This is essential for pipelines where output order must match input order (e.g., parallel compression).
 
 `**cc_channel_send_task` — spawn and queue:**
 
@@ -2593,10 +2615,10 @@ cc_channel_send_task(tx, () => [captures] expr); // with captures
 **How it works:**
 
 
-| Channel Declaration | Task Execution   | Result Delivery                          |
-| ------------------- | ---------------- | ---------------------------------------- |
-| `T[~N >]`           | Immediate, async | Completion order (first done, first out) |
-| `T[~N ordered >]`   | Immediate, async | Submission order (FIFO)                  |
+| Channel Declaration | Task Execution   | Result Delivery                              |
+| ------------------- | ---------------- | -------------------------------------------- |
+| `T[~N >]`           | Immediate, async | No order promise (typically completion order) |
+| `T[~N ordered >]`   | Immediate, async | Submission order (FIFO)                      |
 
 
 Both execute tasks immediately. The difference is purely in `recv` sequencing.
@@ -2680,6 +2702,8 @@ Standard channel semantics apply:
 - **Unbuffered channels** rendezvous: sender blocks until receiver is ready.
 - **Close** does not drop buffered values; they remain available for recv.
 - **Termination** is observed when the channel is both closed and drained (`recv(&out)` returns `ok(false)`).
+
+**Rule (delivery order):** Delivery order is guaranteed only on channels declared `ordered` (§7.2): per-sender FIFO on data channels, submission order on task-handle channels. A channel without `ordered` makes no delivery-order promise.
 
 **Rule:** `recv(&out)` returns `ok(false)` only when the channel is closed and drained. It never uses `ok(false)` to represent an application-level payload error. For per-item errors, use `T!>(E)[~ <]` channels where the received value written to `out` is itself a `T!>(E)`.
 
@@ -3386,9 +3410,26 @@ At every call site inside an `@async` body, the compiler picks a mode
 1. **Call-site annotation** (highest precedence)
    - `@blocking f(...)` — force this edge through `run_blocking`.
    - `@nonblocking f(...)` — force this edge to skip `run_blocking`.
-2. **Callee's declaration-level annotation**
+2. **Callee's annotation** (`@blocking` / `@nonblocking` on the callee)
    - `@blocking fn f(...) { … }` → edge mode is `@blocking`.
    - `@nonblocking fn f(...) { … }` → edge mode is `@nonblocking`.
+   - **Definition wins TU-locally.** When the callee is defined in the
+     same translation unit, the annotation on the **definition** is
+     authoritative for every call edge to it in that TU. A forward
+     declaration need not repeat the annotation, and call sites need no
+     annotation of their own. This includes `static inline` definitions.
+   - If a visible declaration carries `@nonblocking` but the same-TU
+     definition does not, the definition's classification wins (the
+     edge is lowered as blocking) and the compiler emits exactly one
+     warning naming both coordinates:
+
+     ```
+     warning: async: declaration of 'f' at FILE:LINE promises @noblock
+     but its definition at FILE:LINE does not carry it
+     ```
+
+   - For a callee with no definition in the TU (extern / FFI), the
+     declaration's annotation applies (see §8.2.7).
 3. **Lexical block ambient mode** (innermost annotated block)
    - `@blocking { ... }` → undecorated known-CC call edges default to `@blocking`.
    - `@nonblocking { ... }` → undecorated known-CC call edges default to `@nonblocking`.
@@ -3666,7 +3707,7 @@ In brief:
 
 - Mode is fixed at declaration; channel type is immutable.
 - `send()` always succeeds in Drop/Sample modes (never blocks).
-- `recv()` always returns in-order messages (no gaps caused by drops, except drops are not received).
+- `recv()` never observes partial effects from drops: a drop removes a whole message and nothing else. Delivery order follows the §7.4 rule (`ordered` channels guarantee it; others do not promise it).
 - Sample rate must be in range `[0.0, 1.0]`; behavior at boundaries:
   - `Sample(0.0)`: drop all messages
   - `Sample(1.0)`: equivalent to Block mode
@@ -4533,7 +4574,7 @@ void sync_boundary() {
 
 ---
 
-### 8.7.1 Deadlock Prevention: `@nonblocking` and `cc_concurrent`
+### 8.7.1 Deadlock Detection
 
 **Problem:** `block_on` creates a single-task execution context. If that task performs a channel operation that blocks waiting for a peer (send on full buffer, recv on empty buffer), the program deadlocks because no other task can run to unblock it.
 
@@ -4543,134 +4584,38 @@ int[~4 >] tx;
 block_on(producer(tx, 5));  // Hangs forever on 5th send
 ```
 
-**Solution:** Concurrent-C distinguishes between async functions that can safely run alone (`@nonblocking`) and those that require concurrent peers.
+**Contract:** Deadlock detection is a **runtime** service. Compile-time coverage is deliberately narrow — exactly two checks.
 
-#### `@nonblocking` Attribute
+#### Compile-time checks
 
-An `@async` function is `@nonblocking` if it contains no channel operations inside loops that could wait indefinitely for a peer.
+1. **`@closing(...)` is rejected.** The construct is a hard compile error with a migration hint:
 
-**Inference rules (automatic):**
+   ```
+   error: async: `@closing(...)` is retired; use explicit ownership with
+   `@create(...) @destroy { chan.close(); }`
+   ```
 
-1. No `@await ch.send()` or `@await ch.recv(&x)` inside `for`, `while`, or `do-while` loops
-2. All called `@async` functions are also `@nonblocking`
-3. Any loop with channel operations makes the function **not** `@nonblocking`
+2. **`cc_block_on` heuristic warning.** `cc_block_on(T, f(...))` where `f` is an `@async` function that performs channel operations inside a loop and is not marked `@nonblocking` produces a warning:
 
-```c
-// Inferred @nonblocking - no loops with channel ops
-@async int send_one(CCChanTx tx, int v) {
-    @await tx.send(v);  // OK: not in a loop
-    return 0;
-}
+   ```
+   warning: cc_block_on with 'f' may deadlock
+   note: 'f' has channel ops in a loop; consider explicit nursery concurrency
+   or a larger buffer
+   ```
 
-// Inferred @nonblocking - loop without channel ops
-@async int compute_sum(int n) {
-    int sum = 0;
-    for (int i = 0; i < n; i++) sum += i;  // OK: no channel ops
-    return sum;
-}
+   This is a heuristic, not a proof. Marking the function `@nonblocking` suppresses the warning; the compiler does not verify the annotation.
 
-// NOT @nonblocking - loop with channel send
-@async int producer(CCChanTx tx, int count) {
-    for (int i = 0; i < count; i++) {
-        @await tx.send(i);  // In loop → not @nonblocking
-    }
-    return 0;
-}
+There is no general compile-time deadlock analysis. In particular, a consumer that receives inside the nursery that owns a channel's `close_on` compiles cleanly and deadlocks only at runtime; the fix is to move the consumer outside the owning nursery scope.
 
-// NOT @nonblocking - calls non-@nonblocking function
-@async int wrapper(CCChanTx tx) {
-    return producer(tx, 10);  // Calls non-@nonblocking → not @nonblocking
-}
-```
+#### Runtime detection
 
-**Explicit annotation:**
+The scheduler's monitor detects a deadlock when every worker thread is idle and internally parked fibers exist with no progress across a full stall interval (on the order of one second). On detection the runtime prints a diagnostic dump — worker and fiber counts, and each internally parked fiber with its park reason and the state of the channel it is parked on — and exits with code 124 (like `timeout`), so stuck programs surface in CI instead of hanging.
 
-Functions can be explicitly marked `@nonblocking` to override inference (for expert use):
+- Fibers inside `cc_external_wait_enter/leave` or `cc_deadlock_suppress_enter/leave` scopes are excluded from the verdict; an external wait is not a deadlock.
+- `CC_DEADLOCK_ABORT=0` downgrades the exit to a warning: the dump prints and the (deadlocked) program keeps running, which allows log capture.
+- `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` (opt-in): a recv that would wait forever on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` instead of deadlocking.
 
-```c
-// Explicit: "I know this won't deadlock because buffer is always large enough"
-@async @nonblocking int bounded_producer(CCChanTx tx) {
-    for (int i = 0; i < 3; i++) {  // Only 3 sends, buffer assumed >= 3
-        @await tx.send(i);
-    }
-    return 0;
-}
-```
-
-**Warning:** Explicit `@nonblocking` on a function with unbounded channel loops is programmer error. The compiler does not verify correctness of explicit annotations.
-
-#### `block_on` Restrictions
-
-**Rule:** `block_on(task)` emits a compile-time warning if `task` is not `@nonblocking`:
-
-```c
-int[~4 >] tx;
-block_on(send_one(tx, 42));    // ✓ OK: send_one is @nonblocking
-block_on(producer(tx, 5));     // ⚠ WARNING: producer is not @nonblocking
-                               //   hint: use cc_concurrent for peer-dependent tasks
-```
-
-**Diagnostic policy:** An implementation must emit a compile-time diagnostic for `block_on(task)` when `task` is not proven `@nonblocking`. An implementation may treat this as a warning or an error, but silent acceptance is not conforming.
-
-#### Runtime Deadlock Detection
-
-For deadlocks that escape compile-time analysis (e.g., complex patterns, dynamic channel creation), Concurrent-C provides runtime deadlock detection. It is **enabled by default**; on detection the runtime prints a diagnostic banner and `_exit(124)`.
-
-**Configuring:**
-
-```bash
-# Default: detect, print banner, and exit 124.
-./my_program
-
-# Warn-only: print the banner but keep running (do not exit 124).
-CC_DEADLOCK_ABORT=0 ./my_program
-```
-
-**How it works:**
-
-1. **Track blocked threads:** Each thread entering a blocking operation (channel send/recv waiting, `cc_block_on`) increments a global blocked counter
-2. **Track progress:** Each successful channel operation or task completion increments a progress counter
-3. **Watchdog thread:** Periodically checks if:
-  - All threads are blocked AND
-  - No progress has been made for 3+ seconds
-4. **Diagnostic output:** When deadlock detected, prints:
-  - Number of blocked threads
-  - What each thread is blocked on (channel send, recv, cc_block_on)
-  - Common causes and suggested fixes
-
-**Example output:**
-
-```
-╔══════════════════════════════════════════════════════════════╗
-║              ⚠️  POTENTIAL DEADLOCK DETECTED ⚠️               ║
-╠══════════════════════════════════════════════════════════════╣
-║ 2 thread(s) blocked for 3.0+ seconds with no progress.     ║
-╚══════════════════════════════════════════════════════════════╝
-  Thread 0: blocked on cc_block_on (waiting for async task)
-  Thread 1: blocked on recv (channel empty, waiting for sender)
-
-Common causes:
-  • cc_block_on() inside a nursery child
-  • Producer/consumer mismatch (sends without receivers)
-  • Missing channel close (receiver waiting forever)
-
-Suggested fixes:
-  • Use cc_block_all() to run multiple async tasks concurrently
-  • Use sync channel ops in nursery children instead of async
-  • Ensure channels are closed when producers finish
-```
-
-**Key features:**
-
-- **No false positives on temporary saturation:** Only triggers if blocked with zero progress for multiple seconds
-- **Fail-fast by default:** On detection the runtime prints the banner and `_exit(124)` (like `timeout`), so stuck programs surface in CI instead of hanging
-- **Opt-out of abort:** `CC_DEADLOCK_ABORT=0` downgrades the abort to a warning so the (deadlocked) program keeps running
-
-**Limitations:**
-
-- Cannot detect all deadlocks (e.g., distributed deadlocks across processes)
-- Watchdog thread adds minimal overhead (~1 thread, polling every 500ms)
-- Progress counter may overflow on very long-running programs (wraparound is benign)
+Detection is best-effort: it cannot see deadlocks involving resources outside the runtime (other processes, foreign locks).
 
 #### Task Combinators
 
@@ -5147,7 +5092,7 @@ The blocking model is intentionally conservative:
 
 **Rule (deadlock trap):** If there are tasks blocked on channel operations and no runnable tasks, the runtime triggers a deadlock trap with a diagnostic report.
 
-**Rule:** Runtime deadlock detection runs in the scheduler's sysmon tick and is **on by default** in all builds. On detection the runtime prints a banner and `_exit(124)`; set `CC_DEADLOCK_ABORT=0` to downgrade the abort to a warning. (The static, compile-time deadlock checks are separate and always run at compile time.)
+**Rule:** Runtime deadlock detection runs in the scheduler's sysmon tick and is **on by default** in all builds. On detection the runtime prints a diagnostic dump and `_exit(124)`; set `CC_DEADLOCK_ABORT=0` to downgrade the abort to a warning. The compile-time checks are the two defined in §8.7.1.
 
 ---
 
@@ -5174,7 +5119,7 @@ Error handling in `@async` functions and nurseries uses the operators defined in
 @async int!>(IoError) process(char[:] url) {
     CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => subtask_a(url));
-    int v = (@await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
+    int v = (@await subtask_b(url)) !>(e) return cc_err(e);  // unwinds; @destroy cancels and joins
     return cc_ok(0);
 }
 ```
@@ -5189,7 +5134,7 @@ int!>(AppError) parse_with_app_error(char[:] s) {
 }
 
 int!>(AppError) pipeline(char[:] path) {
-    char[:] s = read_with_app_error(path) ?>(e) return cc_err(e);
+    char[:] s = read_with_app_error(path) !>(e) return cc_err(e);
     return parse_with_app_error(s);
 }
 ```
@@ -5385,6 +5330,7 @@ String   cc_string_from_slice(Arena* a, char[:] initial);
 char[:0] @slice("...");                           // build-time canonical slice
 String   @string(expr, Arena* a);                 // literal/single-value builder
 String   @string(policy, `...`, Arena* a);        // templated builder
+char[:]  @string(`...`);                          // arena-less bounded template (§9.1.2)
 String* cc_string_push(String* s, char[:] data);
 String* cc_string_push_char(String* s, char c);
 String* cc_string_push_int(String* s, i64 value);
@@ -5414,6 +5360,7 @@ String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 - `@slice("...")` yields a build-time canonical `char[:0]` inside the existing slice/provenance model.
 - `@string(expr, a)` builds a `String` from a literal, `char`*, `char[:]`, `String`, or a value that supports `to_str(a)`.
 - `@string(policy, \`..., a)`lowers to`String` builder operations over literal chunks plus interpolation slots.
+- `@string(\`...\`)` with no arena is the bounded-template stack form: it yields a `char[:]` borrow of a block-scoped buffer and requires every interpolation to have a statically bounded width (§9.1.2).
 - Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
 - Interpolation syntax: only `${expr}` and `$~tag{expr}` start a slot (where `tag` is a C identifier). `${expr}` is **untagged**—the policy gets an empty tag slice and the value slice. `$~tag{expr}` is **tagged**—the policy gets the tag slice `"tag"` and the value slice, so policies can distinguish holes (metadata, escaping tiers, i18n keys, and so on). Any other `$` in the template is literal text, so ordinary uses like prices or macros do not need escaping.
 - To emit a literal `${` or `$~tag{` sequence, prefix `$` with backslash: `\${` and `\$~…` are not slots; the backslash is removed and the string helpers emit the remainder (same rules as other template backslash escapes, e.g. an even run of `\` before `$` restores slot parsing, as in `\\${x}`).
@@ -5434,6 +5381,64 @@ String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
 // Tag example: policy sees tag "meta" for the second hole
 String row = @string(row_policy, `name=${name}; age=$~meta{age}`, &arena);
 ```
+
+#### 9.1.2 Arena-less `@string` — bounded-template stack form
+
+`@string(`...`)` with no arena argument formats into a block-scoped stack buffer and yields a `char[:]` **borrow** of that buffer — no arena, no allocation, not a `String`.
+
+**Boundedness rule (normative).** The arena-less form is legal iff every `${expr}` interpolation has a statically bounded maximum formatted width. The bounded types and their widths (bytes, worst-case decimal including sign):
+
+
+| Interpolation type                                     | Max width |
+| ------------------------------------------------------ | --------- |
+| `char`                                                 | 1         |
+| `bool`                                                 | 5         |
+| `signed char`                                          | 4         |
+| `unsigned char`                                        | 3         |
+| `short`                                                | 6         |
+| `unsigned short`                                       | 5         |
+| `int`                                                  | 11        |
+| `unsigned int`                                         | 10        |
+| `long` / `unsigned long` / `long long` / `unsigned long long` | 20 |
+
+
+Any other interpolation type (slices, `String`, floating point, pointers, …) is a **compile error** at the `@string` site, naming the offending interpolation and suggesting the arena form:
+
+```
+error: arena-less @string: interpolation '${name}' has no statically bounded
+width (allowed: ${int}/${i64}/${u64}/${bool}/${char}); pass an arena:
+@string(`...`, arena)
+```
+
+Policy-tagged slots (`$~tag{expr}`) require an arena and are not available in the arena-less form.
+
+**Semantics (normative).**
+
+- The buffer is a block-scoped `char[K]` where `K` is an integer constant expression: the decoded literal byte count plus the sum of the per-slot bounds above. The yielded slice's capacity (`alen`) equals `K` exactly.
+- The slice is a borrow with **block lifetime and stack provenance**: it stays valid for the rest of the enclosing block, including across later statements and nested blocks. Each `@string` site gets its own buffer.
+- The form is a pure expression and may appear anywhere an expression may (initializer, argument position, …).
+- `bool` formats as `true` / `false`; integers format in decimal.
+- A literal-only template is legal (bound = decoded literal bytes); the empty template yields the empty slice. Template escapes decode as usual (`\n` is one byte).
+- Formatted output cannot exceed the computed bound by construction; an overflow indicates a compiler bug and aborts loudly at runtime.
+
+```c
+int v = 42;
+char[:] s = @string(`v=${v}!`);   // "v=42!"; s.alen == 2 + 11 + 1
+take_slice(@string(`arg=${v}`));  // expression position
+```
+
+The arena form is unchanged: the same template with an arena yields an owned `String` and accepts unbounded interpolation types (slices, `String`, `double` / `float`, `const char*`, …). For unbounded values with stack-only storage, pass a fixed-buffer arena (`cc_arena_fixed_buffer`, §5); on exhaustion the result is a poisoned `String` (§9.1.3), never truncated output.
+
+#### 9.1.3 `String` failure poison (sticky)
+
+`String` is an owner. A builder step that cannot acquire storage (arena exhaustion — including a too-small fixed-buffer arena — or a size overflow) **poisons** the `String` instead of truncating it:
+
+- Every subsequent push is a sticky no-op returning `NULL`.
+- `len()` reads 0, `as_slice()` is empty, `cc_string_cstr()` returns `NULL`.
+- `cc_string_failed(&s)` reports the poisoned state.
+- `cc_string_clear(&s)` is the explicit recovery: it resets the value to a valid empty string.
+
+`@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 
 #### 9.1.6 Formatting (Global)
 
@@ -6809,12 +6814,12 @@ The following are detected at runtime in debug builds only:
 | Stale slice access | Slice `id` not in allocation table | Trap/abort with diagnostic  |
 | Arena overflow     | Allocation exceeds arena capacity  | Trap with allocation size   |
 | Channel overflow   | Buffer full (Busy)                 | Signaled via IoError::Busy  |
-| Deadlock           | All tasks blocked + no runnable    | Trap with task wait graph   |
+| Deadlock           | All workers idle + parked fibers, no progress (all builds; §8.7.1) | Diagnostic dump + exit 124 |
 | Stack slice escape | Stack-backed slice escapes frame   | Trap (stack capture safety) |
 | Bounds violation   | Array/slice access out of bounds   | Return None or error        |
 
 
-**Deadlock diagnostics:** When detected, runtime prints a task wait graph showing which tasks are blocked on which resources.
+**Deadlock diagnostics:** When detected, the runtime prints each internally parked fiber with its park reason and the state of the channel it is parked on (§8.7.1).
 
 **Stack escape detection:** Implemented via runtime metadata on stack-backed slices (debug-only overhead).
 

@@ -272,11 +272,18 @@ Owned channels (`is_owned = 1`) have lifecycle callbacks:
 
 Recv on an owned channel: try non-blocking dequeue; if empty and under capacity, call `on_create`; otherwise block normally.
 
-## Ordered channels (task channel)
+## Delivery order
 
-Ordered channels (`is_ordered = 1`) carry `CCTask` handles. Ordering is FIFO on handles, not on completion time. The receiver awaits handles in receive order.
+Channels without the `ordered` attribute make **no** delivery-order promise. The current backend preserves per-sender FIFO on buffered channels — the buffered direct-handoff path is gated on an empty ring (`cc__chan_buffered_handoff_would_reorder`), so a newly sent item never overtakes items already queued — but that is an implementation property of this backend, not a contract; the default backend may relax or stripe delivery. Code that relies on delivery order must declare the channel `ordered`.
 
-Head-of-line blocking: if an earlier task stalls, later completed tasks are not observed until earlier ones complete.
+## Ordered channels
+
+`ordered` (`is_ordered = 1`) is the delivery-order guarantee. It is one property — the order of what flows through the channel is preserved — applied to the channel's payload kind:
+
+- **Data channels:** per-sender FIFO. Items from a given sender are received in the order that sender sent them; interleaving between different senders is unspecified.
+- **Task-handle channels:** the channel carries `CCTask` handles; ordering is FIFO on handles, not on completion time. The receiver awaits handles in receive order.
+
+Head-of-line blocking (task-handle channels): if an earlier task stalls, later completed tasks are not observed until earlier ones complete.
 
 ## Channel modes
 
