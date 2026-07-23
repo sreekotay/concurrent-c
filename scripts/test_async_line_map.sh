@@ -47,7 +47,8 @@ n_dirs=$(grep -c '#line [0-9][0-9]* ".*redis_idiomatic\.ccs"' "$emitted" || true
   || fail "expected >=50 #line directives citing redis_idiomatic.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
 
 # (2) no mapped coordinate exceeds the source's line count.
-python3 - "$emitted" "$SRC" <<'PYEOF'
+check_no_map_past_eof() {  # <emitted.c> <src>
+  python3 - "$1" "$2" <<'PYEOF'
 import re, sys
 cfile, src = sys.argv[1], sys.argv[2]
 src_lines = sum(1 for _ in open(src, errors="replace"))
@@ -75,5 +76,36 @@ if bad:
           f"{cfile}:{worst[1]}", file=sys.stderr)
     sys.exit(1)
 PYEOF
+}
+
+check_no_map_past_eof "$emitted" "$SRC" || exit 1
+
+# (3) Focused pin for the return-through-cleanup blob (pass_defer_syntax.c):
+# a `@defer`-carrying fn whose final statement is a `return` places the
+# lowered cleanup blob (`__cc_retval = (...); __cc_ret_set = 1; goto ...`)
+# right at EOF.  Emitting that blob across three physical lines with no
+# per-line ledger entry inflated the mapping +2 and pushed the trailing
+# lines' #line past the source's EOF.  The blob must stay one physical line
+# mapped to the return's true source line.
+mini="$out_dir/defer_return_eof.ccs"
+mini_c="$out_dir/defer_return_eof.c"
+cat > "$mini" <<'CCS'
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static void cleanup(int* p) { (void)p; }
+
+int worker(void) {
+    int r = 0;
+    @defer cleanup(&r);
+    printf("hi\n");
+    return r;
+}
+CCS
+"$CCC" build --no-cache --emit-c-only "$mini" -o "$mini_c" >/dev/null 2>&1 \
+  || fail "emit-c-only build of the defer/return EOF fixture failed"
+grep -q '__cc_ret_set_[0-9]* = 1; goto __cc_cleanup_[0-9]*;' "$mini_c" \
+  || fail "return-cleanup blob not emitted on one physical line (drift-prone shape)"
+check_no_map_past_eof "$mini_c" "$mini" || exit 1
 
 echo "[test_async_line_map] OK"
