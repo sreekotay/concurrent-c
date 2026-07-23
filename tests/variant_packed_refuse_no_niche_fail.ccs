@@ -1,0 +1,15 @@
+/* Refusal oracle: `@variant(packed)` (spec §11 niche packing) refuses when
+ * no lossless niche exists — here both arms need the low 8 bytes (a raw
+ * pointer's null niche sits at offset 0, exactly where the int64 payload
+ * lives), so neither arm can donate a free niche the other leaves untouched.
+ * The compiler names the contending arms and their sizes rather than
+ * silently falling back to the unpacked layout. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant(packed) V {
+    a: const char*;
+    b: int64_t;
+};
+
+int main(void) { return 0; }

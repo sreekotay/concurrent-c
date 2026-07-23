@@ -1,0 +1,2 @@
+# Writing the tag is rejected with the read-only diagnostic.
+variant tag '.kind' is read-only

@@ -56,4 +56,43 @@ grep -q 'case RedisValue_num:' "$emitted2" \
 grep -q 'cell->u\.num += delta;' "$emitted2" \
   || fail "dominated pointer projection did not lower to ->u.num"
 
+# (6) @variant(packed) niche packing (spec §11): the packed layout is an
+#     opaque fixed-size byte struct with NO kind/u members; every surface
+#     form lowers to compiler-emitted encode/decode accessors, and the niche
+#     assumptions are pinned by _Static_asserts visible in the emitted C.
+SRC3=tests/variant_packed_lowering_smoke.ccs
+emitted3="$out_dir/variant_packed_lowering_smoke.c"
+"$CCC" build --no-cache --emit-c-only "$SRC3" -o "$emitted3" >/dev/null 2>&1 \
+  || fail "emit-c-only build of $SRC3 failed"
+
+# opaque byte struct, no kind field and no union
+grep -q 'typedef struct PackedRV { unsigned char __cc_p\[16\]; } PackedRV;' "$emitted3" \
+  || fail "packed layout is not the opaque 16-byte struct"
+if grep -q 'struct PackedRV {[^}]*kind' "$emitted3"; then
+  fail "packed struct must not carry a 'kind' tag field"
+fi
+if grep -q 'struct PackedRV {[^}]*union' "$emitted3"; then
+  fail "packed struct must not expose a union"
+fi
+
+# static asserts pin the sizeof/niche assumptions
+grep -q '_Static_assert(sizeof(CCString) <= 16' "$emitted3" \
+  || fail "packed lowering missing sizeof static assert"
+grep -q '_Static_assert(12 + 4 <= 16' "$emitted3" \
+  || fail "packed lowering missing niche-region static assert"
+
+# encode/decode accessors emitted and used at the surface
+grep -q 'static inline PackedRVKind PackedRV__cc_kind' "$emitted3" \
+  || fail "packed decode (PackedRV__cc_kind) not emitted"
+grep -q 'PackedRV__cc_set_num(42)' "$emitted3" \
+  || fail "packed construction did not lower to a setter call"
+grep -q 'PackedRV__cc_kind(&(v))' "$emitted3" \
+  || fail "packed .kind read did not lower to a decode call"
+grep -q 'switch (PackedRV__cc_kind' "$emitted3" \
+  || fail "packed subject-switch did not lower to switch on the decode"
+# no raw `.u.` reach-in survives for the packed variant
+if grep -q 'v\.u\.\|s\.u\.\|(v)\.u\.\|(s)\.u\.' "$emitted3"; then
+  fail "packed variant emitted a raw .u access"
+fi
+
 echo "[test_variant_lowering] OK"

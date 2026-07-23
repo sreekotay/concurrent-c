@@ -64,6 +64,18 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
  int cc_symbols_lookup_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
  int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
  int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
+/* Niche descriptor (spec/draft_variants.md §11): the (offset, width, sentinel)
+ * bit pattern a valid instance of `type_name` is guaranteed never to exhibit,
+ * plus the type's footprint (size/align).  A `@variant(packed)` arm of this
+ * type donates the niche to carry the discriminant.  Registered by the
+ * `.niche = cc_type_niche(...)` field of a `cc_type_register(...)` hook. */
+ int cc_symbols_set_type_niche(CCSymbolTable* t, const char* type_name,
+                               unsigned size, unsigned align, unsigned offset,
+                               unsigned width, unsigned long long sentinel);
+ int cc_symbols_lookup_type_niche(CCSymbolTable* t, const char* type_name,
+                                  unsigned* out_size, unsigned* out_align,
+                                  unsigned* out_offset, unsigned* out_width,
+                                  unsigned long long* out_sentinel);
  int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee);
  int cc_symbols_lookup_type_ufcs_value(CCSymbolTable* t,
                                       const char* type_name,

@@ -1,0 +1,15 @@
+/* No-raw-access oracle (spec §11): a @variant(packed) has no exposed `.u`
+ * union — raw `.u` access is a clear variant-aware compile error, never a
+ * bare TCC "unknown member" on the opaque byte struct. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant(packed) V {
+    str: CCString;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .num = 5 };
+    return (int)v.u.num;      /* raw union reach-in: rejected */
+}

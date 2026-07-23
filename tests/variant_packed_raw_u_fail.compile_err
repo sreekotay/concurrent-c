@@ -1,0 +1,2 @@
+# Raw `.u` on a packed variant is a variant-aware error naming the fix.
+is @variant(packed): it has no exposed '.u' union

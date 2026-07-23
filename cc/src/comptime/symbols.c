@@ -31,6 +31,12 @@ typedef struct {
     CCOwnedResourceFreeFn create_owner_free;
     char* pre_destroy_call;
     char* destroy_call;
+    int has_niche;
+    unsigned niche_size;
+    unsigned niche_align;
+    unsigned niche_offset;
+    unsigned niche_width;
+    unsigned long long niche_sentinel;
     const void* ufcs_callable;
     int ufcs_callable_is_legacy_compat;
     void* ufcs_owner;
@@ -375,6 +381,40 @@ int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name,
     return 0;
 }
 
+int cc_symbols_set_type_niche(CCSymbolTable* t, const char* type_name,
+                              unsigned size, unsigned align, unsigned offset,
+                              unsigned width, unsigned long long sentinel) {
+    CCTypeEntry* entry = NULL;
+    int err;
+    if (!t || !type_name) return EINVAL;
+    if (width == 0 || width > 8 || offset + width > size) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    entry->has_niche = 1;
+    entry->niche_size = size;
+    entry->niche_align = align;
+    entry->niche_offset = offset;
+    entry->niche_width = width;
+    entry->niche_sentinel = sentinel;
+    return 0;
+}
+
+int cc_symbols_lookup_type_niche(CCSymbolTable* t, const char* type_name,
+                                 unsigned* out_size, unsigned* out_align,
+                                 unsigned* out_offset, unsigned* out_width,
+                                 unsigned long long* out_sentinel) {
+    CCTypeEntry* entry = NULL;
+    if (!t || !type_name) return EINVAL;
+    entry = cc__find_type_entry(t, type_name);
+    if (!entry || !entry->has_niche) return ENOENT;
+    if (out_size) *out_size = entry->niche_size;
+    if (out_align) *out_align = entry->niche_align;
+    if (out_offset) *out_offset = entry->niche_offset;
+    if (out_width) *out_width = entry->niche_width;
+    if (out_sentinel) *out_sentinel = entry->niche_sentinel;
+    return 0;
+}
+
 int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee) {
     CCTypeEntry* entry = NULL;
     char* method_copy = NULL;
@@ -632,6 +672,63 @@ static int cc__parse_ident_call_1_reg(const char* src,
     return 1;
 }
 
+/* Parse one integer literal (decimal or 0x-hex, optional u/l suffixes) from
+ * src[*io_pos..n), skipping leading ws.  Returns 1 and advances on success. */
+static int cc__parse_uint_reg(const char* src, size_t n, size_t* io_pos,
+                              unsigned long long* out) {
+    size_t p = cc__skip_ws_reg(src, n, *io_pos);
+    unsigned long long v = 0;
+    int any = 0;
+    if (p >= n) return 0;
+    if (p + 1 < n && src[p] == '0' && (src[p + 1] == 'x' || src[p + 1] == 'X')) {
+        p += 2;
+        while (p < n && isxdigit((unsigned char)src[p])) {
+            char c = src[p];
+            unsigned d = (c <= '9') ? (unsigned)(c - '0')
+                        : (unsigned)((c | 0x20) - 'a' + 10);
+            v = v * 16 + d;
+            p++;
+            any = 1;
+        }
+    } else {
+        while (p < n && isdigit((unsigned char)src[p])) {
+            v = v * 10 + (unsigned long long)(src[p] - '0');
+            p++;
+            any = 1;
+        }
+    }
+    if (!any) return 0;
+    while (p < n && (src[p] == 'u' || src[p] == 'U' || src[p] == 'l' || src[p] == 'L')) p++;
+    *io_pos = p;
+    *out = v;
+    return 1;
+}
+
+/* Parse `cc_type_niche(size, align, offset, width, sentinel)` at *io_pos. */
+static int cc__parse_niche_call(const char* src, size_t n, size_t* io_pos,
+                                unsigned long long out[5]) {
+    size_t p = cc__skip_ws_reg(src, n, *io_pos);
+    size_t lpar = 0, rpar = 0;
+    if (!cc__match_kw_reg(src, n, p, "cc_type_niche")) return 0;
+    p += strlen("cc_type_niche");
+    p = cc__skip_ws_reg(src, n, p);
+    if (p >= n || src[p] != '(') return 0;
+    lpar = p;
+    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
+    p = lpar + 1;
+    for (int a = 0; a < 5; a++) {
+        if (!cc__parse_uint_reg(src, rpar, &p, &out[a])) return 0;
+        p = cc__skip_ws_reg(src, rpar, p);
+        if (a < 4) {
+            if (p >= rpar || src[p] != ',') return 0;
+            p++;
+        }
+    }
+    if (p != rpar) return 0;
+    *io_pos = rpar + 1;
+    return 1;
+}
+
 static int cc__record_map_decl_ufcs(CCSymbolTable* t, const char* map_name) {
     static const char* methods[] = {
         "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy", "len", "cap"
@@ -805,6 +902,25 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             }
             if (!cc__parse_helper_call_1(src, obj_r, &p, "cc_type_destroy_call", destroy_callee, sizeof(destroy_callee))) return -1;
             if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
+            continue;
+        }
+        if (cc__match_kw_reg(src, obj_r, p, "niche")) {
+            unsigned long long args[5];
+            p += strlen("niche");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p = cc__skip_ws_reg(src, obj_r, p + 1);
+            if (!cc__parse_niche_call(src, obj_r, &p, args)) {
+                fprintf(stderr, "%s: error: malformed .niche = cc_type_niche(...) for '%s'\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
+            if (cc_symbols_set_type_niche(t, type_name, (unsigned)args[0], (unsigned)args[1],
+                                          (unsigned)args[2], (unsigned)args[3], args[4]) != 0) {
+                fprintf(stderr, "%s: error: invalid niche descriptor for '%s'\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
             continue;
         }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs")) {
