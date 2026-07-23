@@ -291,16 +291,36 @@ discriminant lives in invalid representations donated by the arms, not
 in a tag field. Packing is part of v1 precisely because it forces the
 surface to be layout-agnostic from day one (§2).
 
-**Mechanism (multi-word niches).** An arm with unusable encodings
-donates them. Example — packed `RedisValue` in 24 bytes, tag word gone:
+**Mechanism (niche packing).** The discriminant lives in a bit pattern
+that one arm's type can never hold. Niches come from two sources:
+
+- **Inferred** (compiler knows the invalid representations): a raw
+  pointer arm donates the null pattern and its low alignment bits; a
+  `void` arm carries no payload and needs none.
+- **Declared** (the type states its own invalid representations): a type
+  registers a *niche descriptor* — an (offset, width, sentinel-value)
+  the type guarantees a valid instance never exhibits — through the
+  `cc_type_register` comptime hook, the registry the checker already
+  consults. The packing engine reads it there.
+
+A type's first word is **not** assumed to be a pointer: `CCString` is
+SSO (its first word holds inline bytes or a pointer), so no sentinel
+over word 0 is sound. `CCString` instead **declares** a niche in its
+`cap` field — it already reserves `len == UINT32_MAX` as the poison
+sentinel, and reserving a `cap` sentinel for "these bytes are a
+niche-packed non-string" is the same kind of reservation.
+
+Example — packed `RedisValue` in **16 bytes** (`sizeof(CCString)`), tag
+word gone:
 
 ```
-word 0 == valid 8-aligned ptr  → kind=str, words 0..2 are the CCString
-word 0 == 0x1 (impossible ptr) → kind=num, word 1 holds the FULL int64
+cap field != sentinel → kind=str, all 16 bytes are the CCString
+cap field == sentinel → kind=num, bytes 0..7 hold the FULL int64
 ```
 
-No bit theft from payloads: `num` keeps all 64 bits. Pointer-bearing
-arms (strings, slices, boxed types) almost always donate a niche.
+No bit theft from payloads: `num` keeps all 64 bits, `str` keeps all 16
+bytes. A variant packs only if the compiler can prove a lossless niche
+from inferred or declared sources; otherwise it refuses (below).
 
 **Rules:**
 
