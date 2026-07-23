@@ -142,10 +142,13 @@ enforces that every projection is *protected*: legal only when
   partner's / target's type, same license and inference as case labels;
   `RedisValueKind k = .num;` works by the same rule. The lowered
   `Name_arm` spelling remains valid for context-free/interop uses), or
-- it carries a **`!>` handler**, which runs iff the arm is not active:
+- it carries a **`!>` handler** (diverges) or a **`?>` fallback**
+  (substitutes a value of the arm's type) — either suffix protects the
+  projection; both run iff the arm is not active:
 
 ```c
-int64_t n = cell->num !> {                 /* not a num — the "else"     */
+int64_t port = cell->num ?> 6379;          /* fallback value form        */
+int64_t n = cell->num !> {                 /* handler form — diverges    */
     int64_t p = cell->str.to_i64()         /* rides as a suffix handler  */
                  !> { return cc_err(...); };
     ...
