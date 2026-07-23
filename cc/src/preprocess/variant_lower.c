@@ -1970,6 +1970,10 @@ static int cc__va_step_bare_designators(const char* s, size_t n, const char* pat
                         pc == '?' || pc == ':') break;
                     if (pc == '&' && t > pa + 1 && s[t - 2] == '&') break;
                     if (pc == '|' && t > pa + 1 && s[t - 2] == '|') break;
+                    /* '->' is a member accessor, not an operator boundary:
+                       keep walking so `p->kind` is captured whole (a bare '>'
+                       comparison still terminates the partner). */
+                    if (pc == '>' && t > pa + 1 && s[t - 2] == '-') { t--; continue; }
                     if (pc == '=' || pc == '<' || pc == '>' || pc == '!') break;
                     (void)par2; (void)brk2;
                     t--;
