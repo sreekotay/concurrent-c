@@ -136,8 +136,12 @@ Arm access is member-spelled — `v.num`, `cell->str` — and the checker
 enforces that every projection is *protected*: legal only when
 
 - it is **dominated by a kind check** the checker can see (v1 scope:
-  an enclosing `case Name_arm:` of a `switch (v.kind)`, or a directly
-  enclosing `if (v.kind == Name_arm)` in the same block), or
+  an enclosing case of a variant switch, or a directly enclosing
+  `if (v.kind == .arm)` in the same block — RATIFIED: a bare designator
+  in expression position is a C syntax hole, resolved by the comparison
+  partner's / target's type, same license and inference as case labels;
+  `RedisValueKind k = .num;` works by the same rule. The lowered
+  `Name_arm` spelling remains valid for context-free/interop uses), or
 - it carries a **`!>` handler**, which runs iff the arm is not active:
 
 ```c
