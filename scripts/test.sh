@@ -56,6 +56,14 @@ if [ -x "./cc/bin/ccc" ]; then
     exit 1
   fi
 
+  # @variant lowering shape (spec/draft_variants.md §3): the lowered C is a
+  # normative ABI surface; assert the emitted enum/struct/tag/projection
+  # shapes on the smoke sources (the .ccs harness pins only semantics).
+  if ! sh scripts/test_variant_lowering.sh; then
+    echo "[test] variant lowering shape selftest FAILED"
+    exit 1
+  fi
+
   # tcc patch-apply stale-state auto-reset (#116): current tree is a no-op,
   # a stale (old-patch) tree auto-resets and applies, a pristine tree
   # applies.  Needs the tcc submodule; restores the tree on exit.

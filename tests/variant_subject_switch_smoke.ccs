@@ -1,0 +1,50 @@
+/* Subject-switch + designator case labels (spec/draft_variants.md §5b,
+ * RATIFIED): `switch (v)` on a variant VALUE and `switch (p)` on a variant
+ * POINTER are C constraint violations trapped and rewritten to a switch on
+ * the tag; `case .arm:` labels lower to tag constants and each case
+ * dominates its arm's projections.  Pointer subjects need nothing special:
+ * `cell->num += delta;` inside the dominating case is plain C, mutation in
+ * place. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+static int64_t bump(RedisValue* cell, int64_t delta) {
+    switch (cell) {                       /* pointer subject */
+        case .num:
+            cell->num += delta;           /* in-place mutation, dominated */
+            return cell->num;
+        case .txt:
+            return -1;
+    }
+    return -2;
+}
+
+int main(void) {
+    RedisValue v = { .num = 40 };
+    if (bump(&v, 2) != 42) return 1;
+    if (v.u.num != 42) return 2;
+
+    RedisValue s = { .txt = "abc" };
+    if (bump(&s, 1) != -1) return 3;
+
+    int hit = 0;
+    switch (s) {                          /* value subject */
+        case .txt:
+            hit = (int)strlen(s.txt);
+            break;
+        case .num:
+            hit = -1;
+            break;
+    }
+    if (hit != 3) return 4;
+
+    printf("ok\n");
+    return 0;
+}

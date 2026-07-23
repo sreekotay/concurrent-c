@@ -1,0 +1,19 @@
+/* Fail oracle: a wrong-type payload in a designated init surfaces as a
+ * type error with the USER's file:line coordinates (the tag auto-fill
+ * rewrite is line-neutral) — not a cryptic reparse error. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+typedef struct Blob { char* p; int len; } Blob;
+typedef struct Other { float f; } Other;
+
+@variant V {
+    blob: Blob;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .blob = (Other){ 1.0f } };
+    (void)v;
+    return 0;
+}

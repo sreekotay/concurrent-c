@@ -1,0 +1,15 @@
+/* Fail oracle: unknown arm as a bare designator in comparison position —
+ * lists the valid arms with a did-you-mean hint. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    str: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .num = 3 };
+    if (v.kind == .nim) return 1;
+    return 0;
+}

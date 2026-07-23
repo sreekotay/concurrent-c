@@ -1,0 +1,134 @@
+/* Composed real-world-ish smoke mirroring spec/draft_variants.md §10
+ * (db_incrby): a tiny keyed store whose cells are `@variant` values, INCR
+ * with the `?> ({ ... !> ... })` parse-fallback shape, checked add, and the
+ * one-line string->int transition (old arm dropped).  GET renders `.num`
+ * cells at the read boundary. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Text { char* p; size_t len; } Text;
+
+static int g_text_drops = 0;
+
+static Text text_from(const char* s) {
+    Text t;
+    t.len = strlen(s);
+    t.p = (char*)malloc(t.len + 1);
+    memcpy(t.p, s, t.len + 1);
+    return t;
+}
+
+static void text_destroy(Text* t) {
+    if (!t) return;
+    if (t->p) {
+        g_text_drops++;
+        free(t->p);
+        t->p = NULL;
+        t->len = 0;
+    }
+}
+
+@comptime {
+    (void)cc_type_register("Text", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("text_destroy"),
+    });
+}
+
+@variant RedisValue {
+    str: Text;
+    num: int64_t;
+};
+
+typedef struct DbCell {
+    int used;
+    char key[16];
+    RedisValue val;
+} DbCell;
+
+static DbCell g_db[8];
+
+static RedisValue* db_lookup(const char* key) {
+    for (int i = 0; i < 8; i++) {
+        if (g_db[i].used && strcmp(g_db[i].key, key) == 0) return &g_db[i].val;
+    }
+    return NULL;
+}
+
+static void db_set(const char* key, RedisValue v) {
+    for (int i = 0; i < 8; i++) {
+        if (!g_db[i].used) {
+            g_db[i].used = 1;
+            snprintf(g_db[i].key, sizeof(g_db[i].key), "%s", key);
+            g_db[i].val = v;
+            return;
+        }
+    }
+}
+
+static int64_t !>(CCError) db_incrby(const char* key, int64_t delta) {
+    @errhandler(CCError e) { return cc_err(e); }
+    RedisValue* cell = db_lookup(key);
+    int64_t value = delta;
+    if (cell) {
+        int64_t base = cell->num ?> ({          /* fallback: parse str arm */
+            char[:] sl = cc_slice_from_buffer(cell->str.p, cell->str.len);
+            int64_t parsed = sl.to_i64()
+                !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
+                     "ERR value is not an integer or out of range")); };
+            parsed;
+        });
+        value = cc_add_i64_checked(base, delta)
+            !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
+                 "ERR increment or decrement would overflow")); };
+        *cell = (RedisValue){ .num = value };   /* str arm dropped here */
+    } else {
+        db_set(key, (RedisValue){ .num = value });
+    }
+    return cc_ok(value);
+}
+
+static int64_t db_get_num(const char* key) {
+    RedisValue* cell = db_lookup(key);
+    if (!cell) return -1;
+    switch (cell) {
+        case .num: return cell->num;
+        case .str: return -2;
+    }
+    return -3;
+}
+
+int main(void) {
+    /* fresh key: installs an int cell */
+    int64_t !>(CCError) r1 = db_incrby("counter", 5);
+    if (cc_is_err(r1) || cc_value(r1) != 5) return 1;
+
+    /* hot path: existing int cell, no parsing, no drop */
+    int64_t !>(CCError) r2 = db_incrby("counter", 37);
+    if (cc_is_err(r2) || cc_value(r2) != 42) return 2;
+    if (g_text_drops != 0) return 3;
+
+    /* string cell holding decimal text: parse -> add -> transition */
+    db_set("legacy", (RedisValue){ .str = text_from("100") });
+    int64_t !>(CCError) r3 = db_incrby("legacy", 1);
+    if (cc_is_err(r3) || cc_value(r3) != 101) return 4;
+    if (g_text_drops != 1) { printf("text drops = %d\n", g_text_drops); return 5; }
+    if (db_get_num("legacy") != 101) return 6;
+
+    /* string cell with non-numeric text errors out and keeps the cell */
+    db_set("junk", (RedisValue){ .str = text_from("abc") });
+    int64_t !>(CCError) r4 = db_incrby("junk", 1);
+    if (!cc_is_err(r4)) return 7;
+    if (db_get_num("junk") != -2) return 8;
+
+    /* overflow guard */
+    db_set("big", (RedisValue){ .num = INT64_MAX });
+    int64_t !>(CCError) r5 = db_incrby("big", 1);
+    if (!cc_is_err(r5)) return 9;
+
+    printf("ok\n");
+    return 0;
+}

@@ -1,0 +1,1 @@
+variant_unknown_arm_comparison_fail.ccs:13:19: error: variant 'V' has no arm '.nim' (arms: str, num) — did you mean '.num'?

@@ -1,0 +1,1 @@
+variant_unknown_arm_init_fail.ccs:12:13: error: variant 'V' has no arm '.nun' (arms: str, num) — did you mean '.num'?

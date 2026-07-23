@@ -1,0 +1,1 @@
+variant_braced_assign_nonvariant_fail.ccs:16:5: error: braced assignment 'lhs = { ... };' is only defined for @variant types — 'p' does not resolve to a variant and '.x' is not an arm of any declared variant (for a plain struct use a compound literal: 'lhs = (T){ ... };')

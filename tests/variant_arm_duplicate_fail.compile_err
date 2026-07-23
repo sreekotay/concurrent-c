@@ -1,0 +1,1 @@
+variant_arm_duplicate_fail.ccs:7:5: error: @variant 'V': duplicate arm name 'num' (first declared at line 6)

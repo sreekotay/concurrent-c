@@ -1,0 +1,18 @@
+/* Fail oracle (non-variant sanity): a designator case label under a switch
+ * whose subject is not a variant gets a clear diagnostic, not a misparse. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+int main(void) {
+    int x = 1;
+    switch (x) {
+        case .a: return 1;
+        default: break;
+    }
+    return 0;
+}

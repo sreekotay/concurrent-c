@@ -1,0 +1,16 @@
+/* Fail oracle: `.kind` is a READ-ONLY pseudo-member of the portable
+ * surface — assigning to it is a compile error everywhere; tags change
+ * only via construction/brace-assignment transitions. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+int main(void) {
+    V v = { .a = 1 };
+    v.kind = V_b;
+    return 0;
+}

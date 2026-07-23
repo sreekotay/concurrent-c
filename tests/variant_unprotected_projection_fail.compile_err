@@ -1,0 +1,2 @@
+variant_unprotected_projection_fail.ccs:14:18: error: projection of arm 'num' is not dominated by a kind check and has no !> handler
+note: protect it: 'if (v.kind == V_num) { ... }' or 'case .num:' in a switch on 'v', or handle the other arms: 'v.num !> { ...diverge... }' / 'v.num ?> fallback'

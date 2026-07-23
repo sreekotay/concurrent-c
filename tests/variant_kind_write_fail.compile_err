@@ -1,0 +1,1 @@
+variant_kind_write_fail.ccs:14:6: error: variant tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('v = (V){ .arm = ... };')

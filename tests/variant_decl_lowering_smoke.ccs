@@ -1,0 +1,55 @@
+/* @variant declaration + lowering smoke (spec/draft_variants.md §3-§4).
+ *
+ * Pins:
+ *  - `@variant Name { arm: Type; ... };` lowers to the schema one-of shape
+ *    (enum `Name_<arm>` + struct { NameKind kind; union {...} u; }) — the
+ *    shape itself is asserted by scripts/test_variants_lowering.sh on the
+ *    emitted C; here we pin the observable semantics;
+ *  - designated-init construction auto-fills the tag (decl init and
+ *    compound literal);
+ *  - `.kind` reads as a plain tag on the unpacked layout;
+ *  - raw C-interop spellings stay valid: `{ .kind = ..., .u.num = ... }`
+ *    construction, `v.u.num` access, `switch (v.kind)` with `Name_arm`
+ *    labels (exhaustiveness checked there too).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 42 };
+    if (v.kind != RedisValue_num) return 1;
+    if (v.u.num != 42) return 2;            /* raw union access: interop */
+
+    RedisValue s = { .txt = "hello" };
+    if (s.kind != RedisValue_txt) return 3;
+
+    v = (RedisValue){ .num = 43 };          /* compound-literal transition */
+    if (v.u.num != 43) return 4;
+
+    /* raw construction stays valid */
+    RedisValue r = { .kind = RedisValue_num, .u.num = 7 };
+    if (r.kind != RedisValue_num || r.u.num != 7) return 5;
+
+    /* C-interop switch spelling: switch (v.kind) + tag labels, checked
+     * for exhaustiveness like the designator form. */
+    switch (s.kind) {
+        case RedisValue_txt:
+            if (strcmp(s.txt, "hello") != 0) return 6;
+            break;
+        case RedisValue_num:
+            return 7;
+    }
+
+    RedisValueKind k = v.kind;              /* kind read into kind-typed var */
+    if (k != RedisValue_num) return 8;
+
+    printf("ok\n");
+    return 0;
+}

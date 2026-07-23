@@ -1,0 +1,18 @@
+/* Fail oracle (non-variant sanity): braced assignment to a non-variant LHS
+ * gets a clear diagnostic pointing at the compound-literal spelling — not
+ * a silent misparse. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    a: int;
+    b: int;
+};
+
+typedef struct Pt { int x; int y; } Pt;
+
+int main(void) {
+    Pt p = { .x = 1, .y = 2 };
+    p = { .x = 3 };
+    return p.x;
+}

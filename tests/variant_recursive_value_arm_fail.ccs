@@ -1,0 +1,11 @@
+/* Fail oracle: recursive arms are allowed through pointers/slices only
+ * (spec/draft_variants.md §3) — a by-value self-reference is rejected. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant Node {
+    leaf: int64_t;
+    next: Node;
+};
+
+int main(void) { return 0; }

@@ -1,0 +1,37 @@
+/* Projection with `?>` fallback (spec/draft_variants.md §5a, §11.4):
+ * `v.arm ?> fallback` SUBSTITUTES when the arm is not active.  Both plain
+ * value fallbacks and statement-expression fallbacks `?> ({ ... })` work,
+ * on value and pointer receivers. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 42 };
+    RedisValue s = { .txt = "7" };
+
+    int64_t a = v.num ?> -1;                     /* active: projected */
+    if (a != 42) return 1;
+
+    int64_t b = s.num ?> -1;                     /* inactive: substituted */
+    if (b != -1) return 2;
+
+    /* statement-expression fallback (the db_incrby shape) */
+    int64_t c = s.num ?> ({ int64_t z = 6; z + 1; });
+    if (c != 7) return 3;
+
+    /* pointer receiver */
+    RedisValue* p = &s;
+    int64_t d = p->num ?> ({ int64_t z = -9; z; });
+    if (d != -9) return 4;
+    const char* t = p->txt ?> "fallback";
+    if (t[0] != '7') return 5;
+
+    printf("ok\n");
+    return 0;
+}
