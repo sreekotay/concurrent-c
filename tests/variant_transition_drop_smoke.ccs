@@ -45,7 +45,12 @@ int main(void) {
     /* txt -> num transition drops the payload exactly once */
     Cell c = { .txt = payload_from("abc") };
     c = { .num = 7 };
-    if (c.kind != Cell_num || c.u.num != 7) return 1;
+    if (c.kind != Cell_num) return 1;
+    if (c.kind == .num) {
+        if (c.num != 7) return 1;
+    } else {
+        return 1;
+    }
     if (g_drops != 1) { printf("drops after transition = %d\n", g_drops); return 2; }
 
     /* num -> num transition: nothing to drop */

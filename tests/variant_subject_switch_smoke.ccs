@@ -29,7 +29,11 @@ static int64_t bump(RedisValue* cell, int64_t delta) {
 int main(void) {
     RedisValue v = { .num = 40 };
     if (bump(&v, 2) != 42) return 1;
-    if (v.u.num != 42) return 2;
+    if (v.kind == .num) {
+        if (v.num != 42) return 2;
+    } else {
+        return 2;
+    }
 
     RedisValue s = { .txt = "abc" };
     if (bump(&s, 1) != -1) return 3;

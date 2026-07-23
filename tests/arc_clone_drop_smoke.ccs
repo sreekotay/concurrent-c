@@ -1,0 +1,32 @@
+/* CCArc: clone + last drop frees the payload exactly once. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_drops;
+
+static void drop_buf(void* p) {
+    g_drops++;
+    free(p);
+}
+
+int main(void) {
+    g_drops = 0;
+    char* p = (char*)malloc(16);
+    if (!p) return 1;
+    memset(p, 'a', 16);
+
+    CCArc a = cc_arc_from_ptr(p, drop_buf);
+    if (cc_arc_is_null(a)) return 2;
+    CCArc b = cc_arc_clone(a);
+    if (cc_arc_get(a) != cc_arc_get(b)) return 3;
+
+    cc_arc_drop(&a);
+    if (g_drops != 0) return 4;
+    cc_arc_drop(&b);
+    if (g_drops != 1) return 5;
+
+    printf("arc_clone_drop_smoke: ok\n");
+    return 0;
+}

@@ -2786,17 +2786,15 @@ static int cc__va_step_defers(const char* s, size_t n, const char* path, CCVaEdi
 /* Uses step: packed raw-access guard (spec §11)                         */
 /* ==================================================================== */
 
-/* A @variant(packed) has no exposed `.u` union and no writable `.kind` tag.
- * Diagnose user-written raw `.u` access on packed variants here, BEFORE the
- * projection step lowers protected arm reads to `.u.arm` (so the two `.u`
- * spellings never collide).  `.kind` writes are diagnosed generically by the
- * projection step (packed and unpacked alike). */
+/* Ban user-written raw `.u` on every @variant (packed and unpacked) BEFORE
+ * the projection step lowers protected arm reads to `.u.arm` (so compiler-
+ * generated `.u` never collides with this diagnosis).  Schema one-of types
+ * are not in g_va and stay untouched.  `.kind` writes are diagnosed by the
+ * projection step. */
 static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* path, CCVaEdits* ed) {
     (void)ed;
     int nerr = 0;
-    int any_packed = 0;
-    for (int v = 0; v < g_va_n; v++) if (cc__va_is_packed(v)) any_packed = 1;
-    if (!any_packed) return 0;
+    if (g_va_n <= 0) return 0;
 
     CCInertScan sc;
     cc_inert_scan_init(&sc, NULL);
@@ -2823,10 +2821,19 @@ static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* pa
         if (!cc__va_member_base(s, acc, &ba, &ra, &rb, &hops) || hops != 0) { i = mem_b; continue; }
         int form = 0;
         int vi = cc__va_resolve_root(s, n, ba, s + ra, rb - ra, &form);
-        if (vi < 0 || form == CC_VA_FORM_KIND || !cc__va_is_packed(vi)) { i = mem_b; continue; }
-        cc__va_err(s, n, path, acc,
-                   "variant '%s' is @variant(packed): it has no exposed '.u' union — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') instead of reaching into the raw representation",
-                   g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
+        if (vi < 0 || form == CC_VA_FORM_KIND) { i = mem_b; continue; }
+        /* Compiler-emitted drop/accessors use `__cc_*` temps (`__cc_vp->u.arm`);
+         * those are not user raw reach-in. */
+        if (rb > ra + 4 && strncmp(s + ra, "__cc_", 5) == 0) { i = mem_b; continue; }
+        if (cc__va_is_packed(vi)) {
+            cc__va_err(s, n, path, acc,
+                       "variant '%s' is @variant(packed): it has no exposed '.u' union — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') instead of reaching into the raw representation",
+                       g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
+        } else {
+            cc__va_err(s, n, path, acc,
+                       "cannot reach into variant '%s' via '.u' — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') or use '@unsafe'",
+                       g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
+        }
         nerr++;
         i = mem_b;
     }

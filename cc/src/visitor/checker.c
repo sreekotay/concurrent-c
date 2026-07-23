@@ -31,8 +31,7 @@ typedef struct {
     int is_arena_ptr;          /* pointer from cc_arena_alloc* */
     int is_arena_slice_view;   /* borrow/view into an arena epoch */
     const char* arena_name;    /* borrowed ident of owning arena (or pointer to it) */
-    /* PAPER-OVER for flat function scopes: see TODO on cc__scope_add.
-     * Drop once BLOCK pushes/pops a real CCScope. */
+    /* Enclosing-block end line: nursery pin_end + live-borrow line filter. */
     int borrow_end_line;
     int epoch_pinned;          /* arena: spawn captured a borrow from this arena */
     int pin_end_line;          /* arena: epoch-end forbidden through this line */
@@ -84,16 +83,9 @@ static CCSliceVar* cc__scopes_lookup(CCScope* scopes, int n, const char* name) {
     return NULL;
 }
 
-/* TODO(checker-block-scopes): cc__scope_add dedups by name within the
- * current CCScope. BLOCK nodes do not push/pop scopes today, so a function
- * is one flat scope — distinct same-named locals in sibling blocks collapse
- * into one CCSliceVar (twitter grammar TU false-positive class: later
- * arena reset saw an earlier sibling's borrow as still live).
- *
- * borrow_end_line papers over the live-borrow symptom only. Real fix:
- * push a fresh CCScope on CC_STUB_BLOCK enter and pop on exit (like
- * closures already do), then retire borrow_end_line. Regression:
- * tests/arena_reset_sibling_same_name_smoke.ccs. */
+/* Name dedup within one CCScope. BLOCK / closure walkers push a fresh
+ * scope so sibling blocks with the same local names stay distinct.
+ * borrow_end_line remains as pin_end scaffolding (nursery epoch pin). */
 static CCSliceVar* cc__scope_add(CCScope* sc, const char* name) {
     if (!sc || !name) return NULL;
     CCSliceVar* ex = cc__scope_find(sc, name);
@@ -473,6 +465,66 @@ static int cc__call_is_buffer_deleter(const char* name) {
     return 0;
 }
 
+/* Homemade shared last-drop folklore (CVE-2026-10653): `int ref` / `--` + free.
+ * Prefer CCArc (cc_arc_clone / cc_arc_drop). Redis-style drain/`inflight` is fine. */
+enum { CC_TOK_DEC = 0x80 }; /* mirrors third_party/tcc/tcc.h TOK_DEC */
+
+static int cc__is_refcount_field_name(const char* name) {
+    if (!name) return 0;
+    if (strcmp(name, "ref") == 0) return 1;
+    if (strcmp(name, "ref_count") == 0) return 1;
+    if (strcmp(name, "refcount") == 0) return 1;
+    return 0;
+}
+
+static int cc__subtree_has_refcount_member(const StubNodeView* nodes,
+                                           const ChildList* kids,
+                                           int idx) {
+    if (!nodes || !kids || idx < 0) return 0;
+    int stack[256];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_MEMBER && cc__is_refcount_field_name(n->aux_s1)) return 1;
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack) / sizeof(stack[0])); i++)
+            stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
+static int cc__subtree_has_refcount_dec(const StubNodeView* nodes,
+                                        const ChildList* kids,
+                                        int idx) {
+    if (!nodes || !kids || idx < 0) return 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_UNARY && n->aux1 == CC_TOK_DEC &&
+            cc__subtree_has_refcount_member(nodes, kids, cur))
+            return 1;
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack) / sizeof(stack[0])); i++)
+            stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
+/* True if this node is a function/closure boundary (do not search above). */
+static int cc__is_fn_or_closure_boundary(const StubNodeView* n) {
+    if (!n) return 0;
+    if (n->kind == CC_STUB_CLOSURE) return 1;
+    if (n->kind == CC_STUB_DECL) return 1; /* groups fn declarator + body */
+    if (n->kind == CC_STUB_DECL_ITEM && n->aux_s1 && n->aux_s2 && strchr(n->aux_s2, '('))
+        return 1;
+    return 0;
+}
+
 static int cc__var_is_non_owning_arena_buffer(const CCSliceVar* v) {
     if (!v) return 0;
     if (v->is_arena_ptr) return 1;
@@ -566,8 +618,8 @@ static int cc__scopes_live_arena_borrow_at(CCScope* scopes, int scope_n, const c
             if (!v->is_slice || !v->is_arena_slice_view || v->moved) continue;
             if (!v->arena_name || strcmp(v->arena_name, arena_name) != 0) continue;
             if (v->decl_line > 0 && at_line < v->decl_line) continue;
-            /* Line-range filter is the flat-scope paper-over; remove with
-             * block-level scopes (TODO on cc__scope_add). */
+            /* Defense in depth: block scopes pop dead borrows; line filter
+             * still ignores stale entries if a name was re-bound oddly. */
             if (v->borrow_end_line > 0 && at_line > v->borrow_end_line) continue;
             return 1;
         }
@@ -808,6 +860,28 @@ static int cc__walk_call(int idx,
         for (int i = 0; i < cl->len; i++) {
             if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
         }
+        /* Homemade Arc: `--x.ref` / `--x.ref_count` plus free/cfree in one body.
+         * Walk ancestors (not just DECL_ITEM — fn bodies are siblings of the
+         * declarator under DECL) until a function/closure boundary. */
+        if (strcmp(n->aux_s1, "free") == 0 || strcmp(n->aux_s1, "cfree") == 0) {
+            int cur = n->parent;
+            while (cur >= 0) {
+                if (cc__subtree_has_refcount_dec(nodes, kids, cur)) {
+                    cc__emit_err_cat(ctx, n, CC_ERR_SLICE,
+                                     "homemade shared last-drop (refcount field '--' + free); use CCArc");
+                    fprintf(stderr,
+                            "  note: non-atomic int ref / last-drop races under concurrency "
+                            "(CVE-2026-10653 class)\n");
+                    fprintf(stderr,
+                            "  hint: cc_arc_from_ptr / cc_arc_clone / cc_arc_drop, or don't share "
+                            "(redis-style drain/join)\n");
+                    ctx->errors++;
+                    return -1;
+                }
+                if (cc__is_fn_or_closure_boundary(&nodes[cur])) break;
+                cur = nodes[cur].parent;
+            }
+        }
         {
             /* Arena UFCS free/destroy: allowed when not pinned (handled above). */
             const char* aname = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
@@ -1030,6 +1104,36 @@ static int cc__walk_call(int idx,
     return 0;
 }
 
+/* Precomputed per-node escape bits (set in cc_check_ast before walk). */
+static const unsigned char* g_cc_closure_escapes = NULL;
+static int g_cc_closure_escape_n = 0;
+
+static int cc__walk_block(int idx,
+                          const StubNodeView* nodes,
+                          const ChildList* kids,
+                          CCScope* scopes,
+                          int* io_scope_n,
+                          CCCheckerCtx* ctx) {
+    if (!io_scope_n || *io_scope_n >= 256) {
+        cc__emit_err_cat(ctx, &nodes[idx], CC_ERR_SLICE, "scope nesting too deep");
+        ctx->errors++;
+        return -1;
+    }
+    CCScope block_scope = {0};
+    scopes[(*io_scope_n)++] = block_scope;
+    const ChildList* cl = &kids[idx];
+    int rc = 0;
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    cc__scope_free(&scopes[(*io_scope_n) - 1]);
+    (*io_scope_n)--;
+    return rc;
+}
+
 static int cc__walk_closure(int idx,
                             const StubNodeView* nodes,
                             const ChildList* kids,
@@ -1037,6 +1141,11 @@ static int cc__walk_closure(int idx,
                             int* io_scope_n,
                             CCCheckerCtx* ctx) {
     /* Walk closure body in a nested scope, collecting captures of move-only slices. */
+    if (!io_scope_n || *io_scope_n >= 256) {
+        cc__emit_err_cat(ctx, &nodes[idx], CC_ERR_SLICE, "scope nesting too deep");
+        ctx->errors++;
+        return -1;
+    }
     CCScope closure_scope = {0};
     scopes[(*io_scope_n)++] = closure_scope;
 
@@ -1091,25 +1200,31 @@ static int cc__walk_closure(int idx,
     }
 
     const ChildList* cl = &kids[idx];
+    int walk_rc = 0;
     for (int i = 0; i < cl->len; i++) {
         int ch = cl->child[i];
-        if (cc__walk(ch, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        if (cc__walk(ch, nodes, kids, scopes, io_scope_n, ctx) != 0) {
+            walk_rc = -1;
+            break;
+        }
     }
 
     /* Apply implicit move for captured move-only slices (names used but not declared locally). */
-    for (int i = 0; i < used_n; i++) {
-        const char* nm = used_names[i];
-        if (!nm) continue;
-        CCSliceVar* local = cc__scope_find(&scopes[(*io_scope_n) - 1], nm);
-        if (local) continue; /* local to closure */
-        CCSliceVar* outer = cc__scopes_lookup(scopes, (*io_scope_n) - 1, nm);
-        if (outer && outer->is_slice && outer->move_only) outer->moved = 1;
+    if (walk_rc == 0) {
+        for (int i = 0; i < used_n; i++) {
+            const char* nm = used_names[i];
+            if (!nm) continue;
+            CCSliceVar* local = cc__scope_find(&scopes[(*io_scope_n) - 1], nm);
+            if (local) continue; /* local to closure */
+            CCSliceVar* outer = cc__scopes_lookup(scopes, (*io_scope_n) - 1, nm);
+            if (outer && outer->is_slice && outer->move_only) outer->moved = 1;
+        }
     }
 
     /* Pop closure scope */
     cc__scope_free(&scopes[(*io_scope_n) - 1]);
     (*io_scope_n)--;
-    return 0;
+    return walk_rc;
 }
 
 static int cc__walk_assign(int idx,
@@ -1386,14 +1501,18 @@ static int cc__walk(int idx,
 
     if (n->kind == CC_STUB_CLOSURE) {
         if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
-        if (cc__closure_is_under_return(nodes, idx)) {
-            if (cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
-                cc__emit_err_cat(ctx, n, CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
-                fprintf(stderr, "  note: the closure outlives the slice's stack frame\n");
-                fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
-                ctx->errors++;
-                return -1;
-            }
+        /* Escaping closures: check while outer scopes still hold the captures
+         * (block pop would drop them before the post-walk pass). */
+        int escapes = cc__closure_is_under_return(nodes, idx);
+        if (!escapes && g_cc_closure_escapes && idx >= 0 && idx < g_cc_closure_escape_n)
+            escapes = g_cc_closure_escapes[idx] != 0;
+        if (escapes &&
+            cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
+            cc__emit_err_cat(ctx, n, CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
+            fprintf(stderr, "  note: the closure outlives the slice's stack frame\n");
+            fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
+            ctx->errors++;
+            return -1;
         }
         return 0;
     }
@@ -1406,10 +1525,11 @@ static int cc__walk(int idx,
         return cc__walk_return(idx, nodes, kids, scopes, io_scope_n, ctx);
     }
 
-    /* default: recurse.
-     * TODO(checker-block-scopes): CC_STUB_BLOCK should push/pop a CCScope
-     * here (mirror cc__walk_closure). Until then, function scope stays flat
-     * and cc__scope_add name-dedup merges sibling-block locals. */
+    if (n->kind == CC_STUB_BLOCK) {
+        return cc__walk_block(idx, nodes, kids, scopes, io_scope_n, ctx);
+    }
+
+    /* default: recurse */
     const ChildList* cl = &kids[idx];
     for (int i = 0; i < cl->len; i++) {
         if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
@@ -1805,26 +1925,17 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     memset(scopes, 0, sizeof(scopes));
     scopes[scope_n++] = (CCScope){0};
 
+    g_cc_closure_escapes = closure_escapes;
+    g_cc_closure_escape_n = n;
     for (int i = 0; i < n; i++) {
         if (nodes[i].parent != -1) continue;
         if (cc__walk(i, nodes, kids, scopes, &scope_n, ctx) != 0) break;
     }
+    g_cc_closure_escapes = NULL;
+    g_cc_closure_escape_n = 0;
 
-    /* Post-check: stack-slice capture is illegal if the closure escapes (return/store/pass). */
-    if (closure_escapes) {
-        for (int i = 0; i < n; i++) {
-            if (nodes[i].kind != CC_STUB_CLOSURE) continue;
-            if (!closure_escapes[i]) continue;
-            /* Nursery-spawn does not make escaping safe; once it escapes, forbid stack-slice capture. */
-            if (cc__closure_captures_stack_slice_view(i, nodes, kids, scopes, scope_n)) {
-                cc__emit_err_cat(ctx, &nodes[i], CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
-                fprintf(stderr, "  note: closure escapes via spawn/return/assignment\n");
-                fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
-                ctx->errors++;
-                break;
-            }
-        }
-    }
+    /* Post-check retained as belt-and-suspenders; walk-time escape check is
+     * primary now that BLOCK scopes pop locals before this runs. */
 
     /* Post-check: nursery spawn that captures an arena borrow pins that arena's
        epoch until the nursery's enclosing block ends — epoch-end ops in that

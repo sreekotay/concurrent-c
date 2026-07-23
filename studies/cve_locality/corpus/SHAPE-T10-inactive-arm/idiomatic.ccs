@@ -1,0 +1,27 @@
+/*
+ * SHAPE-T10 — inactive @variant arm.
+ *
+ * Ill-formed (see tests/variant_raw_u_inactive_fail.ccs,
+ * tests/variant_unprotected_projection_fail.ccs):
+ *   v.u.num;           // raw union
+ *   v.num;             // unprotected sugar projection
+ *
+ * Idiomatic: dominate the arm (kind / switch / !> / ?>).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 7 };
+    int64_t n = 0;
+    if (v.kind == .num) n = v.num;
+    printf("shape-t10-inactive-arm: prevented "
+           "(protected projection; raw .u banned)\n");
+    return (n == 7) ? 0 : 1;
+}

@@ -1,4 +1,4 @@
-/* Braced assignment (spec/draft_variants.md §4, RATIFIED): `lhs = { .arm =
+/* Braced assignment (spec/draft_variants.md §4): `lhs = { .arm =
  * expr };` is a C syntax hole (braces are init-only in C) trapped and
  * rewritten to a tagged compound literal; the LHS type resolves the arm.
  * Covered LHS shapes: local value, pointer deref, array element. */
@@ -18,16 +18,30 @@ static void set_via_ptr(RedisValue* cell) {
 int main(void) {
     RedisValue v = { .txt = "x" };
     v = { .num = 42 };                    /* value LHS */
-    if (v.kind != RedisValue_num || v.u.num != 42) return 1;
+    if (v.kind != RedisValue_num) return 1;
+    if (v.kind == .num) {
+        if (v.num != 42) return 1;
+    } else {
+        return 1;
+    }
 
     set_via_ptr(&v);                       /* *ptr LHS */
-    if (v.u.num != 5) return 2;
+    if (v.kind == .num) {
+        if (v.num != 5) return 2;
+    } else {
+        return 2;
+    }
 
     RedisValue cells[2];
     cells[0] = { .txt = "a" };             /* array-element LHS */
     cells[1] = { .num = 9 };
     if (cells[0].kind != RedisValue_txt) return 3;
-    if (cells[1].kind != RedisValue_num || cells[1].u.num != 9) return 4;
+    if (cells[1].kind != RedisValue_num) return 4;
+    if (cells[1].kind == .num) {
+        if (cells[1].num != 9) return 4;
+    } else {
+        return 4;
+    }
 
     printf("ok\n");
     return 0;

@@ -6,11 +6,11 @@ mark still_expressible entries that safe Rust also leaves open.
 
 | Verdict | Count | Entries |
 |---------|------:|---------|
-| prevented | 9 | CVE-2017-13245, CVE-2014-0160, CVE-2025-31115, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn |
-| mitigated | 1 | CVE-2026-10653 |
+| prevented | 11 | CVE-2017-13245, CVE-2014-0160, CVE-2025-31115, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, CVE-2026-10653, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn, SHAPE-T10-inactive-arm |
+| mitigated | 0 | — |
 | still_expressible | 1 | SHAPE-T8-adopt-wrong-deleter (`parity: rust_unsafe`) |
 | n/a | 0 | — |
-| **total** | **11** | |
+| **total** | **12** | |
 
 Of which still_expressible with `parity: rust_unsafe`: **1** (not a claim-A backlog item).
 
@@ -33,25 +33,25 @@ escapes (raw `free`, hand `memcpy`, `@unsafe`) go in Gap — same pattern as Rus
 | CVE-2020-12387 | join before drop | **prevented** (destroy/detach under pin) | — | untracked / `@unsafe` |
 | CVE-2025-31115 | owner-only free | **prevented** (owned-buffer-child-free-ban) | — | untracked `malloc`+`free` |
 | CVE-2013-4153 | Drop once | **prevented** (arena tree + child-free ban) | — | malloc tree without provenance |
-| CVE-2026-10653 | `Arc` or don’t share | **mitigated** (redis: closures+drain) | — | homemade `ref--` still compiles |
+| CVE-2026-10653 | `Arc` or don’t share | **prevented** (`CCArc` + homemade last-drop ban; redis drain idiom) | — | `@unsafe` / untracked `malloc` folklore |
 | SHAPE-T8-adopt-wrong-deleter | n/a (`unsafe` / `from_raw`) | **still_expressible** | `rust_unsafe` | deleter↔allocator trusted |
+| SHAPE-T10-inactive-arm | enum match / inactive ban | **prevented** (protected projection + raw `.u` ban) | — | `@unsafe`; schema wire `.u` |
 
-**Reading:** Both CC and Rust win by staying on their surface. **Prevented** = surface plus an enforceable rule (checker / schema). **Mitigated** = surface dissolves the bug class without yet making the C-shaped rewrite ill-formed. The remaining mitigated row is homemade shared last-drop (optional `Arc`); the only `still_expressible` entry is FFI wrong deleter — Rust parity.
+**Reading:** Both CC and Rust win by staying on their surface. **Prevented** = surface plus an enforceable rule (checker / schema). The only `still_expressible` entry is FFI wrong deleter — Rust parity.
 
 ## Language backlog
 
 | needs_language slug | From | Note |
 |---------------------|------|------|
-| (stdlib) atomic shared owner | CVE-2026-10653 | Optional; redis path is “don’t share” |
+| Full non-`Send` type lattice | T7 / shared mut | partial (pointer-alias + child-free ban + `CCArc`) |
 
 Shipped from this study (no longer backlog): `enforce-arena-provenance`,
 `channel-stable-borrow`, `pointer-alias-as-ref-capture`,
-`owned-buffer-child-free-ban`, destroy/detach under arena epoch pin.
+`owned-buffer-child-free-ban`, destroy/detach under arena epoch pin,
+`variant-raw-u-ban`, `atomic-shared-owner` (`CCArc`).
 
 ## Next on the Rust axis
 
 | Direction | Expected CC |
 |-----------|-------------|
-| `@variant` inactive arm (T10) | TBD when exercised (redis `@variant RedisValue` candidate) |
-| Full non-`Send` type lattice | partial (pointer-alias + child-free ban) |
-| Homemade refcount / typed `Arc` | would strengthen CVE-2026-10653 toward prevented |
+| Full non-`Send` type lattice | partial (pointer-alias + child-free ban + `CCArc`) |

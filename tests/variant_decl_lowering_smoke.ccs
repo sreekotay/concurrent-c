@@ -8,9 +8,8 @@
  *  - designated-init construction auto-fills the tag (decl init and
  *    compound literal);
  *  - `.kind` reads as a plain tag on the unpacked layout;
- *  - raw C-interop spellings stay valid: `{ .kind = ..., .u.num = ... }`
- *    construction, `v.u.num` access, `switch (v.kind)` with `Name_arm`
- *    labels (exhaustiveness checked there too).
+ *  - arm projection under kind/switch domination (raw `.u` is banned —
+ *    SHAPE-T10); `switch (v.kind)` with `Name_arm` labels stays valid.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -25,17 +24,29 @@
 int main(void) {
     RedisValue v = { .num = 42 };
     if (v.kind != RedisValue_num) return 1;
-    if (v.u.num != 42) return 2;            /* raw union access: interop */
+    if (v.kind == .num) {
+        if (v.num != 42) return 2;
+    } else {
+        return 2;
+    }
 
     RedisValue s = { .txt = "hello" };
     if (s.kind != RedisValue_txt) return 3;
 
     v = (RedisValue){ .num = 43 };          /* compound-literal transition */
-    if (v.u.num != 43) return 4;
+    if (v.kind == .num) {
+        if (v.num != 43) return 4;
+    } else {
+        return 4;
+    }
 
-    /* raw construction stays valid */
-    RedisValue r = { .kind = RedisValue_num, .u.num = 7 };
-    if (r.kind != RedisValue_num || r.u.num != 7) return 5;
+    RedisValue r = { .num = 7 };
+    if (r.kind != RedisValue_num) return 5;
+    if (r.kind == .num) {
+        if (r.num != 7) return 5;
+    } else {
+        return 5;
+    }
 
     /* C-interop switch spelling: switch (v.kind) + tag labels, checked
      * for exhaustiveness like the designator form. */

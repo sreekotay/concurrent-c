@@ -1,0 +1,13 @@
+/* Fail: raw `.u` reach-in on an unpacked @variant (SHAPE-T10 inactive arm). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .txt = "x" };
+    return (int)v.u.num; /* ERROR: inactive / raw union reach-in */
+}

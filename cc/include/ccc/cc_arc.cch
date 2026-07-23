@@ -1,0 +1,77 @@
+/*
+ * CCArc — atomic shared owner (stdlib Arc).
+ *
+ * Last drop runs the registered destructor exactly once. Clone with
+ * cc_arc_clone; release with cc_arc_drop / @destroy. Prefer this over
+ * homemade `int ref` + `free` across fibers (CVE-2026-10653).
+ */
+#ifndef CC_ARC_CCH
+#define CC_ARC_CCH
+
+#include <ccc/cc_atomic.cch>
+#include <stdlib.h>
+#include <stddef.h>
+
+typedef void (*CCArcDropFn)(void* ptr);
+
+typedef struct CCArcCtrl {
+    cc_atomic_int strong;
+    CCArcDropFn drop_fn;
+    void* ptr;
+} CCArcCtrl;
+
+typedef struct CCArc {
+    CCArcCtrl* ctrl;
+} CCArc;
+
+static inline CCArc cc_arc_null(void) {
+    CCArc a;
+    a.ctrl = NULL;
+    return a;
+}
+
+static inline int cc_arc_is_null(CCArc a) {
+    return a.ctrl == NULL;
+}
+
+static inline void* cc_arc_get(CCArc a) {
+    return a.ctrl ? a.ctrl->ptr : NULL;
+}
+
+static inline CCArc cc_arc_from_ptr(void* ptr, CCArcDropFn drop_fn) {
+    CCArc a = cc_arc_null();
+    if (!ptr) return a;
+    CCArcCtrl* c = (CCArcCtrl*)malloc(sizeof(CCArcCtrl));
+    if (!c) {
+        if (drop_fn) drop_fn(ptr);
+        return a;
+    }
+    c->strong = 1;
+    c->drop_fn = drop_fn;
+    c->ptr = ptr;
+    a.ctrl = c;
+    return a;
+}
+
+static inline CCArc cc_arc_clone(CCArc a) {
+    if (!a.ctrl) return a;
+    cc_atomic_fetch_add(&a.ctrl->strong, 1);
+    return a;
+}
+
+static inline void cc_arc_drop(CCArc* a) {
+    CCArcCtrl* c;
+    int prev;
+    if (!a || !a->ctrl) return;
+    c = a->ctrl;
+    a->ctrl = NULL;
+    prev = cc_atomic_fetch_sub(&c->strong, 1);
+    if (prev == 1) {
+        if (c->drop_fn) c->drop_fn(c->ptr);
+        free(c);
+    }
+}
+
+static inline void CCArc_destroy(CCArc* a) { cc_arc_drop(a); }
+
+#endif /* CC_ARC_CCH */

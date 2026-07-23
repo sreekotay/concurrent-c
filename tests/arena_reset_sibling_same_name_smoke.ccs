@@ -1,10 +1,7 @@
 /* Sibling blocks reuse local names (`buf` / `view`). After the first block
  * ends, a second block with the same names must be able to reset its own
- * arena once its borrow is gone.
- *
- * Today the checker flattens function scope and cc__scope_add dedups by name,
- * so sibling locals collapse; borrow_end_line papers over the live-borrow
- * symptom. Real fix: push/pop CCScope on BLOCK (see TODO on cc__scope_add).
+ * arena once its borrow is gone. Checker push/pop of CCScope on BLOCK keeps
+ * the names distinct.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>

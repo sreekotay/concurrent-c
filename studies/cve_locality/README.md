@@ -6,7 +6,7 @@
 This folder is a feedback loop, same spirit as `real_projects/`:
 
 - **Hits** support the thesis (ownership seams *or* truthful wire *or* data-model sums).  
-- **Misses** are backlog (homemade shared last-drop / typed `Arc`, fuller Send lattice, …).  
+- **Misses** are backlog (fuller Send lattice, FFI wrong deleter, …).  
 - **N/A** is for bugs outside idiomatic language seams (crypto/authz, etc.).
   Prefer **omitting** protocol-product policy bugs (e.g. HTTP smuggling)
   rather than keeping confusing `n/a` entries.

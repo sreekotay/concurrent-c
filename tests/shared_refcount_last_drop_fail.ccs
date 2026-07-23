@@ -1,0 +1,25 @@
+/* Fail: homemade shared last-drop (`--x.ref` + free) — use CCArc instead. */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+
+typedef struct Buf {
+    int ref;
+    char* data;
+} Buf;
+
+static void unref(Buf* b) {
+    if (!b) return;
+    if (--b->ref == 0) {
+        free(b->data); /* ERROR: homemade last-drop */
+        free(b);
+    }
+}
+
+int main(void) {
+    Buf* b = (Buf*)malloc(sizeof(Buf));
+    if (!b) return 1;
+    b->ref = 1;
+    b->data = (char*)malloc(8);
+    unref(b);
+    return 0;
+}
