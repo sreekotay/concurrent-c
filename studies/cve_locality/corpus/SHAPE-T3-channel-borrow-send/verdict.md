@@ -10,7 +10,7 @@
   redis: materialize (unique / static / copy into a reply or batch arena)
   before send, then the receiver owns stable bytes.
 
-  Escape hatch (Gap): non-arena borrows, untracked slices, and raw `T*`
-  are not covered by the same rule — fuller Send lattice remains backlog.
-- **What would strengthen further:** Ban send of any non-unique /
-  non-`'static` slice view, not only arena-backed ones.
+  Escape hatch (Gap): raw `T*` / `@unsafe` outside tracked slices.
+  Untracked `from_buffer` sends are covered by the same rule
+  (SHAPE-T3-nonarena-borrow-send).
+- **What would strengthen further:** Non-slice `T*` Send lattice.

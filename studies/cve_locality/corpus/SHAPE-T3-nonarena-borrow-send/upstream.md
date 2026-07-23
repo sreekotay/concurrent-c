@@ -1,14 +1,13 @@
 # SHAPE-T3 — non-arena / untracked borrow sent on a channel
 
-- **Links:** Class residual of T3 after arena `channel-stable-borrow`
-  (see SHAPE-T3-channel-borrow-send). Proved by compile of untracked
-  `cc_slice_from_buffer` + `cc_channel_send` (no fail oracle — that is
-  the point).
+- **Links:** Class residual of T3 after the first arena-only
+  `channel-stable-borrow` rule. Closed by extending that rule to all
+  non-unique, non-static slices. Evidence:
+  `tests/channel_send_untracked_borrow_fail.ccs`.
 - **Product / versions:** (n/a — shape study)
 - **CWE(s):** CWE-416
-- **One paragraph:** Channel-stable-borrow rejects **arena-backed**
-  non-unique slice views. A heap or stack buffer wrapped with
-  `cc_slice_from_buffer` / untracked `T[:]` is still sendable; the sender
-  can free or leave the frame while the receiver holds `.ptr`. Safe Rust
-  rejects putting a short-lived `&[u8]` into a message. Concurrent-C does
-  not yet — this is a claim-A miss on the Send lattice.
+- **One paragraph:** A heap or stack buffer wrapped with
+  `cc_slice_from_buffer` was still sendable after arena views were banned;
+  the sender could free or leave the frame while the receiver held `.ptr`.
+  Concurrent-C now rejects that send at compile time — same claim-A bar as
+  safe Rust for short-lived borrows in messages.

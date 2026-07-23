@@ -1,1 +1,1 @@
-cannot send arena-backed slice borrow
+cannot send non-stable slice borrow

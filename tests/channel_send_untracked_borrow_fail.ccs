@@ -1,0 +1,23 @@
+/* Fail: cannot send untracked / from_buffer slice borrow on a channel. */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* heap = (char*)malloc(8);
+    if (!heap) return 1;
+    memcpy(heap, "payload!", 8);
+    char[:] view = cc_slice_from_buffer(heap, 8);
+
+    char[:][~4 >] tx;
+    char[:][~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    /* ERROR: channel-stable-borrow (non-arena residual) */
+    (void)cc_channel_send(tx, view);
+
+    free(heap);
+    return 0;
+}

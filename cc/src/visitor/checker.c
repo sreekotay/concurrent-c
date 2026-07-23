@@ -26,6 +26,7 @@ typedef struct {
     int is_slice;
     int is_array;
     int is_stack_slice_view;
+    int is_static_slice;       /* cc_slice_from_static / immortal — channel-stable */
     int is_arena;              /* CCArena (value) local */
     int is_nursery;            /* CCNursery* handle */
     int is_arena_ptr;          /* pointer from cc_arena_alloc* */
@@ -1014,8 +1015,8 @@ static int cc__walk_call(int idx,
         return 0;
     }
 
-    /* Channel-stable-borrow: ban send of non-unique arena slice views.
-       Materialize (unique / static / send_into batch arena) first. */
+    /* Channel-stable-borrow: ban send of non-unique, non-static slice views
+       (arena, stack, untracked from_buffer, …). Unique / static / send_into OK. */
     if (cc__call_is_channel_data_send(n->aux_s1)) {
         const ChildList* cl = &kids[idx];
         for (int i = 0; i < cl->len; i++) {
@@ -1032,14 +1033,16 @@ static int cc__walk_call(int idx,
                     /* skip callee name */
                 } else {
                     CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, cn->aux_s1);
-                    if (v && v->is_slice && v->is_arena_slice_view && !v->move_only && !v->moved) {
+                    if (v && v->is_slice && !v->move_only && !v->moved && !v->is_static_slice) {
                         cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
-                                             "cannot send arena-backed slice borrow '%s' on a channel",
+                                             "cannot send non-stable slice borrow '%s' on a channel",
                                              cn->aux_s1);
                         fprintf(stderr,
-                                "  note: non-unique arena views may be invalidated after send (channel-stable-borrow)\n");
+                                "  note: non-unique slices (arena / stack / untracked from_buffer) may dangle after send "
+                                "(channel-stable-borrow)\n");
                         fprintf(stderr,
-                                "  hint: materialize into a unique/static slice, or copy into the channel batch arena before send\n");
+                                "  hint: use cc_slice_from_static, a unique T[:!] / send_take, or copy into a "
+                                "stable arena before send\n");
                         ctx->errors++;
                         return -1;
                     }
@@ -1271,6 +1274,9 @@ static int cc__walk_assign(int idx,
                     lhs_v->is_arena_slice_view = 1;
                     lhs_v->arena_name = rhs_v->arena_name;
                 }
+                if (lhs_v && rhs_v->is_static_slice) lhs_v->is_static_slice = 1;
+                else if (lhs_v && !has_move_marker && !rhs_v->move_only)
+                    lhs_v->is_static_slice = 0;
             }
         }
         if (lhs_v && rhs_v && !saw_member && rhs_v->is_arena_ptr) {
@@ -1406,6 +1412,12 @@ static int cc__walk(int idx,
                 if (strstr(n->aux_s2, "CCSliceUnique") != NULL) v->move_only = 1;
                 if (cc__subtree_has_call_named(nodes, kids, idx, "cc_adopt")) v->move_only = 1;
 
+                /* Immortal / static bytes are channel-stable. */
+                if (cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_static") ||
+                    cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_cstr")) {
+                    v->is_static_slice = 1;
+                }
+
                 /* Stack-slice view detection (best-effort): if init uses cc_slice_from_buffer/parts with a local array. */
                 int uses_buf = cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_buffer");
                 int uses_parts = cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_parts");
@@ -1459,6 +1471,7 @@ static int cc__walk(int idx,
                     v->is_arena_slice_view = 1;
                     v->arena_name = rhs->arena_name;
                 }
+                if (rhs && rhs->is_static_slice) v->is_static_slice = 1;
                 if (rhs && rhs->is_arena_ptr) {
                     v->is_arena_ptr = 1;
                     v->arena_name = rhs->arena_name;
