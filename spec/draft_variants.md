@@ -51,6 +51,11 @@ program:
   conceptually the two-arm instance.
 - **No hidden allocation.** A variant is a value type: `sizeof = tag +
   max(arm)`. Construction, match, and transition never allocate.
+- **Layout-agnostic surface.** The designator dialect (construction,
+  brace-assignment, `case .arm:`, projection) is the ONLY portable
+  contract; raw `v.kind`/`v.u` access is an interop privilege of the
+  UNPACKED layout, not part of the surface. This is what makes §12
+  packing a representation choice instead of a semantic one.
 - **FAIL LOUDLY.** Non-exhaustive `@match` without `default` is a compile
   error. Reading an inactive arm is UB in C but a compile error where
   statically provable (same rule as Result).
@@ -102,6 +107,10 @@ exactly ONE arm; the compiler fills the tag and the `u.` path:
 RedisValue v = { .num = 42 };
 RedisValue s = { .str = cc_string_from(...) };
 *cell = (RedisValue){ .num = value };   /* transition: old arm dropped */
+*cell = { .num = value };               /* RATIFIED: braced assignment — a C
+                                           syntax hole (braces are init-only
+                                           in C), trapped and rewritten; the
+                                           LHS type resolves the arm */
 
 /* lowers to exactly the by-hand form: */
 (RedisValue){ .kind = RedisValue_num, .u.num = 42 }
@@ -151,11 +160,19 @@ no !> handler").
 projections in the case body:
 
 ```c
-switch (v.kind) {
-    case RedisValue_num: use_int(v.num);        break;
-    case RedisValue_str: use_string(v.str);     break;
+switch (v) {                    /* RATIFIED: variant subject — a C constraint
+                                   violation (non-integer switch), trapped */
+    case .num: use_int(v.num);        break;   /* designator label: also a
+    case .str: use_string(v.str);     break;      C syntax hole, trapped */
 }   /* missing an arm and no default => compile error */
 ```
+
+`switch (v.kind)` with `case Name_arm:` remains valid for UNPACKED
+variants (C-interop spelling) and lowers identically — but the designator
+form is the PORTABLE one: packed variants (§12) have no `kind` field, so
+subject-switch + `case .arm:` is the only spelling that works across
+representations. Same rule for if-domination: `if (v.kind == Name_arm)`
+is unpacked-only; the portable guard is the projection itself.
 
 Pointer subjects need nothing special — `cell->num += delta;` inside the
 dominating case is plain C, mutation in place.
@@ -324,3 +341,43 @@ representation change carried by the type system.
 
 Each phase gates as usual: failing-first tests, full + strict suites,
 lint, and for phase 5 the redis smoke + bench parity.
+
+## 12. Packed representation — first-class, not future
+
+`@variant(packed) Name { ... }` opts a variant into NICHE PACKING: the
+discriminant lives in invalid representations donated by the arms, not in
+a tag field. RATIFIED as part of v1 precisely because it forces the
+surface to be layout-agnostic from day one (§2).
+
+**Mechanism (multi-word niches).** An arm with unusable encodings donates
+them. Canonical example — packed RedisValue in 24 bytes, tag word gone:
+
+```
+word 0 == valid 8-aligned ptr → kind=str, words 0..2 are the CCString
+word 0 == 0x1 (impossible ptr) → kind=num, word 1 holds the FULL int64
+```
+
+No bit theft from payloads: `num` keeps all 64 bits. Pointer-bearing arms
+(strings, slices, boxed types) almost always donate a niche.
+
+**Rules:**
+- Opt-in only; default layout stays the honest C struct of §3.
+- Compiler-PROVED or refused: no lossless packing exists → compile error
+  stating which arms need which bits ("both arms require all of word 0").
+  Never a silent fallback to unpacked.
+- No `v.kind`, no `v.u` on packed variants — raw access is a compile
+  error; construction/brace-assign/projection/subject-switch all work,
+  with encode/decode emitted by the compiler and visible in --keep-c.
+- Packed layout is a private representation: no layout-compat promise
+  with schema one-of; wire types stay unpacked.
+- Drop/transition semantics identical (dispatch on the decoded kind).
+
+**Adoption gate (house rule: measure first).** Phase 5 lands RedisValue
+UNPACKED with MEMLOG before/after; `packed` (or the container-level
+alternative below) is justified by a number, not a vibe.
+
+**Recorded alternative:** for variants that sit by the millions in one
+collection (the redis DB cell), container-level out-of-band tags (a tag
+byte in the map's own cell metadata, untagged payload union) can beat
+type-level packing at zero type-system cost. Type-level packing wins for
+variants that TRAVEL (channels, arrays, arenas).
