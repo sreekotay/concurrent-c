@@ -142,6 +142,33 @@ static void cc__append_missing_indent_to(char** out, size_t* out_len, size_t* ou
     }
 }
 
+/* Emit return-through-cleanup without depending on `__cc_ret*` macros.
+ * Parser-mode stubs define `__cc_ret` as `((void)(value))`; if those ever
+ * leak into final codegen (or a local is named `__cc_ret`), a macro call
+ * can drop the exit code. Inline set+goto matches the async path. */
+static void cc__emit_ret_cleanup_begin(char** out, size_t* out_len, size_t* out_cap, int id) {
+    cc_sb_append_fmt(out, out_len, out_cap, "__cc_retval_%d = (", id);
+}
+
+/* `close` is ");" for plain assign, "));" for cc_ok_into / cc_err_into. */
+static void cc__emit_ret_cleanup_end(char** out, size_t* out_len, size_t* out_cap,
+                                     int id, size_t indent, const char* close) {
+    cc__append_str(out, out_len, out_cap, close ? close : ");");
+    cc__append_str(out, out_len, out_cap, "\n");
+    cc__append_missing_indent_to(out, out_len, out_cap, indent);
+    cc_sb_append_fmt(out, out_len, out_cap, "__cc_ret_set_%d = 1;\n", id);
+    cc__append_missing_indent_to(out, out_len, out_cap, indent);
+    cc_sb_append_fmt(out, out_len, out_cap, "goto __cc_cleanup_%d;", id);
+}
+
+static void cc__emit_ret_ok_cleanup_begin(char** out, size_t* out_len, size_t* out_cap, int id) {
+    cc_sb_append_fmt(out, out_len, out_cap, "cc_ok_into(__cc_retval_%d, (", id);
+}
+
+static void cc__emit_ret_err_cleanup_begin(char** out, size_t* out_len, size_t* out_cap, int id) {
+    cc_sb_append_fmt(out, out_len, out_cap, "cc_err_into(__cc_retval_%d, (", id);
+}
+
 static int cc__count_top_level_semicolons(const char* s, size_t n) {
     int count = 0;
     int par = 0, brk = 0, br = 0;
@@ -923,15 +950,13 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                             }
                         }
                         cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                        if (fn_scope.is_async) {
-                            cc_sb_append_fmt(&out, &outl, &outc, "__cc_retval_%d = __cc_ret;\n", fn_scope.cleanup_label_id);
-                            cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                            cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_set_%d = 1;\n", fn_scope.cleanup_label_id);
-                            cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                            cc_sb_append_fmt(&out, &outl, &outc, "goto __cc_cleanup_%d;\n}", fn_scope.cleanup_label_id);
-                        } else {
-                            cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret(%d, __cc_ret);\n}", fn_scope.cleanup_label_id);
-                        }
+                        /* Local temp is named `__cc_ret`; never emit the
+                         * `__cc_ret(id, ...)` macro here (name clash + stub risk). */
+                        cc_sb_append_fmt(&out, &outl, &outc, "__cc_retval_%d = __cc_ret;\n", fn_scope.cleanup_label_id);
+                        cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
+                        cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_set_%d = 1;\n", fn_scope.cleanup_label_id);
+                        cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
+                        cc_sb_append_fmt(&out, &outl, &outc, "goto __cc_cleanup_%d;\n}", fn_scope.cleanup_label_id);
                     } else {
                         size_t ok_arg_start = 0, ok_arg_end = 0;
                         size_t err_arg_start = 0, err_arg_end = 0;
@@ -964,20 +989,13 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                 }
                             }
                             cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                            if (fn_scope.is_async) {
-                                cc_sb_append_fmt(&out, &outl, &outc, "__cc_retval_%d = (", fn_scope.cleanup_label_id);
-                                cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
-                                cc__append_str(&out, &outl, &outc, ");\n");
-                                cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                                cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_set_%d = 1;\n", fn_scope.cleanup_label_id);
-                                cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);
-                                cc_sb_append_fmt(&out, &outl, &outc, "goto __cc_cleanup_%d;", fn_scope.cleanup_label_id);
-                            } else if (use_ret_ok) {
-                                cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_ok(%d, ", fn_scope.cleanup_label_id);
+                            if (use_ret_ok) {
+                                cc__emit_ret_ok_cleanup_begin(&out, &outl, &outc, fn_scope.cleanup_label_id);
                                 cc__append_n(&out, &outl, &outc,
                                              in_src + expr_start + ok_arg_start,
                                              ok_arg_end - ok_arg_start);
-                                cc__append_str(&out, &outl, &outc, ");");
+                                cc__emit_ret_cleanup_end(&out, &outl, &outc,
+                                                         fn_scope.cleanup_label_id, synth_indent, "));");
                             } else if (use_ret_err) {
                                 size_t err_trim_start = err_arg_start;
                                 size_t err_trim_end = err_arg_end;
@@ -988,28 +1006,32 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                 if (use_ret_err_short &&
                                     err_trim_end > err_trim_start + 6 &&
                                     memcmp(in_src + expr_start + err_trim_start, "CC_IO_", 6) == 0) {
-                                    cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_err(%d, cc_io_error(", fn_scope.cleanup_label_id);
+                                    cc__emit_ret_err_cleanup_begin(&out, &outl, &outc, fn_scope.cleanup_label_id);
+                                    cc__append_str(&out, &outl, &outc, "cc_io_error(");
                                     cc__append_n(&out, &outl, &outc,
                                                  in_src + expr_start + err_arg_start,
                                                  err_arg_end - err_arg_start);
-                                    cc__append_str(&out, &outl, &outc, "));");
+                                    cc__append_str(&out, &outl, &outc, ")");
+                                    cc__emit_ret_cleanup_end(&out, &outl, &outc,
+                                                             fn_scope.cleanup_label_id, synth_indent, "));");
+                                } else if (use_ret_err_short) {
+                                    cc__emit_ret_cleanup_begin(&out, &outl, &outc, fn_scope.cleanup_label_id);
+                                    cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
+                                    cc__emit_ret_cleanup_end(&out, &outl, &outc,
+                                                             fn_scope.cleanup_label_id, synth_indent, ");");
                                 } else {
-                                    if (use_ret_err_short) {
-                                        cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret(%d, ", fn_scope.cleanup_label_id);
-                                        cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
-                                        cc__append_str(&out, &outl, &outc, ");");
-                                    } else {
-                                        cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret_err(%d, ", fn_scope.cleanup_label_id);
-                                        cc__append_n(&out, &outl, &outc,
-                                                     in_src + expr_start + err_arg_start,
-                                                     err_arg_end - err_arg_start);
-                                        cc__append_str(&out, &outl, &outc, ");");
-                                    }
+                                    cc__emit_ret_err_cleanup_begin(&out, &outl, &outc, fn_scope.cleanup_label_id);
+                                    cc__append_n(&out, &outl, &outc,
+                                                 in_src + expr_start + err_arg_start,
+                                                 err_arg_end - err_arg_start);
+                                    cc__emit_ret_cleanup_end(&out, &outl, &outc,
+                                                             fn_scope.cleanup_label_id, synth_indent, "));");
                                 }
                             } else {
-                                cc_sb_append_fmt(&out, &outl, &outc, "__cc_ret(%d, ", fn_scope.cleanup_label_id);
+                                cc__emit_ret_cleanup_begin(&out, &outl, &outc, fn_scope.cleanup_label_id);
                                 cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
-                                cc__append_str(&out, &outl, &outc, ");");
+                                cc__emit_ret_cleanup_end(&out, &outl, &outc,
+                                                         fn_scope.cleanup_label_id, synth_indent, ");");
                             }
                         } else {
                             cc__append_missing_indent_to(&out, &outl, &outc, synth_indent);

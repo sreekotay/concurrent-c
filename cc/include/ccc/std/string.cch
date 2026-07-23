@@ -275,7 +275,7 @@ const char *cc_string_cstr(CCString *str, CCArena *arena);
 uint64_t cc_string_provenance(const CCString *str);
 #endif
 static inline CCSlice cc_string_persist_slice(CCArena *arena, const CCString *str);
-/* @string(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
+/* string-template(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
 #ifndef CC_ENABLE_XJB_FLOAT_FMT
 #define CC_ENABLE_XJB_FLOAT_FMT 0
@@ -959,9 +959,9 @@ static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
 }
 #endif /* CC_COMPTIME */
 
-// ------------- Arena-less @string: bounded-template stack form -------------
-/* Lowering target for `@string(`...`)` with NO arena argument
- * (spec/draft_variants.md §9.2).  The compiler emits a block-scoped
+// ------------- Arena-less string-template: bounded stack form -------------
+/* Lowering target for arena-less backtick string-templates (no arena arg;
+ * spec/draft_variants.md §9.2).  The compiler emits a block-scoped
  * `(char[K]){0}` compound literal sized exactly from the template's static
  * bound (literal bytes + per-slot max width from `cc__string_stack_bound`),
  * chains the pushes below, and yields a `char[:]` BORROW of that buffer
@@ -970,12 +970,16 @@ static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
  * The two `_Generic` macros deliberately have NO default arm: an
  * interpolation whose type is not statically width-boundable (slices,
  * strings, floats, pointers, ...) fails _Generic selection, which the
- * driver reports as "arena-less @string: interpolation '${...}' has no
+ * driver reports as "arena-less string-template: interpolation has no
  * statically bounded width; ... pass an arena".
  *
  * The bound is exact per C type (worst-case decimal width incl. sign);
  * overflow of the computed bound is impossible by construction, so the
- * push helpers treat it as a fatal compiler bug and abort LOUDLY. */
+ * push helpers treat it as a fatal compiler bug and abort LOUDLY.
+ *
+ * Note: do not write the characters at-string-paren in comments or string
+ * literals here — include-expanded comptime hook TUs can re-scan this
+ * header after comments are stripped, and that token would be rewritten. */
 typedef struct CCStringStackBuf {
     char *buf;
     uint32_t cap;
@@ -984,7 +988,7 @@ typedef struct CCStringStackBuf {
 
 static inline void cc__string_stack_overflow_abort(size_t need, size_t cap) {
     fprintf(stderr,
-            "cc fatal: arena-less @string overflowed its computed bound "
+            "cc fatal: arena-less string-template overflowed its computed bound "
             "(need %zu, cap %zu) - compiler bug\n",
             need, cap);
     abort();

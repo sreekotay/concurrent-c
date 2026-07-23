@@ -1,0 +1,40 @@
+/* Sibling blocks reuse local names (`buf` / `view`). After the first block
+ * ends, a second block with the same names must be able to reset its own
+ * arena once its borrow is gone.
+ *
+ * Today the checker flattens function scope and cc__scope_add dedups by name,
+ * so sibling locals collapse; borrow_end_line papers over the live-borrow
+ * symptom. Real fix: push/pop CCScope on BLOCK (see TODO on cc__scope_add).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    {
+        CCArena buf = cc_arena_heap(kilobytes(4));
+        char* backing = cc_arena_alloc_T_count(char, &buf, 64);
+        if (!backing) return 1;
+        memset(backing, 'a', 64);
+        char[:] view = cc_slice_from_parts(backing, 64, 0, 64);
+        if (view.len != 64) return 2;
+        cc_arena_free(&buf);
+    }
+    {
+        CCArena buf = cc_arena_heap(kilobytes(4));
+        char* backing = cc_arena_alloc_T_count(char, &buf, 32);
+        if (!backing) return 3;
+        memset(backing, 'b', 32);
+        {
+            char[:] view = cc_slice_from_parts(backing, 32, 0, 32);
+            if (view.len != 32) return 4;
+        }
+        /* Earlier sibling's `view`/`buf` must not count as a live borrow here. */
+        cc_arena_reset(&buf);
+        char* again = cc_arena_alloc_T_count(char, &buf, 16);
+        if (!again) return 5;
+        cc_arena_free(&buf);
+    }
+    printf("arena_reset_sibling_same_name_smoke: ok\n");
+    return 0;
+}

@@ -31,7 +31,9 @@ typedef struct {
     int is_arena_ptr;          /* pointer from cc_arena_alloc* */
     int is_arena_slice_view;   /* borrow/view into an arena epoch */
     const char* arena_name;    /* borrowed ident of owning arena (or pointer to it) */
-    int borrow_end_line;       /* last line of enclosing block (flat scopes) */
+    /* PAPER-OVER for flat function scopes: see TODO on cc__scope_add.
+     * Drop once BLOCK pushes/pops a real CCScope. */
+    int borrow_end_line;
     int epoch_pinned;          /* arena: spawn captured a borrow from this arena */
     int pin_end_line;          /* arena: epoch-end forbidden through this line */
     int move_only;
@@ -82,6 +84,16 @@ static CCSliceVar* cc__scopes_lookup(CCScope* scopes, int n, const char* name) {
     return NULL;
 }
 
+/* TODO(checker-block-scopes): cc__scope_add dedups by name within the
+ * current CCScope. BLOCK nodes do not push/pop scopes today, so a function
+ * is one flat scope — distinct same-named locals in sibling blocks collapse
+ * into one CCSliceVar (twitter grammar TU false-positive class: later
+ * arena reset saw an earlier sibling's borrow as still live).
+ *
+ * borrow_end_line papers over the live-borrow symptom only. Real fix:
+ * push a fresh CCScope on CC_STUB_BLOCK enter and pop on exit (like
+ * closures already do), then retire borrow_end_line. Regression:
+ * tests/arena_reset_sibling_same_name_smoke.ccs. */
 static CCSliceVar* cc__scope_add(CCScope* sc, const char* name) {
     if (!sc || !name) return NULL;
     CCSliceVar* ex = cc__scope_find(sc, name);
@@ -554,6 +566,8 @@ static int cc__scopes_live_arena_borrow_at(CCScope* scopes, int scope_n, const c
             if (!v->is_slice || !v->is_arena_slice_view || v->moved) continue;
             if (!v->arena_name || strcmp(v->arena_name, arena_name) != 0) continue;
             if (v->decl_line > 0 && at_line < v->decl_line) continue;
+            /* Line-range filter is the flat-scope paper-over; remove with
+             * block-level scopes (TODO on cc__scope_add). */
             if (v->borrow_end_line > 0 && at_line > v->borrow_end_line) continue;
             return 1;
         }
@@ -1392,7 +1406,10 @@ static int cc__walk(int idx,
         return cc__walk_return(idx, nodes, kids, scopes, io_scope_n, ctx);
     }
 
-    /* default: recurse */
+    /* default: recurse.
+     * TODO(checker-block-scopes): CC_STUB_BLOCK should push/pop a CCScope
+     * here (mirror cc__walk_closure). Until then, function scope stays flat
+     * and cc__scope_add name-dedup merges sibling-block locals. */
     const ChildList* cl = &kids[idx];
     for (int i = 0; i < cl->len; i++) {
         if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;

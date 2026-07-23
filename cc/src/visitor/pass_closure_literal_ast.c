@@ -1603,6 +1603,62 @@ static int cc__addr_of_is_readonly_call(const char* body,
     return cc__param_is_const_ptr(pty);
 }
 
+/* True if the identifier ending at `end` (exclusive) is a task/thread escape
+ * callee: surface `spawn` / `spawn_async` / `spawn_thread`, lowered
+ * `cc_nursery_spawn_closure0` / `spawnhybrid*`, or `*_send_task`. */
+static int cc__ident_is_task_escape_callee(const char* src, size_t end) {
+    if (!src || end == 0) return 0;
+    size_t start = end;
+    while (start > 0 && cc__is_ident_char2(src[start - 1])) start--;
+    if (start == end) return 0;
+    /* "spawn" as an ident segment: spawn, spawn_async, cc_nursery_spawn_closure0, … */
+    for (size_t i = start; i + 5 <= end; i++) {
+        if (memcmp(src + i, "spawn", 5) != 0) continue;
+        if (i > start && src[i - 1] != '_') continue;
+        size_t after = i + 5;
+        if (after == end || src[after] == '_' ||
+            (src[after] >= '0' && src[after] <= '9')) {
+            return 1;
+        }
+    }
+    /* Channel task enqueue: send_task / cc_channel_send_task / … */
+    if (end >= start + 9 && memcmp(src + end - 9, "send_task", 9) == 0) return 1;
+    return 0;
+}
+
+/* True if this closure literal escapes onto a task/thread (spawn/async/
+ * send_task), surface or already-lowered. Pointer-alias mutation is a
+ * SHAPE-T7 concurrent smuggle; sync `CCClosureN` stores/calls may still
+ * write through `T* p = &local`. */
+static int cc__closure_in_task_escape_arg(const char* src, size_t len, size_t start_off) {
+    if (!src || start_off > len) return 0;
+    size_t i = start_off;
+    int paren = 0;
+    while (i > 0) {
+        i--;
+        char c = src[i];
+        if (c == ')') {
+            paren++;
+            continue;
+        }
+        if (c == '(') {
+            if (paren > 0) {
+                paren--;
+                continue;
+            }
+            /* Callee immediately before '('. */
+            size_t j = i;
+            while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' ||
+                             src[j - 1] == '\n' || src[j - 1] == '\r')) j--;
+            if (cc__ident_is_task_escape_callee(src, j)) return 1;
+            /* Keep scanning: spawn(helper(() => …)) still escapes. */
+            continue;
+        }
+        if (paren == 0 && (c == ';' || c == '{' || c == '}')) return 0;
+    }
+    return 0;
+}
+
 /* Returns non-zero if the body writes through pointer `var_name`
  * (`*p =`, `(*p)++`, `p->field =`, …). Used for value-captured aliases. */
 static int cc__find_ptr_pointee_mutation_in_body(const char* body,
@@ -3138,8 +3194,11 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 }
             }
             /* Check for mutations to reference-captured variables, and for
-             * value-captured pointer aliases of outer locals (unless @unsafe). */
+             * value-captured pointer aliases of outer locals in task-escaping
+             * closures (unless @unsafe). Sync CCClosure stores/calls may still
+             * write through `T* p = &local`. */
             if (!d->is_unsafe && d->body_text && d->cap_count > 0) {
+                int escapes = cc__closure_in_task_escape_arg(in_src, in_len, d->start_off);
                 for (int ci = 0; ci < d->cap_count; ci++) {
                     int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                     int aliases_local = (d->cap_flags && (d->cap_flags[ci] & 0x08) != 0);
@@ -3159,7 +3218,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                     if (is_ref) {
                         hit = cc__find_mutation_in_body(d->body_text, nm, sigs, sig_n,
                                                         &mk, &mut_off, &callee, &pty);
-                    } else if (aliases_local) {
+                    } else if (aliases_local && escapes) {
                         hit = cc__find_ptr_pointee_mutation_in_body(d->body_text, nm, &mut_off);
                         if (hit) mk = CC_MUT_WRITE;
                     } else {

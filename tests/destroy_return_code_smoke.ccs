@@ -1,0 +1,30 @@
+/* Smoke: return through @destroy cleanup preserves the exit/return code. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_destroyed = 0;
+
+static int leave_with(int code) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy {
+        g_destroyed += 1;
+    };
+    (void)arena;
+    return code;
+}
+
+int main(void) {
+    if (leave_with(7) != 7) {
+        fprintf(stderr, "destroy_return_code_smoke: lost return code\n");
+        return 1;
+    }
+    if (g_destroyed != 1) {
+        fprintf(stderr, "destroy_return_code_smoke: destroy did not run\n");
+        return 2;
+    }
+    /* Also pin early-return paths that go through cleanup. */
+    if (leave_with(0) != 0) return 3;
+    if (g_destroyed != 2) return 4;
+
+    printf("destroy_return_code_smoke: ok\n");
+    return 0;
+}

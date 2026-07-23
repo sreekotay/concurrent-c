@@ -424,6 +424,8 @@ char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len, 
         "#ifndef CC_TSAN_ACQUIRE\n"
         "#define CC_TSAN_ACQUIRE(addr) ((void)0)\n"
         "#endif\n"
+        /* Parser-only stubs. Final codegen emits inline set+goto for
+         * return-through-cleanup and must not rely on these macros. */
         "#ifndef __cc_ret\n"
         "#define __cc_ret(id, value) ((void)(value))\n"
         "#endif\n"

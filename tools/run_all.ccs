@@ -9,8 +9,9 @@
  *
  * Pick one (or more) categories — --stress is what usually panics:
  *   ccc run tools/run_all.ccs -- --trace --stream --stress
- # Or everything:
+ * Or everything:
  *   ccc run tools/run_all.ccs -- --trace --stream --all
+ *
  * Add --trace to write a per-test-boundary log that is fflush+fsynced after
  * every START/END marker. If the machine kernel-panics mid-test, reading
  * tmp/run_all_logs/run_trace.log after reboot shows exactly which test was
@@ -33,9 +34,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-/* Default timeout for stress tests (seconds) */
 #define STRESS_TIMEOUT_SEC 10
-/* Perf runs should still finish promptly in the aggregate runner. */
 #define PERF_TIMEOUT_SEC 20
 
 typedef struct {
@@ -44,13 +43,46 @@ typedef struct {
     int skipped;
 } Stats;
 
+/* expected_exit: -1 skip; otherwise required exit code.
+ * timeout_sec: 0 keep category default; else override.
+ * extra_args: NULL-terminated argv after `--`, or NULL. */
+typedef struct {
+    const char* needle;
+    int expected_exit;
+    int timeout_sec;
+    const char* const* extra_args;
+} RunPolicy;
+
 static const char* LOG_DIR = "tmp/run_all_logs";
 static const char* TRACE_PATH = "tmp/run_all_logs/run_trace.log";
 
-/* Global trace state. When non-NULL, every pre/post-test boundary is written
- * here and fsync'd, so that if the machine hard-crashes we can read the trace
- * file after reboot and see the exact test that was running. */
 static FILE* g_trace = NULL;
+
+static const char* TCP_ECHO_ARGS[] = { "--test", NULL };
+
+/* First match wins. Keep comments next to the rows that need them. */
+static const RunPolicy RUN_POLICIES[] = {
+    /* Servers / long-lived listeners — not self-contained under the runner. */
+    { "ping_server", -1, 0, NULL },
+
+    /* MACHINE-CRASHER under aggregate load: multi-million spawn/join pressure
+     * has paniced macOS Mach VM / pthread limits. See git history on this row. */
+    { "perf_spawn_ladder", -1, 0, NULL },
+
+    /* Deadlock demos abort with exit 1 by design. */
+    { "deadlock_detect_demo", 1, 0, NULL },
+    { "complex_deadlock", 1, 0, NULL },
+
+    /* Slower under the full "all" aggregate load. */
+    { "join_init_race", 0, 20, NULL },
+    { "block_combinators_stress", 0, 20, NULL },
+    { "cancellation_race_storm", 0, 30, NULL },
+    /* mem_stress completes ~21s standalone; default 20s was a false timeout. */
+    { "mem_stress", 0, 40, NULL },
+
+    /* Self-testable recipe: opt into deterministic --test mode. */
+    { "recipe_tcp_echo", 0, 0, TCP_ECHO_ARGS },
+};
 
 static long long epoch_ms(void) {
     struct timeval tv;
@@ -67,46 +99,45 @@ static void trace_write(const char* fmt, ...) {
     va_end(ap);
     fputc('\n', g_trace);
     fflush(g_trace);
-    /* Force kernel to push bytes to disk so it survives a panic. */
     (void)fsync(fileno(g_trace));
 }
 
-static inline CCSlice slice_from_cstr(const char* s) {
-    return cc_slice_from_buffer((void*)s, strlen(s));
+static inline CCSlice slice_cstr(const char* s) {
+    return cc_slice_from_buffer((void*)s, s ? strlen(s) : 0);
+}
+
+static const RunPolicy* policy_for(const char* path) {
+    for (size_t i = 0; i < sizeof(RUN_POLICIES) / sizeof(RUN_POLICIES[0]); i++) {
+        if (strstr(path, RUN_POLICIES[i].needle) != NULL) return &RUN_POLICIES[i];
+    }
+    return NULL;
 }
 
 static void ensure_log_dir(CCArena* arena) {
     CCCommand cmd = cc_command(arena, "mkdir");
-    CCResult_int_CCIoError status;
     cmd.arg("-p");
     cmd.arg(LOG_DIR);
-    status = cmd.status();
-    
-    (void)status;
+    (void)cmd.status();
+}
+
+static const char* log_path_for(CCArena* arena, const char* path, const char* suffix) {
+    CCSlice base = cc_path_basename(arena, slice_cstr(path));
+    const char* base_cstr = base.ptr ? (const char*)base.ptr : "unknown";
+    CCString full = @string(`${LOG_DIR}/${base_cstr}${suffix}`, arena);
+    return full.cstr(arena);
 }
 
 static void write_log(CCArena* arena, const char* path, const char* suffix,
                       const char* data, size_t len) {
     if (!data || len == 0) return;
-    CCSlice base = cc_path_basename(arena, slice_from_cstr(path));
-    // Build "<log_dir>/<basename><suffix>"
-    CCString full = cc_string_new();
-    cc_string_push(&full, slice_from_cstr(LOG_DIR), arena);
-    const char* full_path = cc_string_cstr(&full, arena);
-    if (full.len > 0 && full_path && full_path[full.len - 1] != cc_path_sep()) {
-        cc_string_push_char(&full, cc_path_sep(), arena);
-        full_path = cc_string_cstr(&full, arena);
-    }
-    cc_string_push(&full, base, arena);
-    cc_string_push(&full, slice_from_cstr(suffix), arena);
-    full_path = cc_string_cstr(&full, arena);
+    const char* full_path = log_path_for(arena, path, suffix);
+    if (!full_path) return;
 
     CCFile f;
-    if (full_path && cc_file_open(&f, full_path, "w") == 0) {
-        CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
-        (void)cc_file_write(&f, slice);
-        cc_file_close(&f);
-    }
+    if (cc_file_open(&f, full_path, "w") != 0) return;
+    CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
+    (void)cc_file_write(&f, slice);
+    cc_file_close(&f);
 }
 
 static void write_process_logs(CCArena* arena, const char* path, const CCProcessOutput* out) {
@@ -116,25 +147,26 @@ static void write_process_logs(CCArena* arena, const char* path, const CCProcess
 }
 
 static void print_process_log_paths(CCArena* arena, const char* path) {
-    CCSlice base = cc_path_basename(arena, slice_from_cstr(path));
-    printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
-           LOG_DIR, (const char*)base.ptr,
-           LOG_DIR, (const char*)base.ptr);
+    const char* stdout_path = log_path_for(arena, path, ".stdout.txt");
+    const char* stderr_path = log_path_for(arena, path, ".stderr.txt");
+    CCString line = @string(`    logs: ${stdout_path}, ${stderr_path}\n`, arena);
+    const char* p = line.cstr(arena);
+    if (p) fputs(p, stdout);
 }
 
 static void print_process_output_excerpt(const CCProcessOutput* out) {
-    CCSlice stdout_data;
-    CCSlice stderr_data;
     if (!out) return;
-    stdout_data = out->stdout_data;
-    stderr_data = out->stderr_data;
+    CCSlice stdout_data = out->stdout_data;
+    CCSlice stderr_data = out->stderr_data;
     if (stdout_data.len > 0 && stdout_data.ptr) {
-        printf("    stdout: %.*s", (int)(stdout_data.len > 200 ? 200 : stdout_data.len), (const char*)stdout_data.ptr);
+        int n = (int)(stdout_data.len > 200 ? 200 : stdout_data.len);
+        printf("    stdout: %.*s", n, (const char*)stdout_data.ptr);
         if (stdout_data.len > 200) printf("...(truncated)");
         printf("\n");
     }
     if (stderr_data.len > 0 && stderr_data.ptr) {
-        printf("    stderr: %.*s", (int)(stderr_data.len > 200 ? 200 : stderr_data.len), (const char*)stderr_data.ptr);
+        int n = (int)(stderr_data.len > 200 ? 200 : stderr_data.len);
+        printf("    stderr: %.*s", n, (const char*)stderr_data.ptr);
         if (stderr_data.len > 200) printf("...(truncated)");
         printf("\n");
     }
@@ -143,63 +175,34 @@ static void print_process_output_excerpt(const CCProcessOutput* out) {
     }
 }
 
-/* Returns the expected exit code for a given test path.
- * Most tests expect 0, but some (like deadlock demos) expect 1.
- * Returns -1 if the test should be skipped entirely (like servers). */
-static int get_expected_exit_code(const char* path) {
-    /* recipe_tcp_echo runs in self-contained --test mode (see get_extra_args). */
-    if (strstr(path, "ping_server") != NULL) return -1;           /* Server */
-    /* Pre-existing toolchain conflict, unrelated to V1 strip:
-     * curl/system.h pulls in <sys/socket.h> after libcurl has already declared
-     * its own accept() prototype, producing "incompatible types for redefinition
-     * of 'accept'" on macOS SDK headers.  Triage separately when we touch the
-     * curl integration. */
-    //if (strstr(path, "recipe_http_get") != NULL) return -1; //BUG - fixing it now
-    /* MACHINE-CRASHER (confirmed by trace [1776551671194] START ...
-     *   [no END]): this benchmark runs 6 benches x 7 samples x 100
-     * batches x 1000 spawns = ~4.2M fiber spawn/join pairs, with the
-     * bench_direct_fiber_batch_once path going through the legacy
-     * cc_fiber_spawn / cc_fiber_join / cc_fiber_task_free V1 shim.
-     * Even after 768d9d0 (fiber_v2 + stack leak in the V1 shim),
-     * sustained pressure from this test pushes the macOS kernel into
-     * a Mach VM / pthread-exhaustion panic that brings the whole
-     * machine down.  Not a V1-strip regression per se (test worked
-     * under V1 with its own V1 object pooling), but the V2 shim
-     * evidently still has a secondary leak under multi-million-spawn
-     * pressure.  Deferred to a dedicated isolated-kernel debug session;
-     * skipping here keeps run_all --all stable. */
-    if (strstr(path, "perf_spawn_ladder") != NULL) return -1;
-    if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
-    if (strstr(path, "complex_deadlock") != NULL) return 1;   /* Expected deadlock abort */
-    return 0;
-}
-
-/* Returns NULL if no extra args. Otherwise, a NULL-terminated list of extra
- * args to pass to the test program (after `--`). Lets self-testable recipes
- * opt into a deterministic mode under the runner without being skipped. */
-static const char* const* get_extra_args(const char* path) {
-    static const char* TCP_ECHO_ARGS[] = { "--test", NULL };
-    if (strstr(path, "recipe_tcp_echo") != NULL) return TCP_ECHO_ARGS;
-    return NULL;
-}
-
-static int get_timeout_sec(const char* path, int default_timeout_sec) {
-    if (default_timeout_sec <= 0) return 0;
-    /* Occasionally slower under the full "all" aggregate load. */
-    if (strstr(path, "join_init_race") != NULL) return 20;
-    if (strstr(path, "block_combinators_stress") != NULL) return 20;
-    if (strstr(path, "cancellation_race_storm") != NULL) return 30;
-    /* mem_stress spawns/joins 5000 fibers and completes cleanly in
-     * ~21 s standalone.  The default 20 s timeout trips on a good run;
-     * bump to 40 s so we only fail for genuine hangs. */
-    if (strstr(path, "mem_stress") != NULL) return 40;
-    return default_timeout_sec;
+static void record_outcome(Stats* stats, const char* path, int exit_code, int expected_exit,
+                           int timeout_sec, CCArena* log_arena, const CCProcessOutput* out) {
+    if (exit_code == expected_exit) {
+        printf("OK%s\n", expected_exit != 0 ? " (expected failure)" : "");
+        stats->passed++;
+    } else if (exit_code == 124 && expected_exit != 124) {
+        printf("TIMEOUT (>%ds)\n", timeout_sec);
+        if (out) {
+            write_process_logs(log_arena, path, out);
+            print_process_log_paths(log_arena, path);
+        }
+        stats->failed++;
+    } else {
+        printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
+        if (out) {
+            print_process_output_excerpt(out);
+            write_process_logs(log_arena, path, out);
+            print_process_log_paths(log_arena, path);
+        }
+        stats->failed++;
+    }
+    fflush(stdout);
+    trace_write("END   %s rc=%d expected=%d", path, exit_code, expected_exit);
 }
 
 static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats,
                       int timeout_sec, bool stream_output) {
     printf("\n=== %s ===\n", label);
-
     ensure_log_dir(arena);
 
     CCGlobResult files = cc_glob(arena, pattern);
@@ -211,76 +214,53 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 
     for (size_t i = 0; i < n; i++) {
         const char* path = cc_glob_result_get(&files, i);
-        int timeout_for_file = get_timeout_sec(path, timeout_sec);
-        
-        int expected_exit = get_expected_exit_code(path);
+        const RunPolicy* pol = policy_for(path);
+        int expected_exit = pol ? pol->expected_exit : 0;
+        int timeout_for_file = (pol && pol->timeout_sec > 0) ? pol->timeout_sec : timeout_sec;
+        const char* const* extra = (pol && pol->extra_args) ? pol->extra_args : NULL;
+
         if (expected_exit == -1) {
-            printf("  [%zu/%zu] %s ... SKIP (skipped: see get_expected_exit_code)\n", i + 1, n, path);
+            printf("  [%zu/%zu] %s ... SKIP (policy)\n", i + 1, n, path);
             stats->skipped++;
             continue;
         }
-        
+
         printf("  [%zu/%zu] %s ... ", i + 1, n, path);
         fflush(stdout);
         trace_write("START [%zu/%zu] %s (timeout=%ds)", i + 1, n, path, timeout_for_file);
 
-        /* Small delay between tests to avoid resource contention */
-        usleep(1000);  /* 1ms */
+        usleep(1000); /* brief gap to reduce resource contention */
 
-        /* Use a fresh temp arena for each test to avoid accumulation */
-        CCArena test_arena = cc_arena_heap(megabytes(4));
-        /* The aggregate runner already assumes repo-root-relative paths,
-         * so invoke the repo-local launcher explicitly instead of relying on PATH. */
+        CCArena test_arena = cc_arena_heap(megabytes(4)) @destroy;
         CCCommand cmd = cc_command(&test_arena, "./ccc");
-        CCResult_CCProcessOutput_CCIoError res;
-        CCResult_int_CCIoError status;
         cmd.arg("run");
         cmd.arg_if(timeout_for_file > 0, "--timeout");
         cmd.arg_i32_if(timeout_for_file > 0, timeout_for_file);
         cmd.arg(path);
-        const char* const* extra = get_extra_args(path);
-        if (extra != NULL) {
+        if (extra) {
             cmd.arg("--");
-            for (size_t k = 0; extra[k] != NULL; k++) {
-                cmd.arg(extra[k]);
-            }
+            for (size_t k = 0; extra[k] != NULL; k++) cmd.arg(extra[k]);
         }
+
         if (stream_output) {
             cmd.inherit_stdio();
-            status = cmd.status();
+            CCResult_int_CCIoError status = cmd.status();
             if (cc_is_err(status)) {
                 CCIoError err = cc_unwrap_err_as(status, CCIoError);
-                cc_arena_free(&test_arena);
                 printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
                 fflush(stdout);
                 trace_write("END   %s SKIP (spawn error os=%d)", path, err.os_code);
                 stats->skipped++;
                 continue;
             }
-
-            int exit_code = cc_unwrap(status);
-            if (exit_code == expected_exit) {
-                printf("OK%s\n", expected_exit != 0 ? " (expected failure)" : "");
-                stats->passed++;
-            } else if (exit_code == 124 && expected_exit != 124) {
-                printf("TIMEOUT (>%ds)\n", timeout_for_file);
-                stats->failed++;
-            } else {
-                printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
-                stats->failed++;
-            }
-            fflush(stdout);
-            trace_write("END   %s rc=%d expected=%d", path, exit_code, expected_exit);
-
-            cc_arena_free(&test_arena);
+            record_outcome(stats, path, cc_unwrap(status), expected_exit, timeout_for_file,
+                           &test_arena, NULL);
             continue;
         }
 
-        res = cmd.output(&test_arena);
-
+        CCResult_CCProcessOutput_CCIoError res = cmd.output(&test_arena);
         if (cc_is_err(res)) {
             CCIoError err = cc_unwrap_err_as(res, CCIoError);
-            cc_arena_free(&test_arena);
             printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
             fflush(stdout);
             trace_write("END   %s SKIP (spawn error os=%d)", path, err.os_code);
@@ -289,37 +269,14 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         }
 
         CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
-        int exit_code = cc_process_output_exit_code(&out);
-        
-        if (exit_code == expected_exit) {
-            printf("OK%s\n", expected_exit != 0 ? " (expected failure)" : "");
-            stats->passed++;
-        } else if (exit_code == 124 && expected_exit != 124) {
-            /* 124 = timeout (like GNU timeout) */
-            printf("TIMEOUT (>%ds)\n", timeout_for_file);
-            write_process_logs(&test_arena, path, &out);
-            print_process_log_paths(&test_arena, path);
-            stats->failed++;
-        } else {
-            printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
-            print_process_output_excerpt(&out);
-            write_process_logs(&test_arena, path, &out);
-            print_process_log_paths(&test_arena, path);
-            stats->failed++;
-        }
-        fflush(stdout);
-        trace_write("END   %s rc=%d expected=%d", path, exit_code, expected_exit);
-
-        cc_arena_free(&test_arena);
+        record_outcome(stats, path, out.exit_code(), expected_exit, timeout_for_file,
+                       &test_arena, &out);
     }
 }
 
 int main(int argc, char** argv) {
     CCArena arena = cc_arena_heap(megabytes(16)) @destroy;
-    bool do_examples;
-    bool do_stress;
-    bool do_perf;
-    bool do_all;
+
     static const CCArgSpec RUN_ALL_ARGS[] = {
         { .long_ = "help", .short_ = 'h', .kind = CC_ARG_FLAG, .desc = "Show this help" },
         { .long_ = "examples", .kind = CC_ARG_FLAG, .desc = "Run all example programs" },
@@ -333,6 +290,7 @@ int main(int argc, char** argv) {
           .desc = "Stream per-test stdout/stderr to the terminal (inherit_stdio) for every "
                   "category, not just perf" },
     };
+
     CCCliParse cli = cc_cli_parse_args(argc, argv, RUN_ALL_ARGS, cc_arg_spec_count(RUN_ALL_ARGS), &arena);
     if (!cli.ok) {
         cli.print(stderr);
@@ -342,10 +300,11 @@ int main(int argc, char** argv) {
         cli.print(stdout);
         return 0;
     }
-    do_examples = cli.args.has("examples");
-    do_stress = cli.args.has("stress");
-    do_perf = cli.args.has("perf");
-    do_all = cli.args.has("all");
+
+    bool do_examples = cli.args.has("examples");
+    bool do_stress = cli.args.has("stress");
+    bool do_perf = cli.args.has("perf");
+    bool do_all = cli.args.has("all");
     bool do_trace = cli.args.has("trace");
     bool do_stream = cli.args.has("stream");
     if (do_all) {
@@ -358,16 +317,11 @@ int main(int argc, char** argv) {
         cli.print(stderr);
         return 1;
     }
+
     Stats stats = {0};
 
-    /* Make stdout unbuffered when tracing so progress is visible live even if
-     * the machine panics mid-test. */
-    if (do_trace || do_stream) {
-        setvbuf(stdout, NULL, _IONBF, 0);
-    }
+    if (do_trace || do_stream) setvbuf(stdout, NULL, _IONBF, 0);
 
-    /* Open the hard-flushed trace file up front, so the first test's START
-     * marker is already on disk before we spawn anything. */
     if (do_trace) {
         ensure_log_dir(&arena);
         g_trace = fopen(TRACE_PATH, "a");
@@ -378,24 +332,23 @@ int main(int argc, char** argv) {
         }
         trace_write("SESSION start pid=%d examples=%d stress=%d perf=%d",
                     (int)getpid(), do_examples, do_stress, do_perf);
-        printf("Trace log: %s (fsynced per test)\n", TRACE_PATH);
+        CCString tip = @string(`Trace log: ${TRACE_PATH} (fsynced per test)\n`, &arena);
+        const char* tip_cstr = tip.cstr(&arena);
+        if (tip_cstr) fputs(tip_cstr, stdout);
     }
 
     printf("Concurrent-C Test Runner\n");
 
     if (do_examples) {
-        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, do_stream);  /* No timeout */
+        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, do_stream);
     }
-
     if (do_stress) {
         run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC, do_stream);
     }
-
     if (do_perf) {
         run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats, PERF_TIMEOUT_SEC, true);
     }
 
-    // Summary
     printf("\n=== Summary ===\n");
     printf("  Passed:  %d\n", stats.passed);
     printf("  Failed:  %d\n", stats.failed);
