@@ -1,0 +1,35 @@
+/*
+ * SHAPE-T5 — ignored Result: PREVENTED on the T!>(E) surface.
+ *
+ * Ill-formed under CC_STRICT_RESULT_UNWRAP=1
+ * (tests/result_unwrap_unhandled_bare_fail.ccs):
+ *   int !>(CCError) step(void);
+ *   step();   // ERROR: unhandled-result
+ *
+ * Idiomatic: consume with !> under @errhandler (or ?> / binder).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_half;
+
+static int !>(CCError) step(void) {
+    g_half = 1;
+    return cc_err(CC_ERR_NOT_FOUND, "simulated fail");
+}
+
+int main(void) {
+    g_half = 0;
+    @errhandler(CCError e) {
+        /* Handled — do not continue with half-updated happy path. */
+        if (g_half != 1) return 2;
+        printf("shape-t5-ignored-result: prevented "
+               "(T!>(E) must consume; errhandler ran)\n");
+        return 0;
+    }
+
+    int v = step() !>;
+    (void)v;
+    printf("FAIL: should have taken errhandler\n");
+    return 1;
+}

@@ -1,0 +1,49 @@
+/*
+ * SHAPE-T3 — arena borrow across channel: PREVENTED for arena views.
+ *
+ * Ill-formed (tests/channel_send_arena_borrow_fail.ccs):
+ *   char[:] view = cc_arena_alloc_slice_bytes(&a, n);
+ *   cc_channel_send(tx, view);   // ERROR: channel-stable-borrow
+ *
+ * Idiomatic: materialize stable bytes (static / unique / copy) before send.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(1)) !> @destroy;
+    /* Stabilize: static/canonical bytes outlive any arena reset. */
+    char[:] msg = cc_slice_from_static((void*)"payload!", 8);
+
+    char[:][~4 >] tx;
+    char[:][~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    {
+        char[:] view = cc_arena_alloc_slice_bytes(&a, 8);
+        if (!view.ptr) return 1;
+        memcpy(view.ptr, "payload!", 8);
+        /* Would be ill-formed: cc_channel_send(tx, view); */
+        (void)view;
+    } /* borrow ends — epoch may advance */
+
+    if (!cc_io_avail(cc_channel_send(tx, msg))) return 3;
+
+    char[:] got = {0};
+    if (!cc_io_avail(cc_channel_recv(rx, &got))) return 4;
+    if (got.len != 8 || memcmp(got.ptr, "payload!", 8) != 0) return 5;
+
+    cc_arena_reset(&a);
+
+    printf("shape-t3-channel-borrow-send: prevented "
+           "(channel-stable-borrow; materialize before send)\n");
+    return 0;
+}
