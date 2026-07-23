@@ -1,0 +1,43 @@
+/* UFCS method calls on a @variant(packed) arm (spec §6, §11).
+ *
+ * The redis port calls `val->str.as_slice()` / `.len()` on the str arm of a
+ * packed variant.  A packed arm projection lowers to an overlay-cast lvalue
+ * whose receiver ends in a plain member, so UFCS dispatch resolves it exactly
+ * like the unpacked union member.  This pins the whole chain: dominated
+ * projection -> method call -> observable result, at parity with the unpacked
+ * twin. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+@variant(packed) PMV { str: CCString; num: int64_t; };
+@variant        UMV { str: CCString; num: int64_t; };
+
+static int64_t packed_len(PMV* v) {
+    if (v->kind == .str) {
+        char[:] s = v->str.as_slice();     /* UFCS method on a packed arm */
+        return (int64_t)s.len;
+    }
+    return -1;
+}
+static int64_t unpacked_len(UMV* v) {
+    if (v->kind == .str) {
+        char[:] s = v->str.as_slice();
+        return (int64_t)s.len;
+    }
+    return -1;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(4096);
+    PMV p = { .str = cc_string_from("hello", &arena) };
+    UMV u = { .str = cc_string_from("hello", &arena) };
+    int64_t pl = packed_len(&p);
+    int64_t ul = unpacked_len(&u);
+    printf("packed_len=%lld unpacked_len=%lld\n", (long long)pl, (long long)ul);
+    if (pl != 5 || ul != 5) return 1;
+    if (pl != ul) return 2;
+    printf("ok\n");
+    return 0;
+}
