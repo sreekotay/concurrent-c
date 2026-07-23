@@ -2746,7 +2746,15 @@ static int cc__va_step_defers(const char* s, size_t n, const char* path, CCVaEdi
                         while (db < n && cc_is_ident_char(s[db])) db++;
                         size_t f = cc_skip_ws_and_comments(s, n, db);
                         /* Skip prototypes/calls/arrays; take `=` or `;`. */
-                        if (f < n && (s[f] == '=' || s[f] == ';')) {
+                        /* The transition step (cc__va_step_transitions) emits a
+                           move-through temp `__cc_vtN` that is consumed by the
+                           immediately following `(lhs) = __cc_vtN;`.  Its bytes
+                           alias the LHS payload after that copy, so a scope-exit
+                           drop here would free the LHS's live arm (double-free).
+                           Never inject a drop for it. */
+                        int is_transition_temp =
+                            (db - da) >= 7 && memcmp(s + da, "__cc_vt", 7) == 0;
+                        if (f < n && (s[f] == '=' || s[f] == ';') && !is_transition_temp) {
                             size_t semi = 0;
                             if (cc__va_find_semi(s, n, db, &semi) &&
                                 !cc__va_returned_by_value(s, n, semi + 1, s + da, db - da)) {
