@@ -49,11 +49,10 @@ static cc_atomic_int g_done = 0;      /* iteration finished (spread or deadline)
 static cc_atomic_int g_collapsed = 0; /* deadline hit with < 2 workers seen */
 static struct timespec g_iter_start;
 
-/* NOTE: the helpers below take no arguments and read the globals directly —
- * the closure-capture scanner mis-parses bare global array names passed as
- * call arguments inside closure literals, so the closure body must only
- * reference globals through `&g_xxx[...]` / `&g_xxx` expressions or through
- * zero-argument helper calls. */
+/* The helpers below take no arguments and read the globals directly, which
+ * suits their referee role. Passing a bare file-scope array name as a call
+ * argument inside a closure body is also supported (pinned by
+ * closure_global_array_arg_smoke). */
 static int iteration_deadline_expired(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
