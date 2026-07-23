@@ -1,0 +1,25 @@
+/* Compile-fail: capture pin survives after the local borrow leaves scope. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+
+    CCArena buf = cc_arena_heap(kilobytes(4)) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+
+    {
+        char[:] view = cc_arena_alloc_slice_bytes(&buf, 64);
+        if (!view.ptr) return 1;
+        memset(view.ptr, 'x', view.len);
+        n->spawn(() => [view] {
+            (void)view;
+        });
+    }
+    /* view is out of scope; nursery (and captured borrow) still live. */
+    cc_arena_reset(&buf);
+    return 0;
+}

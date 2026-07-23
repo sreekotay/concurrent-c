@@ -7,7 +7,9 @@ This folder is a feedback loop, same spirit as `real_projects/`:
 
 - **Hits** support the thesis (ownership seams *or* truthful wire *or* data-model sums).  
 - **Misses** are backlog (`channel-stable-borrow`, schema rejects, shipped `@variant`, …).  
-- **N/A** is for bugs with no ownership / wire-framing / representation angle.
+- **N/A** is for bugs outside idiomatic language seams (crypto/authz, etc.).
+  Prefer **omitting** protocol-product policy bugs (e.g. HTTP smuggling)
+  rather than keeping confusing `n/a` entries.
 
 ## Inclusion rules (pre-registered)
 
@@ -18,16 +20,19 @@ Include a CVE if the root cause is primarily one of:
 3. Stack / request buffer captured into a longer-lived task  
 4. Ignored or nonlocal error leaving resources half-live  
 5. Cancel / shutdown races (use after stop)  
-6. Wire/buffer length or framing abuse (Heartbleed-shaped, HTTP smuggling-shaped)  
+6. Wire length vs actual buffer (Heartbleed-shaped) — general serdes idiom  
 7. Wrong in-memory representation that invites encode/decode or inactive-arm bugs (`@variant` / schema `one of`)
 
-**Out of scope (mark N/A):**
+**Out of scope (omit from corpus, or mark N/A only if a control is useful):**
 
 - Crypto breaks, authz/logic bugs, XSS/SQLi with no framing/ownership angle  
 - Speculative execution / side channels  
-- “Would need a full product HTTP stack” alone is not enough for `n/a` — score the **shape** against `@grammar` / schema rejects even if no HTTP library ships yet  
+- HTTP request smuggling / cross-parser framing policy — ecosystem stack work,
+  not idiomatic CC; do not keep in the corpus  
 
-When in doubt between `still_expressible` and `n/a`: prefer `still_expressible` + `needs_language:` if SERDES or variants *could* close it with a concrete rule.
+When in doubt between `still_expressible` and omit/`n/a`: prefer
+`still_expressible` + `needs_language:` only if a **language or general serdes**
+rule could close it; omit if only a full protocol product could.
 
 ## Verdict rubric
 
@@ -37,22 +42,31 @@ Exactly one primary verdict per CVE:
 |---------|---------|
 | `prevented` | Idiomatic CC makes the buggy shape ill-formed (compile / type / schema rule). |
 | `mitigated` | Idiomatic locality **or** idiomatic serdes/variant use makes the safe path natural; footguns remain via raw/`unsafe`/hand parsers. |
-| `still_expressible` | A competent CC port can still ship the same bug. **Language / schema backlog.** |
-| `n/a` | No ownership, wire-framing, or representation angle. |
+| `still_expressible` | A competent CC port can still ship the same bug. |
+| `n/a` | Outside idiomatic language seams (crypto/authz, or protocol-product policy). |
 
-Optional tags: `needs_language:` (e.g. `channel-stable-borrow`, `http-schema-reject-cl-te`).
+Optional tags:
+
+- `needs_language:` (e.g. `channel-stable-borrow`) — CC backlog that could close the miss  
+- `parity:` — when set to `rust_unsafe`, safe Rust does not close it either (`unsafe` /
+  `from_raw` / custom `Drop`). Not a claim-A gap; keep primary `still_expressible`.
 
 In `verdict.md`, name which family drove the score: `locality` | `serdes` | `variant` | `mixed`.
 
-## How to add a CVE
+## How to add a CVE (or shape exemplar)
 
 ```bash
 cp -R studies/cve_locality/corpus/_template \
       studies/cve_locality/corpus/CVE-YYYY-NNNNN
+# Textbook class with no clean single CVE:
+cp -R studies/cve_locality/corpus/_template \
+      studies/cve_locality/corpus/SHAPE-<short-name>
 ```
 
 Fill every file in the template. Keep reconstructions **shape-minimal**.
-Then update `summary.md` from `verdict.md` files only.
+In `shape.md`, when comparing to Rust, use **claim A** only (same shape
+ill-formed in safe Rust) — not rewrite-luck. Then update `summary.md`
+from `verdict.md` files only.
 
 ## Layout
 
@@ -64,7 +78,9 @@ studies/cve_locality/
   corpus/
     _template/
     CVE-…/
+    SHAPE-…/              # optional class exemplar (e.g. T2 stack escape)
 ```
+
 
 ## Relation to real projects
 
@@ -76,8 +92,8 @@ including SERDES and (draft) variants — would have blocked historical failures
 
 A corpus that only contains `mitigated`/`prevented` is marketing. Prefer a
 mix of locality hits, serdes mitigations, **still_expressible** backlog, and
-true `n/a` controls (crypto/authz). Misses feed language work the same way
-redis feeds `@variant` / stabilize.
+true `n/a` controls (crypto/authz) when useful. Misses feed language work the
+same way redis feeds `@variant` / stabilize.
 
 Compile-time + runtime detectors are allowed evidence — they do not inflate
 `prevented` without a language or schema rule.

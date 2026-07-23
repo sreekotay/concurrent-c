@@ -23,6 +23,7 @@
 #include "string.c"
 #include "exec.c"
 #include "arena_state.c"
+#include "slice_adopt.c"
 #include "cc_rt_diag.c"
 #include "cc_type_info.c"
 #include "cc_dyn_vec.c"

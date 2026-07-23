@@ -440,7 +440,7 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
     *pre_hook = NULL;
     *post_hook = NULL;
     *post_pass_address = 0;
-    int saw_nursery = 0, saw_arena = 0, saw_chan = 0, saw_star = 0;
+    int saw_nursery = 0, saw_arena = 0, saw_chan = 0, saw_slice_unique = 0, saw_star = 0;
     size_t i = type_a;
     while (i < type_b) {
         char c = s[i];
@@ -452,6 +452,7 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
             if (len == 9 && memcmp(s + start, "CCNursery", 9) == 0) saw_nursery = 1;
             else if (len == 7 && memcmp(s + start, "CCArena", 7) == 0) saw_arena = 1;
             else if (len == 6 && memcmp(s + start, "CCChan", 6) == 0) saw_chan = 1;
+            else if (len == 13 && memcmp(s + start, "CCSliceUnique", 13) == 0) saw_slice_unique = 1;
             continue;
         }
         i++;
@@ -462,9 +463,15 @@ static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_
         *post_pass_address = 0;
         return 1;
     }
-    if (saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+    if (saw_arena && !saw_nursery && !saw_chan && !saw_slice_unique && !saw_star) {
         *pre_hook = NULL;
         *post_hook = "cc_arena_destroy";
+        *post_pass_address = 1;
+        return 1;
+    }
+    if (saw_slice_unique && !saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+        *pre_hook = NULL;
+        *post_hook = "cc_slice_destroy";
         *post_pass_address = 1;
         return 1;
     }

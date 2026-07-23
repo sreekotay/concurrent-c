@@ -1,45 +1,51 @@
 # Summary
 
 Update counts only from `corpus/*/verdict.md` primary fields.
-Do not invent tallies from memory.
+Do not invent tallies from memory. Optional `parity: rust_unsafe` tags
+mark still_expressible entries that safe Rust also leaves open.
 
-| Verdict | Count | CVEs |
-|---------|------:|------|
-| prevented | 0 | — |
-| mitigated | 2 | CVE-2025-31115 (locality), CVE-2014-0160 (serdes) |
-| still_expressible | 2 | CVE-2017-13245 (locality), CVE-2024-23452 (serdes) |
+| Verdict | Count | Entries |
+|---------|------:|---------|
+| prevented | 4 | CVE-2017-13245, SHAPE-T2-stack-escape, SHAPE-T8-use-after-move, SHAPE-T7-shared-mut-spawn |
+| mitigated | 6 | CVE-2025-31115, CVE-2014-0160, CVE-2008-5038, CVE-2020-12387, CVE-2013-4153, CVE-2026-10653 |
+| still_expressible | 1 | SHAPE-T8-adopt-wrong-deleter (`parity: rust_unsafe`) |
 | n/a | 0 | — |
-| **total** | **4** | |
+| **total** | **11** | |
 
-## By family
+Of which still_expressible with `parity: rust_unsafe`: **1** (not a claim-A backlog item).
 
-| Family | Count | CVEs |
-|--------|------:|------|
-| locality | 2 | CVE-2025-31115, CVE-2017-13245 |
-| serdes | 2 | CVE-2014-0160, CVE-2024-23452 |
-| variant | 0 | — (need a T10 specimen; redis `RedisValue` is the design driver) |
+## Rust claim-A scorecard
 
-## Language backlog (from verdicts)
+Safe Rust would reject the buggy shape. How does idiomatic / enforced CC compare?
+
+| Entry | Rust claim A | CC | Parity | Gap |
+|-------|--------------|-----|--------|-----|
+| SHAPE-T2-stack-escape | ill-formed | **prevented** | — | — |
+| SHAPE-T8-use-after-move | ill-formed (move) | **prevented** (unique `T[:!]`) | — | raw `malloc`/`free` still open |
+| SHAPE-T7-shared-mut-spawn | `&mut` / non-`Sync` across threads | **prevented** (ref-capture mut ban) | — | value-captured `T*` alias; `@unsafe` |
+| CVE-2017-13245 | borrow vs realloc | **prevented** (epoch pin / reset ban) | — | — |
+| CVE-2008-5038 | no shared mut free | **mitigated** | — | raw alias+`free` |
+| CVE-2020-12387 | join before drop | **mitigated** | — | detach / raw |
+| CVE-2025-31115 | owner-only free | **mitigated** | — | child `free` |
+| CVE-2014-0160 | (serdes / bounds) | **mitigated** | — | hand `memcpy` |
+| CVE-2013-4153 | Drop once | **mitigated** (arena tree) | — | raw malloc parent+child `free` |
+| CVE-2026-10653 | `Arc` or don’t share | **mitigated** (redis: closures+drain) | — | homemade `ref--` still compiles |
+| SHAPE-T8-adopt-wrong-deleter | n/a (`unsafe` / `from_raw`) | **still_expressible** | `rust_unsafe` | deleter↔allocator trusted |
+
+**Reading:** Checker-hard prevents: stack escape, unique move, shared-ref mutation across spawn, arena epoch pin. Structure mitigations (redis/arenas/join/serdes) cover the CVE bulk. The only `still_expressible` entry is FFI adopt with a wrong deleter — **Rust parity** (`parity: rust_unsafe`), not a locality backlog miss.
+
+## Language backlog
 
 | needs_language slug | From | Note |
 |---------------------|------|------|
-| owned-buffer-child-free-ban | CVE-2025-31115 | Weak; structure mitigates, raw free still possible |
-| enforce-arena-provenance / invalidate-borrows-on-arena-reset | CVE-2017-13245 | **Primary locality miss** — provenance ids + reset bump already exist; neither comptime nor use-path checks them. Same family as redis stabilize-as-rule |
-| http-schema-reject-cl-te | CVE-2024-23452 | **Primary serdes miss** — ambiguous framing unrepresentable |
+| owned-buffer-child-free-ban | xz, CVE-2008-5038 | Toward Rust’s alias-free bar |
+| channel-stable-borrow | CVE-2017-13245 sibling | Stabilize as rule |
+| pointer-alias-as-ref-capture | SHAPE-T7 gap | Value-captured `T*` smuggle |
+| (stdlib) atomic shared owner | CVE-2026-10653 | Optional; redis path is “don’t share” |
 
-## Meta note (harness)
+## Next on the Rust axis
 
-The first draft of `CVE-2025-31115/idiomatic.ccs` deadlocked (close-after-join).
-`ccc` caught it at **runtime** (sysmon dump, exit 124) — detector evidence,
-not a CVE prevented count.
-
-## Next candidates (suggested)
-
-| Direction | Why |
-|-----------|-----|
-| Stack pointer into fiber (T2) | Expect locality `prevented` / strong `mitigated` |
-| FFI `adopt` double-free (T8) | Likely `still_expressible` |
-| Ignored fallible read (T5) | Result / `@errhandler` |
-| Inactive-arm / wrong tag use (T10) | Expect `@variant` mitigate once shipped; good control for draft |
-| True `n/a` crypto/authz | Keep ≥1 control that is not wire/ownership |
-| Another Heartbleed-twin with hand parser in idiomatic.ccs | Show serdes mitigate + raw escape side-by-side |
+| Direction | Expected CC |
+|-----------|-------------|
+| `@variant` inactive arm (T10) | TBD when exercised |
+| Full non-`Send` type lattice | weak / backlog (`pointer-alias-as-ref-capture`) |

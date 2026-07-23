@@ -152,8 +152,9 @@ static void cc__maybe_record_decl(char*** scope_names,
 
     /* Flags: bit0 = is_slice(CCSlice), bit1 = move-only slice hint. */
     unsigned char flags = 0;
-    if (strcmp(ty, "CCSlice") == 0) flags |= 1;
+    if (strcmp(ty, "CCSlice") == 0 || strcmp(ty, "CCSliceUnique") == 0) flags |= 1;
     if (is_slice && slice_has_bang) flags |= 2;
+    if (strcmp(ty, "CCSliceUnique") == 0) flags |= 2;
     /* Provenance hint (more "real"): detect unique-id construction in initializer.
        - cc_slice_make_id(..., true/1, ...)
        - CC_SLICE_ID_UNIQUE bit present in an id expression
@@ -165,6 +166,7 @@ static void cc__maybe_record_decl(char*** scope_names,
         if (eq) {
             size_t eq_len = (size_t)(semi - eq);
             if (cc_find_substr_top_level(eq, 0, eq_len, "CC_SLICE_ID_UNIQUE", 18) < eq_len) flags |= 2;
+            if (cc_find_substr_top_level(eq, 0, eq_len, "cc_adopt", 8) < eq_len) flags |= 2;
             size_t mk_off = cc_find_substr_top_level(eq, 0, eq_len, "cc_slice_make_id", 16);
             const char* mk = (mk_off < eq_len) ? (eq + mk_off) : NULL;
             if (mk) {

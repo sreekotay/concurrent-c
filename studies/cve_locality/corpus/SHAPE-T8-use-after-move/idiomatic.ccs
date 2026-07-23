@@ -1,0 +1,29 @@
+/*
+ * SHAPE-T8 — unique ownership: PREVENTED for T[:!] / unique provenance.
+ *
+ * Bad shapes (compile-fail — see tests/slice_provenance_*_fail):
+ *   char[:!] a = ...; char[:!] b = a;           // cannot copy
+ *   char[:!] t = cc_move(s); use(s);            // use of moved
+ *
+ * Idiomatic: single owner, explicit cc_move to transfer.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* p = (char*)malloc(8);
+    if (!p) return 1;
+    memset(p, 'u', 8);
+    /* unique + transferable provenance — move-only */
+    char[:!] owned = cc_slice_from_parts(p, 8, cc_slice_make_id(1, true, true, false), 8);
+
+    char[:!] other = cc_move(owned);
+    /* owned is moved; other is the sole owner */
+    if (other.len != 8) return 2;
+    free(other.ptr); /* sole free — adopt/deleter would be cleaner in real code */
+
+    printf("SHAPE-T8: prevented (unique move-only); idiomatic single owner ok\n");
+    return 0;
+}

@@ -1,0 +1,36 @@
+/*
+ * SHAPE-T2 — stack capture into escaping task: PREVENTED for stack slices.
+ *
+ * Bad shape (does not compile — see tests/closure_capture_stack_slice_*_fail):
+ *   char buf[N]; char[:] v = from_buffer(buf);
+ *   return nursery_that_captured(v);  // ERROR: escaping stack slice
+ *
+ * Idiomatic: own bytes in an arena that outlives the nursery, or join
+ * before the frame ends (scoped).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(1)) !> @destroy;
+    char[:] view = cc_arena_alloc_slice_bytes(&a, 32);
+    if (!view.ptr) return 1;
+    memset(view.ptr, 'x', view.len);
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [view] {
+            (void)view;
+        });
+    } /* join before arena destroy */
+
+    printf("SHAPE-T2: prevented (stack-slice escape); "
+           "idiomatic arena+join ok\n");
+    return 0;
+}

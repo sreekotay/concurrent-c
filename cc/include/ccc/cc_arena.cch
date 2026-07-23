@@ -979,6 +979,24 @@ static inline bool cc_slice_is_from_arena_epoch(CCSlice slice, const CCArena *ar
            cc_slice_alloc_id(slice.id) == arena->provenance;
 }
 
+/* Debug belt: abort if a tracked slice's alloc epoch does not match the arena.
+ * Comptime capture/reset rules are the primary enforcement; this is for cases
+ * analysis cannot see. No-op unless CC_DEBUG_ARENA_PROVENANCE is non-zero. */
+static inline void cc_slice_debug_assert_arena_epoch(CCSlice slice, const CCArena *arena) {
+#if defined(CC_DEBUG_ARENA_PROVENANCE) && CC_DEBUG_ARENA_PROVENANCE
+    if (!arena || cc_slice_is_untracked(slice)) return;
+    if (!cc_slice_is_from_arena_epoch(slice, arena)) {
+        fprintf(stderr, "CC: stale arena slice (id epoch %llu, arena epoch %llu)\n",
+                (unsigned long long)cc_slice_alloc_id(slice.id),
+                (unsigned long long)arena->provenance);
+        abort();
+    }
+#else
+    (void)slice;
+    (void)arena;
+#endif
+}
+
 /* CCArena's UFCS dispatch is covered by the global `*` registration
  * (see end of this file).  Only the lifecycle hooks (`.create` /
  * `.destroy`) need a type-specific entry. */
@@ -1176,6 +1194,12 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
         .ufcs = cc_ufcs_generic_cc_slice_family_c,
     });
     (void)cc_type_register("CCSliceShared*", (CCTypeHooks){
+        .ufcs = cc_ufcs_generic_cc_slice_family_c,
+    });
+    /* Bodyless `!> @destroy` / `s.destroy()` for adopted unique slices.
+     * cc_slice_destroy no-ops when the alloc_id is not in the adopt registry. */
+    (void)cc_type_register("CCSliceUnique", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_slice_destroy"),
         .ufcs = cc_ufcs_generic_cc_slice_family_c,
     });
 }

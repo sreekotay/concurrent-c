@@ -7,13 +7,20 @@
  * - id   : provenance/uniqueness token (0 if not tracked)
  * - alen : available length from ptr to the end of the original allocation
  *
- * This header is intentionally small and header-only so it can be used both by
- * the runtime and generated C without additional linkage.
+ * Most helpers are header-only. FFI adopt (`cc_adopt`) + `cc_slice_destroy`
+ * need a small runtime registry (see cc/runtime/slice_adopt.c).
+ *
+ * Provenance axes:
+ * - Untracked (id==0 / from_buffer): no lifetime help; raw ptr+len.
+ * - Arena/static views: tracked, no per-slice destructor.
+ * - adopt(): unique + registered deleter; s.destroy() / !> @destroy calls it
+ *   once. The deleter itself is trusted (wrong free is still expressible).
  */
 #ifndef CC_SLICE_H
 #define CC_SLICE_H
 
 #include <ccc/cc_compat.cch>
+#include <stddef.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -372,5 +379,21 @@ static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) { return cc_sli
         const CCSlice*: cc__slice_sub_const_ptr, \
         default: cc__slice_sub_value \
     )((s), (start), (end))
+
+/* ---- FFI adopt (unique, non-transferable) ----
+ *
+ *   CCSliceUnique s = cc_adopt(malloc(n), n, free) !> @destroy;
+ *   // or: s.destroy();
+ *
+ * Mint unique|!transferable provenance and register `deleter` for the base
+ * pointer. `cc_slice_destroy` / UFCS `s.destroy()` runs the deleter once when
+ * the slice is still unique and registered; moved-away / unregistered unique
+ * slices (e.g. grammar COW) are no-ops. Deleter must match the allocator. */
+typedef void (*CCSliceDeleter)(void*);
+
+CCSliceUnique cc_adopt(void* ptr, size_t nbytes, CCSliceDeleter deleter);
+void cc_slice_destroy(CCSlice* s);
+static inline void CCSlice_destroy(CCSlice* s) { cc_slice_destroy(s); }
+static inline void CCSliceUnique_destroy(CCSliceUnique* s) { cc_slice_destroy((CCSlice*)s); }
 
 #endif // CC_SLICE_H

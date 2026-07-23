@@ -67,6 +67,17 @@ All concurrent tasks are scoped to an owned `CCNursery*`. Its `@destroy` waits f
 // Both tasks complete before this line
 ```
 
+### Adopting FFI buffers
+
+Foreign owned pointers become unique slices with a trusted deleter:
+
+```c
+CCSliceUnique s = cc_adopt(malloc(64), 64, free) @destroy;
+// s.destroy() / @destroy calls free once; send_take is rejected (not transferable)
+```
+
+`cc_slice_from_buffer` is untracked (no destructor). `cc_adopt` is the opposite: unique provenance plus a registered free function. The deleter must match the allocator — the language cannot check that (same trust boundary as Rust `unsafe` / `from_raw`).
+
 ### Channels
 
 Send messages between tasks:

@@ -589,7 +589,11 @@ spawn_thread(() => {
 
 **Rule (enforcement and UB):** Stack slice escape is always a compile-time error when the escape is provable. For cases where escape cannot be determined at compile time, the behavior is undefined in release builds and trapped (runtime error) in debug builds.
 
-**Rule (arena slice capture):** Arena slices can be captured if the compiler can prove the arena outlives the thread/task. In practice, this means the arena must be declared in an enclosing scope that joins the thread/task before the arena is freed.
+**Rule (arena slice capture):** Arena slices can be captured if the compiler can prove the arena outlives the thread/task. In practice, this means the arena must be declared in an enclosing scope that joins the thread/task before the arena is freed **or reset**.
+
+**Rule (arena epoch pin on capture):** Capturing a non-unique arena-backed slice into a nursery/thread task **pins** that arena's provenance epoch until the nursery (or equivalent join scope) ends. While the pin is live, `cc_arena_reset` / `cc_arena_restore` of that arena is a compile-time error. Materialize into a unique/stable slice (or `@unsafe`) to escape the pin.
+
+**Rule (arena reset with live borrow):** `cc_arena_reset` / `cc_arena_restore` is a compile-time error when a derived arena slice borrow of that arena is still within its lexical enclosing block. End the borrow's scope before reset, or copy into another arena / unique slice first.
 
 ```c
 void ok_pattern() {
@@ -613,6 +617,22 @@ void bad_pattern() {
         });
     }  // arena freed here
     g.join();  // thread may access freed memory
+}
+
+void bad_reset_while_borrow() {
+    CCArena a = cc_arena_heap(kilobytes(64));
+    char[:] s = arena_alloc(char, &a, 100);
+    use(s);
+    cc_arena_reset(&a);  // ERROR: borrow of a still in scope
+}
+
+void ok_reset_after_borrow_scope() {
+    CCArena a = cc_arena_heap(kilobytes(64));
+    {
+        char[:] s = arena_alloc(char, &a, 100);
+        use(s);
+    }
+    cc_arena_reset(&a);  // OK
 }
 ```
 
@@ -1743,7 +1763,7 @@ d.block_max = 0;  // unbounded growth beyond the initial user buffer
 
 **Rule:** Arena-allocated slices can be sent through channels or captured in thread closures when lifetime rules (§2.2) are satisfied.
 
-**Rule (arena lifetime obligation):** `arena_reset` and `arena_free` must not be called while any slice derived from that arena may still be used on any thread. This is a programmer obligation. Debug builds may detect some violations; in release builds, violating this rule is undefined behavior.
+**Rule (arena lifetime obligation):** `arena_reset` and `arena_free` must not be called while any slice derived from that arena may still be used on any thread. When the conflict is statically visible (live lexical borrow, or nursery spawn capture of an arena borrow), the compiler rejects `arena_reset` / `arena_restore`. When not statically detectable, violating this rule is undefined behavior in release builds; debug builds may trap via epoch helpers such as `cc_slice_is_from_arena_epoch`.
 
 **Arena checkpoints (normative):**
 

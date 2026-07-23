@@ -1,0 +1,29 @@
+/*
+ * SHAPE-T8 — FFI adopt / wrong deleter (still_expressible).
+ *
+ *   CCSliceUnique s = cc_adopt(ptr, n, deleter) @destroy;
+ * Deleter is trusted. Wrong deleter (free vs munmap, pool vs heap)
+ * is not ill-formed — same class as Rust Box::from_raw.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* p = (char*)malloc(32);
+    if (!p) return 1;
+    memset(p, 'x', 32);
+
+    /* Correct trust: deleter matches allocator. */
+    CCSliceUnique s = cc_adopt(p, 32, free) @destroy;
+    if (s.len != 32) return 2;
+
+    /* Bug-shaped (not executed):
+     *   cc_adopt(mmap_ptr, n, free);  // should be munmap-shaped
+     * Nothing in the type system rejects a mismatched deleter. */
+
+    printf("shape-t8-adopt-wrong-deleter: still_expressible "
+           "(cc_adopt deleter is trusted, like Rust unsafe)\n");
+    return 0;
+}

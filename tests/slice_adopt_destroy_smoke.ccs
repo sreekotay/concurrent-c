@@ -1,0 +1,30 @@
+/* Smoke: cc_adopt + bodyless @destroy runs the registered deleter once. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_freed;
+
+static void test_free(void* p) {
+    g_freed++;
+    free(p);
+}
+
+int main(void) {
+    g_freed = 0;
+    {
+        char* p = (char*)malloc(16);
+        if (!p) return 1;
+        memset(p, 'a', 16);
+        CCSliceUnique s = cc_adopt(p, 16, test_free) @destroy;
+        if (s.len != 16 || !s.ptr) return 2;
+        if (!cc_slice_is_unique(s) || cc_slice_is_transferable(s)) return 3;
+    }
+    if (g_freed != 1) {
+        printf("slice_adopt_destroy_smoke: FAIL freed=%d\n", g_freed);
+        return 4;
+    }
+    printf("slice_adopt_destroy_smoke: ok\n");
+    return 0;
+}

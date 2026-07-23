@@ -1,0 +1,15 @@
+/* Compile-fail: cannot reset an arena while a derived slice borrow is in scope. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+int main(void) {
+    CCArena buf = cc_arena_heap(kilobytes(4));
+    char* backing = cc_arena_alloc_T_count(char, &buf, 64);
+    if (!backing) return 1;
+    memset(backing, 'x', 64);
+    char[:] view = cc_slice_from_parts(backing, 64, 0, 64);
+    (void)view;
+    cc_arena_reset(&buf);
+    cc_arena_free(&buf);
+    return 0;
+}

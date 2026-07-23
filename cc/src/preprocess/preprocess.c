@@ -325,6 +325,7 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
     int saw_arena = 0;
     int saw_checkpoint = 0;
     int saw_chan = 0;
+    int saw_slice_unique = 0;
     int saw_star = 0;
     size_t i = 0;
     if (out_pre_callee) *out_pre_callee = NULL;
@@ -356,18 +357,27 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
             } else if (len == sizeof("CCChan") - 1 &&
                        memcmp(declared_type + start, "CCChan", len) == 0) {
                 saw_chan = 1;
+            } else if (len == sizeof("CCSliceUnique") - 1 &&
+                       memcmp(declared_type + start, "CCSliceUnique", len) == 0) {
+                saw_slice_unique = 1;
             }
             continue;
         }
         i++;
     }
-    if (saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+    if (saw_arena && !saw_nursery && !saw_chan && !saw_slice_unique && !saw_star) {
         if (out_callee) *out_callee = "cc_arena_destroy";
         if (out_pass_address) *out_pass_address = 1;
         return 1;
     }
-    if (saw_checkpoint && !saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+    if (saw_checkpoint && !saw_arena && !saw_nursery && !saw_chan && !saw_slice_unique && !saw_star) {
         if (out_callee) *out_callee = "cc_arena_checkpoint_destroy";
+        if (out_pass_address) *out_pass_address = 1;
+        return 1;
+    }
+    if (saw_slice_unique && !saw_arena && !saw_nursery && !saw_chan && !saw_star) {
+        /* Adopted unique slices: cc_slice_destroy runs the registered deleter. */
+        if (out_callee) *out_callee = "cc_slice_destroy";
         if (out_pass_address) *out_pass_address = 1;
         return 1;
     }

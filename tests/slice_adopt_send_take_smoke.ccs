@@ -1,0 +1,24 @@
+/* Smoke: adopted slices are not transferable via send_take. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* p = (char*)malloc(4);
+    if (!p) return 1;
+    memset(p, 't', 4);
+    CCSliceUnique s = cc_adopt(p, 4, free) @destroy;
+
+    CCChan* ch = cc_chan_create_mode_take(2, CC_CHAN_MODE_BLOCK, true);
+    if (!ch) return 2;
+    @defer cc_chan_free(ch);
+
+    int rc = cc_chan_send_take_slice(ch, &s);
+    if (rc == 0) {
+        printf("slice_adopt_send_take_smoke: FAIL send_take accepted\n");
+        return 3;
+    }
+    printf("slice_adopt_send_take_smoke: ok (rejected rc=%d)\n", rc);
+    return 0;
+}

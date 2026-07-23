@@ -15,12 +15,12 @@ cite which family drove it in the rationale.
 | **T1 Teardown vs in-flight** | Worker frees / owner frees while peer uses | Nursery join before `@destroy`; drain-as-join | Raw `free` from a child; foreign allocators |
 | **T2 Capture escape** | Stack / request buffer into longer-lived task | Closure capture rules; stack-slice rejection | Raw `T*`; `unsafe` / untracked slices |
 | **T3 Borrow across handoff** | View sent on channel / stored past reset | Provenance; stabilize; unique/`send_take`; serdes materialize-on-escape | Borrowed `T[:]` still sendable without a language ban |
-| **T4 Arena / epoch stale** | Use after `arena_reset` / realloc-replace | Lexical arena `@destroy`; **slice/arena provenance ids (already stamped + bumped on reset)** | Enforcement gap: comptime + use-path do not consult the id today; debug table is a separate optional trap |
+| **T4 Arena / epoch stale** | Use after `arena_reset` / realloc-replace | Lexical borrow ban on reset; spawn capture **epoch pin**; slice/arena provenance ids; optional `CC_DEBUG_ARENA_PROVENANCE` | Raw `char*` / `@unsafe` / untyped smuggling; channel-send stabilize still protocol |
 | **T5 Error ignore / nonlocal** | Fallible op ignored; half-updated state | Forced `T!>(E)`; `@errhandler`; `@defer(err)` | `(void)` discard; C APIs that return `int` |
 | **T6 Shutdown / cancel race** | Use after stop | Deadline/cancel; nursery cancel; channel EOF | External threads; dishonest `@blocking` |
 | **T7 Shared mutable without owner** | Data race on non-atomic shared state | Channel single-writer; `@scoped` guards | Shared `T*` folklore |
 | **T8 Double free / wrong deleter** | Two owners free; adopt mismatch | Unique slices; move; `@destroy` once | Manual `free` beside `@destroy` |
-| **T9 Wire length / framing** | Attacker length > buffer; CL vs TE disagree; over-read | Schema `bytes len` bound to remaining input; reject ambiguous headers; truthful provenance (no fake borrow after rewrite) | Hand `memcpy(dst, p, wire_len)`; schemas that omit rejects |
+| **T9 Wire length vs buffer** | Attacker length > buffer; over-read (Heartbleed-shaped) | Schema `bytes len` bound to remaining input; truthful provenance | Hand `memcpy(dst, p, wire_len)`. Cross-parser HTTP policy is out of corpus (ecosystem stack, not idiom) |
 | **T10 Wrong representation** | Value stored as text/bytes when a sum type is needed; parse/encode tax hides bugs; inactive-arm use | `@variant` + protected projection; schema `one of`; Result `!>`/`?>` | Draft not shipped; dual schema/variant until converged |
 
 ## Scoring hint
@@ -30,4 +30,4 @@ cite which family drove it in the rationale.
 - Prefer **still_expressible** when ordinary CC (including hand parsers / raw buffers) can recreate it — file `needs_language:`.  
 - Prefer **n/a** only for crypto/authz/logic with **no** ownership, wire-framing, or representation angle.  
 
-Do **not** mark Heartbleed-class or smuggling-class as `n/a` solely because nurseries don’t help — check SERDES (and variants) first.
+Do **not** mark Heartbleed-class length-vs-buffer as `n/a` solely because nurseries don’t help — check SERDES first. Omit cross-parser HTTP smuggling from the corpus.

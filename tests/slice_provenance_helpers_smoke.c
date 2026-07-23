@@ -21,20 +21,28 @@ int main(void) {
     CCArena arena = cc_arena_heap(1024);
     if (!arena.base) return 3;
 
-    CCSlice cloned = cc_slice_clone(&arena, untracked);
-    if (!cloned.ptr || cc_slice_is_untracked(cloned)) {
-        fprintf(stderr, "expected cloned slice to carry arena provenance\n");
-        return 4;
-    }
-    if (!cc_slice_is_from_arena_epoch(cloned, &arena)) {
-        fprintf(stderr, "expected cloned slice to match current arena epoch\n");
-        return 5;
+    uint64_t old_alloc_id = 0;
+    {
+        CCSlice cloned = cc_slice_clone(&arena, untracked);
+        if (!cloned.ptr || cc_slice_is_untracked(cloned)) {
+            fprintf(stderr, "expected cloned slice to carry arena provenance\n");
+            return 4;
+        }
+        if (!cc_slice_is_from_arena_epoch(cloned, &arena)) {
+            fprintf(stderr, "expected cloned slice to match current arena epoch\n");
+            return 5;
+        }
+        old_alloc_id = cc_slice_alloc_id(cloned.id);
     }
 
     cc_arena_reset(&arena);
-    if (cc_slice_is_from_arena_epoch(cloned, &arena)) {
-        fprintf(stderr, "expected reset to invalidate old arena epoch\n");
-        return 6;
+    /* Stale header reconstructed only to probe epoch bits — borrow scope ended above. */
+    {
+        CCSlice stale = cc_slice_from_parts((void*)"x", 1, cc_slice_make_id(old_alloc_id, false, false, false), 1);
+        if (cc_slice_is_from_arena_epoch(stale, &arena)) {
+            fprintf(stderr, "expected reset to invalidate old arena epoch\n");
+            return 6;
+        }
     }
 
     CCSlice left = cc_slice_from_cstr("foo");

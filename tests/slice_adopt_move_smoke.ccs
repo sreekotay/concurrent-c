@@ -1,0 +1,30 @@
+/* Smoke: cc_move transfers adopt ownership; only the live owner destroys. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_freed;
+
+static void test_free(void* p) {
+    g_freed++;
+    free(p);
+}
+
+int main(void) {
+    g_freed = 0;
+    {
+        char* p = (char*)malloc(8);
+        if (!p) return 1;
+        memset(p, 'm', 8);
+        CCSliceUnique a = cc_adopt(p, 8, test_free);
+        CCSliceUnique b = cc_move(a);
+        /* a is moved — do not touch. Registry still held by b's alloc_id. */
+        if (g_freed != 0) return 2;
+        if (b.len != 8 || !b.ptr) return 3;
+        b.destroy(); /* UFCS → cc_slice_destroy */
+        if (g_freed != 1) return 4;
+    }
+    printf("slice_adopt_move_smoke: ok\n");
+    return 0;
+}

@@ -26,6 +26,14 @@ typedef struct {
     int is_slice;
     int is_array;
     int is_stack_slice_view;
+    int is_arena;              /* CCArena (value) local */
+    int is_nursery;            /* CCNursery* handle */
+    int is_arena_ptr;          /* pointer from cc_arena_alloc* */
+    int is_arena_slice_view;   /* borrow/view into an arena epoch */
+    const char* arena_name;    /* borrowed ident of owning arena (or pointer to it) */
+    int borrow_end_line;       /* last line of enclosing block (flat scopes) */
+    int epoch_pinned;          /* arena: spawn captured a borrow from this arena */
+    int pin_end_line;          /* arena: reset forbidden through this line */
     int move_only;
     int moved;
     int pending_move;
@@ -359,6 +367,159 @@ static int cc__closure_captures_stack_slice_view(int closure_idx,
     return 0;
 }
 
+/* True if closure body uses an outer arena-backed slice; writes arena_name. */
+static int cc__closure_captures_arena_slice_view(int closure_idx,
+                                                 const StubNodeView* nodes,
+                                                 const ChildList* kids,
+                                                 CCScope* scopes,
+                                                 int scope_n,
+                                                 const char** out_arena_name) {
+    if (out_arena_name) *out_arena_name = NULL;
+    const char* locals[256];
+    int locals_n = 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = closure_idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if ((n->kind == CC_STUB_DECL_ITEM || n->kind == CC_STUB_PARAM) && n->aux_s1) {
+            int seen = 0;
+            for (int i = 0; i < locals_n; i++) if (strcmp(locals[i], n->aux_s1) == 0) seen = 1;
+            if (!seen && locals_n < (int)(sizeof(locals)/sizeof(locals[0]))) locals[locals_n++] = n->aux_s1;
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+            stack[sp++] = cl->child[i];
+        }
+    }
+
+    const char* call_names[64];
+    int call_n = 0;
+    cc__subtree_collect_call_names(nodes, kids, closure_idx, call_names, &call_n, 64);
+
+    sp = 0;
+    stack[sp++] = closure_idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+            const char* nm = n->aux_s1;
+            int is_call = 0;
+            for (int i = 0; i < call_n; i++) if (strcmp(call_names[i], nm) == 0) is_call = 1;
+            if (!is_call) {
+                int is_local = 0;
+                for (int i = 0; i < locals_n; i++) if (strcmp(locals[i], nm) == 0) is_local = 1;
+                if (!is_local) {
+                    CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, nm);
+                    if (v && v->is_slice && v->is_arena_slice_view && v->arena_name) {
+                        if (out_arena_name) *out_arena_name = v->arena_name;
+                        return 1;
+                    }
+                }
+            }
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+            stack[sp++] = cl->child[i];
+        }
+    }
+    return 0;
+}
+
+static int cc__call_is_arena_epoch_bump(const char* name) {
+    if (!name) return 0;
+    return strcmp(name, "cc_arena_reset") == 0 ||
+           strcmp(name, "cc_arena_restore") == 0;
+}
+
+static int cc__call_is_nursery_spawn(const char* name) {
+    if (!name) return 0;
+    if (strcmp(name, "cc_nursery_spawn_closure0") == 0) return 1;
+    if (strcmp(name, "cc_nursery_spawnhybrid_closure0") == 0) return 1;
+    if (strcmp(name, "cc_nursery_spawn_async_named") == 0) return 1;
+    if (strcmp(name, "cc_nursery_spawn") == 0) return 1;
+    if (strncmp(name, "cc_nursery_spawn", 16) == 0) return 1;
+    return 0;
+}
+
+/* Best-effort: arena/pointer ident under a call (&x, x, or x->field → field/x). */
+static const char* cc__subtree_arena_ref_name(const StubNodeView* nodes,
+                                              const ChildList* kids,
+                                              int idx,
+                                              CCScope* scopes,
+                                              int scope_n) {
+    if (!nodes || !kids) return NULL;
+    const char* fallback = NULL;
+    int stack[256];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+            if (strcmp(n->aux_s1, "cc_arena_reset") == 0 ||
+                strcmp(n->aux_s1, "cc_arena_restore") == 0 ||
+                strncmp(n->aux_s1, "cc_arena_", 9) == 0 ||
+                strncmp(n->aux_s1, "cc_nursery_", 11) == 0 ||
+                strncmp(n->aux_s1, "cc_slice_", 9) == 0) {
+                /* skip callee-like idents */
+            } else {
+                CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, n->aux_s1);
+                if (v && (v->is_arena || v->is_arena_ptr)) {
+                    return n->aux_s1;
+                }
+                if (!fallback) fallback = n->aux_s1;
+            }
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++)
+            stack[sp++] = cl->child[i];
+    }
+    return fallback;
+}
+
+static int cc__scopes_live_arena_borrow_at(CCScope* scopes, int scope_n, const char* arena_name, int at_line) {
+    if (!scopes || !arena_name || at_line <= 0) return 0;
+    for (int i = 0; i < scope_n; i++) {
+        CCScope* sc = &scopes[i];
+        for (int j = 0; j < sc->vars_len; j++) {
+            CCSliceVar* v = &sc->vars[j];
+            if (!v->is_slice || !v->is_arena_slice_view || v->moved) continue;
+            if (!v->arena_name || strcmp(v->arena_name, arena_name) != 0) continue;
+            if (v->decl_line > 0 && at_line < v->decl_line) continue;
+            if (v->borrow_end_line > 0 && at_line > v->borrow_end_line) continue;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__subtree_max_line(const StubNodeView* nodes, const ChildList* kids, int idx) {
+    int max_line = nodes[idx].line_start;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        if (nodes[cur].line_start > max_line) max_line = nodes[cur].line_start;
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++)
+            stack[sp++] = cl->child[i];
+    }
+    return max_line;
+}
+
+/* Enclosing BLOCK index for a node, or -1. */
+static int cc__enclosing_block(const StubNodeView* nodes, int idx) {
+    int cur = nodes[idx].parent;
+    while (cur >= 0) {
+        if (nodes[cur].kind == CC_STUB_BLOCK) return cur;
+        cur = nodes[cur].parent;
+    }
+    return -1;
+}
+
 static int cc__subtree_find_first_kind(const StubNodeView* nodes,
                                        const ChildList* kids,
                                        int idx,
@@ -503,6 +664,114 @@ static int cc__walk_call(int idx,
                          CCCheckerCtx* ctx) {
     const StubNodeView* n = &nodes[idx];
     if (!n->aux_s1) return 0;
+
+    /* Same-fiber / lexical: reset/restore while an arena borrow is still in scope.
+       Also honors spawn pins recorded on the arena var (capture-as-pin). */
+    if (cc__call_is_arena_epoch_bump(n->aux_s1)) {
+        const ChildList* cl = &kids[idx];
+        for (int i = 0; i < cl->len; i++) {
+            if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        }
+        const char* aname = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+        if (aname) {
+            if (cc__scopes_live_arena_borrow_at(scopes, *io_scope_n, aname, n->line_start)) {
+                cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                     "cannot %s arena '%s' while a derived slice borrow is still in scope",
+                                     n->aux_s1, aname);
+                fprintf(stderr, "  note: arena provenance epoch would invalidate live borrows (CVE-2017-13245 class)\n");
+                fprintf(stderr, "  hint: end the borrow's scope before reset, or materialize into a unique/stable slice\n");
+                ctx->errors++;
+                return -1;
+            }
+            CCSliceVar* arena_v = cc__scopes_lookup(scopes, *io_scope_n, aname);
+            if (arena_v && arena_v->is_arena && arena_v->epoch_pinned &&
+                n->line_start <= arena_v->pin_end_line) {
+                cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                     "cannot %s arena '%s' while a nursery task holds a borrow from it",
+                                     n->aux_s1, aname);
+                fprintf(stderr, "  note: capturing an arena slice into a spawn pins that arena epoch until the nursery scope ends\n");
+                fprintf(stderr, "  hint: join/end the nursery before reset, or capture a materialized unique slice\n");
+                ctx->errors++;
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    /* Nursery spawn: if any arg is (or builds a closure from) an arena slice,
+       pin that arena until the nursery handle's enclosing block ends.
+       Closures may still be CC_STUB_CLOSURE here, or already `cc_closure_*_make`. */
+    if (n->aux_s1 && (cc__call_is_nursery_spawn(n->aux_s1) || strcmp(n->aux_s1, "spawn") == 0)) {
+        const ChildList* cl = &kids[idx];
+        for (int i = 0; i < cl->len; i++) {
+            if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        }
+        const char* nursery_name = NULL;
+        const char* pinned_arena = NULL;
+        int cidx = -1;
+        if (cc__subtree_find_first_kind(nodes, kids, idx, CC_STUB_CLOSURE, &cidx)) {
+            (void)cc__closure_captures_arena_slice_view(cidx, nodes, kids, scopes, *io_scope_n, &pinned_arena);
+        }
+        int st[256];
+        int sp = 0;
+        st[sp++] = idx;
+        while (sp > 0) {
+            int cur = st[--sp];
+            const StubNodeView* cn = &nodes[cur];
+            if (cn->kind == CC_STUB_IDENT && cn->aux_s1) {
+                const char* nm = cn->aux_s1;
+                if (cc__call_is_nursery_spawn(nm)) continue;
+                if (strncmp(nm, "cc_closure_", 11) == 0) continue;
+                CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, nm);
+                if (v && v->is_arena_slice_view && v->arena_name && !pinned_arena) {
+                    pinned_arena = v->arena_name;
+                }
+                if (v && v->is_nursery && !nursery_name) {
+                    nursery_name = nm;
+                }
+            }
+            const ChildList* k = &kids[cur];
+            for (int j = 0; j < k->len && sp < (int)(sizeof(st)/sizeof(st[0])); j++)
+                st[sp++] = k->child[j];
+        }
+        if (pinned_arena) {
+            CCSliceVar* arena_v = cc__scopes_lookup(scopes, *io_scope_n, pinned_arena);
+            /* Pin through the innermost nursery whose scope covers this spawn. */
+            int pin_end = 0;
+            if (nursery_name) {
+                CCSliceVar* nv = cc__scopes_lookup(scopes, *io_scope_n, nursery_name);
+                if (nv && nv->borrow_end_line > 0) pin_end = nv->borrow_end_line;
+            }
+            if (pin_end <= 0) {
+                int best = 0;
+                for (int si = 0; si < *io_scope_n; si++) {
+                    CCScope* sc = &scopes[si];
+                    for (int j = 0; j < sc->vars_len; j++) {
+                        CCSliceVar* nv = &sc->vars[j];
+                        if (!nv->is_nursery || nv->borrow_end_line <= 0) continue;
+                        if (nv->decl_line > n->line_start) continue;
+                        if (nv->borrow_end_line < n->line_start) continue;
+                        /* Innermost: smallest end line that still covers the spawn. */
+                        if (best == 0 || nv->borrow_end_line < best) best = nv->borrow_end_line;
+                    }
+                }
+                pin_end = best;
+            }
+            if (pin_end <= 0) {
+                int blk = cc__enclosing_block(nodes, idx);
+                if (blk >= 0) {
+                    int parent = cc__enclosing_block(nodes, blk);
+                    int use = (parent >= 0) ? parent : blk;
+                    pin_end = cc__subtree_max_line(nodes, kids, use);
+                }
+            }
+            if (arena_v && arena_v->is_arena && pin_end > 0) {
+                arena_v->epoch_pinned = 1;
+                if (pin_end > arena_v->pin_end_line) arena_v->pin_end_line = pin_end;
+            }
+        }
+        return 0;
+    }
 
     /* Move markers (parse-only): cc__move_marker_impl(&x) */
     if (strcmp(n->aux_s1, "cc__move_marker_impl") == 0) {
@@ -748,9 +1017,21 @@ static int cc__walk(int idx,
         if (!v) return -1;
         v->decl_line = n->line_start;
         v->decl_col = n->col_start;
-        v->is_slice = (strstr(n->aux_s2, "CCSlice") != NULL);
+        {
+            int blk = cc__enclosing_block(nodes, idx);
+            v->borrow_end_line = (blk >= 0) ? cc__subtree_max_line(nodes, kids, blk) : n->line_start;
+        }
+        v->is_slice = (strstr(n->aux_s2, "CCSlice") != NULL) ||
+                      (strchr(n->aux_s2, '[') && strchr(n->aux_s2, ':') && strchr(n->aux_s2, ']'));
         if (strchr(n->aux_s2, '[') && strchr(n->aux_s2, ']')) {
             v->is_array = 1;
+        }
+        /* CCArena value or pointer-to-arena (parameter / local). */
+        if (strstr(n->aux_s2, "CCArena") != NULL) {
+            v->is_arena = 1;
+        }
+        if (strstr(n->aux_s2, "CCNursery") != NULL) {
+            v->is_nursery = 1;
         }
 
         /* Determine move_only from initializer subtree */
@@ -758,11 +1039,22 @@ static int cc__walk(int idx,
             const ChildList* cl = &kids[idx];
             const char* copy_from = NULL;
             int saw_slice_ctor = 0;
+            int saw_arena_slice_ctor = 0;
+            int saw_arena_alloc_ptr = 0;
 
             for (int i = 0; i < cl->len; i++) {
                 const StubNodeView* c = &nodes[cl->child[i]];
                 if (c->kind == CC_STUB_CALL && c->aux_s1) {
                     if (strncmp(c->aux_s1, "cc_slice_", 9) == 0) saw_slice_ctor = 1;
+                    if (strcmp(c->aux_s1, "cc_arena_alloc_slice") == 0 ||
+                        strcmp(c->aux_s1, "cc_arena_alloc_slice_bytes") == 0 ||
+                        strcmp(c->aux_s1, "cc_slice_clone") == 0) {
+                        saw_arena_slice_ctor = 1;
+                        saw_slice_ctor = 1;
+                    }
+                    if (strncmp(c->aux_s1, "cc_arena_alloc", 14) == 0) {
+                        saw_arena_alloc_ptr = 1;
+                    }
                 }
             }
 
@@ -770,9 +1062,20 @@ static int cc__walk(int idx,
                prints as 'struct <anonymous>' (CCSlice is a typedef of an anonymous struct). */
             if (saw_slice_ctor) v->is_slice = 1;
 
+            if (saw_arena_alloc_ptr && !v->is_slice) {
+                const char* an = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+                if (an) {
+                    v->is_arena_ptr = 1;
+                    v->arena_name = an;
+                }
+            }
+
             if (v->is_slice) {
                 /* move-only by provenance: detect unique-id construction anywhere under initializer */
                 if (cc__subtree_has_unique_make_id(nodes, kids, idx)) v->move_only = 1;
+                /* Typed unique / FFI adopt */
+                if (strstr(n->aux_s2, "CCSliceUnique") != NULL) v->move_only = 1;
+                if (cc__subtree_has_call_named(nodes, kids, idx, "cc_adopt")) v->move_only = 1;
 
                 /* Stack-slice view detection (best-effort): if init uses cc_slice_from_buffer/parts with a local array. */
                 int uses_buf = cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_buffer");
@@ -790,10 +1093,26 @@ static int cc__walk(int idx,
                                 v->is_stack_slice_view = 1;
                                 break;
                             }
+                            if (maybe && maybe->is_arena_ptr && maybe->arena_name) {
+                                v->is_arena_slice_view = 1;
+                                v->arena_name = maybe->arena_name;
+                                break;
+                            }
                         }
                         const ChildList* k = &kids[curi];
                         for (int j = 0; j < k->len && sp < (int)(sizeof(st)/sizeof(st[0])); j++)
                             st[sp++] = k->child[j];
+                    }
+                }
+
+                if (saw_arena_slice_ctor ||
+                    cc__subtree_has_call_named(nodes, kids, idx, "cc_arena_alloc_slice") ||
+                    cc__subtree_has_call_named(nodes, kids, idx, "cc_arena_alloc_slice_bytes") ||
+                    cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_clone")) {
+                    const char* an = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
+                    if (an) {
+                        v->is_arena_slice_view = 1;
+                        v->arena_name = an;
                     }
                 }
             }
@@ -807,6 +1126,10 @@ static int cc__walk(int idx,
                 /* If we see assignment from an existing slice var, treat this decl as slice too
                    (CCSlice prints as 'struct <anonymous>' in type_to_str). */
                 if (rhs && rhs->is_slice) v->is_slice = 1;
+                if (rhs && rhs->is_arena_slice_view) {
+                    v->is_arena_slice_view = 1;
+                    v->arena_name = rhs->arena_name;
+                }
                 int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
                 int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
                 if (rhs && rhs->is_slice && rhs->move_only && !has_move_marker && is_simple_copy) {
@@ -1149,15 +1472,20 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                 }
             }
         }
-        /* Mark nursery spawned closures: `spawn ( <closure> )` or `spawn ( ident )` */
+        /* Mark nursery spawned closures: `spawn ( <closure> )` or `spawn ( ident )`
+           and lowered UFCS `cc_nursery_spawn*(...)`. */
         for (int i = 0; i < n; i++) {
-            if (nodes[i].kind != CC_STUB_STMT) continue;
-            if (!nodes[i].aux_s1 || strcmp(nodes[i].aux_s1, "spawn") != 0) continue;
             int cidx = -1;
-            if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx)) {
-                if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
-            } else if (cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
-                if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
+            if (nodes[i].kind == CC_STUB_STMT && nodes[i].aux_s1 && strcmp(nodes[i].aux_s1, "spawn") == 0) {
+                if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx) ||
+                    cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
+                    if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
+                }
+            } else if (nodes[i].kind == CC_STUB_CALL && cc__call_is_nursery_spawn(nodes[i].aux_s1)) {
+                if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx) ||
+                    cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
+                    if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
+                }
             }
         }
         /* Mark escaped closures:
@@ -1274,6 +1602,107 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                 ctx->errors++;
                 break;
             }
+        }
+    }
+
+    /* Post-check: nursery spawn that captures an arena borrow pins that arena's
+       epoch until the nursery's enclosing block ends — reset/restore in that
+       window is a compile error (even if the original slice local left scope). */
+    if (closure_spawned && ctx->errors == 0) {
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind != CC_STUB_CLOSURE) continue;
+            if (!closure_spawned[i]) continue;
+            const char* aname = NULL;
+            if (!cc__closure_captures_arena_slice_view(i, nodes, kids, scopes, scope_n, &aname)) continue;
+            if (!aname) continue;
+
+            /* Spawn site: stmt/call parent that marked this closure. */
+            int spawn_site = i;
+            int cur = nodes[i].parent;
+            while (cur >= 0) {
+                if ((nodes[cur].kind == CC_STUB_STMT && nodes[cur].aux_s1 &&
+                     strcmp(nodes[cur].aux_s1, "spawn") == 0) ||
+                    (nodes[cur].kind == CC_STUB_CALL && cc__call_is_nursery_spawn(nodes[cur].aux_s1))) {
+                    spawn_site = cur;
+                    break;
+                }
+                cur = nodes[cur].parent;
+            }
+
+            /* Nursery handle ident under the spawn call (best-effort). */
+            const char* nursery_name = NULL;
+            if (nodes[spawn_site].kind == CC_STUB_CALL) {
+                nursery_name = cc__subtree_arena_ref_name(nodes, kids, spawn_site, scopes, scope_n);
+                /* Prefer an ident that looks like a nursery, not the arena. */
+                {
+                    int st[128];
+                    int sp = 0;
+                    st[sp++] = spawn_site;
+                    while (sp > 0) {
+                        int ci = st[--sp];
+                        if (nodes[ci].kind == CC_STUB_IDENT && nodes[ci].aux_s1) {
+                            const char* nm = nodes[ci].aux_s1;
+                            if (cc__call_is_nursery_spawn(nm)) continue;
+                            if (aname && strcmp(nm, aname) == 0) continue;
+                            CCSliceVar* nv = cc__scopes_lookup(scopes, scope_n, nm);
+                            if (nv && !nv->is_arena && !nv->is_arena_slice_view) {
+                                nursery_name = nm;
+                                break;
+                            }
+                            if (!nursery_name) nursery_name = nm;
+                        }
+                        const ChildList* cl = &kids[ci];
+                        for (int j = 0; j < cl->len && sp < (int)(sizeof(st)/sizeof(st[0])); j++)
+                            st[sp++] = cl->child[j];
+                    }
+                }
+            }
+
+            int pin_block = -1;
+            if (nursery_name) {
+                CCSliceVar* nv = cc__scopes_lookup(scopes, scope_n, nursery_name);
+                if (nv && nv->decl_line > 0) {
+                    for (int di = 0; di < n; di++) {
+                        if (nodes[di].kind == CC_STUB_DECL_ITEM && nodes[di].aux_s1 &&
+                            strcmp(nodes[di].aux_s1, nursery_name) == 0 &&
+                            nodes[di].line_start == nv->decl_line) {
+                            pin_block = cc__enclosing_block(nodes, di);
+                            break;
+                        }
+                    }
+                }
+            }
+            if (pin_block < 0) pin_block = cc__enclosing_block(nodes, spawn_site);
+            if (pin_block < 0) continue;
+
+            int pin_end_line = cc__subtree_max_line(nodes, kids, pin_block);
+            int spawn_line = nodes[spawn_site].line_start;
+
+            for (int r = 0; r < n; r++) {
+                if (nodes[r].kind != CC_STUB_CALL) continue;
+                if (!cc__call_is_arena_epoch_bump(nodes[r].aux_s1)) continue;
+                if (nodes[r].line_start < spawn_line) continue;
+                if (nodes[r].line_start > pin_end_line) continue;
+                const char* rname = cc__subtree_arena_ref_name(nodes, kids, r, scopes, scope_n);
+                if (!rname || strcmp(rname, aname) != 0) continue;
+                /* Reset must sit under the pin block (or nested inside it). */
+                int under = 0;
+                int p = r;
+                while (p >= 0) {
+                    if (p == pin_block) { under = 1; break; }
+                    p = nodes[p].parent;
+                }
+                if (!under) continue;
+
+                cc__emit_err_cat_fmt(ctx, &nodes[r], CC_ERR_SLICE,
+                                     "cannot %s arena '%s' while a nursery task holds a borrow from it",
+                                     nodes[r].aux_s1, aname);
+                fprintf(stderr, "  note: capturing an arena slice into a spawn pins that arena epoch until the nursery scope ends\n");
+                fprintf(stderr, "  hint: join/end the nursery before reset, or capture a materialized unique slice\n");
+                ctx->errors++;
+                break;
+            }
+            if (ctx->errors) break;
         }
     }
 

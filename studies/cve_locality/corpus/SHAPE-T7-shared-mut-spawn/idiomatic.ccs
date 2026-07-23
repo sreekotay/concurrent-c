@@ -1,0 +1,30 @@
+/*
+ * SHAPE-T7 — shared mut across spawn.
+ *
+ * Ill-formed (see tests/closure_ref_capture_mutation_fail.ccs):
+ *   n->spawn(() => [&counter] { counter++; });
+ *
+ * Idiomatic: cc_atomic_int (or Mutex / channel single-writer).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    cc_atomic_int counter = 0;
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); });
+        n->spawn(() => [&counter] { cc_atomic_fetch_add(&counter, 1); });
+    }
+
+    printf("shape-t7-shared-mut-spawn: prevented "
+           "(ref-capture mut banned; Atomic ok; *p smuggle remains)\n");
+    return 0;
+}
