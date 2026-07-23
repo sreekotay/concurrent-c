@@ -23,8 +23,10 @@ Minimal, complete spec for channel state machine, blocking/wake protocol, and co
 
 Each channel has:
 
-- `_Atomic int closed`: 0 = open, 1 = closed. Monotonic (once set, never cleared).
-- `int error_code`: error to propagate on close (0 = normal EPIPE, nonzero = upstream error).
+- `int closed`: the send side is closed. It changes from 0 to 1 under `mu` and never changes back.
+- `int rx_error_closed`: the receive side rejected further sends.
+- `int tx_error_code` / `int rx_error_code`: errno-style downstream and upstream close errors.
+- Optional `CCIoError` values preserve typed close errors in each direction.
 - `pthread_mutex_t mu`: protects waiter lists, close transitions, and slow-path predicates.
 
 ### Ring buffer (buffered channels, `cap > 0`)
@@ -68,7 +70,7 @@ The fast path skips the mutex, debug counters, timing, and waiter checks on the 
 typedef struct cc__fiber_wait_node {
     cc__fiber*  fiber;        // fiber to wake (NULL = OS thread)
     void*       data;         // buffer pointer for direct handoff
-    _Atomic int notified;     // NOTIFY_WAITING / NOTIFY_WOKEN / NOTIFY_DATA
+    _Atomic int notified;     // NONE / DATA / CANCEL / CLOSE / SIGNAL
     int         in_wait_list; // 1 if on a waiter list, 0 if removed (plain int, mu-only)
     // select fields:
     void*       select_group;
@@ -107,11 +109,13 @@ Sender (fast path):                  Receiver (slow path):
   load(has_recv_waiters, acquire)      try_dequeue(acquire)
 ```
 
-At least one side will see the other's store. If the sender sees `has_recv_waiters == 1`, it signals; if the receiver's dequeue sees data, it succeeds without parking. There is no case where both miss.
+At least one side will see the other's store. If the sender sees `has_recv_waiters > 0`, it signals; if the receiver's dequeue sees data, it succeeds without parking. There is no case where both miss.
 
 A false-positive (stale non-zero) just takes the lock unnecessarily — harmless.
 
-`signal_recv_waiter(ch)` takes `ch->mu` internally, signals a recv waiter by setting `notified=SIGNAL` (does NOT remove the node from the list — the receiver self-removes after waking), and calls `unpark`.
+`has_recv_waiters` counts linked receive waiters whose notification is `NONE`. Registration increments it; signaling, direct handoff, cancellation, close, and removal of an unnotified node decrement it. A signaled receive node remains linked until the receiver removes or rearms it, so list length is not the counter value.
+
+`signal_recv_waiter(ch)` runs under `ch->mu`, changes one `NONE` receiver to `SIGNAL`, decrements `has_recv_waiters`, and unparks it without removing it. The receiver removes itself or resets to `NONE` and rearms.
 
 ### Slow path (blocking)
 
@@ -165,7 +169,7 @@ chan_send_slow(ch, value, size):
         cc__fiber_wait_node node = { .fiber=current, .data=value, .notified=0 };
         list_append(&send_waiters, &node);
         unlock(mu);
-        FIBER_PARK_IF(&node.notified, 0, "chan_send");
+        wait while node.notified == NONE;
 
         // Post-wake
         lock(mu);
@@ -177,7 +181,7 @@ chan_send_slow(ch, value, size):
     }
 ```
 
-OS-thread blocking: if `fiber == NULL`, replace `FIBER_PARK_IF` with `pthread_cond_wait(&not_full, &mu)`. The mutex is held across the `cond_wait` call (atomically released by pthreads), so the predicate recheck under mu is inherent. OS threads do not go on the node list for targeted wake; they use the shared condvar. The node list is used only for fibers and for select bookkeeping.
+Fiber waits use the scheduler conditional-wait contract in `spec/concurrent-c-scheduler.md`; the notification is checked immediately before parking and observed with acquire ordering. OS threads instead use `pthread_cond_wait(&not_full, &mu)` and retry the predicate after every wake.
 
 ## Recv path
 
@@ -210,7 +214,7 @@ if (rnode) {
 cc__fiber_wait_node node = { .fiber=current, .data=(void*)value, .notified=0 };
 list_append(&send_waiters, &node);
 unlock(mu);
-FIBER_PARK_IF(&node.notified, 0, "chan_send_rv");
+wait while node.notified == NONE;
 
 lock(mu);
 if (node.in_wait_list) list_remove(&send_waiters, &node);
@@ -231,13 +235,13 @@ The mutex is held for the partner check and waiter insertion — no gap where a 
 cc_chan_close(ch):
     lock(mu);
     ch->closed = 1;
-    // Wake all send waiters with NOTIFY_WOKEN
+    // Wake all send waiters with CLOSE
     while (node = pop_send_waiter(ch))
-        atomic_store(&node->notified, NOTIFY_WOKEN, release);
+        atomic_store(&node->notified, CLOSE, release);
         wake_batch_add(node);
-    // Wake all recv waiters with NOTIFY_WOKEN
+    // Wake all recv waiters with CLOSE
     while (node = pop_recv_waiter(ch))
-        atomic_store(&node->notified, NOTIFY_WOKEN, release);
+        atomic_store(&node->notified, CLOSE, release);
         wake_batch_add(node);
     pthread_cond_broadcast(&not_full);
     pthread_cond_broadcast(&not_empty);
@@ -245,22 +249,34 @@ cc_chan_close(ch):
     wake_batch_flush();
 ```
 
+For a select node, each close wake first claims the select group. A successful claim publishes `CLOSE`; a node whose group already has a winner publishes `CANCEL`.
+
 ### Close-send ordering (public guarantee)
 
-Sends that are already in the lock-free CAS pipeline when close fires may complete. This is intentional and matches Go's semantics. After `cc_chan_close` returns, no new send will succeed (the fast path checks `closed` or the CAS will be followed by a drain that delivers the item). Items enqueued by in-flight senders are guaranteed to be visible to receivers because `lfqueue_inflight` ensures the drain waiter spins until all in-flight enqueues complete (Invariant 6).
+Sends already in the lock-free CAS pipeline when close begins may complete. After `cc_chan_close` returns, no new send succeeds. Items admitted by in-flight senders remain visible to receivers because `lfqueue_inflight` keeps the close-drain path active until those enqueue attempts finish.
+
+### Close forms and typed results
+
+- `cc_chan_close` closes the send side gracefully. Receivers drain admitted values, then observe `EPIPE`; typed receive returns `Ok(false)`. Further sends fail with `EPIPE`.
+- `cc_chan_close_err` has the same admission, drain, and wake behavior, but receivers observe the supplied errno-style error after draining.
+- `cc_chan_rx_close_err` is receive-side-only close. It sets `rx_error_closed`, wakes send waiters with `CLOSE`, and makes pending and future sends return the supplied error. It does not set `closed`, wake receive waiters, or discard queued values; receivers may continue draining.
+- `cc_chan_close_with` closes both sides with one structured `CCIoError`. Non-select waiters and the winning select case wake with `CLOSE`; losing select nodes wake with `CANCEL`. Low-level integer operations return `e.os_code` or `ECANCELED`; typed send and receive operations return the original `Err(e)`, preserving both error kind and OS code.
+- `cc_chan_cancel` is `cc_chan_close_with` using `CC_IO_CANCELLED`.
+
+The shipped typed handle API accepts graceful or structured close on `CCChanTx` and `CCChanRx`. These handle wrappers perform bilateral close. The explicit low-level `cc_chan_rx_close_err` operation provides receive-side-only close.
 
 ## Select / match
 
 1. A `select_wait_group` is created with `_Atomic int selected_index = -1`.
 2. For each case, a `cc__fiber_wait_node` is registered on that channel's waiter list (under that channel's mu), with `is_select = 1`, `select_group = &group`, `select_index = i`.
-3. When a channel wakes a select waiter, it does `CAS(group->selected_index, -1, node->select_index)`.
-   - CAS succeeds: this case won. Set `notified = NOTIFY_WOKEN` (or `NOTIFY_DATA` for handoff), unpark.
-   - CAS fails: another case already won. Skip this node (do not wake, do not set notified).
+3. When a channel claims a select waiter, it does `CAS(group->selected_index, -1, node->select_index)`.
+   - CAS succeeds: this case won. Set `notified` to `SIGNAL`, `DATA`, or `CLOSE` as appropriate and unpark.
+   - CAS fails: another case already won. Set the losing node to `CANCEL`, account the signal in its group, and unpark it so cleanup can finish.
 4. After waking, the select loop checks `group->selected_index` to identify the winner.
 5. The select loop removes **all** nodes from **all** channels (under each channel's mu, checking `in_wait_list`).
 6. The winning case's operation proceeds normally (dequeue, handoff, etc.).
 
-No broadcast condvar. No `NOTIFY_CANCEL`. Losing nodes are simply removed from wait lists during cleanup.
+`CANCEL` never denotes a selected case. Cleanup removes every still-linked node under its channel mutex; `in_wait_list` makes cleanup idempotent when a channel wake path already unlinked a node.
 
 ## Owned channels (pool pattern)
 
@@ -314,7 +330,7 @@ A channel may have an `autoclose_owner` (a nursery). When the nursery exits, it 
 
 ### Invariant 2: No missed wakeups
 
-**Correctness relies on the Dekker protocol between the lock-free queue and the `has_send_waiters` / `has_recv_waiters` atomic flags. `FIBER_PARK_IF` must re-check `notified` immediately before yielding.**
+**Correctness relies on the Dekker protocol between the lock-free queue and the `has_send_waiters` / `has_recv_waiters` atomics, plus the scheduler's conditional-wait contract.**
 
 The blocking phase pattern:
 
@@ -324,25 +340,25 @@ lock(mu);
 // 2. Try direct handoff (pop partner waiter) → return 0
 // 3. Try enqueue/dequeue under mu → return 0 (optimization: avoids append)
 // 4. Steps 1–3 all failed: append waiter to list
-//    — sets has_{send,recv}_waiters = 1 (release)
+//    — publishes has_send_waiters or increments has_recv_waiters (release)
 // 5. unlock(mu)
 // 6. Dekker re-check: try enqueue/dequeue once more (acquire via queue CAS)
 //    — if succeeds: lock, remove self, signal partner, unlock, return 0
-// 7. FIBER_PARK_IF(&node.notified, 0, ...)
+// 7. conditionally wait while node.notified == NONE
 ```
 
 Steps 1–3 check the predicate under mu. Step 3 (retry-enqueue-under-mu) is an optimization that avoids the append+remove cost when space/data is immediately available.
 
 Step 4 makes the waiter visible via the atomic flag. Step 6 is the critical Dekker re-check: after our `release` store of `has_waiters=1`, we `acquire`-load the queue state. Any concurrent fast-path operation that stored data (release) and then loaded `has_waiters` (acquire) will either: (a) see our flag and signal us, or (b) have stored data that our re-check will see. There is no case where both miss — this is the standard Dekker/Peterson exclusion argument.
 
-Step 7 parks with `FIBER_PARK_IF`, which re-checks `notified` before yielding (Required Property 1). If a waker set `notified != 0` between step 5 and step 7, the park is aborted.
+Step 7 uses the scheduler conditional-wait primitive specified in `spec/concurrent-c-scheduler.md`. If a waker changes `notified` between unlock and park, the wait does not sleep.
 
 ### Invariant 3: Close ordering
 
 **`ch->closed` is checked under mu in the blocking path.**
 
 - `cc_chan_close()` sets `ch->closed = 1` under mu, then wakes all waiters.
-- Fast path: `atomic_load(&ch->closed, acquire)` outside mu. A false-negative (send completes after close starts) is acceptable — the item will be drained. Once set, `closed` stays set (monotonic).
+- Fast paths make an early `closed` check, but admission is resolved by revalidation and the in-flight enqueue protocol. A send already past the early check may complete and is then drained normally. Once set, `closed` stays set.
 - Slow path: re-checks `ch->closed` under mu before appending waiter. Prevents parking after close has already woken everyone.
 
 ### Invariant 4: Timed cancellation and node lifetime
@@ -372,51 +388,19 @@ Step 7 parks with `FIBER_PARK_IF`, which re-checks `notified` before yielding (R
 - Close-drain spins on: `while (lfqueue_count > 0 || lfqueue_inflight > 0) { try_dequeue; yield; }`
 - Without `lfqueue_inflight`, a sender between the closed check and the CAS can complete after drain returns EPIPE, orphaning an item.
 
-## Required properties of `FIBER_PARK_IF`
+## Scheduler dependency
 
-`FIBER_PARK_IF(&flag, expected, reason)` is the scheduler primitive used for all channel blocking. The channel spec depends on these properties:
-
-1. **Pre-yield recheck**: `FIBER_PARK_IF` MUST re-check `*flag != expected` immediately before yielding/sleeping. If the flag has changed (e.g., a waker set `notified` between the caller's `unlock(mu)` and the park call), it MUST return without sleeping. This is the linchpin for the "append waiter, unlock, park" pattern — it guarantees no wake is lost in that window.
-
-2. **Acquire semantics on wake**: when `FIBER_PARK_IF` returns because `*flag != expected`, the caller observes all stores by the waker that preceded the flag store (due to the waker's `store_release` and the waiter's `load_acquire` of `notified`).
-
-3. **Spurious wake tolerance**: `FIBER_PARK_IF` may return spuriously (with `*flag == expected`). Callers MUST re-check conditions and retry. The blocking loop handles this.
-
-4. **Idempotent unpark**: if `unpark(fiber)` is called while the fiber is between unlock and park (not yet sleeping), the wake must not be lost. The `pending_unpark` latch in the scheduler guarantees this.
+Channel blocking uses the conditional-wait and unpark contract in `spec/concurrent-c-scheduler.md`: pre-park predicate recheck, acquire observation of the wake publication, spurious-wake tolerance, and idempotent unpark. Channel loops always recheck their predicates after the wait returns.
 
 ## Memory ordering
 
 - **`notified`**: waker `store_release`; waiter `load_acquire`.
-- **`closed`**: set with `store_release` under mu; fast-path read with `load_acquire`.
+- **Close state**: transitions occur under `ch->mu`; blocking paths recheck under that mutex. Lock-free admission races are resolved by `lfqueue_inflight` and close-drain rather than by treating the early `closed` check as the linearization point.
 - **`lfqueue_count`**: `fetch_add/sub` with `release` on update; `load_acquire` on read.
 - **`lfqueue_inflight`**: `fetch_add/sub` with `relaxed` (only used under the close-drain spin, which has its own ordering via `lfqueue_count`).
-- **`has_recv_waiters` / `has_send_waiters`** (fast-path check): `_Atomic int`, set with `store_release` under mu (in waiter add/remove helpers), read with `load_acquire` on the fast path. Forms a Dekker pair with the lock-free queue's release-store/acquire-load (see Invariant 2). `recv_waiters_head` / `send_waiters_head` are plain pointers, only accessed under `ch->mu`.
+- **`has_send_waiters`**: boolean publication of an unnotified send waiter. **`has_recv_waiters`**: count of linked receive waiters with `notified == NONE`. Both use release updates under `mu` and acquire fast-path reads, forming the Dekker pair in Invariant 2. Wait-list pointers are plain and mutex-protected.
 - **`in_wait_list`**: plain `int`, only accessed under `ch->mu`. NOT atomic.
 - **`select_group.selected_index`**: transitions via `CAS_acq_rel`.
-
-## Configuration
-
-### Debug flags (environment)
-
-| Variable | Description |
-|----------|-------------|
-| `CC_CHAN_DEBUG=1` | Channel operation logs |
-| `CC_CHAN_DEBUG_VERBOSE=1` | Detailed select/wake logging |
-| `CC_CHAN_NO_LOCKFREE=1` | Force mutex-based channel path |
-| `CC_CHANNEL_TIMING=1` | Per-operation timing (rdtsc) |
-
-## Debugging / known issues
-
-- Under-lock wake/park behavior has been observed: a wake may be deferred when the channel lock is held, and parking under the lock can miss the deferred wake.
-- `ch->mu` must be acquired/released through `cc_chan_lock`/`cc_chan_unlock` to keep lock-depth tracking consistent.
-- Lock-depth tracking and park-under-lock detection are used to surface under-lock park/flush hazards.
-- A raw `pthread_mutex_unlock(&ch->mu)` can leave depth > 0, which can later permit under-lock park/flush and reproduce the under-lock wake/park issue.
-- Additional lock gaps identified:
-  - `wake_batch_flush()` was observed under the channel lock in send/recv/close paths (under-lock wake hazard).
-  - Park paths in `cc_chan_send`/`cc_chan_recv` could call `CC_FIBER_PARK_IF` after a raw `pthread_mutex_unlock(&ch->mu)`, leaving `tls_chan_lock_depth` non-zero and causing park-under-lock.
-  - Select/match cleanup paths also used raw `pthread_mutex_unlock(&ch->mu)` on per-case channels, creating the same depth leak.
-  - `pthread_cond_wait` releases/reacquires `ch->mu` internally; wrappers must adjust lock-depth around the wait to avoid depth skew.
-  - Nested channel locks are possible (e.g., select/match across multiple channels), so deferred wake flush must only occur when lock depth returns to **0**.
 
 ## Implementation files
 

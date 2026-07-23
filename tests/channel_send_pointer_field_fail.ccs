@@ -1,0 +1,28 @@
+/* Fail: cannot send by-value aggregate with a raw pointer field. */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Msg {
+    char* p;
+    size_t n;
+} Msg;
+
+int main(void) {
+    char* heap = (char*)malloc(8);
+    if (!heap) return 1;
+    memcpy(heap, "payload!", 8);
+    Msg m = { .p = heap, .n = 8 };
+
+    Msg[~4 >] tx;
+    Msg[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    /* ERROR: pointer-channel-send-ban */
+    (void)cc_channel_send(tx, m);
+
+    free(heap);
+    return 0;
+}

@@ -1,2961 +1,1110 @@
 # Concurrent-C Standard Library Specification
 
-**Version:** 1.0  
-**Date:** 2026-03-24  
-**Status:** Normative standard-library and lowering specification
+This document defines the shipped standard-library headers, public types, public C
+callees, and standard-library UFCS families.
 
-> **Implementation status:** This document specifies the *intended* stdlib surface and
-> its normative lowering contracts. Not every API below is shipped yet — some families
-> are aspirational or only partially implemented. For what is currently available and
-> exercised, the `tests/` suite and `examples/` are the source of truth; where this spec
-> and a working example disagree, the example reflects the implemented behavior.
+## Headers
 
----
+The standard library provides these headers under `<ccc/std/...>`:
 
-## Goals and Scope
+- `prelude.cch`
+- `slice.cch`
+- `string.cch`
+- `io.cch`
+- `vec.cch`
+- `map.cch`, `map_forward.cch`, and `map_impl.cch`
+- `dir.cch`
+- `process.cch`
+- `exec.cch`
+- `async_io.cch`
+- `future.cch`
+- `task.cch`
+- `cli.cch`
+- `net.cch`
+- `dns.cch`
+- `tls.cch`
+- `http.cch`
+- `hash.cch`
 
-The Concurrent-C Standard Library (`<std/...>`) provides minimal, composable wrappers around common systems operations, designed to integrate seamlessly with Concurrent-C's core features (arenas, slices, async, error values) while maintaining portability and zero-overhead abstraction.
+Portable atomics are provided separately by `<ccc/cc_atomic.cch>`.
 
-**Philosophy:** Stay small (only battle-tested essentials), be explicit (allocations visible, arenas passed), leverage CC features (T!>(E) for errors, slices for views, channels for streaming), remain optional (header-only, no mandatory linkage), and **use UFCS for natural, discoverable APIs**.
+`<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
+string, I/O, vector, map-forward, directory, process, command, async-I/O, and
+future headers. Networking, DNS, TLS, HTTP, CLI, task, hash, and full map
+headers are included explicitly when needed.
 
-**UFCS Pattern:** Method syntax is primary. UFCS dispatch is resolved from the concrete receiver type, and stdlib families own their lowering contract.
+Public C types use the `CC` prefix and public C functions use the `cc_` prefix.
+Unless a section states otherwise, a slice returned from an operation that
+accepts a `CCArena *` remains valid until that arena releases or reuses its
+storage.
+
+## Generic factories and UFCS
+
+The generic collection factories are:
 
 ```c
-// UFCS-first (user API)
-int len = s.len();
-s.trim().split(",").map(process);
-
-// Direct library-call style (when exposed)
-char[:] trimmed = cc_slice_trim(s);
-String built = @string(trimmed, &arena);
+CCVec::[T] cc_vec_new::[T](CCArena *arena);
+Map::[K, V] map_new::[K, V](CCArena *arena);
 ```
 
-**Scope:** This document defines the standard-library surface APIs together with their normative lowering contracts at the C boundary.
-
----
-
-## Design Principles
-
-1. **UFCS-First API:** Methods on types are primary. Users write `s.len()` not `string_length(s)`.
-   - Lowering is normative: each stdlib type or family defines the callee selected for UFCS, including whether the receiver is passed by address or by value.
-
-2. **Header-Only:** All Phase 1 functions defined in headers; no compilation required.
-3. **Explicit Allocation:** All allocations via `Arena*` passed as explicit parameters. No hidden allocators.
-4. **Error Values:** All fallible operations return `T!>(E)` (Result types); no errno, no exceptions.
-5. **Slices Everywhere:** Parameters and returns use `char[:]` views where appropriate; avoid unnecessary copies.
-6. **Portability:** Abstract OS differences (e.g., path separators) transparently.
-7. **No Dependencies:** Stdlib depends only on C standard library and CC language primitives.
-8. **Integration with Async:** I/O functions have sync and `@async` variants where applicable.
-9. **Single runtime TU:** Runtime impls are aggregated in `cc/runtime/concurrent_c.c` (`#include` of arena, io, scheduler, channels) so consumers can link one object/archive without juggling multiple runtime objects.
-10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. The compiler automatically resolves short aliases to their prefixed forms. Header implementations are `static inline` to keep stdlib header-only.
-11. **Arena-first collections:** Collections default to arena-backed, bounded growth. Vectors/maps grow by allocating new buffers/tables in the provided arena and reusing them; old buffers remain until the arena resets. Growth fails if the arena is exhausted. Heap-backed helpers (kvec/khash style) are optional, tool-only, and never used by generated code unless explicitly included.
-12. **Async backend auto-probe:** The runtime may auto-select a native async backend (io_uring/kqueue/poll) with a safe fallback to the portable executor. An environment override (e.g., `CC_RUNTIME_BACKEND=executor|poll|io_uring`) can force selection; otherwise a best-available backend is chosen lazily.
-
-### UFCS Lowering Contract
-
-For the standard library, UFCS lowering is part of the normative API surface:
-
-- Dispatch is chosen from the resolved receiver type and the full receiver expression to the left of `.` or `->`.
-- Stdlib families normally define custom lowering through type-owned registration such as `cc_type_register(...)`. `cc_ufcs_register(...)` remains a compatibility mechanism for UFCS-only registration.
-- Constructors and helper calls such as `string_new(...)`, `cc_string_from(...)`, `@string(...)`, `file_open(...)`, `cc_vec_new::[T](...)`, and `map_new<K, V>(...)` are direct library calls or syntax sugar, not UFCS.
-- Exact generated helper names are normative where this document names them explicitly; otherwise, the family-level lowering contract is normative.
-
-### Type Notation Precedence
-
-Type modifiers bind with this precedence (tightest first):
-
-1. `*` (pointer)
-2. `!>(E)` (result)
-3. `[:]` (slice)
-
-See **§2.3 Type Precedence** in the main language spec for complete rules.
-
-**Examples:**
-
-| Syntax | Parses as | Meaning |
-|--------|-----------|---------|
-| `char[:] !>(CCIoError)` | `(char[:]) !>(CCIoError)` | slice or error (e.g., `read()` return; empty slice = EOF) |
-| `T* !>(CCIoError)` | `((T)*) !>(CCIoError)` | result of pointer (e.g., `cc_dir_open()` return) |
-| `bool !>(CCIoError)` | `(bool) !>(CCIoError)` | iterator / recv / pop signal (`ok(true)` = value written to out-param, `ok(false)` = EOF/closed/drained) |
-
-**Key distinction:**
-- `T !>(E)` — "operation may fail; success is a `T`" (e.g., file read: error or data; empty slice means EOF)
-- `T* !>(E)` — "operation may fail; if it succeeds, returns a pointer" (common for allocation / fallible lookup)
-- `bool !>(E) op(T* out)` — iterators, `recv`, pop-style APIs; on `ok(true)` the out-param has been written
-
-### Name Aliases (short vs prefixed)
-
-All stdlib signature tables below use the **prefixed ABI names** (`CCString`, `CCFile`, `CCIoError`, `CCNetError`, `CCVec`, `CCMap`, `CCDuplex`, etc.) — these match the exact C ABI 1:1. The compiler automatically resolves these common short aliases in source code:
-
-| Short alias | Prefixed ABI name |
-|-------------|-------------------|
-| `String` | `CCString` |
-| `File` | `CCFile` |
-| `IoError` | `CCIoError` |
-| `NetError` | `CCNetError` |
-| `ParseError` | `CCParseError` |
-| `Vec` | `CCVec` |
-| `Map` | `CCMap` |
-| `Duplex` | `CCDuplex` |
-| `Arena` | `CCArena` |
-
-Free-form example code may use either form; all normative signature tables use the prefixed form.
-
-### Type Macros
-
-Convenience macros for constructing Result type names in C (interop only):
-
-| Macro | Expands To | Example |
-|-------|------------|---------|
-| `CCRes(T, E)` | `CCResult_T_E` | `CCRes(int, CCError)` → `CCResult_int_CCError` |
-| `CCResPtr(T, E)` | `CCResult_Tptr_E` | `CCResPtr(char, CCIoError)` → `CCResult_charptr_CCIoError` |
-
-**Usage in headers vs source files:**
-
-| Context | Syntax | Example |
-|---------|--------|---------|
-| `.ccs` source files | `T !>(E)` sigil syntax | `int !>(CCIoError) read_int(...)` |
-| `.cch` header files | `CCRes(T, E)` macro | `CCRes(int, CCIoError) read_int(...)` |
-| C interop headers | Explicit type name | `CCResult_int_CCIoError read_int(...)` |
-
-The `CCRes(T, E)` macros are part of the C interop contract for headers and generated C. Implementations may use parser-only stubs internally, but that machinery does not change the visible family naming contract.
-
-### Result Helpers
-
-Macros for working with `T!>(E)` Result types:
-
-| Helper | Returns | Description |
-|--------|---------|-------------|
-| `cc_is_ok(res)` | `bool` | True if result is success |
-| `cc_is_err(res)` | `bool` | True if result is error |
-| `cc_value(res)` | `T` | Get success payload (no branch check) |
-| `cc_error(res)` | `E` | Get error payload (no branch check) |
-| `cc_unwrap(res)` | `T` | Get value (for scalar types: int, size_t, bool) |
-| `cc_unwrap_err(res)` | `E` | Get error (for scalar error types) |
-| `cc_unwrap_as(res, T)` | `T` | Get value as specific type (for structs and pointers) |
-| `cc_unwrap_err_as(res, E)` | `E` | Get error as specific type (for struct error types) |
-
-**When to use which:**
-
-| Value Type | Use | Example |
-|------------|-----|---------|
-| Scalar (int, size_t, bool) | `cc_unwrap(res)` | `int n = cc_unwrap(res);` |
-| Pointer (`T*`) | `cc_unwrap_as(res, T*)` | `MyData* p = cc_unwrap_as(res, MyData*);` |
-| Struct | `cc_unwrap_as(res, T)` | `CCDirEntry e = cc_unwrap_as(res, CCDirEntry);` |
-
-**Note:** Pointer result types require `cc_unwrap_as` to avoid compiler warnings. This is a known limitation; future versions may infer the type automatically.
-
-**Result struct layout:**
-
-All Result family contracts use a unified C-visible struct layout:
+`CCVec::[T]` denotes the generated C family `CCVec_<T-mangling>`.
+`cc_vec_new::[T](arena)` calls:
 
 ```c
-struct CCResult_T_E {
-    bool ok;           // true = success, false = error
+CCVec_<T-mangling>_init(arena, CC_VEC_INITIAL_CAP)
+```
+
+`Map::[K, V]` denotes the generated C family
+`Map_<K-mangling>_<V-mangling>`. `map_new::[K, V](arena)` calls:
+
+```c
+Map_<K-mangling>_<V-mangling>_init(arena)
+```
+
+For a generated vector or map value, UFCS selects the corresponding generated
+family function and passes the receiver by address. For public struct families
+with `cc_<family>_<method>` functions, UFCS selects that prefixed function and
+passes the receiver in the form required by its C signature. The exact
+family-specific mappings are listed below.
+
+## Slices
+
+`<ccc/cc_slice.cch>` defines the slice ABI:
+
+```c
+typedef struct {
+    void *ptr;
+    size_t len;
+    uint64_t id;
+    size_t alen;
+} CCSlice;
+
+typedef CCSlice CCSliceUnique;
+typedef CCSlice CCSliceShared;
+
+typedef struct {
+    void *ptr;
+    size_t len;
+} CCSliceHdr;
+
+typedef struct {
+    CCSlice *items;
+    size_t len;
+} CCSliceArray;
+```
+
+`ptr` addresses the first byte, `len` is the view length, `id` carries
+provenance flags, and `alen` is the available length from `ptr` to the end of
+the backing allocation. `CCSliceHdr` is an untracked pointer-length view.
+
+Construction and lifetime functions are:
+
+```c
+CCSliceHdr cc_slice_hdr(CCSlice *s);
+CCSlice cc_slice_empty(void);
+CCSlice cc_slice_from_buffer(void *ptr, size_t len);
+CCSlice cc_slice_from_static(void *ptr, size_t len);
+CCSlice cc_slice_hdr_slice(CCSliceHdr *sh);
+CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id, size_t available_len);
+CCSlice cc_slice_from_cstr(const char *cstr);
+CCSliceUnique cc_adopt(void *ptr, size_t nbytes, CCSliceDeleter deleter);
+void cc_slice_destroy(CCSlice *s);
+```
+
+`cc_slice_from_buffer` and `cc_slice_hdr_slice` produce untracked slices.
+`cc_slice_from_static` and `cc_slice_from_cstr` produce canonical static slices.
+`cc_adopt` registers the supplied deleter and produces a unique,
+non-transferable slice. `cc_slice_destroy` invokes that deleter at most once
+for a still-registered unique slice and then clears the slice.
+
+The query and view operations are:
+
+```c
+bool cc_slice_is_empty(CCSlice *s);
+size_t cc_slice_capacity(CCSlice s);
+const char *cc_slice_str(CCSlice *s);
+const uint8_t *cc_slice_bytes(CCSlice *s);
+bool cc_slice_is_ascii(CCSlice s);
+bool cc_slice_get(CCSlice s, size_t idx, char *out);
+size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found);
+size_t cc_slice_last_index_of(CCSlice s, CCSlice needle, bool *found);
+size_t cc_slice_count(CCSlice s, CCSlice needle);
+CCSlice cc_slice_trim_set(CCSlice s, CCSlice chars);
+uint64_t cc_slice_hash64(CCSlice s);
+size_t cc_slice_len(CCSlice *s);
+CCSlice cc_slice_trim(CCSlice *s);
+CCSlice cc_slice_trim_left(CCSlice *s);
+CCSlice cc_slice_trim_right(CCSlice *s);
+char cc_slice_at(CCSlice *s, size_t idx);
+CCSlice cc_slice_sub(CCSlice s, size_t start, size_t end);
+bool cc_slice_starts_with(CCSlice *s, CCSlice prefix);
+bool cc_slice_ends_with(CCSlice *s, CCSlice suffix);
+bool cc_slice_eq(CCSlice *s, CCSlice other);
+bool cc_slice_eq_cstr(CCSlice *s, const char *cstr);
+```
+
+An invalid `cc_slice_sub` range returns an empty slice. A subslice clears
+uniqueness, preserves transferability, and marks a view that does not cover the
+full allocation as a subslice. `cc_slice_at` returns zero for an invalid index.
+The index functions report absence through `found`.
+
+Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `at`, `sub`,
+`starts_with`, `ends_with`, `eq`, `eq_cstr`, and `destroy` to the corresponding
+`CCSlice_*` or `cc_slice_*` function.
+
+### Arena-backed slice operations
+
+`<ccc/std/slice.cch>` and `<ccc/std/string.cch>` provide:
+
+```c
+CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena *arena);
+CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *arena);
+CCSlice cc_slice_clone(CCArena *arena, CCSlice s);
+char *cc_slice_c_str(CCArena *arena, CCSlice s);
+CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice delim);
+size_t cc_slice_concat_lenv(const CCSlice *parts, size_t count);
+CCSlice cc_slice_concat_into(void *dst, size_t cap, const CCSlice *parts, size_t count);
+CCSlice cc_slice_concat_many(CCArena *arena, const CCSlice *parts, size_t count);
+CCSlice cc_concat(CCArena *arena, ...);
+```
+
+Clone operations copy bytes into the supplied arena. `cc_slice_c_str` appends a
+NUL byte. `cc_slice_concat_into` returns an empty slice when the destination is
+null or too small. `cc_concat` accepts one through eight `CCSlice`, C-string, or
+`CCString` arguments.
+
+### Strict conversions
+
+The shipped slice conversion functions are:
+
+```c
+CCResult_int64_t_CCError cc_slice_to_i64(const CCSlice *s);
+CCResult_uint64_t_CCError cc_slice_to_u64(const CCSlice *s);
+CCResult_double_CCError cc_slice_to_f64(const CCSlice *s);
+```
+
+`cc_slice_to_i64` accepts decimal digits with an optional leading `-`.
+`cc_slice_to_u64` accepts decimal digits only. Both consume the entire slice,
+reject empty input, and return `CC_ERR_PARSE` for invalid syntax and
+`CC_ERR_INVALID_ARG` for overflow.
+
+`cc_slice_to_f64` applies `strtod` to a NUL-terminated copy and requires the
+entire slice to be consumed. Empty or partially consumed input returns
+`CC_ERR_PARSE`; overflow returns `CC_ERR_INVALID_ARG`; allocation failure
+returns `CC_ERR_OUT_OF_MEMORY`.
+
+UFCS maps `s.to_i64()`, `s.to_u64()`, and `s.to_f64()` to these functions with
+`&s`.
+
+### Checked integer arithmetic
+
+```c
+CCResult_int64_t_CCError cc_add_i64_checked(int64_t a, int64_t b);
+CCResult_int64_t_CCError cc_sub_i64_checked(int64_t a, int64_t b);
+CCResult_int64_t_CCError cc_mul_i64_checked(int64_t a, int64_t b);
+```
+
+Each function returns the exact result or `CC_ERR_INVALID_ARG` when the
+operation overflows `int64_t`.
+
+## Strings
+
+`<ccc/std/string.cch>` defines the owning string builder:
+
+```c
+typedef struct CCString {
     union {
-        T value;       // access via cc_value(res) or cc_unwrap*(...)
-        E error;       // access via cc_error(res) or cc_unwrap_err*(...)
-    } u;
-};
-```
-
-**Idiomatic patterns:**
-
-```c
-// Pattern 1: Scalar result - use cc_unwrap
-size_t !>(CCIoError) res = cc_file_write(file, data);
-if (cc_is_err(res)) {
-    handle_error(cc_error(res));
-    return;
-}
-size_t bytes_written = cc_value(res);
-
-// Pattern 2: Pointer result - use cc_unwrap_as with pointer type
-CCDirIter* !>(CCIoError) iter_res = cc_dir_open(arena, ".");
-if (cc_is_err(iter_res)) {
-    CCIoError err = cc_unwrap_err_as(iter_res, CCIoError);
-    printf("Error: %s\n", cc_io_error_str(err));
-    return;
-}
-CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
-
-// Pattern 3: Struct result - use cc_unwrap_as with struct type
-CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, arena);
-if (cc_is_err(entry_res)) {
-    CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
-    if (err.kind == CC_IO_OTHER && err.os_code == 0) {
-        // EOF - not an error
-    } else {
-        handle_error(err);
-    }
-    return;
-}
-CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
-printf("Found: %s\n", (const char*)entry.name.ptr);
-```
-
-### Declaring Result Types in Headers
-
-When defining custom Result types in `.cch` header files, use the `CCRes(T, E)` macro and `CC_DECL_RESULT_SPEC` with guards:
-
-```c
-// In your_types.cch
-#include <ccc/cc_result.cch>
-
-// Use CCRes(T, E) in function signatures
-CCRes(MyData, MyError) my_function(int arg);
-
-// Declare Result type with guards (prevents redefinition if compiler auto-generates)
-#ifndef CCResult_MyData_MyError_DEFINED
-#define CCResult_MyData_MyError_DEFINED 1
-CC_DECL_RESULT_SPEC(CCResult_MyData_MyError, MyData, MyError)
-#endif
-```
-
-**Why guards?** When you use `T !>(E)` syntax in `.ccs` files, the compiler automatically generates `CC_DECL_RESULT_SPEC` calls. The `#ifndef ..._DEFINED` guards prevent redefinition errors when explicit declarations exist in headers.
-
----
-
-## Phase 1: Strings, I/O, and Collections
-
-The Phase 1 stdlib includes three core modules: strings (manipulation and parsing), I/O (file and stream operations), and collections (dynamic arrays and hash maps). All are header-only or minimal-linkage, arena-backed, and designed for concurrent systems programming.
-
-### 1. Strings (`<std/string.cch>`)
-
-**Naming:** Language surface keeps `String` for UFCS ergonomics, but the C ABI is prefixed (`CCString`, `cc_string_*`). The compiler resolves short aliases automatically.
-
-**Collections note:** Vectors/Maps are arena-backed by default. They may grow by allocating new buffers/tables in the arena and copying/rehashing; growth fails if the arena cannot satisfy the request. Optional heap-backed variants exist for tools/tests when explicitly included; generated code uses the arena-backed forms.
-
-#### 1.1 Overview
-
-Concurrent-C slices (`char[:]`) are efficient views for immutable string data. The stdlib builds on slices with:
-
-- **String type:** Arena-backed growable string (used for building, formatting, accumulation).
-- **Slice operations:** Non-owning UFCS methods on `char[:]` (split, trim, find, parse) that work with any slice.
-- **Canonical string views:** `char[:0]` from `String.as_slice()` and `@slice("...")`.
-- **Builder sugar:** `@string(expr, arena)` and `@string(policy, \`...\`, arena)` for direct and templated string construction.
-
-All operations are accessible via UFCS method syntax for ergonomics:
-
-```c
-// Natural, chainable
-str result = input
-    .trim()
-    .lower()
-    .replace("foo", "bar")
-    .slice(0, 10);
-
-// Or fluent builder
-String s = string_new(&arena);
-s.append("Hello")
- .append(" ")
- .append("World");
-```
-
----
-
-#### 1.2 String Builder Type
-
-```c
-// Language surface: String
-// C ABI (prefixed): typedef CCVec_char CCString; // String is backed by CCVec::[char]
-```
-
-**Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a CCVec::[char]). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
-
-**Direct construction surface**
-
-```c
-String string_new(Arena* a);
-String cc_string_from(expr, Arena* a);            // expression-generic helper
-String cc_string_from_slice(Arena* a, char[:] initial);
-char[:0] @slice("...");
-String @string(expr, Arena* a);
-String @string(policy, `...`, Arena* a);
-
-// UFCS surface methods
-String* String.append(char[:] data);          // Append data, return for chaining
-String* String.push(char[:] data);            // Alias of append
-String* String.push_char(char c);             // Append single character
-String* String.push_int(i64 value);           // Append formatted i64
-String* String.push_float(f64 value);         // Append formatted f64
-String* String.push_uint(u64 value);          // Append formatted u64
-String* String.clear();                       // Clear contents, reuse allocation
-char[:0] String.as_slice();                   // Get immutable sentinel view
-size_t String.len();                          // Length in bytes (CCVec::[T] UFCS)
-size_t String.cap();                          // Capacity (CCVec::[T] UFCS)
-String <primitive>.to_str(Arena* a);          // e.g. 42.to_str(&arena)
-```
-
-**Normative lowering:**
-- `s.append(data)` and `s.push(data)` lower to `cc_string_push(&s, data)`.
-- `s.push_char(c)` lowers to `cc_string_push_char(&s, c)`.
-- `s.push_int(v)` lowers to `cc_string_push_int(&s, v)`.
-- `s.push_uint(v)` lowers to `cc_string_push_uint(&s, v)`.
-- `s.push_float(v)` lowers to `cc_string_push_float(&s, v)`.
-- `s.clear()` lowers to `cc_string_clear(&s)`.
-- `s.as_slice()` lowers to `cc_string_as_slice(&s)`.
-- `s.len()` / `s.cap()` lower to `cc_string_len(&s)` / `cc_string_cap(&s)`.
-- `@slice("...")` lowers to a build-time canonical `char[:0]` via `cc_slice_from_cstr("...")`.
-- `@string(expr, a)` lowers to `cc_string_from((expr), (a))`.
-- `@string(policy, \`...\`, a)` lowers to `cc_string_new(a)` plus `cc_string_push_slice(...)` / `cc_string_push_policy(...)` calls for literal and interpolated segments.
-- Built-in primitive `x.to_str(a)` forms lower to helpers such as `int_to_str(x, a)` or `double_to_str(x, a)`.
-
-**Slice Lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
-
-**Failure poison (sticky, normative):** `String` is an owner; a builder step that cannot acquire storage (arena exhaustion — including a too-small fixed-buffer arena — or a size overflow) **poisons** the `String` instead of truncating it. Poisoned semantics:
-
-- Every subsequent `push*` / `append` is a sticky no-op returning `NULL`.
-- `len()` reads 0, `as_slice()` is the empty slice, `cc_string_cstr()` returns `NULL`.
-- `cc_string_failed(&s)` reports the poisoned state (`bool`).
-- `cc_string_clear(&s)` is the explicit recovery: it resets to a valid empty string.
-
-There is no silent truncation and no partial output: a `String` (including one built by `@string(...)` templating into a fixed arena) is either complete or failed. The poison sentinel lives in the existing `len` field, so the 16-byte ABI is unchanged.
-
-**Template slots:** `@string(policy, \`...\`, a)` accepts string-oriented slot expressions (`char*`, `char[:]`, `String`). Non-string values may bridge through the conventional `to_str(a)` UFCS helper when available.
-Backtick template bodies preserve whitespace, indentation, and embedded newlines exactly as written, matching ordinary JavaScript template-literal whitespace behavior (no implicit dedent or trim).
-
-**Builder Pattern (Fluent, UFCS-enabled):**
-
-```c
-Arena arena = arena(megabytes(1));
-
-// Method chaining via UFCS
-String sb = string_new(&arena);
-sb.append("count=")
-  .append("x")
-  .push_int(42);
-char[:0] result = sb.as_slice();  // "count=x42"
-
-// Or more readable step-by-step
-String greeting = string_new(&arena);
-greeting.append("Hello");
-greeting.push_char(' ');
-greeting.append("world");
-printf("%.*s\n", (int)greeting.as_slice().len, greeting.as_slice().ptr);
-
-String msg = @string(42, &arena);
-String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
-```
-
-**Practical Examples:**
-
-```c
-Arena arena = arena(megabytes(1));
-
-// Build JSON
-String json = string_new(&arena);
-json.append("{\"name\":\"")
-    .append(name)
-    .append("\",\"age\":")
-    .push_int(age)
-    .append("}");
-char[:] json_str = json.as_slice();
-
-// Build SQL query with conditionals
-String query = string_new(&arena);
-query.append("SELECT * FROM users WHERE 1=1");
-if (has_filter_name)
-    query.append(" AND name='")
-         .append(filter_name)
-         .append("'");
-if (has_filter_age)
-    query.append(" AND age > ")
-         .push_int(min_age);
-```
-
----
-
-#### 1.3 String Slice Operations (char[:])
-
-UFCS methods on immutable `char[:]` views. These are allocation-free and work with any slice.
-
-**Normative lowering:** `char[:]` methods dispatch on the slice family itself. Representative emitted callees include `cc_slice_trim(...)`, `cc_slice_trim_set(...)`, and related `cc_slice_*` helpers for query, transform, and parsing operations.
-
-##### Core Methods
-
-```c
-size_t  char[:].len();                          // Length in bytes
-
-// Safe indexing (never traps). Returns a pointer into the slice or NULL.
-char*   char[:].get(size_t index);              // NULL if out of bounds
-
-// View (no allocation). Empty slice (len == 0) on invalid range.
-char[:] char[:].slice(size_t start, size_t end);  // empty slice if start > end or end > len
-
-// Copy to new allocation
-char[:] char[:].clone(CCArena* a);              // Byte-for-byte copy into arena (UTF-8 unchanged)
-char*   char[:].c_str(CCArena* a);              // Copy len bytes + NUL terminator; returns char* for C interop
-```
-
-**Slice Safety:** `.slice(start, end)` returns an empty slice (`len == 0`) if `start > end` or `end > len`. Otherwise, it returns a view (no allocation). This keeps the call total (non-trapping, non-erroring) and preserves the "empty slice is the absent sentinel" convention used across stdlib slice APIs.
-
-**Example:**
-```c
-char[:] s = "hello";
-assert(s.slice(1, 4) == "ell");        // valid range
-assert(s.slice(4, 1).len == 0);        // invalid: start > end -> empty
-assert(s.slice(0, 99).len == 0);       // invalid: end > len   -> empty
-assert(s.slice(5, 5).len == 0);        // empty slice at end (valid, bordering)
-```
-
-##### Query Methods
-
-```c
-bool    char[:].is_empty();                    // Check if empty
-bool    char[:].is_ascii();                    // Check if all ASCII
-bool    char[:].starts_with(char[:] prefix);   // Check prefix
-bool    char[:].ends_with(char[:] suffix);     // Check suffix
-bool    char[:].contains(char[:] needle);      // Check contains
-ssize_t char[:].index_of(char[:] needle);      // Find index (-1 if not found)
-ssize_t char[:].last_index_of(char[:] needle); // Find last index (-1 if not found)
-size_t  char[:].count(char[:] needle);         // Count occurrences
-```
-
-##### Transform Methods (return owned String or slice)
-
-```c
-String  char[:].upper(Arena* a);               // Uppercase → new String
-String  char[:].lower(Arena* a);               // Lowercase → new String
-char[:] char[:].trim();                        // Trim whitespace (view)
-char[:] char[:].trim_left();                   // Trim left (view)
-char[:] char[:].trim_right();                  // Trim right (view)
-char[:] char[:].trim_set(char[:] chars);       // Trim custom chars (view)
-String  char[:].replace(Arena* a, char[:] old, char[:] new);  // Replace all
-String  char[:].repeat(Arena* a, size_t times); // Repeat n times
-```
-
-##### Strict Conversion Methods (`to_i64` / `to_u64` / `to_f64`)
-
-Strict slice-to-number conversions returning the standard `CCError` result, designed to compose with `!>` / `?>` and `@errhandler`:
-
-```c
-int64_t  !>(CCError) char[:].to_i64();   // lowers to cc_slice_to_i64(&s)
-uint64_t !>(CCError) char[:].to_u64();   // lowers to cc_slice_to_u64(&s)
-double   !>(CCError) char[:].to_f64();   // lowers to cc_slice_to_f64(&s)
-```
-
-**Contract (normative):**
-
-- **Full consumption.** The entire slice must parse; trailing bytes are an error (`"12a"`, `"1.5x"` fail). The empty slice is an error.
-- **Strict form.** Base 10 only. No whitespace trimming (`" 5"` fails). No `'+'` sign (`"+5"` fails). `to_i64` accepts a leading `'-'`; `to_u64` accepts no sign. Leading zeros are accepted (`"007"` → 7). `to_f64` accepts what `strtod` accepts, subject to full consumption.
-- **Error classes.** Malformed or empty input → `CC_ERR_PARSE`. Value out of range (e.g. `"9223372036854775808"` for `to_i64`, `"18446744073709551616"` for `to_u64`, `±HUGE_VAL` with `ERANGE` for `to_f64`) → `CC_ERR_INVALID_ARG`.
-- Boundary values parse exactly: `INT64_MIN`, `INT64_MAX`, `UINT64_MAX`.
-
-```c
-int64_t v = s.to_i64() !> { return -7; };   // handler on bad input
-int64_t w = s.to_i64() ?> 0;                // default on bad input
-```
-
-##### Parse Methods
-
-```c
-i64  !>(CCI64ParseError)   char[:].parse_i64();    // Parse to i64
-u64  !>(CCI64ParseError)   char[:].parse_u64();    // Parse to u64
-f64  !>(CCFloatParseError) char[:].parse_f64();    // Parse to f64
-bool !>(CCBoolParseError)  char[:].parse_bool();   // Parse to bool ("true"/"false")
-```
-
-**Error types:**
-```c
-enum CCI64ParseError   { InvalidChar, Overflow, Underflow };
-enum CCFloatParseError { InvalidChar, Overflow };
-enum CCBoolParseError  { InvalidValue };
-```
-
-##### Split Methods
-
-```c
-struct CCStringSplitIter {
-    char[:] remaining;
-    char[:] delim;
-};
-
-CCStringSplitIter char[:].split(char[:] delim);                 // Create iterator
-bool              CCStringSplitIter.next(char[:]* out);         // Advance iterator; true if a field was written
-char[:][:]        char[:].split_all(CCArena* a, char[:] delim); // Collect all at once
-```
-
-**Examples:**
-
-```c
-// Slice query and trim
-char[:] input = "  hello world  ";
-char[:] trimmed = input.trim();        // "hello world"
-bool has_hello = trimmed.contains("hello");  // true
-
-// Parse with error handling
-char[:] num_str = "42";
-i64 !>(CCI64ParseError) result = num_str.parse_i64();
-if (result.is_ok()) {
-    i64 val = result.value();
-    printf("Parsed: %ld\n", val);
-} else {
-    printf("Parse error\n");
-}
-
-// Split and iterate
-char[:] csv = "alice,bob,charlie";
-CCStringSplitIter it = csv.split(",");
-char[:] name;
-while (it.next(&name)) {
-    printf("Name: %.*s\n", (int)name.len, name.ptr);
-}
-
-// Split all at once
-CCArena arena = arena(megabytes(1));
-char[:][:] names = csv.split_all(&arena, ",");
-for (size_t i = 0; i < names.len; i++) {
-    printf("%.*s\n", (int)names[i].len, names[i].ptr);
-}
-```
-
----
-
-#### 1.4 UTF-8 Notes
-
-All strings are UTF-8. Basic operations (split, find, trim on whitespace) work on bytes and are safe for UTF-8. Multi-byte character handling (grapheme clusters, normalization) is deferred to Phase 2 if needed.
-
----
-
-#### 1.5 Checked Integer Arithmetic (`<std/slice.cch>`)
-
-Overflow-checked `int64_t` arithmetic returning the standard `CCError` result, composing with `!>` / `?>` in place of hand-rolled `INT64_MAX - delta` guards:
-
-```c
-int64_t !>(CCError) cc_add_i64_checked(int64_t a, int64_t b);
-int64_t !>(CCError) cc_sub_i64_checked(int64_t a, int64_t b);
-int64_t !>(CCError) cc_mul_i64_checked(int64_t a, int64_t b);
-```
-
-**Contract (normative):**
-
-- On overflow of the mathematical result outside `[INT64_MIN, INT64_MAX]`, returns an error with `kind == CC_ERR_INVALID_ARG`; otherwise returns the exact result.
-- All edges are defined, including `INT64_MIN`: `sub(0, INT64_MIN)` and `mul(INT64_MIN, -1)` are errors; `add(INT64_MIN, INT64_MAX)` is `-1`; `mul(0, INT64_MIN)` is `0`.
-- Implemented with `__builtin_*_overflow` where available, with a portable fallback; results are identical either way.
-
-```c
-int64_t v = cc_add_i64_checked(base, delta)
-    !> { return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "increment would overflow")); };
-```
-
----
-
-### 2. I/O (`<std/io.cch>` and `<std/fs.cch>`)
-
-#### 2.1 Overview
-
-Concurrent-C I/O wrappers provide safe alternatives to C's stdio.h and POSIX I/O:
-
-- Replace errno with `T !>(CCIoError)` Result types.
-- Wrap file handles in opaque types for safety.
-- Provide sync and `@async` variants.
-- Allocate into arenas where needed.
-- Use UFCS methods for natural I/O operations.
-
-**Non-blocking guarantee:** All pure in-memory operations (String builder, CCVec::[T], Map<K,V>, char[:] slicing, trimming, parsing) are `@noblock`—they never yield to the scheduler and are safe to call in deadline-sensitive code.
-
-**Blocking behavior:**
-
-File open/read/write/sync operations are **stalling operations** as defined in § 7.8.5 of the language specification. All I/O operations may block indefinitely, may fail with `IoError::Busy` under executor saturation, and provide no cancellation guarantees outside of deadline scopes.
-
-For complete blocking/stalling semantics, see **§ 7.8 (Blocking, Stalling, and Execution Contexts)**. For cancellation behavior inside deadline scopes (how suspension points check for deadline expiration), see **§ 7.5 (Cancellation & Deadline)**. Pure in-memory operations (strings, slices, Vec, Map) are guaranteed non-blocking and must always run inline (§ 7.8.7).
-
-#### 2.2 Basic I/O Errors
-
-```c
-enum CCIoError {
-    PermissionDenied,
-    FileNotFound,
-    InvalidArgument,
-    Interrupted,
-    OutOfMemory,
-    Busy,              // Blocking pool saturated, queue is full
-    ConnectionClosed,  // Normal closure (like EOF for streams; not an error condition)
-
-    // Platform-specific error code preserved for diagnostics.
-    // On POSIX: errno. On Windows: GetLastError()/WSAGetLastError() (implementation-defined).
-    Other(i32 os_code),
-};
-
-enum CCParseError {
-    InvalidUtf8,
-    Truncated,
-};
-
-// Note: EOF is not an error. Streaming APIs return an empty slice (len == 0) at end-of-stream.
-// EOF represents stream exhaustion, not failure; check data.len == 0 to detect EOF.
-```
-
----
-
-#### 2.3 File Type and Methods
-
-```c
-// Opaque file handle
-typedef struct CCFile CCFile;
-
-// Direct library-call constructors
-CCFile !>(CCIoError)        cc_file_open(CCArena* a, char[:] path, char[:] mode);  // "r", "w", "a"
-@async CCFile !>(CCIoError) cc_file_open_async(CCArena* a, char[:] path, char[:] mode);
-
-// UFCS surface methods
-
-// Streaming read: returns slice with data, empty slice on EOF.
-// Reads up to n bytes; returns slice of actual bytes read.
-// EOF: returns ok with empty slice (len == 0).
-char[:] !>(CCIoError) CCFile.read(CCArena* a, size_t n);
-
-// Read one line into arena (line ending handling: accepts \n and \r\n).
-// EOF: returns ok with empty slice (len == 0).
-char[:] !>(CCIoError) CCFile.read_line(CCArena* a);
-
-// Read entire file into arena. Returns empty slice for empty files.
-// This is NOT a streaming API — use read() or read_line() for streaming.
-char[:] !>(CCIoError) CCFile.read_all(CCArena* a);
-
-// Write all bytes from data.
-size_t !>(CCIoError) CCFile.write(char[:] data);
-
-// Read into caller-provided buffer (no allocation).
-// For streaming scenarios where you want to reuse the same buffer.
-// Returns bytes read; 0 on EOF.
-size_t !>(CCIoError) CCFile.read_buf(void* buf, size_t n);
-
-// Write from caller-provided buffer (no slice overhead).
-// For streaming scenarios where you want to avoid slice construction.
-// Returns bytes written.
-size_t !>(CCIoError) CCFile.write_buf(const void* buf, size_t n);
-
-i64    !>(CCIoError) CCFile.seek(i64 offset, int whence);   // SEEK_SET/CUR/END
-i64    !>(CCIoError) CCFile.tell();                         // Current position
-size_t !>(CCIoError) CCFile.size();                         // File size (0 for non-seekable)
-
-// Flush to disk; observes flush errors.
-void   !>(CCIoError) CCFile.sync();
-
-// Close is best-effort and infallible (no error returned).
-// Call sync() before close() to observe flush failures.
-void                 CCFile.close();
-
-// Async variants (same signatures, just async)
-@async char[:] !>(CCIoError) CCFile.read_async(CCArena* a, size_t n);
-@async char[:] !>(CCIoError) CCFile.read_line_async(CCArena* a);
-@async char[:] !>(CCIoError) CCFile.read_all_async(CCArena* a);
-@async size_t  !>(CCIoError) CCFile.write_async(char[:] data);
-```
-
-**Normative lowering:**
-- `file.open(path, mode)` lowers to `cc_file_open(&file, path, mode)`.
-- `file.read(a, n)` lowers to `cc_file_read(&file, a, n)`.
-- `file.read_line(a)` lowers to `cc_file_read_line(&file, a)`.
-- `file.read_all(a)` lowers to `cc_file_read_all(&file, a)`.
-- `file.write(data)` lowers to `cc_file_write(&file, data)`.
-- `file.read_buf(buf, n)` lowers to `cc_file_read_buf(&file, buf, n)`.
-- `file.write_buf(buf, n)` lowers to `cc_file_write_buf(&file, buf, n)`.
-- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_*` family function with `&file` as receiver.
-- Async file methods use the same file family contract; implementations may lower them through direct `cc_file_*_async` calls or equivalent family wrappers.
-
-**EOF Semantics (Unified):**
-
-| Method | Return Type | EOF Behavior |
-|--------|-------------|--------------|
-| `read()` | `char[:] !>(CCIoError)` | Empty slice (`len == 0`) = EOF |
-| `read_line()` | `char[:] !>(CCIoError)` | Empty slice (`len == 0`) = EOF |
-| `read_all()` | `char[:] !>(CCIoError)` | N/A (reads entire file; empty slice for empty file) |
-
-**Rule:** All streaming reads (`read()`, `read_line()`) return an empty slice on EOF. Check `data.len == 0` to detect EOF — there is no separate absent/EOF sentinel on top of the result.
-
-**Examples:**
-
-```c
-CCArena arena = arena(megabytes(10));
-
-// Read entire file (error handling)
-CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
-if (f.is_ok()) {
-    CCFile file = f.value();
-    char[:] !>(CCIoError) content_r = file.read_all(&arena);
-    if (content_r.is_ok()) {
-        printf("Read %zu bytes\n", content_r.value().len);
-    }
-    file.close();
-} else {
-    printf("Error: %d\n", f.error());
-}
-
-// Read lines (empty slice = EOF)
-CCFile !>(CCIoError) f = cc_file_open(&arena, "input.txt", "r");
-if (f.is_ok()) {
-    CCFile file = f.value();
-    while (true) {
-        char[:] !>(CCIoError) line_result = file.read_line(&arena);
-        if (cc_is_err(line_result)) {
-            // Handle error
-            break;
-        }
-        char[:] line = cc_value(line_result);
-        if (line.len == 0) break;  // EOF (empty slice)
-        printf("Line: %.*s\n", (int)line.len, line.ptr);
-    }
-    file.close();
-}
-
-// Write file
-CCFile !>(CCIoError) out = cc_file_open(&arena, "output.txt", "w");
-if (out.is_ok()) {
-    CCFile file = out.value();
-    file.write("Hello, world!\n");
-    file.close();
-}
-
-// Async I/O
-@async void process_file() {
-    // Sync open is allowed; runtime may offload it to blocking pool if needed
-    CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
-    if (f.is_ok()) {
-        CCFile file = f.value();
-        char[:] data = @await file.read_all_async(&arena) !>(e) return;
-        process(data);
-        file.close();
-    }
-}
-```
-
-#### 2.4 Standard Streams
-
-```c
-// UFCS methods on stdout/stderr (singletons)
-void !>(CCIoError) std_out.write(char[:] data);
-void !>(CCIoError) std_err.write(char[:] data);
-// CCString overloads for ergonomics
-void !>(CCIoError) std_out.write(CCString s);
-void !>(CCIoError) std_err.write(CCString s);
-// Overload resolution is handled by UFCS lowering; the compiler selects the
-// best match and emits prefixed C ABI calls (`cc_std_out_write` or
-// `cc_std_out_write_string`) with pointer-based signatures.
-
-**Normative lowering:**
-- `std_out.write(slice)` lowers to `cc_std_out_write(slice)`.
-- `std_err.write(slice)` lowers to `cc_std_err_write(slice)`.
-- `std_out.write(str)` lowers to `cc_std_out_write_string(&str)`.
-- `std_err.write(str)` lowers to `cc_std_err_write_string(&str)`.
-
-**UFCS receiver conversion (general rule):**
-- Overload selection prefers an exact receiver type match.
-- If no exact match, the compiler may apply these implicit receiver conversions (in order) to find a viable overload:
-  1) `CCString -> char[:]` (view of contents via `cc_string_as_slice`)
-  2) `char[N]` / string literal -> `char[:]`
-  3) `CCSlice` alias -> `char[:]`
-- If no overload is viable after these conversions, resolution fails.
-```
-
-**Examples:**
-
-```c
-std_out.write("Hello, world!\n");
-std_err.write("An error occurred\n");
-std_out.write(my_string); // CCString overload
-```
-
-#### 2.5 Structured Logging (`<std/log.cch>`)
-
-Structured logging for servers and production systems. Supports multiple backpressure strategies (block, drop, sample) for different log types.
-
-**Log Levels:**
-
-```c
-enum LogLevel {
-    Debug,   // Development information
-    Info,    // General operational events
-    Warn,    // Potentially harmful situations
-    Error,   // Error conditions
-    Fatal,   // Fatal errors requiring shutdown
-};
-```
-
-**Log Event:**
-
-```c
-struct LogEvent {
-    LogLevel level;
-    char[:] module;      // Module/component name (e.g., "http.handler", "db.pool")
-    char[:] message;     // Log message (no allocation)
-    u64 timestamp_ns;    // Nanoseconds since epoch
-};
-```
-
-**Logging Functions:**
-
-```c
-// Log with drop strategy: never blocks request path
-// Logs to stderr; drops silently if output is slow
-void                 cc_log_drop(CCLogEvent evt);
-
-// Log with block strategy: blocks up to timeout, fails request if timeout exceeded
-// Use for audit/critical logs that cannot be dropped
-void !>(CCIoError)   cc_log_block(CCLogEvent evt, Duration timeout);
-
-// Log with sample strategy: deterministically keep ~rate fraction
-// Use for high-volume logs (traces, metrics) that must be sparse
-void                 cc_log_sample(CCLogEvent evt, f32 rate);
-
-// Runtime configuration
-struct LogConfig {
-    LogLevel min_level;
-    char[:] module_filter;  // Module name prefix filter (e.g., "http.*")
-};
-
-void Runtime.set_log_config(LogConfig cfg);
-void Runtime.set_log_level(LogLevel level);
-```
-
-**Examples:**
-
-```c
-#include <ccc/std/prelude.cch>
-
-LogEvent evt = {
-    .level = Info,
-    .module = "http.handler",
-    .message = "GET /api/users 200 OK",
-    .timestamp_ns = now_ns(),
-};
-
-// Access log (can drop if slow)
-log_drop(evt);
-
-// Audit log (fail request if timeout)
-log_block(evt, milliseconds(100)) !>(e) return cc_err(e);
-
-// Trace log (keep 5% of events)
-log_sample(evt, 0.05);
-```
-
-**Server Pattern:**
-
-```c
-@async @latency_sensitive void http_handler(Request req) {
-    // Parse request (CPU work, inline)
-    char[:] path = parse_path(req);
-    
-    // Access log (drop strategy, never blocks)
-    LogEvent evt = {
-        .level = Info,
-        .module = "http",
-        .message = path,
-        .timestamp_ns = now_ns(),
+        char *data;
+        char inline_buf[sizeof(void *)];
+        uintptr_t _inline_word;
     };
-    log_drop(evt);
-    
-    // Process request...
-    char[:] response = process(path);
-    
-    // Send response (stalling I/O, separate dispatch)
-    @await send_response(req.fd, response);
-}
+    uint32_t len;
+    uint32_t cap;
+} CCString;
 ```
 
-**Design:**
-
-- All logging functions are **non-allocating**.
-- `LogEvent` is stack-allocated; messages are string slices.
-- `log_drop()` never blocks (fail-safe for request handlers).
-- `log_block()` allows controlled backpressure (for critical logs).
-- `log_sample()` implements **deterministic sampling** (reproducible, fair).
-- Runtime configuration is centralized; can be changed at startup.
-
-**@latency_sensitive context:** Use `log_drop()` in `@latency_sensitive` handlers—it is `@noblock` and never yields. Avoid `log_block()` and `log_sample()` in deadline-sensitive code (they may suspend).
-
-#### 2.6 Path Utilities (`<std/path.cch>`)
+The public constructors, accessors, mutation functions, and lifetime functions
+are:
 
 ```c
-// Path operations (mostly free functions, no state)
-char[:] cc_path_join(CCArena* a, char[:] parent, char[:] child);  // Cross-platform path joining
-char[:] cc_path_basename(char[:] path);     // Extract filename
-char[:] cc_path_dirname(char[:] path);      // Extract directory
-char[:] cc_path_extension(char[:] path);    // Extract extension
+CCString cc_string_new(void);
+CCString cc_string_with_capacity(CCArena *arena, size_t cap);
+CCString cc_string_from_slice(CCArena *arena, CCSlice slice);
+CCString cc_string_from(value, CCArena *arena);
 
-// Example: cross-platform
-char[:] config = cc_path_join(&arena, home_dir, ".config/app.txt");
-char[:] dir = cc_path_dirname(config);
-char[:] name = cc_path_basename(config);
-char[:] ext = cc_path_extension(config);
+bool cc_string_failed(const CCString *str);
+size_t cc_string_len(const CCString *str);
+size_t cc_string_cap(const CCString *str);
+bool cc_string_is_inline(const CCString *str);
+const char *cc_string_data_const(const CCString *str);
+char *cc_string_data(CCString *str);
+CCArena *cc_string_arena(const CCString *str);
+uint64_t cc_string_provenance(const CCString *str);
+CCSlice cc_string_as_slice(const CCString *str);
+CCSlice cc_string_persist_slice(CCArena *arena, const CCString *str);
+const char *cc_string_cstr(CCString *str, CCArena *arena);
+
+char *cc_string_reserve(CCString *str, size_t need, CCArena *arena);
+CCString *cc_string_push_buffer(CCString *str, const char *buffer, uint32_t len, CCArena *arena);
+CCString *cc_string_push_slice(CCString *str, CCSlice data, CCArena *arena);
+CCString *cc_string_push_char(CCString *str, char c, CCArena *arena);
+CCString *cc_string_push_int(CCString *str, int64_t value, CCArena *arena);
+CCString *cc_string_push_uint(CCString *str, uint64_t value, CCArena *arena);
+CCString *cc_string_push_f32(CCString *str, float value, CCArena *arena);
+CCString *cc_string_push_f64(CCString *str, double value, CCArena *arena);
+CCString *cc_string_push_float(CCString *str, double value, CCArena *arena);
+CCString *cc_string_push_cstr(CCString *str, const char *value, CCArena *arena);
+CCString *cc_string_clear(CCString *str);
+CCString *cc_string_push(CCString *str, value, CCArena *arena);
+CCString *cc_string_append(CCString *str, value, CCArena *arena);
+
+void cc_string_release_heap(CCString *str);
+void cc_string_release(CCString *str, CCArena *arena);
 ```
 
----
+`cc_string_from` accepts `CCSlice`, C strings, `CCString` values and pointers,
+character and integer scalar types, `float`, `double`, and `bool`.
+`cc_string_push` and `cc_string_append` accept slices, C strings, and
+`CCString` values and pointers.
 
-### 3. Collections (`<std/vec.cch>` and `<std/map.cch>`)
+The builder stores short values inline and stores larger values in arena-owned
+storage. A growth failure poisons the string. On a poisoned string,
+`cc_string_failed` is true, push operations return null,
+`cc_string_as_slice` is empty, and `cc_string_cstr` returns null.
+`cc_string_clear` restores a valid empty string.
 
-#### 3.1 Overview
-
-CC's collections are **arena-backed**, **generic** (canonically via `::[...]` syntax), and **UFCS-enabled**. They enable safe, efficient data structures for concurrent systems: work queues, request buffers, caches, state tables.
-
-#### 3.2 `CCVec::[T]` (Dynamic Array)
+Scalar conversion helpers have the form:
 
 ```c
-// Generic dynamic array type (arena-backed)
-typedef struct CCVec::[T] CCVec::[T];
-
-// Direct library-call constructors
-CCVec::[T] cc_vec_new::[T](CCArena* a);
-CCVec::[T] cc_vec_with_capacity::[T](CCArena* a, size_t capacity);
-
-// UFCS surface methods
-void    CCVec::[T].push(T value);                  // Add element (grows as needed)
-bool    CCVec::[T].pop(T* out);                    // Remove last into *out; false if empty
-T*      CCVec::[T].get(size_t index);              // Bounds-safe get; NULL if out of bounds
-T*      CCVec::[T].get_mut(size_t index);          // Mutable access; NULL if out of bounds
-
-enum CCBoundsError { OutOfBounds };
-void !>(CCBoundsError) CCVec::[T].set(size_t index, T value);   // Set with bounds check
-
-void    CCVec::[T].clear();                        // Clear contents
-size_t  CCVec::[T].len();                          // Length
-size_t  CCVec::[T].cap();                          // Capacity
-T[:]    CCVec::[T].as_slice();                     // View as T[:]
-
-// Iterator
-struct CCVecIter::[T] {
-    CCVec::[T]* vec;
-    size_t index;
-};
-
-CCVecIter::[T] CCVec::[T].iter();
-bool           CCVecIter::[T].next(T* out);        // true if a value was written to *out
+CCString <scalar-type>_to_str(<scalar-type> value, CCArena *arena);
 ```
 
-**Rule (get vs. get_mut):** Both return `T*` (a nullable pointer into the vector's buffer). `get` returns a `const`-like read-only view in source-level prose, but the underlying pointer is identical; `get_mut` exists as a distinct name for readability at call sites that will mutate. Returned pointers are valid until the next mutating operation on the vector (push/pop/set/clear or any growth).
+The shipped scalar families cover `char`, signed and unsigned integer types,
+fixed-width integer types, `intptr_t`, `uintptr_t`, `float`, `double`, and
+`bool`. Integer formatting is decimal, boolean formatting is `true` or
+`false`, and floating-point formatting uses `%g` unless the optional
+XJB formatter is enabled.
 
-**Normative lowering:** `CCVec::[T]` first lowers to the concrete container family `CCVec_<mangledT>`. Legacy `Vec::[T]`, `Vec<T>`, `vec_new::[T]`, and `vec_new<T>` spellings are retired. UFCS then lowers to that family contract. The visible concrete C family names are normative for interop: `CCVec_<mangledT>`, `CCVec_<mangledT>_init`, `CCVec_<mangledT>_push`, `CCVec_<mangledT>_get`, and related family members. Shared erased-core helpers remain an implementation detail.
+## File and buffered I/O
 
-**Examples:**
+`<ccc/std/io.cch>` defines:
 
 ```c
-CCArena arena = arena(megabytes(1));
+typedef struct {
+    FILE *handle;
+} CCFile;
 
-// Work queue (UFCS method syntax)
-CCVec::[Task::[void]] tasks = cc_vec_new::[Task::[void]](&arena);
-tasks.push(async_work1());
-tasks.push(async_work2());
-tasks.push(async_work3());
+typedef struct {
+    CCFile *file;
+    char *buf;
+    size_t cap;
+    size_t len;
+    size_t pos;
+    int eof;
+} CCBufReader;
 
-// Iterate and await
-CCVecIter::[Task::[void]] it = tasks.iter();
-Task::[void] task;
-while (it.next(&task)) {
-    @await task;
-}
-
-// Buffer for accumulation
-CCVec::[char] buffer = cc_vec_new::[char](&arena);
-for (size_t i = 0; i < input.len; i++) {
-    buffer.push(input.ptr[i]);
-}
-char[:] result = buffer.as_slice();
-
-// Bounds-safe access (pointer into the vector, NULL if out of bounds)
-CCVec::[int] data = cc_vec_new::[int](&arena);
-data.push(42);
-int* val = data.get(0);      // non-NULL; *val == 42
-int* oob = data.get(100);    // NULL (out of bounds)
-
-// Size checks
-if (data.len() > 0) {
-    data.clear();
-}
+typedef struct {
+    CCFile *file;
+    char *buf;
+    size_t cap;
+    size_t len;
+} CCBufWriter;
 ```
 
----
-
-#### 3.3 CCMap::[K, V] (Hash Map)
-
-`CCMap::[K, V]` is already defined in the Concurrent-C language spec. The stdlib provides it with UFCS methods:
+The file API is:
 
 ```c
-// Generic hash map (arena-backed)
-typedef struct CCMap::[K, V] CCMap::[K, V];
-
-// Direct library-call constructor
-CCMap::[K, V] cc_map_new::[K, V](CCArena* a);
-
-// UFCS surface methods
-void    CCMap::[K, V].insert(K key, V value);     // Insert or update
-V*      CCMap::[K, V].get(K key);                 // Lookup: pointer into table, NULL if absent
-V*      CCMap::[K, V].get_mut(K key);             // Mutable reference, NULL if absent
-bool    CCMap::[K, V].remove(K key);              // Remove (true if existed)
-void    CCMap::[K, V].clear();                    // Clear all entries
-size_t  CCMap::[K, V].len();                      // Number of entries
-size_t  CCMap::[K, V].cap();                      // Capacity
+int cc_file_open(CCFile *file, const char *path, const char *mode);
+void cc_file_close(CCFile *file);
+CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena);
+CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena *arena, size_t n);
+CCResult_bool_CCIoError cc_file_read_into(CCFile *file, CCArena *arena, size_t n, CCSlice *out);
+CCResult_CCSlice_CCIoError cc_file_read_line(CCFile *file, CCArena *arena);
+CCResult_bool_CCIoError cc_file_read_line_into(CCFile *file, CCArena *arena, CCSlice *out);
+CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data);
+CCResult_size_t_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n);
+CCResult_bool_CCIoError cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out);
+CCResult_size_t_CCIoError cc_file_write_buf(CCFile *file, const void *buf, size_t n);
+CCResult_size_t_CCIoError cc_file_sync(CCFile *file);
+CCResult_size_t_CCIoError cc_file_seek(CCFile *file, long offset, int whence);
+CCResult_size_t_CCIoError cc_file_tell(CCFile *file);
+CCResult_size_t_CCIoError cc_file_size(CCFile *file);
 ```
 
-**Normative lowering:** `CCMap::[K, V]` first lowers to a concrete container family such as `CCMap_int_char_ptr`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `CCMap_int_char_ptr_insert(&m, k, v)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
+`cc_file_open` returns zero on success and an errno value on failure.
+`cc_file_close` ignores close errors. Value-returning reads return an empty
+slice at EOF. The `_into` read forms return `ok(true)` when they write an
+output value and `ok(false)` at EOF. `cc_file_read_line` includes the newline
+when one is read. `cc_file_write` and `cc_file_write_buf` return the number of
+bytes written.
 
-**Rule (get returns pointer):** `get` / `get_mut` both return `V*` — a pointer directly into the map's table — or `NULL` if the key is absent. This matches the vector `get`/`get_mut` pattern and avoids copying `V` on each lookup. The returned pointer is valid until the next mutating operation on the map (`insert`, `remove`, `clear`, or any rehash).
+`CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
 
-**Note on Iteration:** Map iteration is intentionally deferred to Phase 2 to avoid prematurely locking in traversal order semantics. Phase 1 focuses on insertion, lookup, and removal.
-
-**Examples:**
+Standard stream writes are:
 
 ```c
-CCArena arena = arena(megabytes(1));
-
-// Simple cache (string → result)
-CCMap::[char[:], int] cache = cc_map_new::[char[:], int](&arena);
-cache.insert("key1", 100);
-cache.insert("key2", 200);
-
-int* val = cache.get("key1");    // non-NULL; *val == 100
-int* miss = cache.get("key3");   // NULL
-
-// State table for concurrent requests
-struct Request { int id; char[:] path; };
-CCMap::[int, Request] active = cc_map_new::[int, Request](&arena);
-
-active.insert(req.id, req);
-Request* found = active.get(42);
-if (found) {
-    process_request(*found);
-}
-active.remove(42);
-
-// Conditional lookup and update
-Request* r = active.get(id);
-if (r) {
-    r->path = new_path;
-}
+CCResult_size_t_CCIoError cc_std_out_write(CCSlice data);
+CCResult_size_t_CCIoError cc_std_err_write(CCSlice data);
+CCResult_size_t_CCIoError cc_std_out_write_auto(value);
+CCResult_size_t_CCIoError cc_std_err_write_auto(value);
 ```
 
----
+The automatic forms accept a slice, C string, or `CCString` value or pointer.
 
-#### 3.4 Set<T> (Deferred)
-
-`Set<T>` is deferred to Phase 2. Can be implemented as `Map<T, bool>` or a dedicated type; community feedback will guide the decision.
-
----
-
-### 4. Directory & Filesystem (`<std/dir.cch>`)
-
-#### 4.1 Overview
-
-Cross-platform directory operations: iteration, path existence checks, directory creation/removal, and glob pattern matching. Works on macOS, Linux, BSD, and Windows.
-
-#### 4.2 Directory Iteration
+Buffered I/O uses:
 
 ```c
-// Directory entry type
-enum CCDirEntryType {
+int cc_buf_reader_init(CCBufReader *reader, CCFile *file, CCArena *arena, size_t cap);
+CCResult_CCSlice_CCIoError cc_buf_reader_next(CCBufReader *reader, size_t n);
+CCResult_CCSlice_CCIoError cc_buf_reader_read_line(CCBufReader *reader, CCArena *arena);
+int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena *arena, size_t cap);
+CCResult_size_t_CCIoError cc_buf_writer_flush(CCBufWriter *writer);
+CCResult_size_t_CCIoError cc_buf_writer_write(CCBufWriter *writer, CCSlice data);
+```
+
+An empty successful buffered-reader result denotes EOF.
+
+### Async file operations
+
+`<ccc/std/async_io.cch>` defines:
+
+```c
+typedef struct CCAsyncHandle {
+    CCChan *done;
+    volatile int cancelled;
+} CCAsyncHandle;
+
+void cc_async_handle_init(CCAsyncHandle *handle);
+void cc_async_handle_free(CCAsyncHandle *handle);
+int cc_async_wait(CCAsyncHandle *handle);
+int cc_async_wait_timed(CCAsyncHandle *handle, const struct timespec *absolute_deadline);
+int cc_async_wait_deadline(CCAsyncHandle *handle, const CCDeadline *deadline);
+void cc_async_cancel(CCAsyncHandle *handle);
+```
+
+Submission functions return zero when the operation is accepted and an errno
+value otherwise. Completion writes operation results into caller-provided
+storage and sends an errno-compatible completion code through the handle.
+
+```c
+int cc_file_open_async(CCExec *ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle *handle);
+int cc_file_open_async_deadline(CCExec *ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
+int cc_file_close_async_deadline(CCExec *ex, CCFile *file, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_async(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
+int cc_file_write_async(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle);
+int cc_file_write_async_deadline(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle, const CCDeadline *deadline);
+```
+
+### Path helpers
+
+Path helpers are part of `<ccc/std/io.cch>`:
+
+```c
+char cc_path_sep(void);
+bool cc_path_is_abs(CCSlice path);
+CCSlice cc_path_join(CCArena *arena, CCSlice a, CCSlice b);
+CCSlice cc_path_dirname(CCArena *arena, CCSlice path);
+CCSlice cc_path_basename(CCArena *arena, CCSlice path);
+```
+
+The returned `join`, `dirname`, and `basename` slices are NUL-terminated and
+arena-backed. The path separator is `/`.
+
+## Collections
+
+### Vectors
+
+`<ccc/std/vec.cch>` defines arena-backed vector families with:
+
+```c
+#define CC_VEC_DECL_ARENA(T, Name) /* declares the Name family */
+```
+
+Each generated `Name` has `T *data` and `size_t len`, with capacity and arena
+metadata stored by the vector core. Its public family is:
+
+```c
+Name Name_init(CCArena *arena, size_t initial_cap);
+int Name_reserve(Name *vec, size_t need);
+int Name_push(Name *vec, T value);
+T *Name_push_ptr(Name *vec);
+bool Name_pop(Name *vec, T *out);
+T *Name_get(Name *vec, size_t index);
+T *Name_get_ptr(Name *vec, size_t index);
+int Name_set(Name *vec, size_t index, T value);
+T *Name_at_grow(Name *vec, size_t index);
+void Name_clear(Name *vec);
+CCSlice Name_as_slice(const Name *vec);
+uint64_t Name_provenance(const Name *vec);
+size_t Name_len(const Name *vec);
+size_t Name_cap(const Name *vec);
+T *Name_begin(Name *vec);
+T *Name_end(Name *vec);
+T *Name_data(Name *vec);
+```
+
+`push`, `reserve`, and `set` return zero on success and `-1` on failure.
+`pop` returns false when empty. `get` and `get_ptr` return null out of bounds.
+`at_grow` extends the logical length through the requested index and returns
+null on allocation failure. A pointer or slice into a vector is invalidated by
+an operation that grows its storage.
+
+Vector UFCS maps these method names to the generated family with `&vec`.
+`CCVec_char` and `CCVec_size_t` are predefined. `CC_VEC_FOREACH` iterates in
+increasing index order.
+
+`CC_VEC_DECL_HEAP(T, Name)` declares the heap-backed family with `init`, `free`,
+`reserve`, `push`, `push_ptr`, `pop`, `get`, `get_ptr`, `at_grow`, `clear`,
+`len`, `cap`, `begin`, `end`, and `data`.
+
+### Maps
+
+`<ccc/std/map.cch>` defines arena-backed map families with:
+
+```c
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN) /* declares the Name family */
+```
+
+The public generated family is:
+
+```c
+Name *Name_init(CCArena *arena);
+Name *Name_init_count(CCArena *arena, size_t count);
+void Name_destroy(Name *map);
+int Name_insert(Name *map, K key, V value);
+int Name_put(Name *map, K key, V value, int *ret);
+V *Name_get(Name *map, K key);
+V *Name_get_ptr(Name *map, K key);
+bool Name_remove(Name *map, K key);
+bool Name_del(Name *map, K key);
+size_t Name_len(const Name *map);
+size_t Name_cap(const Name *map);
+void Name_clear(Name *map);
+```
+
+`init` and `init_count` return null on allocation failure. `insert` returns zero
+on success and `-1` on failure. `put` writes `1` to `ret` for a new key, `0`
+for a replaced key, and `-1` on failure; its nonnegative return is the bucket
+index. `get` and `get_ptr` return a pointer to the stored value or null.
+`remove` and `del` report whether the key existed.
+
+Map UFCS maps `insert`, `put`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
+`clear`, and `destroy` to the generated family. `CC_MAP_FOREACH` exposes each
+entry without defining a stable traversal order.
+
+The convenience declarations `CC_MAP_DECL_INT`, `CC_MAP_DECL_U64`, and
+`CC_MAP_DECL_SLICE` provide hash and equality functions for `int`, `uint64_t`,
+and `CCSlice` keys.
+
+### Hash helpers
+
+`<ccc/std/hash.cch>` provides:
+
+```c
+uint64_t cc_hash_u64(uint64_t value);
+uint64_t cc_hash_slice(CCSlice value);
+bool cc_eq_slice(CCSlice a, CCSlice b);
+```
+
+## Directories and globbing
+
+`<ccc/std/dir.cch>` defines:
+
+```c
+typedef enum {
     CC_DIRENT_FILE,
     CC_DIRENT_DIR,
     CC_DIRENT_SYMLINK,
     CC_DIRENT_OTHER
-};
+} CCDirEntryType;
 
-// Directory entry
-struct CCDirEntry {
-    char[:] name;           // Entry name (not full path)
+typedef struct {
+    CCSlice name;
     CCDirEntryType type;
-};
+} CCDirEntry;
 
-// Open directory for iteration
-CCDirIter*  !>(CCIoError) cc_dir_open(CCArena* arena, char[:] path);
-
-// Read next entry (returns error with CC_IO_EOF when done)
-CCDirEntry  !>(CCIoError) cc_dir_next(CCDirIter* iter, CCArena* arena);
-
-// Close iterator
-void cc_dir_close(CCDirIter* iter);
-```
-
-**Example:**
-
-```c
-CCArena arena = cc_heap_arena(megabytes(1));
-CCDirIter* iter = cc_dir_open(&arena, "src") !>(e) return cc_err(e);
-
-while (true) {
-    CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, &arena);
-    if (cc_is_err(entry_res)) break;  // EOF or error
-
-    CCDirEntry entry = cc_value(entry_res);
-    printf("%s (%s)\n", entry.name.ptr,
-           entry.type == CC_DIRENT_DIR ? "dir" : "file");
-}
-
-cc_dir_close(iter);
-```
-
-#### 4.3 Path Operations
-
-```c
-bool cc_path_exists(char[:] path);     // Check if path exists
-bool cc_path_is_dir(char[:] path);     // Check if path is directory
-bool cc_path_is_file(char[:] path);    // Check if path is regular file
-
-bool !>(CCIoError) cc_dir_create(char[:] path);      // Create directory
-bool !>(CCIoError) cc_dir_create_all(char[:] path);  // Create directory and parents
-bool !>(CCIoError) cc_dir_remove(char[:] path);      // Remove empty directory
-bool !>(CCIoError) cc_file_remove(char[:] path);     // Remove file
-
-char[:]            cc_dir_cwd(CCArena* arena);       // Get current working directory
-bool !>(CCIoError) cc_dir_chdir(char[:] path);       // Change working directory
-```
-
-#### 4.4 Glob Pattern Matching
-
-```c
-// Glob result: array of matching paths
-struct CCGlobResult {
-    char[:]* paths;     // Array of path slices
-    size_t count;       // Number of matches
-};
-
-// Find files matching pattern
-// Supports: * (any chars), ? (single char), ** (recursive)
-CCGlobResult cc_glob(Arena* arena, char[:] pattern);
-
-// Check if name matches pattern (no directory traversal)
-bool cc_glob_match(char[:] pattern, char[:] name);
-```
-
-**Examples:**
-
-```c
-Arena arena = cc_heap_arena(megabytes(1));
-
-// Find all .ccs files in current directory
-CCGlobResult r1 = cc_glob(&arena, "*.ccs");
-for (size_t i = 0; i < r1.count; i++) {
-    printf("Found: %s\n", r1.paths[i].ptr);
-}
-
-// Find all .ccs files recursively
-CCGlobResult r2 = cc_glob(&arena, "**/*.ccs");
-
-// Find test files
-CCGlobResult r3 = cc_glob(&arena, "tests/test_*.ccs");
-```
-
----
-
-### 5. Process Spawning (`<std/process.cch>`)
-
-#### 5.1 Overview
-
-Cross-platform process spawning, I/O piping, and environment management. Works on macOS, Linux, BSD, and Windows.
-
-#### 5.2 Process Configuration
-
-```c
-struct CCProcessConfig {
-    char[:] program;        // Program path or name
-    char[:]* args;          // NULL-terminated argument array
-    char[:]* env;           // Environment (NULL = inherit)
-    char[:] cwd;            // Working directory (NULL = inherit)
-    bool pipe_stdin;        // Create stdin pipe
-    bool pipe_stdout;       // Create stdout pipe
-    bool pipe_stderr;       // Create stderr pipe
-    bool merge_stderr;      // Redirect stderr to stdout
-};
-
-struct CCProcessStatus {
-    bool exited;            // Exited normally
-    bool signaled;          // Killed by signal (POSIX)
-    int exit_code;          // Exit code or signal number
-};
-```
-
-#### 5.3 Process Spawning
-
-```c
-// Spawn with full configuration
-CCProcess !>(CCIoError) cc_process_spawn(CCProcessConfig* config);
-
-// Simple spawn (no pipes)
-CCProcess !>(CCIoError) cc_process_spawn_simple(char[:] program, char[:]* args);
-
-// Spawn shell command
-CCProcess !>(CCIoError) cc_process_spawn_shell(char[:] command);
-```
-
-#### 5.4 Process Management
-
-```c
-// Wait for exit (blocking)
-CCProcessStatus !>(CCIoError) cc_process_wait(CCProcess* proc);
-
-// Check if exited (non-blocking, returns CC_IO_BUSY if running)
-CCProcessStatus !>(CCIoError) cc_process_try_wait(CCProcess* proc);
-
-// Send signal (POSIX: signal number; Windows: TerminateProcess)
-bool !>(CCIoError) cc_process_kill(CCProcess* proc, int signal);
-
-// Get process ID
-int cc_process_id(CCProcess* proc);
-```
-
-#### 5.5 Process I/O
-
-```c
-// Write to stdin (requires pipe_stdin)
-size_t !>(CCIoError) cc_process_write(CCProcess* proc, char[:] data);
-
-// Read from stdout/stderr (requires pipe_stdout/pipe_stderr); empty slice = EOF
-char[:] !>(CCIoError) cc_process_read(CCProcess* proc, CCArena* arena, size_t max);
-char[:] !>(CCIoError) cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max);
-
-// Read all output until EOF
-char[:] !>(CCIoError) cc_process_read_all(CCProcess* proc, CCArena* arena);
-char[:] !>(CCIoError) cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
-
-// Close stdin (signals EOF to child)
-void cc_process_close_stdin(CCProcess* proc);
-```
-
-#### 5.6 Convenience: Run and Capture
-
-```c
-struct CCProcessOutput {
-    char[:] stdout_data;
-    char[:] stderr_data;
-    CCProcessStatus status;
-};
-
-// Run command and capture all output (blocking)
-CCProcessOutput !>(CCIoError) cc_process_run(CCArena* arena, char[:] program, char[:]* args);
-
-// Run shell command and capture output
-CCProcessOutput !>(CCIoError) cc_process_run_shell(CCArena* arena, char[:] command);
-```
-
-**Examples:**
-
-```c
-Arena arena = cc_heap_arena(megabytes(1));
-
-// Run and capture output
-CCProcessOutput out = cc_process_run_shell(&arena, "ls -la") !>(e) return cc_err(e);
-printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
-printf("exit: %d\n", out.status.exit_code);
-
-// Spawn with pipes for interactive use
-CCProcessConfig cfg = {
-    .program = "cat",
-    .args = (char*[]){"cat", NULL},
-    .pipe_stdin = true,
-    .pipe_stdout = true
-};
-CCProcess proc = cc_process_spawn(&cfg) !>(e) return cc_err(e);
-
-cc_process_write(&proc, "hello\n") !>(e) return cc_err(e);
-cc_process_close_stdin(&proc);
-
-char[:] output = cc_process_read_all(&proc, &arena) !>(e) return cc_err(e);
-CCProcessStatus status = cc_process_wait(&proc) !>(e) return cc_err(e);
-```
-
-#### 5.7 Environment
-
-```c
-// Get environment variable (empty if not set)
-char[:] cc_env_get(Arena* arena, char[:] name);
-
-// Set/unset environment variable for current process
-bool !>(CCIoError) cc_env_set(char[:] name, char[:] value);
-bool !>(CCIoError) cc_env_unset(char[:] name);
-```
-
----
-
-## Module Structure
-
-```
-<std/prelude.cch>        // Common imports (String, File, Vec, Map, etc.)
-<std/string.cch>         // String builder and char[:] methods
-<std/io.cch>             // File, StdStream
-<std/log.cch>            // Structured logging (LogEvent, log_drop/block/sample)
-<std/fs.cch>             // Path utilities
-<std/dir.cch>            // Directory iteration, glob patterns
-<std/process.cch>        // Process spawning, environment
-<std/vec.cch>            // CCVec::[T] dynamic array with UFCS methods
-<std/map.cch>            // Map<K, V> hash map with UFCS methods
-<std/net.cch>            // TCP/UDP sockets, Listener
-<std/tls.cch>            // TLS client/server (wraps BearSSL/mbedTLS)
-<std/http.cch>           // HTTP client (http_get, http_post, HttpClient)
-<std/dns.cch>            // DNS resolution (dns_lookup)
-<std/server.cch>         // server_loop canonical shell
-<std/error.cch>          // Error enums (IoError, NetError, HttpError, etc.)
-<cc_atomic.cch>          // Portable atomic operations (runtime header, not std/)
-```
-
-**Prelude Safety:** `<std/prelude.cch>` performs no implicit allocation or runtime initialization. It is a pure header include with zero hidden costs.
-
-**Updated Prelude Example:**
-
-```c
-#include <ccc/std/prelude.cch>
-
-@async void main() {
-    Arena arena = arena(megabytes(1));
-    
-    // String builder (UFCS)
-    String greeting = string_new(&arena);
-    greeting.append("Hello").append(" ").append("World");
-    std_out.write(greeting.as_slice());
-    std_out.write("\n");
-    
-    // Work queue (UFCS)
-    CCVec::[Task::[void]] tasks = cc_vec_new::[Task::[void]](&arena);
-    tasks.push(async_work1());
-    tasks.push(async_work2());
-    
-    // State map (UFCS)
-    Map<int, char[:] > state = map_new<int, char[:]>(&arena);
-    state.insert(1, "processing");
-    
-    // Run all tasks
-    CCVecIter::[Task::[void]] it = tasks.iter();
-    Task<void> t;
-    while (it.next(&t)) {
-        @await t;
-    }
-
-    // File I/O (UFCS)
-    File !>(IoError) f = file_open(&arena, "data.txt", "r");
-    if (f.is_ok()) {
-        File file = f.value();
-        char[:] data = file.read_all(&arena) !>(e) return cc_err(e);
-
-        // String processing (UFCS)
-        char[:] trimmed = data.trim();
-        StringSplitIter lines = trimmed.split("\n");
-        char[:] line;
-        while (lines.next(&line)) {
-            std_out.write(line);
-            std_out.write("\n");
-        }
-
-        file.close();
-    }
-}
-```
-
----
-
-## Implementation Notes
-
-### Headers vs. Linkage
-
-**Phase 1 (strings, basic I/O):** Mostly inline/static functions in headers. Minimal linkage.
-
-**Future:** If complex (e.g., async I/O needing thread pool integration), provide optional libstd.a. Users can link or provide custom implementations.
-
-### Arena Checkpoints
-
-An **arena checkpoint** captures the current allocation state of an arena and allows later restoration (to bound memory growth in long-lived tasks).
-
-**Standard library interface:**
-
-```c
-typedef struct ArenaCheckpoint ArenaCheckpoint;
-
-ArenaCheckpoint arena_checkpoint(Arena*);
-void arena_restore(ArenaCheckpoint);
-```
-
-**Semantics:**
-
-- Restoring a checkpoint releases all allocations performed after the checkpoint.
-- Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
-- Arena checkpoints do not alter arena ownership or lifetime rules.
-- Taking a checkpoint starts a fresh arena provenance epoch for subsequent allocations.
-- Restoring a checkpoint restores the checkpoint's provenance epoch so post-checkpoint allocations become stale while prior allocations remain valid.
-
-### Blocking Pool and Saturation Handling
-
-Certain stdlib operations may stall indefinitely: file I/O, sync locks, sleep, DNS, etc. These use a bounded thread pool to avoid blocking the async reactor thread.
-
-**Blocking-class operations:**
-```c
-File.read()
-File.read_all()
-File.read_line()
-File.write()
-File.sync()
-
-Mutex<T>.lock()           // Future: if exposed
-// sockets, DNS, etc. (future)
-```
-
-**Non-blocking operations (run inline in async task, no pool overhead):**
-```c
-char[:].trim()
-char[:].split()
-char[:].parse_i64()
-CCVec::[T].push()
-Map<K,V>.insert()
-// All pure CPU computation
-```
-
-**Pool limits and saturation:**
-
-The blocking pool has:
-- `max_threads`: number of worker threads (default: 2× CPU count)
-- `max_queue`: maximum pending operations (default: 1000)
-
-When `max_queue` is full, blocking operations return `IoError::Busy`. This is observable and lets the application decide whether to backoff, reject, or scale.
-
-**Configuration:**
-```c
-Runtime.set_blocking_pool(
-    .max_threads = 32,
-    .max_queue = 1000
-);
-```
-
-**Handling saturation:**
-```c
-@async void process_with_backoff() {
-    CCFile !>(CCIoError) f = cc_file_open(&arena, path, "r");
-    if (f.is_ok()) {
-        CCFile file = f.value();
-        int retry_count = 0;
-        while (true) {
-            char[:] !>(CCIoError) line_result = file.read_line(&arena);
-            if (cc_is_err(line_result)) {
-                CCIoError err = cc_error(line_result);
-                if (err.kind == CC_IO_BUSY) {
-                    if (retry_count++ > 3) {
-                        return cc_err(IoError::Busy);
-                    }
-                    @await sleep(milliseconds(10 * retry_count));
-                    continue;
-                }
-                // Other error, propagate
-                return cc_err(err);
-            }
-            retry_count = 0;
-
-            char[:] line = cc_value(line_result);
-            if (line.len == 0) break;  // EOF (empty slice)
-            process(line);
-        }
-        file.close();
-    }
-}
-```
-
-**No eviction:** Pending operations are not killed on saturation. Bounded queue + fail-fast is safer than eviction (which risks corrupting `@scoped` resources, transactions, or in-flight cleanup).
-
-### UFCS Lowering Model
-
-The pattern is consistent with the language and with the main specification's type-owned UFCS model:
-
-> **The lowering contract is normative. `s.len()` dispatches from the resolved receiver type and lowers to that type family's stdlib callee contract.**
-
-For each method on a type `T`:
-
-```c
-// Direct library-call / C ABI shape for a pointer-style family
-size_t T_len(T* self);
-
-// UFCS surface form
-size_t T.len();  // lowers through T's UFCS family
-```
-
-This allows both function composition and ergonomic method chaining.
-
-### Generic Container Syntax Lowering
-
-The `CCVec::[T]` and `Map::[K, V]` syntax is **compile-time sugar** that lowers to concrete C family types. Those family names are stable at the C boundary and are part of the interop contract even when the implementation routes the actual storage/manipulation work through shared erased-core helpers:
-
-```c
-// CC source code
-CCVec::[int] v = cc_vec_new::[int](&arena);
-v.push(42);
-v.push(100);
-int* val = v.get(0);
-
-// Lowers to (generated C)
-CCVec_int v = CCVec_int_init(&arena, CC_VEC_INITIAL_CAP);
-CCVec_int_push(&v, 42);
-CCVec_int_push(&v, 100);
-int* val = CCVec_int_get(&v, 0);
-```
-
-**Lowering rules:**
-
-| Surface Syntax | Lowered Form |
-|----------------|--------------|
-| `CCVec::[T]` | `CCVec_mangled` where `mangled` is the canonical type-parameter mangling for `T` |
-| `cc_vec_new::[T](&arena)` | `CCVec_mangled_init(&arena, CC_VEC_INITIAL_CAP)` |
-| `Map<K, V>` | `Map_mangledK_mangledV` |
-| `map_new<K, V>(&arena)` | `Map_mangledK_mangledV_init(&arena)` |
-| `v.method(args)` | `CCVec_mangled_method(&v, args)` for vectors; `Map_mangledK_mangledV_method(&m, args)` for maps |
-
-**Type mangling examples:**
-
-| Type Parameter | Mangled Name |
-|----------------|--------------|
-| `int` | `int` |
-| `char*` | `char_ptr` |
-| `int*` | `int_ptr` |
-| `size_t` | `size_t` |
-| `struct Foo` | `struct_Foo` |
-
-**Container declarations** are automatically emitted based on types used:
-
-```c
-// Automatically generated for CCVec::[int] usage
-CC_VEC_DECL_ARENA(int, CCVec_int)
-
-// Automatically generated for Map<int, char*> usage
-CC_MAP_DECL_ARENA(int, char_ptr, Map_int_char_ptr, cc_map_hash_i32, cc_map_eq_i32)
-```
-
-### Testing
-
-All functions are covered by **Spec Tests**—normative, executable tests in `.cc` format that serve as both spec and validation. Implementations must pass all Spec Tests.
-
-**Example Spec Test:**
-
-```c
-@test "string slice operations" {
-    Arena arena = arena(kilobytes(10));
-    char[:] input = "  hello, world!  ";
-
-    // Test trim
-    char[:] trimmed = input.trim();
-    assert(trimmed.len == 13);  // "hello, world!"
-
-    // Test split
-    StringSplitIter it = trimmed.split(", ");
-    char[:] p1;
-    assert(it.next(&p1));
-    assert(p1.len == 5);        // "hello"
-
-    // Test contains
-    assert(trimmed.contains("world"));
-    assert(!trimmed.contains("xyz"));
-
-    // Test parse
-    i64 !>(I64ParseError) val = "42".parse_i64();
-    assert(val.is_ok() && val.value() == 42);
-}
-
-@test "vec and map methods" {
-    Arena arena = arena(kilobytes(10));
-
-    // CCVec::[T] methods
-    CCVec::[int] v = cc_vec_new::[int](&arena);
-    v.push(10);
-    v.push(20);
-    assert(v.len() == 2);
-    int* val = v.get(0);
-    assert(val && *val == 10);
-
-    // Map<K,V> methods
-    Map<char[:], int> m = map_new<char[:], int>(&arena);
-    m.insert("x", 100);
-    int* result = m.get("x");
-    assert(result && *result == 100);
-}
-```
-
-### Portability
-
-**Windows/Unix Differences:**
-- Path separators: `path_join()` handles abstraction.
-- Line endings: `read_line()` handles both \n and \r\n transparently.
-- I/O errors: Map OS-specific codes to `IoError` enum.
-
----
-
-### 4. Server Shell (`<std/server.cch>`)
-
-The `server_loop` function provides a canonical server shell that handles connection acceptance, worker spawning, deadline enforcement, arena management, TLS wrapping, and keep-alive. It supports unary request/response and long-lived connection patterns (WebSockets, SSE, streaming, keep-alive, raw TCP).
-
-**Core Abstractions:**
-
-```c
-// CCDuplex: unified interface for bidirectional, closeable streams
-// Used by TLS wrappers, WebSocket handlers, HTTP/2, raw protocols, etc.
-struct CCDuplex {
-    @async char[:] !>(CCIoError) read(CCArena* a);        // Read chunk; empty slice = EOF
-    @async void    !>(CCIoError) write(char[:] bytes);    // Write chunk
-    @async void    !>(CCIoError) shutdown(CCShutdownMode mode);  // Half-close: Read, Write, or Both
-    @async void    !>(CCIoError) close();                 // Close (equivalent to shutdown(Both))
-};
-
-enum CCShutdownMode {
-    Read,   // Stop reading; keep write side open (recv FIN, continue sending)
-    Write,  // Stop writing; keep read side open (send FIN, continue receiving)
-    Both,   // Close both sides
-};
-
-**ABI Contract (Normative):**
-
-All interface values (including CCDuplex) lower to a two-pointer layout:
-
-```c
-typedef struct {
-    void* self;                    // Opaque receiver state
-    const CCDuplexVTable* vt;      // Method table
-} CCDuplex;
+typedef struct CCDirIter CCDirIter;
 
 typedef struct {
-    Task_CharSliceIoErr (*read)(void* self, CCArena* a);
-    Task_VoidIoErr      (*write)(void* self, CCSlice bytes);
-    Task_VoidIoErr      (*shutdown)(void* self, CCShutdownMode mode);
-    Task_VoidIoErr      (*close)(void* self);
-} CCDuplexVTable;
+    CCSlice *paths;
+    size_t count;
+    size_t capacity;
+} CCGlobResult;
 ```
 
-**Ownership Rules (Normative):**
-
-- Duplex value is a lightweight handle; it does NOT own the underlying resource
-- `self` pointer lifetime is determined by context:
-  - Raw socket Duplex: `self` points to runtime state (valid while connection open)
-  - TLS-wrapped Duplex: `self` points to TLS session (valid while connection open)
-  - Custom protocol Duplex: `self` may point to user state (valid while handler running)
-- Method calls do NOT capture closures or additional environment beyond vtable + self
-- **Closure responsibility:** For server shell context, see **ServerAction ownership rules** below. After calling `close()` or `shutdown(Both)`, the handler must not call any other methods on the same Duplex
-- Duplex values are not thread-safe; they must not be shared across threads (use `send_take()` requires a `Duplex!SendDuplex` marker type, future phase)
-
-// Request from client
-struct Request {
-    int fd;                      // Socket file descriptor (do not close; server manages)
-    char[:] method;              // HTTP method ("GET", "POST", etc.)
-    char[:] path;                // URL path ("/api/users", etc.)
-    char[:] headers;             // Raw HTTP headers
-    Duplex body;                 // Request body stream (use read() for chunked uploads)
-};
-
-// Response to send back
-struct Response {
-    u16 status;                  // HTTP status (200, 404, 500, etc.)
-    char[:] headers;             // Response headers
-    char[:] body;                // Response body (small/unary fast path; empty = use stream)
-    CCDuplex* stream;            // Streaming response (NULL = unary); use write() + shutdown(Write) to end
-};
-
-// Handler returns either unary response or takes over connection
-enum ServerAction {
-    Reply(Response),                    // Send response; connection lifetime controlled by ServerMode + headers
-    Takeover(ConnHandlerFn),            // Handler takes ownership of connection
-};
-
-**Ownership Rules (Normative):**
-
-- **Reply case:** Server shell retains ownership of the Duplex. After handler returns `Reply(resp)`, server calls `send_response()` and manages further I/O per ServerMode:
-  - Http1_Close: shell calls `conn.shutdown(Both)` or closes
-  - Http1_KeepAlive: shell continues reading requests; loop owns the connection
-  - RawTcp: undefined (should not reach Reply in RawTcp mode)
-  
-- **Takeover case:** Ownership of the Duplex transfers to `takeover_fn` when handler returns `Takeover(fn)`. Server shell does NOT call any methods on the Duplex after transfer. Takeover handler is responsible for:
-  - All I/O (reads, writes, shutdowns)
-  - Closure: must call `conn.close()` or `conn.shutdown(Both)` before returning
-  - After `close()` / `shutdown(Both)`, no further method calls
-  - Returning from takeover_fn signals to server: "connection now closed"
-  
-- **Duplex lifetime:** The Duplex is valid only within the handler (or takeover_fn). After handler returns (Reply or Takeover), it is invalid and must not be used.
-
-- **Connection state:** If handler returns `Reply` in Http1_KeepAlive, the same Duplex is reused for the next request (server ownership). If handler returns `Takeover`, the Duplex is consumed and no further requests are parsed on that connection.
-
-// Takeover handler (runs in a long-lived context)
-typedef @async void !>(CCIoError) (*ConnHandlerFn)(CCDuplex* conn, CCArena* conn_arena);
-
-// Unary request/response handler
-typedef @async ServerAction !>(CCIoError) (*ServerHandlerFn)(Request* req, CCArena* req_arena);
-
-// Server modes (how to treat connections)
-enum ServerMode {
-    Http1_Close,      // One request per connection; close after response
-    Http1_KeepAlive,  // Multiple requests per connection; close on "Connection: close" or timeout
-    RawTcp,           // No HTTP parsing; handler decides protocol
-};
-
-// TLS configuration
-struct TlsConfig {
-    char[:] cert_path;           // Path to certificate file
-    char[:] key_path;            // Path to private key file
-    // Implementation: TLS handshake is performed after accept;
-    // connection becomes a Duplex that reads/writes decrypted bytes.
-    // SNI, cipher, peer cert available via TLS metadata (Phase 2).
-};
-
-// Configuration for server_loop
-struct ServerConfig {
-    u16 port;                              // Listen port
-    size_t max_workers;                    // Number of connection handler tasks
-    size_t max_connections;                // Max concurrent connections
-    Duration request_timeout;              // Per-request deadline (unary handlers only)
-    ServerHandlerFn handler;               // User-provided handler
-    ServerMode mode;                       // Http1_Close, Http1_KeepAlive, or RawTcp
-    TlsConfig* tls;                        // Optional TLS wrapping (NULL = plaintext)
-    
-    // Optional lifecycle callbacks
-    bool (*on_request_start)(Request* req);
-    void (*on_request_end)(Request* req, Response* resp, Duration elapsed);
-};
-```
-
-**Main Entry Point:**
+The API is:
 
 ```c
-// Accept connections, perform TLS handshake if configured, spawn workers, manage lifetimes
-@async void !>(CCIoError) server_loop(ServerConfig cfg);
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena *arena, const char *path);
+CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter *iter, CCArena *arena);
+void cc_dir_close(CCDirIter *iter);
+
+bool cc_path_exists(const char *path);
+bool cc_path_is_dir(const char *path);
+bool cc_path_is_file(const char *path);
+CCResult_bool_CCIoError cc_dir_create(const char *path);
+CCResult_bool_CCIoError cc_dir_create_all(const char *path);
+CCResult_bool_CCIoError cc_dir_remove(const char *path);
+CCResult_bool_CCIoError cc_file_remove(const char *path);
+CCSlice cc_dir_cwd(CCArena *arena);
+CCResult_bool_CCIoError cc_dir_chdir(const char *path);
+
+CCGlobResult cc_glob(CCArena *arena, const char *pattern);
+bool cc_glob_match(const char *pattern, const char *name);
 ```
 
-**Lifetime and Deadline Rules:**
+`cc_dir_next` returns `CC_IO_EOF` after the final entry. Entry names and glob
+paths are allocated in the supplied arena. `cc_dir_create` does not create
+parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and recursive
+`**`; `cc_glob_match` matches a single name with `*` and `?`.
 
-1. **Unary handler (returns `Reply`):**
-   - Server wraps handler call in `with_deadline(request_timeout)`
-   - Handler must return within deadline
-   - Server sends response, resets `req_arena`, continues loop (keep-alive mode) or closes (close mode)
-   - No deadline passed to handler; deadline is server's concern
-
-2. **Takeover handler (returns `Takeover`):**
-   - No deadline applied by server
-   - Handler receives `conn_arena` (separate from req_arena, lives until connection closes)
-   - Handler controls its own deadline semantics (may use `with_deadline()` explicitly, or no deadline)
-   - Handler is responsible for all I/O, shutdown, and closure via Duplex
-   - After handler returns, `conn_arena` is reset; connection closed
-
-3. **Arena reset:**
-   - `req_arena`: Reset after each request (fast; per-request lifetime)
-   - `conn_arena`: Created when connection accepted; reset when connection closes (longer lifetime for stateful protocols)
-
-4. **TLS interaction:**
-   - If `cfg.tls` is present, server performs TLS handshake after accept
-   - Handshake failures return `IoError::...` and connection is closed
-   - Successful handshake wraps the raw fd in a Duplex (decryption/encryption transparent)
-   - Handler receives Duplex (either raw fd or TLS-wrapped); no change to handler code
-
-5. **Keep-alive semantics (Http1_KeepAlive mode):**
-   - After each request-response cycle, server checks for "Connection: close" header in response
-   - If absent, server loops back to read next request (reusing `conn_arena` for connection state)
-   - Timeout or I/O error closes connection
-   - Per-request deadline still applies to unary handlers
-
-**Internal Pattern (Illustrative):**
+The accessor functions are:
 
 ```c
-@async void !>(CCIoError) server_loop(ServerConfig cfg) {
-    int listener = listen(cfg.port) !>(e) return cc_err(e);
-
-    CCNursery* n = cc_nursery_create(NULL)
-        !>(e) { return cc_err(CCIoError::OutOfMemory); }
-        @destroy;
-    {
-        for (size_t i = 0; i < cfg.max_workers; i++) {
-            n->spawn(() => server_worker(&cfg, listener));
-        }
-    }
-}
-
-@async void !>(CCIoError) server_worker(ServerConfig* cfg, int listener) {
-    while (true) {
-        // Accept connection (raw socket)
-        int raw_fd = @await accept(listener) !>(e) return cc_err(e);
-
-        // Perform TLS handshake if configured
-        CCDuplex conn = if (cfg.tls) {
-            tls_handshake(raw_fd, cfg.tls) !>(e) return cc_err(e)
-        } else {
-            CCDuplex.from_fd(raw_fd)
-        };
-
-        // Connection-scoped arena (lives until connection closes)
-        CCArena conn_arena = arena(megabytes(1));
-
-        // Keep-alive loop: one or more requests per connection
-        bool keep_alive = true;
-        while (keep_alive) {
-            // Request-scoped arena (reset per request)
-            CCArena req_arena = arena(megabytes(1));
-
-            // Handle one request (`@match` was removed from the language;
-            // branch on the Result / cancellation with ordinary control flow)
-            ServerAction !>(CCIoError) action_r = @await handle_request(&conn, &req_arena, &conn_arena, cfg);
-            if (cc_is_cancelled() || action_r.is_err()) {
-                keep_alive = false;  // Break on error or cancellation
-            } else {
-                ServerAction action = cc_value(action_r);
-                // Check for keep-alive
-                if (cfg.mode == Http1_KeepAlive && action != Takeover && !has_connection_close_header(action)) {
-                    arena_reset(&req_arena);
-                    continue;  // Loop for next request
-                } else {
-                    keep_alive = false;  // Close connection
-                }
-            }
-        }
-
-        // Close connection (CCDuplex.close or raw_fd)
-        conn.close() !>(e) return cc_err(e);
-        arena_reset(&conn_arena);
-    }
-}
-
-@async ServerAction !>(CCIoError) handle_request(CCDuplex* conn, CCArena* req_arena, CCArena* conn_arena, ServerConfig* cfg) {
-    // Read request
-    Request req = @await read_request_from_duplex(conn, req_arena) !>(e) return cc_err(e);
-
-    if (cfg.on_request_start) cfg.on_request_start(&req);
-
-    // Call handler with deadline (unary only)
-    with_deadline(deadline_after(cfg.request_timeout)) {
-        ServerAction !>(CCIoError) action = cfg.handler(&req, req_arena);
-
-        // Branch on response type (checker-enforced switch over the
-        // variant tag with protected projection; `@match` was removed)
-        switch (action.tag) {
-            case Reply: {
-                Response resp = action.reply;
-                if (cfg.on_request_end) cfg.on_request_end(&req, &resp, deadline_remaining());
-                @await send_response_to_duplex(conn, &resp) !>(e) return cc_err(e);
-                return cc_ok(resp);  // Return response for keep-alive check
-            }
-            case Takeover: {
-                // Handler is taking over the connection
-                ConnHandlerFn takeover_fn = action.takeover;
-                @await takeover_fn(conn, conn_arena) !>(e) return cc_err(e);
-                // Takeover handler called close(); connection finished
-                return cc_err(CCIoError::ConnectionClosed);  // Signal to break keep-alive loop
-            }
-        }
-    }
-}
+const char *cc_dir_entry_name_str(const CCDirEntry *entry);
+bool cc_dir_entry_is_dir(const CCDirEntry *entry);
+bool cc_dir_entry_is_file(const CCDirEntry *entry);
+bool cc_dir_entry_is_symlink(const CCDirEntry *entry);
+size_t cc_glob_result_len(const CCGlobResult *result);
+const char *cc_glob_result_get(const CCGlobResult *result, size_t index);
 ```
 
-**Usage Example: Unary Request/Response (HTTP/1.1 with Keep-Alive)**
+UFCS on `CCDirEntry` and `CCGlobResult` maps these accessors to their
+corresponding C functions.
+
+## Processes and commands
+
+`<ccc/std/process.cch>` defines:
 
 ```c
-#include <ccc/std/prelude.cch>
-#include <ccc/std/server.cch>
-
-@async @latency_sensitive ServerAction !>(CCIoError) api_handler(Request* req, CCArena* req_arena) {
-    if (req.path == "/api/users") {
-        User[] users = @await db_get_users(req_arena) !>(e) return cc_err(e);
-        char[:] json = encode_json(users, req_arena);
-        Response resp = {
-            .status = 200,
-            .headers = "Content-Type: application/json\r\n",
-            .body = json
-        };
-        return ServerAction.Reply(resp);
-    } else {
-        return ServerAction.Reply({
-            .status = 404,
-            .body = "Not Found"
-        });
-    }
-}
-
-@async void main() {
-    ServerConfig cfg = {
-        .port = 8080,
-        .max_workers = 32,
-        .request_timeout = seconds(5),
-        .handler = api_handler,
-        .mode = Http1_KeepAlive,  // Multiple requests per connection
-        // .tls = TlsConfig { .cert_path = "cert.pem", .key_path = "key.pem" }
-    };
-    
-    @await server_loop(cfg);
-}
-```
-
-**Usage Example: WebSocket Upgrade (Takeover)**
-
-```c
-@async ServerAction !>(CCIoError) websocket_handler(Request* req, CCArena* req_arena) {
-    if (req.path == "/ws" && req.headers.contains("Upgrade")) {
-        // Return takeover to handle WebSocket protocol
-        return ServerAction.Takeover(websocket_connection);
-    } else {
-        return ServerAction.Reply({.status = 400, .body = "Not a WebSocket request"});
-    }
-}
-
-@async void !>(CCIoError) websocket_connection(CCDuplex* conn, CCArena* conn_arena) {
-    // Perform WebSocket handshake
-    @await ws_handshake(conn) !>(e) return cc_err(e);
-
-    // Handle messages on connection (lives as long as connection lives)
-    while (true) {
-        char[:] frame = @await ws_read_frame(conn, conn_arena) !>(e) return cc_err(e);
-        if (frame.len == 0) break;  // Connection closed (empty frame = EOF sentinel)
-
-        // Process frame; allocations live in conn_arena
-        @await process_ws_message(conn, frame, conn_arena) !>(e) return cc_err(e);
-    }
-
-    // Close connection
-    @await conn.close() !>(e) return cc_err(e);
-}
-```
-
-**Usage Example: Streaming Response (SSE)**
-
-```c
-@async ServerAction !>(CCIoError) sse_handler(Request* req, CCArena* req_arena) {
-    if (req.path == "/events") {
-        // For SSE, use Takeover to control the connection directly
-        return ServerAction.Takeover(sse_connection);
-    } else {
-        return ServerAction.Reply({.status = 404});
-    }
-}
-
-@async void !>(CCIoError) sse_connection(CCDuplex* conn, CCArena* conn_arena) {
-    // Send SSE headers
-    @await conn.write("HTTP/1.1 200 OK\r\n") !>(e) return cc_err(e);
-    @await conn.write("Content-Type: text/event-stream\r\n") !>(e) return cc_err(e);
-    @await conn.write("Connection: keep-alive\r\n\r\n") !>(e) return cc_err(e);
-    
-    // Stream events
-    for (size_t i = 0; i < 100; i++) {
-        char[:] event = format_event(i, conn_arena);
-        @await conn.write(event) !>(e) return cc_err(e);
-        @await sleep(milliseconds(1000));
-    }
-    
-    // Signal end by closing write side
-    @await conn.shutdown(Write) !>(e) return cc_err(e);
-}
-```
-
-**Usage Example: TLS with HTTP/1.1**
-
-```c
-@async void main() {
-    ServerConfig cfg = {
-        .port = 443,
-        .max_workers = 32,
-        .request_timeout = seconds(5),
-        .handler = api_handler,
-        .mode = Http1_KeepAlive,
-        .tls = &(TlsConfig) {
-            .cert_path = "/etc/certs/server.crt",
-            .key_path = "/etc/certs/server.key"
-        }
-    };
-    
-    @await server_loop(cfg);  // Handlers receive decrypted requests
-}
-```
-
-**Usage Example: Raw TCP Protocol (Takeover Mode)**
-
-```c
-@async ServerAction !>(CCIoError) raw_protocol_handler(Request* req, CCArena* req_arena) {
-    // For raw TCP (not HTTP), handler always returns Takeover
-    // The "Request" struct is just for convenience; raw protocols ignore it
-    return ServerAction.Takeover(raw_protocol_loop);
-}
-
-@async void !>(CCIoError) raw_protocol_loop(CCDuplex* conn, CCArena* conn_arena) {
-    // Speak custom protocol directly via conn.read() / conn.write()
-    while (true) {
-        char[:] msg = @await conn.read(conn_arena) !>(e) return cc_err(e);
-        if (msg.len == 0) break;  // EOF (empty slice)
-
-        char[:] response = process_protocol_message(msg, conn_arena);
-        @await conn.write(response) !>(e) return cc_err(e);
-    }
-
-    @await conn.close() !>(e) return cc_err(e);
-}
-
-@async void main() {
-    ServerConfig cfg = {
-        .port = 9000,
-        .max_workers = 32,
-        .handler = raw_protocol_handler,
-        .mode = RawTcp,  // No HTTP parsing; handler speaks protocol directly
-    };
-    
-    @await server_loop(cfg);
-}
-```
-
-**Design Notes:**
-
-- `server_loop` is just the **shell**: accept, TLS wrap, deadline, arena management, keep-alive loop, unary dispatch, takeover transfer.
-- User writes handlers with full control; handler signature is uniform across all modes.
-- **Duplex abstraction:** Unifies raw socket, TLS-wrapped socket, HTTP/2 streams, WebSocket frames, etc. Handler code doesn't care about the underlying transport.
-- **Unary handlers:** Fast-path for HTTP, gRPC, JSON-RPC. Deadline applied by server. Return `Reply(Response)`.
-- **Takeover handlers:** For long-lived protocols (WebSocket, SSE, raw TCP, HTTP/2 with streams). No deadline. Return `Takeover(fn)` and receive `Duplex*` + `conn_arena`.
-- **Keep-alive semantics:** In `Http1_KeepAlive` mode, server loops and reuses connection until "Connection: close" or error.
-- **TLS:** First-class config; transparent to handlers. Duplex hides whether traffic is raw or TLS-wrapped.
-- **Arena management:**
-  - `req_arena`: Reset per request (fast; allows per-request pooling)
-  - `conn_arena`: Reset per connection (allows connection state, stateful protocols)
-  - For long-lived connections processing many messages, use arena checkpoint pattern to avoid unbounded growth:
-    ```c
-    @async void !>(CCIoError) long_lived_handler(CCDuplex* conn, CCArena* conn_arena) {
-        size_t message_count = 0;
-        CCArenaCheckpoint cp = arena_checkpoint(conn_arena);
-        while (true) {
-            char[:] msg = @await conn.read(conn_arena) !>(e) return cc_err(e);
-            if (msg.len == 0) break;  // EOF
-            process(msg);
-            message_count++;
-            // Restore arena every N messages to prevent unlimited growth
-            if (message_count % 100 == 0) {
-                arena_restore(cp);
-                cp = arena_checkpoint(conn_arena);
-                message_count = 0;
-            }
-        }
-        @await conn.close() !>(e) return cc_err(e);
-    }
-    ```
-- **Deadline and Cancellation:** For deadline semantics and how cancellation is checked at suspension points, see language spec **§ 7.5 (Cancellation & Deadline)** and **§ 3.2 (Suspension Points)**. This server shell applies `request_timeout` deadline to unary handlers; takeover handlers control their own deadline semantics (or use no deadline for long-lived connections like WebSocket).
-- **Deadline narrative:** Unary handlers inherit deadline from `request_timeout`. Takeover handlers control their own deadline (or none). This makes streaming safe-by-default (server times out slow clients) while allowing long-lived connections (takeover handler explicitly manages timeouts).
-- **Half-close:** Use `CCDuplex.shutdown(Read)` or `CCDuplex.shutdown(Write)` for proxies and protocols needing unidirectional closure. Standard sentinel `CCIoError::ConnectionClosed` indicates normal remote closure (not an error).
-- **Multiplexed connections (Phase 2):** For HTTP/2 and gRPC, a future `MuxConn` abstraction will manage multiple independent streams over a single TCP/TLS connection, with each stream receiving its own `Duplex` and `stream_arena`. For now, Duplex assumes 1:1 connection-to-stream.
-- Workers are spawned in a nursery; graceful shutdown on scope exit.
-- **Shutdown (Phase 2):** Graceful shutdown via cancellation signal coming in Phase 2. Currently, `server_loop` runs until error or process exit.
-
-**Extensibility:**
-
-Users can:
-- Return `Reply` for unary request/response patterns (HTTP, gRPC, JSON-RPC)
-- Return `Takeover` for long-lived protocols (WebSocket, SSE, raw TCP, HTTP/2, custom protocols)
-- Use `Duplex` for streaming request/response bodies (read for uploads, write for SSE/streaming)
-- Implement custom protocol parsing in handlers
-- Use `Duplex` interface for any bidirectional, closeable stream
-- Configure TLS at the server level (decryption transparent to handlers)
-- Choose keep-alive mode (Http1_Close for simplicity, Http1_KeepAlive for efficiency)
-- Use `conn_arena` for connection state that must live beyond one request
-
----
-
-## Rationale and Examples
-
-### Before (Without Stdlib)
-
-```c
-#include <stdio.h>
-#include <string.h>
-#include <ctype.h>
-
-void process_csv(char* filename) {
-    FILE* f = fopen(filename, "r");
-    if (!f) { perror("fopen"); return; }
-    
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        // Remove newline
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
-        
-        // Split by comma (no safe way, use strtok)
-        char* token = strtok(line, ",");
-        while (token) {
-            // Trim whitespace manually
-            char* start = token;
-            while (isspace(*start)) start++;
-            char* end = start + strlen(start) - 1;
-            while (end > start && isspace(*end)) *end-- = '\0';
-            
-            printf("Field: %s\n", start);
-            token = strtok(NULL, ",");
-        }
-    }
-    fclose(f);
-}
-```
-
-**Issues:** strtok modifies input, manual trimming, no error handling, imperative loops.
-
-### After (With UFCS Stdlib)
-
-```c
-#include <ccc/std/prelude.cch>
-
-@async void process_csv(char[:] filename) {
-    Arena arena = arena(megabytes(1));
-    
-    CCFile !>(CCIoError) f = cc_file_open(&arena, filename, "r");
-    if (f.is_ok()) {
-        CCFile file = f.value();
-        while (true) {
-            char[:] !>(CCIoError) line_result = file.read_line(&arena);
-            if (cc_is_err(line_result)) break;  // Error
-            char[:] line = cc_value(line_result);
-            if (line.len == 0) break;  // EOF (empty slice)
-
-            // UFCS: trim and split naturally
-            CCStringSplitIter it = line.trim().split(",");
-            char[:] field;
-            while (it.next(&field)) {
-                cc_std_out.write("Field: ");
-                cc_std_out.write(field.trim());
-                cc_std_out.write("\n");
-            }
-        }
-        file.close();
-    }
-}
-```
-
-**Benefits:** Safe slices, no strtok, declarative loops, built-in error handling, method chaining, ~40% less code, more readable.
-
-### Advanced Example: Data Processing Pipeline
-
-```c
-#include <ccc/std/prelude.cch>
-
-@async void process_logs() {
-    Arena arena = arena(megabytes(10));
-    
-    // Read file
-    CCFile !>(CCIoError) f = cc_file_open(&arena, "logs.txt", "r");
-    if (f.is_err()) return;
-
-    CCFile file = f.value();
-    CCMap::[int, int] status_counts = cc_map_new::[int, int](&arena);
-
-    // Process line by line (UFCS throughout)
-    while (true) {
-        char[:] !>(CCIoError) line_result = file.read_line(&arena);
-        if (cc_is_err(line_result)) break;  // Error
-        char[:] line = cc_value(line_result);
-        if (line.len == 0) break;  // EOF (empty slice)
-
-        // Skip comments
-        if (line.starts_with("#")) continue;
-
-        // Parse fields
-        CCStringSplitIter fields = line.split(" ");
-        char[:] status_str;
-        if (fields.next(&status_str)) {
-            i64 !>(CCI64ParseError) status = status_str.parse_i64();
-            if (status.is_ok()) {
-                i64 code = status.value();
-                // Update count (nullable pointer lookup; 0 if absent)
-                int* count = status_counts.get((int)code);
-                int new_count = (count ? *count : 0) + 1;
-                status_counts.insert((int)code, new_count);
-            }
-        }
-    }
-
-    file.close();
-
-    // Report results
-    CCString report = cc_string_new(&arena);
-    report.append("Status Code Summary:\n");
-    // (iteration over map in Phase 2)
-
-    cc_std_out.write(report.as_slice());
-}
-```
-
----
-
-### 5. Networking (`<std/net.cch>`)
-
-Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, HTTP clients, and DNS. All operations integrate with the arena model and return `T!>(E)` results.
-
-#### 5.1 Design Principles
-
-1. **Arena-first buffers:** All read operations allocate into caller-provided arenas. No hidden mallocs.
-2. **Duplex unification:** TCP sockets and TLS connections expose the same `Duplex` interface as server connections.
-3. **Explicit lifetimes:** Socket handles are resources that must be closed. Use `@defer` (or `@closing(...)` for channel producer scopes).
-4. **Async by default:** All I/O is async. Sync wrappers exist but prefer async in concurrent code.
-
-#### 5.2 TCP Sockets
-
-```c
-// TCP client connection
-@async CCSocket !>(CCNetError) cc_tcp_connect(char[:] addr);   // "host:port" or "ip:port"
-
-// TCP server listener
-CCListener !>(CCNetError) cc_tcp_listen(char[:] addr);         // "0.0.0.0:8080", "[::]:8080"
-
-// Accept connection (async)
-@async CCSocket !>(CCNetError) CCListener.accept();
-
-// Listener lifecycle
-void CCListener.close();
-
-// CCSocket is a CCDuplex — unified read/write interface
-// CCSocket implements CCDuplex, so all CCDuplex methods work:
-@async char[:] !>(CCIoError) CCSocket.read(CCArena* a, size_t max_bytes);  // empty slice = EOF
-@async size_t  !>(CCIoError) CCSocket.write(char[:] data);
-@async void    !>(CCIoError) CCSocket.shutdown(CCShutdownMode mode);
-void                         CCSocket.close();
-
-// Socket-specific methods
-char[:] !>(CCNetError) CCSocket.peer_addr();   // Remote address as string
-char[:] !>(CCNetError) CCSocket.local_addr();  // Local address as string
-```
-
-**Memory Provenance:**
-- `read()` allocates the returned slice in the provided arena
-- The slice is valid until the arena is reset/freed
-- `write()` does NOT take ownership; data is copied to kernel buffers
-- Socket handles contain no arena references; they're just fd wrappers
-
-**Error Type:**
-```c
-enum CCNetError {
-    ConnectionRefused,
-    ConnectionReset,
-    ConnectionClosed,    // Normal remote close (not an error condition)
-    TimedOut,
-    HostUnreachable,
-    NetworkUnreachable,
-    AddressInUse,
-    AddressNotAvailable,
-    InvalidAddress,      // Parse failure for "host:port"
-    DnsFailure,
-    TlsHandshakeFailed,
-    TlsCertificateError,
-    Other(i32 os_code),
-};
-```
-
-**Examples:**
-
-```c
-// TCP client
-@async void !>(CCNetError) fetch_data() {
-    CCArena arena = arena(megabytes(1));
-
-    CCSocket conn = @await cc_tcp_connect("example.com:80") !>(e) return cc_err(e);
-    @defer conn.close();
-
-    @await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n") !>(e) return cc_err(e);
-
-    // Read response into arena (empty slice = EOF)
-    while (true) {
-        char[:] chunk = @await conn.read(&arena, 4096) !>(e) return cc_err(e);
-        if (chunk.len == 0) break;  // EOF
-        process(chunk);
-    }
-}
-
-// TCP server (low-level; prefer server_loop for HTTP)
-@async void !>(CCNetError) echo_server() {
-    CCListener ln = cc_tcp_listen("0.0.0.0:9000") !>(e) return cc_err(e);
-    @defer ln.close();
-
-    CCNursery* n = cc_nursery_create(NULL)
-        !>(e) { return cc_err(CCNetError::Other(0)); }
-        @destroy;
-    {
-        while (true) {
-            CCSocket conn = @await ln.accept() !>(e) return cc_err(e);
-            n->spawn(() => handle_echo(conn));
-        }
-    }
-}
-
-@async void handle_echo(CCSocket conn) {
-    CCArena arena = arena(kilobytes(64));
-    @defer conn.close();
-
-    while (true) {
-        char[:] data = @await conn.read(&arena, 1024) !>(e) return;
-        if (data.len == 0) break;  // EOF
-        @await conn.write(data) !>(e) return;
-        arena_reset(&arena);  // Reuse buffer space
-    }
-}
-```
-
-#### 5.3 UDP Sockets
-
-```c
-// UDP socket (connectionless)
-CCUdpSocket !>(CCNetError) cc_udp_bind(char[:] addr);  // Bind to local address
-
-// Send to specific address
-@async size_t !>(CCNetError) CCUdpSocket.send_to(char[:] data, char[:] addr);
-
-// Receive with sender address
-struct CCUdpPacket {
-    char[:] data;       // Packet data (allocated in arena); empty = no datagram available (non-blocking)
-    char[:] from_addr;  // Sender address (allocated in arena)
-};
-// Blocking recv; returns the next datagram. On error returns CCNetError.
-@async CCUdpPacket !>(CCNetError) CCUdpSocket.recv_from(CCArena* a, size_t max_bytes);
-
-void CCUdpSocket.close();
-```
-
-**Memory Provenance:**
-- `recv_from()` allocates both `data` and `from_addr` in the provided arena
-- Both slices share arena lifetime
-- `send_to()` copies data to kernel; no ownership transfer
-
-#### 5.4 TLS (`<std/tls.cch>`)
-
-TLS wraps a Socket or Duplex to provide encrypted communication. The wrapped connection exposes the same Duplex interface — handlers don't need to know if they're speaking TLS.
-
-```c
-// TLS client configuration
-// Optional fields use empty slices to mean "not set" (use system/default):
-//   - ca_cert.len == 0       -> use system root CAs
-//   - sni_hostname.len == 0  -> derive SNI from connect addr
-struct CCTlsClientConfig {
-    char[:] ca_cert;            // Optional: custom CA cert path (empty = system roots)
-    bool    verify_hostname;    // Default: true
-    char[:] sni_hostname;       // Optional: override SNI (empty = use connect addr)
-};
-
-// TLS server configuration (same as ServerConfig.tls)
-// client_ca.len == 0  -> do not require client certs.
-struct CCTlsServerConfig {
-    char[:] cert_path;          // Server certificate
-    char[:] key_path;           // Private key
-    char[:] client_ca;          // Optional: require client certs (empty = disabled)
-};
-
-// Wrap existing socket in TLS (client)
-@async CCDuplex !>(CCNetError) cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg);
-
-// Convenience: TCP + TLS in one call
-@async CCDuplex !>(CCNetError) cc_tls_connect_addr(char[:] addr, CCTlsClientConfig cfg);
-
-// Wrap existing socket in TLS (server-side handshake)
-@async CCDuplex !>(CCNetError) cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg);
-
-// TLS connection info (available after handshake)
-// Optional string fields use empty slices to mean "not present":
-//   - peer_cert_subject.len == 0 -> no client cert presented
-//   - sni_hostname.len == 0      -> no SNI extension
-struct CCTlsInfo {
-    char[:] protocol_version;   // "TLSv1.3", "TLSv1.2"
-    char[:] cipher_suite;       // "TLS_AES_256_GCM_SHA384"
-    char[:] peer_cert_subject;  // Client cert subject (empty if no client auth)
-    char[:] sni_hostname;       // SNI from client hello (empty if none)
-};
-// Returns NULL if the Duplex is not TLS-wrapped.
-CCTlsInfo* CCDuplex.tls_info();
-```
-
-**Memory Provenance:**
-- `TlsInfo` strings are allocated in an internal arena owned by the TLS session
-- They remain valid for the lifetime of the Duplex
-- When Duplex is closed, TlsInfo strings become invalid
-- For long-term storage, copy with `.clone(your_arena)`
-
-**Implementation Backend:**
-
-CC's TLS implementation wraps **BearSSL** (primary) or **mbedTLS** (fallback):
-
-| Library | License | Allocation Model | Notes |
-|---------|---------|------------------|-------|
-| **BearSSL** | MIT | Caller-provided buffers | Ideal for arena model; no malloc |
-| **mbedTLS** | Apache 2.0 | Custom allocator hook | More features; hook to arena |
-
-**Interop: BearSSL Buffer Model**
-
-BearSSL requires caller-provided I/O buffers. This maps directly to CC arenas:
-
-```c
-// Internal: how CC wraps BearSSL (illustrative)
-struct TlsSession {
-    br_ssl_client_context cc;
-    br_x509_minimal_context xc;
-    unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];  // ~33KB, stack or arena
-    Socket underlying;
-    Arena* info_arena;  // For TlsInfo strings
-};
-
-// BearSSL's read callback — we implement to read from Socket
-static int tls_sock_read(void* ctx, unsigned char* buf, size_t len) {
-    TlsSession* s = ctx;
-    // Blocking read into BearSSL's buffer (not user arena)
-    return cc_blocking_recv(s->underlying.fd, buf, len);
-}
-```
-
-**Key insight:** BearSSL's zero-allocation design means:
-- No hidden mallocs during handshake or I/O
-- I/O buffers can be stack-allocated or arena-backed
-- Perfect fit for CC's "allocations are explicit" philosophy
-
-**Example:**
-
-```c
-@async void !>(CCNetError) secure_fetch() {
-    CCArena arena = arena(megabytes(1));
-
-    // Connect with TLS (uses system CA roots by default)
-    CCDuplex conn = @await cc_tls_connect_addr("api.example.com:443", {
-        .verify_hostname = true,
-    }) !>(e) return cc_err(e);
-    @defer conn.close();
-
-    // CCDuplex interface is identical to plain CCSocket
-    @await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n") !>(e) return cc_err(e);
-
-    while (true) {
-        char[:] chunk = @await conn.read(&arena, 4096) !>(e) return cc_err(e);
-        if (chunk.len == 0) break;  // EOF
-        process(chunk);
-    }
-
-    // Optional: inspect TLS session (NULL if not TLS)
-    CCTlsInfo* info = conn.tls_info();
-    if (info) {
-        printf("Protocol: %.*s\n", (int)info->protocol_version.len, info->protocol_version.ptr);
-    }
-}
-```
-
-#### 5.5 HTTP Client (`<std/http.cch>`)
-
-Convenience layer over TCP+TLS for common HTTP operations.
-
-```c
-// Simple GET/POST (one-shot, blocks until complete)
-@async CCHttpResponse !>(CCHttpError) cc_http_get(CCArena* a, char[:] url);
-@async CCHttpResponse !>(CCHttpError) cc_http_post(CCArena* a, char[:] url, char[:] body);
-
-// Response structure
-struct CCHttpResponse {
-    u16     status;         // 200, 404, etc.
-    char[:] status_text;    // "OK", "Not Found"
-    char[:] headers;        // Raw headers
-    char[:] body;           // Response body
-};
-
-// Configurable client. Optional fields use nullable pointer / empty slice:
-//   - tls == NULL          -> use default TLS client config
-//   - user_agent.len == 0  -> omit User-Agent header
-struct CCHttpClient {
-    CCDuration        timeout;          // Request timeout (default: 30s)
-    CCTlsClientConfig* tls;             // TLS config (NULL = use defaults)
-    char[:]           user_agent;       // User-Agent header (empty = omit)
-    bool              follow_redirects; // Follow 3xx (default: true, max 10)
-};
-
-CCHttpClient cc_http_client_new();
-
-// Builder methods
-CCHttpClient* CCHttpClient.timeout(CCDuration d);
-CCHttpClient* CCHttpClient.user_agent(char[:] ua);
-CCHttpClient* CCHttpClient.no_redirects();
-
-// Requests
-@async CCHttpResponse !>(CCHttpError) CCHttpClient.get(CCArena* a, char[:] url);
-@async CCHttpResponse !>(CCHttpError) CCHttpClient.post(CCArena* a, char[:] url, char[:] body);
-@async CCHttpResponse !>(CCHttpError) CCHttpClient.request(CCArena* a, CCHttpRequest req);
-
-// Full request control
-struct CCHttpRequest {
-    char[:] method;         // "GET", "POST", "PUT", etc.
-    char[:] url;
-    char[:] headers;        // Additional headers
-    char[:] body;
-};
-```
-
-**Memory Provenance:**
-- All response data (status_text, headers, body) allocated in provided arena
-- Response is valid until arena is reset/freed
-- Request data (url, headers, body) is read but not owned — caller maintains lifetime
-
-**Error Type:**
-```c
-enum CCHttpError {
-    Net(CCNetError),        // Connection errors
-    InvalidUrl,             // URL parse failure
-    TooManyRedirects,
-    InvalidResponse,        // Malformed HTTP response
-    Timeout,
-};
-```
-
-**Examples:**
-
-```c
-// Simple GET
-@async void !>(CCHttpError) fetch_json() {
-    CCArena arena = arena(megabytes(1));
-
-    CCHttpResponse resp = @await cc_http_get(&arena, "https://api.example.com/users") !>(e) return cc_err(e);
-    if (resp.status == 200) {
-        // resp.body is valid until arena reset
-        User[] users = parse_json_users(resp.body, &arena);
-        process_users(users);
-    }
-}
-
-// Configured client
-@async void !>(CCHttpError) fetch_with_config() {
-    CCArena arena = arena(megabytes(1));
-
-    CCHttpClient client = cc_http_client_new()
-        .timeout(seconds(10))
-        .user_agent("MyApp/1.0")
-        .no_redirects();
-
-    CCHttpResponse resp = @await client.get(&arena, "https://api.example.com/data") !>(e) return cc_err(e);
-    process(resp);
-}
-
-// Custom request
-@async void !>(CCHttpError) post_data() {
-    CCArena arena = arena(megabytes(1));
-
-    CCHttpRequest req = {
-        .method = "POST",
-        .url = "https://api.example.com/submit",
-        .headers = "Content-Type: application/json\r\nAuthorization: Bearer token\r\n",
-        .body = "{\"name\": \"test\"}",
-    };
-
-    CCHttpClient client = cc_http_client_new();
-    CCHttpResponse resp = @await client.request(&arena, req) !>(e) return cc_err(e);
-}
-```
-
-#### 5.6 DNS (`<std/dns.cch>`)
-
-Async DNS resolution. Integrates with system resolver by default.
-
-```c
-// Resolve hostname to addresses
-@async CCIpAddr[] !>(CCNetError) cc_dns_lookup(CCArena* a, char[:] hostname);
-
-// IP address (v4 or v6)
-struct CCIpAddr {
-    enum { V4, V6 } family;
-    union {
-        u8 v4[4];
-        u8 v6[16];
-    };
-};
-
-// Format IP as string
-char[:] CCIpAddr.to_string(CCArena* a);
-
-// Parse string to IP (no DNS, just parsing)
-CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
-```
-
-**Memory Provenance:**
-- `dns_lookup()` returns slice of IpAddr allocated in arena
-- `to_string()` allocates the formatted string in arena
-- Both valid until arena reset
-
-**Example:**
-
-```c
-@async void !>(CCNetError) connect_by_name() {
-    CCArena arena = arena(kilobytes(4));
-
-    CCIpAddr[] addrs = @await cc_dns_lookup(&arena, "example.com") !>(e) return cc_err(e);
-    if (addrs.len == 0) {
-        return cc_err(CCNetError::DnsFailure);
-    }
-
-    // Try each address until one works
-    for (size_t i = 0; i < addrs.len; i++) {
-        char[:] addr_str = addrs[i].to_string(&arena);
-        char[:] full_addr = cc_string_new(&arena)
-            .append(addr_str)
-            .append(":443")
-            .as_slice();
-
-        CCSocket !>(CCNetError) sock_r = @await cc_tcp_connect(full_addr);
-        if (sock_r.is_ok()) {
-            return handle_connection(sock_r.value());
-        }
-    }
-
-    return cc_err(CCNetError::HostUnreachable);
-}
-```
-
-#### 5.7 Interop Lessons
-
-Wrapping C networking libraries teaches key interop patterns:
-
-**Pattern 1: Buffer Ownership**
-
-```c
-// BAD: C library allocates, CC must free
-char* result = some_c_lib_alloc();  // Who frees this?
-// ...
-free(result);  // Easy to forget
-
-// GOOD: CC provides buffer, C library fills it
-char buffer[1024];
-int len = some_c_lib_read(buffer, sizeof(buffer));
-// No ownership question — buffer is stack/arena
-
-// GOOD: Hook allocator to arena
-void* my_alloc(size_t n) { return arena_alloc(&my_arena, n); }
-some_c_lib_set_allocator(my_alloc, NULL);
-```
-
-**Pattern 2: Callback Lifetimes**
-
-```c
-// C callback signature
-typedef int (*read_fn)(void* ctx, unsigned char* buf, size_t len);
-
-// CC closure can't be passed directly (different ABI)
-// Solution: pass function pointer + void* context
-
-struct CallbackContext {
-    Socket* sock;
-    CCDeadline* deadline;  // For cancellation checks
-};
-
-static int socket_read_callback(void* ctx, unsigned char* buf, size_t len) {
-    CallbackContext* c = ctx;
-    // Check cancellation
-    if (cc_is_cancelled(c->deadline)) return -1;
-    return cc_blocking_recv(c->sock->fd, buf, len);
-}
-```
-
-**Pattern 3: Arena Checkpoint for Streaming**
-
-```c
-// Long-lived connection processing many messages
-@async void !>(CCIoError) process_stream(CCDuplex* conn, CCArena* arena) {
-    CCArenaCheckpoint cp = arena_checkpoint(arena);
-    size_t count = 0;
-
-    while (true) {
-        char[:] msg = @await conn.read(arena, 4096) !>(e) return cc_err(e);
-        if (msg.len == 0) break;  // EOF
-        process(msg);
-        count++;
-        
-        // Restore arena periodically to prevent unbounded growth
-        if (count % 100 == 0) {
-            arena_restore(cp);
-            cp = arena_checkpoint(arena);
-        }
-    }
-}
-```
-
-**Pattern 4: Foreign Struct Wrapping**
-
-```c
-// C library struct with internal pointers
-typedef struct {
-    void* internal;
-    // ...
-} SomeLibHandle;
-
-// CC wrapper adds provenance tracking
-struct Socket {
-    int fd;
-    // No arena pointer — Socket doesn't own buffers
-    // Buffers are provided per-operation
-};
-
-struct TlsSession {
-    br_ssl_client_context ctx;   // BearSSL context (value, not pointer)
-    Socket underlying;           // Owned socket
-    Arena* info_arena;           // Owns TlsInfo strings
-    // iobuf is stack-allocated in async frame or part of struct
-};
-```
-
----
-
-### 6. Portable Atomics (`<cc_atomic.cch>`)
-
-#### 6.1 Overview
-
-`cc_atomic.cch` provides portable atomic operations across different compilers. This is a **runtime header** (not under `std/`) for users building concurrent data structures or needing explicit atomic memory operations.
-
-**Portability Matrix:**
-
-| Compiler | Backend | Thread-Safety |
-|----------|---------|---------------|
-| GCC/Clang (C11) | `<stdatomic.h>` | ✅ Full |
-| Older GCC/Clang | `__sync_*` builtins | ✅ Full |
-| TCC | Non-atomic fallback | ⚠️ Best-effort only |
-| Other | Non-atomic fallback | ⚠️ Best-effort only |
-
-**Design Note:** TCC does not support real atomics. When compiled with TCC as the final compiler, atomic operations fall back to non-atomic (volatile) operations. This is safe for single-threaded code but **not thread-safe** for concurrent access. For production concurrent code, use GCC or Clang.
-
-#### 6.2 Types
-
-```c
-#include <ccc/cc_atomic.cch>
-
-// Atomic integer types
-cc_atomic_int       // atomic int
-cc_atomic_uint      // atomic unsigned int
-cc_atomic_size      // atomic size_t
-cc_atomic_i64       // atomic int64_t
-cc_atomic_u64       // atomic uint64_t
-cc_atomic_intptr    // atomic intptr_t
-```
-
-All types are guaranteed to be at least as aligned as their non-atomic counterparts.
-
-#### 6.3 Operations
-
-```c
-// Atomic fetch-and-add: returns previous value, adds val
-T cc_atomic_fetch_add(T* ptr, T val);
-
-// Atomic fetch-and-subtract: returns previous value, subtracts val
-T cc_atomic_fetch_sub(T* ptr, T val);
-
-// Atomic load: returns current value
-T cc_atomic_load(T* ptr);
-
-// Atomic store: sets value
-void cc_atomic_store(T* ptr, T val);
-
-// Atomic compare-and-swap: if *ptr == *expected, set *ptr = desired, return true
-//                          else set *expected = *ptr, return false
-bool cc_atomic_cas(T* ptr, T* expected, T desired);
-```
-
-All operations use **sequential consistency** (`memory_order_seq_cst`) for simplicity and safety. Relaxed orderings are not exposed; if you need them, use the underlying compiler intrinsics directly.
-
-#### 6.4 Detection Macro
-
-```c
-// Defined to 1 if real atomics are available, 0 if using fallback
-#if CC_ATOMIC_HAVE_REAL_ATOMICS
-    // Using C11 atomics or __sync builtins — thread-safe
+typedef struct CCProcess {
+#ifdef _WIN32
+    void *handle;
+    uint32_t pid;
 #else
-    // Using non-atomic fallback — NOT thread-safe
-    #warning "Atomics unavailable; concurrent code may have data races"
+    int pid;
 #endif
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+} CCProcess;
+
+typedef struct CCProcessStatus {
+    bool exited;
+    bool signaled;
+    int exit_code;
+} CCProcessStatus;
+
+typedef struct CCProcessConfig {
+    const char *program;
+    const char **args;
+    const char **env;
+    const char *cwd;
+    bool pipe_stdin;
+    bool pipe_stdout;
+    bool pipe_stderr;
+    bool merge_stderr;
+} CCProcessConfig;
+
+typedef struct CCProcessOutput {
+    CCSlice stdout_data;
+    CCSlice stderr_data;
+    CCProcessStatus status;
+} CCProcessOutput;
 ```
 
-#### 6.5 Examples
+`args` and `env` are null-terminated arrays. A null `env` inherits the current
+environment, and a null `cwd` inherits the current working directory.
 
-**Counter:**
+Process creation and management functions are:
 
 ```c
-#include <ccc/cc_atomic.cch>
-#include <stdio.h>
-
-cc_atomic_int g_counter = 0;
-
-void increment(void) {
-    cc_atomic_fetch_add(&g_counter, 1);
-}
-
-int get_count(void) {
-    return cc_atomic_load(&g_counter);
-}
-
-void reset_count(void) {
-    cc_atomic_store(&g_counter, 0);
-}
+CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig *config);
+CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char *program, const char **args);
+CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char *command);
+CCResult_CCProcessStatus_CCIoError cc_process_wait(CCProcess *process);
+CCResult_CCProcessStatus_CCIoError cc_process_try_wait(CCProcess *process);
+CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout_ms(CCProcess *process, int64_t timeout_ms);
+CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout(CCProcess *process, int timeout_sec);
+CCResult_bool_CCIoError cc_process_kill(CCProcess *process, int signal);
+int cc_process_id(const CCProcess *process);
 ```
 
-**Lock-free stack (simple example):**
+`try_wait` returns `CC_IO_BUSY` while the process runs. Timed waits report an
+`ETIMEDOUT` OS code when their timeout expires.
+
+Piped I/O and capture functions are:
 
 ```c
-#include <ccc/cc_atomic.cch>
-
-struct Node {
-    int value;
-    struct Node* next;
-};
-
-cc_atomic_intptr g_stack_head = 0;  // NULL
-
-void push(struct Node* node) {
-    intptr_t old_head;
-    do {
-        old_head = cc_atomic_load(&g_stack_head);
-        node->next = (struct Node*)old_head;
-    } while (!cc_atomic_cas(&g_stack_head, &old_head, (intptr_t)node));
-}
-
-struct Node* pop(void) {
-    intptr_t old_head;
-    struct Node* node;
-    do {
-        old_head = cc_atomic_load(&g_stack_head);
-        node = (struct Node*)old_head;
-        if (!node) return NULL;
-    } while (!cc_atomic_cas(&g_stack_head, &old_head, (intptr_t)node->next));
-    return node;
-}
+CCResult_size_t_CCIoError cc_process_write(CCProcess *process, CCSlice data);
+CCResult_CCSlice_CCIoError cc_process_read(CCProcess *process, CCArena *arena, size_t max_bytes);
+CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess *process, CCArena *arena, size_t max_bytes);
+void cc_process_close_stdin(CCProcess *process);
+CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess *process, CCArena *arena);
+CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess *process, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena *arena, const CCProcessConfig *config);
+CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena *arena, const CCProcessConfig *config, CCSlice input);
+CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena *arena, const char *program, const char **args);
+CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena *arena, const char *command);
 ```
 
-**Concurrent accumulator in spawned tasks:**
+The process-output accessors are:
 
 ```c
-#include <ccc/cc_runtime.cch>
-#include <ccc/cc_atomic.cch>
-
-cc_atomic_int g_sum = 0;
-
-int main(void) {
-    CCNursery* n = cc_nursery_create(NULL) !>(e) { return 1; } @destroy;
-    {
-        for (int i = 0; i < 100; i++) {
-            int val = i;
-            n->spawn(() => {
-                cc_atomic_fetch_add(&g_sum, val);
-            });
-        }
-    }
-    
-    // Sum of 0..99 = 4950
-    printf("sum = %d (expected 4950)\n", cc_atomic_load(&g_sum));
-    return 0;
-}
+const char *cc_process_output_stdout_str(const CCProcessOutput *output);
+size_t cc_process_output_stdout_len(const CCProcessOutput *output);
+const char *cc_process_output_stderr_str(const CCProcessOutput *output);
+size_t cc_process_output_stderr_len(const CCProcessOutput *output);
+int cc_process_output_exit_code(const CCProcessOutput *output);
+bool cc_process_output_success(const CCProcessOutput *output);
 ```
 
-#### 6.6 When to Use
+Environment functions are:
 
-**Use `cc_atomic.cch` when:**
-- Building custom concurrent data structures (queues, stacks, counters)
-- Implementing lock-free algorithms
-- Coordinating between spawned tasks without channels
-- Porting existing C code that uses atomics
+```c
+CCSlice cc_env_get(CCArena *arena, const char *name);
+CCResult_bool_CCIoError cc_env_set(const char *name, const char *value);
+CCResult_bool_CCIoError cc_env_unset(const char *name);
+```
 
-**Prefer channels and nurseries when:**
-- Coordinating producer/consumer patterns → use channel `send`/`recv` UFCS
-- Aggregating results from tasks → use channels or return values
-- Synchronizing task completion → use `CCNursery* n = ... !> @destroy`
+`cc_env_get` returns an empty slice when the variable is absent.
 
-**Avoid atomics when:**
-- A simple mutex would be clearer (atomics are hard to get right)
-- Channel-based coordination is sufficient
-- Compiling with TCC as final compiler (atomics degrade to non-atomic)
+### Command builder
 
-#### 6.7 Relationship to Runtime
+`<ccc/std/exec.cch>` defines the arena-backed `CCCommand` builder:
 
-The `cc_atomic.cch` header is used internally by:
-- `cc_arena.cch` — for thread-safe bump allocation
-- Channel implementation — for lock-free queue operations
-- Nursery implementation — for task counting
+```c
+CCCommand cc_command_new(CCArena *arena, const char *program);
+CCCommand cc_command(CCArena *arena, const char *program);
+size_t cc_command_argc(const CCCommand *command);
+const char *cc_command_get(const CCCommand *command, size_t index);
+const char *cc_command_program(const CCCommand *command);
 
-Users can include it directly for their own needs. It has no dependencies beyond `<stdint.h>` and `<stddef.h>`.
+CCCommand *cc_command_arg(CCCommand *command, const char *arg);
+CCCommand *cc_command_arg_slice(CCCommand *command, CCSlice arg);
+CCCommand *cc_command_arg_i64(CCCommand *command, int64_t value);
+CCCommand *cc_command_arg_i32(CCCommand *command, int value);
+CCCommand *cc_command_arg_if(CCCommand *command, bool condition, const char *arg);
+CCCommand *cc_command_arg_i64_if(CCCommand *command, bool condition, int64_t value);
+CCCommand *cc_command_arg_i32_if(CCCommand *command, bool condition, int value);
+CCCommand *cc_command_stdin_pipe(CCCommand *command);
+CCCommand *cc_command_stdin_slice(CCCommand *command, CCSlice input);
+CCCommand *cc_command_stdin(CCCommand *command, const char *input);
+CCCommand *cc_command_stdout_capture(CCCommand *command);
+CCCommand *cc_command_stderr_capture(CCCommand *command);
+CCCommand *cc_command_stderr_to_stdout(CCCommand *command);
+CCCommand *cc_command_inherit_stdio(CCCommand *command);
+CCCommand *cc_command_cwd(CCCommand *command, const char *cwd);
+CCCommand *cc_command_env(CCCommand *command, const char **env);
 
----
+const char **cc_command_argv(CCCommand *command);
+CCProcessConfig cc_command_process_config(CCCommand *command);
+CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *command);
+CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *command, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *command, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *command, CCArena *arena, CCSlice input);
+CCResult_int_CCIoError cc_command_status(CCCommand *command);
+```
 
-## Future Phases
+`CCCommand` UFCS maps method names to `cc_command_*` and passes the receiver by
+address.
 
-**Phase 2 (v1.1):**
-- `Set<T>` (hash set, arena-backed).
-- Advanced string: UTF-8 aware (grapheme clusters, normalization).
-- Printf-style formatting if proven essential.
-- Concurrency helpers: Fan-in/fan-out patterns, broadcast helpers.
-- Map/Vec iteration methods (UFCS).
-- WebSocket client (`ws_connect()`).
-- HTTP/2 client support.
+## Futures and tasks
 
-**Phase 3 (v1.2):**
-- Advanced I/O: Async file ops, streams, buffering.
-- Math: Safe div, sqrt with error handling.
-- Time: Duration, Timestamp.
-- Process/env: Environment variables, subprocess.
-- Compression/hashing: zlib, xxhash wrappers (maybe).
-- QUIC/HTTP3 (stretch goal).
+`<ccc/std/future.cch>` defines:
 
----
+```c
+typedef enum {
+    CC_FUTURE_PENDING,
+    CC_FUTURE_READY,
+    CC_FUTURE_ERR,
+    CC_FUTURE_CANCELLED,
+    CC_FUTURE_TIMEOUT
+} CCFutureStatus;
 
-## Versioning and Stability
+typedef struct {
+    CCAsyncHandle handle;
+    void *result;
+} CCFuture;
 
-Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; etc.
+typedef void (*cc_future_cb)(CCFutureStatus status, void *user, int err);
+```
 
-**Stability Promise:** APIs in Phase 1 are stable; no breaking changes within v1.x minor versions.
+The API is:
 
----
+```c
+void cc_future_init(CCFuture *future);
+void cc_future_free(CCFuture *future);
+CCFutureStatus cc_future_poll(CCFuture *future, int *out_err);
+CCFutureStatus cc_future_wait(CCFuture *future, int *out_err);
+CCFutureStatus cc_future_wait_deadline(CCFuture *future, const CCDeadline *deadline, int *out_err);
+int cc_future_wait_peek_err(CCFuture *future, int *out_err);
+void cc_future_cancel(CCFuture *future);
+int cc_future_on_complete(CCExec *executor, CCFuture *future, cc_future_cb callback, void *user);
+```
 
-## References and Inspiration
+`result` points to caller-owned result storage. `poll` does not block.
+`on_complete` schedules its callback on the supplied executor.
 
-- Rust `std`: Minimal scope, safety-first, owned types, UFCS methods.
-- Zig `std`: Explicit allocators, composability, low-level control.
-- C `libc`: Keep what works (stdio, basic ops), add safety (`T !>(E)`, slices, UFCS).
+`<ccc/std/task.cch>` operates on `CCTask`:
 
----
+```c
+typedef CCFutureStatus (*cc_task_poll_fn)(void *frame, intptr_t *out_value, int *out_err);
 
-## Appendix: API Quick Reference
+CCTask cc_run_blocking_task(CCClosure0 closure);
+CCTask cc_task_yield_once(void);
+CCTask cc_task_make_poll(cc_task_poll_fn poll, void *frame, void (*drop)(void *frame));
+CCTask cc_task_make_poll_ex(cc_task_poll_fn poll, int (*wait)(void *frame), void *frame, void (*drop)(void *frame));
+intptr_t cc_block_on_intptr(CCTask task);
+CCFutureStatus cc_task_poll(CCTask *task, intptr_t *out_value, int *out_err);
+void cc_task_free(CCTask *task);
+void cc_task_cancel(CCTask *task);
+int cc_block_all(int count, CCTask *tasks, intptr_t *results);
+int cc_block_race(int count, CCTask *tasks, int *winner, intptr_t *result);
+int cc_block_any(int count, CCTask *tasks, int *winner, intptr_t *result);
+int cc_blocking_pool_stats(CCExecStats *out_exec, uint64_t *out_submit_failures);
+```
 
-### String Methods on char[:]
+`cc_block_on(T, task)` casts the `intptr_t` result to `T`.
+`cc_block_all` waits for every task. `cc_block_race` reports the first
+completion. `cc_block_any` reports the first successful completion and returns
+`ECANCELED` when every task fails.
 
-| Method | Purpose |
-|--------|---------|
-| `.len()` | Length |
-| `.get(i)` | Safe index (returns `char*`; NULL if out of range) |
-| `.slice(start, end)` | Subslice view (empty slice if range invalid) |
-| `.c_str(a)` | NUL-terminated copy for C interop |
-| `.clone(a)` | Copy to new allocation |
-| `.trim()`, `.trim_left()`, `.trim_right()` | Trim whitespace |
-| `.is_empty()`, `.is_ascii()` | Checks |
-| `.starts_with()`, `.ends_with()`, `.contains()` | Prefix/suffix/contains |
-| `.index_of()`, `.last_index_of()`, `.count()` | Find (returns `ssize_t`; `-1` if not found) |
-| `.upper(a)`, `.lower(a)` | Case conversion |
-| `.replace(a, old, new)` | Replace all |
-| `.split(delim)` | Iterator split |
-| `.split_all(a, delim)` | Collect all |
-| `.to_i64()`, `.to_u64()`, `.to_f64()` | Strict full-consumption conversion (`!>(CCError)`) |
-| `.parse_i64()`, `.parse_f64()`, `.parse_bool()` | Parse |
+## Command-line parsing
 
-### String Builder Methods
+`<ccc/std/cli.cch>` defines declarative argument specifications with
+`CCArgSpec`, parsed entries with `CCParsedArg`, the `CCParsedArgs` collection,
+and the `CCCliParse` result. The public operations are:
 
-| Method | Purpose |
-|--------|---------|
-| `string_new(a)` | Create |
-| `.append()`, `.push_char()`, `.push_int()`, `.push_float()` | Append |
-| `.append_if()` | Conditional append |
-| `.as_slice()` | Finalize to view |
-| `.len()`, `.cap()` | Info |
-| `.clear()` | Clear (also recovers a poisoned `String`) |
-| `cc_string_failed(&s)` | Check sticky failure poison (§1.2) |
+```c
+const char *cc_cli_prog(int argc, char **argv);
+CCSlice cc_cli_prog_slice(int argc, char **argv);
+CCParsedArgs cc_parsed_args(CCArena *arena);
+CCCliParse cc_cli_parse_args(int argc, char **argv, const CCArgSpec *specs, size_t spec_count, CCArena *arena);
+void cc_print_usage(FILE *out, CCSlice prog, const CCArgSpec *specs, size_t spec_count);
+void cc_cli_parse_print(const CCCliParse *parse, FILE *out);
 
-### File Methods
+size_t cc_parsed_args_len(const CCParsedArgs *args);
+const CCParsedArg *cc_parsed_args_get(const CCParsedArgs *args, size_t index);
+bool cc_parsed_args_has(const CCParsedArgs *args, const char *key);
+size_t cc_parsed_args_count(const CCParsedArgs *args, const char *key);
+const CCSlice *cc_parsed_args_value_at(const CCParsedArgs *args, const char *key, size_t index);
+const CCSlice *cc_parsed_args_last_value(const CCParsedArgs *args, const char *key);
+bool cc_parsed_args_find_value_at(const CCParsedArgs *args, const char *key, size_t index, CCSlice *out);
+bool cc_parsed_args_find_last_value(const CCParsedArgs *args, const char *key, CCSlice *out);
+```
 
-| Method | Purpose |
-|--------|---------|
-| `file_open(a, path, mode)` | Open |
-| `.read()`, `.read_all()`, `.read_line()` | Read (arena-allocated) |
-| `.read_buf(buf, n)` | Read into caller buffer (no allocation) |
-| `.write()` | Write (from slice) |
-| `.write_buf(buf, n)` | Write from caller buffer (no slice) |
-| `.seek()`, `.tell()`, `.size()` | Position/size |
-| `.sync()` | Flush |
-| `.close()` | Close |
+`CCParsedArgs` UFCS maps `len`, `get`, `has`, `count`, `value_at`,
+`last_value`, `find_value_at`, and `find_last_value` to `cc_parsed_args_*`.
+`CCCliParse.print(out)` maps to `cc_cli_parse_print`.
 
-### `CCVec::[T]` Methods
+## Networking
 
-| Method | Purpose |
-|--------|---------|
-| `cc_vec_new::[T](a)` | Create |
-| `.push(v)` | Append |
-| `.pop(T* out)` | Remove last; returns `bool` (false if empty) |
-| `.get(i)` | Access; returns `T*` (NULL if out of range) |
-| `.set(i, v)` | Set; returns `void !>(CCBoundsError)` |
-| `.len()`, `.cap()` | Info |
-| `.iter()` | Iterator (see `CCVecIter::[T].next(T* out)`) |
-| `.as_slice()` | View |
-| `.clear()` | Clear |
+`<ccc/std/net.cch>` defines synchronous TCP, UDP, DNS, and address operations.
 
-### `CCMap::[K, V]` Methods
+```c
+typedef enum CCNetError {
+    CC_NET_OK,
+    CC_NET_CONNECTION_REFUSED,
+    CC_NET_CONNECTION_RESET,
+    CC_NET_CONNECTION_CLOSED,
+    CC_NET_TIMED_OUT,
+    CC_NET_HOST_UNREACHABLE,
+    CC_NET_NETWORK_UNREACHABLE,
+    CC_NET_ADDRESS_IN_USE,
+    CC_NET_ADDRESS_NOT_AVAILABLE,
+    CC_NET_INVALID_ADDRESS,
+    CC_NET_DNS_FAILURE,
+    CC_NET_TLS_HANDSHAKE_FAILED,
+    CC_NET_TLS_CERTIFICATE_ERROR,
+    CC_NET_OTHER
+} CCNetError;
 
-| Method | Purpose |
-|--------|---------|
-| `cc_map_new::[K, V](a)` | Create |
-| `.insert(k, v)` | Insert/update |
-| `.get(k)` | Lookup; returns `V*` (NULL if absent) |
-| `.remove(k)` | Remove; returns `bool` (true if removed) |
-| `.len()`, `.cap()` | Info |
-| `.clear()` | Clear |
+typedef struct CCSocket {
+    int fd;
+    uint8_t flags;
+    void *watcher;
+} CCSocket;
 
----
+typedef union CCSocketSignal {
+    long double __cc_align_ld;
+    void *__cc_align_ptr;
+    unsigned char __cc_storage[128];
+} CCSocketSignal;
 
-**End of Specification**
+typedef struct CCListener {
+    int fd;
+    uint8_t flags;
+    void *watcher;
+} CCListener;
+
+typedef struct CCUdpSocket {
+    int fd;
+    uint8_t flags;
+} CCUdpSocket;
+
+typedef struct CCUdpPacket {
+    CCSlice data;
+    CCSlice from_addr;
+} CCUdpPacket;
+
+typedef struct CCIpAddr {
+    uint8_t family;
+    union {
+        uint8_t v4[4];
+        uint8_t v6[16];
+    } addr;
+} CCIpAddr;
+```
+
+TCP and socket functions are:
+
+```c
+CCSocket cc_tcp_connect(const char *addr, size_t addr_len, CCNetError *out_err);
+CCListener cc_tcp_listen(const char *addr, size_t addr_len, CCNetError *out_err);
+CCSocket cc_listener_accept(CCListener *listener, CCNetError *out_err);
+void cc_listener_close(CCListener *listener);
+
+CCSlice cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCNetError *out_err);
+size_t cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err);
+size_t cc_socket_read_into_deadline(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err, const CCDeadline *deadline);
+size_t cc_socket_try_read_into(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err, bool *out_would_block);
+size_t cc_socket_write(CCSocket *socket, const char *data, size_t len, CCNetError *out_err);
+size_t cc_socket_write_deadline(CCSocket *socket, const char *data, size_t len, CCNetError *out_err, const CCDeadline *deadline);
+void cc_socket_shutdown(CCSocket *socket, CCShutdownMode mode, CCNetError *out_err);
+void cc_socket_close(CCSocket *socket);
+CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
+CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
+```
+
+`addr` is a length-delimited `host:port`, IPv4 `address:port`, or bracketed
+IPv6 address. A socket read reports remote EOF as zero bytes with
+`CC_NET_CONNECTION_CLOSED`. The deadline functions report
+`CC_NET_TIMED_OUT` when the deadline expires. `try_read_into` reports
+`EAGAIN` or `EWOULDBLOCK` by setting `out_would_block` while leaving the error
+as `CC_NET_OK`.
+
+`CCSocket` and `CCListener` UFCS map synchronous method names to
+`cc_socket_*` and `cc_listener_*`. No networking `_async` C callees are
+defined by this API.
+
+Socket readiness signaling uses:
+
+```c
+void cc_socket_create_signal(CCSocket *socket, CCSocketSignal *out_signal);
+void cc_socket_signal_init(CCSocketSignal *signal, CCSocket *socket);
+void cc_socket_signal_free(CCSocketSignal *signal);
+void cc_socket_signal_signal(CCSocketSignal *signal);
+CCResult_bool_CCIoError cc_socket_signal_wait(CCSocketSignal *signal);
+uint64_t cc_socket_signal_snapshot(CCSocketSignal *signal);
+CCResult_bool_CCIoError cc_socket_signal_wait_since(CCSocketSignal *signal, uint64_t seen_epoch);
+```
+
+UDP functions are:
+
+```c
+CCUdpSocket cc_udp_bind(const char *addr, size_t addr_len, CCNetError *out_err);
+size_t cc_udp_send_to(CCUdpSocket *socket, const char *data, size_t len, const char *addr, size_t addr_len, CCNetError *out_err);
+CCUdpPacket cc_udp_recv_from(CCUdpSocket *socket, CCArena *arena, size_t max_bytes, CCNetError *out_err);
+void cc_udp_close(CCUdpSocket *socket);
+```
+
+DNS and address functions are:
+
+```c
+CCSlice cc_dns_lookup(CCArena *arena, const char *hostname, size_t hostname_len, CCNetError *out_err);
+CCSlice cc_ip_addr_to_string(CCIpAddr *addr, CCArena *arena);
+CCIpAddr cc_ip_parse(const char *text, size_t len, CCNetError *out_err);
+```
+
+`cc_dns_lookup` returns an arena-backed contiguous sequence of `CCIpAddr`
+values represented by `CCSlice`. `<ccc/std/dns.cch>` also declares
+`cc_dns_lookup`; callers use this linked implementation.
+
+## HTTP
+
+`<ccc/std/http.cch>` provides a synchronous libcurl-backed client and requires
+linkage with `curl`.
+
+```c
+typedef enum CCHttpError {
+    CC_HTTP_OK,
+    CC_HTTP_NET_ERROR,
+    CC_HTTP_INVALID_URL,
+    CC_HTTP_TOO_MANY_REDIRECTS,
+    CC_HTTP_INVALID_RESPONSE,
+    CC_HTTP_TIMEOUT,
+    CC_HTTP_HEADER_TOO_LARGE,
+    CC_HTTP_BODY_TOO_LARGE
+} CCHttpError;
+
+typedef struct CCHttpErrorInfo {
+    CCHttpError code;
+    CCNetError net_error;
+    CCSlice message;
+} CCHttpErrorInfo;
+
+typedef struct CCHttpResponse {
+    uint16_t status;
+    CCSlice status_text;
+    CCSlice headers;
+    CCSlice body;
+    CCSlice url;
+} CCHttpResponse;
+
+typedef struct CCHttpRequest {
+    CCSlice method;
+    CCSlice url;
+    CCSlice headers;
+    CCSlice body;
+} CCHttpRequest;
+
+typedef struct CCHttpClientConfig {
+    uint32_t timeout_ms;
+    CCSlice user_agent;
+    bool follow_redirects;
+    uint8_t max_redirects;
+    size_t max_response_size;
+    bool verify_ssl;
+} CCHttpClientConfig;
+
+typedef struct CCHttpClient {
+    CCHttpClientConfig config;
+} CCHttpClient;
+```
+
+The API is:
+
+```c
+CCHttpClientConfig cc_http_client_config_default(void);
+CCHttpResponse cc_http_get(CCArena *arena, const char *url, size_t url_len, CCHttpErrorInfo *out_err);
+CCHttpResponse cc_http_post(CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len, CCHttpErrorInfo *out_err);
+CCHttpClient cc_http_client_new(CCHttpClientConfig config);
+CCHttpClient cc_http_client_default(void);
+CCHttpResponse cc_http_client_get(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, CCHttpErrorInfo *out_err);
+CCHttpResponse cc_http_client_post(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len, CCHttpErrorInfo *out_err);
+CCHttpResponse cc_http_client_request(CCHttpClient *client, CCArena *arena, CCHttpRequest request, CCHttpErrorInfo *out_err);
+```
+
+Response and error-info slices are arena-backed. The default configuration
+uses a 30-second timeout, follows at most ten redirects, limits a response to
+64 MiB, and verifies TLS certificates. HTTP does not define `_async` callees.
+
+URL parsing is:
+
+```c
+typedef struct CCParsedUrl {
+    CCSlice scheme;
+    CCSlice host;
+    uint16_t port;
+    CCSlice path;
+    CCSlice query;
+    CCSlice fragment;
+} CCParsedUrl;
+
+CCParsedUrl cc_url_parse(const char *url, size_t url_len, CCHttpError *out_err);
+```
+
+The component slices point into the supplied URL buffer.
+
+## TLS
+
+`<ccc/std/tls.cch>` provides TLS client and server operations when the runtime
+is built with BearSSL support.
+
+```c
+typedef struct CCTlsClientConfig {
+    const char *ca_cert_path;
+    size_t ca_cert_path_len;
+    bool verify_hostname;
+    const char *sni_hostname;
+    size_t sni_hostname_len;
+} CCTlsClientConfig;
+
+typedef struct CCTlsServerConfig {
+    const char *cert_path;
+    size_t cert_path_len;
+    const char *key_path;
+    size_t key_path_len;
+    const char *client_ca_path;
+    size_t client_ca_path_len;
+} CCTlsServerConfig;
+
+typedef struct CCTlsInfo {
+    CCSlice protocol_version;
+    CCSlice cipher_suite;
+    CCSlice peer_cert_subject;
+    CCSlice sni_hostname;
+} CCTlsInfo;
+
+typedef struct CCTlsConn {
+    void *ctx;
+    void *iobuf;
+    size_t iobuf_len;
+    CCSocket underlying;
+    CCArena *info_arena;
+    uint8_t flags;
+} CCTlsConn;
+```
+
+The connection API is:
+
+```c
+#define CC_TLS_IOBUF_SIZE (16384 + 16384 + 325)
+
+CCTlsClientConfig cc_tls_client_config_default(void);
+CCTlsConn cc_tls_connect(CCSocket socket, CCTlsClientConfig config, void *iobuf, size_t iobuf_len, CCArena *info_arena, CCNetError *out_err);
+CCTlsConn cc_tls_connect_addr(const char *addr, size_t addr_len, CCTlsClientConfig config, CCArena *conn_arena, CCNetError *out_err);
+CCTlsConn cc_tls_accept(CCSocket socket, CCTlsServerConfig config, void *iobuf, size_t iobuf_len, CCArena *info_arena, CCNetError *out_err);
+CCSlice cc_tls_read(CCTlsConn *conn, CCArena *arena, size_t max_bytes, CCNetError *out_err);
+size_t cc_tls_write(CCTlsConn *conn, const char *data, size_t len, CCNetError *out_err);
+void cc_tls_shutdown(CCTlsConn *conn, CCShutdownMode mode, CCNetError *out_err);
+void cc_tls_close(CCTlsConn *conn);
+const CCTlsInfo *cc_tls_info(const CCTlsConn *conn);
+```
+
+The caller-provided I/O buffer remains valid for the connection lifetime and
+has at least `CC_TLS_IOBUF_SIZE` bytes. `cc_tls_connect_addr` allocates this
+buffer from `conn_arena`. Session-info slices belong to `info_arena`.
+TLS does not define `_async` callees.
+
+Certificate-loading entry points are:
+
+```c
+CCTlsCertChain *cc_tls_load_cert_chain(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
+CCTlsPrivateKey *cc_tls_load_private_key(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
+CCTlsTrustAnchors *cc_tls_load_trust_anchors(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
+```
+
+## Portable atomics
+
+`<ccc/cc_atomic.cch>` defines:
+
+```c
+typedef /* atomic integer */ cc_atomic_int;
+typedef /* atomic unsigned integer */ cc_atomic_uint;
+typedef /* atomic size_t */ cc_atomic_size;
+typedef /* atomic int64_t */ cc_atomic_i64;
+typedef /* atomic uint64_t */ cc_atomic_u64;
+typedef /* atomic intptr_t */ cc_atomic_intptr;
+
+old_value = cc_atomic_fetch_add(ptr, value);
+old_value = cc_atomic_fetch_sub(ptr, value);
+value = cc_atomic_load(ptr);
+cc_atomic_store(ptr, value);
+bool exchanged = cc_atomic_cas(ptr, expected_ptr, desired);
+```
+
+On a failed compare-and-swap, the C11 and fallback implementations update
+`*expected_ptr` with the observed value. The GCC/Clang `__sync` implementation
+returns false without updating `*expected_ptr`.
+
+`CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics or
+GCC/Clang atomic builtins. It is `0` for TinyCC and unknown-compiler fallback
+implementations. Operations in a `0` configuration are not thread-safe.

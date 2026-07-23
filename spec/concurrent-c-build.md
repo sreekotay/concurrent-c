@@ -1,491 +1,165 @@
-# Concurrent-C Build Spec (Draft)
+# Concurrent-C Build
 
-Status: draft. Purpose: define the `ccc` driver behavior for C output, compilation, and linking, while staying compatible with existing C build systems.
+This specification defines the implemented `ccc` driver contract for C emission, compilation, linking, cached builds, declarative target graphs, and Make integration.
 
-## Goals
-- “Default does the right thing”: minimal flags to go from `.ccs` to a binary.
-- Remain C-friendly: emit clean C; allow Make/CMake to own compilation if desired.
-- Deterministic behavior; clear, inspectable outputs; easy overrides.
+## Invocation
 
-## Design Philosophy
+The driver accepts:
 
-**Declarative sugar over imperative comptime.**
+- `ccc [options] <input.ccs> [output]`
+- `ccc run <input.ccs> [-- <args...>]`
+- `ccc build [step] [options] [<input.ccs> ...]`
+- `ccc clean [--out-dir DIR] [--bin-dir DIR] [--all]`
 
-Like Zig's `build.zig`, CC's `build.cc` should ultimately be real CC code that runs at compile time. However, most builds are simple and don't need imperative logic. Therefore:
+The default pipeline emits C, compiles an object, and links an executable. `run` performs that pipeline and executes the result.
 
-1. **Declarative lines** (`CC_TARGET`, `CC_CONST`, etc.) handle the 80% case — simple, scannable, no logic required.
-2. **Comptime blocks** (`@comptime { ... }`) handle the 20% case — conditionals, loops, platform detection, dynamic target generation.
-3. **Declarative desugars to comptime** — they are not separate systems. `CC_TARGET main exe main.ccs` is syntactic sugar for equivalent comptime API calls.
+The build steps are:
 
-This matches C's own philosophy: simple things are simple (`int x = 5;`), complex things are possible (`__attribute__`, inline asm).
+- default: build the selected target or input files;
+- `run`: build and execute an executable;
+- `test`: run the repository test suite;
+- `list`: print declarations from `build.cc`;
+- `graph`: print the target graph;
+- `install`: build and copy the selected executable to its `CC_INSTALL` destination;
+- `export-make`: write a Makefile fragment for declared targets.
 
-## Invocation Modes
-- `ccc [options] <input.ccs>` — default end-to-end: emit C, compile, link.
-- `ccc --emit-c-only ...` — stop after emitting C.
-- `ccc --compile ...` — emit C and compile to object; no link.
-- `ccc --link ...` — emit C, compile, link (default).
-- `--print-cflags` — print the required `-I` flags for Concurrent-C headers.
-- `--print-libs` — print the path to the runtime source and required linker flags.
-- `ccc build ...` — integrates `build.cc` (consts + targets).
+## Modes and outputs
 
-Build steps:
-- `ccc build` (default)
-- `ccc build run ...`
-- `ccc build test ...`
-- `ccc build list ...`
-- `ccc build graph ...`
-- `ccc build install ...`
+- `--emit-c-only` stops after C emission.
+- `--compile` stops after object compilation.
+- `--link` selects the default emit, compile, and link pipeline.
+- `--emit-c-inspect[=PATH]` requests a best-effort merged translation-unit dump while the selected pipeline still runs.
+- `--print-cflags` prints the required Concurrent-C include flags.
+- `--print-libs` prints the runtime source and linker flags.
 
-## Outputs and Defaults
-- C output: `out/<stem>.c` by default. Override with `-o` in `--emit-c-only` mode.
-- Object output: `out/<stem>.o` by default in `--compile`/`--link` modes (override with `--obj-out`).
-- Binary output: `bin/<stem>` by default in `--link` mode (override with `-o`).
-- `--keep-c` preserves the generated C even when compiling/linking; otherwise it’s retained in `out/`.
-
-### Output Layout
+For an input stem `NAME`, default single-input paths are:
 
 ```
-out/
-  <stem>.c          # generated C
-  <stem>.o          # object file
-  <stem>.d          # dependency file (for incremental builds)
-  .cc-build/        # cache metadata (hidden)
-bin/
-  <stem>            # linked binary
+out/NAME.c
+out/NAME.o
+out/NAME.d
+bin/NAME
+out/.cc-build/
 ```
 
-The `<stem>` is the basename of the input file without extension: `examples/hello.ccs` → `hello`.
+`-o PATH` selects the terminal output for the current mode. In link mode, `--obj-out PATH` independently selects the intermediate object. Generated C is retained; `--keep-c` is accepted and is therefore idempotent.
 
-### Name Collision Note
+`--out-dir DIR` or `CC_OUT_DIR` replaces `out`. `--bin-dir DIR` or `CC_BIN_DIR` replaces `bin`. Command-line values take precedence over environment values.
 
-Output paths use basename only, so files with the same name in different directories will collide:
+### Stem identity and collisions
 
-```bash
-./cc/bin/ccc a/test.ccs   # → out/test.c, bin/test
-./cc/bin/ccc b/test.ccs   # → overwrites out/test.c, bin/test
-```
+A single input uses its basename without extension. Separate invocations with equal basenames therefore address the same default output paths.
 
-**Workarounds:**
-- Use `-o` to specify distinct output paths: `ccc a/test.ccs -o bin/a_test`
-- Use `build.cc` with explicit target names (recommended for multi-file projects)
-- Use `--out-dir` / `--bin-dir` to isolate outputs per project
+Within one multi-input invocation, the driver detects repeated basenames and derives wider stems from each repository-relative path. It then appends numeric suffixes if derived names still collide. This makes outputs unique within that invocation.
 
-This flat naming is intentional for simplicity in single-file workflows. Multi-file projects should use `build.cc` for explicit control.
+`--out-stem NAME` overrides the derived stem for a single input. It is an error with multiple inputs. Explicit `-o`, `--obj-out`, `--out-dir`, and `--bin-dir` remain available when identities must be isolated across separate invocations.
 
-`ccc` automatically detects when multiple inputs share a basename and will widen the stem (by incorporating directory segments) so `out/` and `bin/` files no longer overwrite one another.  For finer control or to impose a custom identity, pass `--out-stem NAME`.
+Declarative target builds do not depend on flat source stems. Each target source is compiled under target-specific `out/c/<target>/` and `out/obj/<target>/` paths with a stable path-derived source identity.
 
-### Output naming customization
-Automated builds can still conflict when legacy trees contain repeated basenames. Use `--out-stem NAME` to override the stem used for the generated `out/<stem>.*` and `bin/<stem>` outputs.
+## Driver options
 
-```bash
-./cc/bin/ccc --out-stem examples_main build examples/main.ccs
-```
+The build parser implements:
 
-now emits `out/examples_main.c` / `bin/examples_main`. This lets teams keep the simple layout while disambiguating outputs from legacy directories.
+- `-DNAME[=VALUE]`: define a compile-time integer constant and pass the same definition to the C compiler; omitted value means `1`.
+- `--build-file PATH`: select an explicit build file.
+- `--no-build`: disable build-file integration.
+- `--dump-consts`: print merged constant bindings.
+- `--dump-comptime`: print constants and target declarations; implies `--dump-consts`.
+- `--dry-run`: resolve build state and print commands without compiling or linking.
+- `--cc-bin PATH`: select the final C compiler.
+- `--cc-flags FLAGS` and `--ld-flags FLAGS`: append compile and link flags.
+- `--target TRIPLE` and `--sysroot PATH`: forward target settings to compile and link commands.
+- `--no-runtime`: omit the bundled runtime from linking.
+- `--no-cache` or `CC_NO_CACHE=1`: disable incremental caching.
+- `--verbose`: print invoked commands.
+- `--summary`: print whether pipeline outputs were built or reused.
+- `--timeout SECONDS`: bound a `run` or `test` step.
+- `-O` or `--release`: add `-O2 -DNDEBUG` and enable supported section dead-stripping.
+- `-g` or `--debug`: add `-O0 -g`.
 
-## Output directories
-- `--out-dir DIR` / `CC_OUT_DIR`: override where generated C and objects are written (default: `<repo>/out`).
-- `--bin-dir DIR` / `CC_BIN_DIR`: override where linked executables are written (default: `<repo>/bin`).
-- `--out-stem NAME`: override the basename/stem used for generated files (auto disambiguation keeps derived names unique).
+If both flavor flags are present, debug wins. The driver honors `CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, and the runtime build's applicable C++ flags. `--cc-bin` overrides `CC`; otherwise the driver selects an available `cc`, `gcc`, or `clang`.
+
+The bundled runtime is linked unless `--no-runtime` is present. The driver may reuse a compatible runtime object or build one under the output directory.
 
 ## Incremental cache
-- Default behavior: `ccc build` uses a lightweight cache under `out/.cc-build/` to skip redundant emit/compile/link work when inputs and flags are unchanged.
-- Disable: `--no-cache` or `CC_NO_CACHE=1`.
-- An emit that prints error diagnostics **fails the build** and its output is **never cached**: every subsequent build of the same input — warm cache included — re-runs the emit, fails again, and prints the diagnostic again. Generated C reaches the cache only from a diagnostic-free emit.
 
-## Toolchain Selection
-- C compiler: use `$CC` if set, else first of `cc`, `gcc`, `clang` in PATH. Override with `--cc-bin PATH`.
-- Flags passthrough: honor `$CFLAGS`, `$CPPFLAGS`, `$LDFLAGS`, `$LDLIBS`. Additional flags via `--cc-flags "..."`, `--ld-flags "..."`.
-- Target/cross: accept `--target TRIPLE` and forward to the C compiler; accept `--sysroot PATH` and forward.
+Cache metadata lives under `<out-dir>/.cc-build/`. The driver independently caches C emission, object compilation, runtime compilation, and linking.
 
-### Supported Compilers
+Cache keys include the relevant source and build-file signatures, compiler inputs, target and sysroot, command-line and environment flags, compile-time bindings, runtime signatures, and declared `#pragma cc_depends` content. Object reuse also checks dependency files.
 
-| Compiler | Support | Notes |
-|----------|---------|-------|
-| **Clang** | ✅ Full | Recommended on macOS |
-| **GCC** | ✅ Full | Recommended on Linux |
-| **TCC** | ⚠️ Partial | See limitations below |
-| **MSVC** | 🚧 Planned | Not yet tested |
+Failed emission is not cached. A diagnostic-producing emit fails the build, and a later invocation reruns it even when prior cache metadata exists. `--no-cache` and `CC_NO_CACHE=1` force each selected phase to execute.
 
-### TCC Compatibility
+## Build-file discovery
 
-TCC (Tiny C Compiler) is used internally by `ccc` for fast preprocessing and parsing. It can also be used as the final C compiler via `CC=./third_party/tcc/tcc`, but with limitations:
+Unless disabled or overridden, the driver looks for `build.cc` beside the first input and in the current directory. If both locations contain different build files, discovery is ambiguous and the build fails. `--build-file PATH` bypasses discovery.
 
-**What works:**
-- TCC as preprocessor (always used by ccc internally)
-- `cc_atomic.cch` portable atomics (detects TCC, uses fallbacks)
-- Compiler flag detection (ccc skips unsupported flags like `-MMD`, `-ffunction-sections`)
+Paths in target declarations are relative to the build-file directory. A target name passed to `ccc build` selects that target. Otherwise selection uses `CC_DEFAULT`, then a target named `default`, then the sole declared target. Multiple targets without one of those choices require an explicit target name.
 
-**Platform limitations:**
+## Declarative build file
 
-| Platform | TCC as Final Compiler |
-|----------|----------------------|
-| **Linux** | ✅ Works (TCC supports `__thread` TLS) |
-| **macOS** | ❌ Not supported (TCC lacks `__thread` TLS on macOS) |
-| **Windows** | 🚧 Untested |
+The parser recognizes whitespace-separated directives. It does not evaluate an imperative build program.
 
-**Why macOS doesn't work:** The CC runtime uses `__thread` for thread-local storage (nursery tracking, deadline scopes). TCC on macOS doesn't implement the Mach-O TLS ABI (`_tlv_bootstrap`, TLV sections). This is a fundamental TCC limitation, not a ccc bug.
+### Constants and options
 
-**Alternatives considered:**
-- Patching TCC for macOS TLS: ~1 week effort, high complexity, not worth it
-- Using `pthread_getspecific` everywhere: ~10x slower TLS access, penalizes 99% of users
-- Single-threaded mode for TCC: Possible but defeats the purpose of concurrent code
-
-**Recommendation:** Use Clang or GCC on macOS. TCC-as-final-compiler is only for Linux or niche use cases.
-
-**Current comptime note:** Generic factories (`CC_GENERIC_FACTORY` / `cc_generic_register`) compile in-process on the `libtcc` evaluator — no host-compiler spawn or dylib. Named `@comptime` UFCS handlers and `cc_type_register` hooks on macOS still execute through a temporary host-compiler bridge that builds a small dylib and loads it during compilation; moving those to the pure in-process `libtcc` backend is the remaining staging step.
-
-### Build Flavors
-
-Build flavor flags control optimization and debugging:
-
-```bash
-./cc/bin/ccc build foo.ccs -O          # Release: -O2 -DNDEBUG + dead-stripping
-./cc/bin/ccc build foo.ccs -g          # Debug: -O0 -g
-./cc/bin/ccc build foo.ccs --release   # Same as -O
-./cc/bin/ccc build foo.ccs --debug     # Same as -g
+```
+CC_CONST <NAME> <EXPR>
+CC_OPTION <NAME> <HELP...>
 ```
 
-| Flag | Compiler Flags | Linker Flags |
-|------|---------------|--------------|
-| `-O` / `--release` | `-O2 -DNDEBUG -ffunction-sections -fdata-sections` | `-Wl,-dead_strip` (macOS) / `-Wl,--gc-sections` (Linux) |
-| `-g` / `--debug` | `-O0 -g` | (none) |
+`EXPR` is an integer literal, `TARGET_PTR_WIDTH`, or `TARGET_IS_LITTLE_ENDIAN`. Target constants are added first, `CC_CONST` declarations follow, and command-line `-D` bindings override equal names.
 
-**Note:** When both `-O` and `-g` are specified, debug wins (safe default).
-
-## Runtime Linking
-- Default: link against the bundled runtime automatically.
-- `--no-runtime` to skip adding the runtime (for external linkage).
-- `--libdir/--includedir` overrides where runtime headers/libs are found if separated.
-
-## Build.cc Integration
-
-### Discovery
-- Prefer a `build.cc` **alongside the first input** (`<input_dir>/build.cc`), else fall back to `./build.cc` (CWD).
-- If **both** exist, `ccc build` errors (ambiguous).
-- `--build-file PATH` overrides discovery.
-- `--no-build` disables build.cc integration even if present.
-
-### End-State Vision: Comptime Build Scripts
-
-The end goal is `build.cc` as real CC code with comptime evaluation:
-
-```c
-// build.cc — CC code, evaluated at compile time
-@comptime {
-    CCTarget* exe = cc_exe("main");
-    exe.sources("main.ccs", "utils.ccs");
-    
-    if (cc_option_bool("debug")) {
-        exe.define("DEBUG", "1");
-        exe.cflags("-fsanitize=address");
-    }
-    
-    if (TARGET_OS == OS_WINDOWS) {
-        exe.libs("ws2_32");
-    } else {
-        exe.libs("pthread");
-    }
-    
-    cc_default(exe);
-}
-```
-
-This is imperative (matches C thinking), uses the same language (no DSL to learn), and handles complex builds naturally.
-
-### Comptime helper utilities (non-normative)
-Some lightweight helper utilities may be added to support legacy build script patterns, but they are not specified or required for this draft. Today the build integration supports declarative `CC_*` lines plus `--dump-comptime`/`ccc build graph` introspection.
-
-### Declarative Syntax (Current & Permanent)
-
-For simple builds, declarative lines are more convenient. These desugar to equivalent comptime API calls:
-
-| Declarative | Equivalent Comptime |
-|-------------|---------------------|
-| `CC_TARGET main exe main.ccs` | `cc_exe("main").sources("main.ccs")` |
-| `CC_TARGET_LIBS main pthread` | `cc_target("main").libs("pthread")` |
-| `CC_CONST DEBUG 1` | `cc_const("DEBUG", 1)` |
-| `CC_DEFAULT main` | `cc_default(cc_target("main"))` |
-
-Both forms coexist in the same `build.cc`. Use declarative for simple cases, drop into `@comptime` when you need logic.
-
-### Consts
-
-Compile-time integer constants:
-- `CC_CONST <NAME> <EXPR>`
-
-Where `<EXPR>` is:
-- An integer literal (`123`, `0xff`, etc), or
-- A target const: `TARGET_PTR_WIDTH`, `TARGET_IS_LITTLE_ENDIAN`, `TARGET_OS`
-
-Precedence (later overrides earlier):
-1. Target consts (injected by compiler)
-2. `CC_CONST` lines
-3. CLI `-DNAME[=VALUE]`
-
-### Options
-
-Project options for `--help` output:
-- `CC_OPTION <NAME> <HELP...>`
-
-End-state: options become typed and queryable in comptime:
-```c
-@comptime {
-    int workers = cc_option_int("workers", 4);  // default 4
-    bool debug = cc_option_bool("debug");
-}
-```
+`CC_OPTION` contributes help text shown by build help; its value is supplied through `-DNAME[=VALUE]`.
 
 ### Targets
 
-Declarative target declarations:
-- `CC_DEFAULT <TARGET_NAME>`
-- `CC_TARGET <TARGET_NAME> exe <SRC...>`
-- `CC_TARGET <TARGET_NAME> obj <SRC...>`
-
-Notes:
-- `<SRC...>` is whitespace-separated; paths relative to `build.cc` directory.
-- Sources may mix `.ccs` (lowered) and `.c` (compiled directly).
-
-Per-target properties (optional):
-- `CC_TARGET_INCLUDE <TARGET_NAME> <DIR...>`
-  - Adds per-target include directories (each resolved relative to `build.cc` dir).
-- `CC_TARGET_DEFINE <TARGET_NAME> <NAME[=VALUE]...>`
-  - Adds per-target compile defines (equivalent to `-DNAME[=VALUE]`).
-- `CC_TARGET_CFLAGS <TARGET_NAME> <FLAGS...>`
-  - Extra per-target compile flags (appended before CLI `--cc-flags`).
-- `CC_TARGET_LDFLAGS <TARGET_NAME> <FLAGS...>`
-  - Extra per-target link flags (appended before CLI `--ld-flags`).
-- `CC_TARGET_LIBS <TARGET_NAME> <LIB...>`
-  - Adds per-target link libraries.
-  - Tokens starting with `-` are passed through as-is; otherwise they are treated as a library name and lowered to `-l<LIB>`.
-- `CC_TARGET_DEPS <TARGET_NAME> <DEP_TARGET...>`
-  - Declares dependencies on other `CC_TARGET` names.
-  - Semantics: deps are built first (compiled into objects under `out/obj/<target>/`), and dependents link those objects.
-  - Dependency `ldflags`/`libs` are included in the final link.
-  - Cycles and unknown target names are errors.
-- `CC_TARGET_OUT <TARGET_NAME> <BIN_NAME>`
-  - Sets the default output binary name (under `bin/`) for an `exe` target.
-- `CC_TARGET_TARGET <TARGET_NAME> <TRIPLE>`
-  - Per-target `--target` override for compilation and linking.
-- `CC_TARGET_SYSROOT <TARGET_NAME> <PATH>`
-  - Per-target `--sysroot` override for compilation and linking.
-- `CC_INSTALL <TARGET_NAME> <DEST>`
-  - Used by `ccc build install <target>` to copy the produced binary to `<DEST>`.
-  - `<DEST>` is resolved relative to repo root unless it is an absolute path.
-
-#### Target grouping (planned — not yet implemented)
-> **Status:** This directive is on the roadmap (see "Future directions") and is **not yet
-> implemented**. The description below is the intended design.
-
-`CC_TARGET_GROUP <GROUP_NAME>` collects multiple declarative directives into a logical block that shares configuration. Inside a group you can omit repeated `CC_TARGET` names and the group name prefixes generated targets. Group-level directives that set include paths, defines, libs, or deps are applied to every target declared within the block, reducing boilerplate for legacy suites that define many similar binaries. The group desugars to per-target calls such as:
-
-```c
-@comptime {
-    CCTarget* exe = cc_exe("server-foo");
-    exe.include("server/include");
-    cc_default(exe);
-}
+```
+CC_DEFAULT <TARGET>
+CC_TARGET <TARGET> exe <SRC...>
+CC_TARGET <TARGET> obj <SRC...>
 ```
 
-where `server-foo` is the concatenation of `CC_TARGET_GROUP` plus the nested `CC_TARGET` name.
+Every target has at least one source. `.ccs` sources are emitted before compilation; `.c` sources compile directly.
 
-### Introspection
-- `ccc build list` prints the declared target graph (and key per-target properties).
-- `ccc build graph` prints the target graph as `--format json` (default) or `--format dot`.
-- `--graph-out PATH` writes the graph output (json/dot) to PATH for downstream build systems.
-- `--dump-consts` prints merged const bindings then compiles.
-- `--dump-comptime` prints the computed const bindings, targets, and option bindings produced by `build.cc` before any emit/compile work.
-- `--dry-run` resolves consts / prints commands, and skips compile/link.
-
-### Legacy build integration
-`ccc` can emit self-describing fragments so existing Make/CMake graphs can keep driving compilation while `ccc` owns C emission. The `ccc build export-make <target>` subcommand writes a Makefile fragment. Per-target variables are keyed by the target name; a fragment for target `main` looks like:
+The parser attaches these optional properties:
 
 ```
-CC_TARGETS := main
-CC_OUT_DIR := out
-CC_INCLUDE := -I<lowered-include> -I<cc-include>
-CC_RUNTIME_C := <runtime>.c
-
-CC_KIND_main := exe
-CC_SRCS_main := <abs>/main.ccs <abs>/utils.c
-CC_GEN_C_main := $(CC_OUT_DIR)/c/main/main.c
-CC_CFLAGS_main := $(CC_INCLUDE) -Ilegacy/include
-CC_LDFLAGS_main := -lm
-CC_DEPS_main := <deps...>
+CC_TARGET_DEPS <TARGET> <DEP_TARGET...>
+CC_TARGET_OUT <TARGET> <BIN_NAME>
+CC_TARGET_TARGET <TARGET> <TRIPLE>
+CC_TARGET_SYSROOT <TARGET> <PATH>
+CC_TARGET_INCLUDE <TARGET> <DIR...>
+CC_TARGET_DEFINE <TARGET> <NAME[=VALUE]...>
+CC_TARGET_CFLAGS <TARGET> <FLAGS...>
+CC_TARGET_LDFLAGS <TARGET> <FLAGS...>
+CC_TARGET_LIBS <TARGET> <LIB...>
+CC_INSTALL <TARGET> <DEST>
 ```
 
-The fragment also defines a `cc-emit-c` helper that runs `ccc build --emit-c-only` for each target. Legacy Makefiles can `include` the fragment and feed `$(CC_SRCS_main)` / `$(CC_GEN_C_main)` through their existing rules while still calling `ccc build` for C emission and caching. (A Ninja exporter is not currently implemented; only `export-make` is available.)
+Unknown property targets, unknown dependencies, and dependency cycles are errors. Dependencies build first and their object closure is linked into dependents. Dependency link flags and libraries propagate to the final link. Library tokens beginning with `-` pass through; other tokens become `-l<TOKEN>`.
 
-## Testing Infrastructure
+`CC_TARGET_OUT` chooses an executable's name under the binary directory. Target and sysroot properties override the corresponding command-line values for that target. Include and install paths are resolved from the build-file directory or repository root as implemented by the driver.
 
-### Stress Tests
+## Graph inspection
 
-Stress tests in `stress/` exercise concurrency patterns under load:
+`ccc build list` prints the selected build file, default target, and each target's parsed properties.
 
-| Test | What it stresses | Correctness check |
-|------|------------------|-------------------|
-| `spawn_storm` | 1000 concurrent task spawns | All tasks complete |
-| `channel_flood` | 10 producers × 1000 msgs | Message count matches |
-| `closure_capture_storm` | Many closures with captures | Sum formula verification |
-| `fanout_fanin` | Scatter-gather pattern | Sum of squares formula |
-| `nursery_deep` | 20 levels of nested nurseries | All levels complete |
-| `pipeline_long` | 4-stage channel pipeline | Sum formula verification |
-| `worker_pool_heavy` | 8 workers × 500 jobs | Sum formula verification |
-| `deadline_race` | Tasks with tight deadlines | Total = completed + timed_out |
+`ccc build graph` emits JSON by default. `--format dot` emits Graphviz DOT, and `--graph-out PATH` writes either format to a file. The graph contains target names, kinds, sources, dependency edges, and the default target.
 
-### Sanitizer Testing
+`--dump-comptime` prints the same parsed declarative state before a build step; it does not imply an additional build language.
 
-Run stress tests with ThreadSanitizer (race detection) and AddressSanitizer (memory errors):
+## Make export
 
-```bash
-./scripts/stress_sanitize.sh              # default compiler only
-./scripts/stress_sanitize.sh tsan         # ThreadSanitizer
-./scripts/stress_sanitize.sh asan         # AddressSanitizer
-./scripts/stress_sanitize.sh sanitizers   # Both TSan and ASan
-./scripts/stress_sanitize.sh compilers    # Test with clang, gcc, (tcc on Linux)
-./scripts/stress_sanitize.sh all          # Everything
-```
+`ccc build export-make` writes `<out-dir>/cc_targets.mk` by default or the path supplied by `-o`.
 
-**Note:** Sanitizers require Clang or GCC. TSan and ASan are mutually exclusive (run separately).
+The fragment defines:
 
-### Portable Atomics
+- `CC_BUILD_FILE`, `CC_OUT_DIR`, `CC_INCLUDE`, and `CC_RUNTIME_C`;
+- `CC_TARGETS`;
+- per-target kind, original sources, generated C paths, compile flags, link flags, and dependencies;
+- a `cc-emit-c` helper target that invokes `ccc build --emit-c-only`.
 
-For user code needing thread-safe counters or lock-free structures, include `cc_atomic.cch`:
+Source and include paths are resolved so an including Makefile can compile the generated C or continue to own its existing compile and link graph.
 
-```c
-#include <ccc/cc_atomic.cch>
+## Failures
 
-cc_atomic_int counter = 0;
-
-void increment(void) {
-    cc_atomic_fetch_add(&counter, 1);
-}
-```
-
-The header auto-detects the compiler and uses:
-- C11 `<stdatomic.h>` on GCC/Clang
-- `__sync_*` builtins on older compilers
-- Non-atomic fallback on TCC (not thread-safe, best-effort only)
-
-See `<cc_atomic.cch>` documentation in the stdlib spec for full API.
-
-## Error Reporting
-- On C compiler/linker failure: print the exact command, exit code, and keep generated C/object for inspection.
-- On const binding overflow: clear error with max binding counts.
-- Build.cc parse errors: show file/line and message; fall back to defaults only if no consts emitted and no fatal error.
-
-## Debugging Environment Variables
-
-The following environment variables aid debugging compiler internals:
-
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `CC_DUMP_LOWERED=<path>` | Dump the lowered source written to TCC to `<path>` | See what TCC receives |
-| `CC_DEBUG_STUB_NODES=1` | Dump stub AST nodes (arenas, nurseries) | Debug AST pass issues |
-| `CC_KEEP_PP=1` | Keep temporary preprocessed files | Inspect lowered C |
-
-**Example: Debugging a compilation error**
-
-```bash
-# Dump lowered output to diagnose "lvalue expected" or similar TCC errors
-CC_DUMP_LOWERED=out/lowered.c ccc build myfile.ccs && less out/lowered.c
-
-# Inspect arena/nursery AST nodes
-CC_DEBUG_STUB_NODES=1 ccc build myfile.ccs
-
-# Keep preprocessed temp files for inspection
-CC_KEEP_PP=1 ccc build myfile.ccs
-```
-
-**Common debugging scenarios:**
-
-1. **"lvalue expected" error:** Use `CC_DUMP_LOWERED=<path>` to see what TCC is parsing. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
-
-2. **Arena/nursery span issues:** Use `CC_DEBUG_STUB_NODES=1` to dump AST node spans. Check that `line_start`/`line_end` and `col_start`/`col_end` match your source.
-
-3. **Macro expansion issues:** Use `CC_KEEP_PP=1` to keep the preprocessed file, then inspect it directly.
-
-## Compatibility Guidance
-- For Make/CMake integration: use `ccc --emit-c-only` to generate C and let the existing build drive compile/link, or `ccc --compile` to produce objects.
-- Use `ccc --print-cflags` and `ccc --print-libs` to get the necessary compiler and linker flags for your build system.
-- Keep generated C stable to aid caching and diagnostics.
-- Support `--verbose` to print all invoked commands.
-
-## Future Extensions (non-normative)
-
-### Comptime Build API (priority)
-- Full comptime evaluation in `build.cc`
-- Typed option queries: `cc_option_int()`, `cc_option_bool()`, `cc_option_string()`
-- Target constants: `TARGET_OS`, `TARGET_ARCH`, `TARGET_PTR_WIDTH`
-- Conditional target generation in `@comptime` blocks
-
-### Build Graph Enhancements
-- Explicit outputs/inputs for custom steps
-- Parallel step execution
-- Richer depfile integration
-
-### Standard Options
-Following Zig's pattern, standardize common options:
-- `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall`
-- `-Dtarget=<triple>`
-
-### Legacy Integration Helpers
-- **Comptime helper library** — expose a small set of `comptime` utilities (path normalization, simple JSON/TOML readers, flag expansion, etc.) so messy legacy build scripts can be re‑expressed inside `@comptime` blocks without hand‑rolling low-level parsing logic.
-- **Automatic stem disambiguation** — add `--out-stem <prefix>` (or similar `build.cc` hook) that prefixes generated files with their relative directories when basenames collide, letting legacy trees with reused filenames drop into the new output layout without accidental overwrites.
-- **Declarative → Make/Ninja bridge** — provide a way to emit target metadata (`cc_target` names, sources, deps, flags) as Makefile or Ninja fragments that legacy `Makefile`s can include, so `ccc build` can coexist with existing dependency graphs instead of replacing them wholesale.
-- **`--dump-comptime` mode** — add a build flag that prints the resolved `@comptime` state (constants, generated targets, selected branches) before running the compiler; this helps users debug why the comptime script produced a particular graph in a messy repo.
-- **Target grouping sugar** — allow `CC_TARGET_GROUP <name> { ... }` (or similar) so a block can declare multiple related `CC_TARGET` entries without repeating boilerplate when importing sprawling legacy target lists.
-
-## Inspiration: Zig `zig build`
-
-Zig models builds as a **DAG of named steps** with `build.zig` as imperative Zig code. CC mirrors this:
-
-| Zig | CC |
-|-----|-----|
-| `build.zig` (Zig code) | `build.cc` (CC code with comptime) |
-| `zig build <step>` | `ccc build <step>` |
-| `-Dname=value` | `-Dname=value` |
-| `b.addExecutable(...)` | `cc_exe(...)` in `@comptime` |
-
-Key difference: CC keeps declarative syntax (`CC_TARGET`) as sugar for simple cases, avoiding boilerplate for the common path.
-
-For more details, see `docs/zig-build-inspiration.md`.
-
-## Recipes (copy/paste)
-
-Assuming you built the compiler (`make -C cc ...`) and are in the repo root.
-
-### Build + run a single file
-
-```bash
-./cc/bin/ccc build run examples/hello.ccs
-```
-
-### Emit generated C only (let your build system compile it)
-
-```bash
-./cc/bin/ccc --emit-c-only examples/hello.ccs
-ls -l out/hello.c
-```
-
-### Use a target graph
-
-```bash
-./cc/bin/ccc build --build-file examples/mixed_c/build.cc --summary
-./cc/bin/ccc build list --build-file examples/mixed_c/build.cc
-./cc/bin/ccc build graph --format dot --build-file examples/mixed_c/build.cc
-```
-
-### Install a target binary
-
-```bash
-./cc/bin/ccc build install hello --build-file examples/mixed_c/build.cc --summary
-```
-
-### Disable the incremental cache
-
-```bash
-./cc/bin/ccc build --no-cache run --summary examples/hello.ccs
-```
-
+Parse errors identify the build file and line. Missing or ambiguous build files, malformed declarations, unknown targets, dependency cycles, invalid constants, unsafe legacy output arguments, and subprocess failures terminate the requested step with a nonzero status. Failed compiler and linker commands are reported with their return status; `--verbose` prints all invoked commands.

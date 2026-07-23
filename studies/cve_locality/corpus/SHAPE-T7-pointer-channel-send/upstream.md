@@ -2,13 +2,12 @@
 
 - **Links:** Class residual after slice `channel-stable-borrow` and
   stack-pointer alias bans (SHAPE-T3-*, SHAPE-T7-shared-mut-spawn).
-  Proved by compile of `struct { char* p; }` send (no fail oracle —
-  that is the point).
+  Closed by `pointer-channel-send-ban` (fail oracle:
+  `tests/channel_send_pointer_field_fail.ccs`).
 - **Product / versions:** (n/a — shape study)
 - **CWE(s):** CWE-416
 - **One paragraph:** Channel-stable-borrow tracks **slices**. A message
-  carrying a raw `T*` (or a struct field pointing at heap/stack) still
-  sends by value; the sender can free while the receiver holds the
-  pointer. Safe Rust rejects non-`Send` / short-lived references in
-  messages. Concurrent-C does not yet — claim-A miss on the non-slice
-  Send lattice.
+  carrying a raw `T*` field in a by-value struct previously sent by
+  value; the sender could free while the receiver held the pointer.
+  Concurrent-C rejects that aggregate send. Bare `T*` handle payloads
+  remain a narrower Gap outside this shape's prevented path.

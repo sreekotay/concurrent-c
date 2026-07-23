@@ -9,5 +9,5 @@
 - **Rust angle (claim A):** Safe Rust cannot put `&T` / non-`Send` raw
   ownership into a cross-thread message — ill-formed. Not `unsafe`
   parity.
-- **Likely CC verdict:** `still_expressible` — slices are prevented;
-  `T*` / pointer fields are not.
+- **Likely CC verdict:** `prevented` — by-value aggregates with raw
+  pointer fields are ill-formed; send owned / static bytes.

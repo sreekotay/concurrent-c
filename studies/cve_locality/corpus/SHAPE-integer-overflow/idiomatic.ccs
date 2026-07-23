@@ -1,0 +1,26 @@
+/*
+ * SHAPE — integer overflow into alloc size: MITIGATED.
+ *
+ * Idiomatic: cc_add_i64_checked rejects overflow.
+ * Escape: size_t need = a + b; still wraps.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        if (e.kind != CC_ERR_INVALID_ARG) {
+            fprintf(stderr, "unexpected: %s\n", e.message);
+            return 2;
+        }
+        printf("shape-integer-overflow: mitigated "
+               "(checked add fails on overflow; bare + still wraps)\n");
+        return 0;
+    }
+
+    int64_t need = cc_add_i64_checked(INT64_MAX, 1) !>;
+    (void)need;
+    printf("FAIL: overflow should have erred\n");
+    return 1;
+}

@@ -1,23 +1,14 @@
 # Verdict
 
-- **Primary:** `still_expressible`
+- **Primary:** `prevented`
 - **Family:** `locality`
-- **needs_language:** `pointer-channel-send-ban` / fuller non-`Send`
-  lattice for `T*` and structs containing pointers
+- **needs_language:** —
 - **Rationale:**
-  Slice sends of non-unique views are ill-formed
-  (SHAPE-T3-*). Stack-local `T*` mutation-via-alias in spawn is
-  ill-formed (SHAPE-T7-shared-mut-spawn). The residual shape still
-  compiles:
-
-      typedef struct Msg { char* p; size_t n; } Msg;
-      Msg m = { .p = malloc(n), .n = n };
-      cc_channel_send(tx, m);   /* still compiles */
-      free(m.p);                /* receiver may still hold got.p */
-
-  Heap `T*` value-capture into spawn is similarly open. Safe Rust claim
-  A rejects both. This is Concurrent-C backlog, not Rust `unsafe`
-  parity.
-- **What would change the verdict:** Ban channel send / escaping capture
-  of types that contain raw pointers (unless branded owned / unique) →
-  toward `prevented`.
+  By-value channel send of an aggregate with a raw pointer field is
+  ill-formed (`pointer-channel-send-ban`;
+  `tests/channel_send_pointer_field_fail.ccs`). Idiomatic path sends
+  owned / static slice bytes instead. Bare `T*` handle payloads remain
+  outside this rule (redis `RedisRequest*` join protocol).
+- **What would change the verdict:** Broader non-`Send` lattice that also
+  bans bare non-branded `T*` would shrink Gap further; not required for
+  this shape's claim-A miss.

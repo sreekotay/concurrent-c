@@ -1,0 +1,25 @@
+/*
+ * SHAPE-T9 — raw index OOB write: still_expressible.
+ *
+ * Schema / at() help reads and wire length. Raw ptr[i]= past len still
+ * compiles — that is the miss (not executed here).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char buf[4] = {'a', 'b', 'c', 'd'};
+    char[:] s = cc_slice_from_buffer(buf, 4);
+
+    /* Soft read: past-end at() returns 0, does not trap. */
+    if (s.at(4) != 0) return 1;
+
+    /* Bug-shaped (still compiles if uncommented):
+     *   ((char*)s.ptr)[s.len] = 'x';
+     */
+
+    printf("shape-t9-raw-index-oob: still_expressible "
+           "(raw ptr[i]= past len; needs checked-index-write)\n");
+    return 0;
+}

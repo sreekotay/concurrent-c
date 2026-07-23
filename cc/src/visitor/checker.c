@@ -10,6 +10,7 @@
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "visitor/pass_common.h"
+#include "preprocess/preprocess.h"
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
@@ -23,6 +24,7 @@ typedef enum {
 
 typedef struct {
     const char* name; /* borrowed */
+    const char* type_spelling; /* borrowed from DECL_ITEM aux_s2, if any */
     int is_slice;
     int is_array;
     int is_stack_slice_view;
@@ -574,6 +576,94 @@ static int cc__call_is_channel_data_send(const char* name) {
     return 0;
 }
 
+/* Branded / runtime-owned spellings — not treated as dangling raw T* fields. */
+static int cc__type_is_branded_channel_ok(const char* t) {
+    if (!t || !t[0]) return 0;
+    if (strstr(t, "CCSlice")) return 1;
+    if (strstr(t, "CCArena")) return 1;
+    if (strstr(t, "CCChan")) return 1;
+    if (strstr(t, "CCNursery")) return 1;
+    if (strstr(t, "CCArc")) return 1;
+    if (strstr(t, "CCMutex") || strstr(t, "Mutex")) return 1;
+    if (strstr(t, "CCAtomic") || strstr(t, "Atomic")) return 1;
+    if (strstr(t, "CCFile")) return 1;
+    if (strstr(t, "CCResult")) return 1;
+    if (strstr(t, "(*)")) return 1; /* function pointer */
+    return 0;
+}
+
+static int cc__type_spelling_is_raw_pointer(const char* t) {
+    if (!t || !strchr(t, '*')) return 0;
+    if (cc__type_is_branded_channel_ok(t)) return 0;
+    return 1;
+}
+
+/* Copy type spelling, trim whitespace / leading cv / trailing array dims for reflect. */
+static void cc__copy_type_base_name(char* out, size_t out_sz, const char* type_name) {
+    size_t i = 0, o = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name) return;
+    while (type_name[i] == ' ' || type_name[i] == '\t') i++;
+    if (strncmp(type_name + i, "const ", 6) == 0) i += 6;
+    else if (strncmp(type_name + i, "volatile ", 9) == 0) i += 9;
+    while (type_name[i] == ' ' || type_name[i] == '\t') i++;
+    while (type_name[i] && type_name[i] != '[' && type_name[i] != '*' && o + 1 < out_sz) {
+        out[o++] = type_name[i++];
+    }
+    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '\t')) o--;
+    out[o] = '\0';
+}
+
+/* Aggregate-by-value contains a raw pointer field (pointer-channel-send-ban).
+   Bare T* payloads are not rejected here (handle protocols / redis Req*). */
+static int cc__type_contains_raw_pointer_field(const char* src, size_t src_len,
+                                               const char* type_name, int depth) {
+    char base[256];
+    CCCtField* fields = NULL;
+    size_t n = 0;
+    int bad = 0;
+    if (!type_name || !type_name[0] || depth > 8) return 0;
+    if (cc__type_is_branded_channel_ok(type_name)) return 0;
+    /* Pointer / channel-endpoint / slice spellings are not aggregate-by-value. */
+    if (strchr(type_name, '*') || strchr(type_name, '[') || strchr(type_name, ':')) return 0;
+    if (!src || src_len == 0) return 0;
+    cc__copy_type_base_name(base, sizeof(base), type_name);
+    if (!base[0] || cc__type_is_branded_channel_ok(base)) return 0;
+    /* Prefer typedef name (`Msg`); also try `struct Tag` / bare tag. */
+    if (!cc_ct_reflect_struct_fields(src, src_len, base, &fields, &n)) {
+        const char* tag = base;
+        if (strncmp(base, "struct ", 7) == 0) tag = base + 7;
+        else if (strncmp(base, "union ", 6) == 0) tag = base + 6;
+        while (*tag == ' ' || *tag == '\t') tag++;
+        if (tag != base && tag[0])
+            (void)cc_ct_reflect_struct_fields(src, src_len, tag, &fields, &n);
+        if ((!fields || n == 0) && tag[0]) {
+            char struct_spelling[288];
+            snprintf(struct_spelling, sizeof(struct_spelling), "struct %s", tag);
+            (void)cc_ct_reflect_struct_fields(src, src_len, struct_spelling, &fields, &n);
+        }
+    }
+    if (!fields || n == 0) return 0;
+    for (size_t i = 0; i < n; i++) {
+        const char* ft = fields[i].type;
+        if (!ft) continue;
+        if (cc__type_is_branded_channel_ok(ft)) continue;
+        if (cc__type_spelling_is_raw_pointer(ft)) {
+            bad = 1;
+            break;
+        }
+        if (!strchr(ft, '*') && !strchr(ft, '[') && !strchr(ft, '(')) {
+            if (cc__type_contains_raw_pointer_field(src, src_len, ft, depth + 1)) {
+                bad = 1;
+                break;
+            }
+        }
+    }
+    cc_ct_free_fields(fields, n);
+    return bad;
+}
+
 /* Best-effort: arena/pointer ident under a call (&x, x, or x->field → field/x). */
 static const char* cc__subtree_arena_ref_name(const StubNodeView* nodes,
                                               const ChildList* kids,
@@ -1015,8 +1105,7 @@ static int cc__walk_call(int idx,
         return 0;
     }
 
-    /* Channel-stable-borrow: ban send of non-unique, non-static slice views
-       (arena, stack, untracked from_buffer, …). Unique / static / send_into OK. */
+    /* Channel-stable-borrow + pointer-channel-send-ban. */
     if (cc__call_is_channel_data_send(n->aux_s1)) {
         const ChildList* cl = &kids[idx];
         for (int i = 0; i < cl->len; i++) {
@@ -1043,6 +1132,22 @@ static int cc__walk_call(int idx,
                         fprintf(stderr,
                                 "  hint: use cc_slice_from_static, a unique T[:!] / send_take, or copy into a "
                                 "stable arena before send\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                    if (v && v->type_spelling &&
+                        cc__type_contains_raw_pointer_field(ctx ? ctx->src : NULL,
+                                                           ctx ? ctx->src_len : 0,
+                                                           v->type_spelling, 0)) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_CHANNEL,
+                                             "cannot send value '%s' containing a raw pointer field on a channel",
+                                             cn->aux_s1);
+                        fprintf(stderr,
+                                "  note: raw T* fields in a by-value message may dangle after the sender frees "
+                                "(pointer-channel-send-ban)\n");
+                        fprintf(stderr,
+                                "  hint: send owned bytes (unique T[:!] / static slice), a branded handle, or "
+                                "an aggregate without raw pointer fields\n");
                         ctx->errors++;
                         return -1;
                     }
@@ -1351,6 +1456,7 @@ static int cc__walk(int idx,
         if (!v) return -1;
         v->decl_line = n->line_start;
         v->decl_col = n->col_start;
+        v->type_spelling = n->aux_s2;
         {
             int blk = cc__enclosing_block(nodes, idx);
             v->borrow_end_line = (blk >= 0) ? cc__subtree_max_line(nodes, kids, blk) : n->line_start;
@@ -1555,12 +1661,13 @@ static int cc__walk(int idx,
 }
 
 int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
+    char* owned_src = NULL;
     if (!root || !ctx) return -1;
     ctx->errors = 0;
+    ctx->src = NULL;
+    ctx->src_len = 0;
 
-
-    /* `await` is allowed, but only inside @async functions.
-       Ignore `await` in comments/strings so tests can mention it in prose. */
+    /* Load TU source once: await/@async scan + pointer-channel-send-ban reflection. */
     if (ctx->input_path) {
         FILE* f = fopen(ctx->input_path, "rb");
         if (f) {
@@ -1568,27 +1675,29 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             long n = ftell(f);
             fseek(f, 0, SEEK_SET);
             if (n > 0 && n < (1 << 20)) {
-                char* buf = (char*)malloc((size_t)n + 1);
-                if (buf) {
-                    size_t got = fread(buf, 1, (size_t)n, f);
-                    buf[got] = 0;
+                owned_src = (char*)malloc((size_t)n + 1);
+                if (owned_src) {
+                    size_t got = fread(owned_src, 1, (size_t)n, f);
+                    owned_src[got] = 0;
+                    ctx->src = owned_src;
+                    ctx->src_len = got;
 
                     CCInertScan scan;
                     cc_inert_scan_init(&scan, ctx->input_path);
                     int saw_await = 0;
                     int saw_async = 0;
                     for (size_t i = 0; i < got; ) {
-                        if (cc_inert_scan_step(&scan, buf, got, &i)) continue;
-                        char c = buf[i];
+                        if (cc_inert_scan_step(&scan, owned_src, got, &i)) continue;
+                        char c = owned_src[i];
                         /* Track presence of @async and await (outside comments/strings). */
-                        if (c == '@' && i + 6 <= got && memcmp(buf + i + 1, "async", 5) == 0) {
-                            char after = (i + 6 < got) ? buf[i + 6] : ' ';
+                        if (c == '@' && i + 6 <= got && memcmp(owned_src + i + 1, "async", 5) == 0) {
+                            char after = (i + 6 < got) ? owned_src[i + 6] : ' ';
                             if (!(isalnum((unsigned char)after) || after == '_')) saw_async = 1;
                         }
                         if (c == 'a' && i + 5 <= got &&
-                            memcmp(buf + i, "await", 5) == 0) {
-                            char before = (i > 0) ? buf[i - 1] : ' ';
-                            char after = (i + 5 < got) ? buf[i + 5] : ' ';
+                            memcmp(owned_src + i, "await", 5) == 0) {
+                            char before = (i > 0) ? owned_src[i - 1] : ' ';
+                            char after = (i + 5 < got) ? owned_src[i + 5] : ' ';
                             int before_ok = !(isalnum((unsigned char)before) || before == '_');
                             int after_ok = !(isalnum((unsigned char)after) || after == '_');
                             if (before_ok && after_ok) saw_await = 1;
@@ -1604,12 +1713,12 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         cc__emit_err_cat(ctx, &sn, CC_ERR_ASYNC, "'await' is only valid inside @async functions");
                         fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
                         ctx->errors++;
-                        free(buf);
+                        free(owned_src);
+                        ctx->src = NULL;
+                        ctx->src_len = 0;
                         fclose(f);
                         return -1;
                     }
-
-                    free(buf);
                 }
             }
             fclose(f);
@@ -1653,6 +1762,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             }
         }
         /* Transitional: no stub nodes, skip other checks. */
+        free(owned_src);
+        ctx->src = NULL;
+        ctx->src_len = 0;
         return 0;
     }
 
@@ -1666,7 +1778,12 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     int* idx_map = NULL;
     if (ctx->input_path) {
         idx_map = (int*)malloc((size_t)n * sizeof(int));
-        if (!idx_map) return -1;
+        if (!idx_map) {
+            free(owned_src);
+            ctx->src = NULL;
+            ctx->src_len = 0;
+            return -1;
+        }
         for (int i = 0; i < n; i++) idx_map[i] = -1;
         int m = 0;
         for (int i = 0; i < n; i++) {
@@ -1676,7 +1793,13 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
         }
         if (m > 0 && m < n) {
             owned_nodes = (StubNodeView*)calloc((size_t)m, sizeof(StubNodeView));
-            if (!owned_nodes) { free(idx_map); return -1; }
+            if (!owned_nodes) {
+                free(idx_map);
+                free(owned_src);
+                ctx->src = NULL;
+                ctx->src_len = 0;
+                return -1;
+            }
             for (int i = 0; i < n; i++) {
                 int ni = idx_map[i];
                 if (ni < 0) continue;
@@ -1725,6 +1848,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             ctx->errors++;
             free(idx_map);
             free(owned_nodes);
+            free(owned_src);
+            ctx->src = NULL;
+            ctx->src_len = 0;
             return -1;
         }
     }
@@ -1778,7 +1904,14 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     }
 
     ChildList* kids = (ChildList*)calloc((size_t)n, sizeof(ChildList));
-    if (!kids) { free(idx_map); free(owned_nodes); return -1; }
+    if (!kids) {
+        free(idx_map);
+        free(owned_nodes);
+        free(owned_src);
+        ctx->src = NULL;
+        ctx->src_len = 0;
+        return -1;
+    }
     for (int i = 0; i < n; i++) {
         int p = nodes[i].parent;
         if (p >= 0 && p < n) cc__child_push(&kids[p], i);
@@ -1929,6 +2062,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             free(closure_escapes);
             free(idx_map);
             free(owned_nodes);
+            free(owned_src);
+            ctx->src = NULL;
+            ctx->src_len = 0;
             return -1;
         }
     }
@@ -2069,6 +2205,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     free(closure_escapes);
     free(idx_map);
     free(owned_nodes);
+    free(owned_src);
+    ctx->src = NULL;
+    ctx->src_len = 0;
 
     return ctx->errors ? -1 : 0;
 }

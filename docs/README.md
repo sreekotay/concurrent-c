@@ -10,6 +10,8 @@
 
 - **[Specification](../spec/concurrent-c-spec-complete.md)** — Full language specification
 - **[Standard Library](../spec/concurrent-c-stdlib-spec.md)** — Stdlib API reference
+- **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract
+- **[Scheduler ops runbook](scheduler-ops-runbook.md)** — Build/test/diagnose loops for the scheduler
 - **[Examples](../examples/)** — Working code examples with [learning path](../examples/README.md#learning-path-recommended-order)
 
 ## Building the Compiler

@@ -1,0 +1,39 @@
+/*
+ * SHAPE-T7 residual — bare T* on a channel: still_expressible.
+ *
+ * Aggregate pointer-field send is prevented
+ * (tests/channel_send_pointer_field_fail.ccs). Bare char* still sends.
+ *
+ * Demo: send then recv before free (no crash). free-before-recv is
+ * equally well-formed today.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* heap = (char*)malloc(8);
+    if (!heap) return 1;
+    memcpy(heap, "payload!", 8);
+
+    char*[~4 >] tx;
+    char*[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    if (!cc_io_avail(cc_channel_send(tx, heap))) return 3;
+
+    char* got = NULL;
+    if (!cc_io_avail(cc_channel_recv(rx, &got))) return 4;
+    if (!got || memcmp(got, "payload!", 8) != 0) return 5;
+
+    free(heap);
+    /* Bug-shaped (also still compiles if moved above recv):
+     *   free(heap); then use got */
+
+    printf("shape-t7-bare-pointer-channel: still_expressible "
+           "(bare T* send; needs bare-pointer-channel-send-ban)\n");
+    return 0;
+}

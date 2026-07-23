@@ -297,8 +297,7 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 *   CTRL_DONE    (-4)   — completed, stack quiescent, safe for joiner to reclaim.
 *                          Implementation extension for join signaling — the
 *                          trampoline sets this after mco_resume returns so
-*                          joiners know the stack is truly idle.  Not in the
-*                          base spec; documented in spec/scheduler_v2.md §DONE.
+*                          joiners know the stack is truly idle.
 *   > 0: CTRL_OWNED(wid) = wid+1 — stack exclusively owned by worker wid
 *
 * The CAS QUEUED→OWNED(wid) atomically claims "running" AND "I own the stack",

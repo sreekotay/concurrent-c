@@ -12,6 +12,9 @@
 typedef struct {
     CCSymbolTable* symbols;
     const char* input_path;
+    /* Optional TU source for struct-field reflection (pointer-channel-send-ban). */
+    const char* src;
+    size_t src_len;
     int errors;
     int warnings;
 } CCCheckerCtx;
