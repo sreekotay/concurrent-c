@@ -27,6 +27,10 @@ void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols) {
     g_ud_symbols = symbols;
 }
 
+CCSymbolTable* cc_unwrap_destroy_get_symbols(void) {
+    return g_ud_symbols;
+}
+
 /* Skip C comments and string/char literals starting at `s[*i]`.  Advances
  * `*i` past the skipped region.  Returns 1 if any input was consumed. */
 static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {

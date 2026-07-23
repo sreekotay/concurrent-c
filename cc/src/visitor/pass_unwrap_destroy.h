@@ -13,6 +13,12 @@
  * to the hardcoded builtin-owned list (CCNursery*, CCArena, CCChan*). */
 void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols);
 
+/* Read back the ambient symbol table installed above (NULL when none).
+ * Used by phase-1 passes that run inside the same canonicalize window and
+ * need `cc_type_register(...)` hook lookups (e.g. @variant arm-destructor
+ * resolution in preprocess/variant_lower.c). */
+CCSymbolTable* cc_unwrap_destroy_get_symbols(void);
+
 /* Rewrite a trailing `@destroy { body }` suffix on a statement that
  * contains a `!>` or `?>` operator into a standalone `@defer { body };`
  * placed immediately after the original statement terminator.

@@ -25,6 +25,7 @@
 #include "preprocess/template_scan.h"
 #include "preprocess/type_registry.h"
 #include "preprocess/type_graph.h"
+#include "preprocess/variant_lower.h"
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/result_fn_registry.h"
@@ -11264,6 +11265,23 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
+    /* @variant declarations + trapped consumption dialect (spec/draft_variants.md).
+     * Runs BEFORE slice/result type lowering so arm types like `T[:]` are
+     * still visible to those passes in the emitted union, and before the
+     * `!>`/`?>` result-unwrap phase-3 passes so projection suffix handlers
+     * are consumed here (a projection is an unwrap whose err-set is the
+     * other arms).  The decls pass resets and repopulates the per-TU
+     * variant registry; the uses pass is a no-op when no @variant exists. */
+    {
+        char* vd = cc_rewrite_variant_decls_text(chain->src, chain->len, input_path);
+        if (vd == (char*)-1) return -1;
+        if (cc_pass_chain_apply(chain, vd) < 0) return -1;
+        if (cc_variant_registry_count() > 0) {
+            char* vu = cc_rewrite_variant_uses_text(chain->src, chain->len, input_path);
+            if (vu == (char*)-1) return -1;
+            if (cc_pass_chain_apply(chain, vu) < 0) return -1;
+        }
+    }
     /* Channel-pair lowering must run while `[~ ... >]` / `[~ ... <]` bracket
      * declarations are still in the source; chan-handle lowering erases them. */
     CC__CANON_STEP("cc__rewrite_channel_pair_pass"); if (cc_pass_chain_apply(chain, cc__rewrite_channel_pair_pass(chain->src, chain->len, input_path)) < 0) return -1;
