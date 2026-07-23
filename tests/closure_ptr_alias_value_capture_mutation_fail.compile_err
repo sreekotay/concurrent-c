@@ -1,0 +1,1 @@
+mutation through value-captured pointer 'p' that aliases an outer local

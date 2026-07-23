@@ -537,7 +537,7 @@ void borrow(char[:]* buf);            // borrows, caller retains
 
 When a closure is captured for use in another thread or task, the captured values are copied into the closure. This creates constraints on what can be captured.
 
-**Rule (channel send vs closure capture):** Channel `send()` deep-copies the value into channel-internal storage—**any value can be sent**. The sendability rules in this section apply only to **closure captures** for threads and tasks, not to channel operations.
+**Rule (channel send vs closure capture):** Channel `send()` copies the value into channel-internal storage. Sendability rules for **closure captures** (threads/tasks) are separate from channel operations. Channel send of a **non-unique arena-backed slice borrow** is ill-formed (see **channel-stable-borrow** below); materialize first.
 
 **Closure capture rules:**
 
@@ -594,6 +594,10 @@ spawn_thread(() => {
 **Rule (arena epoch pin on capture):** Capturing a non-unique arena-backed slice into a nursery/thread task **pins** that arena's provenance epoch until the nursery (or equivalent join scope) ends. While the pin is live, `cc_arena_reset` / `cc_arena_restore` of that arena is a compile-time error. Materialize into a unique/stable slice (or `@unsafe`) to escape the pin.
 
 **Rule (arena reset with live borrow):** `cc_arena_reset` / `cc_arena_restore` is a compile-time error when a derived arena slice borrow of that arena is still within its lexical enclosing block. End the borrow's scope before reset, or copy into another arena / unique slice first.
+
+**Rule (channel-stable-borrow):** Channel send of a non-unique arena-backed slice view is a compile-time error. The payload may outlive the arena epoch that minted the view. Materialize into a unique slice, a static/canonical slice, or channel-bound batch storage (`send_into` / copy into the receiver's arena) before send. Unique (`T[:!]` / `adopt` / `recv`) and static slices may be sent.
+
+**Rule (pointer-alias capture mutation):** Value-capturing `T* p = &local` into a task/thread closure and then writing through `*p` / `p->field` is a compile-time error (same class as mutating a reference capture). Use `Atomic` / `Mutex`, capture by reference under those wrappers, or `@unsafe`.
 
 ```c
 void ok_pattern() {

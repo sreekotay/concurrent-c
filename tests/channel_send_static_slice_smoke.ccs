@@ -1,0 +1,21 @@
+/* Smoke: static/canonical slices may be sent on channels. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char[:] msg = cc_slice_from_static((void*)"ok", 2);
+
+    CCChan* ch = cc_chan_create(4);
+    if (!ch) return 1;
+    @defer cc_chan_free(ch);
+
+    if (cc_chan_send(ch, &msg, sizeof(msg)) != 0) return 2;
+
+    char[:] got = {0};
+    if (cc_chan_recv(ch, &got, sizeof(got)) != 0) return 3;
+    if (got.len != 2 || !got.ptr || memcmp(got.ptr, "ok", 2) != 0) return 4;
+
+    printf("channel_send_static_slice_smoke: ok\n");
+    return 0;
+}

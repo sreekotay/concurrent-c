@@ -1,0 +1,27 @@
+/* Smoke: T* from malloc (not &local) may be value-captured and written. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    int* p = (int*)malloc(sizeof(int));
+    if (!p) return 1;
+    *p = 0;
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [p] {
+            *p = 42;
+        });
+    }
+
+    if (*p != 42) { free(p); return 2; }
+    free(p);
+    printf("closure_ptr_heap_value_capture_mut_smoke: ok\n");
+    return 0;
+}

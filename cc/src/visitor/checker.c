@@ -443,6 +443,37 @@ static int cc__call_is_nursery_spawn(const char* name) {
     return 0;
 }
 
+/* Channel data send (not send_task / send_into). Used for channel-stable-borrow. */
+static int cc__call_is_channel_data_send(const char* name) {
+    if (!name) return 0;
+    if (strstr(name, "send_task")) return 0;
+    if (strstr(name, "send_into")) return 0;
+    if (strcmp(name, "cc_channel_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_try_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_timed_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_deadline_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_raw_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_raw_try_send") == 0) return 1;
+    if (strcmp(name, "cc_channel_send_take") == 0) return 1;
+    if (strcmp(name, "cc_channel_send_take_slice") == 0) return 1;
+    if (strcmp(name, "cc_chan_send") == 0) return 1;
+    if (strcmp(name, "cc_chan_try_send") == 0) return 1;
+    if (strcmp(name, "cc_chan_timed_send") == 0) return 1;
+    if (strcmp(name, "cc_chan_deadline_send") == 0) return 1;
+    if (strcmp(name, "cc_chan_nursery_send") == 0) return 1;
+    if (strcmp(name, "cc_chan_send_take") == 0) return 1;
+    if (strcmp(name, "cc_chan_try_send_take") == 0) return 1;
+    if (strcmp(name, "cc_chan_send_take_slice") == 0) return 1;
+    if (strcmp(name, "cc_chan_try_send_take_slice") == 0) return 1;
+    /* UFCS: CCChanTx_<mangled>_send / _try_send */
+    if (strstr(name, "ChanTx")) {
+        size_t n = strlen(name);
+        if (n > 9 && strcmp(name + n - 9, "_try_send") == 0) return 1;
+        if (n > 5 && strcmp(name + n - 5, "_send") == 0) return 1;
+    }
+    return 0;
+}
+
 /* Best-effort: arena/pointer ident under a call (&x, x, or x->field → field/x). */
 static const char* cc__subtree_arena_ref_name(const StubNodeView* nodes,
                                               const ChildList* kids,
@@ -769,6 +800,44 @@ static int cc__walk_call(int idx,
                 arena_v->epoch_pinned = 1;
                 if (pin_end > arena_v->pin_end_line) arena_v->pin_end_line = pin_end;
             }
+        }
+        return 0;
+    }
+
+    /* Channel-stable-borrow: ban send of non-unique arena slice views.
+       Materialize (unique / static / send_into batch arena) first. */
+    if (cc__call_is_channel_data_send(n->aux_s1)) {
+        const ChildList* cl = &kids[idx];
+        for (int i = 0; i < cl->len; i++) {
+            if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        }
+        int st[256];
+        int sp = 0;
+        st[sp++] = idx;
+        while (sp > 0) {
+            int cur = st[--sp];
+            const StubNodeView* cn = &nodes[cur];
+            if (cn->kind == CC_STUB_IDENT && cn->aux_s1) {
+                if (strcmp(cn->aux_s1, n->aux_s1) == 0) {
+                    /* skip callee name */
+                } else {
+                    CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, cn->aux_s1);
+                    if (v && v->is_slice && v->is_arena_slice_view && !v->move_only && !v->moved) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot send arena-backed slice borrow '%s' on a channel",
+                                             cn->aux_s1);
+                        fprintf(stderr,
+                                "  note: non-unique arena views may be invalidated after send (channel-stable-borrow)\n");
+                        fprintf(stderr,
+                                "  hint: materialize into a unique/static slice, or copy into the channel batch arena before send\n");
+                        ctx->errors++;
+                        return -1;
+                    }
+                }
+            }
+            const ChildList* k = &kids[cur];
+            for (int j = 0; j < k->len && sp < (int)(sizeof(st) / sizeof(st[0])); j++)
+                st[sp++] = k->child[j];
         }
         return 0;
     }

@@ -561,6 +561,55 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     char* ty = cc__dup_decl_type_text(ty_s, ty_e, &flags);
     if (!ty) return;
 
+    /* Detect user `T* p = &local` — value-capturing p then writing *p / p->f is
+     * the SHAPE-T7 smuggle past reference-capture mutation bans (bit 3 / 0x08).
+     * Skip compiler temps (cc_ab_*, __cc_*, …) from autoblock / lowering. */
+    {
+        int synthetic = (name_n >= 4 && name_s[0] == 'c' && name_s[1] == 'c' && name_s[2] == '_') ||
+                        (name_n >= 5 && name_s[0] == '_' && name_s[1] == '_' &&
+                         name_s[2] == 'c' && name_s[3] == 'c' && name_s[4] == '_');
+        int is_ptr = 0;
+        int is_const_ptr = 0;
+        for (const char* q = ty; *q; q++) {
+            if (*q == '*') { is_ptr = 1; break; }
+        }
+        if (is_ptr) {
+            const char* star = strchr(ty, '*');
+            if (star) {
+                const char* c = strstr(ty, "const");
+                if (c && c < star) is_const_ptr = 1;
+            }
+        }
+        if (!synthetic && is_ptr && !is_const_ptr) {
+            CCInertScan scan;
+            cc_inert_scan_init(&scan, NULL);
+            scan.at_line_start = 0;
+            size_t i = p_off;
+            size_t eq = (size_t)-1;
+            while (i < semi_off) {
+                if (cc_inert_scan_step(&scan, stmt, semi_off, &i)) continue;
+                if (stmt[i] == '=' && (i + 1 >= semi_off || stmt[i + 1] != '=')) {
+                    eq = i;
+                    break;
+                }
+                i++;
+            }
+            if (eq != (size_t)-1) {
+                size_t j = eq + 1;
+                while (j < semi_off && (stmt[j] == ' ' || stmt[j] == '\t' ||
+                                        stmt[j] == '\n' || stmt[j] == '\r'))
+                    j++;
+                if (j < semi_off && stmt[j] == '&') {
+                    j++;
+                    while (j < semi_off && (stmt[j] == ' ' || stmt[j] == '\t')) j++;
+                    if (j < semi_off && cc__is_ident_start_char(stmt[j])) {
+                        flags |= 0x08; /* aliases_outer_local */
+                    }
+                }
+            }
+        }
+    }
+
     /* Helper: record a single name+type in the scope arrays. */
     #define RECORD_NAME_IN_SCOPE(nm_s, nm_n, ty_dup) do { \
         int cur_n_ = scope_counts[depth]; \
@@ -1552,6 +1601,142 @@ static int cc__addr_of_is_readonly_call(const char* body,
     if (out_callee) *out_callee = sig->name;
     if (out_param_ty) *out_param_ty = pty;
     return cc__param_is_const_ptr(pty);
+}
+
+/* Returns non-zero if the body writes through pointer `var_name`
+ * (`*p =`, `(*p)++`, `p->field =`, …). Used for value-captured aliases. */
+static int cc__find_ptr_pointee_mutation_in_body(const char* body,
+                                                 const char* var_name,
+                                                 size_t* out_offset) {
+    if (!body || !var_name || !var_name[0]) return 0;
+    size_t var_len = strlen(var_name);
+    size_t body_len = strlen(body);
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    size_t i = 0;
+    while (i < body_len) {
+        if (cc_inert_scan_step(&scan, body, body_len, &i)) continue;
+
+        /* ++*p / --*p */
+        if (i + 2 + var_len <= body_len &&
+            ((body[i] == '+' && body[i + 1] == '+') ||
+             (body[i] == '-' && body[i + 1] == '-'))) {
+            size_t j = i + 2;
+            while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+            if (j < body_len && body[j] == '*') {
+                j++;
+                while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                if (j + var_len <= body_len && strncmp(body + j, var_name, var_len) == 0) {
+                    char after = (j + var_len < body_len) ? body[j + var_len] : 0;
+                    if (!cc__is_ident_char2(after)) {
+                        if (out_offset) *out_offset = i;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        if (!cc__is_ident_start_char(body[i])) { i++; continue; }
+        if (i > 0 && cc__is_ident_char2(body[i - 1])) { i++; continue; }
+        if (i + var_len > body_len || strncmp(body + i, var_name, var_len) != 0) {
+            i++;
+            continue;
+        }
+        char after = (i + var_len < body_len) ? body[i + var_len] : 0;
+        if (cc__is_ident_char2(after)) { i++; continue; }
+
+        /* Skip if this is a field name: foo.p or foo->p */
+        if (i >= 2) {
+            size_t k = i - 1;
+            while (k > 0 && (body[k] == ' ' || body[k] == '\t')) k--;
+            if (body[k] == '.' || (body[k] == '>' && k > 0 && body[k - 1] == '-')) {
+                i++;
+                continue;
+            }
+        }
+
+        /* *p  (pointee write) — look for unary * before the name */
+        if (i > 0) {
+            size_t k = i - 1;
+            while (k > 0 && (body[k] == ' ' || body[k] == '\t')) k--;
+            if (body[k] == '*') {
+                /* not multiply: previous non-space before * should not be ident/)/] */
+                size_t m = k;
+                if (m > 0) {
+                    m--;
+                    while (m > 0 && (body[m] == ' ' || body[m] == '\t')) m--;
+                    char prev = body[m];
+                    if (cc__is_ident_char2(prev) || prev == ')' || prev == ']' || prev == '\'') {
+                        /* likely binary * — skip */
+                    } else {
+                        size_t j = i + var_len;
+                        while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                        if (j + 1 < body_len &&
+                            ((body[j] == '+' && body[j + 1] == '+') ||
+                             (body[j] == '-' && body[j + 1] == '-'))) {
+                            if (out_offset) *out_offset = k;
+                            return 1;
+                        }
+                        if (j < body_len && body[j] == '=' &&
+                            (j + 1 >= body_len || body[j + 1] != '=')) {
+                            if (out_offset) *out_offset = k;
+                            return 1;
+                        }
+                        if (j + 1 < body_len && body[j + 1] == '=' &&
+                            (body[j] == '+' || body[j] == '-' || body[j] == '*' ||
+                             body[j] == '/' || body[j] == '%' || body[j] == '&' ||
+                             body[j] == '|' || body[j] == '^')) {
+                            if (out_offset) *out_offset = k;
+                            return 1;
+                        }
+                    }
+                } else {
+                    size_t j = i + var_len;
+                    while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                    if (j < body_len && body[j] == '=' &&
+                        (j + 1 >= body_len || body[j + 1] != '=')) {
+                        if (out_offset) *out_offset = k;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        /* p->field = … */
+        {
+            size_t j = i + var_len;
+            while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+            if (j + 1 < body_len && body[j] == '-' && body[j + 1] == '>') {
+                j += 2;
+                while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                if (j < body_len && cc__is_ident_start_char(body[j])) {
+                    while (j < body_len && cc__is_ident_char2(body[j])) j++;
+                    while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                    if (j + 1 < body_len &&
+                        ((body[j] == '+' && body[j + 1] == '+') ||
+                         (body[j] == '-' && body[j + 1] == '-'))) {
+                        if (out_offset) *out_offset = i;
+                        return 1;
+                    }
+                    if (j < body_len && body[j] == '=' &&
+                        (j + 1 >= body_len || body[j + 1] != '=')) {
+                        if (out_offset) *out_offset = i;
+                        return 1;
+                    }
+                    if (j + 1 < body_len && body[j + 1] == '=' &&
+                        (body[j] == '+' || body[j] == '-' || body[j] == '*' ||
+                         body[j] == '/' || body[j] == '%' || body[j] == '&' ||
+                         body[j] == '|' || body[j] == '^')) {
+                        if (out_offset) *out_offset = i;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        i++;
+    }
+    return 0;
 }
 
 /* Returns non-zero if mutation/potential mutation found. */
@@ -2952,21 +3137,47 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                     }
                 }
             }
-            /* Check for mutations to reference-captured variables (unless @unsafe). */
+            /* Check for mutations to reference-captured variables, and for
+             * value-captured pointer aliases of outer locals (unless @unsafe). */
             if (!d->is_unsafe && d->body_text && d->cap_count > 0) {
                 for (int ci = 0; ci < d->cap_count; ci++) {
                     int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
-                    if (!is_ref) continue;
+                    int aliases_local = (d->cap_flags && (d->cap_flags[ci] & 0x08) != 0);
                     const char* ty = d->cap_types ? d->cap_types[ci] : NULL;
                     if (cc__is_safe_wrapper_type(ty)) continue;
                     const char* nm = d->cap_names[ci];
+                    /* Ignore compiler-generated pointer temps (autoblock retp, …). */
+                    if (!is_ref && aliases_local && nm &&
+                        (strncmp(nm, "cc_", 3) == 0 || strncmp(nm, "__cc_", 5) == 0)) {
+                        continue;
+                    }
                     size_t mut_off = 0;
                     CCMutationKind mk = CC_MUT_NONE;
                     const char* callee = NULL;
                     const char* pty = NULL;
-                    if (cc__find_mutation_in_body(d->body_text, nm, sigs, sig_n, &mk, &mut_off, &callee, &pty)) {
+                    int hit = 0;
+                    if (is_ref) {
+                        hit = cc__find_mutation_in_body(d->body_text, nm, sigs, sig_n,
+                                                        &mk, &mut_off, &callee, &pty);
+                    } else if (aliases_local) {
+                        hit = cc__find_ptr_pointee_mutation_in_body(d->body_text, nm, &mut_off);
+                        if (hit) mk = CC_MUT_WRITE;
+                    } else {
+                        continue;
+                    }
+                    if (hit) {
                         int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
-                        if (mk == CC_MUT_ADDR_OF_NONCONST_CALL && callee) {
+                        if (!is_ref && aliases_local) {
+                            fprintf(stderr,
+                                    "%s:%d:%d: error: mutation through value-captured pointer '%s' that aliases an outer local\n",
+                                    ctx->input_path ? ctx->input_path : "<input>",
+                                    d->start_line,
+                                    col1,
+                                    nm ? nm : "?");
+                            fprintf(stderr,
+                                    "  = note: capturing `T* p = &x` then writing `*p` bypasses shared-ref mutation checks\n"
+                                    "  = help: capture [&x] with Atomic/Mutex, or @unsafe, or don't alias\n");
+                        } else if (mk == CC_MUT_ADDR_OF_NONCONST_CALL && callee) {
                             fprintf(stderr,
                                     "%s:%d:%d: error: passing '&%s' to '%s' may mutate shared state (data race)\n",
                                     ctx->input_path ? ctx->input_path : "<input>",

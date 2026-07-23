@@ -2,19 +2,17 @@
 
 - **Primary:** `prevented`
 - **Family:** `locality`
-- **needs_language:** (optional strengthen) treat value-captured raw
-  pointers that alias outer locals like ref captures — toward fuller
-  Send/Sync
+- **needs_language:** (done) `pointer-alias-as-ref-capture`
 - **Rationale:**
-  Earlier scorecard guess said “mitigated / weak.” That undersells the
-  checker: reference-capture mutation in spawn closures is already
-  ill-formed (`closure_ref_capture_mutation_fail.ccs`). Safe wrappers
-  are the idiomatic share path; `@unsafe` is the explicit hatch — same
-  shape as Rust’s safe vs `unsafe` split for this rule.
+  Reference-capture mutation in spawn closures is ill-formed
+  (`closure_ref_capture_mutation_fail.ccs`). Value-captured
+  `T* p = &local` then writing `*p` / `p->` is also ill-formed
+  (`closure_ptr_alias_value_capture_mutation_fail.ccs`) — the former
+  smuggle path. Safe wrappers remain the idiomatic share path; `@unsafe`
+  is the explicit hatch.
 
-  Still not a full Rust `Send`/`Sync` lattice: capturing `int* p = &x`
-  by value and writing `*p` is a remaining smuggle (like raw `free`
-  beside unique slices). Score the *named* claim-A shape (shared ref
-  mut across spawn) as **prevented**; pointer smuggling is the gap.
-- **What would strengthen further:** Pointer-alias / non-sendable type
-  tracking beyond ref-capture mutation.
+  Not a full Rust `Send`/`Sync` lattice: heap-backed `T*` value capture
+  and other non-local aliases stay open. Score the *named* claim-A shape
+  as **prevented**.
+- **What would strengthen further:** Broader non-sendable type tracking
+  beyond stack-local pointer aliases.

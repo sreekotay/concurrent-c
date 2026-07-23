@@ -1,0 +1,16 @@
+/* Fail: value-capture T* that aliases an outer local, then mutate through it. */
+#include <ccc/cc_nursery.cch>
+
+int main(void) {
+    int x = 0;
+    int* p = &x;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) abort();
+        n->spawn(() => [p] {
+            *p = 1; /* ERROR: mutation through value-captured pointer alias */
+        });
+    }
+    return 0;
+}

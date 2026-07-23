@@ -6,7 +6,7 @@
 This folder is a feedback loop, same spirit as `real_projects/`:
 
 - **Hits** support the thesis (ownership seams *or* truthful wire *or* data-model sums).  
-- **Misses** are backlog (`channel-stable-borrow`, schema rejects, shipped `@variant`, …).  
+- **Misses** are backlog (owned-buffer child-free ban, fuller Send lattice, …).  
 - **N/A** is for bugs outside idiomatic language seams (crypto/authz, etc.).
   Prefer **omitting** protocol-product policy bugs (e.g. HTTP smuggling)
   rather than keeping confusing `n/a` entries.
@@ -40,8 +40,8 @@ Exactly one primary verdict per CVE:
 
 | Verdict | Meaning |
 |---------|---------|
-| `prevented` | Idiomatic CC makes the buggy shape ill-formed (compile / type / schema rule). |
-| `mitigated` | Idiomatic locality **or** idiomatic serdes/variant use makes the safe path natural; footguns remain via raw/`unsafe`/hand parsers. |
+| `prevented` | On the protected surface, the buggy shape is ill-formed (compile / type / schema rule). Off-surface escapes belong in Gap (like Rust `unsafe`), not a downgrade — see SHAPE-T8 / CVE-2014-0160. |
+| `mitigated` | Idiomatic locality **or** idiomatic serdes/variant use dissolves the bug class; the C-shaped rewrite is still well-formed (no rule yet). |
 | `still_expressible` | A competent CC port can still ship the same bug. |
 | `n/a` | Outside idiomatic language seams (crypto/authz, or protocol-product policy). |
 

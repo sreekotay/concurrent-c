@@ -1,0 +1,20 @@
+/* Smoke: @unsafe allows pointee mutation through a value-captured alias. */
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+int main(void) {
+    int x = 0;
+    int* p = &x;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) abort();
+        n->spawn(@unsafe () => [p] {
+            *p = 1;
+        });
+    }
+
+    if (x != 1) return 1;
+    printf("closure_ptr_alias_unsafe_mutation_smoke: ok\n");
+    return 0;
+}
