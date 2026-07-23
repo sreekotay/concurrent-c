@@ -1,0 +1,41 @@
+/*
+ * SHAPE-T3 residual — non-arena borrow on a channel: still_expressible.
+ *
+ * Arena path is prevented (tests/channel_send_arena_borrow_fail.ccs).
+ * Untracked from_buffer path still compiles — that is the miss.
+ *
+ * Demo: send then recv before free (no crash). The bug-shaped free
+ * before recv is equally well-formed today.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    char* heap = (char*)malloc(8);
+    if (!heap) return 1;
+    memcpy(heap, "payload!", 8);
+    char[:] view = cc_slice_from_buffer(heap, 8);
+
+    char[:][~4 >] tx;
+    char[:][~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    /* Still well-formed: non-arena borrow send. */
+    if (!cc_io_avail(cc_channel_send(tx, view))) return 3;
+
+    char[:] got = {0};
+    if (!cc_io_avail(cc_channel_recv(rx, &got))) return 4;
+    if (got.len != 8 || memcmp(got.ptr, "payload!", 8) != 0) return 5;
+
+    free(heap);
+    /* Bug-shaped (also still compiles if moved above recv):
+     *   free(heap); then recv uses dangling got.ptr / view.ptr */
+
+    printf("shape-t3-nonarena-borrow-send: still_expressible "
+           "(untracked from_buffer send; needs fuller Send lattice)\n");
+    return 0;
+}
