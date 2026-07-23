@@ -52,9 +52,11 @@ program:
 - **No hidden allocation.** A variant is a value type: `sizeof = tag +
   max(arm)`. Construction, match, and transition never allocate.
 - **Layout-agnostic surface.** The designator dialect (construction,
-  brace-assignment, `case .arm:`, projection) is the ONLY portable
-  contract; raw `v.kind`/`v.u` access is an interop privilege of the
-  UNPACKED layout, not part of the surface. This is what makes §12
+  brace-assignment, `case .arm:`, projection) plus READ-ONLY `.kind` is
+  the portable contract: `v.kind` always reads the tag (field read on
+  unpacked, compiler-emitted decode on packed) and is never assignable —
+  tags change only via construction/transition. Raw `v.u` access (and
+  writing `kind`) is an interop privilege of the UNPACKED layout. This is what makes §12
   packing a representation choice instead of a semantic one.
 - **FAIL LOUDLY.** Non-exhaustive `@match` without `default` is a compile
   error. Reading an inactive arm is UB in C but a compile error where
