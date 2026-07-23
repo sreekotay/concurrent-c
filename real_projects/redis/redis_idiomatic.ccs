@@ -80,7 +80,7 @@ static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
  * (.num) — no text round-trip on the int hot path.  Read boundaries
  * (GET/APPEND/STRLEN/MGET) render a num cell to its canonical decimal,
  * which is byte-identical to what the retired text storage held. */
-@variant RedisValue {
+@variant(packed) RedisValue {
     str: CCString;
     num: int64_t;
 };

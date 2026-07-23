@@ -1,0 +1,112 @@
+/* Address-of and in-place lvalue arm projection on @variant(packed)
+ * (spec/draft_variants.md §6, §11).
+ *
+ * A dominated packed projection is an LVALUE: the arm payload lives plainly
+ * at a fixed offset in the opaque byte block, so
+ *   - `&v->arm`         yields a real pointer to the payload (write through it)
+ *   - `v->arm.field = x` mutates the arm's field in place
+ *   - `v.arm` still reads as a plain rvalue
+ * A structurally identical unpacked twin must produce byte-identical
+ * observations and the same destructor count. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Handle { char* p; uint32_t gen; uint32_t tag; } Handle;
+
+static int g_drops = 0;
+
+static Handle handle_make(const char* s) {
+    Handle h;
+    h.p = strdup(s);
+    h.gen = 1;
+    h.tag = 1;              /* a live Handle never has tag == 0xFFFFFFFF */
+    return h;
+}
+
+static void handle_destroy(Handle* h) {
+    if (!h || !h->p) return;
+    g_drops++;
+    free(h->p);
+    h->p = NULL;
+}
+
+/* Mutator that writes through a pointer to the arm payload. */
+static void handle_bump(Handle* h) { h->gen += 40; }
+
+@comptime {
+    (void)cc_type_register("Handle", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("handle_destroy"),
+        .niche = cc_type_niche(16, 8, 12, 4, 0xFFFFFFFF),
+    });
+}
+
+@variant(packed) PCell { h: Handle; num: int64_t; };
+@variant        UCell { h: Handle; num: int64_t; };
+
+static void run_packed(CCArena* a, CCString* out) {
+    PCell c = { .h = handle_make("live") };
+    PCell* pc = &c;
+    if (pc->kind == .h) {
+        pc->h.gen = 2;              /* in-place member write via projection  */
+        handle_bump(&pc->h);        /* &arm passed to a mutator: 2 -> 42     */
+        cc_string_push(out, "gen:", a);
+        cc_string_push_int(out, (int64_t)pc->h.gen, a);
+    }
+    PCell d = { .num = 5 };
+    if (d.kind == .num) {
+        int64_t* np = &d.num;       /* address-of the num arm on a value     */
+        *np += 15;                  /* write through: 5 -> 20                */
+        cc_string_push(out, " num:", a);
+        cc_string_push_int(out, d.num ?> -1, a);
+    }
+}
+
+static void run_unpacked(CCArena* a, CCString* out) {
+    UCell c = { .h = handle_make("live") };
+    UCell* pc = &c;
+    if (pc->kind == .h) {
+        pc->h.gen = 2;
+        handle_bump(&pc->h);
+        cc_string_push(out, "gen:", a);
+        cc_string_push_int(out, (int64_t)pc->h.gen, a);
+    }
+    UCell d = { .num = 5 };
+    if (d.kind == .num) {
+        int64_t* np = &d.num;
+        *np += 15;
+        cc_string_push(out, " num:", a);
+        cc_string_push_int(out, d.num ?> -1, a);
+    }
+}
+
+int main(void) {
+    _Static_assert(sizeof(PCell) == 16, "packed twin is niche-packed to 16 bytes");
+    _Static_assert(sizeof(UCell) == 24, "unpacked twin carries a tag word");
+
+    CCArena arena = cc_arena_create(1 << 16);
+
+    g_drops = 0;
+    CCString pbuf = cc_string_new();
+    run_packed(&arena, &pbuf);
+    int pdrops = g_drops;
+
+    g_drops = 0;
+    CCString ubuf = cc_string_new();
+    run_unpacked(&arena, &ubuf);
+    int udrops = g_drops;
+
+    const char* ps = cc_string_cstr(&pbuf, &arena);
+    const char* us = cc_string_cstr(&ubuf, &arena);
+    printf("packed:   %s\n", ps);
+    printf("unpacked: %s\n", us);
+    if (strcmp(ps, us) != 0) { printf("PARITY MISMATCH\n"); return 1; }
+    if (pdrops != udrops) { printf("DROP MISMATCH %d vs %d\n", pdrops, udrops); return 2; }
+    if (pdrops != 1) { printf("expected exactly one drop, got %d\n", pdrops); return 3; }
+
+    printf("ok\n");
+    return 0;
+}

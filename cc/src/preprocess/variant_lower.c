@@ -102,6 +102,9 @@ typedef struct {
      * niche == sentinel decodes to the (single) non-donor arm, else donor. */
     int is_packed;
     unsigned packed_size;
+    unsigned packed_align;      /* max arm alignment: the byte block is aligned
+                                 * to it so offset-0 typed lvalue access
+                                 * (&v->arm, spec §11) is well-aligned */
     int donor_arm;
     unsigned niche_off, niche_width;
     unsigned long long niche_sentinel;
@@ -735,7 +738,7 @@ static int cc__va_plan_packing(CCSymbolTable* sym, CCVaDef* def,
     if (!def->is_packed) return 0;
 
     /* All arm sizes must be known at compile time. */
-    unsigned maxsz = 0;
+    unsigned maxsz = 0, maxal = 1;
     for (int a = 0; a < def->narms; a++) {
         if (!cc__va_arm_layout(sym, &def->arms[a])) {
             cc__va_err(src, n, path, at,
@@ -744,8 +747,10 @@ static int cc__va_plan_packing(CCSymbolTable* sym, CCVaDef* def,
             return -1;
         }
         if (def->arms[a].size > maxsz) maxsz = def->arms[a].size;
+        if (def->arms[a].align > maxal) maxal = def->arms[a].align;
     }
     def->packed_size = maxsz ? maxsz : 1;
+    def->packed_align = maxal;
 
     /* A single niche sentinel distinguishes exactly two groups (donor vs the
      * one non-donor arm), so niche packing needs at most two arms. */
@@ -820,9 +825,25 @@ static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
     for (int a = 0; a < def->narms; a++)
         cc_sb_append_fmt(&out, &ol, &oc, "%s%s_%s", a ? ", " : "", v, def->arms[a].name);
     cc_sb_append_fmt(&out, &ol, &oc, " } %sKind;", v);
-    /* opaque byte struct */
-    cc_sb_append_fmt(&out, &ol, &oc, " typedef struct %s { unsigned char __cc_p[%u]; } %s;",
-                     v, def->packed_size, v);
+    /* opaque byte struct.  The block is aligned to the widest arm so that a
+     * projection can hand out a real, well-aligned pointer to the arm payload
+     * stored at offset 0 (`&v->arm`, spec §11). */
+    cc_sb_append_fmt(&out, &ol, &oc,
+                     " typedef struct %s { _Alignas(%u) unsigned char __cc_p[%u]; } %s;",
+                     v, def->packed_align ? def->packed_align : 1, def->packed_size, v);
+    /* Per-arm overlay structs.  The arm payload lives at byte 0, so an overlay
+     * whose sole field is the arm type reinterprets the block as that arm.  A
+     * dominated projection lowers to `((Name__cc_ov_arm*)base)->arm`: an LVALUE
+     * at offset 0 that reads, takes its address (`&v->arm`), mutates in place
+     * (`v->arm.field = x`) and — because the receiver ends in a plain member —
+     * resolves under UFCS (`v->arm.method()`) exactly like the unpacked union
+     * member it stands in for. */
+    for (int a = 0; a < def->narms; a++) {
+        if (def->arms[a].is_void) continue;
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         " typedef struct { %s %s; } %s__cc_ov_%s;",
+                         def->arms[a].type, def->arms[a].name, v, def->arms[a].name);
+    }
     /* static asserts pinning size/niche assumptions */
     for (int a = 0; a < def->narms; a++) {
         if (def->arms[a].is_void) continue;
@@ -2579,7 +2600,11 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
             i = mem_b;
             continue;
         }
-        /* Dominated: `.arm` → `.u.arm`. */
+        /* Dominated: `.arm` → `.u.arm`.  On the unpacked layout this is a real
+         * union member (already an lvalue).  On the packed layout the later
+         * materialize step rewrites `.u.arm` to either a value-returning getter
+         * (rvalue positions) or a dereferenced-cast lvalue (address-of /
+         * assignment positions), spec §11. */
         {
             char* repl = NULL;
             size_t rl = 0, rc = 0;
@@ -2851,13 +2876,16 @@ static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* pa
 /* Final pass for @variant(packed): the earlier steps produce the canonical
  * layout-agnostic forms (`v.kind`, `v.u.arm`, tag constants) that the honest
  * unpacked struct exposes as members.  A packed variant is an opaque byte
- * blob with no such members, so those forms are rewritten to the emitted
- * encode/decode accessors:
+ * blob with no such members, so those forms are rewritten:
  *   (base).kind / (base)->kind   -> Name__cc_kind(&(base) / base)
- *   (base).u.arm / (base)->u.arm -> Name__cc_get_arm(&(base) / base)
- * Only bases that resolve to a PROVEN-packed variant are touched; unpacked
- * variants keep their real members.  Runs once, last, and emits no new
- * `.kind`/`.u` text, so a single pass suffices. */
+ *   (base).u.arm / (base)->u.arm -> ((Name__cc_ov_arm*)&(base) / base)->arm
+ * The overlay-cast form is an LVALUE at offset 0 whose receiver ends in a
+ * plain member, so a single spelling covers reads, address-of (`&v->arm`),
+ * in-place assignment (`v->arm.field = x`) and UFCS method calls
+ * (`v->arm.method()`) — everything the unpacked union member supported
+ * (spec §11).  Only bases that resolve to a PROVEN-packed variant are
+ * touched; unpacked variants keep their real members.  Runs once, last, and
+ * emits no new `.kind`/`.u` text, so a single pass suffices. */
 static int cc__va_step_packed_materialize(const char* s, size_t n, const char* path, CCVaEdits* ed) {
     (void)path;
     int nerr = 0;
@@ -2922,12 +2950,17 @@ static int cc__va_step_packed_materialize(const char* s, size_t n, const char* p
             if (ab == aa) { i = mem_b; continue; }
             int ai = cc__va_arm_index(vi, s + aa, ab - aa);
             if (ai < 0) { i = ab; continue; }
+            /* Overlay-cast lvalue: `((Name__cc_ov_arm*)PTR)->arm`, where PTR is
+             * the base (already a pointer under `->`, address-taken under `.`).
+             * One form serves reads, address-of, in-place assignment and UFCS
+             * method calls — the payload sits at offset 0 and the block is
+             * aligned to the widest arm, so the reinterpret is well-defined. */
             char* repl = NULL;
             size_t rl = 0, rc = 0;
-            cc_sb_append_fmt(&repl, &rl, &rc, "%s__cc_get_%s(", def->name, def->arms[ai].name);
-            if (!is_arrow) cc_sb_append_cstr(&repl, &rl, &rc, "&(");
+            cc_sb_append_fmt(&repl, &rl, &rc, "((%s__cc_ov_%s*)%s", def->name,
+                             def->arms[ai].name, is_arrow ? "(" : "&(");
             cc__va_append_flat(&repl, &rl, &rc, s, ba, acc);
-            cc_sb_append_cstr(&repl, &rl, &rc, is_arrow ? ")" : "))");
+            cc_sb_append_fmt(&repl, &rl, &rc, "))->%s", def->arms[ai].name);
             if (!repl || cc__va_edit_add(ed, ba, ab, repl) != 0) nerr++;
             i = ab;
             continue;
