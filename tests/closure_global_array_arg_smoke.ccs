@@ -1,0 +1,55 @@
+/*
+ * Pin: bare file-scope array names passed as plain call arguments inside a
+ * closure literal must pass through untouched — file-scope names need no
+ * capture.
+ *
+ * Regression shape (nursery_spawn_placement_workers4_smoke originally hit
+ * this and worked around it with zero-arg helpers): a file-scope array with
+ * a MACRO dimension, an `f(&g_arr[i], ...)`-style statement before the
+ * closure, and the bare array name as a call argument inside the closure
+ * body.  The capture scanner (1) failed to parse the macro-dimension decl as
+ * a top-level decl, so the name was not recognized as file-scope, and (2)
+ * mis-read the preceding `cc_atomic_store(&g_arr[i], ...)` expression as a
+ * declaration of `g_arr` with "type" `cc_atomic_store(&`, emitting that
+ * garbage as a capture parameter type (C compile error).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+#define ARR_N 4
+
+static cc_atomic_int g_macro_dim[ARR_N];   /* macro dimension: decl parse case */
+static cc_atomic_int g_num_dim[4];         /* numeric dimension: control case */
+static cc_atomic_int g_done = 0;
+
+static int sum_ids(cc_atomic_int *ids) {
+    int t = 0;
+    for (int i = 0; i < 4; i++) t += cc_atomic_load(&ids[i]);
+    return t;
+}
+
+int main(void) {
+    /* Pre-closure indexed use: this is the text the scanner mis-parsed as a
+     * declaration of g_macro_dim with type `cc_atomic_store(&`. */
+    for (int i = 0; i < ARR_N; i++) {
+        cc_atomic_store(&g_macro_dim[i], i + 1);
+        cc_atomic_store(&g_num_dim[i], 10 * (i + 1));
+    }
+
+    CCNursery* n = @create(NULL) @detach;
+    if (!n) abort();
+    int idx = 7;
+    (void)cc_nursery_spawn_closure0(n, () => [idx] {
+        /* Bare global array names as plain call arguments: no capture. */
+        int a = sum_ids(g_macro_dim);
+        int b = sum_ids(g_num_dim);
+        printf("idx=%d macro_sum=%d num_sum=%d\n", idx, a, b);
+        cc_atomic_store(&g_done, 1);
+    });
+    (void)cc_nursery_wait(n);
+    cc_nursery_free(n);
+    if (!cc_atomic_load(&g_done)) abort();
+    printf("closure_global_array_arg_smoke: PASS\n");
+    return 0;
+}

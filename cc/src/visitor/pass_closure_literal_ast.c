@@ -520,6 +520,10 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
             if (cc_inert_scan_step(&scan, stmt, seg_end_off, &i)) continue;
             char c = stmt[i];
             if (c == '=' || c == ';') break;
+            /* The declarator name precedes its array dimensions: stop at the
+               first `[` so a macro dimension (`T name[MACRO_N]`) cannot
+               overwrite the name with the dimension identifier. */
+            if (c == '[') break;
             if (!cc__is_ident_start_char(c)) { i++; continue; }
             size_t s_off = i;
             i++;
@@ -589,6 +593,7 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
         const char* cur = seg_s;
         while (cur < seg_e) {
             if (*cur == '=' || *cur == ';') break;
+            if (*cur == '[') break; /* name precedes array dims (macro dim) */
             if (!cc__is_ident_start_char(*cur)) { cur++; continue; }
             const char* s = cur++;
             while (cur < seg_e && cc__is_ident_char2(*cur)) cur++;
@@ -886,13 +891,19 @@ static char* cc__lookup_internal_generated_decl_type(const char* src,
             int has_ident = 0;
             int has_eq = 0;
             int has_member_access = 0;
+            int has_expr_punct = 0;
             for (const char* p = ty_s; p < ty_e; p++) {
                 if (*p == '=') { has_eq = 1; break; }
                 if (*p == '.' || (*p == '-' && p + 1 < ty_e && p[1] == '>'))
                     has_member_access = 1;
+                /* A decl's type prefix never contains call/operator
+                   punctuation; `f(&name[...]` is an expression, not a decl
+                   of `name` (placement-workers4 capture-scanner bug). */
+                if (*p == '(' || *p == ')' || *p == '&' || *p == ',')
+                    has_expr_punct = 1;
                 if (cc__is_ident_start_char(*p)) has_ident = 1;
             }
-            if (has_eq || !has_ident || has_member_access) continue;
+            if (has_eq || !has_ident || has_member_access || has_expr_punct) continue;
         }
         result = cc__dup_decl_type_text(ty_s, ty_e, out_flags);
         break;
