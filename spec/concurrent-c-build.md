@@ -91,6 +91,7 @@ now emits `out/examples_main.c` / `bin/examples_main`. This lets teams keep the 
 ## Incremental cache
 - Default behavior: `ccc build` uses a lightweight cache under `out/.cc-build/` to skip redundant emit/compile/link work when inputs and flags are unchanged.
 - Disable: `--no-cache` or `CC_NO_CACHE=1`.
+- An emit that prints error diagnostics **fails the build** and its output is **never cached**: every subsequent build of the same input — warm cache included — re-runs the emit, fails again, and prints the diagnostic again. Generated C reaches the cache only from a diagnostic-free emit.
 
 ## Toolchain Selection
 - C compiler: use `$CC` if set, else first of `cc`, `gcc`, `clang` in PATH. Override with `--cc-bin PATH`.
