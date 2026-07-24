@@ -248,6 +248,19 @@ int cc_build_parse_input(const char* file_buf,
         out->buffer_codegen = canonical;
         out->buffer_codegen_len = strlen(canonical);
         canonical = NULL;
+        /* Local quoted .cch were rewritten to #include out/include/*.h above.
+         * Splice those bodies into the UFCS/codegen buffer so phase3 sees them
+         * with parent-TU symbols (e.g. CC_MAP_DECL_UFCS). Write-back happens
+         * after UFCS in visit_codegen. */
+        {
+            char* spliced = cc_splice_local_lowered_headers_for_codegen(
+                out->buffer_codegen, out->buffer_codegen_len);
+            if (spliced) {
+                free(out->buffer_codegen);
+                out->buffer_codegen = spliced;
+                out->buffer_codegen_len = strlen(spliced);
+            }
+        }
     } else {
         free(canonical);
     }

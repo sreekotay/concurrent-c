@@ -1,0 +1,16 @@
+/* Included by local_cch_ufcs_map_smoke.ccs — uses map UFCS that must be
+ * lowered with the parent TU's CC_MAP_DECL_UFCS registration. */
+#ifndef LOCAL_CCH_UFCS_MAP_HELPER_CCH
+#define LOCAL_CCH_UFCS_MAP_HELPER_CCH
+
+static size_t local_cch_map_len(SmokeMap* map) {
+    if (!map) return 0;
+    return map->len();
+}
+
+static size_t local_cch_map_cap(SmokeMap* map) {
+    if (!map) return 0;
+    return map->cap();
+}
+
+#endif /* LOCAL_CCH_UFCS_MAP_HELPER_CCH */

@@ -3378,9 +3378,15 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                             const char* body = src + body_l + 1;
                             const char* body_end = src + body_r;
                             const char* stmt = body;
+                            /* Top-level ';' only (skip comments/strings/nests).
+                             * Naive memchr poisons the next field when a
+                             * trailing block comment contains a semicolon. */
                             while (stmt < body_end) {
-                                const char* semi = memchr(stmt, ';', (size_t)(body_end - stmt));
-                                if (!semi) break;
+                                size_t stmt_off = (size_t)(stmt - src);
+                                size_t end_off = (size_t)(body_end - src);
+                                size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+                                if (semi_off >= end_off) break;
+                                const char* semi = src + semi_off;
                                 char field_name[128];
                                 char field_type[256];
                                 cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name),
@@ -5014,6 +5020,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            (line-count preserving) is safe and removes the blank runs left by
            @comptime blanking. */
         cc__strip_trailing_ws_in_place(src_ufcs, &src_ufcs_len);
+
+        /* Persist post-UFCS local .cch bodies back to out/include/*.h and
+         * collapse splice markers to #include so the host .c does not
+         * duplicate definitions. */
+        if (cc_writeback_local_lowered_headers_from_codegen(&src_ufcs, &src_ufcs_len) != 0) {
+            goto fail;
+        }
 
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);

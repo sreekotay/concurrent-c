@@ -1,0 +1,31 @@
+/* Local quoted .cch bodies must go through phase3 UFCS with parent-TU
+ * symbols (CC_MAP_DECL_UFCS). Without splice/write-back, host C sees raw
+ * map->len() in out/include/.../helper.h and fails. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static inline size_t hash_int_key(int key) {
+    return (size_t)key * 2654435761u;
+}
+
+static inline int eq_int_key(int a, int b) {
+    return a == b;
+}
+
+CC_MAP_DECL_ARENA(int, int, SmokeMap, hash_int_key, eq_int_key);
+CC_MAP_DECL_UFCS(SmokeMap);
+
+#include "local_cch_ufcs_map_helper.cch"
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    SmokeMap* map = SmokeMap_init(&arena);
+    if (!map) return 1;
+    if (map->insert(7, 42) != 0) return 2;
+    if (local_cch_map_len(map) != 1) return 3;
+    if (local_cch_map_cap(map) == 0) return 4;
+    map->destroy();
+    cc_arena_destroy(&arena);
+    printf("ok\n");
+    return 0;
+}

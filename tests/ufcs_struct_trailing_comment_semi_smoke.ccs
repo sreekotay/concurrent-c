@@ -1,0 +1,51 @@
+/* Trailing block comments on a preceding field may contain ';' — field
+ * registration must not split on those, or the next field's UFCS type is
+ * poisoned (e.g. channel tx → cc_arena_try_send_into). */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <string.h>
+
+typedef struct Msg {
+    int value;
+} Msg;
+
+typedef Msg[~1 1:1 >] MsgTx;
+typedef Msg[~1 1:1 <] MsgRx;
+
+typedef struct Holder {
+    CCArena arena; /* payload arena; reset per window */
+    MsgTx tx;
+} Holder;
+
+@noblock static inline bool queue_one(Holder* h, int value) {
+    bool !>(CCIoError) sent =
+        h->tx.try_send_into(
+            (slot, arena) => [value] {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->value = value;
+                return NULL;
+            },
+            &h->arena);
+    return cc_io_avail(sent);
+}
+
+int main(void) {
+    MsgTx tx;
+    MsgRx rx;
+    Holder h;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    assert(ch != NULL);
+    memset(&h, 0, sizeof(h));
+    h.arena = cc_arena_heap(kilobytes(1));
+    h.tx = tx;
+    assert(queue_one(&h, 11));
+    {
+        Msg got = {0};
+        assert(cc_io_avail(rx.recv(&got)));
+        assert(got.value == 11);
+    }
+    ch.free();
+    cc_arena_destroy(&h.arena);
+    return 0;
+}

@@ -3659,9 +3659,16 @@ static void cc__collect_generic_ufcs_types(const char* src,
                             const char* body = src + body_l + 1;
                             const char* body_end = src + body_r;
                             const char* stmt = body;
+                            /* Top-level ';' only — memchr would split on ';'
+                             * inside a trailing block comment on the previous
+                             * field and poison the next field's registered type
+                             * (e.g. ReplyTx → garbage → cc_arena_try_send_into). */
                             while (stmt < body_end) {
-                                const char* semi = memchr(stmt, ';', (size_t)(body_end - stmt));
-                                if (!semi) break;
+                                size_t stmt_off = (size_t)(stmt - src);
+                                size_t end_off = (size_t)(body_end - src);
+                                size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+                                if (semi_off >= end_off) break;
+                                const char* semi = src + semi_off;
                                 char field_name[128];
                                 char field_type[256];
                                 cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
@@ -8583,6 +8590,210 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        const char* input_path) {
     if (!src || input_len == 0 || !input_path || !input_path[0]) return NULL;
     return cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
+}
+
+#define CC_LOCAL_CCH_BEGIN_MARK "/*cc:local_cch_begin:"
+#define CC_LOCAL_CCH_END_MARK "/*cc:local_cch_end:"
+
+static const CCLoweredLocalHeader* cc__find_lowered_header_by_include_path(const char* path,
+                                                                           size_t path_len) {
+    char want[PATH_MAX];
+    char want_real[PATH_MAX];
+    char have[PATH_MAX];
+    size_t i;
+    int want_ok;
+    if (!path || path_len == 0 || path_len >= sizeof(want)) return NULL;
+    memcpy(want, path, path_len);
+    want[path_len] = '\0';
+    want_ok = (realpath(want, want_real) != NULL);
+    for (i = 0; i < g_lowered_local_header_count; ++i) {
+        const char* lp = g_lowered_local_headers[i].lowered_path;
+        if (!lp) continue;
+        if (strcmp(lp, want) == 0) return &g_lowered_local_headers[i];
+        if (want_ok && realpath(lp, have) && strcmp(have, want_real) == 0)
+            return &g_lowered_local_headers[i];
+    }
+    return NULL;
+}
+
+/* True when a lowered local header still has method-call UFCS (`->name(` /
+ * `.name(`) that needs the parent TU's phase3 pass.  Decl-only / schema
+ * headers stay as `#include` so splicing them cannot perturb field maps. */
+static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len) {
+    size_t p = 0;
+    if (!body || body_len < 4) return 0;
+    while (p + 3 < body_len) {
+        char c = body[p];
+        char c2 = body[p + 1];
+        if (c == '/' && c2 == '/') {
+            p += 2;
+            while (p < body_len && body[p] != '\n') p++;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            p += 2;
+            while (p + 1 < body_len && !(body[p] == '*' && body[p + 1] == '/')) p++;
+            if (p + 1 < body_len) p += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (p < body_len) {
+                if (body[p] == '\\' && p + 1 < body_len) { p += 2; continue; }
+                if (body[p] == q) { p++; break; }
+                p++;
+            }
+            continue;
+        }
+        if ((c == '-' && c2 == '>') || (c == '.')) {
+            size_t k = p + ((c == '.') ? 1 : 2);
+            if (k < body_len && (cc_is_ident_start(body[k]) || body[k] == '_')) {
+                while (k < body_len && (cc_is_ident_char(body[k]) || body[k] == '_')) k++;
+                while (k < body_len && (body[k] == ' ' || body[k] == '\t' || body[k] == '\n')) k++;
+                if (k < body_len && body[k] == '(') return 1;
+            }
+        }
+        p++;
+    }
+    return 0;
+}
+
+char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    if (!src || n == 0 || g_lowered_local_header_count == 0) return NULL;
+    while (i < n) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
+            const CCLoweredLocalHeader* h =
+                cc__find_lowered_header_by_include_path(src + i + path_s, path_e - path_s);
+            if (h && h->lowered_path && h->source_path) {
+                char* body = NULL;
+                size_t body_len = 0;
+                if (cc__read_file_text(h->lowered_path, &body, &body_len) == 0 && body &&
+                    cc__lowered_header_needs_ufcs_splice(body, body_len)) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "#line 1 \"");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, h->source_path);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\"\n");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_LOCAL_CCH_BEGIN_MARK);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, h->lowered_path);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+                    cc_sb_append(&out, &out_len, &out_cap, body, body_len);
+                    if (body_len == 0 || body[body_len - 1] != '\n')
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, CC_LOCAL_CCH_END_MARK);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, h->lowered_path);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+                    free(body);
+                    changed = 1;
+                    i = (line_end < n) ? line_end + 1 : line_end;
+                    continue;
+                }
+                free(body);
+            }
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n) {
+    char* in;
+    size_t in_len;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    const size_t begin_len = sizeof(CC_LOCAL_CCH_BEGIN_MARK) - 1;
+    const size_t end_len = sizeof(CC_LOCAL_CCH_END_MARK) - 1;
+    if (!src || !*src || !n) return 0;
+    in = *src;
+    in_len = *n;
+    while (i < in_len) {
+        const char* hit = strstr(in + i, CC_LOCAL_CCH_BEGIN_MARK);
+        const char* path_s;
+        const char* path_e;
+        const char* body_s;
+        const char* end;
+        const char* end_path_e;
+        size_t path_len;
+        size_t hit_off;
+        char path[PATH_MAX];
+        if (!hit) {
+            cc_sb_append(&out, &out_len, &out_cap, in + i, in_len - i);
+            break;
+        }
+        hit_off = (size_t)(hit - in);
+        if (hit_off > i) cc_sb_append(&out, &out_len, &out_cap, in + i, hit_off - i);
+        path_s = hit + begin_len;
+        path_e = strstr(path_s, "*/");
+        if (!path_e) {
+            cc_sb_append(&out, &out_len, &out_cap, hit, in_len - hit_off);
+            break;
+        }
+        path_len = (size_t)(path_e - path_s);
+        if (path_len == 0 || path_len >= sizeof(path)) {
+            cc_sb_append(&out, &out_len, &out_cap, hit, begin_len);
+            i = hit_off + begin_len;
+            continue;
+        }
+        memcpy(path, path_s, path_len);
+        path[path_len] = '\0';
+        body_s = path_e + 2;
+        if (*body_s == '\n') body_s++;
+        end = body_s;
+        end_path_e = NULL;
+        for (;;) {
+            end = strstr(end, CC_LOCAL_CCH_END_MARK);
+            if (!end) break;
+            end_path_e = strstr(end + end_len, "*/");
+            if (!end_path_e) { end = NULL; break; }
+            if ((size_t)(end_path_e - (end + end_len)) == path_len &&
+                memcmp(end + end_len, path, path_len) == 0) {
+                break;
+            }
+            end = end + end_len;
+            end_path_e = NULL;
+        }
+        if (!end || !end_path_e) {
+            cc_sb_append(&out, &out_len, &out_cap, hit, begin_len);
+            i = hit_off + begin_len;
+            continue;
+        }
+        {
+            size_t body_len = (size_t)(end - body_s);
+            if (body_len > 0 && body_s[body_len - 1] == '\n') body_len--;
+            if (cc__write_file_text(path, body_s, body_len) != 0) {
+                free(out);
+                return -1;
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, path);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\"\n");
+            changed = 1;
+            i = (size_t)(end_path_e + 2 - in);
+            if (i < in_len && in[i] == '\n') i++;
+        }
+    }
+    if (!changed) {
+        free(out);
+        return 0;
+    }
+    free(*src);
+    *src = out;
+    *n = out_len;
+    return 0;
 }
 
 /* Harvest CC_GENERIC_FACTORY / _EXTEND blocks from every local .cch included by
