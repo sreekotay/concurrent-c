@@ -13,9 +13,11 @@ static void diag_fprintln(CCString* line, CCArena* scratch) {
 
 @async int owner_like(void) {
     char scratch_buf[256];
+    size_t count = 42;
     @nonblocking {
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-        CCString line = @string("async_create_string_nonblocking_smoke: ok", &scratch);
+        CCString line =
+            @string(`async_create_string_nonblocking_smoke: ${count}`, &scratch);
         diag_fprintln(&line, &scratch);
     }
     return 0;

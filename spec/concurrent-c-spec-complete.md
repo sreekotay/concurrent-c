@@ -592,7 +592,7 @@ n->spawn(() => {
 
 **Rule (arena reset with live borrow):** `cc_arena_reset` / `cc_arena_restore` is a compile-time error when a derived arena slice borrow of that arena is still within its lexical enclosing block. End the borrow's scope before reset, or copy into another arena / unique slice first. Owner `free` / `destroy` at end of the same block after the last use remains well-formed.
 
-**Rule (channel-stable-borrow):** Channel send of a non-unique arena-backed slice view is a compile-time error. The payload may outlive the arena epoch that minted the view. Materialize into a unique slice, a static/canonical slice, or channel-bound batch storage (`send_into` / copy into the receiver's arena) before send. Unique (`T[:!]` / `adopt` / `recv`) and static slices may be sent.
+**Rule (channel-stable-borrow):** Channel send of a non-unique arena-backed slice view is a compile-time error. The payload may outlive the arena epoch that minted the view. The default idiom is reserve-then-write (`send_into` / `try_send_into`, same family as `send_task`): admit a slot, construct the element into that slot, and land variable payload bytes in the provided arena (or use a unique / static / canonical slice). Building a temporary with foreign slice views and copying it through a later send is an anti-pattern. Unique (`T[:!]` / `adopt` / `recv`) and static slices may use ordinary `send` / `try_send`.
 
 **Rule (pointer-channel-send-ban):** Channel send of a by-value aggregate that contains a raw pointer field (`T*`, `char*`, …) is a compile-time error. The sender may free the pointee while the receiver still holds a copy of the pointer. Branded fields (`CCSlice`, `CCArena`, …) are not raw pointers for this rule. Bare `T*` payloads (handle protocols) are outside this rule; prefer owned bytes (`T[:!]` / static slice) or aggregates without raw pointer fields.
 
@@ -2408,6 +2408,80 @@ unsafe {
 
 **Rule:** `adopt()` slices are unique (move-only, have destructor) but not transferable. Use `send` to copy them across channels.
 
+#### Build Into Channel Storage
+
+`send_into` and `try_send_into` are the default idiom for data that carries
+payloads — the data-channel twin of `send_task`. Reserve a slot, then write
+the element into that reserved output (destination-first, immediate mode).
+Ordinary `send` / `try_send` remain for already-stable values (scalars,
+static/canonical slices, unique slices).
+
+The channel handle determines the element type and size; the surface does not
+expose `.raw`, `sizeof(T)`, or errno-to-Result conversion.
+
+```c
+bool !>(CCIoError) queued =
+    tx.try_send_into(
+        (slot, arena) => [req] {
+            *slot = build_reply(req, arena);  /* produce into the slot */
+            return NULL;
+        },
+        payload_arena);
+```
+
+On a typed `T[~ … >]` handle, an untyped `(slot, arena)` builder infers
+`slot` as `T*` and `arena` as `CCArena*`. Explicit parameter types remain
+allowed and are not overwritten. The builder's `slot` denotes uninitialized
+storage for one `T`. `arena` is optional element payload backing supplied by
+the caller (or `NULL`) — a write buffer for variable-sized bytes in `*slot`,
+not a channel-owned pool the runtime resets. The runtime does not acquire or
+extend that arena's lifetime; internal pointers in the constructed `T` remain
+subject to their ordinary provenance and lifetime contracts.
+
+**Rule (scoped slot):** The slot address is valid only during the builder call.
+It must not escape, and program behavior must not depend on whether it names a
+final channel slot, a receiver rendezvous buffer, or hidden staging storage.
+
+**Rule (complete construction):** A builder that returns normally has fully
+initialized `*out`. Builders are synchronous and must not suspend. Builder
+failure is represented in the channel element itself (for example
+`T!>(E)[~ ... >]`) or handled before the call; it is not added to the channel
+operation's `CCIoError`.
+
+**Rule (`try_send_into` admission):** The builder runs exactly once if an
+element slot is admitted. If the channel is full, has no rendezvous partner,
+or is closed/error-closed before admission, the builder does not run.
+`EAGAIN` maps to `err(CC_IO_BUSY)` through the normal channel Result envelope;
+graceful close maps to `ok(false)`.
+
+**Rule (`send_into` backpressure):** `send_into` applies ordinary blocking
+backpressure. An implementation first may attempt direct construction. If no
+slot is immediately available, it may invoke the builder exactly once into
+hidden staging storage and then perform an ordinary blocking send. Direct
+construction versus staging is not observable except through performance and
+the emitted lowering.
+
+**Rule (delivery order):** Construction occupies the same delivery position as
+an ordinary `send`. `ordered` data-channel guarantees therefore apply
+unchanged. Task-handle and owned channels do not accept `send_into`.
+
+**Lowering (normative):**
+
+```c
+// tx.try_send_into(builder, arena)
+cc_channel_try_send_into(tx, builder, arena)
+
+// typed macro / family lowering
+cc_chan_result_with(tx.raw,
+    cc_channel_raw_try_send_into(tx.raw, builder,
+                                 cc_chan_elem_size(tx.raw), arena),
+    false)
+```
+
+`send_into` lowers identically through `cc_channel_raw_send_into`. The raw
+four-argument C forms remain available when the caller supplies `CCChan*`,
+builder, element size, and arena explicitly.
+
 ---
 
 ### 7.5 Select / Multiplex
@@ -2519,6 +2593,7 @@ void close(rx);
 
 // Non-blocking (no @await, either context)
 bool !>(CCIoError) sent_now = try_send(tx, value);
+bool !>(CCIoError) built_now = tx.try_send_into(builder, arena);
 T y;
 bool !>(CCIoError) got_now = try_recv(rx, &y);
 
@@ -2531,6 +2606,7 @@ cc_channel_pair(&stx, &srx);
 
 // Core operations (no @await, blocks)
 bool !>(CCIoError) sent = send(&stx, value);
+bool !>(CCIoError) built = stx.send_into(builder, arena);
 T x; bool !>(CCIoError) got = recv(&srx, &x);   // blocks OS thread until received; ok(false) = closed+drained
 
 // Slice transfer (no @await, blocks; send handle only)
@@ -2553,10 +2629,16 @@ T y; bool !>(CCIoError) got_now = try_recv(srx, &y);
 | `send(ch, v)`             | `@await send(...)` ✅                                 | `send(...)` ✅ (blocks)    | `send(...)` ✅                                      |
 | `recv(ch)`                | `@await recv(...)` ✅                                 | `recv(...)` ✅ (blocks)    | `recv(...)` ✅                                      |
 | `send_take(ch, s)`        | `@await send_take(...)` ✅                            | `send_take(...)` ✅        | `send_take(...)` ✅                                 |
+| `send_into(ch, b, a)`     | blocking edge¹                                        | `send_into(...)` ✅        | `send_into(...)` ✅                                 |
+| `try_send_into(ch, b, a)` | `try_send_into(...)` ✅                               | `try_send_into(...)` ✅    | `try_send_into(...)` ✅                             |
 | `try_send(ch, v)`         | `try_send(...)` ✅                                   | `try_send(...)` ✅         | `try_send(...)` ✅                                  |
 | `try_recv(ch)`            | `try_recv(...)` ✅                                   | `try_recv(...)` ✅         | `try_recv(...)` ✅                                  |
 | `close(ch)`               | `close(...)` ✅                                      | `close(...)` ✅            | `close(...)` ✅                                     |
 | `subscribe(ch)`           | `subscribe(...)` ✅                                  | `subscribe(...)` ✅        | `subscribe(...)` ✅                                 |
+
+¹ `send_into` currently uses the synchronous blocking-edge contract in an
+`@async` body; it has no task-returning `@await` variant. `try_send_into`
+returns immediately in every context.
 
 
 **Rule (`@await` marks suspension points, not channel flavor):** `@await` is
@@ -4999,12 +5081,14 @@ x => expr                     // single parameter, expression body
 () => [x] { stmt; }           // explicit value capture
 () => [&x] { stmt; }          // reference capture (explicit sharing)
 () => [x, &y] { stmt; }       // mixed: x by value, y by reference
+() => [p = &local] { *p; }    // init-capture: value-capture expr as fresh name
 ```
 
 **Capture semantics:**
 
 - **Value capture (default):** Closures capture by value. For copyable types, the captured value is a copy. For move-only types, the capture is a move and the original becomes invalid. **Value-captured variables are immutable within the closure.**
 - **Reference capture (`[&x]`):** Explicitly captures a reference to the outer variable. The closure shares the variable with the outer scope. Reference captures are subject to mutation checks (see below).
+- **Init-capture (`[alias = expr]`):** Value-captures `expr` under a fresh name `alias` (supported forms: `ident`, `&ident`). `[p = &local]` is the idiomatic way to pass a pointer into a mutating callee without reference-capturing `local`. Writing through such a pointer in a task-escaping closure is subject to the same alias-mutation checks as `T* p = &local` outside the capture list.
 - **Capture-all banned:** The forms `[&]` and `[=]` (capture all by reference/value) are not allowed. Each captured variable must be listed explicitly.
 
 **Rule (modification requires `[&x]`):** To modify a captured variable, you must use reference capture `[&x]`. Attempting to modify a value-captured variable is a compile error.

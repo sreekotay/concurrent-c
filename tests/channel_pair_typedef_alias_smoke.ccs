@@ -17,6 +17,13 @@
 typedef int[~4 N:1 >] WorkerTx;
 typedef int[~4 N:1 <] WorkerRx;
 
+enum { k_request_chan_cap = 8 };
+typedef struct RedisShapeRequest {
+    int value;
+} RedisShapeRequest;
+typedef RedisShapeRequest*[~k_request_chan_cap N:1 >] RedisReqTx;
+typedef RedisShapeRequest*[~k_request_chan_cap N:1 ordered <] RedisReqRx;
+
 int main(void) {
     WorkerTx tx;
     WorkerRx rx;
@@ -29,5 +36,25 @@ int main(void) {
     if (!cc_io_avail(chan_recv(rx, &out))) return 3;
     chan_close(tx);
     cc_chan_free(ch);
-    return (out == 7) ? 0 : 4;
+    if (out != 7) return 4;
+
+    RedisReqTx req_tx;
+    RedisReqRx req_rx;
+    CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx);
+    if (!req_ch) return 5;
+
+    RedisShapeRequest req = { .value = 42 };
+    RedisShapeRequest* req_ptr = &req;
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 6;
+        n->spawn(() => [req_tx, req_ptr] {
+            (void)req_tx.send(req_ptr);
+        });
+        RedisShapeRequest* got = NULL;
+        if (!cc_io_avail(req_rx.recv(&got))) return 7;
+        if (!got || got->value != 42) return 8;
+    }
+    req_ch.free();
+    return 0;
 }

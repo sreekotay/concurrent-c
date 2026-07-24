@@ -186,6 +186,7 @@ void cc_emit_plan_clear_comptime_fragments(void);
 size_t cc_emit_plan_comptime_fragment_count(void);
 void cc_emit_plan_collect_comptime_emits(const char* src, size_t len);
 void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
+                                          const char* input_path,
                                           size_t insert_pos, size_t container_pos,
                                           CCEmitPlanComptimeSchedule* out);
 void cc_emit_plan_fprint_comptime_fragment(FILE* out, size_t frag_index);

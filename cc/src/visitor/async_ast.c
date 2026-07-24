@@ -3270,6 +3270,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             /* Avoid hoisting compiler-introduced temporaries / closure locals; keep them as locals in the current state. */
             if (strncmp(n[i].aux_s1, "__cc_ab_", 8) == 0) continue;
             if (strncmp(n[i].aux_s1, "__cc_ns_c", 9) == 0) continue;  /* nursery spawn closure temps */
+            if (strncmp(n[i].aux_s1, "__cc_tpl_", 9) == 0) continue; /* @string stmt-expression locals */
             /* Most result-unwrap temporaries live inside `({ __typeof__(CALL) tmp = ...; ... })`
              * stmt-expressions and must not be hoisted out — their `__typeof__(CALL)`
              * type is often not well-formed at struct-field position. The exception is

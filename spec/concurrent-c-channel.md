@@ -361,6 +361,48 @@ Channels without the `ordered` attribute make **no** delivery-order promise. The
 
 Head-of-line blocking (task-handle channels): if an earlier task stalls, later completed tasks are not observed until earlier ones complete.
 
+## Build-into send operations
+
+`send_into` / `try_send_into` are the default idiom for data carrying payloads —
+reserve a channel slot, then write the element into that slot (same family as
+`send_task`). Ordinary `send` / `try_send` suit already-stable values.
+
+`cc_chan_try_send_into` and `cc_chan_send_into` invoke a `CCClosure2` builder
+with `(slot, arena)`. On a typed `T[~ … >]` handle, an untyped builder infers
+`slot` as `T*` and `arena` as `CCArena*`. `slot` is storage for one channel
+element; `arena` is optional element payload backing supplied by the caller
+(a write buffer for variable-sized bytes, not a runtime-owned batch pool). The
+runtime does not own, pin, reset, or otherwise extend the arena lifetime.
+
+`try_send_into` commits capacity before invoking the builder:
+
+- Direct handoff: build into the parked receiver's output buffer.
+- Buffered lock-free path: reserve a ring cell, build, then publish the cell.
+- Buffered mutex path: build at the current tail, then advance the tail.
+- Full buffer, missing rendezvous partner, or pre-admission close/error:
+  return the corresponding errno without invoking the builder.
+
+The buffered direct-handoff path uses
+`cc__chan_buffered_handoff_would_reorder`; it may bypass the ring only when no
+older buffered item would be overtaken.
+
+`send_into` first attempts `try_send_into`. On `EAGAIN`, it allocates hidden
+staging storage, invokes the builder exactly once into that storage, and calls
+ordinary blocking `cc_chan_send`. The final slot address is therefore not part
+of the observable contract: builders must not retain or compare it after
+return.
+
+The typed `CCChanTx` surface wraps errno with `cc_chan_result_with`:
+
+- committed element: `ok(true)`;
+- graceful close (`EPIPE`): `ok(false)`;
+- full `try_send_into`: `err(CC_IO_BUSY)` with `os_code == EAGAIN`;
+- structured close or other runtime failure: `err(e)`.
+
+Data channels marked `ordered` accept build-into sends and retain their
+per-sender FIFO contract. Owned channels and ordered task-handle channels
+reject them with `EINVAL`.
+
 ## Channel modes
 
 | Mode | Behavior when buffer full |

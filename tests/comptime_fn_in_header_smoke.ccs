@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include "comptime_fn_header_helper.cch"
+#include <stdio.h>
+
+@comptime {
+    cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                   "enum { HEADER_FIB_10 = %d };\n", header_fib(10));
+}
+
+int main(void) {
+    if (HEADER_FIB_10 != 55) return 1;
+    puts("comptime_fn_in_header_smoke: PASS");
+    return 0;
+}

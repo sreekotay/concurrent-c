@@ -1,0 +1,196 @@
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdatomic.h>
+#include <string.h>
+
+typedef struct SendIntoMsg {
+    uintptr_t built_at;
+    int value;
+    char pad[64];
+} SendIntoMsg;
+
+static int g_builder_calls;
+static _Atomic int g_staging_builder_started;
+
+typedef struct StagingDrain {
+    CCChanRx rx;
+    SendIntoMsg first;
+    SendIntoMsg second;
+} StagingDrain;
+
+static void* drain_staged_send(void* arg) {
+    StagingDrain* drain = (StagingDrain*)arg;
+    while (!atomic_load_explicit(&g_staging_builder_started, memory_order_acquire)) {
+    }
+    assert(cc_io_avail(cc_channel_recv(drain->rx, &drain->first)));
+    assert(cc_io_avail(cc_channel_recv(drain->rx, &drain->second)));
+    return NULL;
+}
+
+int main(void) {
+    SendIntoMsg[~1 1:1 >] tx;
+    SendIntoMsg[~1 1:1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    assert(ch != NULL);
+
+    CCResult_bool_CCIoError first =
+        tx.try_send_into(
+            (slot, arena) => {
+                /* Reserve-then-write: produce into the admitted slot.
+                 * slot/arena types inferred from typed tx (SendIntoMsg*, CCArena*). */
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->built_at = (uintptr_t)slot;
+                slot->value = 41;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_io_avail(first));
+    assert(g_builder_calls == 1);
+
+    CCResult_bool_CCIoError full =
+        tx.try_send_into(
+            (slot, arena) => {
+                (void)slot;
+                (void)arena;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_is_err(full));
+    assert(cc_error(full).kind == CC_IO_BUSY);
+    assert(cc_error(full).os_code == EAGAIN);
+    assert(g_builder_calls == 1);
+
+    SendIntoMsg got = {0};
+    assert(cc_io_avail(rx.recv(&got)));
+    assert(got.value == 41);
+    assert(got.built_at != 0);
+    assert(got.built_at != (uintptr_t)&got);
+
+    tx.close();
+    CCResult_bool_CCIoError closed =
+        tx.try_send_into(
+            (slot, arena) => {
+                (void)slot;
+                (void)arena;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_is_ok(closed));
+    assert(!cc_value(closed));
+    assert(g_builder_calls == 1);
+    ch.free();
+
+    SendIntoMsg[~1 1:1 >] tx2;
+    SendIntoMsg[~1 1:1 <] rx2;
+    CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
+    assert(ch2 != NULL);
+
+    CCResult_bool_CCIoError blocking =
+        tx2.send_into(
+            (slot, arena) => {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->value = 42;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_io_avail(blocking));
+    assert(g_builder_calls == 2);
+    assert(cc_io_avail(rx2.recv(&got)));
+    assert(got.value == 42);
+    ch2.free();
+
+    SendIntoMsg[~1 1:1 >] tx3;
+    SendIntoMsg[~1 1:1 <] rx3;
+    CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
+    assert(ch3 != NULL);
+
+    SendIntoMsg queued = { .value = 50 };
+    assert(cc_io_avail(tx3.send(queued)));
+
+    StagingDrain drain = { .rx = rx3 };
+    pthread_t drainer;
+    atomic_store_explicit(&g_staging_builder_started, 0, memory_order_relaxed);
+    assert(pthread_create(&drainer, NULL, drain_staged_send, &drain) == 0);
+
+    CCResult_bool_CCIoError staged =
+        tx3.send_into(
+            (slot, arena) => {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->value = 51;
+                g_builder_calls++;
+                atomic_store_explicit(&g_staging_builder_started, 1, memory_order_release);
+                return NULL;
+            },
+            NULL);
+    assert(cc_io_avail(staged));
+    assert(pthread_join(drainer, NULL) == 0);
+    assert(g_builder_calls == 3);
+    SendIntoMsg* first_received = &drain.first;
+    SendIntoMsg* second_received = &drain.second;
+    assert(first_received->value == 50);
+    assert(second_received->value == 51);
+    ch3.free();
+
+    /* Multi-ident capture list commas must not break try_send_into macros. */
+    SendIntoMsg[~1 1:1 >] tx_multi;
+    SendIntoMsg[~1 1:1 <] rx_multi;
+    CCChan* ch_multi = cc_channel_pair(&tx_multi, &rx_multi);
+    assert(ch_multi != NULL);
+    int add_a = 7;
+    int add_b = 7;
+    CCResult_bool_CCIoError multi_cap =
+        tx_multi.try_send_into(
+            (slot, arena) => [add_a, add_b] {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->value = add_a + add_b;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_io_avail(multi_cap));
+    assert(g_builder_calls == 4);
+    assert(cc_io_avail(rx_multi.recv(&got)));
+    assert(got.value == 14);
+    ch_multi.free();
+
+    /* Typedef handle stored on a struct field: slot type still inferred. */
+    typedef SendIntoMsg[~1 1:1 >] FieldTx;
+    typedef SendIntoMsg[~1 1:1 <] FieldRx;
+    typedef struct FieldHolder {
+        FieldTx tx;
+    } FieldHolder;
+    FieldTx ftx;
+    FieldRx frx;
+    CCChan* ch4 = cc_channel_pair(&ftx, &frx);
+    assert(ch4 != NULL);
+    FieldHolder holder = { .tx = ftx };
+    FieldHolder* hp = &holder;
+    CCResult_bool_CCIoError via_field =
+        hp->tx.try_send_into(
+            (slot, arena) => {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->value = 60;
+                g_builder_calls++;
+                return NULL;
+            },
+            NULL);
+    assert(cc_io_avail(via_field));
+    assert(g_builder_calls == 5);
+    assert(cc_io_avail(frx.recv(&got)));
+    assert(got.value == 60);
+    ch4.free();
+
+    return 0;
+}

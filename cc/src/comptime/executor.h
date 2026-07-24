@@ -23,6 +23,9 @@ void cc_comptime_fn_registry_clear(void);
 int  cc_comptime_fn_registry_scan(const char* src, size_t len);
 const char* cc_comptime_fn_registry_scan_error(void);
 int  cc_comptime_fn_is_registered(const char* name);
+/* Optional helper typedefs/enums prepended to every comptime executor TU.
+ * Survives registry_scan clears; replaced by the next set_prelude call. */
+void cc_comptime_fn_registry_set_prelude(const char* prelude);
 const char* cc_comptime_fn_registry_defs(void);
 const char* cc_comptime_fn_registry_lookup_def(const char* name);
 int cc_comptime_fn_registry_lookup_line(const char* name);

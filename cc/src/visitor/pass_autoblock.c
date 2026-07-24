@@ -77,6 +77,7 @@ typedef enum {
  * considering the edge).  For non-@async owners, autoblock does not
  * run and this function is not consulted. */
 static CCCallEdgeMode cc_resolve_call_edge_mode(unsigned int owner_attrs,
+                                                unsigned int block_attrs,
                                                 unsigned int callee_attrs,
                                                 int callee_known,
                                                 unsigned int site_attrs) {
@@ -89,15 +90,17 @@ static CCCallEdgeMode cc_resolve_call_edge_mode(unsigned int owner_attrs,
     if (callee_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
     if (callee_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
 
-    /* 3. Undecorated CC: inherit caller ambient. */
-    if (callee_known) {
-        if (owner_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
-        if (owner_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
-        /* Spec §8.2.3: @async defaults to @blocking ambient. */
-        return CC_CALL_MODE_BLOCKING;
-    }
+    /* 3. Explicit lexical block ambient. */
+    if (block_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
+    if (block_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
 
-    /* 4. FFI / unknown: default @blocking. */
+    /* 4. Caller ambient (one hop).  An explicit function ambient is a
+     * brownfield contract and therefore applies to unknown/FFI edges too. */
+    if (owner_attrs & CC_FN_ATTR_NOBLOCK)  return CC_CALL_MODE_NOBLOCK;
+    if (owner_attrs & CC_FN_ATTR_BLOCKING) return CC_CALL_MODE_BLOCKING;
+
+    /* 5. Undecorated sync CC and FFI/unknown default @blocking. */
+    (void)callee_known;
     return CC_CALL_MODE_BLOCKING;
 }
 
@@ -915,8 +918,12 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
         unsigned int site_attrs = 0;
         unsigned int block_attrs = 0;
         if (n[i].line_start > 0 && n[i].col_start > 0) {
-            size_t call_name_pos = cc__offset_of_line_col_1based(
-                in_src, in_len, n[i].line_start, n[i].col_start);
+            size_t call_name_pos =
+                cc_pass_node_exact_off(root, n[i].off_start, in_len);
+            if (call_name_pos == (size_t)-1) {
+                call_name_pos = cc__offset_of_line_col_1based(
+                    in_src, in_len, n[i].line_start, n[i].col_start);
+            }
             if (call_name_pos > 0 && call_name_pos <= in_len) {
                 block_attrs = cc__block_mode_attrs_at_offset(in_src, in_len, call_name_pos);
                 size_t p = call_name_pos;
@@ -951,19 +958,14 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
 
         /* Spec §8.2.2: resolve the call-edge mode via the one precedence
          * chain.  Anything non-blocking skips the autoblock wrap. */
-        unsigned int ambient_attrs = owner_attrs;
-        if (block_attrs & (CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK)) {
-            ambient_attrs &= ~(unsigned int)(CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK);
-            ambient_attrs |= block_attrs & (CC_FN_ATTR_BLOCKING | CC_FN_ATTR_NOBLOCK);
-        }
         CCCallEdgeMode edge_mode = cc_resolve_call_edge_mode(
-            ambient_attrs, callee_attrs, callee_known, site_attrs);
+            owner_attrs, block_attrs, callee_attrs, callee_known, site_attrs);
         if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
             const char* mode_name =
                 (edge_mode == CC_CALL_MODE_ASYNC) ? "async" :
                 (edge_mode == CC_CALL_MODE_NOBLOCK) ? "noblock" : "blocking";
-            fprintf(stderr, "  edge_mode=%s site_attrs=0x%x block_attrs=0x%x callee_attrs=0x%x owner_attrs=0x%x ambient_attrs=0x%x callee_known=%d under_await=%d chan=%d\n",
-                    mode_name, site_attrs, block_attrs, callee_attrs, owner_attrs, ambient_attrs, callee_known,
+            fprintf(stderr, "  edge_mode=%s site_attrs=0x%x block_attrs=0x%x callee_attrs=0x%x owner_attrs=0x%x callee_known=%d under_await=%d chan=%d\n",
+                    mode_name, site_attrs, block_attrs, callee_attrs, owner_attrs, callee_known,
                     is_under_await, is_chan_op);
         }
         if (edge_mode != CC_CALL_MODE_BLOCKING) continue;

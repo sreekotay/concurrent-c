@@ -59,7 +59,7 @@ typedef enum RedisReplyKind {
     REDIS_REPLY_INTEGER,
     REDIS_REPLY_NULL_BULK,
     REDIS_REPLY_ERROR,
-    REDIS_REPLY_RAW,
+    REDIS_REPLY_ENCODED,
 } RedisReplyKind;
 
 /* Max command arguments AFTER the command word.  Total wire tokens per
@@ -136,7 +136,7 @@ static inline const char* redis_reply_name(RedisReplyKind kind) {
         case REDIS_REPLY_INTEGER: return "integer";
         case REDIS_REPLY_NULL_BULK: return "null-bulk";
         case REDIS_REPLY_ERROR: return "error";
-        case REDIS_REPLY_RAW: return "raw";
+        case REDIS_REPLY_ENCODED: return "encoded";
         default: return "unknown";
     }
 }

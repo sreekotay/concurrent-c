@@ -1130,8 +1130,9 @@ static int cc__walk_call(int idx,
                                 "  note: non-unique slices (arena / stack / untracked from_buffer) may dangle after send "
                                 "(channel-stable-borrow)\n");
                         fprintf(stderr,
-                                "  hint: use cc_slice_from_static, a unique T[:!] / send_take, or copy into a "
-                                "stable arena before send\n");
+                                "  hint: prefer try_send_into / send_into (reserve slot, write into it, "
+                                "materialize payload into the provided arena); or use cc_slice_from_static / "
+                                "unique T[:!] / send_take\n");
                         ctx->errors++;
                         return -1;
                     }

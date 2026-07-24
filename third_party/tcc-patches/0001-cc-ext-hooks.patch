@@ -2115,7 +2115,7 @@ index 50802edf..c104d757 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,13 +6741,28 @@ special_math_val:
+@@ -6168,13 +6741,75 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -2143,6 +2143,53 @@ index 50802edf..c104d757 100644
              skip(']');
 +            CC_REC_END();
          } else if (tok == '(') {
++#ifdef CONFIG_CC_EXT
++            /* Recorder mode only needs UFCS call/argument spans.  The
++             * synthetic callee type installed above may not have a complete
++             * ABI, so do not send it through gfunc_call/type_size. */
++            if (tcc_state && tcc_state->cc_parser_mode &&
++                tcc_state->cc_ufcs_active) {
++                int saved_ncw = nocode_wanted;
++                CC_REC_CALL(tcc_state->cc_last_member_flags);
++                tcc_state->cc_ufcs_active = 0;
++                ++nocode_wanted;
++                next(); /* consume '(' */
++                if (tok != ')') {
++                    for (;;) {
++                        expr_eq();
++                        vpop();
++                        if (tok != ',') break;
++                        next();
++                    }
++                }
++                if (tok == ')' && file) {
++                    tcc_state->cc_last_rparen_line = file->line_num;
++                    tcc_state->cc_last_rparen_col = tok_col;
++                }
++                skip(')');
++                nocode_wanted = saved_ncw;
++                if (tcc_state->cc_nodes && tcc_state->cc_call_stack &&
++                    tcc_state->cc_call_stack_top >= 0) {
++                    int call_idx =
++                        tcc_state->cc_call_stack[tcc_state->cc_call_stack_top--];
++                    if (tcc_state->cc_last_rparen_line)
++                        tcc_state->cc_nodes[call_idx].line_end =
++                            tcc_state->cc_last_rparen_line;
++                    if (tcc_state->cc_last_rparen_col)
++                        tcc_state->cc_nodes[call_idx].col_end =
++                            tcc_state->cc_last_rparen_col + 1;
++                    tcc_state->cc_last_rparen_line = 0;
++                    tcc_state->cc_last_rparen_col = 0;
++                    if (tcc_state->cc_node_stack_top >= 0 &&
++                        tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] == call_idx)
++                        tcc_state->cc_node_stack_top--;
++                }
++                vpop();   /* synthetic callee */
++                vpushi(0); /* one expression result */
++                tcc_state->cc_ufcs_result_pending = 1;
++                break;
++            }
++#endif
              SValue ret;
              Sym *sa;
 @@ -6182,6 +6770,8 @@ special_math_val:

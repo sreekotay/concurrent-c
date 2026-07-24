@@ -1,0 +1,33 @@
+/* Smoke: init-capture [alias = &local] value-captures a pointer under a fresh name. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int x = 6;
+
+    /* Sync closure: init-capture pointer alias, mutate through it (non-escaping). */
+    CCClosure0 f = () => [p = &x] {
+        *p = *p + 1;
+    };
+    cc_closure0_call(f);
+    if (x != 7) {
+        fprintf(stderr, "init-capture mutate failed: x=%d\n", x);
+        return 1;
+    }
+
+    /* Mix init-capture with a plain value capture. */
+    int y = 10;
+    int sum = 0;
+    int* sump = &sum;
+    CCClosure0 h = () => [p = &x, y, sp = sump] {
+        *sp = *p + y;
+    };
+    cc_closure0_call(h);
+    if (sum != 17) {
+        fprintf(stderr, "mixed init-capture failed: sum=%d\n", sum);
+        return 1;
+    }
+
+    printf("closure_init_capture_smoke: ok\n");
+    return 0;
+}

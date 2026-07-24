@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <limits.h>
 
 #include <ccc/cc_arena.cch>
 
@@ -18,9 +19,12 @@
 #include "util/path.h"
 #include "util/text.h"
 
+static int cc__diag_line_for_pos(size_t pos);
+
 typedef struct CCEmitComptimeFragment {
     CCEmitAnchor anchor;
     size_t site_pos;
+    int site_line;
     char* text;
     /* Emit provenance (edge-push #5): explicit origin for this fragment, set by
      * cc_emit_raw_at so a downstream C-compiler error in generated code maps to
@@ -111,6 +115,9 @@ static int cc__emit_try_collect_cc_emit_cstr(const char* src, size_t len, size_t
         CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
         f->anchor = anchor;
         f->site_pos = site_pos;
+        f->site_line = 1;
+        for (size_t k = 0; k < site_pos && k < len; k++)
+            if (src[k] == '\n') f->site_line++;
         f->origin_file = NULL;
         f->origin_line = 0;
         f->text = strdup(frag);
@@ -197,6 +204,9 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
         CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
         f->anchor = anchor;
         f->site_pos = site_pos;
+        f->site_line = 1;
+        for (size_t k = 0; k < site_pos && k < len; k++)
+            if (src[k] == '\n') f->site_line++;
         f->origin_file = NULL;
         f->origin_line = 0;
         f->text = strdup(frag);
@@ -334,6 +344,7 @@ int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text
         CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
         f->anchor = CC_EMIT_AFTER_PRELUDE;
         f->site_pos = 0;
+        f->site_line = 1;
         f->origin_file = NULL;
         f->origin_line = 0;
         f->text = d;
@@ -934,6 +945,7 @@ static void cc__host_emit_raw_impl(int anchor, const char* ptr, size_t len,
     CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
     f->anchor = (CCEmitAnchor)anchor;
     f->site_pos = cc__host_site_pos;
+    f->site_line = cc__diag_line_for_pos(cc__host_site_pos);
     f->text = dup;
     f->origin_line = origin_line;
     f->origin_file = (origin_file && origin_file[0]) ? strdup(origin_file) : NULL;
@@ -1272,11 +1284,69 @@ void cc_emit_plan_collect_comptime_emits(const char* src, size_t len) {
                                      (void*)&cc__ci_mask_emit);
 }
 
+static const char* cc__emit_basename(const char* path) {
+    const char* slash;
+    if (!path) return "";
+    slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static int cc__emit_same_file(const char* a, const char* b) {
+    return a && b && (strcmp(a, b) == 0 ||
+           strcmp(cc__emit_basename(a), cc__emit_basename(b)) == 0);
+}
+
+static size_t cc__emit_find_logical_line(const char* src, size_t len,
+                                         const char* input_path, int target_line,
+                                         size_t fallback) {
+    size_t pos = 0;
+    int logical = 1;
+    char current[PATH_MAX];
+    snprintf(current, sizeof(current), "%s", input_path ? input_path : "");
+    while (pos < len) {
+        size_t end = pos;
+        while (end < len && src[end] != '\n') end++;
+        if (cc__emit_same_file(current, input_path) && logical == target_line)
+            return pos;
+        {
+            char line[PATH_MAX + 64], file[4096];
+            int nline = 0;
+            size_t ll = end - pos;
+            if (ll >= sizeof(line)) ll = sizeof(line) - 1;
+            memcpy(line, src + pos, ll);
+            line[ll] = '\0';
+            file[0] = '\0';
+            if (sscanf(line, " #line %d \"%4095[^\"]\"", &nline, file) == 2 ||
+                sscanf(line, "#line %d \"%4095[^\"]\"", &nline, file) == 2 ||
+                sscanf(line, " #%d \"%4095[^\"]\"", &nline, file) == 2 ||
+                sscanf(line, "#%d \"%4095[^\"]\"", &nline, file) == 2) {
+                logical = nline;
+                snprintf(current, sizeof(current), "%s", file);
+            } else {
+                logical++;
+            }
+        }
+        pos = end < len ? end + 1 : end;
+    }
+    return fallback < len ? fallback : len;
+}
+
 static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
+                                          int site_line, const char* src, size_t len,
+                                          const char* input_path,
                                           size_t insert_pos, size_t container_pos) {
     switch (anchor) {
-    case CC_EMIT_AT_COMPTIME_SITE:
-        return site_pos;
+    case CC_EMIT_AT_COMPTIME_SITE: {
+        char marker[64];
+        snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
+        const char* hit = src ? strstr(src, marker) : NULL;
+        if (hit) {
+            size_t pos = (size_t)(hit - src);
+            while (pos > 0 && src[pos - 1] != '\n') pos--;
+            return pos;
+        }
+        return cc__emit_find_logical_line(src, len, input_path, site_line, site_pos);
+    }
     case CC_EMIT_BEFORE_FIRST_USE:
         return insert_pos;
     case CC_EMIT_AFTER_PRELUDE:
@@ -1286,16 +1356,17 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
 }
 
 void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
+                                          const char* input_path,
                                           size_t insert_pos, size_t container_pos,
                                           CCEmitPlanComptimeSchedule* out) {
     if (!out) return;
     memset(out, 0, sizeof(*out));
-    (void)src;
-    (void)len;
     for (size_t i = 0; i < cc__comptime_frag_count &&
                        out->n < CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS; i++) {
         out->pos[out->n] = cc__emit_resolve_anchor_pos(cc__comptime_frags[i].anchor,
                                                          cc__comptime_frags[i].site_pos,
+                                                         cc__comptime_frags[i].site_line,
+                                                         src, len, input_path,
                                                          insert_pos, container_pos);
         out->frag_index[out->n] = i;
         out->n++;
@@ -1457,7 +1528,8 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
     if (cc__comptime_frag_count == 0) return 0;
     insert_pos = cc_emit_plan_compute_prelude_insert_pos(*src, *len);
     container_pos = cc_emit_plan_compute_container_anchor(*src, *len);
-    cc_emit_plan_build_comptime_schedule(*src, *len, insert_pos, container_pos, &sched);
+    cc_emit_plan_build_comptime_schedule(*src, *len, input_path,
+                                          insert_pos, container_pos, &sched);
     for (size_t i = 0; i < sched.n; i++) order[i] = i;
     for (size_t i = 0; i + 1 < sched.n; i++) {
         for (size_t j = i + 1; j < sched.n; j++) {
@@ -1610,6 +1682,22 @@ size_t cc_emit_plan_type_decl_end_top_level(const char* src, size_t len,
                     while (e < end && cc_is_ident_char(src[e])) e++;
                     size_t type_len = strlen(type_name);
                     declares_type = (e > b && e - b == type_len && memcmp(src + b, type_name, type_len) == 0);
+                    if (declares_type) {
+                        size_t after_name = e;
+                        while (after_name < end &&
+                               (src[after_name] == ' ' || src[after_name] == '\t' ||
+                                src[after_name] == '\r' || src[after_name] == '\n')) {
+                            after_name++;
+                        }
+                        /* Autoblock argument captures are ordinary variables
+                         * (`struct T* __cc_ab_*`), not definitions of T.
+                         * Do not delay Result<T,E> declarations to them. */
+                        if (after_name < end && src[after_name] == '*' &&
+                            cc_find_substr_top_level(src, after_name, end,
+                                                     "__cc_ab_", 8) < end) {
+                            declares_type = 0;
+                        }
+                    }
                 }
                 if (declares_type) {
                     if (end < len && src[end] == '\n') end++;

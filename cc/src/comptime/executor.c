@@ -30,7 +30,10 @@ static CCComptimeFnEntry cc__comptime_fns[CC_COMPTIME_FN_MAX];
 static size_t cc__comptime_fn_count = 0;
 static char* cc__comptime_fn_defs_blob = NULL;
 static size_t cc__comptime_fn_defs_len = 0;
+static char* cc__comptime_fn_prelude = NULL;
 static char cc__comptime_fn_scan_err[512];
+
+static void cc__comptime_fn_rebuild_blob(void);
 
 void cc_comptime_fn_registry_clear(void) {
     cc__comptime_fn_scan_err[0] = '\0';
@@ -43,12 +46,33 @@ void cc_comptime_fn_registry_clear(void) {
     free(cc__comptime_fn_defs_blob);
     cc__comptime_fn_defs_blob = NULL;
     cc__comptime_fn_defs_len = 0;
+    /* Keep cc__comptime_fn_prelude: harvest installs it before scan, and
+     * scan() clears the function table on every TU. Prelude is replaced
+     * explicitly via cc_comptime_fn_registry_set_prelude. */
+    cc__comptime_fn_rebuild_blob();
+}
+
+void cc_comptime_fn_registry_set_prelude(const char* prelude) {
+    free(cc__comptime_fn_prelude);
+    cc__comptime_fn_prelude = NULL;
+    if (prelude && prelude[0]) cc__comptime_fn_prelude = strdup(prelude);
+    cc__comptime_fn_rebuild_blob();
 }
 
 static void cc__comptime_fn_rebuild_blob(void) {
     free(cc__comptime_fn_defs_blob);
     cc__comptime_fn_defs_blob = NULL;
     cc__comptime_fn_defs_len = 0;
+    if (cc__comptime_fn_prelude && cc__comptime_fn_prelude[0]) {
+        size_t plen = strlen(cc__comptime_fn_prelude);
+        char* nb = (char*)malloc(plen + 2);
+        if (!nb) return;
+        memcpy(nb, cc__comptime_fn_prelude, plen);
+        nb[plen] = '\n';
+        nb[plen + 1] = '\0';
+        cc__comptime_fn_defs_blob = nb;
+        cc__comptime_fn_defs_len = plen + 1;
+    }
     for (size_t i = 0; i < cc__comptime_fn_count; i++) {
         const CCComptimeFnEntry* e = &cc__comptime_fns[i];
         size_t need = cc__comptime_fn_defs_len + e->def_len + 2;

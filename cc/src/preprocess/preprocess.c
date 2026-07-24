@@ -7812,7 +7812,9 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
             size_t n_vec_ctnr = ctnr_sched.n_vec;
             size_t n_map_ctnr = ctnr_sched.n_map;
             int have_container_decls = (n_vec_ctnr > 0 || n_map_ctnr > 0);
-            cc_emit_plan_build_comptime_schedule(use, use_len, insert_pos, container_pos, &comptime_sched);
+            cc_emit_plan_build_comptime_schedule(use, use_len, input_path,
+                                                  insert_pos, container_pos,
+                                                  &comptime_sched);
             cc_emit_plan_warn_duplicate_symbols(use, use_len, input_path);
             {
                 size_t cursor = have_container_decls ? container_pos : insert_pos;
@@ -8268,6 +8270,10 @@ static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
 static size_t g_lowered_local_header_count = 0;
 static size_t g_lowered_local_header_cap = 0;
 
+static char** g_included_cch_sources = NULL;
+static size_t g_included_cch_source_count = 0;
+static size_t g_included_cch_source_cap = 0;
+
 static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     if (g_lowered_local_header_cap >= needed) return 0;
     size_t new_cap = g_lowered_local_header_cap ? g_lowered_local_header_cap * 2 : 8;
@@ -8278,6 +8284,33 @@ static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     g_lowered_local_headers = nv;
     g_lowered_local_header_cap = new_cap;
     return 0;
+}
+
+void cc_reset_included_cch_sources(void) {
+    for (size_t i = 0; i < g_included_cch_source_count; i++)
+        free(g_included_cch_sources[i]);
+    g_included_cch_source_count = 0;
+}
+
+static int cc__register_included_cch_source(const char* source_path) {
+    char abs_src[PATH_MAX];
+    char** nv;
+    size_t cap;
+    if (!source_path || !realpath(source_path, abs_src)) return -1;
+    for (size_t i = 0; i < g_included_cch_source_count; i++) {
+        if (strcmp(g_included_cch_sources[i], abs_src) == 0) return 0;
+    }
+    if (g_included_cch_source_count == g_included_cch_source_cap) {
+        cap = g_included_cch_source_cap ? g_included_cch_source_cap * 2 : 16;
+        nv = (char**)realloc(g_included_cch_sources, cap * sizeof(*nv));
+        if (!nv) return -1;
+        g_included_cch_sources = nv;
+        g_included_cch_source_cap = cap;
+    }
+    g_included_cch_sources[g_included_cch_source_count] = strdup(abs_src);
+    if (!g_included_cch_sources[g_included_cch_source_count]) return -1;
+    g_included_cch_source_count++;
+    return 1;
 }
 
 static int cc__mkpath_local(const char* path) {
@@ -8343,6 +8376,64 @@ static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len)
     *out_buf = buf;
     *out_len = got;
     return 0;
+}
+
+static void cc__register_included_cch_tree(const char* source_path) {
+    char abs_src[PATH_MAX];
+    char source_dir[PATH_MAX];
+    char repo_root[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    int added;
+    if (!source_path || !realpath(source_path, abs_src)) return;
+    added = cc__register_included_cch_source(abs_src);
+    if (added <= 0) return;
+    if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) != 0) return;
+    repo_root[0] = '\0';
+    (void)cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root));
+    if (cc__read_file_text(abs_src, &src, &n) != 0) return;
+
+    while (i < n) {
+        size_t line_end = i, p, path_s, path_e;
+        char open = 0, close = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < line_end && src[p++] == '#') {
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(src + p, "include", 7) == 0 &&
+                (p + 7 == line_end || !cc_is_ident_char(src[p + 7]))) {
+                p += 7;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < line_end && (src[p] == '"' || src[p] == '<')) {
+                    open = src[p++];
+                    close = open == '"' ? '"' : '>';
+                    path_s = p;
+                    while (p < line_end && src[p] != close) p++;
+                    path_e = p;
+                    if (path_e > path_s + 4 &&
+                        memcmp(src + path_e - 4, ".cch", 4) == 0) {
+                        char rel[PATH_MAX], child[PATH_MAX];
+                        size_t rel_len = path_e - path_s;
+                        if (rel_len < sizeof(rel)) {
+                            memcpy(rel, src + path_s, rel_len);
+                            rel[rel_len] = '\0';
+                            if (open == '"') {
+                                snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
+                            } else if (repo_root[0]) {
+                                snprintf(child, sizeof(child), "%s/cc/include/%s", repo_root, rel);
+                            } else {
+                                child[0] = '\0';
+                            }
+                            if (child[0]) cc__register_included_cch_tree(child);
+                        }
+                    }
+                }
+            }
+        }
+        i = line_end < n ? line_end + 1 : line_end;
+    }
+    free(src);
 }
 
 static int cc__write_file_text(const char* path, const char* buf, size_t len) {
@@ -8412,6 +8503,7 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     size_t lowered_idx;
     if (!source_path || !source_path[0]) return NULL;
     if (!realpath(source_path, abs_src)) return NULL;
+    cc__register_included_cch_tree(abs_src);
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
         if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0 &&
             access(g_lowered_local_headers[i].lowered_path, F_OK) == 0) {
@@ -8590,6 +8682,166 @@ char* cc_harvest_local_header_factories(void) {
     return out;
 }
 
+/* Reusable @comptime functions in .cch files follow the same model as header
+ * generic factories: harvest their raw definitions into the including TU,
+ * then let the normal registry/executor path compile them. File-scope typedef
+ * and enum declarations from those headers are installed as the comptime
+ * executor prelude so call-site @comptime blocks can name the helper types. */
+char* cc_harvest_header_comptime_functions(void) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    char* prelude = NULL;
+    size_t prelude_len = 0, prelude_cap = 0;
+    int any = 0;
+    for (size_t h = 0; h < g_included_cch_source_count; h++) {
+        const char* path = g_included_cch_sources[h];
+        char* src = NULL;
+        size_t n = 0, i = 0;
+        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+        int has_comptime_fn = 0;
+        if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
+        /* Only harvest helper types from headers that define a real @comptime
+         * function — skip comments/strings, and ignore @comptime {/if/for. */
+        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = i + 1 < n ? src[i + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
+                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+                if (p < n && src[p] != '{' &&
+                    !cc_match_ident_kw(src, n, p, "if") &&
+                    !cc_match_ident_kw(src, n, p, "for")) {
+                    has_comptime_fn = 1;
+                    break;
+                }
+            }
+            i++;
+        }
+        if (!has_comptime_fn) { free(src); continue; }
+        /* Pass 1: typedef / enum helpers for the executor prelude only.
+         * Restrict to this header's own helper surface — skip nested includes'
+         * transitive types by only accepting declarations before the first
+         * @comptime function. */
+        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = i + 1 < n ? src[i + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) break;
+            if ((cc_match_ident_kw(src, n, i, "typedef") ||
+                 cc_match_ident_kw(src, n, i, "enum")) &&
+                (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+                size_t start = i;
+                size_t p = i;
+                int depth = 0;
+                while (p < n) {
+                    char d = src[p];
+                    char d2 = p + 1 < n ? src[p + 1] : 0;
+                    if (d == '/' && d2 == '/') { while (p < n && src[p] != '\n') p++; continue; }
+                    if (d == '/' && d2 == '*') {
+                        p += 2;
+                        while (p + 1 < n && !(src[p] == '*' && src[p + 1] == '/')) p++;
+                        p += 2;
+                        continue;
+                    }
+                    if (d == '"' || d == '\'') {
+                        char qch = src[p++];
+                        while (p < n && src[p] != qch) { if (src[p] == '\\') p++; p++; }
+                        if (p < n) p++;
+                        continue;
+                    }
+                    if (d == '{') { depth++; p++; continue; }
+                    if (d == '}') { if (depth) depth--; p++; continue; }
+                    if (d == ';' && depth == 0) {
+                        cc_sb_append(&prelude, &prelude_len, &prelude_cap,
+                                     src + start, p + 1 - start);
+                        cc_sb_append_cstr(&prelude, &prelude_len, &prelude_cap, "\n");
+                        i = p + 1;
+                        break;
+                    }
+                    p++;
+                }
+                if (p >= n) break;
+                continue;
+            }
+            i++;
+        }
+        /* Pass 2: @comptime function definitions into the TU buffer. */
+        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = i + 1 < n ? src[i + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+            if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
+                size_t start = i;
+                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+                size_t lparen = 0, rparen = 0, body_r = 0;
+                if (p >= n || src[p] == '{' ||
+                    cc_match_ident_kw(src, n, p, "if") ||
+                    cc_match_ident_kw(src, n, p, "for")) {
+                    i++;
+                    continue;
+                }
+                for (size_t q = p; q < n; q++) {
+                    if (src[q] == ';' || src[q] == '{') break;
+                    if (src[q] == '(') { lparen = q; break; }
+                }
+                if (!lparen || !cc_find_matching_paren(src, n, lparen, &rparen)) {
+                    i++;
+                    continue;
+                }
+                p = cc_skip_ws_and_comments(src, n, rparen + 1);
+                if (p >= n || src[p] != '{' ||
+                    !cc_find_matching_brace(src, n, p, &body_r)) {
+                    i++;
+                    continue;
+                }
+                {
+                    int line = 1;
+                    char ld[PATH_MAX + 64];
+                    for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
+                    snprintf(ld, sizeof(ld), "\n#line %d \"%s\"\n", line, path);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+                    cc_sb_append(&out, &out_len, &out_cap,
+                                 src + start, body_r + 1 - start);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                }
+                any = 1;
+                i = body_r + 1;
+                continue;
+            }
+            i++;
+        }
+        free(src);
+    }
+    cc_comptime_fn_registry_set_prelude(prelude);
+    free(prelude);
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
 const char* cc_lowered_header_source_for(const char* lowered_path) {
     if (!lowered_path || !lowered_path[0]) return NULL;
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
@@ -8614,7 +8866,10 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     int changed = 0;
+    char repo_root[PATH_MAX];
     if (!src) return NULL;
+    repo_root[0] = '\0';
+    (void)cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root));
     while (i < n) {
         size_t line_end = i;
         while (line_end < n && src[line_end] != '\n') line_end++;
@@ -8635,6 +8890,17 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
                             close >= p + 5 &&
                             strncmp(src + close - 4, ".cch", 4) == 0) {
                             size_t path_end = close - 4;
+                            if (repo_root[0]) {
+                                char rel[PATH_MAX], abs_src[PATH_MAX];
+                                size_t rel_len = close - (p + 1);
+                                if (rel_len < sizeof(rel)) {
+                                    memcpy(rel, src + p + 1, rel_len);
+                                    rel[rel_len] = '\0';
+                                    snprintf(abs_src, sizeof(abs_src), "%s/cc/include/%s",
+                                             repo_root, rel);
+                                    cc__register_included_cch_tree(abs_src);
+                                }
+                            }
                             cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
                             cc_sb_append(&out, &out_len, &out_cap, src + close, line_end - close);

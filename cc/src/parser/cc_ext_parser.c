@@ -138,7 +138,11 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
     ++nocode_wanted;
     if (tcc_state) tcc_state->cc_in_closure_body++;
     
-    /* NEW: Parse optional captures [x, y, ...] after => */
+    /* NEW: Parse optional captures [x, y, ...] after =>.
+     * Init-captures `[alias = expr]` introduce names that are not in outer
+     * scope; like typed params, the body must be skipped for TCC typecheck
+     * (the closure rewrite pass binds the real types). */
+    int has_init_capture = 0;
     if (tok == '[') {
         /* Mark that this closure has captures (aux2 bit 3) */
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
@@ -147,9 +151,17 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
         }
         next(); /* consume '[' */
         int sq = 1;
+        int paren = 0, brace = 0;
         while (tok != TOK_EOF && sq > 0) {
             if (tok == '[') sq++;
             else if (tok == ']') sq--;
+            else if (tok == '(') paren++;
+            else if (tok == ')') { if (paren > 0) paren--; }
+            else if (tok == '{') brace++;
+            else if (tok == '}') { if (brace > 0) brace--; }
+            else if (tok == '=' && sq == 1 && paren == 0 && brace == 0) {
+                has_init_capture = 1;
+            }
             if (sq > 0) next();
         }
         if (tok == ']') {
@@ -159,8 +171,8 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
     
     int is_block = (tok == '{');
     
-    if (has_typed_params) {
-        /* Skip body without type-checking - TCC doesn't know param types */
+    if (has_typed_params || has_init_capture) {
+        /* Skip body without type-checking - TCC doesn't know param / init-capture types */
         cc_skip_closure_body(is_block);
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
             int idx = tcc_state->cc_nodes ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
@@ -432,10 +444,13 @@ static int cc_try_cc_closure(void) {
                 tcc_state->cc_nodes[cidx].aux_s1 = tcc_strdup("closure");
             }
 
-            /* Check if any param has a type annotation */
-            int has_typed_params = 0;
+            /* Parameter names are not installed in TCC's ordinary symbol
+             * scope during this recorder-only parse.  Any parameterized
+             * closure body must therefore be skipped rather than type-checked;
+             * otherwise uses of untyped `(slot, arena)` parameters can corrupt
+             * TCC's value stack in a surrounding call expression. */
+            int has_params = cc_param_n > 0;
             for (int pi = 0; pi < cc_param_n; pi++) {
-                if (cc_param_ty[pi]) has_typed_params = 1;
                 cc_ast_record_start(CC_AST_NODE_PARAM);
                 if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
                     int pidx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
@@ -450,7 +465,7 @@ static int cc_try_cc_closure(void) {
                 cc_ast_record_end();
             }
 
-            cc_parse_closure_body_ex(has_typed_params);
+            cc_parse_closure_body_ex(has_params);
             cc_ast_record_end();
             vpushi(0);
             return 1;

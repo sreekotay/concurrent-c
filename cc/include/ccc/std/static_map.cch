@@ -1,0 +1,194 @@
+#ifndef CC_STD_STATIC_MAP_CCH
+#define CC_STD_STATIC_MAP_CCH
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+
+#ifndef CC_STATIC_MAP_TYPES_DEFINED
+#define CC_STATIC_MAP_TYPES_DEFINED
+typedef struct CCStaticMapEntry {
+    const char* key;
+    const char* value; /* C initializer source for one `value_type` */
+} CCStaticMapEntry;
+
+enum {
+    CC_STATIC_MAP_CASE_SENSITIVE = 0,
+    CC_STATIC_MAP_ASCII_CI = 1,
+};
+#endif
+
+/* Emit a frozen CCSlice -> value_type map at the comptime call site.
+ *
+ * Lookup is a minimal perfect hash: hash(key) -> slot -> verify -> &value.
+ * `entries` must be an array of CCStaticMapEntry; `flags` selects exact or
+ * ASCII case-insensitive matching. Generated surface:
+ *
+ *   static const value_type* <name>_get(CCSlice key);
+ */
+@comptime void static_map(const char* name,
+                          const char* value_type,
+                          const void* raw_entries,
+                          size_t count,
+                          int flags) {
+    typedef struct {
+        const char* key;
+        const char* value;
+    } Entry;
+    const Entry* entries = (const Entry*)raw_entries;
+    int ascii_ci = (flags & CC_STATIC_MAP_ASCII_CI) != 0;
+    size_t i, j;
+    size_t table_size = 0;
+    uint32_t seed = 0;
+    int found = 0;
+    int16_t slots[512];
+    size_t key_lens[256];
+    uint32_t hashes[256];
+
+    if (!name || !name[0] || !value_type || !value_type[0] ||
+        !entries || count == 0 || count > 256) {
+        cc_emit_error("static_map: invalid arguments");
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (!entries[i].key || !entries[i].value ||
+            strchr(entries[i].key, '"') || strchr(entries[i].key, '\\')) {
+            cc_emit_error("static_map: keys must be simple string literals");
+            return;
+        }
+        key_lens[i] = strlen(entries[i].key);
+        for (j = 0; j < i; j++) {
+            if (key_lens[i] != key_lens[j]) continue;
+            int same = 1;
+            for (size_t k = 0; k < key_lens[i]; k++) {
+                unsigned char a = (unsigned char)entries[i].key[k];
+                unsigned char b = (unsigned char)entries[j].key[k];
+                if (ascii_ci) {
+                    if (a >= 'a' && a <= 'z') a = (unsigned char)(a - 'a' + 'A');
+                    if (b >= 'a' && b <= 'z') b = (unsigned char)(b - 'a' + 'A');
+                }
+                if (a != b) { same = 0; break; }
+            }
+            if (same) {
+                cc_emit_error("static_map: duplicate key");
+                return;
+            }
+        }
+    }
+
+    /* Search for a collision-free FNV-1a seed into a power-of-two table. */
+    for (table_size = 1; table_size < count; table_size <<= 1) {}
+    if (table_size < 4) table_size = 4;
+    while (table_size <= 512 && !found) {
+        for (seed = 1; seed < 100000u; seed++) {
+            for (i = 0; i < table_size; i++) slots[i] = -1;
+            int ok = 1;
+            for (i = 0; i < count; i++) {
+                uint32_t h = seed;
+                for (j = 0; j < key_lens[i]; j++) {
+                    unsigned char c = (unsigned char)entries[i].key[j];
+                    if (ascii_ci && c >= 'a' && c <= 'z')
+                        c = (unsigned char)(c - 'a' + 'A');
+                    h ^= c;
+                    h *= 16777619u;
+                }
+                hashes[i] = h;
+                size_t slot = (size_t)(h & (uint32_t)(table_size - 1));
+                if (slots[slot] >= 0) { ok = 0; break; }
+                slots[slot] = (int16_t)i;
+            }
+            if (ok) { found = 1; break; }
+        }
+        if (!found) table_size <<= 1;
+    }
+    if (!found) {
+        cc_emit_error("static_map: failed to build perfect hash");
+        return;
+    }
+
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "static const char* const %s__keys[%zu] = {\n", name, count);
+    for (i = 0; i < count; i++) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "    \"%s\",\n", entries[i].key);
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "};\n"
+        "static const size_t %s__key_lens[%zu] = {\n", name, count);
+    for (i = 0; i < count; i++) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "    %zu,\n", key_lens[i]);
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "};\n"
+        "static const %s %s__values[%zu] = {\n",
+        value_type, name, count);
+    for (i = 0; i < count; i++) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "    %s,\n", entries[i].value);
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "};\n"
+        "static const int16_t %s__slots[%zu] = {\n",
+        name, table_size);
+    for (i = 0; i < table_size; i++) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "    %d,\n", (int)slots[i]);
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "};\n"
+        "static uint32_t %s__hash(CCSlice key) {\n"
+        "    uint32_t h = %uu;\n"
+        "    size_t i;\n"
+        "    const unsigned char* p = (const unsigned char*)key.ptr;\n"
+        "    for (i = 0; i < key.len; i++) {\n"
+        "        unsigned char c = p[i];\n",
+        name, seed);
+    if (ascii_ci) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "        if (c >= 'a' && c <= 'z') c = (unsigned char)(c - 'a' + 'A');\n");
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "        h ^= c;\n"
+        "        h *= 16777619u;\n"
+        "    }\n"
+        "    return h;\n"
+        "}\n"
+        "static int %s__key_eq(CCSlice key, size_t idx) {\n"
+        "    size_t i;\n"
+        "    const unsigned char* a;\n"
+        "    const unsigned char* b;\n"
+        "    if (key.len != %s__key_lens[idx]) return 0;\n"
+        "    a = (const unsigned char*)key.ptr;\n"
+        "    b = (const unsigned char*)%s__keys[idx];\n"
+        "    for (i = 0; i < key.len; i++) {\n",
+        name, name, name);
+    if (ascii_ci) {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "        unsigned char x = a[i], y = b[i];\n"
+            "        if (x >= 'a' && x <= 'z') x = (unsigned char)(x - 'a' + 'A');\n"
+            "        if (y >= 'a' && y <= 'z') y = (unsigned char)(y - 'a' + 'A');\n"
+            "        if (x != y) return 0;\n");
+    } else {
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+            "        if (a[i] != b[i]) return 0;\n");
+    }
+    cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+        "    }\n"
+        "    return 1;\n"
+        "}\n"
+        "static const %s* %s_get(CCSlice key) {\n"
+        "    size_t slot = (size_t)(%s__hash(key) & %zuu);\n"
+        "    int16_t idx = %s__slots[slot];\n"
+        "    if (idx < 0) return NULL;\n"
+        "    if (!%s__key_eq(key, (size_t)idx)) return NULL;\n"
+        "    return &%s__values[idx];\n"
+        "}\n",
+        value_type, name, name, (size_t)(table_size - 1),
+        name, name, name);
+}
+
+#endif

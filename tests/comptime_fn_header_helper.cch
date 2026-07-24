@@ -1,0 +1,9 @@
+#ifndef COMPTIME_FN_HEADER_HELPER_CCH
+#define COMPTIME_FN_HEADER_HELPER_CCH
+
+@comptime int header_fib(int n) {
+    if (n <= 1) return n;
+    return header_fib(n - 1) + header_fib(n - 2);
+}
+
+#endif

@@ -134,6 +134,7 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        const char* input_path);
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
+void cc_reset_included_cch_sources(void);
 
 // Map an emitted lowered-header path (out/include/.../X.h) back to the .cch
 // source the user actually wrote, using the local-header lowering registry.
@@ -149,6 +150,11 @@ const char* cc_lowered_header_source_for(const char* lowered_path);
 // Must be called after cc_rewrite_local_cch_includes_to_lowered_headers has
 // populated the registry for this TU.
 char* cc_harvest_local_header_factories(void);
+
+// Harvest reusable @comptime function definitions from every local or system
+// .cch included by the current TU. Definitions retain #line provenance and are
+// appended before comptime preparation/execution.
+char* cc_harvest_header_comptime_functions(void);
 
 // Shared header-safe type-syntax lowering used by both preprocessing and
 // `.cch -> .h` lowering. Rewrites syntax that must not leak into plain C

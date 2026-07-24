@@ -59,7 +59,7 @@ int main(void) {
     snprintf(out_path, sizeof(out_path), "tmp/redis_phase2_lowering_%ld.c", (long)getpid());
     snprintf(log_path, sizeof(log_path), "tmp/redis_phase2_lowering_%ld.log", (long)getpid());
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc --emit-c-only real_projects/redis/redis_idiomatic.ccs -o %s > %s 2>&1",
+             "./cc/bin/ccc --no-cache --emit-c-only real_projects/redis/redis_idiomatic.ccs -o %s > %s 2>&1",
              out_path, log_path);
     if (system(cmd) != 0) {
         fprintf(stderr, "emit-c-only failed; see %s\n", log_path);
@@ -72,8 +72,13 @@ int main(void) {
         return 2;
     }
 
-    if (!strstr(lowered, "cc_channel_raw_try_send_into(")) {
-        fprintf(stderr, "Redis reply path did not lower to try_send_into\n");
+    if (!strstr(lowered, "cc_channel_try_send_into(")) {
+        fprintf(stderr, "Redis reply path did not lower to typed try_send_into\n");
+        free(lowered);
+        return 1;
+    }
+    if (strstr(lowered, "cc_channel_raw_try_send_into(")) {
+        fprintf(stderr, "Redis reply path still contains raw try_send_into plumbing\n");
         free(lowered);
         return 1;
     }

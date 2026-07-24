@@ -1,0 +1,50 @@
+#include <ccc/std/prelude.cch>
+#include "../real_projects/redis/redis_cc/redis_cc.cch"
+#include <assert.h>
+
+static RedisReply !>(CCError) make_reply(int64_t value) {
+    RedisReply reply = {0};
+    reply.kind = REDIS_REPLY_INTEGER;
+    reply.int_value = value;
+    return cc_ok(reply);
+}
+
+typedef RedisReply[~1 1:1 >] TestReplyTx;
+typedef struct ReplyHolder {
+    TestReplyTx tx;
+} ReplyHolder;
+
+@noblock static inline bool queue_reply(ReplyHolder* holder, RedisReply* reply) {
+    bool !>(CCIoError) sent =
+        holder->tx.try_send_into(
+            (slot, arena) => [reply] {
+                (void)arena;
+                *(RedisReply*)slot = *reply;
+                return NULL;
+            },
+            NULL);
+    return cc_io_avail(sent);
+}
+
+int main(void) {
+    TestReplyTx tx;
+    RedisReply[~1 1:1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    assert(ch != NULL);
+
+    RedisReply reply = make_reply(73) !>(e) return e.kind ? e.kind : 1;
+    ReplyHolder holder = { .tx = tx };
+    assert(queue_reply(&holder, &reply));
+
+    RedisReply got = {0};
+    assert(cc_io_avail(rx.recv(&got)));
+    assert(got.kind == REDIS_REPLY_INTEGER);
+    assert(got.int_value == 73);
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        assert(n != NULL);
+        n->spawn(() => { });
+    }
+    ch.free();
+    return 0;
+}

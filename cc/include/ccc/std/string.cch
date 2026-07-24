@@ -424,6 +424,41 @@ static inline CCSlice cc_string_persist_slice(CCArena *arena, const CCString *st
     return cc__string_persist_slice(arena, str);
 }
 
+#ifndef CC_COMPTIME
+/* Ensure `*s` is owned in `arena`. Inline/empty strings are already
+ * value-owned; heap strings already in `arena` (pointer or provenance)
+ * are left alone; otherwise copy into a fresh string in `arena`. */
+static inline CCResult_bool_CCError cc_string_materialize_in(CCString *s, CCArena *arena) {
+    if (!s || !arena) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "materialize_in without arena"));
+    }
+    if (cc_string_failed(s)) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "materialize_in poisoned string"));
+    }
+    if (cc_string_len(s) == 0 || cc_string_is_inline(s)) {
+        return cc_ok_CCResult_bool_CCError(true);
+    }
+    if (cc_string_arena(s) == arena ||
+        cc_string_provenance(s) == arena->provenance) {
+        return cc_ok_CCResult_bool_CCError(true);
+    }
+    {
+        CCString neu = cc_string_from_slice(arena, cc_string_as_slice(s));
+        if (cc_string_failed(&neu)) {
+            return cc_err_CCResult_bool_CCError(
+                CC_ERROR(CC_ERR_OUT_OF_MEMORY, "materialize string"));
+        }
+        *s = neu;
+        return cc_ok_CCResult_bool_CCError(true);
+    }
+}
+static inline CCResult_bool_CCError CCString_materialize_in(CCString *s, CCArena *arena) {
+    return cc_string_materialize_in(s, arena);
+}
+#endif /* !CC_COMPTIME */
+
 static inline CCString* cc_string_push_char(CCString *str, char c, CCArena *arena) {
     return cc_string_push_buffer(str, &c, 1, arena);
 }

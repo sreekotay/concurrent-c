@@ -57,6 +57,32 @@ static inline CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice* src, CCArena
     return cc_ok_CCResult_CCSlice_CCError(stable);
 }
 
+/* Ensure `*s` is stable in `arena` for a later release of its source lifetime.
+ *
+ * No-op when empty, canonical/static, or already minted by this arena's
+ * provenance epoch; otherwise clone bytes into `arena` and replace `*s`.
+ * Does not free or destroy the prior view. */
+static inline CCResult_bool_CCError cc_slice_materialize_in(CCSlice* s, CCArena* arena) {
+    CCResult_CCSlice_CCError cloned;
+    if (!s || !arena) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "materialize_in without arena"));
+    }
+    if (s->len == 0 || cc_slice_is_canonical(*s) ||
+        cc_slice_is_from_arena_epoch(*s, arena)) {
+        return cc_ok_CCResult_bool_CCError(true);
+    }
+    cloned = cc_slice_clone_into(s, arena);
+    if (CCResult_CCSlice_CCError_is_err(cloned)) {
+        return cc_err_CCResult_bool_CCError(CCResult_CCSlice_CCError_error(cloned));
+    }
+    *s = CCResult_CCSlice_CCError_value(cloned);
+    return cc_ok_CCResult_bool_CCError(true);
+}
+static inline CCResult_bool_CCError CCSlice_materialize_in(CCSlice* s, CCArena* arena) {
+    return cc_slice_materialize_in(s, arena);
+}
+
 static inline CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr* src, CCArena* arena) {
     if (!src || !arena) {
         return cc_err_CCResult_CCSliceHdr_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "clone_into without arena"));

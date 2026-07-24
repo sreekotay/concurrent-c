@@ -40,7 +40,7 @@ static void reply_init_inline(RedisReply* reply, uint64_t seq) {
     memset(reply, 0, sizeof(*reply));
     reply->conn_id = seq;
     reply->request_id = seq;
-    reply->kind = REDIS_REPLY_RAW;
+    reply->kind = REDIS_REPLY_ENCODED;
     reply->data_inline = 1;
     int len = snprintf(reply->inline_buf, sizeof(reply->inline_buf),
                        "$5\r\n%05llu\r\n",

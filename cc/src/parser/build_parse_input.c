@@ -70,6 +70,7 @@ int cc_build_parse_input(const char* file_buf,
     size_t got = file_len ? file_len : strlen(buf);
 
     cc__blank_pragma_cc_depends(buf, got);
+    cc_reset_included_cch_sources();
 
     {
         char* lowered = cc_rewrite_local_cch_includes_to_lowered_headers(buf, got, input_path);
@@ -99,6 +100,21 @@ int cc_build_parse_input(const char* file_buf,
                 got = got + 1 + hlen;
             }
             free(harvested);
+        }
+    }
+    {
+        char* harvested = cc_harvest_header_comptime_functions();
+        if (harvested) {
+            size_t hlen = strlen(harvested);
+            char* nb = (char*)malloc(got + 1 + hlen + 1);
+            if (!nb) { free(harvested); goto fail_buf; }
+            memcpy(nb, buf, got);
+            nb[got] = '\n';
+            memcpy(nb + got + 1, harvested, hlen + 1);
+            free(harvested);
+            free(buf);
+            buf = nb;
+            got += 1 + hlen;
         }
     }
     /* Seam: expand `@comptime for`/`if`, then lower `@emit`/`@string` templates

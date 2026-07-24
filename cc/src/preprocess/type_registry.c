@@ -347,6 +347,21 @@ const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,
     return NULL;
 }
 
+const char* cc_type_registry_lookup_unique_field_type(CCTypeRegistry* reg,
+                                                     const char* field_name) {
+    const char* found = NULL;
+    if (!reg || !field_name || !field_name[0]) return NULL;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].field_name, field_name) != 0) continue;
+        if (!found) {
+            found = reg->fields[i].field_type;
+            continue;
+        }
+        if (strcmp(found, reg->fields[i].field_type) != 0) return NULL;
+    }
+    return found;
+}
+
 static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) {
     size_t len = 0;
     if (!out || out_sz == 0) return;

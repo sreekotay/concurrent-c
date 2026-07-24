@@ -1,0 +1,60 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena src = cc_arena_heap(kilobytes(1)) @destroy;
+    CCArena dst = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!src.valid() || !dst.valid()) return 1;
+
+    /* Canonical / static: no-op. */
+    CCSlice lit = cc_slice_from_cstr("GET");
+    void* lit_ptr = lit.ptr;
+    lit.materialize_in(&dst) !>;
+    if (lit.ptr != lit_ptr || lit.len != 3) return 2;
+
+    /* Same-arena epoch: no-op. */
+    CCSlice local = cc_arena_alloc_slice_bytes(&dst, 4);
+    if (!local.ptr) return 3;
+    memcpy(local.ptr, "PING", 4);
+    void* local_ptr = local.ptr;
+    local.materialize_in(&dst) !>;
+    if (local.ptr != local_ptr) return 4;
+
+    /* Cross-arena borrow: copy into dst. */
+    CCSlice borrowed = cc_arena_alloc_slice_bytes(&src, 5);
+    if (!borrowed.ptr) return 5;
+    memcpy(borrowed.ptr, "hello", 5);
+    borrowed.materialize_in(&dst) !>;
+    if (!cc_slice_is_from_arena_epoch(borrowed, &dst)) return 6;
+    if (borrowed.len != 5 || memcmp(borrowed.ptr, "hello", 5) != 0) return 7;
+
+    /* Empty: no-op. */
+    CCSlice empty = cc_slice_empty();
+    empty.materialize_in(&dst) !>;
+    if (empty.len != 0) return 8;
+
+    /* CCString: heap in src → materialize into dst (longer than inline cap). */
+    CCString owned =
+        cc_string_from_slice(&src, cc_slice_from_cstr("hello-materialize-world"));
+    if (cc_string_failed(&owned) || cc_string_is_inline(&owned)) return 9;
+    owned.materialize_in(&dst) !>;
+    if (cc_string_arena(&owned) != &dst &&
+        cc_string_provenance(&owned) != dst.provenance) return 10;
+    CCSlice view = owned.as_slice();
+    if (view.len != 23 || memcmp(view.ptr, "hello-materialize-world", 23) != 0) return 11;
+
+    /* Inline string stays put. */
+    CCString tiny = cc_string_from_slice(&src, cc_slice_from_cstr("hi"));
+    if (cc_string_failed(&tiny) || !cc_string_is_inline(&tiny)) return 12;
+    tiny.materialize_in(&dst) !>;
+    if (!cc_string_is_inline(&tiny)) return 13;
+
+    puts("slice_materialize_in_smoke: PASS");
+    return 0;
+}

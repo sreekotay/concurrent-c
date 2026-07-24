@@ -11,6 +11,7 @@
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/type_registry.h"
 #include "visitor/pass_common.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
@@ -1626,6 +1627,208 @@ static int cc__ident_is_task_escape_callee(const char* src, size_t end) {
     return 0;
 }
 
+/* Callee name ending at `end` (exclusive) is send_into / try_send_into,
+ * including cc_channel_* forms. */
+static int cc__callee_is_send_into_name(const char* src, size_t end) {
+    if (!src || end < 9) return 0;
+    if (memcmp(src + end - 9, "send_into", 9) != 0) return 0;
+    size_t s = end - 9;
+    if (s == 0) return 1;
+    char p = src[s - 1];
+    /* `.send_into` / whitespace, or `*_send_into` / `*try_send_into` */
+    return !cc__is_ident_char2(p) || p == '_';
+}
+
+static size_t cc__skip_ws_left(const char* src, size_t i) {
+    while (i > 0 && (src[i - 1] == ' ' || src[i - 1] == '\t' ||
+                     src[i - 1] == '\n' || src[i - 1] == '\r')) i--;
+    return i;
+}
+
+static size_t cc__skip_ws_right(const char* src, size_t n, size_t i) {
+    while (i < n && (src[i] == ' ' || src[i] == '\t' ||
+                     src[i] == '\n' || src[i] == '\r')) i++;
+    return i;
+}
+
+/* Scan a primary receiver expression leftward ending at `end` (exclusive):
+ * ident / . / -> chains (and a leading &). Returns start offset, or end on fail. */
+static size_t cc__recv_expr_start(const char* src, size_t end) {
+    size_t i = cc__skip_ws_left(src, end);
+    if (i == 0) return end;
+    for (;;) {
+        if (i == 0 || !cc__is_ident_char2(src[i - 1])) return end;
+        while (i > 0 && cc__is_ident_char2(src[i - 1])) i--;
+        size_t j = cc__skip_ws_left(src, i);
+        if (j >= 2 && src[j - 1] == '>' && src[j - 2] == '-') {
+            i = cc__skip_ws_left(src, j - 2);
+            continue;
+        }
+        if (j >= 1 && src[j - 1] == '.') {
+            i = cc__skip_ws_left(src, j - 1);
+            continue;
+        }
+        if (j >= 1 && src[j - 1] == '&') return j - 1;
+        return i;
+    }
+}
+
+/* Fill missing builder param types from a typed channel send_into call:
+ * slot -> T*, arena -> CCArena*.  Explicit annotations are left alone.
+ * (Takes type out-params so it can live above CCClosureDesc's definition.) */
+static void cc__infer_send_into_builder_param_types(const char* src, size_t len,
+                                                    size_t start_off,
+                                                    int param_count,
+                                                    char** param0_type,
+                                                    char** param1_type) {
+    if (!src || !param0_type || !param1_type || param_count != 2) return;
+    if (*param0_type && *param1_type) return;
+
+    size_t i = start_off;
+    int paren = 0;
+    while (i > 0) {
+        i--;
+        char c = src[i];
+        if (c == ')') { paren++; continue; }
+        if (c == '(') {
+            if (paren > 0) { paren--; continue; }
+
+            size_t callee_end = cc__skip_ws_left(src, i);
+            if (callee_end == 0 || !cc__is_ident_char2(src[callee_end - 1])) continue;
+            size_t callee_start = callee_end;
+            while (callee_start > 0 && cc__is_ident_char2(src[callee_start - 1])) callee_start--;
+            if (!cc__callee_is_send_into_name(src, callee_end)) continue;
+
+            char recv_buf[256];
+            const char* handle_ty = NULL;
+            size_t before = cc__skip_ws_left(src, callee_start);
+            int is_method = (before > 0 && src[before - 1] == '.');
+
+            if (is_method) {
+                /* recv.try_send_into( builder, arena ) — closure is arg0 */
+                size_t recv_end = before - 1;
+                size_t recv_start = cc__recv_expr_start(src, recv_end);
+                if (recv_start >= recv_end || recv_end - recv_start >= sizeof(recv_buf)) continue;
+                memcpy(recv_buf, src + recv_start, recv_end - recv_start);
+                recv_buf[recv_end - recv_start] = 0;
+            } else {
+                /* cc_channel_try_send_into( tx, builder, arena ) — closure is arg1 */
+                size_t arg0_a = cc__skip_ws_right(src, len, i + 1);
+                size_t p = arg0_a;
+                int depth = 0;
+                while (p < start_off) {
+                    char ch = src[p];
+                    if (ch == '(' || ch == '[' || ch == '{') depth++;
+                    else if (ch == ')' || ch == ']' || ch == '}') {
+                        if (depth == 0) break;
+                        depth--;
+                    } else if (ch == ',' && depth == 0) break;
+                    p++;
+                }
+                if (p >= start_off || src[p] != ',' || p <= arg0_a) continue;
+                size_t arg0_b = cc__skip_ws_left(src, p);
+                if (arg0_b <= arg0_a || arg0_b - arg0_a >= sizeof(recv_buf)) continue;
+                memcpy(recv_buf, src + arg0_a, arg0_b - arg0_a);
+                recv_buf[arg0_b - arg0_a] = 0;
+            }
+
+            {
+                CCTypeRegistry* reg = cc_type_registry_get_global();
+                const char* field_ty = NULL;
+                const char* elem = NULL;
+                if (!reg) return;
+                /* Trailing field on `conn->reply_tx`: keep the raw field typedef
+                 * (ReplyTx).  Receiver resolve alias-normalizes that to bare
+                 * CCChanTx and drops the element type. */
+                {
+                    const char* p = recv_buf + strlen(recv_buf);
+                    while (p > recv_buf && (p[-1] == ' ' || p[-1] == '\t')) p--;
+                    const char* field_end = p;
+                    while (p > recv_buf && cc__is_ident_char2(p[-1])) p--;
+                    const char* field_start = p;
+                    while (p > recv_buf && (p[-1] == ' ' || p[-1] == '\t')) p--;
+                    int is_field = 0;
+                    if (p > recv_buf && p[-1] == '.') is_field = 1;
+                    else if (p >= recv_buf + 2 && p[-1] == '>' && p[-2] == '-') is_field = 1;
+                    if (is_field && field_end > field_start) {
+                        char field[128];
+                        size_t fl = (size_t)(field_end - field_start);
+                        if (fl < sizeof(field)) {
+                            memcpy(field, field_start, fl);
+                            field[fl] = 0;
+                            field_ty = cc_type_registry_lookup_unique_field_type(reg, field);
+                        }
+                    }
+                }
+                handle_ty = cc_type_registry_resolve_receiver_expr_at(reg, recv_buf, src, start_off, NULL);
+                if (!handle_ty) handle_ty = cc_type_registry_resolve_receiver_expr(reg, recv_buf, NULL);
+                if (!handle_ty) handle_ty = cc_type_registry_lookup_var(reg, recv_buf);
+                if (!handle_ty) handle_ty = field_ty;
+
+                /* Bare CCChanTx/CCChanRx (local decl after rewrite, or typedef
+                 * alias normalize) loses the element type. Recover via the
+                 * typed var registration (tx → CCChanTx_<Elem>) or the field
+                 * typedef name (ReplyTx → same). */
+                {
+                    int bare_chan =
+                        handle_ty &&
+                        ((strcmp(handle_ty, "CCChanTx") == 0) ||
+                         (strcmp(handle_ty, "CCChanRx") == 0));
+                    if (bare_chan) {
+                        const char* typed = cc_type_registry_lookup_var(reg, recv_buf);
+                        if (typed &&
+                            (strncmp(typed, "CCChanTx_", 9) == 0 ||
+                             strncmp(typed, "CCChanRx_", 9) == 0)) {
+                            handle_ty = typed;
+                        } else if (field_ty) {
+                            handle_ty = field_ty;
+                        }
+                    }
+                }
+
+                elem = cc_type_registry_lookup_channel_elem_type(reg, handle_ty);
+                if (!elem && handle_ty) {
+                    const char* via_var = cc_type_registry_lookup_var(reg, handle_ty);
+                    if (via_var) elem = cc_type_registry_lookup_channel_elem_type(reg, via_var);
+                }
+                if (!elem && field_ty && field_ty != handle_ty) {
+                    elem = cc_type_registry_lookup_channel_elem_type(reg, field_ty);
+                    if (!elem) {
+                        const char* via_var = cc_type_registry_lookup_var(reg, field_ty);
+                        if (via_var) elem = cc_type_registry_lookup_channel_elem_type(reg, via_var);
+                    }
+                }
+                if (!elem && handle_ty) {
+                    const char* aliased = cc_type_registry_lookup_alias(reg, handle_ty);
+                    if (aliased) {
+                        elem = cc_type_registry_lookup_channel_elem_type(reg, aliased);
+                        if (!elem) {
+                            const char* via_var = cc_type_registry_lookup_var(reg, aliased);
+                            if (via_var) elem = cc_type_registry_lookup_channel_elem_type(reg, via_var);
+                        }
+                    }
+                }
+                if (!elem || !elem[0]) return;
+
+                if (!*param0_type) {
+                    size_t el = strlen(elem);
+                    char* ty = (char*)malloc(el + 2);
+                    if (!ty) return;
+                    memcpy(ty, elem, el);
+                    ty[el] = '*';
+                    ty[el + 1] = 0;
+                    *param0_type = ty;
+                }
+                if (!*param1_type) {
+                    *param1_type = strdup("CCArena*");
+                }
+            }
+            return;
+        }
+        if (paren == 0 && (c == ';' || c == '{' || c == '}')) return;
+    }
+}
+
 /* True if this closure literal escapes onto a task/thread (spawn/async/
  * send_task), surface or already-lowered. Pointer-alias mutation is a
  * SHAPE-T7 concurrent smuggle; sync `CCClosureN` stores/calls may still
@@ -1939,6 +2142,7 @@ typedef struct {
     char* param1_type;
     int is_unsafe;
     char** explicit_cap_names;
+    char** explicit_cap_inits; /* parallel to names; NULL = plain capture, else init expr text */
     unsigned char* explicit_cap_flags; /* bit 0: is_ref */
     int explicit_cap_count;
     char** cap_names;
@@ -2275,6 +2479,7 @@ static int cc__parse_closure_from_src(const char* src,
 
     /* Parse params on the left. */
     int param_count = 0;
+    int params_from_source = 0;
     char p0[128] = {0}, p1[128] = {0};
     char t0[128] = {0}, t1[128] = {0};
 
@@ -2305,6 +2510,7 @@ static int cc__parse_closure_from_src(const char* src,
         size_t rp = l1;
         while (rp > l0 && s[rp - 1] != ')') rp--;
         if (rp <= l0) return 0;
+        params_from_source = 1;
         size_t ps = l0 + 1;
         size_t pe = rp - 1;
         while (ps < pe && (s[ps] == ' ' || s[ps] == '\t')) ps++;
@@ -2359,6 +2565,7 @@ static int cc__parse_closure_from_src(const char* src,
         }
     } else if (l0 < l1 && cc__is_ident_start_char(s[l0])) {
         /* x => ... */
+        params_from_source = 1;
         size_t q = l0 + 1;
         while (q < l1 && cc__is_ident_char2(s[q])) q++;
         size_t nn = q - l0;
@@ -2368,8 +2575,11 @@ static int cc__parse_closure_from_src(const char* src,
         param_count = 1;
     }
 
-    if (aux_param_count >= 0 && aux_param_count != param_count) {
-        /* Prefer the AST-provided param_count when available (parser is authoritative). */
+    if (!params_from_source && aux_param_count >= 0 && aux_param_count != param_count) {
+        /* Fall back to the AST count only when the source span did not expose
+         * an explicit parameter form.  The parser can report arity 0 when a
+         * captured closure is passed through an unresolved macro/UFCS callee;
+         * in that case `(a, b) => [capture] { ... }` remains authoritative. */
         param_count = aux_param_count;
         if (param_count == 0) { p0[0] = 0; p1[0] = 0; t0[0] = 0; t1[0] = 0; }
         if (param_count == 1 && p0[0] == 0) { /* leave unnamed */ }
@@ -2400,20 +2610,26 @@ static int cc__parse_closure_from_src(const char* src,
         size_t cap_l = b0 + 1;
         size_t cap_r = k;
 
-        /* Parse entries: (&)? ident, comma-separated */
+        /* Parse entries: (&)? ident | ident = expr, comma-separated.
+         * Init form `[alias = &local]` value-captures the expression under a
+         * fresh name (C++-style init-capture). Capture-all `[=]` / `[&]` banned. */
         {
             char** names = NULL;
+            char** inits = NULL;
             unsigned char* flags = NULL;
             int nn = 0;
             size_t p = cap_l;
             while (p < cap_r) {
-                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
                 if (p >= cap_r) break;
                 if (s[p] == ',') { p++; continue; }
                 if (s[p] == '=') {
                     /* capture-all not allowed */
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
+                    for (int i = 0; i < nn; i++) {
+                        free(names[i]);
+                        free(inits ? inits[i] : NULL);
+                    }
+                    free(names); free(inits); free(flags);
                     return 0;
                 }
                 int is_ref = 0;
@@ -2421,8 +2637,11 @@ static int cc__parse_closure_from_src(const char* src,
                 while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
                 if (p >= cap_r || !cc__is_ident_start_char(s[p])) {
                     /* capture-all like `[&]` or malformed */
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
+                    for (int i = 0; i < nn; i++) {
+                        free(names[i]);
+                        free(inits ? inits[i] : NULL);
+                    }
+                    free(names); free(inits); free(flags);
                     return 0;
                 }
                 size_t ns = p;
@@ -2430,29 +2649,99 @@ static int cc__parse_closure_from_src(const char* src,
                 while (p < cap_r && cc__is_ident_char2(s[p])) p++;
                 size_t nl = p - ns;
                 char* nm = (char*)malloc(nl + 1);
-                if (!nm) { for (int i = 0; i < nn; i++) free(names[i]); free(names); free(flags); return 0; }
+                if (!nm) {
+                    for (int i = 0; i < nn; i++) {
+                        free(names[i]);
+                        free(inits ? inits[i] : NULL);
+                    }
+                    free(names); free(inits); free(flags);
+                    return 0;
+                }
                 memcpy(nm, s + ns, nl);
                 nm[nl] = 0;
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                char* init_txt = NULL;
+                if (p < cap_r && s[p] == '=') {
+                    /* Init-capture: name = expr. Not combinable with [&name]. */
+                    if (is_ref) {
+                        free(nm);
+                        for (int i = 0; i < nn; i++) {
+                            free(names[i]);
+                            free(inits ? inits[i] : NULL);
+                        }
+                        free(names); free(inits); free(flags);
+                        return 0;
+                    }
+                    p++;
+                    while (p < cap_r && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+                    size_t es = p;
+                    int paren = 0, brace = 0, bracket = 0;
+                    while (p < cap_r) {
+                        char c = s[p];
+                        if (c == '(') paren++;
+                        else if (c == ')') { if (paren > 0) paren--; }
+                        else if (c == '{') brace++;
+                        else if (c == '}') { if (brace > 0) brace--; }
+                        else if (c == '[') bracket++;
+                        else if (c == ']') { if (bracket > 0) bracket--; }
+                        else if (c == ',' && paren == 0 && brace == 0 && bracket == 0) break;
+                        p++;
+                    }
+                    size_t ee = p;
+                    while (ee > es && (s[ee - 1] == ' ' || s[ee - 1] == '\t' ||
+                                       s[ee - 1] == '\n' || s[ee - 1] == '\r')) {
+                        ee--;
+                    }
+                    if (ee <= es) {
+                        free(nm);
+                        for (int i = 0; i < nn; i++) {
+                            free(names[i]);
+                            free(inits ? inits[i] : NULL);
+                        }
+                        free(names); free(inits); free(flags);
+                        return 0;
+                    }
+                    init_txt = (char*)malloc((ee - es) + 1);
+                    if (!init_txt) {
+                        free(nm);
+                        for (int i = 0; i < nn; i++) {
+                            free(names[i]);
+                            free(inits ? inits[i] : NULL);
+                        }
+                        free(names); free(inits); free(flags);
+                        return 0;
+                    }
+                    memcpy(init_txt, s + es, ee - es);
+                    init_txt[ee - es] = 0;
+                }
                 /* dedupe */
                 int dup = 0;
                 for (int q = 0; q < nn; q++) if (names[q] && strcmp(names[q], nm) == 0) { dup = 1; break; }
-                if (dup) { free(nm); continue; }
+                if (dup) { free(nm); free(init_txt); continue; }
                 char** nnames = (char**)realloc(names, (size_t)(nn + 1) * sizeof(char*));
+                char** ninits = (char**)realloc(inits, (size_t)(nn + 1) * sizeof(char*));
                 unsigned char* nflags = (unsigned char*)realloc(flags, (size_t)(nn + 1) * sizeof(unsigned char));
-                if (!nnames || !nflags) {
+                if (!nnames || !ninits || !nflags) {
                     free(nm);
-                    free(nnames); free(nflags);
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
+                    free(init_txt);
+                    free(nnames); free(ninits); free(nflags);
+                    for (int i = 0; i < nn; i++) {
+                        free(names[i]);
+                        free(inits ? inits[i] : NULL);
+                    }
+                    free(names); free(inits); free(flags);
                     return 0;
                 }
                 names = nnames;
+                inits = ninits;
                 flags = nflags;
                 names[nn] = nm;
+                inits[nn] = init_txt;
                 flags[nn] = (unsigned char)(is_ref ? 1 : 0);
                 nn++;
             }
             out->explicit_cap_names = names;
+            out->explicit_cap_inits = inits;
             out->explicit_cap_flags = flags;
             out->explicit_cap_count = nn;
         }
@@ -2500,8 +2789,12 @@ static void cc__free_closure_desc(CCClosureDesc* d) {
     free(d->param1_name);
     free(d->param0_type);
     free(d->param1_type);
-    for (int i = 0; i < d->explicit_cap_count; i++) free(d->explicit_cap_names ? d->explicit_cap_names[i] : NULL);
+    for (int i = 0; i < d->explicit_cap_count; i++) {
+        free(d->explicit_cap_names ? d->explicit_cap_names[i] : NULL);
+        free(d->explicit_cap_inits ? d->explicit_cap_inits[i] : NULL);
+    }
     free(d->explicit_cap_names);
+    free(d->explicit_cap_inits);
     free(d->explicit_cap_flags);
     for (int i = 0; i < d->cap_count; i++) free(d->cap_names ? d->cap_names[i] : NULL);
     free(d->cap_names);
@@ -2532,6 +2825,51 @@ static int cc__cap_is_explicit(const CCClosureDesc* d, const char* name) {
     return 0;
 }
 
+/* Init-capture expression for `name`, or NULL for a plain capture. */
+static const char* cc__cap_init_expr(const CCClosureDesc* d, const char* name) {
+    if (!d || !name || !d->explicit_cap_names || !d->explicit_cap_inits) return NULL;
+    for (int i = 0; i < d->explicit_cap_count; i++) {
+        if (!d->explicit_cap_names[i]) continue;
+        if (strcmp(d->explicit_cap_names[i], name) == 0) {
+            return d->explicit_cap_inits[i];
+        }
+    }
+    return NULL;
+}
+
+/* Parse supported init-capture forms into a base identifier and optional address-of.
+ * Supported: `ident`, `&ident`, and one layer of parentheses around those. */
+static int cc__parse_init_capture_base(const char* init, char* out_name, size_t out_cap, int* out_is_addr) {
+    if (!init || !out_name || out_cap == 0 || !out_is_addr) return 0;
+    *out_is_addr = 0;
+    out_name[0] = 0;
+    const char* s = init;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    const char* e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) e--;
+    if (e > s && *s == '(' && e[-1] == ')') {
+        s++;
+        e--;
+        while (s < e && (*s == ' ' || *s == '\t')) s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    }
+    if (s < e && *s == '&') {
+        *out_is_addr = 1;
+        s++;
+        while (s < e && (*s == ' ' || *s == '\t')) s++;
+    }
+    if (s >= e || !cc__is_ident_start_char(*s)) return 0;
+    const char* ns = s;
+    s++;
+    while (s < e && cc__is_ident_char2(*s)) s++;
+    if (s != e) return 0; /* only simple ident / &ident */
+    size_t nl = (size_t)(s - ns);
+    if (nl + 1 > out_cap) return 0;
+    memcpy(out_name, ns, nl);
+    out_name[nl] = 0;
+    return 1;
+}
+
 static char* cc__make_call_expr(const CCClosureDesc* d) {
     if (!d) return NULL;
     char* b = NULL;
@@ -2544,9 +2882,14 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
             if (i) cc__append_str(&b, &bl, &bc, ", ");
             int is_ref = (d->cap_flags && (d->cap_flags[i] & 4) != 0);
             int mo = (!is_ref && d->cap_flags && (d->cap_flags[i] & 2) != 0);
+            const char* init = cc__cap_init_expr(d, d->cap_names[i]);
             if (is_ref) cc__append_str(&b, &bl, &bc, "&");
             if (mo) cc__append_str(&b, &bl, &bc, "cc_move(");
-            cc__append_str(&b, &bl, &bc, d->cap_names[i] ? d->cap_names[i] : "0");
+            if (init) {
+                cc__append_str(&b, &bl, &bc, init);
+            } else {
+                cc__append_str(&b, &bl, &bc, d->cap_names[i] ? d->cap_names[i] : "0");
+            }
             if (mo) cc__append_str(&b, &bl, &bc, ")");
         }
         cc__append_str(&b, &bl, &bc, ")");
@@ -2781,11 +3124,31 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
     }
     if (idx_n == 0) { free(idxs); return 0; }
 
-    /* idxs is already in SOURCE ORDER: the recorder appends nodes in parse
-     * order, and a recursive-descent parse cannot start a later closure
-     * before an earlier one.  (An old best-effort re-sort keyed on the
-     * line/col heuristic could only DAMAGE that order when coordinates
-     * drifted — it's gone with the rest of the heuristic.) */
+    /* TCC may defer and replay function-call arguments in reverse order, so
+     * recorder order is not source order for closure literals nested in call
+     * arguments.  Stable-sort by exact parse-buffer offsets; fall back to
+     * source line/column only when an offset is unavailable.  Marker pairing
+     * below depends on this order. */
+    for (int i = 1; i < idx_n; i++) {
+        int key = idxs[i];
+        int j = i;
+        while (j > 0) {
+            const NodeView* a = &n[idxs[j - 1]];
+            const NodeView* b = &n[key];
+            int a_after_b = 0;
+            if (a->off_start >= 0 && b->off_start >= 0) {
+                a_after_b = a->off_start > b->off_start;
+            } else if (a->line_start != b->line_start) {
+                a_after_b = a->line_start > b->line_start;
+            } else {
+                a_after_b = a->col_start > b->col_start;
+            }
+            if (!a_after_b) break;
+            idxs[j] = idxs[j - 1];
+            j--;
+        }
+        idxs[j] = key;
+    }
 
     /* Marker k is closure k: the marker producer scans the buffer linearly
      * and idxs is in source order, so the k-th surviving marker is the k-th
@@ -2943,6 +3306,12 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             cc__free_func_sigs(sigs, sig_n);
             return -1;
         }
+        if (pr == 1) {
+            cc__infer_send_into_builder_param_types(in_src, in_len, d->start_off,
+                                                    d->param_count,
+                                                    &d->param0_type,
+                                                    &d->param1_type);
+        }
     }
 
     /* Walk file text in order, record simple decls, and compute captures for each closure at its location. */
@@ -3083,32 +3452,63 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                     for (int ci = 0; ci < cap_n; ci++) {
                         const char* ty = NULL;
                         unsigned char fl = 0;
+                        const char* init = cc__cap_init_expr(d, caps[ci]);
+                        char init_base[128];
+                        int init_is_addr = 0;
+                        const char* lookup_name = caps[ci];
+                        if (init) {
+                            if (!cc__parse_init_capture_base(init, init_base, sizeof(init_base),
+                                                             &init_is_addr)) {
+                                int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
+                                fprintf(stderr,
+                                        "%s:%d:%d: error: CC: unsupported init-capture '%s = %s' "
+                                        "(supported forms: ident, &ident)\n",
+                                        ctx->input_path ? ctx->input_path : "<input>",
+                                        d->start_line,
+                                        col1,
+                                        caps[ci] ? caps[ci] : "?",
+                                        init);
+                                for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+                                free(descs);
+                                for (int dd = 0; dd < 256; dd++) {
+                                    for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_names[dd][k2]);
+                                    free(scope_names[dd]);
+                                    for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_types[dd][k2]);
+                                    free(scope_types[dd]);
+                                    free(scope_flags[dd]);
+                                }
+                                free(idxs);
+                                free(in_src_decl_scan);
+                                return -1;
+                            }
+                            lookup_name = init_base;
+                        }
                         for (int dd = depth; dd >= 1 && !ty; dd--) {
-                            ty = cc__lookup_decl_type(scope_names[dd], scope_types[dd], scope_counts[dd], caps[ci]);
-                            if (ty) fl = cc__lookup_decl_flags(scope_names[dd], scope_flags[dd], scope_counts[dd], caps[ci]);
+                            ty = cc__lookup_decl_type(scope_names[dd], scope_types[dd], scope_counts[dd], lookup_name);
+                            if (ty) fl = cc__lookup_decl_flags(scope_names[dd], scope_flags[dd], scope_counts[dd], lookup_name);
                         }
-                        if (ty && !cc__capture_type_text_usable(ty, caps[ci])) {
+                        if (ty && !cc__capture_type_text_usable(ty, lookup_name)) {
                             ty = NULL;
                             fl = 0;
                         }
                         if (!ty) {
-                            ty = cc__lookup_param_type_by_src(sigs, sig_n, in_src, d->start_off, caps[ci]);
+                            ty = cc__lookup_param_type_by_src(sigs, sig_n, in_src, d->start_off, lookup_name);
                         }
-                        if (ty && !cc__capture_type_text_usable(ty, caps[ci])) {
+                        if (ty && !cc__capture_type_text_usable(ty, lookup_name)) {
                             ty = NULL;
                             fl = 0;
                         }
                         if (!ty) {
-                            ty = cc__lookup_param_type_for_closure(sigs, sig_n, caps[ci], d->start_line);
+                            ty = cc__lookup_param_type_for_closure(sigs, sig_n, lookup_name, d->start_line);
                         }
-                        if (ty && !cc__capture_type_text_usable(ty, caps[ci])) {
+                        if (ty && !cc__capture_type_text_usable(ty, lookup_name)) {
                             ty = NULL;
                             fl = 0;
                         }
                         if (!ty) {
                             unsigned char fl_global = 0;
-                            char* ty_global = cc__lookup_top_level_decl_type_by_text(in_src, d->start_off, caps[ci], &fl_global);
-                            if (ty_global && cc__capture_type_text_usable(ty_global, caps[ci])) {
+                            char* ty_global = cc__lookup_top_level_decl_type_by_text(in_src, d->start_off, lookup_name, &fl_global);
+                            if (ty_global && cc__capture_type_text_usable(ty_global, lookup_name)) {
                                 d->cap_types[ci] = ty_global;
                                 ty = d->cap_types[ci];
                                 fl = fl_global;
@@ -3118,8 +3518,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                         }
                         if (!ty) {
                             unsigned char fl_fb = 0;
-                            char* ty_fb = cc__lookup_decl_type_by_text_fallback(in_src, d->start_off, caps[ci], &fl_fb);
-                            if (ty_fb && cc__capture_type_text_usable(ty_fb, caps[ci])) {
+                            char* ty_fb = cc__lookup_decl_type_by_text_fallback(in_src, d->start_off, lookup_name, &fl_fb);
+                            if (ty_fb && cc__capture_type_text_usable(ty_fb, lookup_name)) {
                                 d->cap_types[ci] = ty_fb;
                                 ty = d->cap_types[ci];
                                 fl = fl_fb;
@@ -3129,8 +3529,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                         }
                         if (!ty) {
                             unsigned char fl_gen = 0;
-                            char* ty_gen = cc__lookup_internal_generated_decl_type(in_src, d->start_off, caps[ci], &fl_gen);
-                            if (ty_gen && cc__capture_type_text_usable(ty_gen, caps[ci])) {
+                            char* ty_gen = cc__lookup_internal_generated_decl_type(in_src, d->start_off, lookup_name, &fl_gen);
+                            if (ty_gen && cc__capture_type_text_usable(ty_gen, lookup_name)) {
                                 d->cap_types[ci] = ty_gen;
                                 ty = d->cap_types[ci];
                                 fl = fl_gen;
@@ -3138,20 +3538,60 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                 free(ty_gen);
                             }
                         }
+                        if (ty && init_is_addr) {
+                            /* `alias = &local` → capture type is pointer-to(local). */
+                            size_t tlen = strlen(ty);
+                            char* ptr_ty = (char*)malloc(tlen + 2);
+                            if (ptr_ty) {
+                                memcpy(ptr_ty, ty, tlen);
+                                ptr_ty[tlen] = '*';
+                                ptr_ty[tlen + 1] = 0;
+                                free(d->cap_types[ci]);
+                                d->cap_types[ci] = ptr_ty;
+                                ty = ptr_ty;
+                                fl |= 0x08; /* aliases_outer_local (same as T* p = &local) */
+                            }
+                        }
                         if (ty) {
-                            if (!d->cap_types[ci]) d->cap_types[ci] = strdup(ty);
+                            char canonical_ty[256];
+                            const char* emit_ty = ty;
+                            CCTypeRegistry* reg = cc_type_registry_get_global();
+                            if (reg &&
+                                cc_type_registry_canonicalize_type_name(
+                                    reg, ty, canonical_ty, sizeof(canonical_ty)) &&
+                                canonical_ty[0]) {
+                                emit_ty = canonical_ty;
+                            }
+                            if (!d->cap_types[ci] ||
+                                strcmp(d->cap_types[ci], emit_ty) != 0) {
+                                char* owned_ty = strdup(emit_ty);
+                                if (owned_ty) {
+                                    free(d->cap_types[ci]);
+                                    d->cap_types[ci] = owned_ty;
+                                }
+                            }
                         }
                         
                         if (cc__cap_is_ref(d, caps[ci])) fl |= 4; /* bit 2: reference capture */
                         d->cap_flags[ci] = fl;
                         if (!ty) {
                             int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
-                            fprintf(stderr,
-                                    "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
-                                    ctx->input_path ? ctx->input_path : "<input>",
-                                    d->start_line,
-                                    col1,
-                                    caps[ci] ? caps[ci] : "?");
+                            if (init) {
+                                fprintf(stderr,
+                                        "%s:%d:%d: error: CC: cannot infer type for init-capture '%s = %s'\n",
+                                        ctx->input_path ? ctx->input_path : "<input>",
+                                        d->start_line,
+                                        col1,
+                                        caps[ci] ? caps[ci] : "?",
+                                        init);
+                            } else {
+                                fprintf(stderr,
+                                        "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
+                                        ctx->input_path ? ctx->input_path : "<input>",
+                                        d->start_line,
+                                        col1,
+                                        caps[ci] ? caps[ci] : "?");
+                            }
                             /* cleanup */
                             for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                             free(descs);
@@ -3428,7 +3868,11 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
-                if (is_ref) {
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s;\n",
+                                   cc__capture_needs_const_opaque(is_ref, ty) ? "const void*" : "void*",
+                                   nm);
+                } else if (is_ref) {
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s;\n", ty, nm);
                 } else {
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s;\n", ty, nm);
@@ -3473,9 +3917,13 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                 if (cc__capture_needs_opaque(is_ref, ty)) {
                     if (is_ref) {
-                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s = (%s*)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s*)0) %s = (__typeof__((%s*)0))__cc_opaque_%s;\n",
+                                       ty, nm, ty, nm);
                     } else {
-                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s)0) %s = (__typeof__((%s)0))__cc_opaque_%s;\n",
+                                       ty, nm, ty, nm);
                     }
                 }
             }
@@ -3518,9 +3966,13 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                 if (cc__capture_needs_opaque(is_ref, ty)) {
                     if (is_ref) {
-                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s = (%s*)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s*)0) %s = (__typeof__((%s*)0))__cc_opaque_%s;\n",
+                                       ty, nm, ty, nm);
                     } else {
-                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s)0) %s = (__typeof__((%s)0))__cc_opaque_%s;\n",
+                                       ty, nm, ty, nm);
                     }
                 }
             }
@@ -3579,10 +4031,24 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 if (is_ref) {
                     /* Reference capture: dereference the stored pointer.
                        Use a local reference-like alias. */
-                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* __cc_ref_%s = __env->%s;\n", ty, nm, nm);
+                    if (cc__capture_needs_opaque(is_ref, ty)) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s*)0) __cc_ref_%s = (__typeof__((%s*)0))__env->%s;\n",
+                                       ty, nm, ty, nm);
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  %s* __cc_ref_%s = __env->%s;\n", ty, nm, nm);
+                    }
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "#define %s (*__cc_ref_%s)\n", nm, nm);
                 } else {
-                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = __env->%s;\n", ty, nm, nm);
+                    if (cc__capture_needs_opaque(is_ref, ty)) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __typeof__((%s)0) %s = (__typeof__((%s)0))__env->%s;\n",
+                                       ty, nm, ty, nm);
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  %s %s = __env->%s;\n", ty, nm, nm);
+                    }
                 }
             }
         } else if (!simple_closure0) {

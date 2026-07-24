@@ -276,6 +276,7 @@ void cc_chan_free(CCChan* ch);
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size);
 int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena);
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
+size_t cc_chan_elem_size(const CCChan* ch);
 
 // Batched send/recv: sends or receives `count` elements from/to contiguous buffers.
 // Returns 0 on success or errno-style error.
@@ -492,6 +493,7 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 }
 
 #define CC__CHANNEL_SELECT_2_OR_3(_1, _2, _3, NAME, ...) NAME
+#define CC__CHANNEL_SELECT_3_OR_4(_1, _2, _3, _4, NAME, ...) NAME
 #define cc_channel_send_raw3(ch, value, value_size) cc_channel_raw_send((ch), (value), (value_size))
 #define cc_channel_send_typed(tx, value) ({ \
     __typeof__(value) __cc_tmp = (value); \
@@ -509,6 +511,47 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
     cc_chan_result_with((tx).raw, cc_channel_raw_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp)), /*is_recv=*/false); \
 })
 #define cc_channel_try_send(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_send_raw3, cc_channel_try_send_typed)(__VA_ARGS__)
+
+/* send_into / try_send_into: dispatch on the first argument's type, not
+ * arity.  Closure builders often contain capture-list commas (`[a, b]`)
+ * that are not parenthesis-protected; arity macros mis-count those as
+ * extra arguments.  `_Generic` + `(first, __VA_ARGS__)` keeps the builder
+ * intact because `__VA_ARGS__` re-joins the remaining preprocessor args. */
+static inline int cc_channel_send_into_raw_call(CCChan* ch, CCClosure2 builder,
+                                               size_t value_size, CCArena* arena) {
+    return cc_channel_raw_send_into(ch, builder, value_size, arena);
+}
+static inline CCResult_bool_CCIoError cc_channel_send_into_typed_call(CCChanTx tx,
+                                                                     CCClosure2 builder,
+                                                                     CCArena* arena) {
+    return cc_chan_result_with(tx.raw,
+                               cc_channel_raw_send_into(tx.raw, builder,
+                                                        cc_chan_elem_size(tx.raw), arena),
+                               /*is_recv=*/false);
+}
+#define cc_channel_send_into(a, ...) \
+    _Generic((a), \
+        CCChan *: cc_channel_send_into_raw_call, \
+        default: cc_channel_send_into_typed_call \
+    )((a), __VA_ARGS__)
+
+static inline int cc_channel_try_send_into_raw_call(CCChan* ch, CCClosure2 builder,
+                                                   size_t value_size, CCArena* arena) {
+    return cc_channel_raw_try_send_into(ch, builder, value_size, arena);
+}
+static inline CCResult_bool_CCIoError cc_channel_try_send_into_typed_call(CCChanTx tx,
+                                                                         CCClosure2 builder,
+                                                                         CCArena* arena) {
+    return cc_chan_result_with(tx.raw,
+                               cc_channel_raw_try_send_into(tx.raw, builder,
+                                                            cc_chan_elem_size(tx.raw), arena),
+                               /*is_recv=*/false);
+}
+#define cc_channel_try_send_into(a, ...) \
+    _Generic((a), \
+        CCChan *: cc_channel_try_send_into_raw_call, \
+        default: cc_channel_try_send_into_typed_call \
+    )((a), __VA_ARGS__)
 
 #define cc_channel_try_recv_typed(rx, out_ptr) (cc_chan_result_with((rx).raw, cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))), /*is_recv=*/true))
 #define cc_channel_try_recv_raw3(ch, out_value, value_size) cc_channel_raw_try_recv((ch), (out_value), (value_size))
@@ -584,6 +627,8 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, C
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
     }
     if (cc__channel_lower_c_eq(method, "try_send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send");
+    if (cc__channel_lower_c_eq(method, "send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_into");
+    if (cc__channel_lower_c_eq(method, "try_send_into")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send_into");
     if (cc__channel_lower_c_eq(method, "set_recv_signal")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_set_recv_signal");
     if (cc__channel_lower_c_eq(method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
     if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");

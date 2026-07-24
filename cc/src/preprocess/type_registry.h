@@ -41,6 +41,10 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
 const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,
                                           const char* struct_name,
                                           const char* field_name);
+/* If `field_name` appears on exactly one registered struct (or all hits
+ * share one field type), return that field type; otherwise NULL. */
+const char* cc_type_registry_lookup_unique_field_type(CCTypeRegistry* reg,
+                                                     const char* field_name);
 const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
                                                    const char* recv_expr,
                                                    int* out_recv_is_ptr);

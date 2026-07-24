@@ -1,8 +1,8 @@
 # SHAPE-T3 — arena / epoch borrow sent across a channel
 
 - **Links:** Class exemplar (CWE-416 via handoff). Redis pressure:
-  `redis_reply_stabilize_for_channel` in
-  `real_projects/redis/redis_idiomatic.ccs`. CC evidence:
+  reserve-then-write via `try_send_into` + `redis_reply_write_payload_into`
+  in `real_projects/redis/redis_idiomatic.ccs`. CC evidence:
   `tests/channel_send_arena_borrow_fail.ccs` (channel-stable-borrow).
 - **Product / versions:** (n/a — shape study)
 - **CWE(s):** CWE-416

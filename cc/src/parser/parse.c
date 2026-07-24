@@ -48,6 +48,23 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
                 }
+                {
+                    char marker[64];
+                    int mlen = snprintf(marker, sizeof(marker),
+                                        "enum{__ccs%zu=0};", body_l);
+                    if (mlen > 0) {
+                        size_t line_s = i;
+                        while (line_s <= body_r) {
+                            size_t line_e = line_s;
+                            while (line_e <= body_r && out[line_e] != '\n') line_e++;
+                            if (line_e - line_s >= (size_t)mlen) {
+                                memcpy(out + line_s, marker, (size_t)mlen);
+                                break;
+                            }
+                            line_s = line_e + 1;
+                        }
+                    }
+                }
                 i = body_r;
                 continue;
             }

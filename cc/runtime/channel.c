@@ -2160,6 +2160,10 @@ int cc_chan_init_elem(CCChan* ch, size_t elem_size) {
     return cc_chan_ensure_buf(ch, elem_size);
 }
 
+size_t cc_chan_elem_size(const CCChan* ch) {
+    return ch ? ch->elem_size : 0;
+}
+
 static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
 

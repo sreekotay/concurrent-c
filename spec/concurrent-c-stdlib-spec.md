@@ -137,11 +137,18 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
 CCResult_CCSlice_CCError cc_slice_clone_into(CCSlice *src, CCArena *arena);
 CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *arena);
 
+/* Stabilize `*s` in `arena` (mutate in place). */
+bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena *arena);
+
 /* Checked index — same Result/error in all builds (no debug/release split). */
 char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
 char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* alias of get_checked */
 bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 ```
+
+`materialize_in` is a no-op when the slice is empty, canonical/static, or
+already from `arena`'s provenance epoch; otherwise it clones into `arena` and
+replaces `*s`. It does not free the prior view. UFCS: `s.materialize_in(arena)`.
 
 Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
 `at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
@@ -233,6 +240,7 @@ CCArena *cc_string_arena(const CCString *str);
 uint64_t cc_string_provenance(const CCString *str);
 CCSlice cc_string_as_slice(const CCString *str);
 CCSlice cc_string_persist_slice(CCArena *arena, const CCString *str);
+bool !>(CCError) cc_string_materialize_in(CCString *str, CCArena *arena);
 const char *cc_string_cstr(CCString *str, CCArena *arena);
 
 char *cc_string_reserve(CCString *str, size_t need, CCArena *arena);
@@ -271,6 +279,11 @@ storage. A growth failure poisons the string. On a poisoned string,
 `cc_string_failed` is true, push operations return null,
 `cc_string_as_slice` is empty, and `cc_string_cstr` returns null.
 `cc_string_clear` restores a valid empty string.
+
+`cc_string_materialize_in` leaves inline and empty strings unchanged. A heap
+string already owned by `arena` (same arena pointer or matching provenance) is
+a no-op; otherwise the bytes are copied into a new string in `arena` and
+`*str` is replaced. UFCS: `s.materialize_in(arena)`.
 
 Scalar conversion helpers have the form:
 
@@ -512,6 +525,42 @@ The convenience declarations are:
 
 Their `_FULL(V, Name, OptV_ignored)` forms expand to the same generated family
 and ignore the final argument.
+
+### Static maps
+
+`<ccc/std/static_map.cch>` provides a comptime perfect-hash map:
+
+```c
+typedef struct CCStaticMapEntry {
+    const char *key;
+    const char *value; /* C initializer source for one value_type */
+} CCStaticMapEntry;
+
+enum {
+    CC_STATIC_MAP_CASE_SENSITIVE = 0,
+    CC_STATIC_MAP_ASCII_CI = 1,
+};
+
+@comptime void static_map(const char *name,
+                          const char *value_type,
+                          const void *entries,
+                          size_t count,
+                          int flags);
+```
+
+`entries` is an array of `CCStaticMapEntry`. At the comptime call site the
+function searches for a collision-free FNV-1a seed into a power-of-two slot
+table and emits keys, values, slots, and:
+
+```c
+static const value_type *name_get(CCSlice key);
+```
+
+Lookup is `hash(key) -> slot -> verify -> &value`, with exact or ASCII
+case-insensitive verification according to `flags`. A miss returns null.
+Invalid arguments, duplicate keys (under the selected match policy), keys
+requiring C-string escaping, and failure to construct a perfect hash are
+compile-time errors.
 
 ### Hash helpers
 

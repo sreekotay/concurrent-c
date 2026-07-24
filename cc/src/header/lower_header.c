@@ -312,7 +312,26 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
             size_t body_l = 0, body_r = 0;
             int depth = 0, ls = 0, lc = 0, st = 0, ch = 0;
             while (p < n && isspace((unsigned char)src[p])) p++;
-            if (p >= n || src[p] != '{') { i++; continue; }
+            if (p >= n) { i++; continue; }
+            if (src[p] != '{') {
+                size_t lparen = 0, rparen = 0;
+                if (cc_match_ident_kw(src, n, p, "if") ||
+                    cc_match_ident_kw(src, n, p, "for")) {
+                    i++;
+                    continue;
+                }
+                for (size_t q = p; q < n; q++) {
+                    if (src[q] == ';' || src[q] == '{') break;
+                    if (src[q] == '(') { lparen = q; break; }
+                }
+                if (!lparen || !cc_find_matching_paren(src, n, lparen, &rparen)) {
+                    i++;
+                    continue;
+                }
+                p = rparen + 1;
+                while (p < n && isspace((unsigned char)src[p])) p++;
+                if (p >= n || src[p] != '{') { i++; continue; }
+            }
             body_l = p;
             for (p = body_l; p < n; ++p) {
                 char d = src[p];
@@ -393,7 +412,8 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf2 = NULL;
     char* buf_result_fields = NULL;
     
-    /* Pass 0: Strip raw @comptime blocks so lowered headers are valid C. */
+    /* Pass 0: Strip raw @comptime blocks and function definitions so lowered
+       headers are valid C. Functions are harvested into including CC TUs. */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
     if (buf0) {
         cur = buf0;
