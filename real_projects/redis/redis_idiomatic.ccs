@@ -53,14 +53,8 @@
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_type.cch>
 
-/* DB arena layout:
- *   - Three arenas: map (RedisDbMap blob + handle), key (cloned key bytes),
- *     value (CCString backing for DB values).  Mem report prints
- *     cc_arena_committed_gross_bytes per pool (slab chain + overflow + extent
- *     wrapper structs); see cc_arena.cch.
- *   - Map/value arenas use small fixed roots + heap overflow.
- *   - Key arena remains growable because key bytes are many small persistent
- *     allocations, which fit the slab model better than per-key malloc. */
+/* Three DB arenas: map (table blob), key (cloned key bytes), value (CCString
+ * backing).  Map/value: fixed root + heap overflow; key: growable slabs. */
 
 static inline CCSliceHdr db_key_hdr_view(char[:] key) {
     CCSliceHdr h = {0};
@@ -81,24 +75,14 @@ static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
-/* DB value payload: a data-model sum type (spec/draft_variants.md).  SET
- * stores raw bytes (.str); the INCR family stores integers AS integers
- * (.num) — no text round-trip on the int hot path.  Read boundaries
- * (GET/APPEND/STRLEN/MGET) render a num cell to its canonical decimal,
- * which is byte-identical to what the retired text storage held. */
+/* .str = SET bytes; .num = INCR-family ints (no text round-trip).  Read
+ * boundaries render .num to canonical decimal. */
 @variant(packed) RedisValue {
     str: CCString;
     num: int64_t;
 };
 
-/* DB cell: the value variant plus an absolute expiration deadline.
- * expires_at_ms sits NEXT TO the variant (not inside each arm): expiry is
- * arm-independent, so wrapping it per-arm would duplicate the field and
- * force projections at every TTL site — this keeps all expires_at_ms
- * reads textually unchanged.  expires_at_ms == 0 means "no expiry".
- * Expiration is LAZY: checked on access (db_lookup_live) and overwritten
- * on write; there is no active expiry cycle, so an expired-but-untouched
- * key still occupies memory until the next access, FLUSH*, or teardown. */
+/* expires_at_ms == 0 → no expiry.  Lazy: checked on access (db_lookup_live). */
 typedef struct RedisEntry {
     RedisValue val;
     int64_t expires_at_ms;
@@ -134,6 +118,9 @@ typedef struct RedisDbMemStats {
 } RedisDbMemStats;
 
 static RedisDbMemStats g_db_mem_stats = {0};
+
+#include "redis_mem.cch"
+#include "redis_glob.cch"
 
 /* Compile-time channel geometry: embedded in CC endpoint types and must match
  * handle_client's per-round submit cap (same value as reply channel depth). */
@@ -177,55 +164,31 @@ static inline void redis_pipeline_window_accept(RedisPipelineWindow* window) {
     window->replies_pending++;
 }
 
-/* DELIVERY-ORDER CONTRACT: pipelined replies MUST arrive in submission
- * order (RESP maps the i-th reply to the i-th request), and default
- * channels promise no order (spec/concurrent-c-channel.md "Delivery
- * order") — so the receive endpoint is declared `ordered`: per-sender
- * FIFO on a data channel (spec "Ordered channels"), which with the
- * single owner sender is total reply order. */
+/* Replies must match submission order (RESP).  `ordered` = per-sender FIFO;
+ * single owner sender ⇒ total order. */
 typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
 typedef RedisReply[~k_pipeline_reply_cap 1:1 ordered <] ReplyRx;
 
 typedef struct RedisConn {
     uint64_t conn_id;
     uint64_t next_request_id;
-    /* Requests accepted by the owner but not yet drained from reply_rx.
-     * Only the client fiber touches this (submit++ / drain--), and the
-     * teardown drain-to-zero uses it as the join condition — see
-     * handle_client's @destroy.  No refcounts: the owner returns each
-     * request's pool slot after try_send_into commits the reply, so
-     * "all replies drained" proves the owner holds nothing of this conn. */
+    /* Client-only: submit++ / drain--.  Drain-to-zero is the teardown join. */
     size_t inflight;
-    /* Per-conn pool of RedisRequest slots.  Each slot is exactly one
-     * RedisRequest, with req->arena wrapping the trailing argv_buf
-     * (heap-spills on overflow). */
+    /* Per-conn RedisRequest pool. */
     CCArenaPool req_pool;
-    /* Payload backing for try_send_into: reply bytes that cannot borrow
-     * request/DB memory across the owner→client handoff.  Reset after the
-     * client drains one pipeline window. */
+    /* Reply payload arena; reset per pipeline window. */
     CCArena reply_arena;
-    /* Owner → client reply stream (1:1, depth k_pipeline_reply_cap). */
+    /* Owner → client reply stream. */
     ReplyTx reply_tx;
     ReplyRx reply_rx;
-    /* The session's socket, set once by handle_client right after create.
-     * The socket is handle_client's stack frame and its @defer close runs
-     * AFTER the conn's @destroy (reverse registration order), so it
-     * strictly outlives the conn.  Owned here so the write family below
-     * are RECEIVER-FIRST conn methods instead of (sock, conn, ...)
-     * threading through every signature. */
+    /* Session socket on handle_client stack; outlives conn. */
     CCSocket* sock;
     size_t out_len;
     char out_buf[redis_conn_out_buf_bytes];
 } RedisConn;
 
-/* The shared request channel's two endpoints, named so function
- * signatures don't have to spell out the channel type.  Clients hand a
- * RedisRequest* across ReqTx; the owner drains from ReqRx and replies
- * on the request's originating conn->reply_rx. */
-/* Same delivery-order contract as ReplyRx: the owner must execute a
- * connection's requests in submission order, which is exactly the
- * ordered data-channel per-sender FIFO guarantee — so the receive
- * endpoint is declared `ordered`. */
+/* Shared N:1 request channel; Rx is ordered so each conn's requests run
+ * in submission order. */
 typedef RedisRequest*[~k_request_chan_cap N:1 >] ReqTx;
 typedef RedisRequest*[~k_request_chan_cap N:1 ordered <] ReqRx;
 
@@ -238,10 +201,7 @@ static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t 
 static bool !>(CCError) reply_encode_into_arena(RedisReply* reply,
                                                      CCArena* reply_arena);
 
-/* Register RedisConn*'s destroy hook.  Per-use @destroy bodies run
- * BEFORE the registered callee, letting handle_client drain in-flight
- * replies to zero ahead of the free — the drain IS the join (one reply
- * per accepted request; slot returned after each try_send_into commits). */
+/* @destroy body drains inflight, then this frees the conn. */
 @comptime {
     (void)cc_type_register("RedisConn*", (CCTypeHooks){
         .destroy = cc_type_destroy_call("redis_conn_destroy"),
@@ -260,9 +220,6 @@ static CCIoError net_to_io_error(CCNetError err) {
     }
 }
 
-/* Line-oriented stderr via @string scratch arena (see string_template_smoke).
- * Rare startup diagnostics stay direct as one local operation rather than
- * fragmenting arena/string/stdio across blocking-pool dispatches. */
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
@@ -281,33 +238,13 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     return true;
 }
 
-/* Integer argument parsing is stdlib now: `char[:].to_i64()` (strict
- * full-slice, overflow -> CC_ERR_INVALID_ARG).  INCR-family cells store
- * int64 directly (@variant RedisValue .num arm); decimal rendering
- * happens only at read boundaries via the arena-less `@string`
- * bounded-template stack form — the former parse_i64 / i64_decimal_len /
- * encode_i64_decimal_into hand helpers are gone. */
+/* Args: char[:].to_i64().  Num cells render at read boundaries via @string. */
 
 #include "redis_resp.cch"
 
-/* ---- @grammar RESP reader (the ONLY reader: the hand-rolled one is
- * retired from the server and lives on solely as the parity oracle in
- * tests/redis_resp_gen_parity_smoke.ccs) ----
- * The schema IS the protocol description; parity with the hand reader is
- * pinned by tests/redis_resp_gen_parity_smoke.ccs. The command is a tagged
- * union: '*' dispatches the framed arm, anything else is the inline-command
- * DEFAULT arm. cap 8 = the server's own "unsupported argument count"
- * policy (REDIS_ARGV_MAX + 1 wire tokens), as an inline array.
- *
- * SERDES alloc contract (parse):
- *   - Fully capped schema → try_read allocates nothing; arena may be NULL.
- *   - `bytes len` / keep spans BORROW the read buffer (zero-copy).
- *   - Ownership materialize is ONLY the argv clone into req->arena after
- *     a complete frame (channel handoff), never during parse itself.
- *
- * Known divergence from the hand reader (documented, pathological input
- * only): an inline line with a lone CR or LF inside it ("AB\nCD\r\n") is a
- * parse error here but accepted by rr_try_read_line's \r\n pair scan. */
+/* RESP reader (parity oracle: tests/redis_resp_gen_parity_smoke.ccs).
+ * Parse borrows the read buffer; argv is cloned into req->arena after a
+ * complete frame.  cap 8 = REDIS_ARGV_MAX+1 wire tokens. */
 @grammar(schema) RespGArg {~~~~
     rules [
         digit:  charset [#'0' - #'9']
@@ -331,26 +268,10 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     ]
 ~~~~}
 
-/* ---- @grammar RESP reply WRITER (parse→format symmetry) ----
- * The same schema shape as the read side, used in the WRITE projection:
- * cc_write(RespGReply, &v, dst, cap) returns bytes written (0 = didn't fit
- * or invalid kind), $len / *n are DERIVED from data.len / items_n on write,
- * and the self-typed `array` variant recurses.  Every reply byte the server
- * emits comes from these writers (plus the two header schemas below).
- *
- * SERDES alloc contract (write):
- *   - cc_write itself allocates nothing; the caller supplies dst/cap.
- *   - Hot replies (SET/GET/INCR) write straight into conn->out_buf.
- *   - Array replies (MGET/KEYS/CONFIG) encode once into reply_arena; encode
- *     retries checkpoint/restore so a too-small guess leaves no hole.
- *
- * NIL modeling: RESP2 null bulk is "$-1\r\n" — a bulk HEADER with length
- * -1 and no payload/trailer.  It cannot be a RespGReply variant: union
- * dispatch is by each variant's first literal byte, and a `nil` variant's
- * '$' would collide with `bulk`'s (two variants sharing a dispatch byte is
- * a schema compile error — see tests/grammar_schema_union_ambiguous_fail).
- * So nil stays a boundary case, written through RespGBulkHdr with len = -1,
- * which is exactly what RESP2 says a null bulk IS. */
+/* RESP writer (same shape as the reader).  cc_write allocates nothing;
+ * hot replies go to out_buf; arrays encode into reply_arena.
+ * Nil is not a RespGReply arm ('$' collides with bulk) — use RespGBulkHdr
+ * with len = -1. */
 @grammar(schema) RespGReply {~~~~
     rules [
         digit:  charset [#'0' - #'9']
@@ -795,236 +716,6 @@ static size_t db_string_cap_8x(size_t len) {
     return rounded;
 }
 
-static size_t redis_map_live_payload_bytes(const RedisDbMap* map) {
-    return RedisDbMap_live_bytes(map);
-}
-
-static void db_mem_stats_note_key_alloc(size_t bytes) {
-    g_db_mem_stats.key_alloc_count++;
-    g_db_mem_stats.key_alloc_bytes += bytes;
-}
-
-static void db_mem_stats_note_key_release(size_t bytes) {
-    g_db_mem_stats.key_release_count++;
-    g_db_mem_stats.key_release_bytes += bytes;
-}
-
-static void db_mem_stats_note_value_alloc(size_t bytes) {
-    g_db_mem_stats.value_alloc_count++;
-    g_db_mem_stats.value_alloc_bytes += bytes;
-}
-
-static void db_mem_stats_note_value_release(size_t bytes) {
-    g_db_mem_stats.value_release_count++;
-    g_db_mem_stats.value_release_bytes += bytes;
-}
-
-static void db_dump_mem_stats(RedisDb* db, const char* tag);
-
-static size_t redis_mem_worker_hint(void) {
-    const char* s = getenv("CC_WORKERS");
-    size_t w;
-    if (s && s[0]) {
-        char* end = NULL;
-        unsigned long n = strtoul(s, &end, 10);
-        if (end != s && (!end || *end == 0) && n > 0 && n < 4096) return (size_t)n;
-    }
-    w = cc_sched_get_num_workers();
-    if (w > 0) return w;
-    {
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        if (n > 0) return (size_t)n;
-    }
-    return 1;
-}
-
-/* Mach / map summary to stderr (no getenv gate).  Caller may follow with db_dump_mem_stats for arena slab lines. */
-static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
-    struct rusage ru;
-    uint64_t mach_phys_footprint = 0;
-    int have_mach_footprint = 0;
-    memset(&ru, 0, sizeof(ru));
-    if (getrusage(RUSAGE_SELF, &ru) == 0) {
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] getrusage maxrss=%ld (%s)\n",
-                tag ? tag : "?",
-                (long)ru.ru_maxrss,
-#if defined(__APPLE__)
-                "bytes on Darwin"
-#else
-                "kilobytes on Linux/most Unix"
-#endif
-                );
-    }
-#if defined(__APPLE__)
-    {
-        struct task_vm_info vm_info;
-        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
-        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm_info, &count) ==
-            KERN_SUCCESS) {
-            mach_phys_footprint = (uint64_t)vm_info.phys_footprint;
-            have_mach_footprint = 1;
-            fprintf(stderr,
-                    "redis_idiomatic: mem[%s] mach resident=%llu phys_footprint=%llu\n",
-                    tag ? tag : "?",
-                    (unsigned long long)vm_info.resident_size,
-                    (unsigned long long)vm_info.phys_footprint);
-        }
-    }
-#endif
-    fprintf(stderr,
-            "redis_idiomatic: mem[%s] worker_hint=%zu sched_workers=%zu (fiber stacks: VM reserve "
-            "~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)\n",
-            tag ? tag : "?",
-            redis_mem_worker_hint(),
-            cc_sched_get_num_workers());
-    if (db && db->entries) {
-        size_t cap = db->entries->cap();
-        size_t n = db->entries->len();
-        size_t meta_off = 0;
-        size_t map_alloc = 0;
-        /* One contiguous Jackson map blob: header + (CCSliceHdr+RedisEntry)/slot +
-         * uint16_t metadata[cap+4].  Explains most MALLOC_LARGE under key load. */
-        if (cap > 0) {
-            ccj_map_allocation_details(cap,
-                                       sizeof(CCSliceHdr),
-                                       RedisDbMap__layout(),
-                                       &meta_off,
-                                       &map_alloc);
-        }
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] map len=%zu cap=%zu ccj_map_allocation=%zu "
-                "(~%.2fMiB primary table; doubles by cap until load)\n",
-                tag ? tag : "?",
-                n,
-                cap,
-                map_alloc,
-                map_alloc / (1024.0 * 1024.0));
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] model: map/value arenas fixed root+overflow; "
-                "key arena growable — large map/value allocs use heap-overflow malloc\n",
-                tag ? tag : "?");
-        /* Same logical_live as db_dump_mem_stats: keys + heap values + map model bytes. */
-        @nonblocking {
-            size_t map_live = redis_map_live_payload_bytes(db->entries);
-            size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
-            size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-            size_t logical_live = key_live + value_live + map_live;
-            if (have_mach_footprint) {
-                if (logical_live > 0) {
-                    double ratio = (double)mach_phys_footprint / (double)logical_live;
-                    int64_t gap = (int64_t)mach_phys_footprint - (int64_t)logical_live;
-                    fprintf(stderr,
-                            "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B "
-                            "logical_db_live=%zu B (ratio %.1fx; gap=%lld B ≈ runtime+fibers+libc; "
-                            "current_map_blob=%zu B)\n",
-                            tag ? tag : "?",
-                            (unsigned long long)mach_phys_footprint,
-                            logical_live,
-                            ratio,
-                            (long long)gap,
-                            map_alloc);
-                } else {
-                    fprintf(stderr,
-                            "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B logical_db_live=0 "
-                            "(empty db; ccj_map_blob=%zu B)\n",
-                            tag ? tag : "?",
-                            (unsigned long long)mach_phys_footprint,
-                            map_alloc);
-                }
-            }
-        }
-    }
-}
-
-/* Set CC_REDIS_MEM_REPORT=1 to print Mach + map summary and db_dump_mem_stats at owner startup. */
-static void redis_mem_report(const RedisDb* db, const char* tag) {
-    const char* want = getenv("CC_REDIS_MEM_REPORT");
-    if (!want || !want[0]) return;
-    redis_mem_report_impl(db, tag);
-    if (db && db->entries) {
-        db_dump_mem_stats((RedisDb*)(void*)db, tag);
-    }
-}
-
-/* Print each bump slab's capacity for `a`, newest (current root) first, then each
- * older extent via ->prev.  Matches cc_arena_slab_chain_bytes (sum of these). */
-static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char* pool, const CCArena* a) {
-    const CCArena* cur = a;
-    fprintf(stderr, "redis_idiomatic: mem[%s] arena_%s_slab_sizes_B (root_first", tag ? tag : "db", pool);
-    while (cur && cur->base) {
-        fprintf(stderr, " %zu", cur->capacity);
-        cur = cur->prev;
-    }
-    fprintf(stderr, ") sum=%zu\n", cc_arena_slab_chain_bytes(a));
-}
-
-static void db_dump_mem_stats(RedisDb* db, const char* tag) {
-    size_t map_live = db ? redis_map_live_payload_bytes(db->entries) : 0;
-    size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
-    size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-    size_t map_count = (db && db->entries) ? db->entries->len() : 0;
-    size_t map_buckets = (db && db->entries) ? db->entries->cap() : 0;
-    fprintf(stderr,
-            "redis_idiomatic: mem[%s] entries=%zu buckets=%zu keys allocs=%zu bytes=%zu live=%zu | "
-            "values allocs=%zu bytes=%zu live=%zu | map_live=%zu | total_live=%zu\n",
-            tag ? tag : "db",
-            map_count,
-            map_buckets,
-            g_db_mem_stats.key_alloc_count,
-            g_db_mem_stats.key_alloc_bytes,
-            key_live,
-            g_db_mem_stats.value_alloc_count,
-            g_db_mem_stats.value_alloc_bytes,
-            value_live,
-            map_live,
-            key_live + value_live + map_live);
-    if (db) {
-        /* Arena roots (B): must match db_init() map/value heap root and key root. */
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(growable) value=%u(heap_overflow)\n",
-                tag ? tag : "db",
-                1024u,
-                4096u,
-                1024u);
-        redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
-        redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);
-        redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
-        size_t m_slab = cc_arena_slab_chain_bytes(&db->map_arena);
-        size_t m_ovf = cc_arena_overflow_raw_bytes(&db->map_arena);
-        size_t m_ext = cc_arena_extent_struct_bytes(&db->map_arena);
-        size_t m_gross = cc_arena_committed_gross_bytes(&db->map_arena);
-        size_t k_slab = cc_arena_slab_chain_bytes(&db->key_arena);
-        size_t k_ovf = cc_arena_overflow_raw_bytes(&db->key_arena);
-        size_t k_ext = cc_arena_extent_struct_bytes(&db->key_arena);
-        size_t k_gross = cc_arena_committed_gross_bytes(&db->key_arena);
-        size_t v_slab = cc_arena_slab_chain_bytes(&db->value_arena);
-        size_t v_ovf = cc_arena_overflow_raw_bytes(&db->value_arena);
-        size_t v_ext = cc_arena_extent_struct_bytes(&db->value_arena);
-        size_t v_gross = cc_arena_committed_gross_bytes(&db->value_arena);
-        fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_committed_B "
-                "map slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
-                "key slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
-                "value slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
-                "db_arenas_gross_sum=%zu\n",
-                tag ? tag : "db",
-                m_slab,
-                m_ovf,
-                m_ext,
-                m_gross,
-                k_slab,
-                k_ovf,
-                k_ext,
-                k_gross,
-                v_slab,
-                v_ovf,
-                v_ext,
-                v_gross,
-                m_gross + k_gross + v_gross);
-    }
-}
-
 static CCString !>(CCError) db_clone_value_into_arena(CCArena* arena,
                                                       char[:] src,
                                                       const char* err_msg) {
@@ -1427,12 +1118,8 @@ static RedisReply db_persist(RedisDb* db, char[:] key, int64_t* now_cache) {
     return reply_integer(1);
 }
 
-/* MGET: one RESP array built directly into the send_into reply arena.
- * Two lookup passes on purpose: pass 1 reaps every expired key (map may
- * mutate), pass 2 re-reads cells against the SAME cached `now` —
- * deterministically no reaps — so the borrowed value slices stay valid
- * through the encode (small values are inline in map cells and would
- * dangle across a delete's entry shuffle). */
+/* MGET → WIRE array in reply_arena.  Pass 1 reaps; pass 2 re-reads with
+ * a stable now_cache. */
 static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       CCSlice* keys,
                                       size_t nkeys,
@@ -1549,75 +1236,7 @@ static RedisReply db_flush(RedisDb* db) {
     return reply_simple("OK");
 }
 
-/* redis-style glob: '*', '?', '[...]' (with '^' negation and a-b ranges),
- * '\' escape.  Runs of '*' collapse before the per-position recursion so
- * depth is bounded by the pattern length. */
-static bool glob_match(const char* p, size_t plen, const char* s, size_t slen) {
-    while (plen > 0) {
-        switch (p[0]) {
-            case '*': {
-                while (plen > 1 && p[1] == '*') { p++; plen--; }
-                if (plen == 1) return true;
-                while (slen > 0) {
-                    if (glob_match(p + 1, plen - 1, s, slen)) return true;
-                    s++;
-                    slen--;
-                }
-                return glob_match(p + 1, plen - 1, s, slen);
-            }
-            case '?':
-                if (slen == 0) return false;
-                s++;
-                slen--;
-                break;
-            case '[': {
-                bool neg = false;
-                bool matched = false;
-                p++;
-                plen--;
-                if (plen > 0 && p[0] == '^') { neg = true; p++; plen--; }
-                while (plen > 0 && p[0] != ']') {
-                    if (p[0] == '\\' && plen >= 2) {
-                        p++;
-                        plen--;
-                        if (slen > 0 && p[0] == s[0]) matched = true;
-                    } else if (plen >= 3 && p[1] == '-' && p[2] != ']') {
-                        char lo = p[0];
-                        char hi = p[2];
-                        if (lo > hi) { char t = lo; lo = hi; hi = t; }
-                        if (slen > 0 && s[0] >= lo && s[0] <= hi) matched = true;
-                        p += 2;
-                        plen -= 2;
-                    } else if (slen > 0 && p[0] == s[0]) {
-                        matched = true;
-                    }
-                    p++;
-                    plen--;
-                }
-                if (neg) matched = !matched;
-                if (slen == 0 || !matched) return false;
-                s++;
-                slen--;
-                break;
-            }
-            case '\\':
-                if (plen >= 2) { p++; plen--; }
-                /* fallthrough: match the escaped byte literally */
-            default:
-                if (slen == 0 || p[0] != s[0]) return false;
-                s++;
-                slen--;
-                break;
-        }
-        if (plen > 0) { p++; plen--; }
-    }
-    return slen == 0;
-}
-
-/* KEYS: full scan, glob filter, one RESP array into conn->reply_arena.
- * Count pass then stream-encode (same shape as MGET) — no intermediate
- * RespGReply vector.  No map mutation, so borrowed key bytes stay put.
- * Expired entries are skipped, not reaped. */
+/* KEYS → WIRE array in reply_arena (count, then encode; skip expired). */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena* reply_arena,
@@ -1826,9 +1445,9 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
     }
 }
 
-/* Ownership seam (orthogonal to structured vs WIRE form): every slice the
- * channel RedisReply points at must outlive req/DB — live in reply_arena,
- * or be canonical/static.  No-op when already owned. */
+/* Ownership seam (⊥ structured vs WIRE form): slices must outlive req/DB.
+ * ensure_owned may encode into WIRE — that is still ownership, not a command
+ * choosing opaque form.  No-op when already owned. */
 static inline bool redis_slice_is_in_reply_arena(CCSlice data, CCArena* reply_arena) {
     if (data.len == 0) return true;
     if (cc_slice_is_canonical(data)) return true;
@@ -2157,9 +1776,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
             return 0;
         }
 
-        /* Reserve-then-write: produce the reply into the admitted slot.
-         * Init-capture [dbp = &db]: pointer by value (not [&db] — ref-capturing
-         * a mutated RedisDb trips the shared-mut checker). */
+        /* Reserve-then-write.  [dbp = &db]: value-capture pointer (not [&db]). */
         CCResult_bool_CCIoError queued =
             conn->reply_tx.try_send_into(
                 (slot, arena) => [dbp = &db, req] {

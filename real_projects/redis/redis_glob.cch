@@ -1,0 +1,70 @@
+/* redis-style glob for KEYS. Included into redis_idiomatic.ccs. */
+#ifndef REDIS_IDIOMATIC_GLOB_CCH
+#define REDIS_IDIOMATIC_GLOB_CCH
+
+/* redis-style glob: '*', '?', '[...]' (with '^' negation and a-b ranges),
+ * '\' escape.  Runs of '*' collapse before the per-position recursion so
+ * depth is bounded by the pattern length. */
+static bool glob_match(const char* p, size_t plen, const char* s, size_t slen) {
+    while (plen > 0) {
+        switch (p[0]) {
+            case '*': {
+                while (plen > 1 && p[1] == '*') { p++; plen--; }
+                if (plen == 1) return true;
+                while (slen > 0) {
+                    if (glob_match(p + 1, plen - 1, s, slen)) return true;
+                    s++;
+                    slen--;
+                }
+                return glob_match(p + 1, plen - 1, s, slen);
+            }
+            case '?':
+                if (slen == 0) return false;
+                s++;
+                slen--;
+                break;
+            case '[': {
+                bool neg = false;
+                bool matched = false;
+                p++;
+                plen--;
+                if (plen > 0 && p[0] == '^') { neg = true; p++; plen--; }
+                while (plen > 0 && p[0] != ']') {
+                    if (p[0] == '\\' && plen >= 2) {
+                        p++;
+                        plen--;
+                        if (slen > 0 && p[0] == s[0]) matched = true;
+                    } else if (plen >= 3 && p[1] == '-' && p[2] != ']') {
+                        char lo = p[0];
+                        char hi = p[2];
+                        if (lo > hi) { char t = lo; lo = hi; hi = t; }
+                        if (slen > 0 && s[0] >= lo && s[0] <= hi) matched = true;
+                        p += 2;
+                        plen -= 2;
+                    } else if (slen > 0 && p[0] == s[0]) {
+                        matched = true;
+                    }
+                    p++;
+                    plen--;
+                }
+                if (neg) matched = !matched;
+                if (slen == 0 || !matched) return false;
+                s++;
+                slen--;
+                break;
+            }
+            case '\\':
+                if (plen >= 2) { p++; plen--; }
+                /* fallthrough: match the escaped byte literally */
+            default:
+                if (slen == 0 || p[0] != s[0]) return false;
+                s++;
+                slen--;
+                break;
+        }
+        if (plen > 0) { p++; plen--; }
+    }
+    return slen == 0;
+}
+
+#endif /* REDIS_IDIOMATIC_GLOB_CCH */
