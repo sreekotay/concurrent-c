@@ -11,16 +11,23 @@
 #define BENCH_DEPTH 16
 #define BENCH_ITEMS 4000000
 
+/* Bench-only wrapper; see reply_path_bench.ccs. */
+typedef struct BenchWireReply {
+    RedisReply reply;
+    int data_inline;
+    char inline_buf[32];
+} BenchWireReply;
+
 typedef struct {
     CCLocalReadyQueue* q;
-    RedisReply* storage;
+    BenchWireReply* storage;
     _Atomic uint64_t produced;
     _Atomic uint64_t consumed;
 } LocalCtx;
 
 typedef struct {
     CCChan* ch;
-    RedisReply* replies;
+    BenchWireReply* replies;
     _Atomic uint64_t produced;
     _Atomic uint64_t consumed;
 } ChanCtx;
@@ -36,25 +43,25 @@ static void bench_abort(const char* msg) {
     exit(1);
 }
 
-static void reply_init_inline(RedisReply* reply, uint64_t seq) {
-    memset(reply, 0, sizeof(*reply));
-    reply->conn_id = seq;
-    reply->request_id = seq;
-    reply->kind = REDIS_REPLY_ENCODED;
-    reply->data_inline = 1;
-    int len = snprintf(reply->inline_buf, sizeof(reply->inline_buf),
+static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
+    memset(wr, 0, sizeof(*wr));
+    wr->reply.conn_id = seq;
+    wr->reply.request_id = seq;
+    wr->reply.kind = REDIS_REPLY_WIRE;
+    wr->data_inline = 1;
+    int len = snprintf(wr->inline_buf, sizeof(wr->inline_buf),
                        "$5\r\n%05llu\r\n",
                        (unsigned long long)(seq % 100000ull));
-    if (len < 0 || (size_t)len >= sizeof(reply->inline_buf)) {
+    if (len < 0 || (size_t)len >= sizeof(wr->inline_buf)) {
         bench_abort("failed to build inline reply");
     }
-    reply->data.ptr = reply->inline_buf;
-    reply->data.len = (size_t)len;
+    wr->reply.data.ptr = wr->inline_buf;
+    wr->reply.data.len = (size_t)len;
 }
 
-static void reply_rebase_inline_ptr(RedisReply* reply) {
-    if (!reply || !reply->data_inline) return;
-    reply->data.ptr = reply->inline_buf;
+static void reply_rebase_inline_ptr(BenchWireReply* wr) {
+    if (!wr || !wr->data_inline) return;
+    wr->reply.data.ptr = wr->inline_buf;
 }
 
 static void* local_producer(void* arg) {
@@ -71,14 +78,14 @@ static void* local_producer(void* arg) {
 
 static void* local_consumer(void* arg) {
     LocalCtx* ctx = (LocalCtx*)arg;
-    RedisReply reply = {0};
+    BenchWireReply reply = {0};
     uint64_t seen = 0;
     while (seen < BENCH_ITEMS) {
         if (!cc_local_ready_queue_try_pop(ctx->q, &reply)) {
             continue;
         }
         reply_rebase_inline_ptr(&reply);
-        if (reply.data.ptr != reply.inline_buf) bench_abort("local threaded rebase failed");
+        if (reply.reply.data.ptr != reply.inline_buf) bench_abort("local threaded rebase failed");
         seen++;
         atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
         if (seen == atomic_load_explicit(&ctx->produced, memory_order_acquire)) {
@@ -92,7 +99,7 @@ static void* chan_producer(void* arg) {
     ChanCtx* ctx = (ChanCtx*)arg;
     for (uint64_t i = 0; i < BENCH_ITEMS; ++i) {
         reply_init_inline(&ctx->replies[i % BENCH_DEPTH], i);
-        while (cc_chan_try_send(ctx->ch, &ctx->replies[i % BENCH_DEPTH], sizeof(RedisReply)) != 0) {
+        while (cc_chan_try_send(ctx->ch, &ctx->replies[i % BENCH_DEPTH], sizeof(BenchWireReply)) != 0) {
         }
         atomic_store_explicit(&ctx->produced, i + 1, memory_order_release);
     }
@@ -103,10 +110,10 @@ static void* chan_consumer(void* arg) {
     ChanCtx* ctx = (ChanCtx*)arg;
     uint64_t seen = 0;
     while (seen < BENCH_ITEMS) {
-        RedisReply reply = {0};
+        BenchWireReply reply = {0};
         if (cc_chan_try_recv(ctx->ch, &reply, sizeof(reply)) != 0) continue;
         reply_rebase_inline_ptr(&reply);
-        if (reply.data.ptr != reply.inline_buf) bench_abort("chan threaded value rebase failed");
+        if (reply.reply.data.ptr != reply.inline_buf) bench_abort("chan threaded value rebase failed");
         seen++;
         atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
     }
@@ -123,8 +130,8 @@ static double million_items_per_sec(uint64_t elapsed_ns) {
 }
 
 static uint64_t run_local_threaded(void) {
-    RedisReply storage[BENCH_DEPTH + 1];
-    RedisReply replies[BENCH_DEPTH];
+    BenchWireReply storage[BENCH_DEPTH + 1];
+    BenchWireReply replies[BENCH_DEPTH];
     CCLocalReadyQueue q;
     LocalCtx ctx = { .q = &q, .storage = replies };
     cc_local_ready_queue_init(&q, storage, BENCH_DEPTH + 1, sizeof(storage[0]));
@@ -139,9 +146,9 @@ static uint64_t run_local_threaded(void) {
 
 static uint64_t run_chan_threaded(void) {
     CCChan* ch = cc_chan_create(BENCH_DEPTH);
-    RedisReply replies[BENCH_DEPTH];
+    BenchWireReply replies[BENCH_DEPTH];
     if (!ch) bench_abort("threaded chan create failed");
-    if (cc_chan_init_elem(ch, sizeof(RedisReply)) != 0) {
+    if (cc_chan_init_elem(ch, sizeof(BenchWireReply)) != 0) {
         bench_abort("threaded chan init failed");
     }
     ChanCtx ctx = { .ch = ch, .replies = replies };
@@ -162,12 +169,12 @@ int main(void) {
     printf("# Reply Path Threaded Benchmark\n\n");
     printf("- items: `%d`\n", BENCH_ITEMS);
     printf("- depth: `%d`\n", BENCH_DEPTH);
-    printf("- reply_size: `%zu`\n\n", sizeof(RedisReply));
+    printf("- reply_size: `%zu`\n\n", sizeof(BenchWireReply));
     printf("| Path | ns/item | M items/sec | vs local |\n");
     printf("|---|---:|---:|---:|\n");
-    printf("| `local_ready_queue<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+    printf("| `local_ready_queue<BenchWireReply>` | %.2f | %.2f | %.3fx |\n",
            ns_per_item(local_ns), million_items_per_sec(local_ns), 1.0);
-    printf("| `cc_chan<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+    printf("| `cc_chan<BenchWireReply>` | %.2f | %.2f | %.3fx |\n",
            ns_per_item(chan_value_ns), million_items_per_sec(chan_value_ns), (double)chan_value_ns / (double)local_ns);
     return 0;
 }

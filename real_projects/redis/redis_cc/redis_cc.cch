@@ -53,13 +53,18 @@ typedef enum RedisCommandKind {
     REDIS_CMD_CC_MEMLOG,
 } RedisCommandKind;
 
+/* Channel element form:
+ *   structured — SIMPLE/BULK/INTEGER/NULL_BULK/ERROR (domain shape)
+ *   WIRE       — opaque RESP bytes already in the reply arena (array+nil
+ *                shapes that do not round-trip through structured arms)
+ * Ownership (arena-safe for send_into) is a separate seam from form. */
 typedef enum RedisReplyKind {
     REDIS_REPLY_SIMPLE_STRING = 0,
     REDIS_REPLY_BULK_STRING,
     REDIS_REPLY_INTEGER,
     REDIS_REPLY_NULL_BULK,
     REDIS_REPLY_ERROR,
-    REDIS_REPLY_ENCODED,
+    REDIS_REPLY_WIRE,
 } RedisReplyKind;
 
 /* Max command arguments AFTER the command word.  Total wire tokens per
@@ -136,7 +141,7 @@ static inline const char* redis_reply_name(RedisReplyKind kind) {
         case REDIS_REPLY_INTEGER: return "integer";
         case REDIS_REPLY_NULL_BULK: return "null-bulk";
         case REDIS_REPLY_ERROR: return "error";
-        case REDIS_REPLY_ENCODED: return "encoded";
+        case REDIS_REPLY_WIRE: return "wire";
         default: return "unknown";
     }
 }
