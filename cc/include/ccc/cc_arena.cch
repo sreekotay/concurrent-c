@@ -489,7 +489,13 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         (tlen >= 8 && memcmp(t, "CCChanTx", 8) == 0 &&
          (tlen == 8 || t[8] == '_')) ||
         (tlen >= 8 && memcmp(t, "CCChanRx", 8) == 0 &&
-         (tlen == 8 || t[8] == '_'))) {
+         (tlen == 8 || t[8] == '_')) ||
+        /* Stdlib container families use `Type_method` (CCVec_int_push,
+           Map_K_V_insert, ArrayMap_K_V_insert), not snake_case. */
+        (tlen >= 6 && memcmp(t, "CCVec_", 6) == 0) ||
+        (tlen >= 9 && memcmp(t, "ArrayMap_", 9) == 0) ||
+        (tlen >= 4 && memcmp(t, "Map_", 4) == 0) ||
+        (tlen >= 9 && memcmp(t, "CCResult_", 9) == 0)) {
         /* Inline the CC_UFCS_PASS_TAG literal: cc_ufcs.cch (which defines
            the macro + helper) includes this header, so we can't reference
            cc_ufcs_pass() here without a circular include. */

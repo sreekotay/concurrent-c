@@ -3057,6 +3057,13 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
             return;
         }
     }
+    if ((size_t)(base_end - start) > 11 && memcmp(start, "ArrayMap::[", 11) == 0 &&
+        base_end[-1] == ']') {
+        size_t inner_len = (size_t)(base_end - (start + 11) - 1);
+        snprintf(out, out_sz, "__CC_ARRAY_MAP(%.*s)%.*s",
+                 (int)inner_len, start + 11, ptr_count, "********");
+        return;
+    }
     if (((size_t)(base_end - start) > 4 && memcmp(start, "Map<", 4) == 0 && base_end[-1] == '>') ||
         ((size_t)(base_end - start) > 6 && memcmp(start, "Map::[", 6) == 0 && base_end[-1] == ']')) {
         size_t prefix = (start[3] == ':') ? 6 : 4;
@@ -3064,6 +3071,36 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         snprintf(out, out_sz, "__CC_MAP(%.*s)%.*s",
                  (int)inner_len, start + prefix, ptr_count, "********");
         return;
+    }
+    if ((size_t)(base_end - start) > 15 && memcmp(start, "__CC_ARRAY_MAP(", 15) == 0 &&
+        base_end[-1] == ')') {
+        const char* inner_s = start + 15;
+        const char* inner_e = base_end - 1;
+        const char* comma = NULL;
+        int depth = 0;
+        char mangled_key[128];
+        char mangled_val[128];
+        for (const char* q = inner_s; q < inner_e; q++) {
+            char c = *q;
+            if (c == '(' || c == '[' || c == '<' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '>' || c == '}') depth--;
+            else if (c == ',' && depth == 0) { comma = q; break; }
+        }
+        if (comma) {
+            const char* key_s = inner_s;
+            const char* key_e = comma;
+            const char* val_s = comma + 1;
+            const char* val_e = inner_e;
+            cc__trim_span_ws(&key_s, &key_e);
+            cc__trim_span_ws(&val_s, &val_e);
+            cc__mangle_type_name(key_s, (size_t)(key_e - key_s), mangled_key, sizeof(mangled_key));
+            cc__mangle_type_name(val_s, (size_t)(val_e - val_s), mangled_val, sizeof(mangled_val));
+            if (mangled_key[0] && mangled_val[0]) {
+                snprintf(out, out_sz, "ArrayMap_%s_%s%.*s", mangled_key, mangled_val,
+                         ptr_count, "********");
+                return;
+            }
+        }
     }
     if ((size_t)(base_end - start) > 9 && memcmp(start, "__CC_MAP(", 9) == 0 && base_end[-1] == ')') {
         const char* inner_s = start + 9;
@@ -3143,12 +3180,14 @@ static int cc__type_is_parser_vec(const char* type_name) {
 }
 
 static int cc__type_is_parser_map(const char* type_name) {
-    return type_name && strncmp(type_name, "__CC_MAP", 8) == 0;
+    return type_name && (strncmp(type_name, "__CC_MAP", 8) == 0 ||
+                         strncmp(type_name, "__CC_ARRAY_MAP", 14) == 0);
 }
 
 static int cc__type_is_known_ufcs_family_base(const char* type_name) {
     if (!type_name || !type_name[0]) return 0;
     return strncmp(type_name, "CCVec_", 6) == 0 ||
+           strncmp(type_name, "ArrayMap_", 9) == 0 ||
            strncmp(type_name, "Map_", 4) == 0 ||
            strcmp(type_name, "CCString") == 0 ||
            strcmp(type_name, "CCSlice") == 0 ||
@@ -4175,6 +4214,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                    strcmp(recv_type_base, "CCChanRx*") == 0);
         map_decl_like = cc__source_declares_map_ufcs(src, n, recv_type_base);
         if (!(strncmp(recv_type_base, "CCVec_", 6) == 0 ||
+              strncmp(recv_type_base, "ArrayMap_", 9) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx || map_decl_like ||
@@ -4219,7 +4259,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             }
         }
         family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0);
-        family_pass_direct = parser_map || map_decl_like || (strncmp(recv_type_base, "Map_", 4) == 0);
+        family_pass_direct = parser_map || map_decl_like ||
+                             (strncmp(recv_type_base, "ArrayMap_", 9) == 0) ||
+                             (strncmp(recv_type_base, "Map_", 4) == 0);
         if (strncmp(recv_type_base, "CCResult_", 9) == 0) {
             if (!(strcmp(method_name, "value") == 0 ||
                   strcmp(method_name, "error") == 0 ||
@@ -4314,11 +4356,15 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                         const char* val_e = rp;
                         char mangled_key[128];
                         char mangled_val[128];
+                        int is_array_map =
+                            (strncmp(recv_type_base, "__CC_ARRAY_MAP", 14) == 0);
                         cc__trim_span_ws(&key_s, &key_e);
                         cc__trim_span_ws(&val_s, &val_e);
                         cc__mangle_type_name(key_s, (size_t)(key_e - key_s), mangled_key, sizeof(mangled_key));
                         cc__mangle_type_name(val_s, (size_t)(val_e - val_s), mangled_val, sizeof(mangled_val));
-                        snprintf(concrete_type, sizeof(concrete_type), "Map_%s_%s", mangled_key, mangled_val);
+                        snprintf(concrete_type, sizeof(concrete_type), "%s_%s_%s",
+                                 is_array_map ? "ArrayMap" : "Map",
+                                 mangled_key, mangled_val);
                     }
                 }
             }
@@ -4776,10 +4822,17 @@ static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
         return;
     }
 
-    if ((strncmp(type, "Map::[", 6) == 0 && type[strlen(type) - 1] == ']') ||
+    if ((strncmp(type, "ArrayMap::[", 11) == 0 && type[strlen(type) - 1] == ']') ||
+        (strncmp(type, "__CC_ARRAY_MAP(", 15) == 0 && type[strlen(type) - 1] == ')') ||
+        (strncmp(type, "Map::[", 6) == 0 && type[strlen(type) - 1] == ']') ||
         (strncmp(type, "Map<", 4) == 0 && type[strlen(type) - 1] == '>') ||
         (strncmp(type, "__CC_MAP(", 9) == 0 && type[strlen(type) - 1] == ')')) {
-        size_t prefix = (strncmp(type, "__CC_MAP(", 9) == 0) ? 9 : ((type[3] == ':') ? 6 : 4);
+        int is_array = (strncmp(type, "ArrayMap::[", 11) == 0) ||
+                       (strncmp(type, "__CC_ARRAY_MAP(", 15) == 0);
+        size_t prefix = is_array
+                            ? ((strncmp(type, "__CC_ARRAY_MAP(", 15) == 0) ? 15 : 11)
+                            : ((strncmp(type, "__CC_MAP(", 9) == 0) ? 9
+                                                                   : ((type[3] == ':') ? 6 : 4));
         const char* params = type + prefix;
         size_t params_len = strlen(type) - prefix - 1;
         size_t key_len;
@@ -4812,20 +4865,31 @@ static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
         cc__canonicalize_container_param_type(canonical_val, sizeof(canonical_val));
         cc__mangle_container_type_param(canonical_key, strlen(canonical_key), mangled_key, sizeof(mangled_key));
         cc__mangle_container_type_param(canonical_val, strlen(canonical_val), mangled_val, sizeof(mangled_val));
-        snprintf(type, type_sz, "Map_%s_%s", mangled_key, mangled_val);
+        snprintf(type, type_sz, "%s_%s_%s", is_array ? "ArrayMap" : "Map", mangled_key, mangled_val);
         return;
     }
 }
 
 static void cc__canonicalize_ufcs_alias_target(char* out, size_t out_sz, const char* type_src) {
+    size_t len;
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!type_src || !type_src[0]) return;
     snprintf(out, out_sz, "%s", type_src);
     cc__canonicalize_container_param_type(out, out_sz);
-    if (out[0] && strcmp(out, type_src) != 0) return;
-    cc__normalize_ufcs_type_name(out, out_sz, type_src);
-    cc__canonicalize_container_param_type(out, out_sz);
+    if (!(out[0] && strcmp(out, type_src) != 0)) {
+        cc__normalize_ufcs_type_name(out, out_sz, type_src);
+        cc__canonicalize_container_param_type(out, out_sz);
+    }
+    /* Map/ArrayMap sugar is a pointer handle (`typedef __CC_MAP(...)* Name`).
+     * Keep that pointer-ness on the alias so UFCS passes `recv`, not `&recv`. */
+    len = strlen(out);
+    if (len > 0 && out[len - 1] != '*' &&
+        (strncmp(out, "ArrayMap_", 9) == 0 || strncmp(out, "Map_", 4) == 0) &&
+        len + 1 < out_sz) {
+        out[len] = '*';
+        out[len + 1] = '\0';
+    }
 }
 
 /* Mangle a type parameter for container names (int -> int, char[:] -> charslice, etc.) */
@@ -4923,8 +4987,11 @@ static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, 
 /* Rewrite generic container syntax (canonical bracket form only):
    - CCVec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
    - Map::[K, V] -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
+   - ArrayMap::[K, V] -> __CC_ARRAY_MAP(K_mangled, V_mangled)*
    - cc_vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
    - map_new::[K, V](...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
+   - array_map_new::[K, V](...) -> __CC_ARRAY_MAP_INIT(...)
+   - array_map_new_count::[K, V](arena, n) -> __CC_ARRAY_MAP_INIT_COUNT(...)
    The angle-bracket spellings (Vec<T>, CCVec<T>, Map<K, V>, vec_new<T>,
    map_new<K, V>, ...) and the prefixless Vec::[T]/vec_new::[T] are retired:
    they are detected only to emit a migration error.  `::[ ... ]` is the single
@@ -5214,6 +5281,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 retired_vec_syntax = "Vec::[T]";
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
                 retired_vec_syntax = "Vec<T>";
+            } else if (i + 11 <= n && memcmp(src + i, "ArrayMap::[", 11) == 0) {
+                is_map_type = 2; kw_len = 8; use_bracket = 1; /* 2 ⇒ ArrayMap */
             } else if (i + 6 <= n && memcmp(src + i, "Map::[", 6) == 0) {
                 is_map_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
@@ -5226,6 +5295,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 retired_vec_syntax = "vec_new::[T]";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
                 retired_vec_syntax = "vec_new<T>";
+            } else if (i + 22 <= n && memcmp(src + i, "array_map_new_count::[", 22) == 0) {
+                /* Must precede array_map_new::[ — that spelling is a prefix. */
+                is_map_new = 3; kw_len = 19; use_bracket = 1;
+            } else if (i + 16 <= n && memcmp(src + i, "array_map_new::[", 16) == 0) {
+                is_map_new = 2; kw_len = 13; use_bracket = 1;
             } else if (i + 10 <= n && memcmp(src + i, "map_new::[", 10) == 0) {
                 is_map_new = 1; kw_len = 7; use_bracket = 1;
             } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
@@ -5354,7 +5428,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 
                 cc__mangle_container_type_param(orig_key_type, strlen(orig_key_type), key_type, sizeof(key_type));
                 cc__mangle_container_type_param(orig_val_type, strlen(orig_val_type), val_type, sizeof(val_type));
-                snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
+                if (is_map_type == 2 || is_map_new == 2 || is_map_new == 3) {
+                    snprintf(mangled, sizeof(mangled), "ArrayMap_%s_%s", key_type, val_type);
+                } else {
+                    snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
+                }
                 cc__ctype_memo_put(mangled, orig_key_type, orig_val_type);
                 
                 if (graph) {
@@ -5373,6 +5451,12 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                } else if (is_map_type == 2) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_ARRAY_MAP(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")*");
                 } else {
                     /* Map uses pointers (the generated init returns a stable handle). */
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP(");
@@ -5440,6 +5524,22 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                             /* Emit the arena argument(s) */
                             cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        } else if (is_map_new == 3) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_ARRAY_MAP_INIT_COUNT(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        } else if (is_map_new == 2) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_ARRAY_MAP_INIT(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                         } else {
                             cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP_INIT(");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
@@ -5459,6 +5559,18 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 if (is_vec_new) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC_INIT(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
+                } else if (is_map_new == 3) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_ARRAY_MAP_INIT_COUNT(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL, 0)");
+                } else if (is_map_new == 2) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_ARRAY_MAP_INIT(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
                 } else {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP_INIT(");
@@ -5567,21 +5679,25 @@ static void cc__register_lowered_vec_macros(const char* src) {
     }
 }
 
-static void cc__register_lowered_map_macros(const char* src) {
-    if (!src) return;
+static void cc__register_lowered_kv_macros(const char* src, const char* macro,
+                                           const char* mangled_prefix) {
+    if (!src || !macro || !mangled_prefix) return;
     CCTypeGraph* graph = cc_type_graph_get_global();
+    size_t macro_len;
+    const char* p;
     if (!graph) return;
-
-    const char* p = src;
-    while ((p = strstr(p, "__CC_MAP(")) != NULL) {
-        const char* arg = p + 9;
+    macro_len = strlen(macro);
+    p = src;
+    while ((p = strstr(p, macro)) != NULL) {
+        const char* arg = p + macro_len;
         const char* end = strchr(arg, ')');
-        if (!end) break;
-
-        const char* s = arg;
-        const char* e = end;
+        const char* s;
+        const char* e;
         const char* comma = NULL;
         int depth = 0;
+        if (!end) break;
+        s = arg;
+        e = end;
         for (const char* q = s; q < e; q++) {
             char c = *q;
             if (c == '(' || c == '[' || c == '<' || c == '{') depth++;
@@ -5599,20 +5715,19 @@ static void cc__register_lowered_map_macros(const char* src) {
             const char* ke = comma;
             const char* vs = comma + 1;
             const char* ve = e;
+            size_t k_len;
+            size_t v_len;
             cc__trim_span_ws(&ks, &ke);
             cc__trim_span_ws(&vs, &ve);
-            size_t k_len = (size_t)(ke - ks);
-            size_t v_len = (size_t)(ve - vs);
+            k_len = (size_t)(ke - ks);
+            v_len = (size_t)(ve - vs);
             if (k_len >= sizeof(key_type)) k_len = sizeof(key_type) - 1;
             if (v_len >= sizeof(val_type)) v_len = sizeof(val_type) - 1;
             memcpy(key_type, ks, k_len);
             key_type[k_len] = '\0';
             memcpy(val_type, vs, v_len);
             val_type[v_len] = '\0';
-            snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
-            /* Prefer the real key/val spellings captured at the lowering site;
-             * the scanned key_type/val_type are mangled tokens (e.g. `intptr`),
-             * which the real CC_MAP_DECL_ARENA body cannot use as types. */
+            snprintf(mangled, sizeof(mangled), "%s%s_%s", mangled_prefix, key_type, val_type);
             {
                 const char* real_key = cc__ctype_memo_get_type1(mangled);
                 const char* real_val = cc__ctype_memo_get_type2(mangled);
@@ -5622,9 +5737,13 @@ static void cc__register_lowered_map_macros(const char* src) {
                                           mangled);
             }
         }
-
         p = end + 1;
     }
+}
+
+static void cc__register_lowered_map_macros(const char* src) {
+    cc__register_lowered_kv_macros(src, "__CC_MAP(", "Map_");
+    cc__register_lowered_kv_macros(src, "__CC_ARRAY_MAP(", "ArrayMap_");
 }
 
 static CCResultSpecTable cc__result_specs = {0};
@@ -9643,7 +9762,7 @@ static int cc__ti_name_is_primitive(const char* s, size_t n) {
     return 0;
 }
 static int cc__ti_name_is_container(const char* s, size_t n) {
-    static const char* const pre[] = { "CCVec_", "Map_", "CCChan" };
+    static const char* const pre[] = { "CCVec_", "ArrayMap_", "Map_", "CCChan" };
     for (size_t k = 0; k < sizeof(pre) / sizeof(pre[0]); k++) {
         size_t pl = strlen(pre[k]);
         if (n >= pl && memcmp(s, pre[k], pl) == 0) return 1;

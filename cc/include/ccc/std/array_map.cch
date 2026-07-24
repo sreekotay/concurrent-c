@@ -16,6 +16,21 @@
 #include <stdbool.h>
 #include <ccc/cc_arena.cch>
 
+/* Sugar: ArrayMap::[K,V] / array_map_new::[K,V] / array_map_new_count::[K,V]. */
+#ifdef __CC_ARRAY_MAP
+#undef __CC_ARRAY_MAP
+#endif
+#ifdef __CC_ARRAY_MAP_INIT
+#undef __CC_ARRAY_MAP_INIT
+#endif
+#ifdef __CC_ARRAY_MAP_INIT_COUNT
+#undef __CC_ARRAY_MAP_INIT_COUNT
+#endif
+#define __CC_ARRAY_MAP(K, V) ArrayMap_##K##_##V
+#define __CC_ARRAY_MAP_INIT(K, V, arena) ArrayMap_##K##_##V##_init((arena))
+#define __CC_ARRAY_MAP_INIT_COUNT(K, V, arena, count) \
+    ArrayMap_##K##_##V##_init_count((arena), (count))
+
 enum {
     CC_ARRAY_MAP_EMPTY = 0u,
     CC_ARRAY_MAP_TOMB = 0xffffffffu,

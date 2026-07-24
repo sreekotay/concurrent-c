@@ -1,13 +1,12 @@
-/* array_map: pow2 u32 index + dense rows. */
+/* array_map sugar: ArrayMap::[K,V] / array_map_new::[K,V] /
+ * array_map_new_count::[K,V]. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
-#include <string.h>
-
-CC_ARRAY_MAP_DECL(int, int, IntArrayMap, cc_map_hash_i32, cc_map_eq_i32);
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
-    IntArrayMap *m;
+    ArrayMap::[int, int] m;
+    ArrayMap::[int, int] sized;
     int *p;
     int k;
     int v;
@@ -15,26 +14,30 @@ int main(void) {
     size_t i;
 
     if (!arena.base) return 1;
-    m = IntArrayMap_init_count(&arena, 16);
+    sized = array_map_new_count::[int, int](&arena, 64);
+    if (!sized) return 14;
+    if (sized.cap() < 64) return 15;
+    sized.destroy();
+
+    m = array_map_new::[int, int](&arena);
     if (!m) return 2;
 
     for (i = 0; i < 100; i++) {
-        if (IntArrayMap_insert(m, (int)i, (int)(i * 10)) != 0) return 3;
+        if (m.insert((int)i, (int)(i * 10)) != 0) return 3;
     }
-    if (IntArrayMap_len(m) != 100) return 4;
+    if (m.len() != 100) return 4;
 
-    p = IntArrayMap_get_ptr(m, 42);
+    p = m.get_ptr(42);
     if (!p || *p != 420) return 5;
-    if (IntArrayMap_get_ptr(m, 1000) != NULL) return 6;
+    if (m.get_ptr(1000) != NULL) return 6;
 
-    if (!IntArrayMap_del(m, 42)) return 7;
-    if (IntArrayMap_get_ptr(m, 42) != NULL) return 8;
-    if (IntArrayMap_len(m) != 99) return 9;
+    if (!m.del(42)) return 7;
+    if (m.get_ptr(42) != NULL) return 8;
+    if (m.len() != 99) return 9;
 
-    /* Remaining keys still resolve after swap-remove. */
-    p = IntArrayMap_get_ptr(m, 99);
+    p = m.get_ptr(99);
     if (!p || *p != 990) return 10;
-    p = IntArrayMap_get_ptr(m, 0);
+    p = m.get_ptr(0);
     if (!p || *p != 0) return 11;
 
     n = 0;
@@ -45,11 +48,11 @@ int main(void) {
     }
     if (n != 99) return 12;
 
-    IntArrayMap_clear(m);
-    if (IntArrayMap_len(m) != 0) return 13;
+    m.clear();
+    if (m.len() != 0) return 13;
 
     printf("array_map_smoke ok\n");
-    IntArrayMap_destroy(m);
+    m.destroy();
     cc_arena_free(&arena);
     return 0;
 }

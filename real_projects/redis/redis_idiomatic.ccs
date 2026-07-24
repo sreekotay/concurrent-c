@@ -66,18 +66,6 @@ static inline CCSliceHdr db_key_hdr_view(char[:] key) {
     return h;
 }
 
-static inline size_t db_map_hash_key(CCSliceHdr key) {
-    size_t h = 2166136261U;
-    const unsigned char *p = (const unsigned char *)key.ptr;
-    for (size_t i = 0; i < key.len; ++i)
-        h ^= p[i], h *= 16777619;
-    return h;
-}
-
-static inline int db_map_eq_key(CCSliceHdr a, CCSliceHdr b) {
-    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
-}
-
 /* .str = SET bytes; .num = INCR-family ints (no text round-trip).  Read
  * boundaries render .num to canonical decimal. */
 @variant(packed) RedisValue {
@@ -92,13 +80,13 @@ typedef struct RedisEntry {
 } RedisEntry;
 
 /* Wide RedisEntry values: array_map keeps empty probe slots to 4 B. */
-CC_ARRAY_MAP_DECL(CCSliceHdr, RedisEntry, RedisDbMap, db_map_hash_key, db_map_eq_key);
+typedef ArrayMap::[CCSliceHdr, RedisEntry] RedisDbMap;
 
 typedef struct RedisDb {
     CCArena map_arena;
     CCArena key_arena;
     CCArena value_arena;
-    RedisDbMap* entries;
+    RedisDbMap entries;
 } RedisDb;
 
 typedef struct RedisDbMemStats {
@@ -742,7 +730,7 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
         db_free_arenas_only(db);
         return false;
     }
-    db->entries = RedisDbMap_init_count(&db->map_arena, bucket_count);
+    db->entries = array_map_new_count::[CCSliceHdr, RedisEntry](&db->map_arena, bucket_count);
     if (!db->entries) {
         db_free_arenas_only(db);
         return false;
@@ -800,7 +788,7 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
 static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return NULL;
     CCSliceHdr kh = db_key_hdr_view(key);
-    return RedisDbMap_get_ptr(db->entries, kh);
+    return db->entries.get_ptr(kh);
 }
 
 /* ---- lazy expiration ----
@@ -831,7 +819,7 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     RedisValue* val = &cell->val;
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSliceHdr kh = db_key_hdr_view(key);
-    if (!RedisDbMap_del(db->entries, kh)) return;
+    if (!db->entries.del(kh)) return;
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
 }
@@ -860,7 +848,7 @@ static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, Redis
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    if (RedisDbMap_insert(db->entries, owned_key, entry) != 0) {
+    if (db->entries.insert(owned_key, entry) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok();
@@ -1207,7 +1195,7 @@ static RedisReply db_flush(RedisDb* db) {
         CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
         db_release_value(db, &doomed);
     }
-    RedisDbMap_clear(db->entries);
+    db->entries.clear();
     return reply_simple("OK");
 }
 
@@ -1441,7 +1429,7 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
 static void db_free_all(RedisDb* db) {
     if (!db) return;
     if (db->entries) {
-        RedisDbMap_destroy(db->entries);
+        db->entries.destroy();
         db->entries = NULL;
     }
     db_free_arenas_only(db);

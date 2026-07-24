@@ -13,6 +13,7 @@ The standard library provides these headers under `<ccc/std/...>`:
 - `io.cch`
 - `vec.cch`
 - `map.cch`, `map_forward.cch`, and `map_impl.cch`
+- `array_map.cch`
 - `dir.cch`
 - `process.cch`
 - `exec.cch`
@@ -29,9 +30,9 @@ The standard library provides these headers under `<ccc/std/...>`:
 Portable atomics are provided separately by `<ccc/cc_atomic.cch>`.
 
 `<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
-string, I/O, vector, map-forward, directory, process, command, async-I/O, and
-future headers. Networking, DNS, TLS, HTTP, CLI, task, hash, and full map
-headers are included explicitly when needed.
+string, I/O, vector, map-forward, array-map, directory, process, command,
+async-I/O, and future headers. Networking, DNS, TLS, HTTP, CLI, task, hash, and
+full map headers are included explicitly when needed.
 
 Public C types use the `CC` prefix and public C functions use the `cc_` prefix.
 Unless a section states otherwise, a slice returned from an operation that
@@ -45,6 +46,8 @@ The generic collection factories are:
 ```c
 CCVec::[T] cc_vec_new::[T](CCArena *arena);
 Map::[K, V] map_new::[K, V](CCArena *arena);
+ArrayMap::[K, V] array_map_new::[K, V](CCArena *arena);
+ArrayMap::[K, V] array_map_new_count::[K, V](CCArena *arena, size_t count);
 ```
 
 `CCVec::[T]` denotes the generated C family `CCVec_<T-mangling>`.
@@ -55,11 +58,29 @@ CCVec_<T-mangling>_init(arena, CC_VEC_INITIAL_CAP)
 ```
 
 `Map::[K, V]` denotes the generated C family
-`Map_<K-mangling>_<V-mangling>`. `map_new::[K, V](arena)` calls:
+`Map_<K-mangling>_<V-mangling>` (inline open-addressing). `map_new::[K, V](arena)`
+calls:
 
 ```c
 Map_<K-mangling>_<V-mangling>_init(arena)
 ```
+
+`ArrayMap::[K, V]` denotes the generated C family
+`ArrayMap_<K-mangling>_<V-mangling>` (pow2 `u32` probe index + dense key/value
+rows). `array_map_new::[K, V](arena)` calls:
+
+```c
+ArrayMap_<K-mangling>_<V-mangling>_init(arena)
+```
+
+`array_map_new_count::[K, V](arena, count)` calls:
+
+```c
+ArrayMap_<K-mangling>_<V-mangling>_init_count(arena, count)
+```
+
+Prefer `ArrayMap` when values are wide (empty buckets stay small). Prefer `Map`
+when keys and values are tiny and probe locality matters.
 
 For a generated vector or map value, UFCS selects the corresponding generated
 family function and passes the receiver by address. For public struct families
@@ -275,7 +296,8 @@ and `bool`. These append decimal integers, one character for `char`, `true` or
 `CCSlice`, C strings, and `CCString` values and pointers.
 
 The builder stores short values inline and stores larger values in arena-owned
-storage. A growth failure poisons the string. On a poisoned string,
+storage. Heap growth multiplies capacity by 1.6 (`(cap * 8) / 5`). A growth
+failure poisons the string. On a poisoned string,
 `cc_string_failed` is true, push operations return null,
 `cc_string_as_slice` is empty, and `cc_string_cstr` returns null.
 `cc_string_clear` restores a valid empty string.
@@ -468,8 +490,9 @@ T *Name_data(Name *vec);
 `push`, `reserve`, and `set` return zero on success and `-1` on failure.
 `pop` returns false when empty. `get` and `get_ptr` return null out of bounds.
 `at_grow` extends the logical length through the requested index and returns
-null on allocation failure. A pointer or slice into a vector is invalidated by
-an operation that grows its storage.
+null on allocation failure. Growth multiplies capacity by 1.6 (`(cap * 8) / 5`).
+A pointer or slice into a vector is invalidated by an operation that grows its
+storage.
 
 Vector UFCS maps these method names to the generated family with `&vec`.
 `CCVec_char` and `CCVec_size_t` are predefined. `CC_VEC_FOREACH` iterates in
@@ -511,6 +534,7 @@ for a replaced key, and `-1` on failure; its nonnegative return is the bucket
 index. `get` and `get_ptr` return a pointer to the stored value or null.
 `remove` and `del` report whether the key existed.
 
+Probe-table capacity stays a power of two (2× growth) for quadratic probing.
 Map UFCS maps `insert`, `put`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
 `clear`, and `destroy` to the generated family. `CC_MAP_FOREACH` exposes each
 entry without defining a stable traversal order.
@@ -525,6 +549,48 @@ The convenience declarations are:
 
 Their `_FULL(V, Name, OptV_ignored)` forms expand to the same generated family
 and ignore the final argument.
+
+### Array maps
+
+`<ccc/std/array_map.cch>` defines arena-backed array-map families with a pow2
+`uint32_t` probe index and a dense `(key, value)` row store:
+
+```c
+#define CC_ARRAY_MAP_DECL(K, V, Name, HASH_FN, EQ_FN) /* declares the Name family */
+```
+
+`EQ_FN` returns non-zero when keys are equal (same convention as `cc_map_eq_*`).
+
+The public generated family is:
+
+```c
+Name *Name_init(CCArena *arena);
+Name *Name_init_count(CCArena *arena, size_t count);
+void Name_destroy(Name *map);
+int Name_insert(Name *map, K key, V value);
+V *Name_get(Name *map, K key);
+V *Name_get_ptr(Name *map, K key);
+bool Name_remove(Name *map, K key);
+bool Name_del(Name *map, K key);
+size_t Name_len(const Name *map);
+size_t Name_cap(const Name *map); /* probe-table bucket count */
+size_t Name_live_bytes(const Name *map);
+void Name_clear(Name *map);
+```
+
+`init` / `init_count` return null on allocation failure. `insert` returns zero
+on success and `-1` on failure. `get` / `get_ptr` return a pointer into the
+dense store or null. `cap` is the probe-table capacity (power of two), not the
+dense row capacity. `CC_ARRAY_MAP_FOREACH` iterates dense rows in insertion
+order (swap-remove on delete may reorder).
+
+Sugar `ArrayMap::[K, V]` / `array_map_new::[K, V]` /
+`array_map_new_count::[K, V]` lowers to the `ArrayMap_<K>_<V>` family with the
+same key hash/eq selection as `Map::[K, V]` for built-in key kinds (`int`,
+`uint64_t`, `CCSlice`, `CCSliceHdr`).
+
+Array-map UFCS maps `insert`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
+`live_bytes`, `clear`, and `destroy` to the generated family.
 
 ### Static maps
 

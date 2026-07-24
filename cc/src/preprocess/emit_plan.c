@@ -1718,10 +1718,16 @@ static int cc__emit_plan_block_references_container(const char* src, size_t bloc
     int typedef_uses_only_predeclared_vec_char = 0;
     if (!src || block_end <= block_start) return 0;
     for (size_t si = block_start; si + 7 < block_end && !refs_container; si++) {
-        if (memcmp(src + si, "__CC_MAP", 8) == 0 ||
+        /* Check __CC_ARRAY_MAP before __CC_MAP: the names share no prefix, but
+         * keeping the longer family first documents the intended order next to
+         * Map_/ArrayMap_ below. */
+        if ((si + 14 <= block_end && memcmp(src + si, "__CC_ARRAY_MAP", 14) == 0) ||
+            memcmp(src + si, "__CC_MAP", 8) == 0 ||
             memcmp(src + si, "__CC_VEC", 8) == 0) {
             refs_container = 1;
-        } else if ((si + 4 < block_end && memcmp(src + si, "Map_", 4) == 0) ||
+        } else if ((si + 9 <= block_end && memcmp(src + si, "ArrayMap_", 9) == 0) ||
+                   (si + 4 < block_end && memcmp(src + si, "Map_", 4) == 0 &&
+                    (si == 0 || !cc_is_ident_char(src[si - 1]))) ||
                    (si + 6 < block_end && memcmp(src + si, "CCVec_", 6) == 0)) {
             refs_container = 1;
         }
@@ -1963,7 +1969,10 @@ void cc_emit_plan_fprint_container_prelude(FILE* out, int use_cch,
         if (need_chan) fprintf(out, "#include <ccc/cc_channel.cch>\n");
     } else {
         if (need_vec) fprintf(out, "#include <ccc/std/vec.h>\n");
-        if (need_map) fprintf(out, "#include <ccc/std/map.h>\n");
+        if (need_map) {
+            fprintf(out, "#include <ccc/std/map.h>\n");
+            fprintf(out, "#include <ccc/std/array_map.h>\n");
+        }
         if (need_chan) fprintf(out, "#include <ccc/cc_channel.h>\n");
     }
 }
@@ -2036,6 +2045,11 @@ static void cc__builtin_map_decl(FILE* out, const CCTypeInstantiation* inst) {
     const char* eq_fn;
     if (!out || !inst || !inst->type1 || !inst->type2 || !inst->mangled_name) return;
     cc__map_select_hasheq(inst->type1, &hash_fn, &eq_fn);
+    if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
+        fprintf(out, "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
+                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+        return;
+    }
     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
             inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
 }

@@ -135,6 +135,119 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
     return 0;
 }
 
+/* Format one Vec/Map/ArrayMap monomorph + its cc_type_info into *buf. */
+static void cc__format_vec_container_decl(char** buf, size_t* len, size_t* cap,
+                                          const CCTypeInstantiation* inst) {
+    char line[512];
+    const char* mangled_elem;
+    if (!inst || !inst->type1 || !inst->mangled_name) return;
+    mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
+    if (strcmp(mangled_elem, "char") == 0) return;
+    snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n",
+             inst->type1, inst->mangled_name);
+    cc__sb_append_cstr_local(buf, len, cap, line);
+    cc__emit_container_cc_type_info(buf, len, cap, inst->mangled_name);
+}
+
+static void cc__format_map_container_decl(char** buf, size_t* len, size_t* cap,
+                                          const CCTypeInstantiation* inst) {
+    const char* hash_fn = "cc_map_hash_i32";
+    const char* eq_fn = "cc_map_eq_i32";
+    char line[512];
+    if (!inst || !inst->type1 || !inst->type2 || !inst->mangled_name) return;
+    if (strcmp(inst->type1, "int") == 0) {
+        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
+    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
+        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
+    } else if (strstr(inst->type1, "64") != NULL) {
+        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
+    } else if (strstr(inst->type1, "slice") != NULL ||
+               strstr(inst->type1, "Slice") != NULL ||
+               strcmp(inst->type1, "charslice") == 0) {
+        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
+    }
+    if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
+        snprintf(line, sizeof(line), "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
+                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+    } else {
+        snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
+                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+    }
+    cc__sb_append_cstr_local(buf, len, cap, line);
+    cc__emit_container_cc_type_info(buf, len, cap, inst->mangled_name);
+}
+
+typedef struct CCCtnrInsert {
+    size_t pos;
+    char* text;
+    size_t text_len;
+} CCCtnrInsert;
+
+static void cc__ctnr_insert_append(CCCtnrInsert* inserts, size_t* n_ins, size_t max_ins,
+                                   size_t pos, const char* text, size_t text_len) {
+    size_t i;
+    if (!inserts || !n_ins || !text || text_len == 0 || *n_ins >= max_ins) return;
+    for (i = 0; i < *n_ins; i++) {
+        if (inserts[i].pos == pos) {
+            char* merged = (char*)realloc(inserts[i].text, inserts[i].text_len + text_len + 1);
+            if (!merged) return;
+            memcpy(merged + inserts[i].text_len, text, text_len);
+            inserts[i].text_len += text_len;
+            merged[inserts[i].text_len] = '\0';
+            inserts[i].text = merged;
+            return;
+        }
+    }
+    inserts[*n_ins].pos = pos;
+    inserts[*n_ins].text = (char*)malloc(text_len + 1);
+    if (!inserts[*n_ins].text) return;
+    memcpy(inserts[*n_ins].text, text, text_len);
+    inserts[*n_ins].text[text_len] = '\0';
+    inserts[*n_ins].text_len = text_len;
+    (*n_ins)++;
+}
+
+static void cc__ctnr_insert_resync(const char* src, size_t pos,
+                                   int* out_line, char* out_file, size_t out_file_sz) {
+    int last_line_num = 1;
+    char last_file[512] = {0};
+    int lines_since = 0;
+    size_t si = 0;
+    if (out_line) *out_line = 1;
+    if (out_file && out_file_sz) out_file[0] = '\0';
+    if (!src) return;
+    while (si < pos) {
+        if (si + 5 < pos && src[si] == '#' && memcmp(src + si, "#line", 5) == 0) {
+            size_t li = si + 5;
+            int num = 0;
+            while (li < pos && (src[li] == ' ' || src[li] == '\t')) li++;
+            while (li < pos && src[li] >= '0' && src[li] <= '9') {
+                num = num * 10 + (src[li] - '0');
+                li++;
+            }
+            if (num > 0) {
+                last_line_num = num;
+                lines_since = 0;
+                while (li < pos && (src[li] == ' ' || src[li] == '\t')) li++;
+                if (li < pos && src[li] == '"') {
+                    size_t fn = 0;
+                    li++;
+                    while (li < pos && src[li] != '"' && fn + 1 < sizeof(last_file)) {
+                        last_file[fn++] = src[li++];
+                    }
+                    last_file[fn] = '\0';
+                }
+            }
+        }
+        if (src[si] == '\n') lines_since++;
+        si++;
+    }
+    if (out_line) *out_line = last_line_num + lines_since;
+    if (out_file && out_file_sz && last_file[0]) {
+        snprintf(out_file, out_file_sz, "%s", last_file);
+    }
+}
+
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
 typedef enum CCPhase3Stage CCPhase3Stage;
@@ -1014,8 +1127,10 @@ static const char* cc__canonicalize_placeholder_family_type_codegen(const char* 
         snprintf(scratch, scratch_cap, "CCVec_%s", mangled);
         return scratch;
     }
-    if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
-        const char* args = type_name + 9;
+    if (strncmp(type_name, "__CC_ARRAY_MAP(", 15) == 0 ||
+        strncmp(type_name, "__CC_MAP(", 9) == 0) {
+        int is_array = strncmp(type_name, "__CC_ARRAY_MAP(", 15) == 0;
+        const char* args = type_name + (is_array ? 15 : 9);
         const char* close = strrchr(args, ')');
         const char* comma = NULL;
         int par = 0, br = 0, brc = 0, ang = 0;
@@ -1040,7 +1155,8 @@ static const char* cc__canonicalize_placeholder_family_type_codegen(const char* 
         cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_k, sizeof(mangled_k));
         cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_v, sizeof(mangled_v));
         if (!mangled_k[0] || !mangled_v[0]) return type_name;
-        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_k, mangled_v);
+        snprintf(scratch, scratch_cap, "%s_%s_%s", is_array ? "ArrayMap" : "Map",
+                 mangled_k, mangled_v);
         return scratch;
     }
     return type_name;
@@ -3437,6 +3553,15 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                 if (macro_l < n && src[macro_l] == '(' && cc__find_matching_paren_codegen(src, n, macro_l, &macro_r)) {
                     type_end = macro_r + 1;
                 }
+            } else if (type_end - type_start == sizeof("__CC_ARRAY_MAP") - 1 &&
+                       memcmp(src + type_start, "__CC_ARRAY_MAP",
+                              sizeof("__CC_ARRAY_MAP") - 1) == 0) {
+                size_t macro_l = cc__skip_ws_codegen(src, n, type_end);
+                size_t macro_r = 0;
+                if (macro_l < n && src[macro_l] == '(' &&
+                    cc__find_matching_paren_codegen(src, n, macro_l, &macro_r)) {
+                    type_end = macro_r + 1;
+                }
             } else if (type_end - type_start == sizeof("__CC_MAP") - 1 &&
                        memcmp(src + type_start, "__CC_MAP", sizeof("__CC_MAP") - 1) == 0) {
                 size_t macro_l = cc__skip_ws_codegen(src, n, type_end);
@@ -3742,7 +3867,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     size_t closure_protos_len = 0;
     char* closure_defs = NULL;
     size_t closure_defs_len = 0;
-    char* container_decl_buf = NULL;
+    int need_container_decls = 0;
     size_t src_len = 0;
     size_t src_raw_len = 0;
     if (!root || !root->codegen_buffer || !root->codegen_buffer_len) {
@@ -4215,101 +4340,36 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* TSan macros and spawn helpers */
     fprintf(out, "#include <ccc/cc_closure_helper.h>\n\n");
 
-    /* Build container type declarations from type registry (populated by generic rewriting).
-       These are buffered and inserted into the source AFTER user type definitions
-       so that user-defined types (e.g. Entry in Map<K, Entry*>) are visible. */
-    size_t container_decl_len = 0, container_decl_cap = 0;
+    /* Container monomorph macros are spliced later (after UFCS/closures) using
+     * cc_emit_plan_build_container_schedule so decls land after payload typedefs
+     * (e.g. ArrayMap::[K, Entry] when Entry follows a helper function). */
     {
         CCTypeRegistry* reg = cc_type_registry_get_global();
         if (reg) {
             size_t n_vec = cc_type_registry_vec_count(reg);
             size_t n_map = cc_type_registry_map_count(reg);
-            int emit_container_decls = (n_map > 0);
-            if (!emit_container_decls) {
+            need_container_decls = (n_map > 0);
+            if (!need_container_decls) {
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (!inst || !inst->mangled_name) continue;
                     if (strcmp(inst->mangled_name, "CCVec_char") != 0) {
-                        emit_container_decls = 1;
+                        need_container_decls = 1;
                         break;
                     }
                 }
             }
-
-            if (emit_container_decls) {
+            if (need_container_decls) {
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
+                fprintf(out, "#include <ccc/std/array_map.h>\n");
                 fprintf(out, "#include <ccc/cc_channel.h>\n");
                 /* Pulled in so the per-T `cc_type_info` symbol emissions
                  * below (the "container type info" block) compile.  See
                  * COMPILER_CLEANUP_STATUS.md milestone #4a / Commit 3a. */
                 fprintf(out, "#include <ccc/cc_type.cch>\n");
                 fprintf(out, "/* --- end container declarations (macros inserted after typedefs) --- */\n\n");
-
-                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
-                    "/* --- CC container type macros (auto-positioned after typedefs) --- */\n");
-                
-                /* Emit Vec declarations */
-                for (size_t i = 0; i < n_vec; i++) {
-                    const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
-                    if (inst && inst->type1 && inst->mangled_name) {
-                        const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
-                        
-                        if (strcmp(mangled_elem, "char") == 0) {
-                            continue;
-                        }
-                        
-                        /* Emit the 2-arg convenience macro; vec.cch owns any
-                         * compatibility details for older declaration forms. */
-                        char line[512];
-                        snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                        /* Commit 3a: per-T `cc_type_info` + auto-
-                         * registering constructor for this Vec
-                         * instantiation, so `type_of(CCVec_T)` and
-                         * `cc_type_of("CCVec_T")` resolve through the
-                         * global registry.  Bridges Commit 2's
-                         * `cc_dyn_vec` to container element types. */
-                        cc__emit_container_cc_type_info(
-                            &container_decl_buf,
-                            &container_decl_len,
-                            &container_decl_cap,
-                            inst->mangled_name);
-                    }
-                }
-
-                /* Emit Map declarations through the 5-arg convenience macro. */
-                for (size_t i = 0; i < n_map; i++) {
-                    const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
-                    if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                        const char* hash_fn = "cc_map_hash_i32";
-                        const char* eq_fn = "cc_map_eq_i32";
-                        if (strcmp(inst->type1, "int") == 0) {
-                            hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
-                        } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
-                            hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
-                        } else if (strstr(inst->type1, "64") != NULL) {
-                            hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
-                        } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
-                            hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
-                        }
-                        char line[512];
-                        snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
-                                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
-                        cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
-                        /* Commit 3a: same per-instantiation cc_type_info
-                         * shape as Vec above (see helper). */
-                        cc__emit_container_cc_type_info(
-                            &container_decl_buf,
-                            &container_decl_len,
-                            &container_decl_cap,
-                            inst->mangled_name);
-                    }
-                }
-
-                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
-                    "/* --- end container type macros --- */\n");
             }
         }
     }
@@ -4929,73 +4989,85 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
         
-        /* Insert buffered container declarations after typedefs/structs but BEFORE
-           any struct that references a container type (e.g. __CC_MAP, Map_). */
-        if (container_decl_buf && container_decl_len > 0) {
-            size_t ctnr_pos = cc_emit_plan_compute_container_anchor(src_ufcs, src_ufcs_len);
-            /* Splice container declarations into src_ufcs at ctnr_pos,
-               then re-sync line numbers with a #line directive. */
-            {
-                char* new_src = NULL;
-                size_t new_len = 0, new_cap = 0;
-
-                int resync_line = 0;
-                char resync_file[512] = {0};
-                {
-                    int last_line_num = 1;
-                    char last_file[512] = {0};
-                    int lines_since = 0;
-                    const char* s = src_ufcs;
-                    size_t si = 0;
-                    while (si < ctnr_pos) {
-                        if (si + 5 < ctnr_pos && s[si] == '#' && memcmp(s + si, "#line", 5) == 0) {
-                            size_t li = si + 5;
-                            while (li < ctnr_pos && (s[li] == ' ' || s[li] == '\t')) li++;
-                            int num = 0;
-                            while (li < ctnr_pos && s[li] >= '0' && s[li] <= '9') {
-                                num = num * 10 + (s[li] - '0');
-                                li++;
-                            }
-                            if (num > 0) {
-                                last_line_num = num;
-                                lines_since = 0;
-                                while (li < ctnr_pos && (s[li] == ' ' || s[li] == '\t')) li++;
-                                if (li < ctnr_pos && s[li] == '"') {
-                                    li++;
-                                    size_t fn = 0;
-                                    while (li < ctnr_pos && s[li] != '"' && fn + 1 < sizeof(last_file)) {
-                                        last_file[fn++] = s[li++];
-                                    }
-                                    last_file[fn] = '\0';
-                                }
-                            }
-                        }
-                        if (s[si] == '\n') lines_since++;
-                        si++;
-                    }
-                    resync_line = last_line_num + lines_since;
-                    if (last_file[0]) {
-                        memcpy(resync_file, last_file, sizeof(resync_file));
+        /* Splice Vec/Map/ArrayMap monomorphs using the emit-plan schedule so
+         * decls whose payload types are declared after the early anchor (e.g.
+         * after a helper fn / closure protos) land after those typedefs. */
+        if (need_container_decls) {
+            CCEmitPlanContainerSchedule sched;
+            CCTypeGraph* graph = cc_type_graph_get_global();
+            CCCtnrInsert inserts[CC_EMIT_PLAN_MAX_DELAYED];
+            size_t n_ins = 0;
+            size_t i;
+            memset(inserts, 0, sizeof(inserts));
+            cc_emit_plan_build_container_schedule(src_ufcs, src_ufcs_len, graph, &sched);
+            for (i = 0; i < sched.n_vec && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                const CCTypeInstantiation* inst = cc_type_graph_get_vec(graph, i);
+                char* piece = NULL;
+                size_t piece_len = 0, piece_cap = 0;
+                size_t pos;
+                if (!inst || !inst->mangled_name) continue;
+                if (strcmp(inst->mangled_name + 6, "char") == 0) continue;
+                cc__format_vec_container_decl(&piece, &piece_len, &piece_cap, inst);
+                if (!piece || piece_len == 0) { free(piece); continue; }
+                pos = sched.vec_delayed[i] ? sched.vec_pos[i] : sched.anchor_pos;
+                cc__ctnr_insert_append(inserts, &n_ins, CC_EMIT_PLAN_MAX_DELAYED,
+                                       pos, piece, piece_len);
+                free(piece);
+            }
+            for (i = 0; i < sched.n_map && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                const CCTypeInstantiation* inst = cc_type_graph_get_map(graph, i);
+                char* piece = NULL;
+                size_t piece_len = 0, piece_cap = 0;
+                size_t pos;
+                if (!inst || !inst->mangled_name) continue;
+                cc__format_map_container_decl(&piece, &piece_len, &piece_cap, inst);
+                if (!piece || piece_len == 0) { free(piece); continue; }
+                pos = sched.map_delayed[i] ? sched.map_pos[i] : sched.anchor_pos;
+                cc__ctnr_insert_append(inserts, &n_ins, CC_EMIT_PLAN_MAX_DELAYED,
+                                       pos, piece, piece_len);
+                free(piece);
+            }
+            /* Highest offset first so earlier splice points stay stable. */
+            for (i = 0; i + 1 < n_ins; i++) {
+                size_t j;
+                for (j = i + 1; j < n_ins; j++) {
+                    if (inserts[j].pos > inserts[i].pos) {
+                        CCCtnrInsert tmp = inserts[i];
+                        inserts[i] = inserts[j];
+                        inserts[j] = tmp;
                     }
                 }
-
-                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, ctnr_pos);
-                cc__sb_append_local(&new_src, &new_len, &new_cap, container_decl_buf, container_decl_len);
-                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, "\n");
+            }
+            for (i = 0; i < n_ins; i++) {
+                char* new_src = NULL;
+                size_t new_len = 0, new_cap = 0;
+                int resync_line = 0;
+                char resync_file[512] = {0};
+                size_t pos = inserts[i].pos;
+                if (pos > src_ufcs_len) pos = src_ufcs_len;
+                cc__ctnr_insert_resync(src_ufcs, pos, &resync_line, resync_file, sizeof(resync_file));
+                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, pos);
+                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
+                    "/* --- CC container type macros (auto-positioned after typedefs) --- */\n");
+                cc__sb_append_local(&new_src, &new_len, &new_cap,
+                                    inserts[i].text, inserts[i].text_len);
+                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap,
+                    "/* --- end container type macros --- */\n");
                 if (resync_line > 0 && resync_file[0]) {
                     char line_dir[640];
-                    snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", resync_line, resync_file);
+                    snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n",
+                             resync_line, resync_file);
                     cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, line_dir);
                 }
                 cc__sb_append_local(&new_src, &new_len, &new_cap,
-                                    src_ufcs + ctnr_pos, src_ufcs_len - ctnr_pos);
+                                    src_ufcs + pos, src_ufcs_len - pos);
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = new_src;
                 src_ufcs_len = new_len;
+                free(inserts[i].text);
+                inserts[i].text = NULL;
             }
         }
-        free(container_decl_buf);
-        container_decl_buf = NULL;
 
         if (cc_emit_plan_splice_comptime_fragments(&src_ufcs, &src_ufcs_len, ctx->input_path) != 0) {
             goto fail;
@@ -5080,7 +5152,6 @@ fail:
     if (src_regs_owned) free(src_regs);
     free(closure_protos);
     free(closure_defs);
-    free(container_decl_buf);
     return EINVAL;
 }
 

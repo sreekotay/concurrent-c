@@ -544,13 +544,13 @@ static const CCUfcsFamilyDesc cc__ufcs_builtin_families[] = {
     { CC_UFCS_FAM_VEC,              "vec",
       { NULL },                                  { "CCVec_",     NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
     { CC_UFCS_FAM_MAP,              "map",
-      { NULL },                                  { "Map_",       NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+      { NULL },                                  { "ArrayMap_",  "Map_", NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
     { CC_UFCS_FAM_RESULT,           "result",
       { NULL },                                  { "CCResult_",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
     { CC_UFCS_FAM_PARSER_MACRO_VEC, "vec-macro",
       { NULL },                                  { "__CC_VEC(",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
     { CC_UFCS_FAM_PARSER_MACRO_MAP, "map-macro",
-      { NULL },                                  { "__CC_MAP(",  NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
+      { NULL },                                  { "__CC_ARRAY_MAP(", "__CC_MAP(", NULL }, CC_UFCS_FAM_F_NAME_DISPATCH },
     { CC_UFCS_FAM_PARSER_VEC,       "parser-vec",
       { "__CCVecGeneric", "__CCVecGeneric*", NULL },       { NULL }, 0u },
     { CC_UFCS_FAM_PARSER_MAP,       "parser-map",
@@ -609,12 +609,17 @@ static const char* cc__canonicalize_parser_family_macro(const char* type_name,
     const char* close = NULL;
     const char* tail = NULL;
     int is_map = 0;
+    int is_array_map = 0;
     char mangled_a[128];
     char mangled_b[128];
     if (!type_name || !scratch || scratch_cap == 0) return NULL;
     if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
         args = type_name + 9;
         is_map = 0;
+    } else if (strncmp(type_name, "__CC_ARRAY_MAP(", 15) == 0) {
+        args = type_name + 15;
+        is_map = 1;
+        is_array_map = 1;
     } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
         args = type_name + 9;
         is_map = 1;
@@ -652,7 +657,8 @@ static const char* cc__canonicalize_parser_family_macro(const char* type_name,
         cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_a, sizeof(mangled_a));
         cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_b, sizeof(mangled_b));
         if (!mangled_a[0] || !mangled_b[0]) return NULL;
-        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_a, mangled_b);
+        snprintf(scratch, scratch_cap, "%s_%s_%s", is_array_map ? "ArrayMap" : "Map",
+                 mangled_a, mangled_b);
         return scratch;
     }
 }
@@ -754,8 +760,35 @@ typedef struct {
     int recv_is_ptr;
 } CCUFCSDispatchCtx;
 
+/* Map_/ArrayMap_ values are pointer handles (typedef to Struct*).  Match the
+ * preprocess text UFCS path (`family_pass_direct`) so spliced local headers —
+ * which only see visitor UFCS — pass `recv` rather than `&recv`. */
+static int cc__is_map_handle_type(const char* type_name) {
+    char base[256];
+    size_t len;
+    if (!type_name || !type_name[0]) return 0;
+    len = strlen(type_name);
+    while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t' ||
+                       type_name[len - 1] == '*')) {
+        len--;
+    }
+    if (len == 0 || len >= sizeof(base)) return 0;
+    memcpy(base, type_name, len);
+    base[len] = '\0';
+    return strncmp(base, "ArrayMap_", 9) == 0 ||
+           strncmp(base, "Map_", 4) == 0 ||
+           strncmp(base, "__CC_ARRAY_MAP(", 15) == 0 ||
+           strncmp(base, "__CC_MAP(", 9) == 0;
+}
+
 static int cc__recv_pass_direct(const CCUFCSDispatchCtx* ctx, bool recv_is_ptr) {
-    return recv_is_ptr || !ctx || ctx->recv_is_ptr || !ctx->recv_is_addressable;
+    if (recv_is_ptr || !ctx || ctx->recv_is_ptr || !ctx->recv_is_addressable) return 1;
+    if (cc__is_map_handle_type(ctx->recv_family_type) ||
+        cc__is_map_handle_type(ctx->recv_type_base) ||
+        cc__is_map_handle_type(ctx->recv_type_name)) {
+        return 1;
+    }
+    return 0;
 }
 
 static int cc__type_name_has_ptr(const char* type_name) {
@@ -1151,9 +1184,14 @@ static const char* cc__ufcs_canonicalize_family_macro(const char* type_name,
     int is_map = 0;
     char mangled_a[128];
     char mangled_b[128];
+    int is_array_map = 0;
     if (!type_name || !scratch || scratch_cap == 0) return NULL;
     if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
         args = type_name + 9;
+    } else if (strncmp(type_name, "__CC_ARRAY_MAP(", 15) == 0) {
+        args = type_name + 15;
+        is_map = 1;
+        is_array_map = 1;
     } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
         args = type_name + 9;
         is_map = 1;
@@ -1189,7 +1227,8 @@ static const char* cc__ufcs_canonicalize_family_macro(const char* type_name,
         cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_a, sizeof(mangled_a));
         cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_b, sizeof(mangled_b));
         if (!mangled_a[0] || !mangled_b[0]) return NULL;
-        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_a, mangled_b);
+        snprintf(scratch, scratch_cap, "%s_%s_%s", is_array_map ? "ArrayMap" : "Map",
+                 mangled_a, mangled_b);
         return scratch;
     }
 }
@@ -1251,6 +1290,7 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
          * used to be cleaned up by a separate end-of-pipeline rewriter. */
         if (ctx->recv_type_name &&
             (strncmp(ctx->recv_type_name, "__CC_VEC(", 9) == 0 ||
+             strncmp(ctx->recv_type_name, "__CC_ARRAY_MAP(", 15) == 0 ||
              strncmp(ctx->recv_type_name, "__CC_MAP(", 9) == 0)) {
             const char* canon = cc__ufcs_canonicalize_family_macro(
                 ctx->recv_type_name, family_canon_buf, sizeof(family_canon_buf));

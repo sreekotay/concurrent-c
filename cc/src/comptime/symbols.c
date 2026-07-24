@@ -731,7 +731,8 @@ static int cc__parse_niche_call(const char* src, size_t n, size_t* io_pos,
 
 static int cc__record_map_decl_ufcs(CCSymbolTable* t, const char* map_name) {
     static const char* methods[] = {
-        "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy", "len", "cap"
+        "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy",
+        "len", "cap", "live_bytes"
     };
     char pattern[256];
     char callee[256];

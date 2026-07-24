@@ -5200,7 +5200,8 @@ if (e is IoError.Other(code)) { use(code); }
 
 - `CCTaskIntptr` — pollable async task handle
 - `CCVec::[T]` — dynamic array
-- `Map::[K, V]` — hash map
+- `Map::[K, V]` — inline open-addressing hash map
+- `ArrayMap::[K, V]` — probe index + dense key/value rows
 - `T[~... >]` / `T[~... <]` — channel handles for element type T
 
 **Built-in non-generic types:**
@@ -5246,10 +5247,10 @@ spelling, duplicate-emission prevention, source attribution, splice placement,
 and use-site rewriting. The language does not infer generic parameters from
 ordinary calls.
 
-Shipped families include `CCVec::[T]`, `Map::[K,V]`, result families, and
-registered user/library families. Their public C names and operations are
-defined by the owning headers. A family may emit specialized C for one
-instantiation and erased wrappers for another without changing the
+Shipped families include `CCVec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, result
+families, and registered user/library families. Their public C names and
+operations are defined by the owning headers. A family may emit specialized C
+for one instantiation and erased wrappers for another without changing the
 `Name::[args]` source rule.
 
 ### 12.3 UFCS composition
@@ -5270,9 +5271,11 @@ registration exactly as other lowered C does.
 Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
 - `**CCVec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
-- `**Map::[K,V]`** — arena-backed hash table (`<std/map.cch>`)
+- `**Map::[K,V]`** — arena-backed inline open-addressing map (`<std/map.cch>`)
+- `**ArrayMap::[K,V]`** — arena-backed index + dense rows (`<std/array_map.cch>`)
 
-Both types are generic, use UFCS methods, and require an `Arena*` at construction. See the stdlib spec for full API reference, rules, and examples.
+These types are generic, use UFCS methods, and require an `Arena*` at
+construction. See the stdlib spec for full API reference, rules, and examples.
 
 **Quick reference:**
 
@@ -5283,14 +5286,27 @@ v.push(value);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
 
-// Map::[K,V]
+// Map::[K,V] — tiny K/V, max probe locality
 Map::[K, V] m = map_new::[K, V](&arena);
 m.insert(key, value);
 V* x = m.get_ptr(key);
 m.remove(key);
+
+// ArrayMap::[K,V] — wide values; empty buckets stay cheap
+ArrayMap::[K, V] am = array_map_new::[K, V](&arena);
+ArrayMap::[K, V] sized = array_map_new_count::[K, V](&arena, 1024);
+am.insert(key, value);
+V* y = am.get_ptr(key);
+am.del(key);
 ```
 
-**Implementation note:** The `CCVec::[T]` and `Map::[K,V]` syntax is compile-time sugar that lowers to concrete C family types (e.g., `CCVec::[int]` → `CCVec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `CCVec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
+**Implementation note:** The `CCVec::[T]`, `Map::[K,V]`, and `ArrayMap::[K,V]`
+syntax is compile-time sugar that lowers to concrete C family types (e.g.,
+`CCVec::[int]` → `CCVec_int`, `ArrayMap::[int,int]` → `ArrayMap_int_int`). UFCS
+method calls on containers lower through that family contract; implementations
+may use direct concrete symbols such as `CCVec_int_push(&v, x)` or thin family
+wrappers over shared erased-core helpers. See the stdlib spec for full lowering
+rules.
 
 ---
 

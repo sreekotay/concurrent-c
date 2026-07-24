@@ -3,8 +3,8 @@
 #ifndef REDIS_IDIOMATIC_MEM_CCH
 #define REDIS_IDIOMATIC_MEM_CCH
 
-static size_t redis_map_live_payload_bytes(const RedisDbMap* map) {
-    return RedisDbMap_live_bytes(map);
+static size_t redis_map_live_payload_bytes(RedisDbMap map) {
+    return map ? map.live_bytes() : 0;
 }
 
 static void db_mem_stats_note_key_alloc(size_t bytes) {
@@ -87,12 +87,12 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
             redis_mem_worker_hint(),
             cc_sched_get_num_workers());
     if (db && db->entries) {
-        size_t cap = RedisDbMap_cap(db->entries);
-        size_t n = RedisDbMap_len(db->entries);
+        size_t cap = db->entries.cap();
+        size_t n = db->entries.len();
         size_t dense_cap = db->entries->dense_cap;
-        size_t map_alloc = RedisDbMap_live_bytes(db->entries);
+        size_t map_alloc = db->entries.live_bytes();
         size_t index_bytes = cap * sizeof(uint32_t);
-        size_t dense_bytes = dense_cap * sizeof(RedisDbMapSlot);
+        size_t dense_bytes = dense_cap * sizeof(*db->entries->dense);
         fprintf(stderr,
                 "redis_idiomatic: mem[%s] map len=%zu buckets=%zu dense_cap=%zu "
                 "live_bytes=%zu (index~%.2fMiB + dense~%.2fMiB; array_map)\n",
@@ -163,8 +163,8 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
     size_t map_live = db ? redis_map_live_payload_bytes(db->entries) : 0;
     size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
     size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-    size_t map_count = (db && db->entries) ? RedisDbMap_len(db->entries) : 0;
-    size_t map_buckets = (db && db->entries) ? RedisDbMap_cap(db->entries) : 0;
+    size_t map_count = (db && db->entries) ? db->entries.len() : 0;
+    size_t map_buckets = (db && db->entries) ? db->entries.cap() : 0;
     fprintf(stderr,
             "redis_idiomatic: mem[%s] entries=%zu buckets=%zu keys allocs=%zu bytes=%zu live=%zu | "
             "values allocs=%zu bytes=%zu live=%zu | map_live=%zu | total_live=%zu\n",

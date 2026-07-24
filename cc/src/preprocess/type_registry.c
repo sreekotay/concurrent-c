@@ -364,6 +364,7 @@ const char* cc_type_registry_lookup_unique_field_type(CCTypeRegistry* reg,
 
 static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) {
     size_t len = 0;
+    size_t start = 0;
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!type_name) return;
@@ -371,8 +372,25 @@ static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) 
     while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
     while (len > 0 && type_name[len - 1] == '*') len--;
     while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
+    /* Drop leading cv-qualifiers so `const Db*` field lookup hits `Db`. */
+    while (start < len) {
+        size_t rest = len - start;
+        size_t kw = 0;
+        if (rest >= 5 && memcmp(type_name + start, "const", 5) == 0) kw = 5;
+        else if (rest >= 8 && memcmp(type_name + start, "volatile", 8) == 0) kw = 8;
+        else if (rest >= 8 && memcmp(type_name + start, "restrict", 8) == 0) kw = 8;
+        if (kw == 0) break;
+        if (start + kw < len &&
+            (isalnum((unsigned char)type_name[start + kw]) || type_name[start + kw] == '_')) {
+            break;
+        }
+        start += kw;
+        while (start < len && (type_name[start] == ' ' || type_name[start] == '\t')) start++;
+    }
+    if (start >= len) return;
+    len -= start;
     if (len >= out_sz) len = out_sz - 1;
-    memcpy(out, type_name, len);
+    memcpy(out, type_name + start, len);
     out[len] = '\0';
 }
 
@@ -430,10 +448,18 @@ static void cc__normalize_registry_container_param_name(CCTypeRegistry* reg,
         cc__normalize_registry_container_param_name(reg, inner, inner, sizeof(inner));
         cc_result_spec_mangle_type(inner, strlen(inner), mangled_inner, sizeof(mangled_inner));
         if (mangled_inner[0]) snprintf(work, sizeof(work), "CCVec_%s", mangled_inner);
-    } else if ((strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
+    } else if ((strncmp(work, "ArrayMap::[", 11) == 0 && work[strlen(work) - 1] == ']') ||
+               (strncmp(work, "__CC_ARRAY_MAP(", 15) == 0 && work[strlen(work) - 1] == ')') ||
+               (strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
                (strncmp(work, "Map<", 4) == 0 && work[strlen(work) - 1] == '>') ||
                (strncmp(work, "__CC_MAP(", 9) == 0 && work[strlen(work) - 1] == ')')) {
-        const char* params = work + ((strncmp(work, "__CC_MAP(", 9) == 0) ? 9 : ((work[3] == ':') ? 6 : 4));
+        int is_array = (strncmp(work, "ArrayMap::[", 11) == 0) ||
+                       (strncmp(work, "__CC_ARRAY_MAP(", 15) == 0);
+        const char* params = work + (is_array
+                                         ? ((strncmp(work, "__CC_ARRAY_MAP(", 15) == 0) ? 15 : 11)
+                                         : ((strncmp(work, "__CC_MAP(", 9) == 0)
+                                                ? 9
+                                                : ((work[3] == ':') ? 6 : 4)));
         size_t params_len = strlen(work) - (size_t)(params - work) - 1;
         int depth = 0;
         const char* comma = NULL;
@@ -463,7 +489,8 @@ static void cc__normalize_registry_container_param_name(CCTypeRegistry* reg,
             cc_result_spec_mangle_type(key, strlen(key), mangled_key, sizeof(mangled_key));
             cc_result_spec_mangle_type(val, strlen(val), mangled_val, sizeof(mangled_val));
             if (mangled_key[0] && mangled_val[0]) {
-                snprintf(work, sizeof(work), "Map_%s_%s", mangled_key, mangled_val);
+                snprintf(work, sizeof(work), "%s_%s_%s", is_array ? "ArrayMap" : "Map",
+                         mangled_key, mangled_val);
             }
         }
     }
@@ -507,6 +534,17 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
         alias = cc_type_registry_lookup_alias(reg, work);
         if (!alias || !alias[0] || strcmp(alias, work) == 0) break;
         snprintf(work, sizeof(work), "%s", alias);
+        cc__trim_type_text(work);
+        len = strlen(work);
+        /* Alias targets may themselves carry `*` (Map/ArrayMap pointer
+         * typedefs).  Fold those into ptr_count so later expansion of
+         * `__CC_MAP(...)` / `__CC_ARRAY_MAP(...)` still matches. */
+        while (len > 0 && work[len - 1] == '*') {
+            ptr_count++;
+            work[--len] = '\0';
+            cc__trim_type_text(work);
+            len = strlen(work);
+        }
     }
     if ((strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "__CC_VEC(", 9) == 0 && work[strlen(work) - 1] == ')')) {
@@ -519,10 +557,18 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
         cc__normalize_registry_container_param_name(reg, inner, inner, sizeof(inner));
         cc_result_spec_mangle_type(inner, strlen(inner), mangled_inner, sizeof(mangled_inner));
         if (mangled_inner[0]) snprintf(work, sizeof(work), "CCVec_%s", mangled_inner);
-    } else if ((strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
+    } else if ((strncmp(work, "ArrayMap::[", 11) == 0 && work[strlen(work) - 1] == ']') ||
+               (strncmp(work, "__CC_ARRAY_MAP(", 15) == 0 && work[strlen(work) - 1] == ')') ||
+               (strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
                (strncmp(work, "Map<", 4) == 0 && work[strlen(work) - 1] == '>') ||
                (strncmp(work, "__CC_MAP(", 9) == 0 && work[strlen(work) - 1] == ')')) {
-        const char* params = work + ((strncmp(work, "__CC_MAP(", 9) == 0) ? 9 : ((work[3] == ':') ? 6 : 4));
+        int is_array = (strncmp(work, "ArrayMap::[", 11) == 0) ||
+                       (strncmp(work, "__CC_ARRAY_MAP(", 15) == 0);
+        const char* params = work + (is_array
+                                         ? ((strncmp(work, "__CC_ARRAY_MAP(", 15) == 0) ? 15 : 11)
+                                         : ((strncmp(work, "__CC_MAP(", 9) == 0)
+                                                ? 9
+                                                : ((work[3] == ':') ? 6 : 4)));
         size_t params_len = strlen(work) - (size_t)(params - work) - 1;
         int depth = 0;
         const char* comma = NULL;
@@ -552,7 +598,8 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
             cc_result_spec_mangle_type(key, strlen(key), mangled_key, sizeof(mangled_key));
             cc_result_spec_mangle_type(val, strlen(val), mangled_val, sizeof(mangled_val));
             if (mangled_key[0] && mangled_val[0]) {
-                snprintf(work, sizeof(work), "Map_%s_%s", mangled_key, mangled_val);
+                snprintf(work, sizeof(work), "%s_%s_%s", is_array ? "ArrayMap" : "Map",
+                         mangled_key, mangled_val);
             }
         }
     }

@@ -1,0 +1,37 @@
+/* ArrayMap:: sugar in a struct field after a helper fn + UFCS methods. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int helper_before_types(void) { return 0; }
+
+typedef struct Entr {
+    int x;
+} Entr;
+
+typedef struct Db {
+    ArrayMap::[int, Entr] entries;
+} Db;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+    Db db;
+    Entr e;
+    Entr* p;
+    if (!arena.base) return 1;
+    (void)helper_before_types;
+    db.entries = array_map_new::[int, Entr](&arena);
+    if (!db.entries) return 2;
+    e.x = 7;
+    if (db.entries.insert(1, e) != 0) return 3;
+    p = db.entries.get_ptr(1);
+    if (!p || p->x != 7) return 4;
+    if (db.entries.len() != 1) return 5;
+    if (!db.entries.del(1)) return 6;
+    if (db.entries.get_ptr(1) != NULL) return 7;
+    db.entries.clear();
+    if (db.entries.len() != 0) return 8;
+    printf("array_map_sugar_struct_ufcs_smoke ok\n");
+    db.entries.destroy();
+    cc_arena_free(&arena);
+    return 0;
+}
