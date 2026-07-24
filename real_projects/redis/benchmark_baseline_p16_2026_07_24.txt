@@ -1,0 +1,90 @@
+=== Benchmark Baseline (P=16) ===
+Date: Fri Jul 24 01:36:00 EDT 2026
+Commit: 8998bbda Keep redis reply ownership as materialize-only.
+Command: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16 MEMLOG_ON_EXIT=1 ./bench_robust.sh
+Notes: post make clean && make all; materialize-only ensure_owned (no WIRE collapse).
+
+tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.GL0IWcE2cN
+[warmup]
+   upstream  set   rps=1457726.00
+   idiomatic set   rps=2392344.50
+   upstream  get   rps=1792114.62
+   idiomatic get   rps=2762431.00
+   idiomatic incr  rps=2941176.50
+   upstream  incr  rps=1945525.25
+[round 1/6]
+   upstream  set   rps=1602564.12
+   idiomatic set   rps=2762431.00
+   idiomatic get   rps=2369668.25
+   upstream  get   rps=1976284.62
+   idiomatic incr  rps=3030303.00
+   upstream  incr  rps=2008032.12
+[round 2/6]
+   upstream  set   rps=1567398.12
+   idiomatic set   rps=2793296.00
+   upstream  get   rps=2083333.38
+   idiomatic get   rps=2659574.50
+   idiomatic incr  rps=2824858.75
+   upstream  incr  rps=2032520.25
+[round 3/6]
+   idiomatic set   rps=2808988.75
+   upstream  set   rps=1562500.00
+   idiomatic get   rps=2793296.00
+   upstream  get   rps=2173913.00
+   upstream  incr  rps=2100840.25
+   idiomatic incr  rps=2762431.00
+[round 4/6]
+   upstream  set   rps=1597444.12
+   idiomatic set   rps=2732240.50
+   idiomatic get   rps=2673796.75
+   upstream  get   rps=2183406.00
+   idiomatic incr  rps=2976190.50
+   upstream  incr  rps=2145922.75
+[round 5/6]
+   upstream  set   rps=1618123.00
+   idiomatic set   rps=2793296.00
+   idiomatic get   rps=2873563.25
+   upstream  get   rps=2066115.75
+   upstream  incr  rps=2083333.38
+   idiomatic incr  rps=2941176.50
+[round 6/6]
+   upstream  set   rps=1577287.00
+   idiomatic set   rps=2824858.75
+   upstream  get   rps=2049180.25
+   idiomatic get   rps=2793296.00
+   upstream  incr  rps=2066115.75
+   idiomatic incr  rps=2857143.00
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 cc_workers=default
+sample_interval=0.05s  samples_taken: upstream=172  idiomatic=172
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.588M   1.587M   1.562M   1.618M   0.022M   1.4%
+  idiomatic    2.786M   2.793M   2.732M   2.825M   0.033M   1.2%
+  idiomatic/upstream median: 1.760x  (SEPARATED)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.089M   2.075M   1.976M   2.183M   0.079M   3.8%
+  idiomatic    2.694M   2.734M   2.370M   2.874M   0.178M   6.6%
+  idiomatic/upstream median: 1.318x  (SEPARATED)
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     2.073M   2.075M   2.008M   2.146M   0.049M   2.4%
+  idiomatic    2.899M   2.899M   2.762M   3.030M   0.101M   3.5%
+  idiomatic/upstream median: 1.397x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       11.4MB              3
+  idiomatic      21.3MB             15
+
+[IDIOMATIC DB ARENAS] (final CC.MEMLOG)
+  arena         slabs   overflow   metadata      gross
+  map           1.0KB     5.27MB         0B     5.27MB
+  key          2.27MB         0B       832B     2.27MB
+  value         1.0KB         0B         0B      1.0KB
+  sum                                           7.54MB
