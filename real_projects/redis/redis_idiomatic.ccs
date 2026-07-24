@@ -91,16 +91,8 @@ typedef struct RedisEntry {
     int64_t expires_at_ms;
 } RedisEntry;
 
-CC_MAP_DECL_ARENA(CCSliceHdr, RedisEntry, RedisDbMap, db_map_hash_key, db_map_eq_key);
-CC_MAP_DECL_UFCS(RedisDbMap);
-
-static inline size_t RedisDbMap_live_bytes(const RedisDbMap *m) {
-    size_t cap;
-    if (!m) return 0;
-    cap = RedisDbMap_cap(m);
-    if (cap == 0) return sizeof(*m);
-    return sizeof(*m) + cap * (sizeof(CCSliceHdr) + sizeof(RedisEntry)) + sizeof(uint16_t) * (cap + 4u) + 128u;
-}
+/* Wide RedisEntry values: array_map keeps empty probe slots to 4 B. */
+CC_ARRAY_MAP_DECL(CCSliceHdr, RedisEntry, RedisDbMap, db_map_hash_key, db_map_eq_key);
 
 typedef struct RedisDb {
     CCArena map_arena;
@@ -808,7 +800,7 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
 static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
     if (!db || !db->entries) return NULL;
     CCSliceHdr kh = db_key_hdr_view(key);
-    return db->entries->get_ptr(kh);
+    return RedisDbMap_get_ptr(db->entries, kh);
 }
 
 /* ---- lazy expiration ----
@@ -839,7 +831,7 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     RedisValue* val = &cell->val;
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSliceHdr kh = db_key_hdr_view(key);
-    if (!db->entries->del(kh)) return;
+    if (!RedisDbMap_del(db->entries, kh)) return;
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
 }
@@ -868,7 +860,7 @@ static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, Redis
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    if (db->entries->insert(owned_key, entry) != 0) {
+    if (RedisDbMap_insert(db->entries, owned_key, entry) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok();
@@ -1194,7 +1186,7 @@ static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
     CCSliceHdr k;
     RedisEntry v;
     if (!db || !db->entries) return reply_integer(0);
-    CC_MAP_FOREACH(db->entries, k, v) {
+    CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
         if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
         n++;
     }
@@ -1209,13 +1201,13 @@ static RedisReply db_flush(RedisDb* db) {
     CCSliceHdr k;
     RedisEntry v;
     if (!db || !db->entries) return reply_simple("OK");
-    CC_MAP_FOREACH(db->entries, k, v) {
+    CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
         db_mem_stats_note_key_release(k.len);
         RedisValue* val = &v.val;
         CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
         db_release_value(db, &doomed);
     }
-    db->entries->clear();
+    RedisDbMap_clear(db->entries);
     return reply_simple("OK");
 }
 
@@ -1237,7 +1229,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     size_t matched = 0;
     size_t cap = 16;
     if (db && db->entries) {
-        CC_MAP_FOREACH(db->entries, k, v) {
+        CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
             if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
             if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
             matched++;
@@ -1253,7 +1245,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
         bool fit = off != 0;
         if (fit && db && db->entries) {
-            CC_MAP_FOREACH(db->entries, k, v) {
+            CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
                 if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
                 if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
                 RespGReply elem = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));

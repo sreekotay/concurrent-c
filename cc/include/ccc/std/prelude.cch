@@ -26,6 +26,7 @@
 #include "io.cch"
 #include "vec.cch"
 #include "map_forward.cch"
+#include "array_map.cch"
 #include "dir.cch"
 #include "process.cch"
 #include "exec.cch"

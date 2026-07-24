@@ -217,8 +217,9 @@ static inline void *cc_vec_push_slot(CCVec *v,
     if (!v) return NULL;
     cap = cc_vec_cap(v);
     if (v->len == cap) {
-        if (cc_vec_reserve(v, elem_size, elem_align,
-                           cap ? cap << 1 : 8) != 0) {
+        size_t new_cap = cap ? (cap * 8) / 5 : 8;
+        if (new_cap <= cap) new_cap = cap + 1;
+        if (cc_vec_reserve(v, elem_size, elem_align, new_cap) != 0) {
             return NULL;
         }
     }
@@ -236,7 +237,11 @@ static inline void *cc_vec_at_grow(CCVec *v,
     cap = cc_vec_cap(v);
     if (i >= cap) {
         size_t new_cap = cap ? cap : 8;
-        while (new_cap <= i) new_cap <<= 1;
+        while (new_cap <= i) {
+            size_t next = (new_cap * 8) / 5;
+            if (next <= new_cap) next = new_cap + 1;
+            new_cap = next;
+        }
         if (cc_vec_reserve(v, elem_size, elem_align, new_cap) != 0) return NULL;
     }
     if (i >= v->len) {

@@ -33,7 +33,7 @@ $(REDIS_SRC_DIR)/src/redis-benchmark: $(REDIS_SRC_DIR)/src/redis-server
 
 upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(REDIS_SRC_DIR)/src/redis-benchmark
 
-$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
 # Reader A/B variants: gen (the default @grammar reader, same as plain

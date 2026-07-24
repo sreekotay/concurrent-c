@@ -359,7 +359,11 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     }
     new_cap = str->cap ? str->cap : CC_STRING_INLINE_CAP;
     if (new_cap < CC_STRING_INLINE_CAP) new_cap = CC_STRING_INLINE_CAP;
-    while (new_cap < need) new_cap <<= 1;
+    while (new_cap < need) {
+        size_t next = (new_cap * 8) / 5;
+        if (next <= new_cap) next = new_cap + 1;
+        new_cap = next;
+    }
     if (new_cap > UINT32_MAX) { cc__string_poison(str); return NULL; }
     if (cc_string_is_inline(str) || !cc_string_heap_data(str)) {
         saved_len = str->len + 1;

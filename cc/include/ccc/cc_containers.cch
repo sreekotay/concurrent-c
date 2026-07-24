@@ -2242,7 +2242,10 @@ static inline ccj_allocing_fn_result_ty ccj_vec_insert_n(
       cap = 2;
 
     while( cap < ccj_vec_size( cntr ) + n )
-      cap *= 2;
+    {
+      size_t next = ( cap * 8 ) / 5;
+      cap = next > cap ? next : cap + 1;
+    }
 
     ccj_allocing_fn_result_ty result = ccj_vec_reserve(
       cntr,
@@ -5480,7 +5483,10 @@ static inline ccj_allocing_fn_result_ty ccj_str_insert_n(
       cap = 2;
 
     while( cap < ccj_str_size( cntr ) + n )
-      cap *= 2;
+    {
+      size_t next = ( cap * 8 ) / 5;
+      cap = next > cap ? next : cap + 1;
+    }
 
     ccj_allocing_fn_result_ty result = ccj_str_reserve(
       cntr,
@@ -6148,7 +6154,10 @@ static inline ccj_allocing_fn_result_ty ccj_str_insert_wrapped_fmt_args(
       cap = 2;
 
     while( cap < ccj_str_size( cntr ) + total )
-      cap *= 2;
+    {
+      size_t next = ( cap * 8 ) / 5;
+      cap = next > cap ? next : cap + 1;
+    }
 
     ccj_allocing_fn_result_ty result = ccj_str_reserve(
       cntr,
