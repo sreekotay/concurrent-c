@@ -295,9 +295,13 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
  * pinned by tests/redis_resp_gen_parity_smoke.ccs. The command is a tagged
  * union: '*' dispatches the framed arm, anything else is the inline-command
  * DEFAULT arm. cap 8 = the server's own "unsupported argument count"
- * policy (REDIS_ARGV_MAX + 1 wire tokens), as an inline array: the parse
- * hot path allocates nothing (the arena parameter of try_read is unused
- * by a fully capped schema).
+ * policy (REDIS_ARGV_MAX + 1 wire tokens), as an inline array.
+ *
+ * SERDES alloc contract (parse):
+ *   - Fully capped schema → try_read allocates nothing; arena may be NULL.
+ *   - `bytes len` / keep spans BORROW the read buffer (zero-copy).
+ *   - Ownership materialize is ONLY the argv clone into req->arena after
+ *     a complete frame (channel handoff), never during parse itself.
  *
  * Known divergence from the hand reader (documented, pathological input
  * only): an inline line with a lone CR or LF inside it ("AB\nCD\r\n") is a
@@ -331,6 +335,12 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
  * or invalid kind), $len / *n are DERIVED from data.len / items_n on write,
  * and the self-typed `array` variant recurses.  Every reply byte the server
  * emits comes from these writers (plus the two header schemas below).
+ *
+ * SERDES alloc contract (write):
+ *   - cc_write itself allocates nothing; the caller supplies dst/cap.
+ *   - Hot replies (SET/GET/INCR) write straight into conn->out_buf.
+ *   - Array replies (MGET/KEYS/CONFIG) encode once into reply_arena; encode
+ *     retries checkpoint/restore so a too-small guess leaves no hole.
  *
  * NIL modeling: RESP2 null bulk is "$-1\r\n" — a bulk HEADER with length
  * -1 and no payload/trailer.  It cannot be a RespGReply variant: union
@@ -544,8 +554,9 @@ static RedisReply reply_raw_slice(CCSlice s) {
 
 /* Encode one wire reply into reply-batch arena storage.  `cap_hint` is a
  * capacity guess, not wire math: cc_write's 0-on-didn't-fit catches any
- * shortfall and the loop doubles.  Bytes live until the client drains or
- * tears down the batch and resets conn->reply_arena. */
+ * shortfall and the loop doubles.  Each attempt is checkpointed so a miss
+ * restores the arena (no abandoned too-small slices).  Bytes live until
+ * the client drains or tears down the batch and resets conn->reply_arena. */
 enum { k_reply_encode_cap_max = 1 << 30 };
 
 @noblock static CCSlice !>(CCError) reply_wire_encode_into_batch(const RespGReply* wire,
@@ -554,12 +565,14 @@ enum { k_reply_encode_cap_max = 1 << 30 };
     @errhandler(CCError e) { return cc_err(e); }
     size_t cap = cap_hint < 16 ? 16 : cap_hint;
     for (;;) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_batch_arena);
         CCSlice out = reply_batch_alloc_slice(reply_batch_arena, cap) !>;
         size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
         if (w != 0) {
             out.len = w;
             return cc_ok(out);
         }
+        cc_arena_restore(cp);
         if (cap >= (size_t)k_reply_encode_cap_max) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
         }
@@ -690,10 +703,10 @@ static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
 static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     RedisConn* conn = it->conn;
     @errhandler(CCError e) { return cc_err(e); }
-    RedisRequestSlot slot = redis_conn_request_slot(conn) !>;
-    @defer redis_request_slot_release(&slot);
-    RedisRequest* req = slot.req;
 
+    /* Parse BEFORE taking a pool slot: incomplete frames are the common
+     * refill case and must not touch req_pool / argv_buf at all.  Args
+     * borrow read_buf until we materialize into req->arena below. */
     CCSlice args[1 + REDIS_ARGV_MAX] = {0};
     size_t argc = 0;
     CCError perr = {0};
@@ -708,6 +721,10 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     size_t arg_start = 0;
     size_t req_argc = 0;
     decode_request_shape(args, argc, &kind, &arg_start, &req_argc) !>(e) { return cc_err(e); };
+
+    RedisRequestSlot slot = redis_conn_request_slot(conn) !>;
+    @defer redis_request_slot_release(&slot);
+    RedisRequest* req = slot.req;
 
     req->conn_id = conn->conn_id;
     req->request_id = conn->next_request_id;
@@ -1418,6 +1435,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
      * RespGReply variant — see the schema comment), so the array is written
      * element-by-element under a schema-written "*<n>\r\n" header. */
     for (;;) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
         CCSlice out = reply_batch_alloc_slice(reply_arena, cap) !>;
         char* dst = (char*)out.ptr;
         RespGArrayHdr hdr = { .n = (long long)nkeys };
@@ -1439,6 +1457,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
             out.len = off;
             return cc_ok(reply_raw_slice(out));
         }
+        cc_arena_restore(cp);
         if (cap >= (size_t)k_reply_encode_cap_max) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "mget reply encode overflow"));
         }
@@ -1552,9 +1571,9 @@ static bool glob_match(const char* p, size_t plen, const char* s, size_t slen) {
 }
 
 /* KEYS: full scan, glob filter, one RESP array into conn->reply_arena.
- * Two passes over the map (size, then encode) with only an arena alloc in
- * between — no map mutation, so borrowed key bytes stay put.  Expired
- * entries are skipped, not reaped (no mutation during iteration). */
+ * Count pass then stream-encode (same shape as MGET) — no intermediate
+ * RespGReply vector.  No map mutation, so borrowed key bytes stay put.
+ * Expired entries are skipped, not reaped. */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena* reply_arena,
@@ -1569,42 +1588,44 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     CCSliceHdr k;
     RedisEntry v;
 
-    /* Structured array: count pass, fill a RespGReply items vector (bulk
-     * elements borrowing key bytes — safe: no map mutation between the
-     * passes and the encode below), then ONE recursive cc_write. */
-    RespGReply* items = NULL;
     size_t matched = 0;
-    size_t cap_hint = 16;
+    size_t cap = 16;
     if (db && db->entries) {
         CC_MAP_FOREACH(db->entries, k, v) {
             if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
             if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
             matched++;
-            cap_hint += k.len + 24;
-        }
-        if (matched > 0) {
-            /* align 8: RespGReply holds pointers/long long, nothing wider */
-            items = (RespGReply*)cc_arena_alloc(reply_arena,
-                                                matched * sizeof(RespGReply), 8);
-            if (!items) {
-                return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode OOM"));
-            }
-            size_t idx = 0;
-            CC_MAP_FOREACH(db->entries, k, v) {
-                if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
-                if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
-                items[idx++] = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));
-            }
+            cap += k.len + 24;
         }
     }
 
-    RespGReply arr;
-    arr.kind = RespGReply_array;
-    arr.u.array.n = (long long)matched; /* derived on write; set for hygiene */
-    arr.u.array.items = items;
-    arr.u.array.items_n = matched;
-    CCSlice out = reply_wire_encode_into_batch(&arr, reply_arena, cap_hint) !>;
-    return cc_ok(reply_raw_slice(out));
+    for (;;) {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
+        CCSlice out = reply_batch_alloc_slice(reply_arena, cap) !>;
+        char* dst = (char*)out.ptr;
+        RespGArrayHdr hdr = { .n = (long long)matched };
+        size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
+        bool fit = off != 0;
+        if (fit && db && db->entries) {
+            CC_MAP_FOREACH(db->entries, k, v) {
+                if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+                if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+                RespGReply elem = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));
+                size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
+                if (w == 0) { fit = false; break; }
+                off += w;
+            }
+        }
+        if (fit) {
+            out.len = off;
+            return cc_ok(reply_raw_slice(out));
+        }
+        cc_arena_restore(cp);
+        if (cap >= (size_t)k_reply_encode_cap_max) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
+        }
+        cap *= 2;
+    }
 }
 
 /* Seconds → relative ms for EXPIRE/SETEX, clamped instead of overflowing. */
