@@ -113,6 +113,9 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
     return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
 }
 
+/* CCStringRef hash/eq live in string_ref.cch (needs the type).  Map sugar
+ * resolves keys named CCStringRef to cc_map_hash_string_ref / eq. */
+
 #define CC_MAP_DECL_UFCS(Name) typedef char __cc_map_decl_ufcs__##Name
 
 /*

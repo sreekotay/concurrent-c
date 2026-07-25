@@ -242,6 +242,34 @@ typedef struct CCString {
 } CCString;
 ```
 
+`<ccc/std/string_ref.cch>` (prelude) defines `CCStringRef`: a pointer-sized
+string **value** for dense keys and interned payloads. Small strings stay
+inline in the word; larger ones point at an arena `[u32 len][bytes…]` block
+(SDS-style). The handle does not grow or free — the arena owns heap bytes.
+Ephemeral borrows remain `char[:]` / `CCSlice`. `CCString` remains the
+growable owner.
+
+```c
+typedef struct CCStringRef {
+    uintptr_t w;
+} CCStringRef;  /* 8 bytes on 64-bit little-endian hosts */
+
+CCStringRef cc_string_ref_empty(void);
+CCResult_CCStringRef_CCError cc_string_ref_from_slice(CCArena *arena, CCSlice src);
+CCStringRef cc_string_ref_borrow(CCStringRefView *view);           /* probe only */
+CCStringRef cc_string_ref_borrow_slice(CCStringRefView *view, CCSlice src);
+uint32_t cc_string_ref_len(const CCStringRef *r);
+CCSlice cc_string_ref_as_slice(const CCStringRef *r);  /* inline/view: storage must stay live */
+int cc_string_ref_is_inline(const CCStringRef *r);
+int cc_string_ref_is_view(const CCStringRef *r);
+int cc_string_ref_is_empty(const CCStringRef *r);
+size_t cc_map_hash_string_ref(CCStringRef r);
+int cc_map_eq_string_ref(CCStringRef a, CCStringRef b);
+```
+
+`Map` / `ArrayMap` sugar accepts `CCStringRef` keys via those hash/eq helpers.
+Borrowed views are for lookup probes only — never insert them.
+
 The public constructors, accessors, mutation functions, and lifetime functions
 are:
 

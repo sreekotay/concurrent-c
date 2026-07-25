@@ -2021,11 +2021,12 @@ typedef struct CCMapKeyHashEq {
 } CCMapKeyHashEq;
 
 static const CCMapKeyHashEq cc__map_key_hasheq[] = {
-    { "int",        0, "cc_map_hash_i32",       "cc_map_eq_i32"       },
-    { "CCSliceHdr", 0, "cc_map_hash_slice_hdr", "cc_map_eq_slice_hdr" },
-    { "64",         1, "cc_map_hash_u64",       "cc_map_eq_u64"       },
-    { "slice",      1, "cc_map_hash_slice",     "cc_map_eq_slice"     },
-    { "Slice",      1, "cc_map_hash_slice",     "cc_map_eq_slice"     },
+    { "int",          0, "cc_map_hash_i32",         "cc_map_eq_i32"         },
+    { "CCSliceHdr",   0, "cc_map_hash_slice_hdr",   "cc_map_eq_slice_hdr"   },
+    { "CCStringRef",  0, "cc_map_hash_string_ref",  "cc_map_eq_string_ref"  },
+    { "64",           1, "cc_map_hash_u64",         "cc_map_eq_u64"         },
+    { "slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },
+    { "Slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },
 };
 
 static void cc__map_select_hasheq(const char* key_type,

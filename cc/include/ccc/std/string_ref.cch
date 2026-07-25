@@ -1,0 +1,241 @@
+/*
+ * CCStringRef — pointer-sized string value: inline small bytes, arena
+ * length-prefixed payload, or a short-lived borrow of foreign bytes.
+ *
+ * Dense twin of CCString (growable 16B owner).  Durable forms (inline / SDS
+ * heap) do not grow or free; heap bytes live until the arena is reset.
+ * Borrowed views are for map probes only — do not store them.
+ *
+ * Tags (little-endian hosts):
+ *   inline: (w & 1) != 0; low byte = (len << 1) | 1, next len bytes payload
+ *   view:   (w & 3) == 2; w&~3 → CCStringRefView { len, data }
+ *   heap:   (w & 3) == 0; w → data, uint32_t len at data[-1]
+ */
+#ifndef CC_STD_STRING_REF_H
+#define CC_STD_STRING_REF_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
+
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#error "CCStringRef requires little-endian (inline bytes live in the low address bytes)"
+#endif
+
+#ifndef CC_STRING_REF_INLINE_MAX
+#define CC_STRING_REF_INLINE_MAX ((int)sizeof(uintptr_t) - 1)
+#endif
+
+enum {
+    CC_STRING_REF_TAG_INLINE = 1u,
+    CC_STRING_REF_TAG_VIEW = 2u,
+};
+
+typedef struct CCStringRef {
+    uintptr_t w;
+} CCStringRef;
+
+/* Stack (or other short-lived) borrow target for map lookup keys. */
+typedef struct CCStringRefView {
+    uint32_t len;
+    const char *data;
+} CCStringRefView;
+
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(CCStringRef) == 8, "CCStringRef should be one pointer word");
+#endif
+_Static_assert(sizeof(CCStringRef) == sizeof(uintptr_t), "CCStringRef is pointer-sized");
+
+#ifndef CCResult_CCStringRef_CCError_DEFINED
+#define CCResult_CCStringRef_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCStringRef_CCError, CCStringRef, CCError)
+#endif
+
+static inline unsigned char *cc__string_ref_bytes(CCStringRef *r) {
+    return (unsigned char *)(void *)&r->w;
+}
+
+static inline const unsigned char *cc__string_ref_bytes_const(const CCStringRef *r) {
+    return (const unsigned char *)(const void *)&r->w;
+}
+
+static inline CCStringRef cc_string_ref_empty(void) {
+    CCStringRef r;
+    r.w = 0;
+    return r;
+}
+
+static inline int cc_string_ref_is_inline(const CCStringRef *r) {
+    return r && (r->w & CC_STRING_REF_TAG_INLINE) != 0;
+}
+
+static inline int cc_string_ref_is_view(const CCStringRef *r) {
+    return r && (r->w & 3u) == CC_STRING_REF_TAG_VIEW;
+}
+
+static inline int cc_string_ref_is_empty(const CCStringRef *r) {
+    if (!r || r->w == 0) return 1;
+    if (cc_string_ref_is_inline(r)) return (cc__string_ref_bytes_const(r)[0] >> 1) == 0;
+    if (cc_string_ref_is_view(r)) {
+        const CCStringRefView *v =
+            (const CCStringRefView *)(void *)(r->w & ~(uintptr_t)3u);
+        return !v || v->len == 0;
+    }
+    return 0;
+}
+
+/* Borrow `view` for the duration of its lifetime.  Do not insert into maps. */
+static inline CCStringRef cc_string_ref_borrow(CCStringRefView *view) {
+    CCStringRef r;
+    r.w = (uintptr_t)view | CC_STRING_REF_TAG_VIEW;
+    return r;
+}
+
+/* Fill `view` from `src` and return a borrow handle (same lifetime as `view`). */
+static inline CCStringRef cc_string_ref_borrow_slice(CCStringRefView *view, CCSlice src) {
+    if (!view) return cc_string_ref_empty();
+    view->len = (src.len > (size_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)src.len;
+    view->data = (const char *)src.ptr;
+    return cc_string_ref_borrow(view);
+}
+
+static inline CCStringRef cc__string_ref_pack_inline(const char *p, uint32_t len) {
+    CCStringRef r;
+    unsigned char *b;
+    uint32_t i;
+    r.w = 0;
+    b = cc__string_ref_bytes(&r);
+    b[0] = (unsigned char)((len << 1) | CC_STRING_REF_TAG_INLINE);
+    for (i = 0; i < len; i++) b[1 + i] = (unsigned char)p[i];
+    return r;
+}
+
+static inline CCStringRef cc__string_ref_from_heap_data(char *data) {
+    CCStringRef r;
+    r.w = (uintptr_t)data;
+    return r;
+}
+
+static inline uint32_t cc_string_ref_len(const CCStringRef *r) {
+    if (!r || r->w == 0) return 0;
+    if (cc_string_ref_is_inline(r)) return (uint32_t)(cc__string_ref_bytes_const(r)[0] >> 1);
+    if (cc_string_ref_is_view(r)) {
+        const CCStringRefView *v =
+            (const CCStringRefView *)(void *)(r->w & ~(uintptr_t)3u);
+        return v ? v->len : 0;
+    }
+    return ((uint32_t *)(void *)r->w)[-1];
+}
+
+/* Inline / view bytes are addressable only while `r` (and view) stay live. */
+static inline CCSlice cc_string_ref_as_slice(const CCStringRef *r) {
+    if (!r || r->w == 0) return cc_slice_empty();
+    if (cc_string_ref_is_inline(r)) {
+        const unsigned char *b = cc__string_ref_bytes_const(r);
+        return cc_slice_from_buffer((void *)(uintptr_t)&b[1], (size_t)(b[0] >> 1));
+    }
+    if (cc_string_ref_is_view(r)) {
+        const CCStringRefView *v =
+            (const CCStringRefView *)(void *)(r->w & ~(uintptr_t)3u);
+        if (!v || !v->data) return cc_slice_empty();
+        return cc_slice_from_buffer((void *)(uintptr_t)v->data, (size_t)v->len);
+    }
+    {
+        char *data = (char *)(void *)r->w;
+        uint32_t len = ((uint32_t *)(void *)data)[-1];
+        return cc_slice_from_buffer(data, (size_t)len);
+    }
+}
+
+static inline size_t CCStringRef_len(const CCStringRef *r) {
+    return (size_t)cc_string_ref_len(r);
+}
+
+static inline CCSlice CCStringRef_as_slice(const CCStringRef *r) {
+    return cc_string_ref_as_slice(r);
+}
+
+static inline int CCStringRef_is_inline(const CCStringRef *r) {
+    return cc_string_ref_is_inline(r);
+}
+
+static inline int CCStringRef_is_empty(const CCStringRef *r) {
+    return cc_string_ref_is_empty(r);
+}
+
+/* Copy `src` into a durable handle.  len <= INLINE_MAX stays inline (no arena).
+ * Larger payloads allocate [u32 len][bytes] in `arena` (SDS-style). */
+static inline CCResult_CCStringRef_CCError cc_string_ref_from_slice(CCArena *arena,
+                                                                   CCSlice src) {
+    CCStringRef r;
+    char *block;
+    char *data;
+    size_t need;
+    if (src.len > (size_t)UINT32_MAX) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef length exceeds u32"));
+    }
+    if (src.len == 0) {
+        return cc_ok_CCResult_CCStringRef_CCError(cc_string_ref_empty());
+    }
+    if (src.len <= (size_t)CC_STRING_REF_INLINE_MAX) {
+        if (!src.ptr) {
+            return cc_err_CCResult_CCStringRef_CCError(
+                CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef inline without ptr"));
+        }
+        return cc_ok_CCResult_CCStringRef_CCError(
+            cc__string_ref_pack_inline((const char *)src.ptr, (uint32_t)src.len));
+    }
+    if (!arena) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef heap form needs arena"));
+    }
+    if (!src.ptr) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef heap without ptr"));
+    }
+    need = sizeof(uint32_t) + src.len;
+    block = (char *)cc_arena_alloc(arena, need, sizeof(uint32_t));
+    if (!block) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStringRef arena alloc failed"));
+    }
+    {
+        uint32_t n = (uint32_t)src.len;
+        memcpy(block, &n, sizeof(n));
+    }
+    data = block + sizeof(uint32_t);
+    memcpy(data, src.ptr, src.len);
+    /* Heap tag requires (w & 3) == 0; 4-byte header keeps data 4-aligned. */
+    if (((uintptr_t)data & 3u) != 0) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef heap data misaligned"));
+    }
+    r = cc__string_ref_from_heap_data(data);
+    return cc_ok_CCResult_CCStringRef_CCError(r);
+}
+
+static inline size_t cc_map_hash_string_ref(CCStringRef r) {
+    CCSlice s = cc_string_ref_as_slice(&r);
+    size_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char *)s.ptr;
+    size_t i;
+    for (i = 0; i < s.len; ++i) h ^= p[i], h *= 16777619;
+    return h;
+}
+
+static inline int cc_map_eq_string_ref(CCStringRef a, CCStringRef b) {
+    CCSlice sa;
+    CCSlice sb;
+    if (a.w == b.w) return 1;
+    sa = cc_string_ref_as_slice(&a);
+    sb = cc_string_ref_as_slice(&b);
+    return sa.len == sb.len &&
+           (sa.len == 0 ||
+            (sa.ptr && sb.ptr && memcmp(sa.ptr, sb.ptr, sa.len) == 0));
+}
+
+#endif /* CC_STD_STRING_REF_H */

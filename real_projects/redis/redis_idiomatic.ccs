@@ -19,7 +19,8 @@
  * Command surface: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX/APPEND/STRLEN,
  * TYPE, DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
  * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute ms deadline in
- * a side `expires` map, checked on access; no active cycle), DBSIZE,
+ * a side `expires` map keyed by CCStringRef, checked on access; no active
+ * cycle), DBSIZE,
  * FLUSHDB/FLUSHALL, KEYS (glob), CONFIG GET, CC.MEMLOG.  Functional smoke:
  * `python3 redis_smoke.py`.
  *
@@ -61,11 +62,9 @@
 /* Three DB arenas: map (table blob), key (cloned key bytes), value (CCString
  * backing).  Map/value: fixed root + heap overflow; key: growable slabs. */
 
-static inline CCSliceHdr db_key_hdr_view(char[:] key) {
-    CCSliceHdr h = {0};
-    h.ptr = key.ptr;
-    h.len = key.len;
-    return h;
+/* Probe key: stack borrow of request bytes (not durable — do not insert). */
+static inline CCStringRef db_key_ref_borrow(CCStringRefView* view, char[:] key) {
+    return cc_string_ref_borrow_slice(view, key);
 }
 
 /* .str = SET bytes; .num = INCR-family ints (no text round-trip).  Read
@@ -81,10 +80,10 @@ typedef struct RedisEntry {
     RedisValue val;
 } RedisEntry;
 
-/* Wide RedisEntry values: array_map keeps empty probe slots to 4 B. */
-typedef ArrayMap::[CCSliceHdr, RedisEntry] RedisDbMap;
+/* Keys are CCStringRef (8B): dense rows stay narrow; empty probe slots 4 B. */
+typedef ArrayMap::[CCStringRef, RedisEntry] RedisDbMap;
 /* key → absolute expire ms; absent / missing ⇒ no TTL. */
-typedef ArrayMap::[CCSliceHdr, int64_t] RedisExpiresMap;
+typedef ArrayMap::[CCStringRef, int64_t] RedisExpiresMap;
 
 typedef struct RedisDb {
     CCArena map_arena;
@@ -735,13 +734,13 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
         db_free_arenas_only(db);
         return false;
     }
-    db->entries = array_map_new_count::[CCSliceHdr, RedisEntry](&db->map_arena, bucket_count);
+    db->entries = array_map_new_count::[CCStringRef, RedisEntry](&db->map_arena, bucket_count);
     if (!db->entries) {
         db_free_arenas_only(db);
         return false;
     }
     /* Side expires dict starts small; grows only for keys that get a TTL. */
-    db->expires = array_map_new::[CCSliceHdr, int64_t](&db->map_arena);
+    db->expires = array_map_new::[CCStringRef, int64_t](&db->map_arena);
     if (!db->expires) {
         db->entries.destroy();
         db->entries = NULL;
@@ -799,8 +798,10 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
 }
 
 static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
+    CCStringRefView view;
+    CCStringRef kh;
     if (!db || !db->entries) return NULL;
-    CCSliceHdr kh = db_key_hdr_view(key);
+    kh = db_key_ref_borrow(&view, key);
     return db->entries.get_ptr(kh);
 }
 
@@ -820,23 +821,29 @@ static int64_t db_req_now(int64_t* now_cache) {
     return *now_cache;
 }
 
-static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
+static CCStringRef !>(CCError) db_clone_key_ref(RedisDb* db, char[:] key) {
     @errhandler(CCError e) { return cc_err(e); }
+    CCResult_CCStringRef_CCError rr;
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
-    CCSliceHdr view = db_key_hdr_view(key);
-    CCSliceHdr stable = cc_slice_hdr_clone_into(&view, &db->key_arena) !>;
-    return cc_ok(stable);
+    rr = cc_string_ref_from_slice(&db->key_arena, key);
+    if (rr.is_err()) return cc_err(rr.error());
+    return cc_ok(rr.value());
 }
 
-static int64_t db_expires_get(RedisDb* db, CCSliceHdr kh) {
+static int64_t db_expires_get(RedisDb* db, CCStringRef kh) {
     int64_t* p;
     if (!db || !db->expires) return 0;
     p = db->expires.get_ptr(kh);
     return p ? *p : 0;
 }
 
+static int64_t db_expires_get_key(RedisDb* db, char[:] key) {
+    CCStringRefView view;
+    return db_expires_get(db, db_key_ref_borrow(&view, key));
+}
+
 static bool db_key_expired(RedisDb* db, char[:] key, int64_t* now_cache) {
-    int64_t exp = db_expires_get(db, db_key_hdr_view(key));
+    int64_t exp = db_expires_get_key(db, key);
     if (exp == 0) return false;
     return db_req_now(now_cache) >= exp;
 }
@@ -845,7 +852,8 @@ static bool db_key_expired(RedisDb* db, char[:] key, int64_t* now_cache) {
  * (side-table key bytes; not double-counted in key_alloc mem stats). */
 static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCSliceHdr kh = db_key_hdr_view(key);
+    CCStringRefView view;
+    CCStringRef kh = db_key_ref_borrow(&view, key);
     if (!db || !db->expires) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db expires without map"));
     }
@@ -860,7 +868,7 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
             return cc_ok();
         }
     }
-    CCSliceHdr owned = db_clone_key_hdr(db, key) !>;
+    CCStringRef owned = db_clone_key_ref(db, key) !>;
     if (db->expires.insert(owned, when) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
     }
@@ -873,7 +881,8 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
 static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     RedisValue* val = &cell->val;
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
-    CCSliceHdr kh = db_key_hdr_view(key);
+    CCStringRefView view;
+    CCStringRef kh = db_key_ref_borrow(&view, key);
     if (db->expires) (void)db->expires.del(kh);
     if (!db->entries.del(kh)) return;
     db_mem_stats_note_key_release(key.len);
@@ -892,7 +901,7 @@ static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, int64_t* now_cache) 
     return cell;
 }
 
-static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, RedisEntry entry) {
+static void !>(CCError) db_insert_value(RedisDb* db, CCStringRef owned_key, RedisEntry entry) {
     if (!db || !db->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
@@ -908,7 +917,7 @@ static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, Redis
 static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
                                             RedisValue val, int64_t expires_at_ms) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCSliceHdr owned_key = db_clone_key_hdr(db, key) !>;
+    CCStringRef owned_key = db_clone_key_ref(db, key) !>;
     RedisEntry entry;
     entry.val = val;
     db_insert_value(db, owned_key, entry) !>(e) {
@@ -919,7 +928,10 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
     };
     db_mem_stats_note_key_alloc(key.len);
     if (expires_at_ms != 0) {
-        db_expires_set(db, key, expires_at_ms) !>;
+        /* Reuse the same durable key word in the side table (no second clone). */
+        if (db->expires.insert(owned_key, expires_at_ms) != 0) {
+            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
+        }
     }
     return cc_ok();
 }
@@ -1122,7 +1134,7 @@ static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, int64_t* now_cach
     RedisEntry* cell = db_lookup_live(db, key, now_cache);
     if (!cell) return reply_integer(-2);
     {
-        int64_t exp = db_expires_get(db, db_key_hdr_view(key));
+        int64_t exp = db_expires_get_key(db, key);
         if (exp == 0) return reply_integer(-1);
         int64_t rem = exp - db_req_now(now_cache);
         if (rem < 0) rem = 0;
@@ -1134,7 +1146,7 @@ static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, int64_t* now_
     @errhandler(CCError e) { return cc_err(e); }
     RedisEntry* cell = db_lookup_live(db, key, now_cache);
     if (!cell) return cc_ok(reply_integer(0));
-    if (db_expires_get(db, db_key_hdr_view(key)) == 0) return cc_ok(reply_integer(0));
+    if (db_expires_get_key(db, key) == 0) return cc_ok(reply_integer(0));
     db_expires_set(db, key, 0) !>;
     return cc_ok(reply_integer(1));
 }
@@ -1229,7 +1241,7 @@ static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
  * (not deleted — no map mutation during iteration). */
 static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
     int64_t n = 0;
-    CCSliceHdr k;
+    CCStringRef k;
     RedisEntry v;
     if (!db || !db->entries) return reply_integer(0);
     CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
@@ -1246,11 +1258,11 @@ static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
  * cleared in one shot; key bytes follow the standing DEL policy (arena-held
  * until db teardown). */
 static RedisReply db_flush(RedisDb* db) {
-    CCSliceHdr k;
+    CCStringRef k;
     RedisEntry v;
     if (!db || !db->entries) return reply_simple("OK");
     CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-        db_mem_stats_note_key_release(k.len);
+        db_mem_stats_note_key_release((size_t)cc_string_ref_len(&k));
         RedisValue* val = &v.val;
         CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
         db_release_value(db, &doomed);
@@ -1272,19 +1284,21 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR KEYS pattern too long"));
     }
     const char* pat = (const char*)pattern.ptr;
-    CCSliceHdr k;
+    CCStringRef k;
     RedisEntry v;
 
     size_t matched = 0;
     size_t cap = 16;
     if (db && db->entries) {
         CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
+            CCSlice ks;
             int64_t exp = db_expires_get(db, k);
             if (exp != 0 && db_req_now(now_cache) >= exp) continue;
             (void)v;
-            if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
+            ks = cc_string_ref_as_slice(&k);
+            if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
             matched++;
-            cap += k.len + 24;
+            cap += ks.len + 24;
         }
     }
 
@@ -1297,11 +1311,13 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         bool fit = off != 0;
         if (fit && db && db->entries) {
             CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
+                CCSlice ks;
                 int64_t exp = db_expires_get(db, k);
                 if (exp != 0 && db_req_now(now_cache) >= exp) continue;
                 (void)v;
-                if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
-                RespGReply elem = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));
+                ks = cc_string_ref_as_slice(&k);
+                if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+                RespGReply elem = wire_bulk(ks);
                 size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
                 if (w == 0) { fit = false; break; }
                 off += w;

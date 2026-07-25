@@ -1,0 +1,79 @@
+/* CCStringRef: 8B SSO or arena length-prefixed payload; map key. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+    CCStringRef a;
+    CCStringRef b;
+    CCStringRef long_ref;
+    CCSlice s;
+    ArrayMap::[CCStringRef, int] m;
+    int *p;
+    char long_buf[64];
+    size_t i;
+
+    if (!arena.base) return 1;
+    if (sizeof(CCStringRef) != sizeof(void *)) return 2;
+
+    a = cc_string_ref_empty();
+    if (!cc_string_ref_is_empty(&a) || cc_string_ref_len(&a) != 0) return 3;
+
+    {
+        CCResult_CCStringRef_CCError rr =
+            cc_string_ref_from_slice(&arena, cc_slice_from_buffer((void *)"hi", 2));
+        if (rr.is_err()) return 100;
+        a = rr.value();
+    }
+    if (!cc_string_ref_is_inline(&a) || cc_string_ref_len(&a) != 2) return 4;
+    s = cc_string_ref_as_slice(&a);
+    if (s.len != 2 || memcmp(s.ptr, "hi", 2) != 0) return 5;
+
+    {
+        CCResult_CCStringRef_CCError rr =
+            cc_string_ref_from_slice(&arena, cc_slice_from_buffer((void *)"hi", 2));
+        if (rr.is_err()) return 101;
+        b = rr.value();
+    }
+    if (!cc_map_eq_string_ref(a, b)) return 6;
+
+    for (i = 0; i < sizeof(long_buf); i++) long_buf[i] = (char)('A' + (i % 26));
+    {
+        CCResult_CCStringRef_CCError rr =
+            cc_string_ref_from_slice(&arena, cc_slice_from_buffer(long_buf, sizeof(long_buf)));
+        if (rr.is_err()) return 102;
+        long_ref = rr.value();
+    }
+    if (cc_string_ref_is_inline(&long_ref) || cc_string_ref_len(&long_ref) != sizeof(long_buf))
+        return 7;
+    s = cc_string_ref_as_slice(&long_ref);
+    if (s.len != sizeof(long_buf) || memcmp(s.ptr, long_buf, sizeof(long_buf)) != 0) return 8;
+
+    m = array_map_new::[CCStringRef, int](&arena);
+    if (!m) return 9;
+    if (m.insert(a, 11) != 0) return 10;
+    if (m.insert(long_ref, 22) != 0) return 11;
+    p = m.get_ptr(b);
+    if (!p || *p != 11) return 12;
+    p = m.get_ptr(long_ref);
+    if (!p || *p != 22) return 13;
+    if (m.len() != 2) return 14;
+
+    if (a.len() != 2 || !a.is_inline()) return 15;
+    s = a.as_slice();
+    if (s.len != 2) return 16;
+
+    /* Borrowed view probes the map without copying long keys. */
+    {
+        CCStringRefView view;
+        CCStringRef probe = cc_string_ref_borrow_slice(
+            &view, cc_slice_from_buffer(long_buf, sizeof(long_buf)));
+        p = m.get_ptr(probe);
+        if (!p || *p != 22) return 17;
+        if (!cc_string_ref_is_view(&probe)) return 18;
+    }
+
+    printf("string_ref_smoke: ok\n");
+    return 0;
+}
