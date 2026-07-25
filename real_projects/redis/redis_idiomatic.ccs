@@ -18,15 +18,17 @@
  *
  * Command surface: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX/APPEND/STRLEN,
  * TYPE, DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
- * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute deadline
- * checked on access, no active cycle), DBSIZE, FLUSHDB/FLUSHALL, KEYS
- * (glob), CONFIG GET, CC.MEMLOG.  Functional smoke: `python3 redis_smoke.py`.
+ * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute ms deadline in
+ * a side `expires` map, checked on access; no active cycle), DBSIZE,
+ * FLUSHDB/FLUSHALL, KEYS (glob), CONFIG GET, CC.MEMLOG.  Functional smoke:
+ * `python3 redis_smoke.py`.
  *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
- * Memory: CC_REDIS_MEM_REPORT=1 logs Mach footprint, logical_db_live vs
- * mach_phys_footprint, db_dump_mem_stats (per-arena map, key, value slabs).
- * CC.MEMLOG command prints arena + accounting without restart; see bench_then_memlog.sh.
- * mem_account.sh runs vmmap summary idle vs load vs upstream.
+ * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
+ * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value
+ * live).  CC_REDIS_MEM_REPORT=1 adds verbose Mach/arena dump at owner-ready.
+ * CC.MEMLOG [phase] dumps arenas + accounting without restart; see
+ * bench_robust.sh / bench_then_memlog.sh.
  */
 
 #include <ccc/std/prelude.cch>
@@ -73,20 +75,23 @@ static inline CCSliceHdr db_key_hdr_view(char[:] key) {
     num: int64_t;
 };
 
-/* expires_at_ms == 0 → no expiry.  Lazy: checked on access (db_lookup_live). */
+/* Value only in the main map.  Absolute expire deadlines live in `expires`
+ * (Redis-style side table): keys without TTL pay no per-entry int64. */
 typedef struct RedisEntry {
     RedisValue val;
-    int64_t expires_at_ms;
 } RedisEntry;
 
 /* Wide RedisEntry values: array_map keeps empty probe slots to 4 B. */
 typedef ArrayMap::[CCSliceHdr, RedisEntry] RedisDbMap;
+/* key → absolute expire ms; absent / missing ⇒ no TTL. */
+typedef ArrayMap::[CCSliceHdr, int64_t] RedisExpiresMap;
 
 typedef struct RedisDb {
     CCArena map_arena;
     CCArena key_arena;
     CCArena value_arena;
     RedisDbMap entries;
+    RedisExpiresMap expires;
 } RedisDb;
 
 typedef struct RedisDbMemStats {
@@ -363,7 +368,7 @@ typedef struct RedisCommandSpec {
         { "FLUSHDB",   "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0 }" },
         { "FLUSHALL",  "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0 }" },
         { "KEYS",      "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0 }" },
-        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 0, 0 }" },
+        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0 }" },
     };
     static_map("redis_commands", "RedisCommandSpec", commands,
                sizeof(commands) / sizeof(commands[0]),
@@ -735,6 +740,14 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
         db_free_arenas_only(db);
         return false;
     }
+    /* Side expires dict starts small; grows only for keys that get a TTL. */
+    db->expires = array_map_new::[CCSliceHdr, int64_t](&db->map_arena);
+    if (!db->expires) {
+        db->entries.destroy();
+        db->entries = NULL;
+        db_free_arenas_only(db);
+        return false;
+    }
     return true;
 }
 
@@ -807,9 +820,51 @@ static int64_t db_req_now(int64_t* now_cache) {
     return *now_cache;
 }
 
-static bool db_entry_expired(const RedisEntry* cell, int64_t* now_cache) {
-    if (cell->expires_at_ms == 0) return false;
-    return db_req_now(now_cache) >= cell->expires_at_ms;
+static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
+    CCSliceHdr view = db_key_hdr_view(key);
+    CCSliceHdr stable = cc_slice_hdr_clone_into(&view, &db->key_arena) !>;
+    return cc_ok(stable);
+}
+
+static int64_t db_expires_get(RedisDb* db, CCSliceHdr kh) {
+    int64_t* p;
+    if (!db || !db->expires) return 0;
+    p = db->expires.get_ptr(kh);
+    return p ? *p : 0;
+}
+
+static bool db_key_expired(RedisDb* db, char[:] key, int64_t* now_cache) {
+    int64_t exp = db_expires_get(db, db_key_hdr_view(key));
+    if (exp == 0) return false;
+    return db_req_now(now_cache) >= exp;
+}
+
+/* Set absolute deadline; when==0 clears TTL.  New TTL keys clone into key_arena
+ * (side-table key bytes; not double-counted in key_alloc mem stats). */
+static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCSliceHdr kh = db_key_hdr_view(key);
+    if (!db || !db->expires) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db expires without map"));
+    }
+    if (when == 0) {
+        (void)db->expires.del(kh);
+        return cc_ok();
+    }
+    {
+        int64_t* p = db->expires.get_ptr(kh);
+        if (p) {
+            *p = when;
+            return cc_ok();
+        }
+    }
+    CCSliceHdr owned = db_clone_key_hdr(db, key) !>;
+    if (db->expires.insert(owned, when) != 0) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
+    }
+    return cc_ok();
 }
 
 /* Remove one entry outright (value released, key accounted).  The key bytes
@@ -819,6 +874,7 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     RedisValue* val = &cell->val;
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSliceHdr kh = db_key_hdr_view(key);
+    if (db->expires) (void)db->expires.del(kh);
     if (!db->entries.del(kh)) return;
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
@@ -829,19 +885,11 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
 static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, int64_t* now_cache) {
     RedisEntry* cell = db_find_entry(db, key);
     if (!cell) return NULL;
-    if (db_entry_expired(cell, now_cache)) {
+    if (db_key_expired(db, key, now_cache)) {
         db_remove_entry(db, key, cell);
         return NULL;
     }
     return cell;
-}
-
-static CCSliceHdr !>(CCError) db_clone_key_hdr(RedisDb* db, char[:] key) {
-    @errhandler(CCError e) { return cc_err(e); }
-    if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
-    CCSliceHdr view = db_key_hdr_view(key);
-    CCSliceHdr stable = cc_slice_hdr_clone_into(&view, &db->key_arena) !>;
-    return cc_ok(stable);
 }
 
 static void !>(CCError) db_insert_value(RedisDb* db, CCSliceHdr owned_key, RedisEntry entry) {
@@ -863,7 +911,6 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
     CCSliceHdr owned_key = db_clone_key_hdr(db, key) !>;
     RedisEntry entry;
     entry.val = val;
-    entry.expires_at_ms = expires_at_ms;
     db_insert_value(db, owned_key, entry) !>(e) {
         RedisValue* pv = &entry.val;
         CCString doomed = pv->str ?> cc_string_new();
@@ -871,6 +918,9 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
         return cc_err(e);
     };
     db_mem_stats_note_key_alloc(key.len);
+    if (expires_at_ms != 0) {
+        db_expires_set(db, key, expires_at_ms) !>;
+    }
     return cc_ok();
 }
 
@@ -886,7 +936,7 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value, in
     RedisEntry* cell = db_find_entry(db, key);
     if (cell) {
         db_entry_store_str(db, &cell->val, value) !>;
-        cell->expires_at_ms = expires_at_ms;
+        db_expires_set(db, key, expires_at_ms) !>;
         return cc_ok(reply_simple("OK"));
     }
 
@@ -1051,16 +1101,19 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
 /* EXPIRE/PEXPIRE, already scaled to relative ms.  Non-positive TTL deletes
  * the key immediately and still answers 1 (redis semantics).  A deadline
  * past INT64_MAX clamps to "effectively never". */
-static RedisReply db_expire_rel_ms(RedisDb* db, char[:] key, int64_t rel_ms, int64_t* now_cache) {
+static RedisReply !>(CCError) db_expire_rel_ms(RedisDb* db, char[:] key, int64_t rel_ms,
+                                               int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
     RedisEntry* cell = db_lookup_live(db, key, now_cache);
-    if (!cell) return reply_integer(0);
+    if (!cell) return cc_ok(reply_integer(0));
     if (rel_ms <= 0) {
         db_remove_entry(db, key, cell);
-        return reply_integer(1);
+        return cc_ok(reply_integer(1));
     }
     int64_t now = db_req_now(now_cache);
-    cell->expires_at_ms = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
-    return reply_integer(1);
+    int64_t when = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
+    db_expires_set(db, key, when) !>;
+    return cc_ok(reply_integer(1));
 }
 
 /* TTL/PTTL: -2 missing key, -1 no expiry, else remaining time (TTL rounds
@@ -1068,17 +1121,22 @@ static RedisReply db_expire_rel_ms(RedisDb* db, char[:] key, int64_t rel_ms, int
 static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, int64_t* now_cache) {
     RedisEntry* cell = db_lookup_live(db, key, now_cache);
     if (!cell) return reply_integer(-2);
-    if (cell->expires_at_ms == 0) return reply_integer(-1);
-    int64_t rem = cell->expires_at_ms - db_req_now(now_cache);
-    if (rem < 0) rem = 0;
-    return reply_integer(in_ms ? rem : (rem + 999) / 1000);
+    {
+        int64_t exp = db_expires_get(db, db_key_hdr_view(key));
+        if (exp == 0) return reply_integer(-1);
+        int64_t rem = exp - db_req_now(now_cache);
+        if (rem < 0) rem = 0;
+        return reply_integer(in_ms ? rem : (rem + 999) / 1000);
+    }
 }
 
-static RedisReply db_persist(RedisDb* db, char[:] key, int64_t* now_cache) {
+static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, int64_t* now_cache) {
+    @errhandler(CCError e) { return cc_err(e); }
     RedisEntry* cell = db_lookup_live(db, key, now_cache);
-    if (!cell || cell->expires_at_ms == 0) return reply_integer(0);
-    cell->expires_at_ms = 0;
-    return reply_integer(1);
+    if (!cell) return cc_ok(reply_integer(0));
+    if (db_expires_get(db, db_key_hdr_view(key)) == 0) return cc_ok(reply_integer(0));
+    db_expires_set(db, key, 0) !>;
+    return cc_ok(reply_integer(1));
 }
 
 /* MGET → WIRE array in reply_arena.  Pass 1 reaps; pass 2 re-reads with
@@ -1175,7 +1233,9 @@ static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
     RedisEntry v;
     if (!db || !db->entries) return reply_integer(0);
     CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-        if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+        int64_t exp = db_expires_get(db, k);
+        if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+        (void)v;
         n++;
     }
     return reply_integer(n);
@@ -1196,6 +1256,7 @@ static RedisReply db_flush(RedisDb* db) {
         db_release_value(db, &doomed);
     }
     db->entries.clear();
+    if (db->expires) db->expires.clear();
     return reply_simple("OK");
 }
 
@@ -1218,7 +1279,9 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     size_t cap = 16;
     if (db && db->entries) {
         CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-            if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+            int64_t exp = db_expires_get(db, k);
+            if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+            (void)v;
             if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
             matched++;
             cap += k.len + 24;
@@ -1234,7 +1297,9 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         bool fit = off != 0;
         if (fit && db && db->entries) {
             CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-                if (v.expires_at_ms != 0 && db_req_now(now_cache) >= v.expires_at_ms) continue;
+                int64_t exp = db_expires_get(db, k);
+                if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+                (void)v;
                 if (!glob_match(pat, pattern.len, (const char*)k.ptr, k.len)) continue;
                 RespGReply elem = wire_bulk(cc_slice_from_buffer((void*)k.ptr, k.len));
                 size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
@@ -1374,20 +1439,20 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
         case REDIS_CMD_EXPIRE: {
             char[:] secs_arg = req->argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
-            return cc_ok(db_expire_rel_ms(db, req->argv[0],
-                                          expire_seconds_to_rel_ms(seconds), &now));
+            return db_expire_rel_ms(db, req->argv[0],
+                                   expire_seconds_to_rel_ms(seconds), &now);
         }
         case REDIS_CMD_PEXPIRE: {
             char[:] ms_arg = req->argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return cc_ok(db_expire_rel_ms(db, req->argv[0], ms, &now));
+            return db_expire_rel_ms(db, req->argv[0], ms, &now);
         }
         case REDIS_CMD_TTL:
             return cc_ok(db_ttl(db, req->argv[0], false, &now));
         case REDIS_CMD_PTTL:
             return cc_ok(db_ttl(db, req->argv[0], true, &now));
         case REDIS_CMD_PERSIST:
-            return cc_ok(db_persist(db, req->argv[0], &now));
+            return db_persist(db, req->argv[0], &now);
         case REDIS_CMD_DBSIZE:
             return cc_ok(db_dbsize(db, &now));
         case REDIS_CMD_FLUSHDB:
@@ -1395,11 +1460,21 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
             return cc_ok(db_flush(db));
         case REDIS_CMD_KEYS:
             return db_keys(db, req->argv[0], reply_arena, &now);
-        case REDIS_CMD_CC_MEMLOG:
-            /* Explicit debug-command exception: diagnostics may block stderr. */
-            db_dump_mem_stats(db, "cc-memlog");
-            redis_mem_report_impl(db, "cc-memlog");
+        case REDIS_CMD_CC_MEMLOG: {
+            /* Optional phase tag: CC.MEMLOG [phase].  Diagnostics may block stderr. */
+            const char* phase = "cc-memlog";
+            char phase_buf[64];
+            if (req->argc >= 1 && req->argv[0].ptr && req->argv[0].len > 0) {
+                size_t n = req->argv[0].len < sizeof(phase_buf) - 1 ? req->argv[0].len
+                                                                    : sizeof(phase_buf) - 1;
+                memcpy(phase_buf, req->argv[0].ptr, n);
+                phase_buf[n] = '\0';
+                phase = phase_buf;
+            }
+            db_dump_mem_stats(db, phase);
+            redis_mem_report_impl(db, phase);
             return cc_ok(reply_simple("OK"));
+        }
         default:
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
     }
@@ -1428,6 +1503,10 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
 
 static void db_free_all(RedisDb* db) {
     if (!db) return;
+    if (db->expires) {
+        db->expires.destroy();
+        db->expires = NULL;
+    }
     if (db->entries) {
         db->entries.destroy();
         db->entries = NULL;
@@ -1645,6 +1724,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
             redis_diag_fprintln(&line, &preload_scratch);
         }
         db_dump_mem_stats(&db, "post-preload");
+        redis_mem_emit_gap(&db, "post-preload");
     }
     redis_mem_report(&db, "owner-ready");
     @defer db_free_all(&db);

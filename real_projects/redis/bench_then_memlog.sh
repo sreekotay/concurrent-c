@@ -54,7 +54,7 @@ wait_port "$PORT"
 "$BENCH" -h 127.0.0.1 -p "$PORT" -n "$REQUESTS" -c "$CLIENTS" -P "$PIPELINE" \
     -q -r "$RANDOM_KEYS" -t "$BENCH_TESTS" >/dev/null
 
-"$CLI" -h 127.0.0.1 -p "$PORT" CC.MEMLOG >/dev/null
+"$CLI" -h 127.0.0.1 -p "$PORT" CC.MEMLOG final >/dev/null
 
-echo "--- arena lines (from server stderr) ---" >&2
-grep -E 'arena_initial|arena_map_slab|arena_key_slab|arena_value_slab|arena_committed|mem\[cc-memlog\]' "$LOG" || true
+echo "--- mem_gap + arena lines (from server stderr) ---" >&2
+grep -E 'mem_gap|arena_initial|arena_committed|mem\[(post-preload|owner-ready|final|cc-memlog)\]' "$LOG" || true

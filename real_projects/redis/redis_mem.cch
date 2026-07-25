@@ -46,7 +46,76 @@ static size_t redis_mem_worker_hint(void) {
     return 1;
 }
 
-/* Mach / map summary to stderr (no getenv gate).  Caller may follow with db_dump_mem_stats for arena slab lines. */
+/* Process footprint in bytes. Prefer Mach phys_footprint on Darwin; else
+ * getrusage maxrss (Darwin: bytes; Linux: kilobytes). */
+static int redis_mem_process_footprint_B(uint64_t* out_bytes, const char** out_source) {
+    struct rusage ru;
+    if (!out_bytes || !out_source) return 0;
+    *out_bytes = 0;
+    *out_source = "none";
+#if defined(__APPLE__)
+    {
+        struct task_vm_info vm_info;
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm_info, &count) ==
+            KERN_SUCCESS) {
+            *out_bytes = (uint64_t)vm_info.phys_footprint;
+            *out_source = "mach_phys";
+            return 1;
+        }
+    }
+#endif
+    memset(&ru, 0, sizeof(ru));
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#if defined(__APPLE__)
+    *out_bytes = (uint64_t)ru.ru_maxrss;
+#else
+    *out_bytes = (uint64_t)ru.ru_maxrss * 1024ull;
+#endif
+    *out_source = "maxrss";
+    return 1;
+}
+
+static size_t redis_mem_arenas_gross_B(const RedisDb* db) {
+    if (!db) return 0;
+    return cc_arena_committed_gross_bytes(&db->map_arena) +
+           cc_arena_committed_gross_bytes(&db->key_arena) +
+           cc_arena_committed_gross_bytes(&db->value_arena);
+}
+
+/* One machine-parseable line: footprint − (map+key+value live). Always on.
+ * Remainder is runtime/fibers/overflow/frag/untracked — not a leak by itself. */
+static void redis_mem_emit_gap(const RedisDb* db, const char* phase) {
+    uint64_t footprint = 0;
+    const char* source = "none";
+    size_t map_live = (db && db->entries) ? redis_map_live_payload_bytes(db->entries) : 0;
+    size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
+    size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+    size_t logical = map_live + key_live + value_live;
+    size_t arenas_gross = redis_mem_arenas_gross_B(db);
+    size_t workers = redis_mem_worker_hint();
+    uint64_t fiber_hint = (uint64_t)workers * (2ull << 20);
+    int64_t gap = 0;
+    if (!redis_mem_process_footprint_B(&footprint, &source)) return;
+    gap = (int64_t)footprint - (int64_t)logical;
+    fprintf(stderr,
+            "redis_idiomatic: mem_gap phase=%s footprint_B=%llu source=%s logical_B=%zu "
+            "gap_B=%lld map_B=%zu key_B=%zu value_B=%zu arenas_gross_B=%zu workers=%zu "
+            "fiber_reserve_hint_B=%llu note=runtime+fibers+overflow+frag+untracked\n",
+            phase ? phase : "?",
+            (unsigned long long)footprint,
+            source,
+            logical,
+            (long long)gap,
+            map_live,
+            key_live,
+            value_live,
+            arenas_gross,
+            workers,
+            (unsigned long long)fiber_hint);
+}
+
+/* Mach / map summary to stderr (no getenv gate).  Always ends with mem_gap. */
 static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
     struct rusage ru;
     uint64_t mach_phys_footprint = 0;
@@ -107,11 +176,12 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
                 "redis_idiomatic: mem[%s] model: map/value arenas fixed root+overflow; "
                 "key arena growable — large map/value allocs use heap-overflow malloc\n",
                 tag ? tag : "?");
-        size_t map_live = redis_map_live_payload_bytes(db->entries);
-        size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
-        size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-        size_t logical_live = key_live + value_live + map_live;
         if (have_mach_footprint) {
+            size_t map_live = redis_map_live_payload_bytes(db->entries);
+            size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
+            size_t value_live =
+                g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+            size_t logical_live = key_live + value_live + map_live;
             if (logical_live > 0) {
                 double ratio = (double)mach_phys_footprint / (double)logical_live;
                 int64_t gap = (int64_t)mach_phys_footprint - (int64_t)logical_live;
@@ -127,24 +197,29 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
                         map_alloc);
             } else {
                 fprintf(stderr,
-                        "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B logical_db_live=0 "
-                        "(empty db; map_live_bytes=%zu B)\n",
+                        "redis_idiomatic: mem[%s] accounting: mach_phys_footprint=%llu B "
+                        "logical_db_live=0 (empty db; map_live_bytes=%zu B)\n",
                         tag ? tag : "?",
                         (unsigned long long)mach_phys_footprint,
                         map_alloc);
             }
         }
     }
+    redis_mem_emit_gap(db, tag);
 }
 
-/* Set CC_REDIS_MEM_REPORT=1 to print Mach + map summary and db_dump_mem_stats at owner startup. */
+/* Set CC_REDIS_MEM_REPORT=1 for verbose Mach/arena dump at owner-ready.
+ * Compact mem_gap always prints (via report_impl or standalone). */
 static void redis_mem_report(const RedisDb* db, const char* tag) {
     const char* want = getenv("CC_REDIS_MEM_REPORT");
-    if (!want || !want[0]) return;
-    redis_mem_report_impl(db, tag);
-    if (db && db->entries) {
-        db_dump_mem_stats((RedisDb*)(void*)db, tag);
+    if (want && want[0]) {
+        redis_mem_report_impl(db, tag);
+        if (db && db->entries) {
+            db_dump_mem_stats((RedisDb*)(void*)db, tag);
+        }
+        return;
     }
+    redis_mem_emit_gap(db, tag);
 }
 
 /* Print each bump slab's capacity for `a`, newest (current root) first, then each

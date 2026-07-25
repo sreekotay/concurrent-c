@@ -19,6 +19,7 @@
 #   IDIOMATIC_PORT   default 6393
 #   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
 #   MEMLOG_ON_EXIT   request idiomatic CC.MEMLOG before summary (default 1)
+#   MEMLOG_AFTER_WARMUP  CC.MEMLOG post-warmup after round 0 (default 1)
 
 set -euo pipefail
 
@@ -37,6 +38,7 @@ UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
+MEMLOG_AFTER_WARMUP="${MEMLOG_AFTER_WARMUP:-1}"
 
 need() {
     if [[ ! -x "$1" ]]; then
@@ -162,13 +164,19 @@ run_one() {
         >"$4" 2>&1
 }
 
+# CC.MEMLOG [phase] — phase becomes the mem_gap / mem[...] tag in idiomatic.log.
 request_idiomatic_memlog() {
-    [[ "$MEMLOG_ON_EXIT" == "0" ]] && return 0
+    local phase="${1:-}"
     check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
-    python3 - "$IDIOMATIC_PORT" <<'PY'
+    python3 - "$IDIOMATIC_PORT" "$phase" <<'PY'
 import socket, sys
 port = int(sys.argv[1])
-payload = b"*1\r\n$9\r\nCC.MEMLOG\r\n"
+phase = sys.argv[2] if len(sys.argv) > 2 else ""
+if phase:
+    pb = phase.encode()
+    payload = b"*2\r\n$9\r\nCC.MEMLOG\r\n$%d\r\n%s\r\n" % (len(pb), pb)
+else:
+    payload = b"*1\r\n$9\r\nCC.MEMLOG\r\n"
 with socket.create_connection(("127.0.0.1", port), timeout=2.0) as s:
     s.sendall(payload)
     s.settimeout(2.0)
@@ -224,6 +232,11 @@ print(' '.join(labels))")"
             fi
         done
     done
+    if [[ $r -eq 0 && "$MEMLOG_AFTER_WARMUP" != "0" ]]; then
+        echo >&2 "[mem] CC.MEMLOG post-warmup"
+        request_idiomatic_memlog post-warmup \
+            || echo "warning: CC.MEMLOG post-warmup failed; see $TMP_DIR/idiomatic.log" >&2
+    fi
 done
 
 # --- stop samplers and let them flush ---
@@ -232,8 +245,11 @@ for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID"; do
     wait "$p" 2>/dev/null || true
 done
 
-request_idiomatic_memlog || echo "warning: failed to request idiomatic CC.MEMLOG; see $TMP_DIR/idiomatic.log" >&2
-
+if [[ "$MEMLOG_ON_EXIT" != "0" ]]; then
+    echo >&2 "[mem] CC.MEMLOG final"
+    request_idiomatic_memlog final \
+        || echo "warning: CC.MEMLOG final failed; see $TMP_DIR/idiomatic.log" >&2
+fi
 # --- stats ---
 python3 - <<PY
 import csv, statistics
@@ -277,11 +293,13 @@ def fmt_mb(kb): return f"{kb/1024:.1f}MB" if kb else "  n/a"
 def fmt_thr(t): return f"{t}" if t else "n/a"
 def fmt_b(n):
     n = int(n)
+    sign = "-" if n < 0 else ""
+    n = abs(n)
     if n >= 1024 * 1024:
-        return f"{n / (1024 * 1024):.2f}MB"
+        return f"{sign}{n / (1024 * 1024):.2f}MB"
     if n >= 1024:
-        return f"{n / 1024:.1f}KB"
-    return f"{n}B"
+        return f"{sign}{n / 1024:.1f}KB"
+    return f"{sign}{n}B"
 
 def read_idiomatic_memlog(path):
     try:
@@ -299,19 +317,48 @@ def read_idiomatic_memlog(path):
         r"entries=(\d+) buckets=(\d+) .*? keys .*? live=(\d+) \| "
         r"values .*? live=(\d+) \| map_live=(\d+) \| total_live=(\d+)"
     )
+    gap_re = re.compile(
+        r"mem_gap phase=(\S+) footprint_B=(\d+) source=(\S+) logical_B=(\d+) "
+        r"gap_B=(-?\d+) map_B=(\d+) key_B=(\d+) value_B=(\d+) "
+        r"arenas_gross_B=(\d+) workers=(\d+) fiber_reserve_hint_B=(\d+)"
+    )
     committed = committed_re.findall(text)
     entries = entries_re.findall(text)
-    if not committed:
+    gaps = []
+    for m in gap_re.finditer(text):
+        gaps.append({
+            "phase": m.group(1),
+            "footprint": int(m.group(2)),
+            "source": m.group(3),
+            "logical": int(m.group(4)),
+            "gap": int(m.group(5)),
+            "map": int(m.group(6)),
+            "key": int(m.group(7)),
+            "value": int(m.group(8)),
+            "arenas_gross": int(m.group(9)),
+            "workers": int(m.group(10)),
+            "fiber_hint": int(m.group(11)),
+        })
+    # Keep last line per phase (stable order of first appearance).
+    by_phase = {}
+    order = []
+    for g in gaps:
+        if g["phase"] not in by_phase:
+            order.append(g["phase"])
+        by_phase[g["phase"]] = g
+    gaps = [by_phase[p] for p in order]
+    if not committed and not gaps:
         return None
-    c = tuple(int(x) for x in committed[-1])
+    c = tuple(int(x) for x in committed[-1]) if committed else None
     e = tuple(int(x) for x in entries[-1]) if entries else None
-    return {
-        "map":   {"slabs": c[0], "ovf": c[1], "meta": c[2], "gross": c[3]},
-        "key":   {"slabs": c[4], "ovf": c[5], "meta": c[6], "gross": c[7]},
-        "value": {"slabs": c[8], "ovf": c[9], "meta": c[10], "gross": c[11]},
-        "gross_sum": c[12],
-        "entries": e,
-    }
+    out = {"entries": e, "gaps": gaps, "gross_sum": None,
+           "map": None, "key": None, "value": None}
+    if c:
+        out["map"] = {"slabs": c[0], "ovf": c[1], "meta": c[2], "gross": c[3]}
+        out["key"] = {"slabs": c[4], "ovf": c[5], "meta": c[6], "gross": c[7]}
+        out["value"] = {"slabs": c[8], "ovf": c[9], "meta": c[10], "gross": c[11]}
+        out["gross_sum"] = c[12]
+    return out
 
 print()
 print("== bench_robust summary ==")
@@ -347,8 +394,21 @@ for label in labels:
 print()
 
 mem = read_idiomatic_memlog("$TMP_DIR/idiomatic.log")
-if mem:
-    print("[IDIOMATIC DB ARENAS] (final CC.MEMLOG)")
+if mem and mem.get("gaps"):
+    print("[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag")
+    print(
+        f"  {'phase':<14} {'footprint':>10} {'logical':>10} {'gap':>10} "
+        f"{'map':>8} {'key':>8} {'value':>8} {'arenas':>10} {'src':>10}"
+    )
+    for g in mem["gaps"]:
+        print(
+            f"  {g['phase']:<14} {fmt_b(g['footprint']):>10} {fmt_b(g['logical']):>10} "
+            f"{fmt_b(g['gap']):>10} {fmt_b(g['map']):>8} {fmt_b(g['key']):>8} "
+            f"{fmt_b(g['value']):>8} {fmt_b(g['arenas_gross']):>10} {g['source']:>10}"
+        )
+    print()
+if mem and mem.get("map"):
+    print("[IDIOMATIC DB ARENAS] (last CC.MEMLOG with arena dump)")
     if mem["entries"]:
         entries, buckets, key_live, value_live, map_live, total_live = mem["entries"]
         print(
@@ -365,7 +425,7 @@ if mem:
         )
     print(f"  {'sum':<8} {'':>10} {'':>10} {'':>10} {fmt_b(mem['gross_sum']):>10}")
     print()
-else:
-    print("[IDIOMATIC DB ARENAS] final CC.MEMLOG unavailable; see idiomatic.log")
+elif not (mem and mem.get("gaps")):
+    print("[MEM GAP / ARENAS] unavailable; see idiomatic.log")
     print()
 PY
