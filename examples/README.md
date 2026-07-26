@@ -23,9 +23,10 @@ New to Concurrent-C? Work through these in order:
 | 6  | `recipe_async_await.ccs` | Async/Await | `@async` functions, `@await`, `cc_block_on` |
 | 7  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 8  | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 9  | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
-| 10 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
-| 11 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
+| 9  | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
+| 10 | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
+| 11 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
+| 12 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
 
 After these, explore the remaining recipes and build system examples.
 
@@ -43,6 +44,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
+| `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + guard unlock |
 | `recipe_arena_scope.ccs` | Scoped memory | Arena reset per iteration |
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |

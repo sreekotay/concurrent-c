@@ -1,12 +1,12 @@
 /*
  * Named exclusive lock table (v1).
  *
- * Lock word: 0 free, 1 locked, 2 locked+waiters.
- * Uncontended lock/unlock CAS is inlined in the header.
- * Contended: enqueue fiber, park_if; unlock drains waiters (wake-all) and
- * stores FREE; waiters retry CAS (no ownership handoff).
+ * Lock word: 0 free, 1 locked, 2 contended.
+ * Uncontended lock and unlock CAS operations are inlined in the header.
  *
- * Double-release safety is local to CCExclusiveGuard.held.
+ * A waiter changes LOCKED to CONTENDED under wait_spin before enqueueing.
+ * Contended unlock hands ownership directly to one waiter and never
+ * publishes FREE while the queue is nonempty.
  */
 
 #include <ccc/cc_exclusive.cch>
@@ -20,15 +20,15 @@
 
 typedef struct CCExclusiveWaiter {
     void* fiber;
-    _Atomic int ready; /* 0 = park, 1 = woken (sticky for park_if) */
+    _Atomic int ready;
     struct CCExclusiveWaiter* next;
 } CCExclusiveWaiter;
 
 typedef struct {
     _Atomic int used;
     uint64_t name;
-    _Atomic int locked;    /* 0 free, 1 locked, 2 locked+waiters */
-    _Atomic int wait_spin; /* 0/1 spinlock for waiter list */
+    _Atomic int locked;
+    _Atomic int wait_spin;
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
 } CCExclusiveEntry;
@@ -107,23 +107,43 @@ static CCExclusiveEntry* cc__exclusive_get_or_create(CCExclusive* excl, uint64_t
     return NULL;
 }
 
+static int cc__exclusive_try_lock(CCExclusiveEntry* e) {
+    int expected = CC_EXCL_FREE;
+    return atomic_compare_exchange_strong_explicit(
+        &e->locked, &expected, CC_EXCL_LOCKED,
+        memory_order_acquire, memory_order_relaxed);
+}
+
+/* Caller observed CONTENDED. Transfer ownership to the queue head. */
+static void cc__exclusive_handoff(CCExclusiveEntry* e) {
+    cc__spin_lock(&e->wait_spin);
+    CCExclusiveWaiter* w = e->wait_head;
+    if (!w) abort();
+
+    e->wait_head = w->next;
+    if (!e->wait_head) e->wait_tail = NULL;
+    w->next = NULL;
+
+    /* The recipient owns the lock; preserve CONTENDED if others remain. */
+    atomic_store_explicit(
+        &e->locked,
+        e->wait_head ? CC_EXCL_CONTENDED : CC_EXCL_LOCKED,
+        memory_order_release);
+    void* fiber = w->fiber;
+    cc__spin_unlock(&e->wait_spin);
+
+    /* Do not dereference the stack waiter after publishing ready. */
+    atomic_store_explicit(&w->ready, 1, memory_order_release);
+    if (fiber) cc__fiber_unpark(fiber);
+}
+
 static void cc__exclusive_lock_entry(CCExclusiveEntry* e) {
     for (;;) {
-        int expected = CC_EXCL_FREE;
-        if (atomic_compare_exchange_weak_explicit(
-                &e->locked, &expected, CC_EXCL_LOCKED,
-                memory_order_acquire, memory_order_relaxed)) {
-            return;
-        }
+        if (cc__exclusive_try_lock(e)) return;
 
         if (!cc__fiber_in_context()) {
             for (int i = 0; i < 64; i++) {
-                expected = CC_EXCL_FREE;
-                if (atomic_compare_exchange_weak_explicit(
-                        &e->locked, &expected, CC_EXCL_LOCKED,
-                        memory_order_acquire, memory_order_relaxed)) {
-                    return;
-                }
+                if (cc__exclusive_try_lock(e)) return;
 #if defined(__GNUC__) || defined(__clang__)
                 __asm__ __volatile__("" ::: "memory");
 #endif
@@ -137,67 +157,43 @@ static void cc__exclusive_lock_entry(CCExclusiveEntry* e) {
         atomic_store_explicit(&node.ready, 0, memory_order_relaxed);
 
         cc__spin_lock(&e->wait_spin);
-        expected = CC_EXCL_FREE;
-        if (atomic_compare_exchange_strong_explicit(
-                &e->locked, &expected, CC_EXCL_LOCKED,
-                memory_order_acquire, memory_order_relaxed)) {
-            cc__spin_unlock(&e->wait_spin);
-            return;
-        }
-        /* Publish CONTENDED via CAS 1→2 before enqueue. Fast unlock is CAS
-         * 1→0; once we land 2 it must take the slow path and serialize on
-         * this spin. If the word is already FREE, retry (lost the race). */
+        /*
+         * Publish contention in the lock word before enqueueing. The owner
+         * either wins LOCKED->FREE first (we retry and acquire), or observes
+         * CONTENDED and waits for this critical section before handoff.
+         */
         for (;;) {
-            int st = atomic_load_explicit(&e->locked, memory_order_relaxed);
-            if (st == CC_EXCL_FREE) {
+            if (cc__exclusive_try_lock(e)) {
                 cc__spin_unlock(&e->wait_spin);
-                goto retry_lock;
+                return;
             }
-            if (st == CC_EXCL_CONTENDED) break;
-            expected = CC_EXCL_LOCKED;
+            int expected = CC_EXCL_LOCKED;
             if (atomic_compare_exchange_strong_explicit(
                     &e->locked, &expected, CC_EXCL_CONTENDED,
-                    memory_order_release, memory_order_relaxed)) {
+                    memory_order_acq_rel, memory_order_acquire)) {
                 break;
             }
-            /* expected updated to FREE or CONTENDED — loop. */
+            if (expected == CC_EXCL_CONTENDED) break;
         }
         if (!e->wait_head) e->wait_head = &node;
         else e->wait_tail->next = &node;
         e->wait_tail = &node;
         cc__spin_unlock(&e->wait_spin);
 
-        /* V2 has no pending-unpark latch: recheck ready after every park so
-         * an unlock that runs between enqueue and park cannot lose the wake. */
         while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0) {
             CC_FIBER_PARK("exclusive_lock");
         }
-        /* Woken (or never parked): retry CAS. */
-    retry_lock:
-        ;
+        /* Handoff: unlocker left locked=1 for us. */
+        return;
     }
 }
 
 void cc_exclusive_guard_unlock_impl(void* entry) {
     CCExclusiveEntry* e = (CCExclusiveEntry*)entry;
     if (!e) abort();
-
-    /* Contended unlock: drain waiters + FREE under the spinlock so we never
-     * leave parked fibers behind a free lock word. Wake-all; losers requeue. */
-    cc__spin_lock(&e->wait_spin);
-    CCExclusiveWaiter* w = e->wait_head;
-    e->wait_head = NULL;
-    e->wait_tail = NULL;
-    atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_release);
-    cc__spin_unlock(&e->wait_spin);
-
-    while (w) {
-        CCExclusiveWaiter* next = w->next;
-        atomic_store_explicit(&w->ready, 1, memory_order_release);
-        void* fiber = w->fiber;
-        w = next;
-        if (fiber) cc__fiber_unpark(fiber);
-    }
+    if (atomic_load_explicit(&e->locked, memory_order_acquire)
+            != CC_EXCL_CONTENDED) abort();
+    cc__exclusive_handoff(e);
 }
 
 CCExclusive* cc_exclusive_create(void) {
