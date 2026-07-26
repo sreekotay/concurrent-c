@@ -1,94 +1,94 @@
 === Benchmark Baseline (P=16) ===
-Date: Sun Jul 26 05:36:03 EDT 2026
-Commit: 2e0e8efa Skip the expand-pool mutex once the worker pool is full. + uncommitted adaptive pool-growth controller (eager=2, recheck=25us, rate=100us/pop/worker, depth_x=2, esc=0)
-Command: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16 MEMLOG_ON_EXIT=1 ./bench_robust.sh
-Notes: first record at adaptive-growth defaults; deferred growth (eager cap 2, sysmon rate/depth controller) replaces fully-inline pool growth.
+Date: Sun Jul 26 05:37:00 EDT 2026
+Commit: bb384a5e Defer worker-pool growth to a sysmon rate/depth controller.
+Command: ./bench_robust.sh  (defaults: REPEATS=6 REQUESTS=500000 CLIENTS=50 PIPELINE=16)
+Notes: first record at adaptive-growth defaults (eager=2, recheck=25us, rate=100us/pop/worker, depth_x=2, esc=0); re-run on a quiet machine, replacing an earlier noisy capture.
 
-tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.MCiUnkkM9g
+tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.pqIIiaEw0Y
 [warmup]
-   upstream  set   rps=1497006.00
-   idiomatic set   rps=1976284.62
-   upstream  get   rps=1992032.00
-   idiomatic get   rps=2369668.25
-   upstream  incr  rps=1984127.00
-   idiomatic incr  rps=2673796.75
+   idiomatic set   rps=2202643.25
+   upstream  set   rps=1587301.62
+   idiomatic get   rps=2617801.00
+   upstream  get   rps=2100840.25
+   upstream  incr  rps=2049180.25
+   idiomatic incr  rps=2840909.00
 [mem] CC.MEMLOG post-warmup
 [round 1/6]
-   upstream  set   rps=1547987.50
-   idiomatic set   rps=2590673.50
-   idiomatic get   rps=2512562.75
-   upstream  get   rps=2049180.25
-   upstream  incr  rps=1976284.62
-   idiomatic incr  rps=2551020.50
+   idiomatic set   rps=2747252.75
+   upstream  set   rps=1597444.12
+   upstream  get   rps=2083333.38
+   idiomatic get   rps=2732240.50
+   upstream  incr  rps=2066115.75
+   idiomatic incr  rps=2717391.25
 [round 2/6]
-   idiomatic set   rps=2538071.00
-   upstream  set   rps=1373626.38
-   upstream  get   rps=2000000.00
-   idiomatic get   rps=2463054.25
-   upstream  incr  rps=1976284.62
-   idiomatic incr  rps=2577319.50
+   idiomatic set   rps=2702702.75
+   upstream  set   rps=1602564.12
+   idiomatic get   rps=2631579.00
+   upstream  get   rps=1858736.12
+   upstream  incr  rps=2016129.12
+   idiomatic incr  rps=2673796.75
 [round 3/6]
-   upstream  set   rps=1577287.00
-   idiomatic set   rps=2380952.50
-   idiomatic get   rps=2475247.50
-   upstream  get   rps=2032520.25
-   idiomatic incr  rps=1908397.00
-   upstream  incr  rps=1785714.25
+   idiomatic set   rps=2232142.75
+   upstream  set   rps=1592356.62
+   upstream  get   rps=1396648.00
+   idiomatic get   rps=2645502.75
+   upstream  incr  rps=2040816.25
+   idiomatic incr  rps=2659574.50
 [round 4/6]
-   upstream  set   rps=1519756.88
-   idiomatic set   rps=2242152.50
-   idiomatic get   rps=2202643.25
-   upstream  get   rps=1984127.00
-   idiomatic incr  rps=1930501.88
-   upstream  incr  rps=2000000.00
+   idiomatic set   rps=2645502.75
+   upstream  set   rps=1587301.62
+   idiomatic get   rps=2659574.50
+   upstream  get   rps=2100840.25
+   upstream  incr  rps=1984127.00
+   idiomatic incr  rps=2732240.50
 [round 5/6]
-   upstream  set   rps=1543209.88
-   idiomatic set   rps=2202643.25
-   upstream  get   rps=2049180.25
-   idiomatic get   rps=2212389.50
-   upstream  incr  rps=1976284.62
-   idiomatic incr  rps=1953124.88
+   upstream  set   rps=1633987.00
+   idiomatic set   rps=2604166.75
+   idiomatic get   rps=2617801.00
+   upstream  get   rps=2118644.00
+   idiomatic incr  rps=2702702.75
+   upstream  incr  rps=2083333.38
 [round 6/6]
-   idiomatic set   rps=2252252.25
-   upstream  set   rps=1501501.50
-   idiomatic get   rps=2252252.25
-   upstream  get   rps=1953124.88
-   idiomatic incr  rps=1945525.25
-   upstream  incr  rps=1960784.38
+   idiomatic set   rps=2336448.50
+   upstream  set   rps=1633987.00
+   upstream  get   rps=2136752.25
+   idiomatic get   rps=2564102.75
+   upstream  incr  rps=2092050.25
+   idiomatic incr  rps=2688172.00
 [mem] CC.MEMLOG final
 
 == bench_robust summary ==
 rounds=6 requests_per_round=500000 clients=50 pipeline=16 cc_workers=default
-sample_interval=0.05s  samples_taken: upstream=189  idiomatic=189
+sample_interval=0.05s  samples_taken: upstream=175  idiomatic=175
 
 [SET]
   label          mean   median      min      max   stddev    cv%
-  upstream     1.511M   1.531M   1.374M   1.577M   0.072M   4.8%
-  idiomatic    2.368M   2.317M   2.203M   2.591M   0.164M   6.9%
-  idiomatic/upstream median: 1.513x  (SEPARATED)
+  upstream     1.608M   1.600M   1.587M   1.634M   0.021M   1.3%
+  idiomatic    2.545M   2.625M   2.232M   2.747M   0.210M   8.3%
+  idiomatic/upstream median: 1.641x  (SEPARATED)
 
 [GET]
   label          mean   median      min      max   stddev    cv%
-  upstream     2.011M   2.016M   1.953M   2.049M   0.039M   1.9%
-  idiomatic    2.353M   2.358M   2.203M   2.513M   0.145M   6.2%
-  idiomatic/upstream median: 1.169x  (SEPARATED)
+  upstream     1.949M   2.092M   1.397M   2.137M   0.289M  14.8%
+  idiomatic    2.642M   2.639M   2.564M   2.732M   0.055M   2.1%
+  idiomatic/upstream median: 1.261x  (SEPARATED)
 
 [INCR]
   label          mean   median      min      max   stddev    cv%
-  upstream     1.946M   1.976M   1.786M   2.000M   0.079M   4.1%
-  idiomatic    2.144M   1.949M   1.908M   2.577M   0.326M  15.2%
-  idiomatic/upstream median: 0.986x  (OVERLAP)
+  upstream     2.047M   2.053M   1.984M   2.092M   0.042M   2.0%
+  idiomatic    2.696M   2.695M   2.660M   2.732M   0.027M   1.0%
+  idiomatic/upstream median: 1.313x  (SEPARATED)
 
 [RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
   label        peak_rss   peak_threads
-  upstream       12.5MB              3
-  idiomatic      18.4MB             15
+  upstream       12.6MB              3
+  idiomatic      19.4MB             15
 
 [MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
   phase           footprint    logical        gap      map      key    value     arenas        src
-  owner-ready        1.22MB     37.6KB     1.18MB   37.6KB       0B       0B     46.0KB  mach_phys
-  post-warmup       17.23MB     5.38MB    11.85MB   3.67MB   1.72MB       0B     5.95MB  mach_phys
-  final             18.05MB     5.38MB    12.66MB   3.67MB   1.72MB       0B     5.95MB  mach_phys
+  owner-ready        1.20MB     37.6KB     1.17MB   37.6KB       0B       0B     46.0KB  mach_phys
+  post-warmup       17.92MB     5.38MB    12.54MB   3.67MB   1.72MB       0B     5.95MB  mach_phys
+  final             18.97MB     5.38MB    13.59MB   3.67MB   1.72MB       0B     5.95MB  mach_phys
 
 [IDIOMATIC DB ARENAS] (last CC.MEMLOG with arena dump)
   arena         slabs   overflow   metadata      gross
