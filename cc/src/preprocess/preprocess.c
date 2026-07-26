@@ -7249,6 +7249,71 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
     return warnings;
 }
 
+/* Variable -> result-type table used by cc__rewrite_inferred_result_ctors.
+ * Records variables declared with an explicit `CCResult_T_E` type (or the
+ * `T !>(E) name` sugar) so short-form `cc_ok()`/`cc_err()` initializers and
+ * assignments resolve against the variable's declared type instead of the
+ * enclosing function's result type. */
+typedef struct {
+    char name[128];
+    char rtype[256]; /* mangled, e.g. "CCResult_bool_CCError" */
+} CCCtorTargetVar;
+
+static void cc__ctor_target_vars_add(CCCtorTargetVar** vars, size_t* count, size_t* cap,
+                                     const char* name, size_t name_len,
+                                     const char* rtype, size_t rtype_len) {
+    if (name_len == 0 || name_len >= sizeof((*vars)[0].name)) return;
+    if (rtype_len == 0 || rtype_len >= sizeof((*vars)[0].rtype)) return;
+    if (*count == *cap) {
+        size_t nc = *cap ? *cap * 2 : 16;
+        CCCtorTargetVar* nv = (CCCtorTargetVar*)realloc(*vars, nc * sizeof(**vars));
+        if (!nv) return;
+        *vars = nv;
+        *cap = nc;
+    }
+    memcpy((*vars)[*count].name, name, name_len);
+    (*vars)[*count].name[name_len] = 0;
+    memcpy((*vars)[*count].rtype, rtype, rtype_len);
+    (*vars)[*count].rtype[rtype_len] = 0;
+    (*count)++;
+}
+
+/* Most-recent declaration wins so a redeclaration in a later function
+ * shadows an earlier same-named variable. */
+static const char* cc__ctor_target_vars_find(const CCCtorTargetVar* vars, size_t count,
+                                             const char* name, size_t name_len) {
+    for (size_t k = count; k > 0; k--) {
+        if (strlen(vars[k - 1].name) == name_len &&
+            memcmp(vars[k - 1].name, name, name_len) == 0) {
+            return vars[k - 1].rtype;
+        }
+    }
+    return NULL;
+}
+
+/* If the ctor call starting at `macro_start` is the RHS of
+ * `<ident> = cc_ok(...)` / `<ident> = cc_err(...)` (declaration initializer
+ * or plain reassignment), return the recorded result type for <ident>.
+ * Returns NULL when the site is not an assignment (e.g. `return cc_ok(x)`,
+ * a bare argument position) or the variable's type is unknown.  Member
+ * assignments (`s.res = ...`, `p->res = ...`) are skipped: the bare field
+ * name cannot be trusted to identify a type. */
+static const char* cc__ctor_assign_target_type(const char* src, size_t macro_start,
+                                               const CCCtorTargetVar* vars, size_t count) {
+    size_t p = macro_start;
+    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    if (p == 0 || src[p-1] != '=') return NULL;
+    p--;
+    /* Reject `==`, `!=`, `<=`, `>=` and compound assignments. */
+    if (p > 0 && strchr("=!<>+-*/%&|^", src[p-1])) return NULL;
+    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    size_t nm_end = p;
+    while (p > 0 && cc_is_ident_char(src[p-1])) p--;
+    if (nm_end == p || !cc_is_ident_start(src[p])) return NULL;
+    if (p > 0 && (src[p-1] == '.' || (p > 1 && src[p-1] == '>' && src[p-2] == '-'))) return NULL;
+    return cc__ctor_target_vars_find(vars, count, src + p, nm_end - p);
+}
+
 /* Infer result constructor types from enclosing function signature.
    Within a function returning `T!E`:
      cc_ok(v)   -> cc_ok(T, v)     for T!CCError
@@ -7256,7 +7321,10 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
      cc_err(e)  -> cc_err(T, e)    for T!CCError  
      cc_err(e)  -> cc_err(T, E, e) for T!E (custom error)
    
-   This allows users to write just `cc_ok(42)` and have the compiler infer the type. */
+   This allows users to write just `cc_ok(42)` and have the compiler infer the type.
+   When the constructor initializes (or is assigned to) a variable whose declared
+   type is a concrete CCResult type, that type takes precedence over the enclosing
+   function's result type. */
 static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     
@@ -7269,7 +7337,13 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
     char current_err_type[128] = {0};  /* e.g., "CCError" or custom */
     int brace_depth = 0;
     int fn_brace_depth = -1;
-    
+
+    /* Variables declared with a concrete CCResult type (explicit
+       `CCResult_T_E name` or `T !>(E) name` sugar); used to resolve
+       ctor targets for initializers/assignments. */
+    CCCtorTargetVar* rvars = NULL;
+    size_t rvar_count = 0, rvar_cap = 0;
+
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     
     for (size_t i = 0; i < n; ) {
@@ -7315,6 +7389,86 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
             continue;
         }
         
+        /* Record `CCResult_T_E name` declarations (not function declarators)
+           so short-form ctors that initialize or assign these variables can
+           resolve against the declared type. */
+        if (c == 'C' && i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t ty_start = i;
+            size_t j = i + 9;
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            size_t ty_end = j;
+            size_t k = ty_end;
+            while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+            while (k < n && src[k] == '*') {
+                k++;
+                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+            }
+            if (k < n && cc_is_ident_start(src[k])) {
+                size_t nm_start = k;
+                while (k < n && cc_is_ident_char(src[k])) k++;
+                size_t nm_end = k;
+                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+                if (k < n && src[k] != '(') {
+                    cc__ctor_target_vars_add(&rvars, &rvar_count, &rvar_cap,
+                                             src + nm_start, nm_end - nm_start,
+                                             src + ty_start, ty_end - ty_start);
+                }
+            }
+            i = ty_end;
+            continue;
+        }
+
+        /* Record local `T !>(E) name [=|;]` declarations inside a function
+           body.  The unwrap-operator forms (`!>;`, `!> @destroy`,
+           `expr !>(e) { ... }`) never match because they are not followed
+           by `(E) ident` and then `=`/`;`. */
+        if (c == '!' && c2 == '>' && fn_brace_depth >= 0 && i > 0) {
+            size_t j = i + 2;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j < n && src[j] == '(') {
+                j++;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                size_t e_start = j;
+                while (j < n && cc_is_ident_char(src[j])) j++;
+                size_t e_end = j;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (e_end > e_start && j < n && src[j] == ')') {
+                    j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && cc_is_ident_start(src[j])) {
+                        size_t nm_start = j;
+                        while (j < n && cc_is_ident_char(src[j])) j++;
+                        size_t nm_end = j;
+                        size_t k = nm_end;
+                        while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                        int is_decl = (k < n && (src[k] == ';' ||
+                                      (src[k] == '=' && (k + 1 >= n || src[k + 1] != '='))));
+                        if (is_decl) {
+                            size_t ty_start = cc__scan_back_to_delim(src, i);
+                            ty_start = cc__skip_leading_decl_specs(src, ty_start);
+                            size_t ty_len = (ty_start < i) ? i - ty_start : 0;
+                            while (ty_len > 0 && (src[ty_start + ty_len - 1] == ' ' ||
+                                                  src[ty_start + ty_len - 1] == '\t')) ty_len--;
+                            if (ty_len > 0 && ty_len < 128) {
+                                char m_ok[128], m_err[128], full[300];
+                                cc__mangle_type_name(src + ty_start, ty_len, m_ok, sizeof(m_ok));
+                                cc__mangle_type_name(src + e_start, e_end - e_start, m_err, sizeof(m_err));
+                                int fl = snprintf(full, sizeof(full), "CCResult_%s_%s", m_ok, m_err);
+                                if (fl > 0 && (size_t)fl < sizeof(full)) {
+                                    cc__ctor_target_vars_add(&rvars, &rvar_count, &rvar_cap,
+                                                             src + nm_start, nm_end - nm_start,
+                                                             full, (size_t)fl);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            /* Fall through to the shared i++ below: the `!>` text itself is
+               left intact for the later result-type lowering pass. */
+        }
+
         /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
            Handle space before ! (e.g., "MyData !> (MyError)" or "MyData*!>(MyError)") */
         if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
@@ -7411,8 +7565,10 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
             continue;
         }
         
-        /* Rewrite cc_ok(...) and cc_err(...) when inside result-returning function */
-        if (current_ok_type[0] && c == 'c' && i + 5 < n) {
+        /* Rewrite cc_ok(...) and cc_err(...) when inside a result-returning
+           function, or when the ctor targets a variable with a known
+           concrete CCResult type. */
+        if ((current_ok_type[0] || rvar_count > 0) && c == 'c' && i + 5 < n) {
             int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
             int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
             
@@ -7451,6 +7607,27 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                        Long form: cc_ok(T,v) has 1+ commas
                        Shorthand: cc_err(CC_ERR_*, "msg") has 1 comma - expand to CC_ERROR(...) */
                     int is_short = (comma_count == 0);
+
+                    /* Resolve the target result type.  A declaration
+                       initializer or assignment to a variable with a known
+                       CCResult type takes precedence over the enclosing
+                       function's result type; `return cc_ok(...)` and bare
+                       expression positions keep the function's type. */
+                    const char* target_rtype =
+                        cc__ctor_assign_target_type(src, macro_start, rvars, rvar_count);
+                    char full_rtype[300] = {0};
+                    if (target_rtype) {
+                        snprintf(full_rtype, sizeof(full_rtype), "%s", target_rtype);
+                    } else if (current_ok_type[0]) {
+                        char mangled_ok[128], mangled_err[128];
+                        cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
+                        cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
+                        snprintf(full_rtype, sizeof(full_rtype), "CCResult_%s_%s", mangled_ok, mangled_err);
+                    }
+                    size_t full_rtype_len = strlen(full_rtype);
+                    int err_is_ccerror =
+                        (full_rtype_len >= 8 &&
+                         strcmp(full_rtype + full_rtype_len - 8, "_CCError") == 0);
                     
                     /* cc_err shorthand: any 2-arg cc_err(KIND_EXPR, MSG) inside
                        a CCError-keyed result function — not just the literal
@@ -7467,7 +7644,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                        for both literal and expression KIND arguments. */
                     int is_err_shorthand = 0;
                     int is_err_shorthand_no_msg = 0;
-                    if (is_err && strcmp(current_err_type, "CCError") == 0) {
+                    if (is_err && err_is_ccerror) {
                         if (comma_count == 1) {
                             is_err_shorthand = 1;
                         } else if (comma_count == 0) {
@@ -7486,17 +7663,10 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     
                     if (is_err_shorthand && depth == 0) {
                         /* Rewrite cc_err(CC_ERR_*) -> cc_err_CCResult_T_E(CC_ERROR(CC_ERR_*, NULL))
-                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(CC_ERROR(CC_ERR_*, "msg"))
-                           Type names must be mangled (e.g., MyData* -> MyDataptr) */
-                        char mangled_ok[128], mangled_err[128];
-                        cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
-                        cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
-                        
+                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(CC_ERROR(CC_ERR_*, "msg")) */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, full_rtype);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(CC_ERROR(");
                         /* Copy args */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
@@ -7509,25 +7679,18 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         continue;
                     }
                     
-                    if (is_short && depth == 0) {
+                    if (is_short && depth == 0 && full_rtype[0]) {
                         /* Rewrite short form to typed constructor call:
                            cc_ok(x) -> cc_ok_CCResult_T_E(x)
-                           cc_err(e) -> cc_err_CCResult_T_E(e)
-                           Type names must be mangled (e.g., MyData* -> MyDataptr) */
-                        char mangled_ok[128], mangled_err[128];
-                        cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
-                        cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
-                        
+                           cc_err(e) -> cc_err_CCResult_T_E(e) */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         
                         if (is_ok) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_ok_CCResult_");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_ok_");
                         } else {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_");
                         }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, full_rtype);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                         /* Copy argument */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
@@ -7543,7 +7706,11 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
         i++;
     }
     
-    if (last_emit == 0) return NULL;
+    free(rvars);
+    if (last_emit == 0) {
+        free(out);
+        return NULL;
+    }
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }

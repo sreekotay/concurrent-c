@@ -1,0 +1,125 @@
+/* Smoke: short-form `cc_ok(...)` / `cc_err(...)` used as the initializer of
+ * (or an assignment to) a local declared with an explicit CCResult type must
+ * monomorphize against THAT type, not the enclosing function's result type.
+ *
+ * Regression guard for `cc__rewrite_inferred_result_ctors` in
+ * `cc/src/preprocess/preprocess.c` (and its header-lowering sibling
+ * `cc__rewrite_inferred_result_constructors` in
+ * `cc/src/visitor/pass_type_syntax.c`).
+ *
+ * The pass tracked only the enclosing function's result signature, so inside
+ *
+ *     static int !>(CCError) f(void) {
+ *         CCResult_bool_CCError r = cc_ok(true);
+ *         ...
+ *     }
+ *
+ * the initializer lowered to
+ *
+ *     CCResult_bool_CCError r = cc_ok_CCResult_int_CCError(true);
+ *
+ * i.e. `cc_ok` was resolved against the function's result type instead of
+ * the declared type of the variable being initialized — a type mismatch
+ * that at best fails to compile and at worst silently reinterprets the
+ * payload across struct-compatible layouts.
+ *
+ * With the fix, the declared type of the initialized/assigned variable
+ * takes precedence when it is a concrete CCResult type (explicit
+ * `CCResult_T_E name` or `T !>(E) name` sugar); `return cc_ok(...)` and
+ * bare expression positions keep resolving against the enclosing
+ * function's result type.
+ *
+ * Covered here, all inside functions whose own result type differs from
+ * the locals':
+ *   (a) locals with an explicit CCResult type initialized via `cc_ok(...)`
+ *       and via `cc_err(...)` (including the `cc_err(KIND, MSG)` shorthand);
+ *   (b) reassignment of such locals through the short forms;
+ *   (c) `return cc_ok(...)` / `return cc_err(...)` in the same function
+ *       still resolving against the function's own result type.
+ * Runtime values are unwrapped and checked, not just compiled.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Registers CCResult_bool_CCError in this TU via a function signature. */
+static bool !>(CCError) make_bool(bool v) {
+    if (!v) return cc_err(CC_ERR_NOT_FOUND, "false requested");
+    return cc_ok(true);
+}
+
+/* Enclosing result type: CCResult_int_CCError.  Every local below is
+ * CCResult_bool_CCError; before the fix each short-form ctor here
+ * monomorphized against CCResult_int_CCError. */
+static int !>(CCError) mixed_ctor_targets(void) {
+    /* (a) decl initializer via cc_ok against the declared type */
+    CCResult_bool_CCError ok_local = cc_ok(true);
+    if (ok_local.is_err()) return cc_err(CC_ERR_INVALID_ARG, "ok_local is_err");
+    if (!ok_local.value()) return cc_err(CC_ERR_INVALID_ARG, "ok_local value");
+
+    /* (a) decl initializer via the cc_err(KIND, MSG) shorthand */
+    CCResult_bool_CCError err_local = cc_err(CC_ERR_TIMEOUT, "expected timeout");
+    if (err_local.is_ok()) return cc_err(CC_ERR_INVALID_ARG, "err_local is_ok");
+    if (err_local.error().kind != CC_ERR_TIMEOUT)
+        return cc_err(CC_ERR_INVALID_ARG, "err_local kind");
+
+    /* (b) reassignment of the locals through the short forms */
+    ok_local = cc_err(CC_ERR_NOT_FOUND, "reassigned to err");
+    if (ok_local.is_ok()) return cc_err(CC_ERR_INVALID_ARG, "reassign err is_ok");
+    if (ok_local.error().kind != CC_ERR_NOT_FOUND)
+        return cc_err(CC_ERR_INVALID_ARG, "reassign err kind");
+
+    err_local = cc_ok(false);
+    if (err_local.is_err()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok is_err");
+    if (err_local.value()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok value");
+
+    /* (c) return short form keeps the function's own result type */
+    return cc_ok(41);
+}
+
+/* Same shape with the `T !>(E)` declaration sugar for the local. */
+static int !>(CCError) sugar_decl_target(void) {
+    bool !>(CCError) local = cc_ok(true);
+    if (local.is_err()) return cc_err(CC_ERR_INVALID_ARG, "sugar local is_err");
+    if (!local.value()) return cc_err(CC_ERR_INVALID_ARG, "sugar local value");
+
+    local = cc_err(CC_ERR_TIMEOUT, "sugar reassigned");
+    if (local.is_ok()) return cc_err(CC_ERR_INVALID_ARG, "sugar reassign is_ok");
+    if (local.error().kind != CC_ERR_TIMEOUT)
+        return cc_err(CC_ERR_INVALID_ARG, "sugar reassign kind");
+
+    return cc_ok(42);
+}
+
+/* (c) the error path of the enclosing function must also keep its own
+ * result type right after a differently-typed local was initialized. */
+static int !>(CCError) err_return_after_local(void) {
+    CCResult_bool_CCError scratch = cc_ok(true);
+    if (scratch.is_err()) return cc_err(CC_ERR_INVALID_ARG, "scratch is_err");
+    return cc_err(CC_ERR_NOT_FOUND, "expected fn-typed error");
+}
+
+int main(void) {
+    if (make_bool(true).is_err()) return 1;
+
+    int !>(CCError) mixed = mixed_ctor_targets();
+    if (mixed.is_err()) {
+        fprintf(stderr, "mixed_ctor_targets: %s\n", mixed.error().message);
+        return 2;
+    }
+    if (mixed.value() != 41) return 3;
+
+    int !>(CCError) sugar = sugar_decl_target();
+    if (sugar.is_err()) {
+        fprintf(stderr, "sugar_decl_target: %s\n", sugar.error().message);
+        return 4;
+    }
+    if (sugar.value() != 42) return 5;
+
+    int !>(CCError) errret = err_return_after_local();
+    if (errret.is_ok()) return 6;
+    if (errret.error().kind != CC_ERR_NOT_FOUND) return 7;
+
+    printf("ok\n");
+    return 0;
+}

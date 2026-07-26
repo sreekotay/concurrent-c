@@ -746,11 +746,74 @@ char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* s
     return out;
 }
 
+/* Variable -> result-type table mirroring the one in preprocess.c's
+ * cc__rewrite_inferred_result_ctors: variables declared with an explicit
+ * `CCResult_T_E` type let short-form ctor initializers/assignments resolve
+ * against the declared type instead of the enclosing function's result
+ * type. */
+typedef struct {
+    char name[128];
+    char rtype[256];
+} CCCtorTargetVarLocal;
+
+static void cc__ctor_target_vars_add_local(CCCtorTargetVarLocal** vars, size_t* count, size_t* cap,
+                                           const char* name, size_t name_len,
+                                           const char* rtype, size_t rtype_len) {
+    if (name_len == 0 || name_len >= sizeof((*vars)[0].name)) return;
+    if (rtype_len == 0 || rtype_len >= sizeof((*vars)[0].rtype)) return;
+    if (*count == *cap) {
+        size_t nc = *cap ? *cap * 2 : 16;
+        CCCtorTargetVarLocal* nv = (CCCtorTargetVarLocal*)realloc(*vars, nc * sizeof(**vars));
+        if (!nv) return;
+        *vars = nv;
+        *cap = nc;
+    }
+    memcpy((*vars)[*count].name, name, name_len);
+    (*vars)[*count].name[name_len] = 0;
+    memcpy((*vars)[*count].rtype, rtype, rtype_len);
+    (*vars)[*count].rtype[rtype_len] = 0;
+    (*count)++;
+}
+
+/* Most-recent declaration wins (shadowing across functions). */
+static const char* cc__ctor_target_vars_find_local(const CCCtorTargetVarLocal* vars, size_t count,
+                                                   const char* name, size_t name_len) {
+    for (size_t k = count; k > 0; k--) {
+        if (strlen(vars[k - 1].name) == name_len &&
+            memcmp(vars[k - 1].name, name, name_len) == 0) {
+            return vars[k - 1].rtype;
+        }
+    }
+    return NULL;
+}
+
+/* If the ctor at `macro_start` is the RHS of `<ident> = cc_ok(...)` (decl
+ * initializer or reassignment), return the recorded result type for
+ * <ident>; NULL for non-assignment sites (`return cc_ok(x)`, argument
+ * positions) or unknown variables.  Member assignments are skipped. */
+static const char* cc__ctor_assign_target_type_local(const char* src, size_t macro_start,
+                                                     const CCCtorTargetVarLocal* vars, size_t count) {
+    size_t p = macro_start;
+    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    if (p == 0 || src[p-1] != '=') return NULL;
+    p--;
+    /* Reject `==`, `!=`, `<=`, `>=` and compound assignments. */
+    if (p > 0 && strchr("=!<>+-*/%&|^", src[p-1])) return NULL;
+    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    size_t nm_end = p;
+    while (p > 0 && cc__is_ident_char_local(src[p-1])) p--;
+    if (nm_end == p || !cc__is_ident_start_local2(src[p])) return NULL;
+    if (p > 0 && (src[p-1] == '.' || (p > 1 && src[p-1] == '>' && src[p-2] == '-'))) return NULL;
+    return cc__ctor_target_vars_find_local(vars, count, src + p, nm_end - p);
+}
+
 /* Rewrite cc_ok(...) and cc_err(...) to fully qualified forms based on enclosing function's return type.
    Inside a function returning CCResult_T_E:
      cc_ok(v)   -> cc_ok_CCResult_T_E(v)
      cc_err(e)  -> cc_err_CCResult_T_E(e)
-   This allows users to write just cc_ok(42) instead of cc_ok(int, 42). */
+   This allows users to write just cc_ok(42) instead of cc_ok(int, 42).
+   A ctor that initializes (or is assigned to) a variable declared with a
+   concrete CCResult type resolves against that type instead. */
 char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -763,6 +826,11 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
     char current_result_type[256] = {0};  /* e.g., "CCResult_int_CCError" */
     int brace_depth = 0;
     int fn_brace_depth = -1;  /* brace depth when we entered the function body */
+
+    /* Variables declared with a concrete CCResult type inside function
+       bodies; used to resolve ctor targets for initializers/assignments. */
+    CCCtorTargetVarLocal* rvars = NULL;
+    size_t rvar_count = 0, rvar_cap = 0;
 
     CCInertScan scan;
     cc_inert_scan_init(&scan, NULL);
@@ -789,6 +857,37 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             continue;
         }
         
+        /* Inside a function body, record `CCResult_T_E name` declarations
+           (not function declarators) so short-form ctors that initialize or
+           assign these variables can resolve against the declared type. */
+        if (fn_brace_depth >= 0 && c == 'C' && i + 9 < n &&
+            memcmp(src + i, "CCResult_", 9) == 0 &&
+            (i == 0 || !cc__is_ident_char_local(src[i - 1]))) {
+            size_t ty_start = i;
+            size_t j = i + 9;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t ty_end = j;
+            size_t k = ty_end;
+            while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+            while (k < n && src[k] == '*') {
+                k++;
+                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+            }
+            if (k < n && cc__is_ident_start_local2(src[k])) {
+                size_t nm_start = k;
+                while (k < n && cc__is_ident_char_local(src[k])) k++;
+                size_t nm_end = k;
+                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+                if (k < n && src[k] != '(') {
+                    cc__ctor_target_vars_add_local(&rvars, &rvar_count, &rvar_cap,
+                                                   src + nm_start, nm_end - nm_start,
+                                                   src + ty_start, ty_end - ty_start);
+                }
+            }
+            i = ty_end;
+            continue;
+        }
+
         /* Detect function definition with result return type.
            Handles: __CC_RESULT(T, E), CCRes(T, E), CCResPtr(T, E), CCResult_T_E */
         if (fn_brace_depth < 0) {
@@ -898,8 +997,9 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             }
         }
         
-        /* Detect cc_ok(...) or cc_err(...) when inside a result-returning function */
-        if (current_result_type[0] && c == 'c' && i + 5 < n) {
+        /* Detect cc_ok(...) or cc_err(...) inside a result-returning function
+           or targeting a variable with a known concrete CCResult type */
+        if ((current_result_type[0] || rvar_count > 0) && c == 'c' && i + 5 < n) {
             int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
             int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
             
@@ -936,12 +1036,20 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         j++;
                     }
                     
+                    /* Resolve the target result type: a decl initializer or
+                       assignment to a variable with a known CCResult type
+                       wins over the enclosing function's result type;
+                       `return cc_ok(...)` keeps the function's type. */
+                    const char* target_rtype =
+                        cc__ctor_assign_target_type_local(src, macro_start, rvars, rvar_count);
+                    const char* use_rtype = target_rtype ? target_rtype : current_result_type;
+
                     /* Shorthand error constructors - detect error type and wrap appropriately */
-                    size_t crt_len = strlen(current_result_type);
+                    size_t crt_len = strlen(use_rtype);
                     int is_default_err = (crt_len >= 8 &&
-                                          strcmp(current_result_type + crt_len - 8, "_CCError") == 0);
+                                          strcmp(use_rtype + crt_len - 8, "_CCError") == 0);
                     int is_io_err = (crt_len >= 10 &&
-                                    strcmp(current_result_type + crt_len - 10, "_CCIoError") == 0);
+                                    strcmp(use_rtype + crt_len - 10, "_CCIoError") == 0);
                     
                     if (is_err && depth == 0) {
                         size_t k = args_start;
@@ -963,7 +1071,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         if (is_default_2arg || is_default_kind_literal) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
-                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, use_rtype);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(CC_ERROR(");
                             cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
                             if (comma_count == 0) {
@@ -979,7 +1087,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         if (is_io_err && k + 6 < j && memcmp(src + k, "CC_IO_", 6) == 0) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
-                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, use_rtype);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(cc_io_error(");
                             cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
@@ -993,7 +1101,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                        Long form has 1+ commas for cc_ok(T,v) or cc_ok(T,E,v) */
                     int is_short_form = (is_ok && comma_count == 0) || (is_err && comma_count == 0);
                     
-                    if (is_short_form && depth == 0) {
+                    if (is_short_form && depth == 0 && use_rtype[0]) {
                         /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) */
                         cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         if (is_ok) {
@@ -1001,7 +1109,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         } else {
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
                         }
-                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, use_rtype);
                         cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(");
                         /* Copy the argument */
                         cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
@@ -1017,7 +1125,11 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
         i++;
     }
     
-    if (last_emit == 0) return NULL;  /* No rewrites done */
+    free(rvars);
+    if (last_emit == 0) {
+        free(out);
+        return NULL;  /* No rewrites done */
+    }
     if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
