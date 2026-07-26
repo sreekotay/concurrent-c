@@ -22,6 +22,10 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 
 # 4. Run benchmark
 ./benchmark.sh 200 8 3   # <size_mb> <workers> <runs>
+
+# 5. Linux i386 (Docker) — build + correctness + compare vs original pigz
+../../scripts/pigz_i386.sh
+# Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
 ```
 
 ## Benchmark Data (auto-downloaded, not checked in)

@@ -16,6 +16,9 @@ CFLAGS_COMMON := -Wall -Wextra -I../out/include -Isrc -Iinclude -DCC_RUNTIME_V3=
 # exports them, so link with --export-dynamic there.
 ifneq ($(shell uname -s),Darwin)
   LDFLAGS += -Wl,--export-dynamic
+  # ILP32: plain readdir() returns EOVERFLOW on filesystems with 64-bit
+  # inodes (Docker volumes, many modern ext4 layouts). Harmless on LP64.
+  CFLAGS_COMMON += -D_FILE_OFFSET_BITS=64
 endif
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC

@@ -1,0 +1,33 @@
+# Concurrent-C ILP32 smoke image — Linux i386.
+#
+# Build:
+#   docker build --platform linux/386 -f scripts/docker/Dockerfile.i386 -t ccc-i386 .
+# Run (RO source + writable sandbox; preferred):
+#   docker run --rm --platform linux/386 \
+#     -v "$PWD":/src:ro -v /work \
+#     -e CCC_ILP32_ARCH=i386 ccc-i386 /src/scripts/docker/ilp32_entrypoint.sh
+#
+# Or: ./scripts/smoke_i386.sh
+#
+# ARM32 follow-up: same packages/CMD in Dockerfile.arm32 (stub); swap base + --platform.
+
+FROM i386/debian:bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    file \
+    git \
+    libzopfli-dev \
+    make \
+    pkg-config \
+    python3 \
+    rsync \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+ENV CCC_ILP32_ARCH=i386
+ENV CCC_ILP32_SRC=/src
+ENV CCC_ILP32_WORK=/work
+CMD ["/src/scripts/docker/ilp32_entrypoint.sh"]

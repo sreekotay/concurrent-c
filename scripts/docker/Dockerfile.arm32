@@ -1,0 +1,34 @@
+# Concurrent-C ILP32 smoke image — Linux ARM32 (gnueabihf / armhf).
+#
+# Build:
+#   docker build --platform linux/arm/v7 -f scripts/docker/Dockerfile.arm32 -t ccc-arm32 .
+# Run (RO source + writable sandbox; preferred):
+#   docker run --rm --platform linux/arm/v7 \
+#     -v "$PWD":/src:ro -v /work \
+#     -e CCC_ILP32_ARCH=arm ccc-arm32 /src/scripts/docker/ilp32_entrypoint.sh
+#
+# Or: ./scripts/smoke_arm32.sh
+#
+# ABI: arm32v7/debian is hard-float (armhf / gnueabihf), matching TCC's
+# default arm_eabihf configuration on this host.
+
+FROM arm32v7/debian:bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    file \
+    git \
+    libzopfli-dev \
+    make \
+    pkg-config \
+    python3 \
+    rsync \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+ENV CCC_ILP32_ARCH=arm
+ENV CCC_ILP32_SRC=/src
+ENV CCC_ILP32_WORK=/work
+CMD ["/src/scripts/docker/ilp32_entrypoint.sh"]

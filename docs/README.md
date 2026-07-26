@@ -5,6 +5,7 @@
 - **[Getting Started](getting-started.md)** — Install, build, and run your first program
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
+- **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 (and planned ARM32) runtime smokes via Docker
 
 ## Reference
 

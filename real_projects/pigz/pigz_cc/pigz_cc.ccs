@@ -285,7 +285,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
             }
             
             pos += deflate_len;
-            res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+            res->data = res_arena->slice(out_buf, pos);
             cc_atomic_fetch_add(&g_bytes_out, pos);
         } else {
             // Zopfli compression (level 11) (matches pigz.c:2470-2480)
@@ -351,7 +351,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
                 }
             }
 
-            res->data = cc_slice_from_parts(out_buf, out_len, CC_SLICE_ID_UNTRACKED, out_len);
+            res->data = res_arena->slice(out_buf, out_len);
             cc_atomic_fetch_add(&g_bytes_out, out_len);
         }
 
@@ -404,54 +404,14 @@ CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
 CompressedResult* compress_owned_block(Block* blk) {
     CompressedResultPtr !>(CCIoError) result = do_compress_work(blk);
     return_input_arena(blk->arena, blk->pool);
-    if (cc_is_err(result)) {
-        return NULL;
-    }
-    return cc_value(result);
+    if (result.is_err()) return NULL;
+    return result.value();
 }
 
-/* ============================================================================
- * Decompression Engine (matches pigz.c:2700-2750)
- * ============================================================================ */
-
-// decompress_block - currently unused, single-threaded decompression in decompress_file
-DecompressedResultPtr !>(CCIoError) decompress_block(CCSlice member, long seq) {
-    size_t est_size = 256 * 1024;
-    {
-        CCArena res_arena_storage = @create(est_size + 8192) @destroy;
-        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-        CCArena* res_arena = &res_arena_storage;
-        DecompressedResult* res = cc_arena_alloc_T(DecompressedResult, res_arena);
-        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-        res->seq = seq;
-
-        z_stream strm;
-        memset(&strm, 0, sizeof(strm));
-        if (inflateInit2(&strm, 15 + 16) != Z_OK) return cc_err(cc_io_error(CC_IO_OTHER));
-        @defer inflateEnd(&strm);
-
-        strm.next_in = (Bytef*)member.ptr;
-        strm.avail_in = (uInt)member.len;
-
-        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, est_size);
-        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
-
-        strm.next_out = out_buf;
-        strm.avail_out = (uInt)est_size;
-
-        int ret = inflate(&strm, Z_FINISH);
-        if (ret != Z_STREAM_END && ret != Z_OK) return cc_err(cc_io_error(CC_IO_OTHER));
-
-        res->data = cc_slice_from_parts(out_buf, strm.total_out, CC_SLICE_ID_UNTRACKED, est_size);
-        res->arena = res_arena->detach();
-        return cc_ok(res);
-    }
-}
-
-/* Chunk with arena for pipeline transfer */
+/* Pipeline transfer: arena owns the slab; data is a view into it. */
 typedef struct {
-    CCSlice data;
     CCArena arena;
+    CCSlice data;
 } DecompChunk;
 
 int decompress_file(const char* in_path, const char* out_path, int num_workers) {
@@ -531,14 +491,14 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         CCClosure0 decomp_writer_task = () => [out_ptr, decompressed_rx, decompressed_ch, p_total_out] {
             DecompChunk chunk;
             while (true) {
-                bool !>(CCIoError) recv_res = cc_channel_recv(decompressed_rx, &chunk);
-                if (cc_is_err(recv_res)) {
+                bool !>(CCIoError) recv_res = decompressed_rx.recv(&chunk);
+                if (recv_res.is_err()) {
                     report_io_error("failed to receive decompressed chunk", cc_unwrap_err_as(recv_res, CCIoError));
                     mark_pipeline_error();
                     cc_channel_close_err(decompressed_ch, EIO);
                     break;
                 }
-                if (!cc_value(recv_res)) break;
+                if (!recv_res.value()) break;
                 if (chunk.data.len > 0 && !g.test && !g.list) {
                     if (!write_all_or_fail(out_ptr, chunk.data, "decompressed output")) {
                         cc_channel_close_err(decompressed_ch, EIO);
@@ -568,15 +528,15 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             } else {
                 DecompChunk in_chunk;
                 while (!cc_atomic_load(&g_pipeline_error)) {
-                    bool !>(CCIoError) recv_res = cc_channel_recv(compressed_rx, &in_chunk);
-                    if (cc_is_err(recv_res)) {
+                    bool !>(CCIoError) recv_res = compressed_rx.recv(&in_chunk);
+                    if (recv_res.is_err()) {
                         report_io_error("failed to receive compressed chunk", cc_unwrap_err_as(recv_res, CCIoError));
                         mark_pipeline_error();
                         cc_channel_close_err(compressed_ch, EIO);
                         cc_channel_close_err(decompressed_ch, EIO);
                         break;
                     }
-                    if (!cc_value(recv_res)) break;
+                    if (!recv_res.value()) break;
                     strm.next_in = (Bytef*)in_chunk.data.ptr;
                     strm.avail_in = (uInt)in_chunk.data.len;
                     
@@ -609,11 +569,10 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         
                         size_t have = BLOCK_SIZE - strm.avail_out;
                         if (have > 0) {
-                            DecompChunk out_chunk = {
-                                .data = cc_slice_from_parts(out_buf, have, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
-                                .arena = out_arena.detach()
-                            };
-                            bool !>(CCIoError) send_res = cc_channel_send(decompressed_tx, out_chunk);
+                            DecompChunk out_chunk = {0};
+                            out_chunk.data = out_arena.slice(out_buf, have);
+                            out_chunk.arena = out_arena.detach();
+                            bool !>(CCIoError) send_res = decompressed_tx.send(out_chunk);
                             if (send_res.is_err()) {
                                 report_io_error("failed to send decompressed chunk", cc_unwrap_err_as(send_res, CCIoError));
                                 mark_pipeline_error();
@@ -662,31 +621,30 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                 
                 size_t bytes_read = 0;
                 bool !>(CCIoError) read_res = cc_file_read_buf(in_ptr, buf, BLOCK_SIZE, &bytes_read);
-                if (cc_is_err(read_res)) {
+                if (read_res.is_err()) {
                     report_io_error("failed to read compressed input", cc_unwrap_err_as(read_res, CCIoError));
                     mark_pipeline_error();
                     cc_channel_close_err(compressed_ch, EIO);
                     break;
                 }
-                if (!cc_value(read_res)) {
+                if (!read_res.value()) {
                     break;
                 }
                 
                 cc_atomic_fetch_add(p_total_in, bytes_read);
                 
-                DecompChunk chunk = {
-                    .data = cc_slice_from_parts(buf, bytes_read, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
-                    .arena = chunk_arena.detach()
-                };
-                bool !>(CCIoError) send_res = cc_channel_send(compressed_tx, chunk);
-                if (cc_is_err(send_res)) {
+                DecompChunk chunk = {0};
+                chunk.data = chunk_arena.slice(buf, bytes_read);
+                chunk.arena = chunk_arena.detach();
+                bool !>(CCIoError) send_res = compressed_tx.send(chunk);
+                if (send_res.is_err()) {
                     report_io_error("failed to send compressed chunk", cc_unwrap_err_as(send_res, CCIoError));
                     mark_pipeline_error();
                     cc_channel_close_err(compressed_ch, EIO);
                     chunk.arena.free();
                     break;
                 }
-                if (!cc_value(send_res)) {
+                if (!send_res.value()) {
                     fprintf(stderr, "Error: compressed input channel closed early\n");
                     mark_pipeline_error();
                     cc_channel_close_err(compressed_ch, EIO);
@@ -908,14 +866,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         
         while (!write_failed) {
             CompressedResult* r = NULL;
-            bool !>(CCIoError) recv_res = cc_channel_recv(results_rx, &r);
-            if (cc_is_err(recv_res)) {
+            bool !>(CCIoError) recv_res = results_rx.recv(&r);
+            if (recv_res.is_err()) {
                 report_io_error("failed to receive compression result", cc_unwrap_err_as(recv_res, CCIoError));
                 mark_pipeline_error();
                 write_failed = true;
                 break;
             }
-            if (!cc_value(recv_res)) break;
+            if (!recv_res.value()) break;
 
             // Check for global error (e.g. SIGINT)
             if (cc_atomic_load(&g_pipeline_error)) {
@@ -1109,12 +1067,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             CCArena* blk_arena = NULL;
             CCResult_bool_CCIoError borrow_res =
                 cc_chan_result_from_errno(cc_channel_recv(arena_pool, &blk_arena, sizeof(blk_arena)));
-            if (cc_is_err(borrow_res)) {
+            if (borrow_res.is_err()) {
                 report_io_error("failed to borrow input arena", cc_unwrap_err_as(borrow_res, CCIoError));
                 mark_pipeline_error();
                 break;
             }
-            if (!cc_unwrap(borrow_res)) {
+            if (!borrow_res.value()) {
                 fprintf(stderr, "Error: arena pool closed unexpectedly\n");
                 mark_pipeline_error();
                 break;
@@ -1122,7 +1080,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             
             // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
             CCSlice data;
-            bool !>(CCIoError) read_res = cc_file_read(in_ptr, blk_arena, block_size, &data);
+            bool !>(CCIoError) read_res = in_ptr->read(blk_arena, block_size, &data);
             if (read_res.is_err()) {
                 report_io_error("failed to read input block", cc_unwrap_err_as(read_res, CCIoError));
                 mark_pipeline_error();
@@ -1134,7 +1092,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 return_input_arena(blk_arena, arena_pool);
                 if (prev_blk) {
                     prev_blk->is_last = true;
-                    cc_channel_send_task(results_tx, () => [prev_blk] {
+                    results_tx.send_task(() => [prev_blk] {
                         return compress_owned_block(prev_blk);
                     });
                     prev_blk = NULL;
@@ -1188,7 +1146,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             hits[n_hits++] = data.len - last_hit_pos;
                         }
                     }
-                    blk->lens = cc_slice_from_parts(hits, n_hits * sizeof(size_t), CC_SLICE_ID_UNTRACKED, n_hits * sizeof(size_t));
+                    blk->lens = blk_arena->slice(hits, n_hits * sizeof(size_t));
                 }
             }
 
@@ -1201,7 +1159,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     break;
                 }
                 memcpy(dict_mem, last_tail_buf, last_tail_len);
-                blk->dict = cc_slice_from_parts(dict_mem, last_tail_len, CC_SLICE_ID_UNTRACKED, last_tail_len);
+                blk->dict = blk_arena->slice(dict_mem, last_tail_len);
             }
             
             // Update last_tail for the next block
@@ -1211,7 +1169,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
             // If we already have a pending block, spawn task
             if (prev_blk) {
-                cc_channel_send_task(results_tx, () => [prev_blk] {
+                results_tx.send_task(() => [prev_blk] {
                     return compress_owned_block(prev_blk);
                 });
             }
@@ -1219,7 +1177,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             // If this was a short read, it's the last block.
             if (data.len < block_size) {
                 blk->is_last = true;
-                cc_channel_send_task(results_tx, () => [blk] {
+                results_tx.send_task(() => [blk] {
                     return compress_owned_block(blk);
                 });
                 prev_blk = NULL;

@@ -29,6 +29,10 @@ ifeq ($(and $(strip $(ZOPFLI_CFLAGS)),$(strip $(ZOPFLI_LDFLAGS))),)
   else ifneq ($(wildcard /usr/include/zopfli.h),)
     override ZOPFLI_CFLAGS :=
     override ZOPFLI_LDFLAGS := -lzopfli
+  else ifneq ($(wildcard /usr/include/zopfli/zopfli.h),)
+    # Debian/Ubuntu libzopfli-dev installs headers under include/zopfli/.
+    override ZOPFLI_CFLAGS := -I/usr/include/zopfli
+    override ZOPFLI_LDFLAGS := -lzopfli
   else
     $(error Zopfli not found (need zopfli.h + libzopfli). Install: brew install zopfli (macOS), apt install libzopfli-dev (Debian/Ubuntu), or set both ZOPFLI_CFLAGS and ZOPFLI_LDFLAGS for your prefix.)
   endif
@@ -48,8 +52,8 @@ OUT_DIR = out
 PIGZ_C_DIR = pigz_c
 PIGZ_SRCS = $(PIGZ_C_DIR)/pigz.c $(PIGZ_C_DIR)/yarn.c $(PIGZ_C_DIR)/try.c
 
-# CC compiler
-CCC = ../../out/cc/bin/ccc
+# CC compiler (wrapper preferred; falls back to out/ layout)
+CCC ?= $(shell test -x ../../cc/bin/ccc && echo ../../cc/bin/ccc || echo ../../out/cc/bin/ccc)
 
 # Ensure output directory exists
 $(OUT_DIR):
