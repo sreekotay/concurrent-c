@@ -1,0 +1,45 @@
+/* OK: send CCArena + offset/len; rebuild a local view after recv. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Chunk {
+    CCArena arena;
+    size_t offset;
+    size_t len;
+} Chunk;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    char* p = (char*)cc_arena_alloc(&a, 32, 1);
+    if (!p) return 1;
+    memcpy(p, "arena-len-ok", 12);
+
+    /* Offset before detach — designated-init evaluation order is unspecified. */
+    size_t off = (size_t)((uint8_t*)p - (uint8_t*)a.base);
+    Chunk c = {0};
+    c.offset = off;
+    c.len = 12;
+    c.arena = a.detach();
+
+    Chunk[~4 >] tx;
+    Chunk[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    bool !>(CCIoError) send_res = cc_channel_send(tx, c);
+    if (cc_is_err(send_res) || !cc_value(send_res)) return 3;
+
+    Chunk got = {0};
+    bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
+    if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
+
+    CCSlice view = cc_arena_slice(&got.arena,
+                                  (uint8_t*)got.arena.base + got.offset,
+                                  got.len);
+    if (view.len != 12) return 5;
+    if (memcmp(view.ptr, "arena-len-ok", 12) != 0) return 6;
+
+    got.arena.free();
+    return 0;
+}

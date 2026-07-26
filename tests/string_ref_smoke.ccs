@@ -21,8 +21,8 @@ int main(void) {
     if (!cc_string_ref_is_empty(&a) || cc_string_ref_len(&a) != 0) return 3;
 
     {
-        CCResult_CCStringRef_CCError rr =
-            cc_string_ref_from_slice(&arena, cc_slice_from_buffer((void *)"hi", 2));
+        CCSlice hi = cc_slice_from_buffer((void *)"hi", 2);
+        CCResult_CCStringRef_CCError rr = hi.to_ref(&arena);
         if (rr.is_err()) return 100;
         a = rr.value();
     }
@@ -31,8 +31,8 @@ int main(void) {
     if (s.len != 2 || memcmp(s.ptr, "hi", 2) != 0) return 5;
 
     {
-        CCResult_CCStringRef_CCError rr =
-            cc_string_ref_from_slice(&arena, cc_slice_from_buffer((void *)"hi", 2));
+        CCSlice hi = cc_slice_from_buffer((void *)"hi", 2);
+        CCResult_CCStringRef_CCError rr = hi.to_ref(&arena);
         if (rr.is_err()) return 101;
         b = rr.value();
     }
@@ -40,8 +40,8 @@ int main(void) {
 
     for (i = 0; i < sizeof(long_buf); i++) long_buf[i] = (char)('A' + (i % 26));
     {
-        CCResult_CCStringRef_CCError rr =
-            cc_string_ref_from_slice(&arena, cc_slice_from_buffer(long_buf, sizeof(long_buf)));
+        CCSlice long_s = cc_slice_from_buffer(long_buf, sizeof(long_buf));
+        CCResult_CCStringRef_CCError rr = long_s.to_ref(&arena);
         if (rr.is_err()) return 102;
         long_ref = rr.value();
     }
@@ -72,6 +72,8 @@ int main(void) {
         p = m.get_ptr(probe);
         if (!p || *p != 22) return 17;
         if (!cc_string_ref_is_view(&probe)) return 18;
+        if (cc_string_ref_is_durable(&probe)) return 19;
+        if (!cc_string_ref_is_durable(&a)) return 20;
     }
 
     printf("string_ref_smoke: ok\n");

@@ -1,0 +1,39 @@
+/* OK: aggregate field init via cc_slice_from_parts + sibling CCArena send. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Block {
+    CCSlice data;
+    CCArena arena;
+} Block;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    unsigned char* buf = (unsigned char*)cc_arena_alloc(&a, 32, 1);
+    if (!buf) return 1;
+    memcpy(buf, "from-parts-ok", 13);
+
+    CCArena taken = a.detach();
+    uint64_t id = cc_slice_make_id(taken.provenance, false, false, false);
+    Block b = {
+        .data = cc_slice_from_parts(buf, 13, id, 32),
+        .arena = taken,
+    };
+
+    Block[~2 >] tx;
+    Block[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    bool !>(CCIoError) send_res = cc_channel_send(tx, b);
+    if (cc_is_err(send_res) || !cc_value(send_res)) return 3;
+
+    Block got = {0};
+    bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
+    if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
+    if (got.data.len != 13 || memcmp(got.data.ptr, "from-parts-ok", 13) != 0) return 5;
+
+    got.arena.free();
+    return 0;
+}

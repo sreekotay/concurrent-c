@@ -1,0 +1,42 @@
+/* OK: named aggregate initialized with a cc_slice_* field ctor + sibling
+ * CCArena may be sent (the former over-marking / pigz failure path). */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Packet {
+    CCSlice data;
+    CCArena arena;
+} Packet;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    char* p = (char*)cc_arena_alloc(&a, 24, 1);
+    if (!p) return 1;
+    memcpy(p, "compound-init-ok", 16);
+
+    /* Detach first so the compound literal does not race evaluation order. */
+    CCArena taken = a.detach();
+    Packet pkt = {
+        .data = taken.slice(p, 16),
+        .arena = taken,
+    };
+
+    Packet[~2 >] tx;
+    Packet[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    bool !>(CCIoError) send_res = cc_channel_send(tx, pkt);
+    if (cc_is_err(send_res) || !cc_value(send_res)) return 3;
+
+    Packet got = {0};
+    bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
+    if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
+    if (got.data.len != 16) return 5;
+    if (memcmp(got.data.ptr, "compound-init-ok", 16) != 0) return 6;
+    if (!cc_slice_is_from_arena_epoch(got.data, &got.arena)) return 7;
+
+    got.arena.free();
+    return 0;
+}

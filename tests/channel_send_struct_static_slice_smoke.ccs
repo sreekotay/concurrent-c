@@ -1,0 +1,33 @@
+/* OK: aggregate whose only slice field is static/canonical may use send.
+ * (No CCArena required — bytes are immortal.) */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Msg {
+    CCSlice data;
+    int tag;
+} Msg;
+
+int main(void) {
+    Msg m = {
+        .data = cc_slice_from_static((void*)"static-field", 12),
+        .tag = 7,
+    };
+
+    Msg[~2 >] tx;
+    Msg[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    @defer ch.free();
+
+    bool !>(CCIoError) send_res = cc_channel_send(tx, m);
+    if (cc_is_err(send_res) || !cc_value(send_res)) return 2;
+
+    Msg got = {0};
+    bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
+    if (cc_is_err(recv_res) || !cc_value(recv_res)) return 3;
+    if (got.tag != 7 || got.data.len != 12) return 4;
+    if (memcmp(got.data.ptr, "static-field", 12) != 0) return 5;
+    if (!cc_slice_is_canonical(got.data)) return 6;
+    return 0;
+}

@@ -1,0 +1,4 @@
+non-stable slice field without a CCArena
+channel-stable-borrow
+__cc_tmp
+send_into

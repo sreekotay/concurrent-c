@@ -4,7 +4,7 @@
  *
  * Dense twin of CCString (growable 16B owner).  Durable forms (inline / SDS
  * heap) do not grow or free; heap bytes live until the arena is reset.
- * Borrowed views are for map probes only — do not store them.
+ * Borrowed views are probe-only — caller must not insert them into maps.
  *
  * Tags (little-endian hosts):
  *   inline: (w & 1) != 0; low byte = (len << 1) | 1, next len bytes payload
@@ -102,6 +102,10 @@ static inline CCStringRef cc_string_ref_borrow_slice(CCStringRefView *view, CCSl
     return cc_string_ref_borrow(view);
 }
 
+static inline int cc_string_ref_is_durable(const CCStringRef *r) {
+    return r && !cc_string_ref_is_view(r);
+}
+
 static inline CCStringRef cc__string_ref_pack_inline(const char *p, uint32_t len) {
     CCStringRef r;
     unsigned char *b;
@@ -166,49 +170,63 @@ static inline int CCStringRef_is_empty(const CCStringRef *r) {
     return cc_string_ref_is_empty(r);
 }
 
+static inline int CCStringRef_is_view(const CCStringRef *r) {
+    return cc_string_ref_is_view(r);
+}
+
+static inline int CCStringRef_is_durable(const CCStringRef *r) {
+    return cc_string_ref_is_durable(r);
+}
+
 /* Copy `src` into a durable handle.  len <= INLINE_MAX stays inline (no arena).
- * Larger payloads allocate [u32 len][bytes] in `arena` (SDS-style). */
-static inline CCResult_CCStringRef_CCError cc_string_ref_from_slice(CCArena *arena,
-                                                                   CCSlice src) {
+ * Larger payloads allocate [u32 len][bytes] in `arena` (SDS-style).
+ * Slice-first for UFCS: `src.to_ref(arena)`. */
+static inline CCResult_CCStringRef_CCError cc_slice_to_ref(CCSlice *src, CCArena *arena) {
+    CCSlice s;
     CCStringRef r;
     char *block;
     char *data;
     size_t need;
-    if (src.len > (size_t)UINT32_MAX) {
+    if (!src) {
+        return cc_err_CCResult_CCStringRef_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef to_ref without slice"));
+    }
+    s = *src;
+    if (s.len > (size_t)UINT32_MAX) {
         return cc_err_CCResult_CCStringRef_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef length exceeds u32"));
     }
-    if (src.len == 0) {
+    if (s.len == 0) {
         return cc_ok_CCResult_CCStringRef_CCError(cc_string_ref_empty());
     }
-    if (src.len <= (size_t)CC_STRING_REF_INLINE_MAX) {
-        if (!src.ptr) {
+    if (s.len <= (size_t)CC_STRING_REF_INLINE_MAX) {
+        if (!s.ptr) {
             return cc_err_CCResult_CCStringRef_CCError(
                 CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef inline without ptr"));
         }
         return cc_ok_CCResult_CCStringRef_CCError(
-            cc__string_ref_pack_inline((const char *)src.ptr, (uint32_t)src.len));
+            cc__string_ref_pack_inline((const char *)s.ptr, (uint32_t)s.len));
     }
     if (!arena) {
         return cc_err_CCResult_CCStringRef_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef heap form needs arena"));
     }
-    if (!src.ptr) {
+    if (!s.ptr) {
         return cc_err_CCResult_CCStringRef_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "CCStringRef heap without ptr"));
     }
-    need = sizeof(uint32_t) + src.len;
+    need = sizeof(uint32_t) + s.len;
     block = (char *)cc_arena_alloc(arena, need, sizeof(uint32_t));
     if (!block) {
         return cc_err_CCResult_CCStringRef_CCError(
             CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStringRef arena alloc failed"));
     }
     {
-        uint32_t n = (uint32_t)src.len;
+        uint32_t n = (uint32_t)s.len;
         memcpy(block, &n, sizeof(n));
     }
     data = block + sizeof(uint32_t);
-    memcpy(data, src.ptr, src.len);
+    memcpy(data, s.ptr, s.len);
     /* Heap tag requires (w & 3) == 0; 4-byte header keeps data 4-aligned. */
     if (((uintptr_t)data & 3u) != 0) {
         return cc_err_CCResult_CCStringRef_CCError(
@@ -216,6 +234,10 @@ static inline CCResult_CCStringRef_CCError cc_string_ref_from_slice(CCArena *are
     }
     r = cc__string_ref_from_heap_data(data);
     return cc_ok_CCResult_CCStringRef_CCError(r);
+}
+
+static inline CCResult_CCStringRef_CCError CCSlice_to_ref(CCSlice *src, CCArena *arena) {
+    return cc_slice_to_ref(src, arena);
 }
 
 static inline size_t cc_map_hash_string_ref(CCStringRef r) {

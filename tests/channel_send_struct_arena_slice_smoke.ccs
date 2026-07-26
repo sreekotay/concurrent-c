@@ -1,0 +1,39 @@
+/* OK: aggregate with CCArena + CCSlice may use ordinary channel send. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Msg {
+    CCArena arena;
+    CCSlice data;
+} Msg;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    char* p = (char*)cc_arena_alloc(&a, 16, 1);
+    if (!p) return 1;
+    memcpy(p, "hello-arena-ok", 14);
+
+    /* View before detach — designated-init evaluation order is unspecified. */
+    CCSlice view = a.slice(p, 14);
+    Msg m = {0};
+    m.data = view;
+    m.arena = a.detach();
+
+    Msg[~4 >] tx;
+    Msg[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    bool !>(CCIoError) send_res = cc_channel_send(tx, m);
+    if (cc_is_err(send_res) || !cc_value(send_res)) return 3;
+
+    Msg got = {0};
+    bool !>(CCIoError) recv_res = cc_channel_recv(rx, &got);
+    if (cc_is_err(recv_res) || !cc_value(recv_res)) return 4;
+    if (got.data.len != 14) return 5;
+    if (memcmp(got.data.ptr, "hello-arena-ok", 14) != 0) return 6;
+
+    got.arena.free();
+    return 0;
+}

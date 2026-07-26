@@ -621,6 +621,8 @@ static void detect_host_target(CCBuildTarget* t) {
     const char* arch = "unknown";
 #if defined(__x86_64__) || defined(_M_X64)
     arch = "x86_64";
+#elif defined(__i386__) || defined(__i686__) || defined(_M_IX86)
+    arch = "i386";
 #elif defined(__aarch64__) || defined(_M_ARM64)
     arch = "aarch64";
 #elif defined(__arm__) || defined(_M_ARM)
@@ -2128,17 +2130,18 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
             if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
         } else {
+            /* Put -l libs after objects so GNU ld resolves them (macOS ld is laxer). */
             snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s -o %s",
                      cc_bin,
                      ccflags_env ? ccflags_env : "",
                      opt->cc_flags ? opt->cc_flags : "",
                      target_part,
                      sysroot_part,
-                     ldflags_env ? ldflags_env : "",
-                     final_ld_flags ? final_ld_flags : "",
-                      link_extra,
+                     link_extra,
                      opt->obj_out_path,
                      have_runtime ? runtime_obj : "",
+                     ldflags_env ? ldflags_env : "",
+                     final_ld_flags ? final_ld_flags : "",
                      opt->bin_out_path);
             if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
 
@@ -2166,11 +2169,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  opt->cc_flags ? opt->cc_flags : "",
                  target_part,
                  sysroot_part,
-                 ldflags_env ? ldflags_env : "",
-                 final_ld_flags ? final_ld_flags : "",
-                  link_extra,
+                 link_extra,
                  opt->obj_out_path,
                  have_runtime ? runtime_obj : "",
+                 ldflags_env ? ldflags_env : "",
+                 final_ld_flags ? final_ld_flags : "",
                  opt->bin_out_path);
         if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
 

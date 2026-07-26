@@ -33,6 +33,7 @@ typedef struct {
     int is_nursery;            /* CCNursery* handle */
     int is_arena_ptr;          /* pointer from cc_arena_alloc* */
     int is_arena_slice_view;   /* borrow/view into an arena epoch */
+    int has_slice_field;       /* aggregate initializer used a slice ctor in a field */
     const char* arena_name;    /* borrowed ident of owning arena (or pointer to it) */
     /* Enclosing-block end line: nursery pin_end + live-borrow line filter. */
     int borrow_end_line;
@@ -592,6 +593,125 @@ static int cc__type_is_branded_channel_ok(const char* t) {
     return 0;
 }
 
+static void cc__copy_type_base_name(char* out, size_t out_sz, const char* type_name);
+
+/* Declared type is a slice value (not an aggregate that merely contains one).
+ * Unknown/empty spelling is not slice-like by itself — pair with a slice ctor
+ * (`saw_slice_ctor`) before branding. */
+static int cc__type_spelling_is_slice_like(const char* t) {
+    if (!t || !t[0]) return 0;
+    if (strstr(t, "CCSliceUnique") != NULL) return 1;
+    if (strstr(t, "CCSlice") != NULL) return 1;
+    if (strstr(t, "[:!]") != NULL || strstr(t, "[:]") != NULL) return 1;
+    /* CCSlice is often `typedef struct {…} CCSlice` → prints as anonymous. */
+    if (strstr(t, "<anonymous>") != NULL) return 1;
+    return 0;
+}
+
+static int cc__type_field_is_plain_slice(const char* ft) {
+    if (!ft || !ft[0]) return 0;
+    if (strstr(ft, "CCSliceUnique") != NULL) return 0;
+    if (strstr(ft, "[:!]") != NULL) return 0;
+    if (strstr(ft, "CCSlice") != NULL) return 1;
+    if (strstr(ft, "[:]") != NULL) return 1;
+    return 0;
+}
+
+static int cc__type_field_is_ccarena(const char* ft) {
+    return ft && strstr(ft, "CCArena") != NULL;
+}
+
+/* Reflect `type_name`; set *has_arena / *has_plain_slice from fields. */
+static void cc__aggregate_slice_arena_fields(const char* src, size_t src_len,
+                                             const char* type_name,
+                                             int* has_arena, int* has_plain_slice) {
+    char base[256];
+    CCCtField* fields = NULL;
+    size_t n = 0;
+    if (has_arena) *has_arena = 0;
+    if (has_plain_slice) *has_plain_slice = 0;
+    if (!type_name || !type_name[0] || !src || src_len == 0) return;
+    if (cc__type_spelling_is_slice_like(type_name) && strstr(type_name, "CCArena") == NULL)
+        return;
+    cc__copy_type_base_name(base, sizeof(base), type_name);
+    if (!base[0]) return;
+    if (!cc_ct_reflect_struct_fields(src, src_len, base, &fields, &n)) {
+        const char* tag = base;
+        if (strncmp(base, "struct ", 7) == 0) tag = base + 7;
+        else if (strncmp(base, "union ", 6) == 0) tag = base + 6;
+        while (*tag == ' ' || *tag == '\t') tag++;
+        if (tag != base && tag[0])
+            (void)cc_ct_reflect_struct_fields(src, src_len, tag, &fields, &n);
+        if ((!fields || n == 0) && tag[0]) {
+            char struct_spelling[288];
+            snprintf(struct_spelling, sizeof(struct_spelling), "struct %s", tag);
+            (void)cc_ct_reflect_struct_fields(src, src_len, struct_spelling, &fields, &n);
+        }
+    }
+    if (!fields || n == 0) return;
+    for (size_t i = 0; i < n; i++) {
+        const char* ft = fields[i].type;
+        if (!ft) continue;
+        if (cc__type_field_is_ccarena(ft) && has_arena) *has_arena = 1;
+        if (cc__type_field_is_plain_slice(ft) && has_plain_slice) *has_plain_slice = 1;
+    }
+    cc_ct_free_fields(fields, n);
+}
+
+/* Aggregate carries a non-unique slice field without a sibling CCArena. */
+static int cc__aggregate_unstable_slice_without_arena(const char* src, size_t src_len,
+                                                      const char* type_name) {
+    int has_arena = 0, has_plain_slice = 0;
+    cc__aggregate_slice_arena_fields(src, src_len, type_name, &has_arena, &has_plain_slice);
+    return has_plain_slice && !has_arena;
+}
+
+/* True for by-value struct-ish payloads — not scalars, pointers, tasks, slices. */
+static int cc__type_spelling_is_aggregate_value(const char* t) {
+    if (!t || !t[0]) return 0;
+    if (strchr(t, '*') != NULL) return 0;
+    if (strchr(t, '[') != NULL) return 0;
+    if (cc__type_spelling_is_slice_like(t)) return 0;
+    if (strstr(t, "CCTask") != NULL) return 0;
+    if (strstr(t, "CCClosure") != NULL) return 0;
+    /* Common scalars / typedefs that must not hit aggregate field rules
+     * (e.g. send_task lowers to cc_chan_send of a CCTask / int handle). */
+    if (strcmp(t, "int") == 0 || strcmp(t, "long") == 0 ||
+        strcmp(t, "short") == 0 || strcmp(t, "char") == 0 ||
+        strcmp(t, "bool") == 0 || strcmp(t, "_Bool") == 0 ||
+        strcmp(t, "size_t") == 0 || strcmp(t, "ssize_t") == 0 ||
+        strcmp(t, "uintptr_t") == 0 || strcmp(t, "intptr_t") == 0 ||
+        strcmp(t, "uint64_t") == 0 || strcmp(t, "int64_t") == 0 ||
+        strcmp(t, "uint32_t") == 0 || strcmp(t, "int32_t") == 0 ||
+        strcmp(t, "unsigned") == 0 || strcmp(t, "signed") == 0 ||
+        strcmp(t, "float") == 0 || strcmp(t, "double") == 0 ||
+        strcmp(t, "void") == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+static void cc__emit_channel_stable_borrow_hints(FILE* err, const char* name, int is_aggregate) {
+    if (!err) err = stderr;
+    fprintf(err,
+            "  note: non-unique slices (arena / stack / untracked from_buffer) may dangle after send "
+            "(channel-stable-borrow)\n");
+    if (is_aggregate) {
+        fprintf(err,
+                "  hint: include a CCArena in the same message (ownership rides with the arena), "
+                "use unique T[:!] / cc_slice_from_static, send arena+len and rebuild a local view, "
+                "or use send_into / try_send_into\n");
+    } else {
+        fprintf(err,
+                "  hint: prefer send_into / try_send_into; or unique T[:!] / cc_slice_from_static / "
+                "send_take; or send an owning struct (CCArena + view / arena+len)\n");
+    }
+    if (name && name[0] && strcmp(name, "__cc_tmp") == 0) {
+        fprintf(err,
+                "  note: '__cc_tmp' is the channel send macro's by-value copy of the payload\n");
+    }
+}
+
 static int cc__type_spelling_is_raw_pointer(const char* t) {
     if (!t || !strchr(t, '*')) return 0;
     if (cc__type_is_branded_channel_ok(t)) return 0;
@@ -1126,15 +1246,47 @@ static int cc__walk_call(int idx,
                         cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
                                              "cannot send non-stable slice borrow '%s' on a channel",
                                              cn->aux_s1);
-                        fprintf(stderr,
-                                "  note: non-unique slices (arena / stack / untracked from_buffer) may dangle after send "
-                                "(channel-stable-borrow)\n");
-                        fprintf(stderr,
-                                "  hint: prefer try_send_into / send_into (reserve slot, write into it, "
-                                "materialize payload into the provided arena); or use cc_slice_from_static / "
-                                "unique T[:!] / send_take\n");
+                        cc__emit_channel_stable_borrow_hints(stderr, cn->aux_s1, /*is_aggregate=*/0);
                         ctx->errors++;
                         return -1;
+                    }
+                    /* Aggregates with only static/canonical slice fields are stable
+                     * even without a sibling CCArena (immortal bytes). */
+                    if (v && !v->is_slice && !v->is_static_slice && v->type_spelling &&
+                        cc__type_spelling_is_aggregate_value(v->type_spelling) &&
+                        cc__aggregate_unstable_slice_without_arena(ctx ? ctx->src : NULL,
+                                                                   ctx ? ctx->src_len : 0,
+                                                                   v->type_spelling)) {
+                        cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                             "cannot send '%s' (type '%s'): non-stable slice field without a CCArena",
+                                             cn->aux_s1, v->type_spelling);
+                        cc__emit_channel_stable_borrow_hints(stderr, cn->aux_s1, /*is_aggregate=*/1);
+                        ctx->errors++;
+                        return -1;
+                    }
+                    if (v && !v->is_slice && !v->is_static_slice && v->has_slice_field &&
+                        v->type_spelling &&
+                        cc__type_spelling_is_aggregate_value(v->type_spelling) &&
+                        !cc__aggregate_unstable_slice_without_arena(ctx ? ctx->src : NULL,
+                                                                    ctx ? ctx->src_len : 0,
+                                                                    v->type_spelling)) {
+                        /* has_slice_field but reflect did not prove a bare slice-only
+                         * aggregate — either arena+slice (ok) or reflect missed fields.
+                         * Re-check: if reflect found nothing, refuse when we saw a ctor. */
+                        int has_arena = 0, has_plain = 0;
+                        cc__aggregate_slice_arena_fields(ctx ? ctx->src : NULL,
+                                                         ctx ? ctx->src_len : 0,
+                                                         v->type_spelling,
+                                                         &has_arena, &has_plain);
+                        if (!has_arena && !has_plain) {
+                            cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE,
+                                                 "cannot send '%s' (type '%s'): slice field in initializer "
+                                                 "without a provable sibling CCArena",
+                                                 cn->aux_s1, v->type_spelling);
+                            cc__emit_channel_stable_borrow_hints(stderr, cn->aux_s1, /*is_aggregate=*/1);
+                            ctx->errors++;
+                            return -1;
+                        }
                     }
                     if (v && v->type_spelling &&
                         cc__type_contains_raw_pointer_field(ctx ? ctx->src : NULL,
@@ -1462,8 +1614,16 @@ static int cc__walk(int idx,
             int blk = cc__enclosing_block(nodes, idx);
             v->borrow_end_line = (blk >= 0) ? cc__subtree_max_line(nodes, kids, blk) : n->line_start;
         }
-        v->is_slice = (strstr(n->aux_s2, "CCSlice") != NULL) ||
-                      (strchr(n->aux_s2, '[') && strchr(n->aux_s2, ':') && strchr(n->aux_s2, ']'));
+        /* Brand as a slice only for slice-like spellings — not aggregates that
+         * merely contain a CCSlice field (those use field-aware channel rules). */
+        if (cc__type_spelling_is_slice_like(n->aux_s2)) {
+            int has_arena = 0, has_plain = 0;
+            cc__aggregate_slice_arena_fields(ctx ? ctx->src : NULL,
+                                             ctx ? ctx->src_len : 0,
+                                             n->aux_s2, &has_arena, &has_plain);
+            if (!(has_arena || has_plain)) v->is_slice = 1;
+            else if (has_plain) v->has_slice_field = 1;
+        }
         if (strchr(n->aux_s2, '[') && strchr(n->aux_s2, ']')) {
             v->is_array = 1;
         }
@@ -1489,6 +1649,7 @@ static int cc__walk(int idx,
                     if (strncmp(c->aux_s1, "cc_slice_", 9) == 0) saw_slice_ctor = 1;
                     if (strcmp(c->aux_s1, "cc_arena_alloc_slice") == 0 ||
                         strcmp(c->aux_s1, "cc_arena_alloc_slice_bytes") == 0 ||
+                        strcmp(c->aux_s1, "cc_arena_slice") == 0 ||
                         strcmp(c->aux_s1, "cc_slice_clone") == 0) {
                         saw_arena_slice_ctor = 1;
                         saw_slice_ctor = 1;
@@ -1499,9 +1660,30 @@ static int cc__walk(int idx,
                 }
             }
 
-            /* If initializer is a known slice constructor, treat as slice even if the type string
-               prints as 'struct <anonymous>' (CCSlice is a typedef of an anonymous struct). */
-            if (saw_slice_ctor) v->is_slice = 1;
+            /* Slice ctor brands the local as a slice only when the declared type
+             * is slice-like (or unknown — CCSlice often prints empty/anonymous).
+             * Aggregate initializers that use cc_slice_* for a field set
+             * has_slice_field for field-aware channel checks. */
+            if (saw_slice_ctor) {
+                int unknown_ty = !n->aux_s2 || !n->aux_s2[0];
+                if (unknown_ty || cc__type_spelling_is_slice_like(n->aux_s2)) {
+                    int has_arena = 0, has_plain = 0;
+                    if (!unknown_ty) {
+                        cc__aggregate_slice_arena_fields(ctx ? ctx->src : NULL,
+                                                         ctx ? ctx->src_len : 0,
+                                                         n->aux_s2, &has_arena, &has_plain);
+                    }
+                    if (has_arena || has_plain) {
+                        v->is_slice = 0;
+                        if (has_plain) v->has_slice_field = 1;
+                    } else {
+                        v->is_slice = 1;
+                    }
+                } else {
+                    v->is_slice = 0;
+                    v->has_slice_field = 1;
+                }
+            }
 
             if (saw_arena_alloc_ptr && !v->is_slice) {
                 const char* an = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
@@ -1556,6 +1738,7 @@ static int cc__walk(int idx,
                 if (saw_arena_slice_ctor ||
                     cc__subtree_has_call_named(nodes, kids, idx, "cc_arena_alloc_slice") ||
                     cc__subtree_has_call_named(nodes, kids, idx, "cc_arena_alloc_slice_bytes") ||
+                    cc__subtree_has_call_named(nodes, kids, idx, "cc_arena_slice") ||
                     cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_clone")) {
                     const char* an = cc__subtree_arena_ref_name(nodes, kids, idx, scopes, *io_scope_n);
                     if (an) {
@@ -1565,16 +1748,34 @@ static int cc__walk(int idx,
                 }
             }
 
+            /* Static/canonical field init on aggregates (not only bare slices). */
+            if (cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_static") ||
+                cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_cstr")) {
+                v->is_static_slice = 1;
+            }
+
             /* Find a candidate RHS identifier in the initializer (best-effort). */
             (void)cc__subtree_find_first_ident_matching_scope(nodes, kids, idx, scopes, *io_scope_n, v->name, &copy_from);
 
-            /* Copy rule for decl initializers: `CCSlice t = s;` / `char* p = bytes;` */
+            /* Copy rule for decl initializers: `CCSlice t = s;` / `char* p = bytes;`
+             * Do not brand a named aggregate as a slice just because a field
+             * initializer mentions a slice ident (`Msg m = { .data = view }`). */
             if (copy_from && copy_from != v->name) {
                 CCSliceVar* rhs = cc__scopes_lookup(scopes, *io_scope_n, copy_from);
-                /* If we see assignment from an existing slice var, treat this decl as slice too
-                   (CCSlice prints as 'struct <anonymous>' in type_to_str). */
-                if (rhs && rhs->is_slice) v->is_slice = 1;
-                if (rhs && rhs->is_arena_slice_view) {
+                int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
+                int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
+                int lhs_slice_like = cc__type_spelling_is_slice_like(n->aux_s2);
+                /* Named aggregates (e.g. Msg) must not inherit is_slice from a
+                 * field initializer that mentions a slice ident. */
+                int named_aggregate = n->aux_s2 && n->aux_s2[0] && !lhs_slice_like;
+                if (rhs && rhs->is_slice) {
+                    if (lhs_slice_like || (is_simple_copy && !named_aggregate))
+                        v->is_slice = 1;
+                    else
+                        v->has_slice_field = 1;
+                }
+                if (rhs && rhs->has_slice_field) v->has_slice_field = 1;
+                if (rhs && rhs->is_arena_slice_view && v->is_slice) {
                     v->is_arena_slice_view = 1;
                     v->arena_name = rhs->arena_name;
                 }
@@ -1583,8 +1784,6 @@ static int cc__walk(int idx,
                     v->is_arena_ptr = 1;
                     v->arena_name = rhs->arena_name;
                 }
-                int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
-                int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
                 if (rhs && rhs->is_slice && rhs->move_only && !has_move_marker && is_simple_copy) {
                     cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE, "cannot copy unique slice '%s' (type T[:!])", copy_from);
                     fprintf(stderr, "  hint: unique slices have move-only semantics; use cc_move(x) to transfer ownership\n");

@@ -790,7 +790,7 @@ static inline int cc__chan_lock_spin_count(void) {
 }
 
 static inline void cc__chan_spin_hint(void) {
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__arm__)
     __asm__ volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(__i386__)
     __asm__ volatile("pause" ::: "memory");

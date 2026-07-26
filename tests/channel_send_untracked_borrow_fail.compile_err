@@ -1,1 +1,3 @@
 cannot send non-stable slice borrow
+channel-stable-borrow
+send_into

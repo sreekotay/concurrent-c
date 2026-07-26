@@ -1,0 +1,29 @@
+/* Fail: aggregate with a non-unique slice field and no sibling CCArena. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Msg {
+    CCSlice data;
+    size_t tag;
+} Msg;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    char[:] view = cc_arena_alloc_slice_bytes(&a, 16);
+    if (!view.ptr) return 1;
+    memset(view.ptr, 'x', view.len);
+
+    Msg m = { .data = view, .tag = 1 };
+
+    Msg[~4 >] tx;
+    Msg[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 2;
+    @defer ch.free();
+
+    /* ERROR: channel-stable-borrow (aggregate, no CCArena) */
+    (void)cc_channel_send(tx, m);
+
+    cc_arena_free(&a);
+    return 0;
+}
