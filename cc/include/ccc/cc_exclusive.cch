@@ -5,14 +5,18 @@
  *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
  *   CCExclusiveGuard g = m.lock();
  *   ... short critical section (do not @await) ...
- *   g.unlock();                              // idempotent (local `held`)
+ *   g.unlock();                              // idempotent (local NULL check)
  *   // also: excl->lock(name);  g.destroy();  excl->destroy();
  *
- * Double-release is fully local: `g.held` on the stack token.
+ * Double-release is fully local: a released guard holds a NULL entry.
  *
- * Lock word: 0 free, 1 locked, 2 contended.
- * Uncontended lock and unlock are inlined CAS operations. Contended unlock
- * hands ownership directly to one queued waiter without publishing FREE.
+ * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
+ * Uncontended lock is an inlined CAS; unlock is an inlined swap to FREE.
+ * Contended unlock wakes one queued waiter, which re-contends (barging):
+ * the lock stays available while the woken fiber is being scheduled.
+ *
+ * The lock word is the first field of the runtime entry, so a guard is a
+ * single entry pointer and the inline paths cast it directly.
  *
  * Each CCExclusive is its own name space. Later: @create / guard @destroy.
  */
@@ -28,21 +32,18 @@ extern "C" {
 
 typedef struct CCExclusive CCExclusive;
 
-#define CC_EXCL_FREE   0
-#define CC_EXCL_LOCKED 1
+#define CC_EXCL_FREE      0
+#define CC_EXCL_LOCKED    1
 #define CC_EXCL_CONTENDED 2
 
 typedef struct CCExclusiveMutex {
     CCExclusive* excl;
     uint64_t name;
-    _Atomic int* _state;
-    void* _entry;
+    void* _entry; /* runtime entry; lock word at offset 0 */
 } CCExclusiveMutex;
 
 typedef struct CCExclusiveGuard {
-    _Atomic int* _state;
-    void* _entry;
-    int held;
+    void* _entry; /* NULL when not held */
 } CCExclusiveGuard;
 
 CCExclusive* cc_exclusive_create(void);
@@ -50,26 +51,25 @@ void cc_exclusive_destroy(CCExclusive* excl);
 
 CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
 
-CCExclusiveGuard cc_exclusive_mutex_lock_slow(CCExclusiveMutex* m);
-void cc_exclusive_guard_unlock_impl(void* entry);
+/* Blocks until the entry's lock is owned by the caller. */
+void cc_exclusive_lock_entry_slow(void* entry);
+/* Called after an unlock swap observed CONTENDED: wake one waiter. */
+void cc_exclusive_unlock_contended(void* entry);
 
 static inline CCExclusiveGuard cc_exclusive_mutex_lock(CCExclusiveMutex* m) {
     CCExclusiveGuard g;
-    g._state = NULL;
     g._entry = NULL;
-    g.held = 0;
-    if (!m || !m->_state) return g;
+    if (!m || !m->_entry) return g;
 
+    _Atomic int* state = (_Atomic int*)m->_entry;
     int expected = CC_EXCL_FREE;
-    if (atomic_compare_exchange_weak_explicit(
-            m->_state, &expected, CC_EXCL_LOCKED,
+    if (!atomic_compare_exchange_weak_explicit(
+            state, &expected, CC_EXCL_LOCKED,
             memory_order_acquire, memory_order_relaxed)) {
-        g._state = m->_state;
-        g._entry = m->_entry;
-        g.held = 1;
-        return g;
+        cc_exclusive_lock_entry_slow(m->_entry);
     }
-    return cc_exclusive_mutex_lock_slow(m);
+    g._entry = m->_entry;
+    return g;
 }
 
 static inline CCExclusiveGuard cc_exclusive_lock(CCExclusive* excl, uint64_t name) {
@@ -78,19 +78,15 @@ static inline CCExclusiveGuard cc_exclusive_lock(CCExclusive* excl, uint64_t nam
 }
 
 static inline void cc_exclusive_guard_unlock(CCExclusiveGuard* g) {
-    if (!g || !g->held) return;
-    g->held = 0;
-    _Atomic int* state = g->_state;
+    if (!g || !g->_entry) return;
     void* entry = g->_entry;
-    g->_state = NULL;
     g->_entry = NULL;
-    if (!entry || !state) return;
 
-    int expected = CC_EXCL_LOCKED;
-    if (atomic_compare_exchange_strong_explicit(
-            state, &expected, CC_EXCL_FREE,
-            memory_order_release, memory_order_relaxed)) return;
-    cc_exclusive_guard_unlock_impl(entry);
+    _Atomic int* state = (_Atomic int*)entry;
+    if (atomic_exchange_explicit(state, CC_EXCL_FREE, memory_order_release)
+            == CC_EXCL_CONTENDED) {
+        cc_exclusive_unlock_contended(entry);
+    }
 }
 
 static inline void cc_exclusive_guard_destroy(CCExclusiveGuard* g) {
