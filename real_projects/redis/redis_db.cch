@@ -259,26 +259,35 @@ static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
 }
 
 /* ---- lazy expiration ----
- * One wall-clock sample per command: callers seed now_cache = -1 and every
- * expiry-aware helper reads through db_req_now, so a command sees a single
+ * One wall-clock sample per command: the command boundary owns a DbCmdClock
+ * (`DbCmdClock clock = {0}`) and every expiry-aware helper reads through
+ * `clock.now()` (UFCS → db_cmd_clock_now), so a command sees a single
  * consistent "now" (and the no-TTL hot path never touches the clock).
- * Deadlines are absolute wall milliseconds; 0 means no expiry. */
+ * Deadlines are absolute wall milliseconds; 0 = none. */
+typedef struct DbCmdClock {
+    int64_t now_ms;
+    bool sampled;
+} DbCmdClock;
+
 static int64_t redis_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
-static int64_t db_req_now(int64_t* now_cache) {
-    if (*now_cache < 0) *now_cache = redis_now_ms();
-    return *now_cache;
+/* UFCS: clock.now() */
+static int64_t db_cmd_clock_now(DbCmdClock* clock) {
+    if (!clock->sampled) {
+        clock->now_ms = redis_now_ms();
+        clock->sampled = true;
+    }
+    return clock->now_ms;
 }
 
 static CCStringRef !>(CCError) db_clone_key_ref(RedisDb* db, char[:] key) {
     @errhandler(CCError e) { return cc_err(e); }
-    CCResult_CCStringRef_CCError rr;
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
-    rr = key.to_ref(&db->key_arena);
+    CCStringRef !>(CCError) rr = key.to_ref(&db->key_arena);
     if (rr.is_err()) return cc_err(rr.error());
     return cc_ok(rr.value());
 }
@@ -296,10 +305,10 @@ static int64_t db_expires_get_key(RedisDb* db, char[:] key) {
     return db_expires_get(db, db_key_ref_borrow(&view, key));
 }
 
-static bool db_key_expired(RedisDb* db, char[:] key, int64_t* now_cache) {
+static bool db_key_expired(RedisDb* db, char[:] key, DbCmdClock* clock) {
     int64_t exp = db_expires_get_key(db, key);
     if (exp == 0) return false;
-    return db_req_now(now_cache) >= exp;
+    return clock.now() >= exp;
 }
 
 /* Set absolute deadline; when==0 clears TTL.  New TTL keys clone into key_arena
@@ -345,10 +354,10 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
 
 /* THE read path: every command that touches a key goes through here so
  * expired entries die on first contact (lazy expiration, no active cycle). */
-static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, int64_t* now_cache) {
+static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
     RedisEntry* cell = db_find_entry(db, key);
     if (!cell) return NULL;
-    if (db_key_expired(db, key, now_cache)) {
+    if (db_key_expired(db, key, clock)) {
         db_remove_entry(db, key, cell);
         return NULL;
     }
@@ -438,14 +447,14 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
         }
         *val = (RedisValue){ .str = owned_value };
         if (expires_at_ms != 0 || (db->expires && db->expires.len() > 0)) {
-            CCResult_void_CCError exp = db_expires_set(db, key, expires_at_ms);
+            void !>(CCError) exp = db_expires_set(db, key, expires_at_ms);
             if (exp.is_err()) return cc_err(exp.error());
         }
         return cc_ok(reply_simple("OK"));
     }
 
     {
-        CCResult_CCStringRef_CCError kr = db_clone_key_ref(db, key);
+        CCStringRef !>(CCError) kr = db_clone_key_ref(db, key);
         if (kr.is_err()) {
             db_release_value(db, &owned_value);
             return cc_err(kr.error());
@@ -453,7 +462,7 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
         CCStringRef owned_key = kr.value();
         RedisEntry entry;
         entry.val = (RedisValue){ .str = owned_value };
-        CCResult_void_CCError inserted = db_insert_value(db, owned_key, entry);
+        void !>(CCError) inserted = db_insert_value(db, owned_key, entry);
         if (inserted.is_err()) {
             db_release_value(db, &owned_value);
             return cc_err(inserted.error());
@@ -472,9 +481,9 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
 
 /* GET: num cells render at the boundary (arena-less @string → reply_arena). */
 static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
-                                     CCArena* reply_arena, int64_t* now_cache) {
+                                     CCArena* reply_arena, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return cc_ok(reply_null());
     RedisValue* val = &cell->val;
     switch (val) {
@@ -492,11 +501,11 @@ static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
 
 /* DEL/EXISTS share the variadic count shape: lazy expiry means a key that
  * timed out counts as absent for both (lookup_live reaps it first). */
-static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, int64_t* now_cache) {
+static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* clock) {
     int64_t removed = 0;
     if (!db || !db->entries) return reply_integer(0);
     for (size_t i = 0; i < nkeys; ++i) {
-        RedisEntry* cell = db_lookup_live(db, keys[i], now_cache);
+        RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         if (!cell) continue;
         db_remove_entry(db, keys[i], cell);
         removed++;
@@ -504,21 +513,21 @@ static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, int64_t* now_
     return reply_integer(removed);
 }
 
-static RedisReply db_exists(RedisDb* db, CCSlice* keys, size_t nkeys, int64_t* now_cache) {
+static RedisReply db_exists(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* clock) {
     int64_t found = 0;
     for (size_t i = 0; i < nkeys; ++i) {
-        if (db_lookup_live(db, keys[i], now_cache)) found++;
+        if (db_lookup_live(db, keys[i], clock)) found++;
     }
     return reply_integer(found);
 }
 
-static RedisReply db_type(RedisDb* db, char[:] key, int64_t* now_cache) {
+static RedisReply db_type(RedisDb* db, char[:] key, DbCmdClock* clock) {
     /* Only string values exist in this server. */
-    return reply_simple(db_lookup_live(db, key, now_cache) ? "string" : "none");
+    return reply_simple(db_lookup_live(db, key, clock) ? "string" : "none");
 }
 
-static RedisReply db_strlen(RedisDb* db, char[:] key, int64_t* now_cache) {
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+static RedisReply db_strlen(RedisDb* db, char[:] key, DbCmdClock* clock) {
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return reply_integer(0);
     RedisValue* val = &cell->val;
     switch (val) {
@@ -533,9 +542,9 @@ static RedisReply db_strlen(RedisDb* db, char[:] key, int64_t* now_cache) {
     return reply_integer(0);
 }
 
-static RedisReply !>(CCError) db_setnx(RedisDb* db, char[:] key, char[:] value, int64_t* now_cache) {
+static RedisReply !>(CCError) db_setnx(RedisDb* db, char[:] key, char[:] value, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (db_lookup_live(db, key, now_cache)) return cc_ok(reply_integer(0));
+    if (db_lookup_live(db, key, clock)) return cc_ok(reply_integer(0));
     db_set(db, key, value, 0) !>;
     return cc_ok(reply_integer(1));
 }
@@ -547,9 +556,9 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
                                         char[:] key,
                                         char[:] suffix,
                                         CCArena* scratch,
-                                        int64_t* now_cache) {
+                                        DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) {
         db_set(db, key, suffix, 0) !>;
         return cc_ok(reply_integer((int64_t)suffix.len));
@@ -591,11 +600,11 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
  * first with the same value-arena accounting as before (int64 carries no
  * destructor, so the manual release IS the drop).  Error paths leave the
  * cell untouched. */
-static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, int64_t* now_cache) {
+static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+    RedisEntry* cell = db_lookup_live(db, key, clock);
 
     int64_t value = delta;
     if (cell) {
@@ -627,15 +636,15 @@ static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta,
  * the key immediately and still answers 1 (redis semantics).  A deadline
  * past INT64_MAX clamps to "effectively never". */
 static RedisReply !>(CCError) db_expire_rel_ms(RedisDb* db, char[:] key, int64_t rel_ms,
-                                               int64_t* now_cache) {
+                                               DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return cc_ok(reply_integer(0));
     if (rel_ms <= 0) {
         db_remove_entry(db, key, cell);
         return cc_ok(reply_integer(1));
     }
-    int64_t now = db_req_now(now_cache);
+    int64_t now = clock.now();
     int64_t when = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
     db_expires_set(db, key, when) !>;
     return cc_ok(reply_integer(1));
@@ -643,21 +652,21 @@ static RedisReply !>(CCError) db_expire_rel_ms(RedisDb* db, char[:] key, int64_t
 
 /* TTL/PTTL: -2 missing key, -1 no expiry, else remaining time (TTL rounds
  * the millisecond remainder UP, matching redis's second-granularity view). */
-static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, int64_t* now_cache) {
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, DbCmdClock* clock) {
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return reply_integer(-2);
     {
         int64_t exp = db_expires_get_key(db, key);
         if (exp == 0) return reply_integer(-1);
-        int64_t rem = exp - db_req_now(now_cache);
+        int64_t rem = exp - clock.now();
         if (rem < 0) rem = 0;
         return reply_integer(in_ms ? rem : (rem + 999) / 1000);
     }
 }
 
-static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, int64_t* now_cache) {
+static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    RedisEntry* cell = db_lookup_live(db, key, now_cache);
+    RedisEntry* cell = db_lookup_live(db, key, clock);
     if (!cell) return cc_ok(reply_integer(0));
     if (db_expires_get_key(db, key) == 0) return cc_ok(reply_integer(0));
     db_expires_set(db, key, 0) !>;
@@ -665,15 +674,15 @@ static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, int64_t* now_
 }
 
 /* MGET → WIRE array in reply_arena.  Pass 1 reaps; pass 2 re-reads with
- * a stable now_cache. */
+ * a stable clock. */
 static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       CCSlice* keys,
                                       size_t nkeys,
                                       CCArena* reply_arena,
-                                      int64_t* now_cache) {
+                                      DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     for (size_t i = 0; i < nkeys; ++i) {
-        (void)db_lookup_live(db, keys[i], now_cache);
+        (void)db_lookup_live(db, keys[i], clock);
     }
 
     CCSlice vals[REDIS_ARGV_MAX];
@@ -683,7 +692,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
      * shortfall below and the loop doubles. */
     size_t cap = 16;
     for (size_t i = 0; i < nkeys; ++i) {
-        RedisEntry* cell = db_lookup_live(db, keys[i], now_cache);
+        RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         found[i] = cell != NULL;
         if (cell) {
             RedisValue* val = &cell->val;
@@ -752,14 +761,14 @@ static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
 
 /* DBSIZE counts only live entries: expired-but-unreaped cells are skipped
  * (not deleted — no map mutation during iteration). */
-static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
+static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
     int64_t n = 0;
     CCStringRef k;
     RedisEntry v;
     if (!db || !db->entries) return reply_integer(0);
     CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
         int64_t exp = db_expires_get(db, k);
-        if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+        if (exp != 0 && clock.now() >= exp) continue;
         (void)v;
         n++;
     }
@@ -769,14 +778,17 @@ static RedisReply db_dbsize(RedisDb* db, int64_t* now_cache) {
 /* FLUSHDB/FLUSHALL (one logical DB, so they are the same operation): a
  * mass-DEL.  Values are released with the usual accounting, then the map is
  * cleared in one shot; key bytes follow the standing DEL policy (arena-held
- * until db teardown). */
+ * until db teardown).  Dense at_ptr/key_ptr so release hits the live cell
+ * (same discipline as get_ptr — not a by-value FOREACH alias). */
 static RedisReply db_flush(RedisDb* db) {
-    CCStringRef k;
-    RedisEntry v;
     if (!db || !db->entries) return reply_simple("OK");
-    CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-        db_mem_stats_note_key_release(k.len());
-        RedisValue* val = &v.val;
+    size_t n = db->entries.len();
+    for (size_t i = 0; i < n; ++i) {
+        CCStringRef* k = db->entries.key_ptr(i);
+        RedisEntry* cell = db->entries.at_ptr(i);
+        if (!k || !cell) continue;
+        db_mem_stats_note_key_release(k->len());
+        RedisValue* val = &cell->val;
         CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
         db_release_value(db, &doomed);
     }
@@ -789,7 +801,7 @@ static RedisReply db_flush(RedisDb* db) {
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena* reply_arena,
-                                      int64_t* now_cache) {
+                                      DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     /* Depth cap for glob_match's recursion (fiber stacks are ~2MiB). */
     enum { k_keys_pattern_max = 512 };
@@ -806,7 +818,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
             CCSlice ks;
             int64_t exp = db_expires_get(db, k);
-            if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+            if (exp != 0 && clock.now() >= exp) continue;
             (void)v;
             ks = k.as_slice();
             if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
@@ -826,7 +838,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
             CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
                 CCSlice ks;
                 int64_t exp = db_expires_get(db, k);
-                if (exp != 0 && db_req_now(now_cache) >= exp) continue;
+                if (exp != 0 && clock.now() >= exp) continue;
                 (void)v;
                 ks = k.as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
@@ -860,12 +872,12 @@ static RedisReply !>(CCError) db_set_with_ttl(RedisDb* db,
                                               char[:] key,
                                               char[:] value,
                                               int64_t rel_ms,
-                                              int64_t* now_cache) {
+                                              DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
     if (rel_ms <= 0) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR invalid expire time"));
     }
-    int64_t now = db_req_now(now_cache);
+    int64_t now = clock.now();
     int64_t deadline = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
     return db_set(db, key, value, deadline);
 }

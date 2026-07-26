@@ -619,12 +619,12 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
 #include "redis_db.cch"
 
 /* Owner dispatch (@noblock).  Builders may borrow req/DB; ensure_owned runs
- * before the slot is released.  `now` sampled at most once (db_req_now). */
+ * before the slot is released.  DbCmdClock sampled at most once (clock.now()). */
 @noblock static RedisReply !>(CCError) execute_request_body(RedisDb* db,
                                                            RedisRequest* req,
                                                            CCArena* reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
-    int64_t now = -1;
+    DbCmdClock clock = {0};
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
@@ -634,40 +634,40 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         case REDIS_CMD_CONFIG_GET:
             return config_get_reply(req->argv[0], reply_arena);
         case REDIS_CMD_GET:
-            return db_get(db, req->argv[0], reply_arena, &now);
+            return db_get(db, req->argv[0], reply_arena, &clock);
         case REDIS_CMD_SET:
             return db_set(db, req->argv[0], req->argv[1], 0);
         case REDIS_CMD_SETNX:
-            return db_setnx(db, req->argv[0], req->argv[1], &now);
+            return db_setnx(db, req->argv[0], req->argv[1], &clock);
         case REDIS_CMD_SETEX: {
             char[:] secs_arg = req->argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
             return db_set_with_ttl(db, req->argv[0], req->argv[2],
-                                   expire_seconds_to_rel_ms(seconds), &now);
+                                   expire_seconds_to_rel_ms(seconds), &clock);
         }
         case REDIS_CMD_PSETEX: {
             char[:] ms_arg = req->argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &now);
+            return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &clock);
         }
         case REDIS_CMD_APPEND:
-            return db_append(db, req->argv[0], req->argv[1], &req->arena, &now);
+            return db_append(db, req->argv[0], req->argv[1], &req->arena, &clock);
         case REDIS_CMD_STRLEN:
-            return cc_ok(db_strlen(db, req->argv[0], &now));
+            return cc_ok(db_strlen(db, req->argv[0], &clock));
         case REDIS_CMD_TYPE:
-            return cc_ok(db_type(db, req->argv[0], &now));
+            return cc_ok(db_type(db, req->argv[0], &clock));
         case REDIS_CMD_DEL:
-            return cc_ok(db_del(db, req->argv, req->argc, &now));
+            return cc_ok(db_del(db, req->argv, req->argc, &clock));
         case REDIS_CMD_EXISTS:
-            return cc_ok(db_exists(db, req->argv, req->argc, &now));
+            return cc_ok(db_exists(db, req->argv, req->argc, &clock));
         case REDIS_CMD_INCR:
-            return db_incrby(db, req->argv[0], 1, &now);
+            return db_incrby(db, req->argv[0], 1, &clock);
         case REDIS_CMD_DECR:
-            return db_incrby(db, req->argv[0], -1, &now);
+            return db_incrby(db, req->argv[0], -1, &clock);
         case REDIS_CMD_INCRBY: {
             char[:] delta_arg = req->argv[1];
             int64_t delta = delta_arg.to_i64() !>;
-            return db_incrby(db, req->argv[0], delta, &now);
+            return db_incrby(db, req->argv[0], delta, &clock);
         }
         case REDIS_CMD_DECRBY: {
             char[:] delta_arg = req->argv[1];
@@ -676,36 +676,36 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
                 return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
                                        "ERR decrement would overflow"));
             };
-            return db_incrby(db, req->argv[0], neg, &now);
+            return db_incrby(db, req->argv[0], neg, &clock);
         }
         case REDIS_CMD_MGET:
-            return db_mget(db, req->argv, req->argc, reply_arena, &now);
+            return db_mget(db, req->argv, req->argc, reply_arena, &clock);
         case REDIS_CMD_MSET:
             return db_mset(db, req->argv, req->argc);
         case REDIS_CMD_EXPIRE: {
             char[:] secs_arg = req->argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
             return db_expire_rel_ms(db, req->argv[0],
-                                   expire_seconds_to_rel_ms(seconds), &now);
+                                   expire_seconds_to_rel_ms(seconds), &clock);
         }
         case REDIS_CMD_PEXPIRE: {
             char[:] ms_arg = req->argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return db_expire_rel_ms(db, req->argv[0], ms, &now);
+            return db_expire_rel_ms(db, req->argv[0], ms, &clock);
         }
         case REDIS_CMD_TTL:
-            return cc_ok(db_ttl(db, req->argv[0], false, &now));
+            return cc_ok(db_ttl(db, req->argv[0], false, &clock));
         case REDIS_CMD_PTTL:
-            return cc_ok(db_ttl(db, req->argv[0], true, &now));
+            return cc_ok(db_ttl(db, req->argv[0], true, &clock));
         case REDIS_CMD_PERSIST:
-            return db_persist(db, req->argv[0], &now);
+            return db_persist(db, req->argv[0], &clock);
         case REDIS_CMD_DBSIZE:
-            return cc_ok(db_dbsize(db, &now));
+            return cc_ok(db_dbsize(db, &clock));
         case REDIS_CMD_FLUSHDB:
         case REDIS_CMD_FLUSHALL:
             return cc_ok(db_flush(db));
         case REDIS_CMD_KEYS:
-            return db_keys(db, req->argv[0], reply_arena, &now);
+            return db_keys(db, req->argv[0], reply_arena, &clock);
         case REDIS_CMD_CC_MEMLOG: {
             /* Optional phase tag: CC.MEMLOG [phase].  Diagnostics may block stderr. */
             const char* phase = "cc-memlog";
@@ -980,10 +980,10 @@ static inline void reply_arena_reset(RedisConn* conn) {
         }
 
         /* Reserve-then-write.  [dbp = &db]: value-capture pointer (not [&db]). */
-        CCResult_bool_CCIoError queued =
+        bool !>(CCIoError) queued =
             conn->reply_tx.try_send_into(
                 (slot, arena) => [dbp = &db, req] {
-                    CCResult_RedisReply_CCError built =
+                    RedisReply !>(CCError) built =
                         execute_request(dbp, req, arena);
                     if (built.is_err()) *slot = err_reply(built.error());
                     else *slot = built.value();
@@ -1020,7 +1020,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
         bool has = rr_req_iter_next(req_iter, &req) !>;
         if (!has) break;
         conn->next_request_id++;
-        CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
+        bool !>(CCIoError) send_res = cc_channel_send(req_tx, req);
         if (cc_is_err(send_res) || !send_res.u.value) {
             redis_conn_release_slot(conn, req);
             return cc_ok(REDIS_PIPELINE_OWNER_UNAVAILABLE);
@@ -1037,7 +1037,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
     @defer reply_arena_reset(conn);
     while (window->replies_pending > 0) {
         RedisReply reply = {0};
-        CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
+        bool !>(CCIoError) recv_res = cc_channel_recv(conn->reply_rx, &reply);
         if (cc_is_err(recv_res) || !recv_res.u.value) return REDIS_PIPELINE_REPLY_CLOSED;
         window->replies_pending--;
         conn->inflight--;

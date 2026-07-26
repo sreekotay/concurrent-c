@@ -599,6 +599,8 @@ void Name_destroy(Name *map);
 int Name_insert(Name *map, K key, V value);
 V *Name_get(Name *map, K key);
 V *Name_get_ptr(Name *map, K key);
+V *Name_at_ptr(Name *map, size_t i);   /* dense row i in [0, len) */
+K *Name_key_ptr(Name *map, size_t i);  /* dense row i in [0, len) */
 bool Name_remove(Name *map, K key);
 bool Name_del(Name *map, K key);
 size_t Name_len(const Name *map);
@@ -609,17 +611,21 @@ void Name_clear(Name *map);
 
 `init` / `init_count` return null on allocation failure. `insert` returns zero
 on success and `-1` on failure. `get` / `get_ptr` return a pointer into the
-dense store or null. `cap` is the probe-table capacity (power of two), not the
-dense row capacity. `CC_ARRAY_MAP_FOREACH` iterates dense rows in insertion
-order (swap-remove on delete may reorder).
+dense store or null. `at_ptr` / `key_ptr` index the dense row store (live
+indices `[0, len)`); out of range returns null. Prefer them (or `get_ptr`)
+over by-value `CC_ARRAY_MAP_FOREACH` when releasing or mutating owned values.
+`cap` is the probe-table capacity (power of two), not the dense row capacity.
+`CC_ARRAY_MAP_FOREACH` iterates dense rows in insertion order (swap-remove on
+delete may reorder).
 
 Sugar `ArrayMap::[K, V]` / `array_map_new::[K, V]` /
 `array_map_new_count::[K, V]` lowers to the `ArrayMap_<K>_<V>` family with the
 same key hash/eq selection as `Map::[K, V]` for built-in key kinds (`int`,
 `uint64_t`, `CCSlice`, `CCSliceHdr`).
 
-Array-map UFCS maps `insert`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
-`live_bytes`, `clear`, and `destroy` to the generated family.
+Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`, `remove`,
+`del`, `len`, `cap`, `live_bytes`, `clear`, and `destroy` to the generated
+family.
 
 ### Static maps
 

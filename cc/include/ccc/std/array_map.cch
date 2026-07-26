@@ -256,6 +256,18 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
                                                                                       \
     static inline V *Name##_get(Name *m, K key) { return Name##_get_ptr(m, key); }   \
                                                                                       \
+    /* Dense-row accessors for live indices [0, len).  Prefer these (or             \
+     * get_ptr(key)) over by-value FOREACH when releasing/mutating owned V. */      \
+    static inline V *Name##_at_ptr(Name *m, size_t i) {                               \
+        if (!m || i >= m->len) return NULL;                                           \
+        return &m->dense[i].val;                                                      \
+    }                                                                                 \
+                                                                                      \
+    static inline K *Name##_key_ptr(Name *m, size_t i) {                              \
+        if (!m || i >= m->len) return NULL;                                           \
+        return &m->dense[i].key;                                                      \
+    }                                                                                 \
+                                                                                      \
     static inline int Name##_insert(Name *m, K key, V val) {                          \
         size_t bucket = 0;                                                            \
         size_t di;                                                                    \
@@ -306,7 +318,8 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
                                                                                       \
     static inline bool Name##_remove(Name *m, K key) { return Name##_del(m, key); }
 
-/* Iterate live dense rows. k_var / v_var assigned by value each step. */
+/* Iterate live dense rows. k_var / v_var assigned by value each step.
+ * For owned-value release/mutation use at_ptr / key_ptr (or get_ptr). */
 #define CC_ARRAY_MAP_FOREACH(h, k_var, v_var)                                         \
     for (size_t __cc_am_i = 0;                                                        \
          (h) && __cc_am_i < (h)->len &&                                               \
