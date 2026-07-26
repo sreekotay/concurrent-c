@@ -1200,12 +1200,26 @@ static void sched_v2_wake(int worker_hint) {
  * ============================================================================ */
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f) {
-    int expected = fiber_v2_state_base(atomic_load_explicit(&f->state, memory_order_acquire));
-    if (expected != FIBER_V2_QUEUED) {
-        fprintf(stderr, "[sched_v2] BUG: thread %d got fiber in state %d\n", tid, expected);
+    int raw = atomic_load_explicit(&f->state, memory_order_acquire);
+    if (fiber_v2_state_base(raw) != FIBER_V2_QUEUED) {
+        fprintf(stderr, "[sched_v2] BUG: thread %d got fiber in state %d\n", tid,
+                fiber_v2_state_base(raw));
         return;
     }
-    atomic_store_explicit(&f->state, FIBER_V2_RUNNING, memory_order_release);
+    /* QUEUED -> RUNNING must be an RMW that carries SIGNAL_PENDING: a
+     * signal racing this pickup CASes the pending bit onto QUEUED, and a
+     * plain store here would wipe it — the fiber could then re-check its
+     * wait condition before the signaler published it, park, and lose the
+     * wake.  Carrying the bit makes the park-commit requeue instead. */
+    for (;;) {
+        int desired = FIBER_V2_RUNNING | (raw & FIBER_V2_FLAG_SIGNAL_PENDING);
+        if (atomic_compare_exchange_weak_explicit(&f->state, &raw, desired,
+                memory_order_acq_rel, memory_order_acquire)) {
+            break;
+        }
+        /* CAS failure can only mean a signal toggled the pending bit;
+         * only this worker moves the fiber out of QUEUED. */
+    }
     f->last_thread_id = tid;
     tls_v2_current_fiber = f;
     f->park_reason = NULL;
@@ -1320,7 +1334,12 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
 
     int raw_state = atomic_load_explicit(&f->state, memory_order_acquire);
     if (f->yield_kind == V2_YIELD_YIELD || fiber_v2_state_has_signal_pending(raw_state)) {
-        atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
+        /* Exchange, not store: consuming SIGNAL_PENDING must stay inside
+         * the state word's RMW release chain (see sched_v2_signal), so the
+         * pickup that follows this requeue acquires the signaler's prior
+         * stores before the fiber re-checks its wait condition. */
+        (void)atomic_exchange_explicit(&f->state, FIBER_V2_QUEUED,
+                                       memory_order_acq_rel);
         sched_v2_enqueue_runnable(f);
         if (f->yield_kind == V2_YIELD_YIELD) {
             V2_STAT_INC(g_v2_run_yield_requeue);
@@ -1330,14 +1349,15 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         return;
     }
 
-    expected = FIBER_V2_RUNNING;
+    int expected = FIBER_V2_RUNNING;
     if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_V2_PARKED,
             memory_order_acq_rel, memory_order_relaxed)) {
         int fail_state = fiber_v2_state_base(expected);
         if (fail_state >= 0 && fail_state < FIBER_V2_STATE_COUNT) {
             V2_STAT_INC(g_v2_run_commit_park_fail_state[fail_state]);
         }
-        atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
+        (void)atomic_exchange_explicit(&f->state, FIBER_V2_QUEUED,
+                                       memory_order_acq_rel);
         sched_v2_enqueue_runnable(f);
         V2_STAT_INC(g_v2_run_pending_requeue);
         return;
@@ -1349,44 +1369,60 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
  * Signal: publish runnable work through state only
  * ============================================================================ */
 
+/*
+ * Signal contract: the caller published its data (release-stored a flag the
+ * fiber re-checks) BEFORE calling; the fiber re-checks that flag after any
+ * wake.  Two rules make this loss-proof:
+ *
+ *   1. Every exit lands a SUCCESSFUL RMW on f->state — even the branches
+ *      that change nothing (pending already set, IDLE/DEAD drop) perform a
+ *      validating CAS.  A plain-load no-op is unsound twice over: the load
+ *      can race the park/requeue transitions (deciding "already pending"
+ *      exactly while the fiber consumes that bit and re-checks the caller's
+ *      flag it cannot yet see), and it contributes no release edge.
+ *
+ *   2. Together with the RMW transitions in thread_v2_run_fiber (pickup,
+ *      requeue) this makes the state word an unbroken RMW release chain:
+ *      the pickup's acquire that precedes the fiber's re-check observes
+ *      every store made before ANY earlier signal, including ours.
+ *
+ * A signal on QUEUED/RUNNING sets the sticky SIGNAL_PENDING bit; pickup
+ * carries it into RUNNING and the park-commit converts it to a requeue, so
+ * the fiber always re-checks after the wake.  IDLE/DEAD drop (validated).
+ */
 void sched_v2_signal(fiber_v2* f) {
-    while (1) {
-        int expected = atomic_load_explicit(&f->state, memory_order_acquire);
+    int expected = atomic_load_explicit(&f->state, memory_order_acquire);
+    for (;;) {
         int base_state = fiber_v2_state_base(expected);
-        if (base_state == FIBER_V2_QUEUED) {
-            V2_STAT_INC(g_v2_signal_ok);
-            return;
-        }
-        if (base_state == FIBER_V2_RUNNING) {
-            if (fiber_v2_state_has_signal_pending(expected)) {
-                V2_STAT_INC(g_v2_signal_running_pending_already_set);
-                V2_STAT_INC(g_v2_signal_pending);
-                return;
-            }
-            int desired = expected | FIBER_V2_FLAG_SIGNAL_PENDING;
-            if (!atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
-                    memory_order_acq_rel, memory_order_relaxed)) {
-                continue;
-            }
-            V2_STAT_INC(g_v2_signal_running_pending_set);
-            V2_STAT_INC(g_v2_signal_pending);
-            return;
-        }
+        int desired;
         if (base_state == FIBER_V2_PARKED) {
-            int desired = FIBER_V2_QUEUED;
-            if (!atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
-                    memory_order_acq_rel, memory_order_relaxed)) {
-                continue;
+            desired = FIBER_V2_QUEUED;
+        } else if (base_state == FIBER_V2_QUEUED || base_state == FIBER_V2_RUNNING) {
+            desired = expected | FIBER_V2_FLAG_SIGNAL_PENDING;
+        } else {
+            desired = expected; /* IDLE/DEAD: validated drop */
+        }
+        if (atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
+                memory_order_acq_rel, memory_order_acquire)) {
+            if (base_state == FIBER_V2_PARKED) {
+                V2_STAT_INC(g_v2_signal_ok);
+                sched_v2_enqueue_runnable(f);
+            } else if (base_state == FIBER_V2_QUEUED || base_state == FIBER_V2_RUNNING) {
+                if (fiber_v2_state_has_signal_pending(expected)) {
+                    V2_STAT_INC(g_v2_signal_running_pending_already_set);
+                } else {
+                    V2_STAT_INC(g_v2_signal_running_pending_set);
+                }
+                V2_STAT_INC(g_v2_signal_pending);
+            } else {
+                V2_STAT_INC(g_v2_signal_dropped);
+                if (base_state >= 0 && base_state < FIBER_V2_STATE_COUNT) {
+                    V2_STAT_INC(g_v2_signal_dropped_state[base_state]);
+                }
             }
-            V2_STAT_INC(g_v2_signal_ok);
-            sched_v2_enqueue_runnable(f);
             return;
         }
-        V2_STAT_INC(g_v2_signal_dropped);
-        if (base_state >= 0 && base_state < FIBER_V2_STATE_COUNT) {
-            V2_STAT_INC(g_v2_signal_dropped_state[base_state]);
-        }
-        return;
+        /* CAS failure refreshed `expected`; retry against the live value. */
     }
 }
 
