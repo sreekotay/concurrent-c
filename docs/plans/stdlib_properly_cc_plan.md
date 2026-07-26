@@ -198,6 +198,13 @@ Landed: Result-primary `cc_http_get` / `cc_http_post` / `cc_http_client_get` /
 Result-primary with caller-arena lifetime for response/error slices. No
 public `*_result` sidecar or taught `CCHttpErrorInfo*` out-param.
 
+Compiler support: register
+`CCResult_CCHttpResponse_CCHttpErrorInfo` /
+`CCResult_CCParsedUrl_CCHttpError` in
+`cc__stdlib_predeclared_result_specs`, and make
+`cc__ru_err_type_from_result_name` consult that table so Err types with
+underscores (`CCHttpErrorInfo`) type `!>(e)` binders correctly.
+
 ### Phase 4 — TLS / DNS
 
 Mirror Phase 2. Deduplicate DNS decls.
