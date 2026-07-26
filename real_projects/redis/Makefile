@@ -33,30 +33,36 @@ $(REDIS_SRC_DIR)/src/redis-benchmark: $(REDIS_SRC_DIR)/src/redis-server
 
 upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(REDIS_SRC_DIR)/src/redis-benchmark
 
-$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
+
+# Table-lock variant: connection fibers execute directly under one named
+# exclusive lock; no owner fiber, no request/reply channels.
+$(OUT_DIR)/redis_lock: redis_lock.ccs redis_cc/redis_cc.cch redis_db.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_lock.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
 # Reader A/B variants: gen (the default @grammar reader, same as plain
 # redis_idiomatic) and hand (-DREDIS_RESP_HAND selects redis_resp.cch's
 # handrolled reader).  Distinct outputs so both coexist for bench_readers.sh.
-$(OUT_DIR)/redis_idiomatic_gen: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic_gen: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
-$(OUT_DIR)/redis_idiomatic_hand: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic_hand: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS) -DREDIS_RESP_HAND=1"
 
 # Profile: optimized release build with symbols (sample / Instruments).
-$(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS) -g"
 
 # Debug: symbols + light optimization (lldb-friendly without pathological slowdown).
-$(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
+$(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch | $(OUT_DIR)
 	$(CCC) -o $@ redis_idiomatic.ccs --cc-flags "$(REDIS_IDIOMATIC_DEFS) -g -Og"
 
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
+redis_lock: $(OUT_DIR)/redis_lock
 redis_idiomatic_gen: $(OUT_DIR)/redis_idiomatic_gen
 redis_idiomatic_hand: $(OUT_DIR)/redis_idiomatic_hand
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
@@ -74,4 +80,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config
