@@ -1745,7 +1745,10 @@ static int cc__emit_plan_block_references_container(const char* src, size_t bloc
          * Map_/ArrayMap_ below. */
         if ((si + 14 <= block_end && memcmp(src + si, "__CC_ARRAY_MAP", 14) == 0) ||
             memcmp(src + si, "__CC_MAP", 8) == 0 ||
-            memcmp(src + si, "__CC_VEC", 8) == 0) {
+            memcmp(src + si, "__CC_VEC", 8) == 0 ||
+            (si + 11 <= block_end && memcmp(src + si, "ArrayMap::[", 11) == 0) ||
+            (si + 6 <= block_end && memcmp(src + si, "Map::[", 6) == 0) ||
+            (si + 6 <= block_end && memcmp(src + si, "Vec::[", 6) == 0)) {
             refs_container = 1;
         } else if ((si + 9 <= block_end && memcmp(src + si, "ArrayMap_", 9) == 0) ||
                    (si + 4 < block_end && memcmp(src + si, "Map_", 4) == 0 &&
@@ -1855,12 +1858,15 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
             continue;
         }
         if (src[p] == '#') {
-            /* Skip whole #if/#ifdef/#ifndef … #endif regions.  A one-line
-             * skip used to land the container anchor between `#define FOO_DEFINED 1`
-             * and the body of an already-satisfied `#ifndef`, so ArrayMap
-             * monomorphs for builtin payloads (e.g. int64_t) were nested
-             * inside a dead branch and never compiled — while user-typed
-             * payloads (delayed past a local typedef) stayed healthy. */
+            /* Skip whole #if/#ifdef/#ifndef … #endif regions when they do not
+             * host container typedefs.  A one-line skip used to land the
+             * container anchor between `#define FOO_DEFINED 1` and the body of
+             * an already-satisfied `#ifndef`, so ArrayMap monomorphs for
+             * builtin payloads (e.g. int64_t) nested inside a dead branch and
+             * never compiled.  Skipping the whole region fixes that — but
+             * include-guarded impl .cch that wraps `typedef ArrayMap::…`
+             * must still be entered: otherwise the monomorph lands after
+             * `#endif` and the typedef sees an unknown type. */
             size_t kw = p + 1;
             while (kw < line_end && (src[kw] == ' ' || src[kw] == '\t')) kw++;
             int is_if = 0;
@@ -1875,6 +1881,7 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
                 is_if = 1;
             if (is_if) {
                 int depth = 1;
+                int region_refs_container = 0;
                 size_t q = (line_end < len) ? line_end + 1 : line_end;
                 while (q < len && depth > 0) {
                     size_t ls = q, le = q;
@@ -1896,11 +1903,48 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
                         else if (k + 5 <= le && memcmp(src + k, "endif", 5) == 0 &&
                                  (k + 5 == le || !cc_is_ident_char(src[k + 5])))
                             depth--;
+                    } else if (depth == 1 && !region_refs_container && r < le &&
+                               ((r + 7 <= le && memcmp(src + r, "typedef", 7) == 0 &&
+                                 !cc_is_ident_char(src[r + 7])) ||
+                                (r + 6 <= le && memcmp(src + r, "struct", 6) == 0 &&
+                                 !cc_is_ident_char(src[r + 6])) ||
+                                (r + 5 <= le && memcmp(src + r, "union", 5) == 0 &&
+                                 !cc_is_ident_char(src[r + 5])) ||
+                                (r + 4 <= le && memcmp(src + r, "enum", 4) == 0 &&
+                                 !cc_is_ident_char(src[r + 4])))) {
+                        int is_typedef_block =
+                            (r + 7 <= le && memcmp(src + r, "typedef", 7) == 0 &&
+                             !cc_is_ident_char(src[r + 7]));
+                        size_t block_start = r;
+                        size_t b = r;
+                        int brace_depth = 0;
+                        size_t block_end = len;
+                        while (b < len) {
+                            char c = src[b];
+                            if (c == '{') brace_depth++;
+                            else if (c == '}') { if (brace_depth > 0) brace_depth--; }
+                            else if (c == ';' && brace_depth == 0) {
+                                b++;
+                                if (b < len && src[b] == '\n') b++;
+                                block_end = b;
+                                break;
+                            }
+                            b++;
+                        }
+                        if (b >= len) block_end = len;
+                        if (cc__emit_plan_block_references_container(
+                                src, block_start, block_end, is_typedef_block))
+                            region_refs_container = 1;
                     }
                     q = (le < len) ? le + 1 : le;
                 }
-                pos = q;
-                continue;
+                if (!region_refs_container) {
+                    pos = q;
+                    continue;
+                }
+                /* Include-guard (or live conditional) hosting a container
+                 * typedef: fall through to the one-line `#` skip so the
+                 * normal typedef walk can place the anchor before first use. */
             }
             /* Also consume backslash-continued physical lines so a
              * multi-line `#define … _Generic( \\` (result unwrap arms)

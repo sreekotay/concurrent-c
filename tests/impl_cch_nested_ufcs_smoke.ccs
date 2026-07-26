@@ -1,0 +1,39 @@
+/*
+ * Smoke: UFCS inside a NESTED include of a spliced impl-grade .cch must
+ * lower and run. This is the redis_db.cch -> redis_mem.cch composition:
+ * the nested file does UFCS on a map type declared by the outer header,
+ * so it cannot lower standalone — only in the spliced TU context.
+ *
+ * A diagnostics fail-oracle (diag_oracle_ufcs_spliced_fail) cannot cover
+ * this: its intentional error aborts before TCC would ever trip over
+ * un-lowered nested text. This test has no error in it anywhere — it
+ * pins that the nested lowering itself happens, and that text after the
+ * nested include (outer destroy) still lowers as well.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#include "impl_cch_nested_ufcs_outer.cch"
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(16));
+    NestedUfcsDb db = {0};
+    db.entries = array_map_new::[int, int](&a);
+    if (!db.entries) return 1;
+
+    if (db.entries.insert(1, 10) != 0) return 2;
+    if (db.entries.insert(2, 20) != 0) return 3;
+
+    if (nested_ufcs_len(db.entries) != 2) return 4;
+    /* cap + len + raw len (+1 for nonzero live bytes): cap >= len, raw == len */
+    if (nested_ufcs_report(&db) < 2 + 2 + 1) return 5;
+
+    NestedUfcsVal v = { .num = 7 };
+    int64_t n = v.num ?> 0;
+    if (n != 7) return 6;
+
+    nested_ufcs_destroy(&db);
+    cc_arena_free(&a);
+    printf("impl_cch_nested_ufcs_smoke: PASS\n");
+    return 0;
+}
