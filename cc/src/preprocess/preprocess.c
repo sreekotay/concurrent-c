@@ -2908,6 +2908,8 @@ static int cc__match_kw_at(const char* src, size_t n, size_t pos, const char* kw
 static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* type_name) {
     char base[128];
     size_t tlen;
+    static const char* const kws[] = { "CC_MAP_DECL_UFCS", "CC_ARRAY_MAP_DECL_UFCS" };
+    static const char* const markers[] = { "__cc_map_decl_ufcs__", "__cc_array_map_decl_ufcs__" };
     if (!src || !type_name || !type_name[0]) return 0;
     while (*type_name == ' ' || *type_name == '\t') type_name++;
     if (strncmp(type_name, "struct ", 7) == 0) type_name += 7;
@@ -2917,33 +2919,35 @@ static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* t
     if (tlen == 0 || tlen >= sizeof(base)) return 0;
     memcpy(base, type_name, tlen);
     base[tlen] = '\0';
-    for (size_t i = 0; i + strlen("CC_MAP_DECL_UFCS") < n; ++i) {
-        size_t p;
-        size_t ident_start;
-        size_t ident_end;
-        if (!cc__match_kw_at(src, n, i, "CC_MAP_DECL_UFCS")) continue;
-        p = cc_skip_ws_and_comments(src, n, i + strlen("CC_MAP_DECL_UFCS"));
-        if (p >= n || src[p] != '(') continue;
-        p = cc_skip_ws_and_comments(src, n, p + 1);
-        ident_start = p;
-        if (p >= n || !cc_is_ident_start(src[p])) continue;
-        p++;
-        while (p < n && cc_is_ident_char(src[p])) p++;
-        ident_end = p;
-        p = cc_skip_ws_and_comments(src, n, p);
-        if (p >= n || src[p] != ')') continue;
-        if (ident_end - ident_start == tlen && memcmp(src + ident_start, base, tlen) == 0) return 1;
+    for (size_t ki = 0; ki < sizeof(kws) / sizeof(kws[0]); ++ki) {
+        size_t kwlen = strlen(kws[ki]);
+        for (size_t i = 0; i + kwlen < n; ++i) {
+            size_t p;
+            size_t ident_start;
+            size_t ident_end;
+            if (!cc__match_kw_at(src, n, i, kws[ki])) continue;
+            p = cc_skip_ws_and_comments(src, n, i + kwlen);
+            if (p >= n || src[p] != '(') continue;
+            p = cc_skip_ws_and_comments(src, n, p + 1);
+            ident_start = p;
+            if (p >= n || !cc_is_ident_start(src[p])) continue;
+            p++;
+            while (p < n && cc_is_ident_char(src[p])) p++;
+            ident_end = p;
+            p = cc_skip_ws_and_comments(src, n, p);
+            if (p >= n || src[p] != ')') continue;
+            if (ident_end - ident_start == tlen && memcmp(src + ident_start, base, tlen) == 0) return 1;
+        }
     }
-    {
+    for (size_t mi = 0; mi < sizeof(markers) / sizeof(markers[0]); ++mi) {
         char marker[192];
-        int mlen = snprintf(marker, sizeof(marker), "__cc_map_decl_ufcs__%s", base);
-        if (mlen > 0 && (size_t)mlen < sizeof(marker)) {
-            for (size_t i = 0; i + (size_t)mlen <= n; ++i) {
-                if (memcmp(src + i, marker, (size_t)mlen) != 0) continue;
-                if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
-                if (i + (size_t)mlen < n && cc_is_ident_char(src[i + (size_t)mlen])) continue;
-                return 1;
-            }
+        int mlen = snprintf(marker, sizeof(marker), "%s%s", markers[mi], base);
+        if (mlen <= 0 || (size_t)mlen >= sizeof(marker)) continue;
+        for (size_t i = 0; i + (size_t)mlen <= n; ++i) {
+            if (memcmp(src + i, marker, (size_t)mlen) != 0) continue;
+            if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
+            if (i + (size_t)mlen < n && cc_is_ident_char(src[i + (size_t)mlen])) continue;
+            return 1;
         }
     }
     return 0;
@@ -9046,6 +9050,7 @@ static int cc__impl_cch_mark_spliced(const char* abs_src) {
 }
 
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path);
+static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len);
 
 /* Splice an implementation-grade header's raw source into `out` in place of
  * its include line.  Nested local includes inside the header are processed
@@ -9160,32 +9165,50 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 /* Implementation-grade headers bypass .h lowering: splice
                  * their raw source into the stream so the full TU pipeline
                  * lowers it in context (see the block comment above
-                 * cc__cch_text_is_impl_grade). */
-                if (realpath(child_path, child_abs) &&
-                    cc__local_cch_is_impl_grade(child_abs)) {
-                    if (cc__impl_cch_was_spliced(child_abs)) {
-                        /* Repeat include: the header's guard would make this
-                         * inert; keep a blank line so following lines in this
-                         * file keep their physical numbers. */
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                        changed = 1;
-                        i = (line_end < n) ? line_end + 1 : line_end;
-                        continue;
+                 * cc__cch_text_is_impl_grade).
+                 *
+                 * Also splice nested locals that still contain method-call
+                 * UFCS even when they are not themselves impl-grade (the
+                 * redis_db → redis_mem shape).  Interface-lowering those to
+                 * out/include/*.h leaves nested-only methods (e.g.
+                 * ArrayMap.live_bytes) dependent on a later UFCS splice /
+                 * writeback that can miss or half-rewrite on some hosts. */
+                if (realpath(child_path, child_abs)) {
+                    int splice_child = cc__local_cch_is_impl_grade(child_abs);
+                    if (!splice_child) {
+                        char* child_src = NULL;
+                        size_t child_len = 0;
+                        if (cc__read_file_text(child_abs, &child_src, &child_len) == 0 &&
+                            child_src &&
+                            cc__lowered_header_needs_ufcs_splice(child_src, child_len))
+                            splice_child = 1;
+                        free(child_src);
                     }
-                    {
-                        size_t line_no = 1;
-                        for (size_t k = 0; k < i; k++)
-                            if (src[k] == '\n') line_no++;
-                        if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
-                                                     child_abs, current_path,
-                                                     line_no) == 0) {
+                    if (splice_child) {
+                        if (cc__impl_cch_was_spliced(child_abs)) {
+                            /* Repeat include: the header's guard would make this
+                             * inert; keep a blank line so following lines in this
+                             * file keep their physical numbers. */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                             changed = 1;
                             i = (line_end < n) ? line_end + 1 : line_end;
                             continue;
                         }
+                        {
+                            size_t line_no = 1;
+                            for (size_t k = 0; k < i; k++)
+                                if (src[k] == '\n') line_no++;
+                            if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
+                                                         child_abs, current_path,
+                                                         line_no) == 0) {
+                                changed = 1;
+                                i = (line_end < n) ? line_end + 1 : line_end;
+                                continue;
+                            }
+                        }
+                        /* Unreadable header: fall through to the interface path
+                         * (which fails the same way it always has). */
                     }
-                    /* Unreadable header: fall through to the interface path
-                     * (which fails the same way it always has). */
                 }
                 lowered_path = cc__lower_local_cch_header(child_path);
                 if (lowered_path) {

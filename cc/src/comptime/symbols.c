@@ -1050,6 +1050,27 @@ int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
                 continue;
             }
         }
+        if (i + strlen("__cc_array_map_decl_ufcs__") < n &&
+            memcmp(src + i, "__cc_array_map_decl_ufcs__", strlen("__cc_array_map_decl_ufcs__")) == 0 &&
+            (i == 0 || !isalnum((unsigned char)src[i - 1])) && (i == 0 || src[i - 1] != '_')) {
+            char map_name[256];
+            size_t p = i + strlen("__cc_array_map_decl_ufcs__");
+            size_t s = p;
+            while (p < n && (src[p] == '_' || isalnum((unsigned char)src[p]))) p++;
+            if (p > s && p - s < sizeof(map_name)) {
+                int rc;
+                memcpy(map_name, src + s, p - s);
+                map_name[p - s] = '\0';
+                rc = cc__record_map_decl_ufcs(t, map_name);
+                if (rc != 0) {
+                    fprintf(stderr, "%s: error: failed to record array-map UFCS declaration for '%s'\n",
+                            input_path ? input_path : "<input>", map_name);
+                    return -1;
+                }
+                i = p;
+                continue;
+            }
+        }
         if (cc__match_kw_reg(src, n, i, "CC_MAP_DECL_UFCS")) {
             char map_name[256];
             size_t p = i;
@@ -1057,6 +1078,20 @@ int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
                 int rc = cc__record_map_decl_ufcs(t, map_name);
                 if (rc != 0) {
                     fprintf(stderr, "%s: error: failed to record map UFCS declaration for '%s'\n",
+                            input_path ? input_path : "<input>", map_name);
+                    return -1;
+                }
+                i = p;
+                continue;
+            }
+        }
+        if (cc__match_kw_reg(src, n, i, "CC_ARRAY_MAP_DECL_UFCS")) {
+            char map_name[256];
+            size_t p = i;
+            if (cc__parse_ident_call_1_reg(src, n, &p, "CC_ARRAY_MAP_DECL_UFCS", map_name, sizeof(map_name))) {
+                int rc = cc__record_map_decl_ufcs(t, map_name);
+                if (rc != 0) {
+                    fprintf(stderr, "%s: error: failed to record array-map UFCS declaration for '%s'\n",
                             input_path ? input_path : "<input>", map_name);
                     return -1;
                 }

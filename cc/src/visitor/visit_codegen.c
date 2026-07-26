@@ -171,11 +171,15 @@ static void cc__format_map_container_decl(char** buf, size_t* len, size_t* cap,
     if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
         snprintf(line, sizeof(line), "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
                  inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+        cc__sb_append_cstr_local(buf, len, cap, line);
+        /* Seed Map-style UFCS method table (incl. live_bytes) for symbols. */
+        snprintf(line, sizeof(line), "CC_ARRAY_MAP_DECL_UFCS(%s);\n", inst->mangled_name);
+        cc__sb_append_cstr_local(buf, len, cap, line);
     } else {
         snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
                  inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+        cc__sb_append_cstr_local(buf, len, cap, line);
     }
-    cc__sb_append_cstr_local(buf, len, cap, line);
     cc__emit_container_cc_type_info(buf, len, cap, inst->mangled_name);
 }
 

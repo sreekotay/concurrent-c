@@ -2171,6 +2171,8 @@ static void cc__builtin_map_decl(FILE* out, const CCTypeInstantiation* inst) {
     if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
         fprintf(out, "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+        /* Seed Map-style UFCS method table (incl. live_bytes) for symbols. */
+        fprintf(out, "CC_ARRAY_MAP_DECL_UFCS(%s);\n", inst->mangled_name);
         return;
     }
     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",

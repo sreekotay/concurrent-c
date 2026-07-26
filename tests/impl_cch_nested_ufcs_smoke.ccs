@@ -9,6 +9,9 @@
  * un-lowered nested text. This test has no error in it anywhere — it
  * pins that the nested lowering itself happens, and that text after the
  * nested include (outer destroy) still lowers as well.
+ *
+ * live_bytes is intentionally nested-only (no call site in this .ccs) so
+ * method registration / splice cannot cheat by seeding from the outer TU.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>

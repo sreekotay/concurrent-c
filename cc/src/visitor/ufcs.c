@@ -1449,7 +1449,8 @@ static int cc__emit_type_driven_dispatch(char* out,
             strcmp(method, "get") == 0 || strcmp(method, "get_ptr") == 0 ||
             strcmp(method, "remove") == 0 || strcmp(method, "del") == 0 ||
             strcmp(method, "clear") == 0 || strcmp(method, "destroy") == 0 ||
-            strcmp(method, "len") == 0) {
+            strcmp(method, "len") == 0 || strcmp(method, "cap") == 0 ||
+            strcmp(method, "live_bytes") == 0) {
             if (has_args) {
                 if (cc__recv_pass_direct(ctx, recv_is_ptr))
                     return snprintf(out, cap, "__cc_map_generic_%s(%s, ", method, recv);
