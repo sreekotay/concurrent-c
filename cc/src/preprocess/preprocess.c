@@ -8652,7 +8652,280 @@ static int cc__match_local_include_line(const char* line,
     return (*out_path_e > *out_path_s);
 }
 
+/* ---------------------------------------------------------------------------
+ * Implementation-grade local .cch headers.
+ *
+ * The eager .cch -> .h lowering above is interface-grade: it can rewrite type
+ * syntax (`T !>(E)`, `char[:]`, containers) but cannot lower statement-level
+ * CC constructs (`@errhandler`, `@defer`, `!>` unwrap statements, `@string`
+ * templates), `@variant` declarations/uses, or anything that needs the TU's
+ * comptime-executed type registry (packed variant arm sizes/niches).
+ *
+ * A local header that carries such constructs is therefore spliced RAW into
+ * the including TU's text at the include site — before comptime preparation
+ * and cc_preprocess_canonicalize — bracketed by `#line` provenance in and
+ * out, so the full TU pipeline processes it exactly as if the user had
+ * pasted it (C header-library semantics: each including TU compiles its own
+ * static copy; the header's own include guard keeps repeat inclusion inert).
+ * No lowered .h is written for these headers; the include line itself is
+ * consumed by the splice. Plain interface headers keep the fast path above.
+ */
+
+#define CC_IMPL_CCH_BEGIN_MARK "/*cc:impl_cch_begin:"
+#define CC_IMPL_CCH_END_MARK "/*cc:impl_cch_end:"
+
+/* True when header text contains constructs only the full TU pipeline can
+ * lower.  Comment/string aware.  `@comptime` blocks/functions and
+ * CC_GENERIC_FACTORY bodies are skipped (the interface pipeline strips and
+ * harvests those correctly); `T !>(E)` result-type syntax is allowed. */
+static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
+    static const char fac_kw[] = "CC_GENERIC_FACTORY";
+    static const char fac_kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
+    const size_t fac_len = sizeof(fac_kw) - 1;
+    const size_t fac_len_ext = sizeof(fac_kw_ext) - 1;
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src || n == 0) return 0;
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == 'C') {
+            size_t mlen = 0;
+            if (i + fac_len_ext <= n && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
+                (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                (i + fac_len_ext >= n || !cc_is_ident_char(src[i + fac_len_ext])))
+                mlen = fac_len_ext;
+            else if (i + fac_len <= n && memcmp(src + i, fac_kw, fac_len) == 0 &&
+                     (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                     (i + fac_len >= n || !cc_is_ident_char(src[i + fac_len])))
+                mlen = fac_len;
+            if (mlen) {
+                size_t p = cc_skip_ws_and_comments(src, n, i + mlen);
+                size_t rp = 0, body_r = 0;
+                if (p < n && src[p] == '(' && cc_find_matching_paren(src, n, p, &rp)) {
+                    p = cc_skip_ws_and_comments(src, n, rp + 1);
+                    if (p < n && src[p] == '{' && cc_find_matching_brace(src, n, p, &body_r)) {
+                        i = body_r + 1;
+                        continue;
+                    }
+                }
+                i += mlen;
+                continue;
+            }
+        }
+        if (c == '@' && i + 1 < n && cc_is_ident_start(src[i + 1])) {
+            if (cc_match_ident_kw(src, n, i + 1, "comptime")) {
+                size_t p = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("comptime") - 1));
+                size_t body_r = 0;
+                if (p < n && (cc_match_ident_kw(src, n, p, "if") ||
+                              cc_match_ident_kw(src, n, p, "for")))
+                    return 1;
+                if (p < n && src[p] == '{' && cc_find_matching_brace(src, n, p, &body_r)) {
+                    i = body_r + 1;
+                    continue;
+                }
+                /* @comptime function definition: skip signature + body. */
+                {
+                    size_t lp = 0, rp = 0;
+                    for (size_t q = p; q < n; q++) {
+                        if (src[q] == ';' || src[q] == '{') break;
+                        if (src[q] == '(') { lp = q; break; }
+                    }
+                    if (lp && cc_find_matching_paren(src, n, lp, &rp)) {
+                        size_t b = cc_skip_ws_and_comments(src, n, rp + 1);
+                        if (b < n && src[b] == '{' && cc_find_matching_brace(src, n, b, &body_r)) {
+                            i = body_r + 1;
+                            continue;
+                        }
+                    }
+                }
+                i++;
+                continue;
+            }
+            return 1;
+        }
+        if (c == '?' && c2 == '>') return 1;
+        if (c == '!' && c2 == '>') {
+            size_t j = i + 2;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' ||
+                             src[j] == '\n' || src[j] == '\r')) j++;
+            if (j >= n || src[j] != '(') return 1; /* statement unwrap */
+            i = j; /* `T !>(E)` result-type syntax: interface pipeline handles it */
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
+ * 0 interface, -1 classification in progress (include cycle break). */
+typedef struct {
+    char* path;
+    int grade;
+} CCCchGradeMemo;
+
+static CCCchGradeMemo* g_cch_grade_memo = NULL;
+static size_t g_cch_grade_memo_count = 0;
+static size_t g_cch_grade_memo_cap = 0;
+
+static CCCchGradeMemo* cc__cch_grade_memo_find(const char* abs_src) {
+    for (size_t i = 0; i < g_cch_grade_memo_count; i++) {
+        if (strcmp(g_cch_grade_memo[i].path, abs_src) == 0) return &g_cch_grade_memo[i];
+    }
+    return NULL;
+}
+
+static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
+    CCCchGradeMemo* e = cc__cch_grade_memo_find(abs_src);
+    if (e) { e->grade = grade; return; }
+    if (g_cch_grade_memo_count == g_cch_grade_memo_cap) {
+        size_t cap = g_cch_grade_memo_cap ? g_cch_grade_memo_cap * 2 : 8;
+        CCCchGradeMemo* nv = (CCCchGradeMemo*)realloc(g_cch_grade_memo, cap * sizeof(*nv));
+        if (!nv) return;
+        g_cch_grade_memo = nv;
+        g_cch_grade_memo_cap = cap;
+    }
+    g_cch_grade_memo[g_cch_grade_memo_count].path = strdup(abs_src);
+    if (!g_cch_grade_memo[g_cch_grade_memo_count].path) return;
+    g_cch_grade_memo[g_cch_grade_memo_count].grade = grade;
+    g_cch_grade_memo_count++;
+}
+
+/* Implementation-grade check, transitive over nested LOCAL quoted .cch
+ * includes: a header including an impl-grade header cannot lower to a clean
+ * .h either (the child is spliced, so the parent must be too).  System
+ * `<...>` includes are pre-lowered interface headers and are not walked. */
+static int cc__local_cch_is_impl_grade(const char* abs_src) {
+    char source_dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0;
+    int grade = 0;
+    CCCchGradeMemo* memo = cc__cch_grade_memo_find(abs_src);
+    if (memo) return memo->grade > 0;
+    cc__cch_grade_memo_set(abs_src, -1);
+    if (cc__read_file_text(abs_src, &src, &n) == 0 && src) {
+        if (cc__cch_text_is_impl_grade(src, n)) {
+            grade = 1;
+        } else if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) == 0) {
+            size_t i = 0;
+            while (i < n && !grade) {
+                size_t line_end = i;
+                size_t path_s = 0, path_e = 0;
+                while (line_end < n && src[line_end] != '\n') line_end++;
+                if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e) &&
+                    path_e >= path_s + 4 &&
+                    memcmp(src + i + path_e - 4, ".cch", 4) == 0) {
+                    char rel[PATH_MAX], child[PATH_MAX], child_abs[PATH_MAX];
+                    size_t rel_len = path_e - path_s;
+                    if (rel_len < sizeof(rel)) {
+                        memcpy(rel, src + i + path_s, rel_len);
+                        rel[rel_len] = '\0';
+                        snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
+                        if (realpath(child, child_abs) &&
+                            cc__local_cch_is_impl_grade(child_abs))
+                            grade = 1;
+                    }
+                }
+                i = (line_end < n) ? line_end + 1 : line_end;
+            }
+        }
+    }
+    free(src);
+    cc__cch_grade_memo_set(abs_src, grade);
+    return grade;
+}
+
+/* Headers already spliced into the current rewrite (one top-level call of
+ * cc_rewrite_local_cch_includes_to_lowered_headers), by realpath.  A repeat
+ * include of a spliced header is inert (its include guard would have made it
+ * a no-op) and is replaced with a blank line. */
+static char** g_spliced_impl_cch = NULL;
+static size_t g_spliced_impl_cch_count = 0;
+static size_t g_spliced_impl_cch_cap = 0;
+
+static void cc__reset_spliced_impl_cch(void) {
+    for (size_t i = 0; i < g_spliced_impl_cch_count; i++) free(g_spliced_impl_cch[i]);
+    g_spliced_impl_cch_count = 0;
+}
+
+static int cc__impl_cch_was_spliced(const char* abs_src) {
+    for (size_t i = 0; i < g_spliced_impl_cch_count; i++) {
+        if (strcmp(g_spliced_impl_cch[i], abs_src) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cc__impl_cch_mark_spliced(const char* abs_src) {
+    if (g_spliced_impl_cch_count == g_spliced_impl_cch_cap) {
+        size_t cap = g_spliced_impl_cch_cap ? g_spliced_impl_cch_cap * 2 : 8;
+        char** nv = (char**)realloc(g_spliced_impl_cch, cap * sizeof(*nv));
+        if (!nv) return -1;
+        g_spliced_impl_cch = nv;
+        g_spliced_impl_cch_cap = cap;
+    }
+    g_spliced_impl_cch[g_spliced_impl_cch_count] = strdup(abs_src);
+    if (!g_spliced_impl_cch[g_spliced_impl_cch_count]) return -1;
+    g_spliced_impl_cch_count++;
+    return 0;
+}
+
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path);
+
+/* Splice an implementation-grade header's raw source into `out` in place of
+ * its include line.  Nested local includes inside the header are processed
+ * recursively (interface children lower to .h include lines, impl children
+ * splice in turn).  `include_line_no` is the 1-based line of the include in
+ * the including file, used to restore `#line` provenance after the splice.
+ * Returns 0 on success, -1 when the header could not be read (caller falls
+ * back to the interface path). */
+static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap,
+                                    const char* child_abs,
+                                    const char* current_path,
+                                    size_t include_line_no) {
+    char* body = NULL;
+    size_t body_len = 0;
+    char* rew = NULL;
+    const char* use;
+    size_t use_len;
+    char ld[PATH_MAX + 64];
+    if (cc__read_file_text(child_abs, &body, &body_len) != 0 || !body) {
+        free(body);
+        return -1;
+    }
+    if (cc__impl_cch_mark_spliced(child_abs) != 0) {
+        free(body);
+        return -1;
+    }
+    rew = cc__rewrite_local_cch_includes_impl(body, body_len, child_abs);
+    use = rew ? rew : body;
+    use_len = rew ? strlen(rew) : body_len;
+    cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
+    cc_sb_append_cstr(out, out_len, out_cap, child_abs);
+    cc_sb_append_cstr(out, out_len, out_cap, "*/\n");
+    snprintf(ld, sizeof(ld), "#line 1 \"%s\"\n", child_abs);
+    cc_sb_append_cstr(out, out_len, out_cap, ld);
+    cc_sb_append(out, out_len, out_cap, use, use_len);
+    if (use_len == 0 || use[use_len - 1] != '\n')
+        cc_sb_append_cstr(out, out_len, out_cap, "\n");
+    cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_END_MARK);
+    cc_sb_append_cstr(out, out_len, out_cap, child_abs);
+    cc_sb_append_cstr(out, out_len, out_cap, "*/\n");
+    snprintf(ld, sizeof(ld), "#line %zu \"%s\"\n", include_line_no + 1, current_path);
+    cc_sb_append_cstr(out, out_len, out_cap, ld);
+    free(rew);
+    free(body);
+    return 0;
+}
+
 static const char* cc__lower_local_cch_header(const char* source_path) {
     char abs_src[PATH_MAX];
     char lowered_path[PATH_MAX];
@@ -8711,11 +8984,42 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
             if (rel_len >= 4 && strncmp(src + i + path_e - 4, ".cch", 4) == 0) {
                 char rel_path[PATH_MAX];
                 char child_path[PATH_MAX];
+                char child_abs[PATH_MAX];
                 const char* lowered_path;
                 if (rel_len >= sizeof(rel_path)) rel_len = sizeof(rel_path) - 1;
                 memcpy(rel_path, src + i + path_s, rel_len);
                 rel_path[rel_len] = '\0';
                 snprintf(child_path, sizeof(child_path), "%s/%s", current_dir, rel_path);
+                /* Implementation-grade headers bypass .h lowering: splice
+                 * their raw source into the stream so the full TU pipeline
+                 * lowers it in context (see the block comment above
+                 * cc__cch_text_is_impl_grade). */
+                if (realpath(child_path, child_abs) &&
+                    cc__local_cch_is_impl_grade(child_abs)) {
+                    if (cc__impl_cch_was_spliced(child_abs)) {
+                        /* Repeat include: the header's guard would make this
+                         * inert; keep a blank line so following lines in this
+                         * file keep their physical numbers. */
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                        changed = 1;
+                        i = (line_end < n) ? line_end + 1 : line_end;
+                        continue;
+                    }
+                    {
+                        size_t line_no = 1;
+                        for (size_t k = 0; k < i; k++)
+                            if (src[k] == '\n') line_no++;
+                        if (cc__splice_impl_cch_into(&out, &out_len, &out_cap,
+                                                     child_abs, current_path,
+                                                     line_no) == 0) {
+                            changed = 1;
+                            i = (line_end < n) ? line_end + 1 : line_end;
+                            continue;
+                        }
+                    }
+                    /* Unreadable header: fall through to the interface path
+                     * (which fails the same way it always has). */
+                }
                 lowered_path = cc__lower_local_cch_header(child_path);
                 if (lowered_path) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
@@ -8743,6 +9047,10 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path) {
     if (!src || input_len == 0 || !input_path || !input_path[0]) return NULL;
+    /* One top-level rewrite = one logical translation unit: repeat includes
+     * of an already-spliced implementation header are inert within it, but a
+     * later rewrite (reparse, comptime dylib TU) must splice afresh. */
+    cc__reset_spliced_impl_cch();
     return cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
 }
 

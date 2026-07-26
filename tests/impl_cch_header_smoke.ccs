@@ -1,0 +1,16 @@
+/* Implementation-grade .cch headers: a local header carrying @variant
+ * (plain and packed), @errhandler, @defer, and !> unwraps is spliced raw
+ * into the TU and lowered by the full pipeline.  Repeat inclusion is inert
+ * (the header's own guard). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "impl_cch_header_helper.cch"
+#include "impl_cch_header_helper.cch"
+
+int main(void) {
+    char[:] a = cc_slice_from_cstr("40");
+    char[:] b = cc_slice_from_cstr("2");
+    printf("sum=%lld\n", (long long)helper_sum(a, b));
+    printf("cell=%lld\n", (long long)helper_cell_roundtrip(7));
+    return 0;
+}

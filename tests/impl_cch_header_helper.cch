@@ -1,0 +1,51 @@
+/*
+ * Implementation-grade local header: carries statement-level CC constructs
+ * (@variant, @errhandler, @defer, !> unwraps) that the interface .cch -> .h
+ * lowering cannot handle.  The preprocessor splices this file's raw source
+ * into each including TU (C header-library semantics) so the full pipeline
+ * lowers it in context — including comptime niche registration for the
+ * packed variant below.
+ */
+#ifndef IMPL_CCH_HEADER_HELPER_CCH
+#define IMPL_CCH_HEADER_HELPER_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Plain variant with builtin-size arms. */
+@variant HelperVal {
+    num: int64_t;
+    flag: int;
+};
+
+/* Packed variant with a runtime-sized arm (needs the TU's comptime type
+ * registry — the original failure mode for headers like this). */
+@variant(packed) HelperCell {
+    str: CCString;
+    num: int64_t;
+};
+
+/* Result-returning function with statement unwrap + @errhandler. */
+static int64_t !>(CCError) helper_parse(char[:] s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t v = s.to_i64() !>;
+    return cc_ok(v);
+}
+
+/* @defer + UFCS + designated variant init + projection unwrap. */
+static int64_t helper_sum(char[:] a, char[:] b) {
+    HelperVal pv = { .num = 0 };
+    @defer (void)pv;
+    int64_t x = helper_parse(a) !> { return -1; };
+    int64_t y = helper_parse(b) !> { return -1; };
+    pv = (HelperVal){ .num = x + y };
+    int64_t out = pv.num !> { return -1; };
+    return out;
+}
+
+static int64_t helper_cell_roundtrip(int64_t v) {
+    HelperCell c = { .num = v };
+    int64_t got = c.num !> { return -1; };
+    return got;
+}
+
+#endif /* IMPL_CCH_HEADER_HELPER_CCH */
