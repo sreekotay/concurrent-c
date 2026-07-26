@@ -471,6 +471,37 @@ static inline CCString cc_gr_wunion_default_text(CCArena* a) {
 `, a);
 }
 
+/* Field-discriminated write: emit the discriminant int from arm tag
+ * (EQ → literal imm; GE → derived length expression), never from a stored lie. */
+static inline CCString cc_gr_wdisc_open_text(CCArena* a) {
+    return @string(`    { long long __wd;
+      switch (v->kind) {
+`, a);
+}
+
+static inline CCString cc_gr_wdisc_eq_text(CCArena* a, const char* sname,
+                                           const char* vname, long long imm) {
+    return @string(`      case ${sname}_${vname}: __wd = ${imm}LL; break;
+`, a);
+}
+
+static inline CCString cc_gr_wdisc_ge_text(CCArena* a, const char* sname,
+                                           const char* vname, const char* expr) {
+    return @string(`      case ${sname}_${vname}: __wd = (long long)(${expr}); break;
+`, a);
+}
+
+static inline CCString cc_gr_wdisc_close_text(CCArena* a) {
+    return @string(`      default: return 0;
+      }
+`, a);
+}
+
+static inline CCString cc_gr_wdisc_end_text(CCArena* a) {
+    return @string(`    }
+`, a);
+}
+
 /* writer-triplet function heads/tails and the checked _write entry.
  * measure's tail folds the whole structural skeleton to ONE constant. */
 static inline CCString cc_gr_write_head_text(CCArena* a, int md, const char* n) {
@@ -633,32 +664,35 @@ static inline CCString cc_gr_bind_slice_borrow_text(CCArena* a, int k,
 }
 
 /* counted opaque payload: exactly out->cfield bytes, borrowed */
-static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* pfx,
-                                             const char* cfield, const char* field,
-                                             const char* fail) {
-    return @string(`    { long long L${k} = out->${pfx}${cfield};
+/* cpfx: prefix for the length int; fpfx: prefix for the payload bind.
+ * They differ when a field-discriminated arm reads a product-level len. */
+static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* cpfx,
+                                             const char* cfield, const char* fpfx,
+                                             const char* field, const char* fail) {
+    return @string(`    { long long L${k} = out->${cpfx}${cfield};
       if (L${k} < 0) goto ${fail};
       if ((unsigned long long)L${k} > (unsigned long long)(n - p)) { *cc_inc = 1; goto ${fail}; }
-      out->${pfx}${field} = cc_slice_from_buffer((void*)(s + p), (size_t)L${k});
+      out->${fpfx}${field} = cc_slice_from_buffer((void*)(s + p), (size_t)L${k});
       p += (size_t)L${k}; }
 `, a);
 }
 
 /* count-driven items: cap > 0 fills the struct's INLINE array (zero
- * alloc; larger count is a protocol error), else exact-size allocation */
+ * alloc; larger count is a protocol error), else exact-size allocation.
+ * cpfx = count int prefix; fpfx = items bind prefix (may differ). */
 static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T,
-                                                const char* pfx, const char* field,
-                                                const char* cfield, int cap,
-                                                const char* fail) {
+                                                const char* cpfx, const char* cfield,
+                                                const char* fpfx, const char* field,
+                                                int cap, const char* fail) {
     if (cap > 0)
-        return @string(`    { long long C${k} = out->${pfx}${cfield};
+        return @string(`    { long long C${k} = out->${cpfx}${cfield};
       if (C${k} < 0 || C${k} > ${cap}) goto ${fail};
       if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
       for (long long i${k} = 0; i${k} < C${k}; i${k}++)
-          if (!${T}__fill(s, n, &p, arena, &out->${pfx}${field}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
-      out->${pfx}${field}_n = (size_t)C${k}; }
+          if (!${T}__fill(s, n, &p, arena, &out->${fpfx}${field}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
+      out->${fpfx}${field}_n = (size_t)C${k}; }
 `, a);
-    return @string(`    { long long C${k} = out->${pfx}${cfield};
+    return @string(`    { long long C${k} = out->${cpfx}${cfield};
       if (C${k} < 0) goto ${fail};
       if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
       size_t cap${k} = C${k} > 0 ? (size_t)C${k} : 1;
@@ -666,7 +700,7 @@ static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T
       if (!v${k}) goto ${fail};
       for (long long i${k} = 0; i${k} < C${k}; i${k}++)
           if (!${T}__fill(s, n, &p, arena, &v${k}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
-      out->${pfx}${field} = v${k}; out->${pfx}${field}_n = (size_t)C${k}; }
+      out->${fpfx}${field} = v${k}; out->${fpfx}${field}_n = (size_t)C${k}; }
 `, a);
 }
 
@@ -943,6 +977,39 @@ static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
 `, a);
 }
 
+/* Field-discriminated `one of ... by <field>`: discriminant already bound.
+ * Emitter passes sep="" for the first arm and "else " for later arms. */
+static inline CCString cc_gr_funion_open_text(CCArena* a, const char* pfx,
+                                              const char* field) {
+    return @string(`    { long long __d = out->${pfx}${field};
+`, a);
+}
+
+static inline CCString cc_gr_funion_eq_text(CCArena* a, const char* sep, long long imm,
+                                            const char* sname, const char* vname) {
+    return @string(`      ${sep}if (__d == ${imm}LL) {
+        out->kind = ${sname}_${vname};
+`, a);
+}
+
+static inline CCString cc_gr_funion_ge_text(CCArena* a, const char* sep, long long imm,
+                                            const char* sname, const char* vname) {
+    return @string(`      ${sep}if (__d >= ${imm}LL) {
+        out->kind = ${sname}_${vname};
+`, a);
+}
+
+static inline CCString cc_gr_funion_arm_end_text(CCArena* a) {
+    return @string(`      }
+`, a);
+}
+
+static inline CCString cc_gr_funion_fail_text(CCArena* a, const char* fail) {
+    return @string(`      else goto ${fail};
+    }
+`, a);
+}
+
 static inline CCString cc_gr_union_case_text(CCArena* a, int db,
                                              const char* sname, const char* vname) {
     CCString c = cc_gr_chr_text(a, db);
@@ -1161,6 +1228,12 @@ static inline CCString cc_gr_union_decl_close_text(CCArena* a) {
 
 static inline CCString cc_gr_empty_member_text(CCArena* a) {
     return @string(`    char cc__empty;
+`, a);
+}
+
+/* Unit variant arms (literals only): C forbids empty structs. */
+static inline CCString cc_gr_uempty_member_text(CCArena* a) {
+    return @string(`            char cc__empty;
 `, a);
 }
 

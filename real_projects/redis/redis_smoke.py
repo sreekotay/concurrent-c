@@ -219,7 +219,7 @@ def test_basics(port):
 
 def test_wire_parity(port):
     """Byte-exact wire replies: the generated schema writers (RespGReply /
-    RespGBulkHdr / RespGArrayHdr) must reproduce the retired hand encoders'
+    RespGBulk / RespGBulkHdr / RespGArrayHdr) must reproduce the retired hand encoders'
     bytes for every reply shape, including boundary nil and empty arrays."""
     print("[wire parity]")
     c = Resp(port)

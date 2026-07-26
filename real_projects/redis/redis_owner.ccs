@@ -197,8 +197,8 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 
 /* RESP writer (same shape as the reader).  cc_write allocates nothing;
  * hot replies go to out_buf; arrays encode into reply_arena.
- * Nil is not a RespGReply arm ('$' collides with bulk) — use RespGBulkHdr
- * with len = -1. */
+ * Non-nil bulk stays a RespGReply arm; nil bulk is RespGBulk (field-
+ * discriminated after `$`). */
 @grammar(schema) RespGReply {~~~~
     rules [
         digit:  charset [#'0' - #'9']
@@ -215,8 +215,31 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     ]
 ~~~~}
 
-/* Bulk header alone: "$<len>\r\n".  Two boundary jobs the union cannot do:
- * nil (len = -1, see above) and streaming a bulk payload larger than
+/* Bulk that may be nil: `$` then len, then framing by len
+ * ($-1\r\n vs $<n>\r\n<bytes>\r\n). Write derives len from the arm. */
+@grammar(schema) RespGBulk {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number
+    one of [
+        nil  [= -1] [ "\r\n" ]
+        data [>= 0] [ "\r\n" payload: bytes len "\r\n" ]
+    ] by len
+~~~~}
+
+/* Array of bulk-or-nil (MGET). */
+@grammar(schema) RespGBulkArray {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' n: int number "\r\n"
+    elems: items RespGBulk n
+~~~~}
+
+/* Bulk header alone: "$<len>\r\n" for streaming a payload larger than
  * conn->out_buf (schema-written header, then the payload slice). */
 @grammar(schema) RespGBulkHdr {~~~~
     rules [
@@ -226,9 +249,8 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     #'$' len: int number "\r\n"
 ~~~~}
 
-/* Multi-bulk header alone: "*<n>\r\n".  MGET interleaves bulk and nil
- * elements, and nil can't be a RespGReply array item — so its array is
- * written element-by-element under this schema-written header. */
+/* Multi-bulk header: "*<n>\r\n".  KEYS writes elements immediately (inline
+ * CCStringRef key bytes must not be staged across a later encode). */
 @grammar(schema) RespGArrayHdr {~~~~
     rules [
         digit:  charset [#'0' - #'9']
@@ -383,13 +405,25 @@ static RedisReply reply_wire(CCSlice s) {
 }
 
 /* RedisReply → socket bytes.  RespGReply is encode-only; NULL_BULK uses
- * RespGBulkHdr (nil is not a RespGReply arm). */
+ * RespGBulk's nil arm. */
 static inline RespGReply wire_bulk(CCSlice data) {
     RespGReply w;
     w.kind = RespGReply_bulk;
     w.u.bulk.len = (long long)data.len; /* derived on write; set for hygiene */
     w.u.bulk.data = data;
     return w;
+}
+
+static inline RespGBulk wire_bulk_or_nil(CCSlice data, bool found) {
+    RespGBulk b;
+    memset(&b, 0, sizeof b);
+    if (!found) {
+        b.kind = RespGBulk_nil;
+        return b;
+    }
+    b.kind = RespGBulk_data;
+    b.u.data.payload = data;
+    return b;
 }
 
 /* Structured arms → RespGReply.  WIRE and NULL_BULK are not projected here. */
@@ -416,7 +450,7 @@ static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
 }
 
 /* Serialize a channel RedisReply into dst.  WIRE copies; structured uses
- * RespGReply/cc_write; NULL_BULK uses RespGBulkHdr. */
+ * RespGReply/cc_write; NULL_BULK uses RespGBulk. */
 static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
     if (!reply || !dst) return 0;
     if (reply->kind == REDIS_REPLY_WIRE) {
@@ -425,8 +459,8 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
         return reply->data.len;
     }
     if (reply->kind == REDIS_REPLY_NULL_BULK) {
-        RespGBulkHdr nil = { .len = -1 };
-        return cc_write(RespGBulkHdr, &nil, dst, cap);
+        RespGBulk nil = { .kind = RespGBulk_nil };
+        return cc_write(RespGBulk, &nil, dst, cap);
     }
     RespGReply wire;
     if (!redis_reply_to_wire(reply, &wire)) return 0;

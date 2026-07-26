@@ -717,30 +717,21 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
         }
     }
 
-    /* Nil elements keep MGET off the single-array cc_write path (nil has no
-     * RespGReply variant — see the schema comment), so the array is written
-     * element-by-element under a schema-written "*<n>\r\n" header. */
+    RespGBulk elems[REDIS_ARGV_MAX];
+    for (size_t i = 0; i < nkeys; ++i)
+        elems[i] = wire_bulk_or_nil(vals[i], found[i]);
+
     for (;;) {
         CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
         CCSlice out = reply_arena_alloc_slice(reply_arena, cap) !>;
-        char* dst = (char*)out.ptr;
-        RespGArrayHdr hdr = { .n = (long long)nkeys };
-        size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
-        bool fit = off != 0;
-        for (size_t i = 0; fit && i < nkeys; ++i) {
-            size_t w;
-            if (found[i]) {
-                RespGReply elem = wire_bulk(vals[i]);
-                w = cc_write(RespGReply, &elem, dst + off, out.len - off);
-            } else {
-                RespGBulkHdr nil = { .len = -1 };
-                w = cc_write(RespGBulkHdr, &nil, dst + off, out.len - off);
-            }
-            fit = w != 0;
-            off += w;
-        }
-        if (fit) {
-            out.len = off;
+        RespGBulkArray arr;
+        memset(&arr, 0, sizeof arr);
+        arr.n = (long long)nkeys;
+        arr.elems = elems;
+        arr.elems_n = nkeys;
+        size_t w = cc_write(RespGBulkArray, &arr, (char*)out.ptr, out.len);
+        if (w != 0) {
+            out.len = w;
             return cc_ok(reply_wire(out));
         }
         cc_arena_restore(cp);
@@ -797,7 +788,10 @@ static RedisReply db_flush(RedisDb* db) {
     return reply_simple("OK");
 }
 
-/* KEYS → WIRE array in reply_arena (count, then encode; skip expired). */
+/* KEYS → WIRE array in reply_arena.  Count, then encode; write each bulk
+ * immediately so inline CCStringRef key bytes are copied before the next
+ * dense-row step (staging RespGReply items for a later cc_write mis-encodes
+ * under --release). */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena* reply_arena,
@@ -809,22 +803,19 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR KEYS pattern too long"));
     }
     const char* pat = (const char*)pattern.ptr;
-    CCStringRef k;
-    RedisEntry v;
 
     size_t matched = 0;
     size_t cap = 16;
-    if (db && db->entries) {
-        CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-            CCSlice ks;
-            int64_t exp = db_expires_get(db, k);
-            if (exp != 0 && clock.now() >= exp) continue;
-            (void)v;
-            ks = k.as_slice();
-            if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
-            matched++;
-            cap += ks.len + 24;
-        }
+    size_t n = (db && db->entries) ? db->entries.len() : 0;
+    for (size_t i = 0; i < n; ++i) {
+        CCStringRef* kp = db->entries.key_ptr(i);
+        if (!kp) continue;
+        int64_t exp = db_expires_get(db, *kp);
+        if (exp != 0 && clock.now() >= exp) continue;
+        CCSlice ks = kp->as_slice();
+        if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+        matched++;
+        cap += ks.len + 24;
     }
 
     for (;;) {
@@ -834,19 +825,17 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         RespGArrayHdr hdr = { .n = (long long)matched };
         size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
         bool fit = off != 0;
-        if (fit && db && db->entries) {
-            CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-                CCSlice ks;
-                int64_t exp = db_expires_get(db, k);
-                if (exp != 0 && clock.now() >= exp) continue;
-                (void)v;
-                ks = k.as_slice();
-                if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
-                RespGReply elem = wire_bulk(ks);
-                size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
-                if (w == 0) { fit = false; break; }
-                off += w;
-            }
+        for (size_t i = 0; fit && i < n; ++i) {
+            CCStringRef* kp = db->entries.key_ptr(i);
+            if (!kp) continue;
+            int64_t exp = db_expires_get(db, *kp);
+            if (exp != 0 && clock.now() >= exp) continue;
+            CCSlice ks = kp->as_slice();
+            if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+            RespGReply elem = wire_bulk(ks);
+            size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
+            if (w == 0) { fit = false; break; }
+            off += w;
         }
         if (fit) {
             out.len = off;

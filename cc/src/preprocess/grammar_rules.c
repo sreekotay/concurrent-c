@@ -1953,10 +1953,18 @@ typedef struct {
     char ipad[S_NAME];
     int rfkey, rfpad, rfelse, ripad;              /* resolved rule idx, -1 unset */
 
-    /* tagged union (`one of`): variants are product-term runs; dispatch is
-     * the first byte of each variant's leading literal (one optional
-     * non-literal DEFAULT arm — e.g. redis inline commands) */
-    struct { char name[S_NAME]; int t[16]; int nt; int db; } uv[24];
+    /* tagged union (`one of`): variants are product-term runs.
+     * Prefix mode (no `by`): dispatch is the first byte of each variant's
+     * leading literal (one optional non-literal DEFAULT arm).
+     * Field mode (`by <int-field>`): discriminant is that earlier int bind;
+     * each arm carries an EQ/GE constraint (constr/constr_imm). */
+    struct {
+        char name[S_NAME];
+        int t[16]; int nt;
+        int db;                 /* prefix mode: first lit byte, or -1 default */
+        int constr;             /* field mode: 0 unused, 1 =EQ, 2 =GE */
+        long long constr_imm;
+    } uv[24];
     int nuv;
     int uterm;                           /* the SK_UNION term idx, -1 none */
     signed char vof[S_MAX_TERMS];        /* term idx -> variant idx (-1 top) */
@@ -2162,6 +2170,7 @@ static int ss_term(SS* s, int* out_term) {
             s->p++;
             if (s->uterm >= 0) return ss_fail(s, s->p, "one union per schema");
             t->kind = SK_UNION;
+            t->cfield[0] = 0;   /* set by optional `by <field>` below */
             int self = s->nterms++;
             for (;;) {
                 ss_ws(s);
@@ -2171,6 +2180,57 @@ static int ss_term(SS* s, int* out_term) {
                 if (!ss_ident(s, vn, sizeof vn)) return ss_fail(s, s->p, "expected variant name");
                 snprintf(s->uv[s->nuv].name, S_NAME, "%s", vn);
                 s->uv[s->nuv].nt = 0;
+                s->uv[s->nuv].constr = 0;
+                s->uv[s->nuv].constr_imm = 0;
+                ss_ws(s);
+                /* Optional arm constraint before the product body:
+                 *   nil [= -1] [ ... ]   or   data [>= 0] [ ... ] */
+                if (s->p < s->n && s->b[s->p] == '[') {
+                    size_t saveb = s->p;
+                    s->p++;
+                    ss_ws(s);
+                    int is_constr = 0;
+                    if (s->p < s->n && s->b[s->p] == '=') {
+                        s->p++;
+                        ss_ws(s);
+                        long long imm = 0; int neg = 0;
+                        if (s->p < s->n && s->b[s->p] == '-') { neg = 1; s->p++; }
+                        if (!(s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9'))
+                            return ss_fail(s, s->p, "expected integer after '[='");
+                        while (s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9') {
+                            imm = imm * 10 + (s->b[s->p] - '0');
+                            s->p++;
+                        }
+                        if (neg) imm = -imm;
+                        ss_ws(s);
+                        if (!(s->p < s->n && s->b[s->p] == ']'))
+                            return ss_fail(s, s->p, "expected ']' after arm constraint");
+                        s->p++;
+                        s->uv[s->nuv].constr = 1;
+                        s->uv[s->nuv].constr_imm = imm;
+                        is_constr = 1;
+                    } else if (s->p + 1 < s->n && s->b[s->p] == '>' && s->b[s->p + 1] == '=') {
+                        s->p += 2;
+                        ss_ws(s);
+                        long long imm = 0; int neg = 0;
+                        if (s->p < s->n && s->b[s->p] == '-') { neg = 1; s->p++; }
+                        if (!(s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9'))
+                            return ss_fail(s, s->p, "expected integer after '[>='");
+                        while (s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9') {
+                            imm = imm * 10 + (s->b[s->p] - '0');
+                            s->p++;
+                        }
+                        if (neg) imm = -imm;
+                        ss_ws(s);
+                        if (!(s->p < s->n && s->b[s->p] == ']'))
+                            return ss_fail(s, s->p, "expected ']' after arm constraint");
+                        s->p++;
+                        s->uv[s->nuv].constr = 2;
+                        s->uv[s->nuv].constr_imm = imm;
+                        is_constr = 1;
+                    }
+                    if (!is_constr) s->p = saveb;   /* `[` opens the product body */
+                }
                 ss_ws(s);
                 if (!(s->p < s->n && s->b[s->p] == '[')) return ss_fail(s, s->p, "expected '[' after variant name");
                 s->p++;
@@ -2183,10 +2243,23 @@ static int ss_term(SS* s, int* out_term) {
                     s->vof[ti] = (signed char)s->nuv;
                     s->uv[s->nuv].t[s->uv[s->nuv].nt++] = ti;
                 }
-                if (s->uv[s->nuv].nt == 0) return ss_fail(s, s->p, "empty variant");
+                /* empty product is allowed for unit arms (e.g. nil → only lits) */
                 s->nuv++;
             }
             if (s->nuv < 2) return ss_fail(s, s->p, "one of needs at least two variants");
+            /* Optional `by <int-field>`: field-discriminated union. */
+            ss_ws(s);
+            {
+                size_t save_by = s->p;
+                char bykw[S_NAME];
+                if (ss_ident(s, bykw, sizeof bykw) && strcmp(bykw, "by") == 0) {
+                    ss_ws(s);
+                    if (!ss_ident(s, t->cfield, sizeof t->cfield))
+                        return ss_fail(s, s->p, "expected field name after 'by'");
+                } else {
+                    s->p = save_by;
+                }
+            }
             s->uterm = self;
             *out_term = self;
             return 0;
@@ -2952,7 +3025,9 @@ static int rs_derived_from(const SS* ss, int ti) {
      * returns that term's index, or -1 */
     for (int j = ti + 1; j < ss->nterms; j++) {
         const STerm* t = &ss->terms[j];
-        if (ss->vof[j] != ss->vof[ti]) continue;       /* stay in-variant */
+        /* Same variant, or product-level int deriving from a field-union arm. */
+        if (ss->vof[j] != ss->vof[ti] &&
+            !(ss->vof[ti] == -1 && ss->vof[j] >= 0)) continue;
         if ((t->kind == SK_BIND_BYTES ||
              (t->kind == SK_BIND_ITEMS && t->cfield[0])) &&
             strcmp(t->cfield, ss->terms[ti].field) == 0)
@@ -3176,6 +3251,50 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
     case SK_RULE:
         break;   /* pads/matchers: canonical output emits nothing */
     case SK_BIND_INT: {
+        /* Field-mode discriminant: emit from arm tag (EQ imm / GE derived),
+         * not from the stored product field (same "stored len is a lie" rule). */
+        int is_disc = 0;
+        if (ss->uterm >= 0 && ss->vof[ti] < 0) {
+            const STerm* ut = &ss->terms[ss->uterm];
+            if (ut->cfield[0] && strcmp(ut->cfield, t->field) == 0) is_disc = 1;
+        }
+        if (is_disc) {
+            if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+            eb_emit(e, cc_gr_wdisc_open_text(e->scratch));
+            for (int pass = 0; pass < 2; pass++) {   /* EQ first, then GE */
+                for (int vi = 0; vi < ss->nuv; vi++) {
+                    if (pass == 0 && ss->uv[vi].constr != 1) continue;
+                    if (pass == 1 && ss->uv[vi].constr != 2) continue;
+                    if (ss->uv[vi].constr == 1) {
+                        eb_emit(e, cc_gr_wdisc_eq_text(e->scratch, cc__sname,
+                                                       ss->uv[vi].name,
+                                                       ss->uv[vi].constr_imm));
+                    } else {
+                        const char* dfield = NULL;
+                        for (int j = 0; j < ss->uv[vi].nt; j++) {
+                            const STerm* at = &ss->terms[ss->uv[vi].t[j]];
+                            if (at->kind == SK_BIND_BYTES &&
+                                strcmp(at->cfield, t->field) == 0) {
+                                dfield = at->field;
+                                break;
+                            }
+                        }
+                        if (!dfield) {
+                            snprintf(pe, sizeof pe, "v->%s", t->field);
+                        } else {
+                            snprintf(pe, sizeof pe, "v->u.%s.%s.len",
+                                     ss->uv[vi].name, dfield);
+                        }
+                        eb_emit(e, cc_gr_wdisc_ge_text(e->scratch, cc__sname,
+                                                       ss->uv[vi].name, pe));
+                    }
+                }
+            }
+            eb_emit(e, cc_gr_wdisc_close_text(e->scratch));
+            rw_emit_wint(e, w, lbl, md, "__wd", 0);
+            eb_emit(e, cc_gr_wdisc_end_text(e->scratch));
+            break;
+        }
         int dj = rs_derived_from(ss, ti);
         if (dj >= 0 && ss->terms[dj].kind == SK_BIND_BYTES)
             snprintf(pe, sizeof pe, "v->%s%s.len", cc__fpfx, ss->terms[dj].field);
@@ -3499,17 +3618,32 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     eb_emit(e, cc_gr_byte_check_text(e->scratch, ss->fc, fail));
 }
 
-static void rs_emit_bytes(EB* e, int* lbl, const STerm* t, const char* fail) {
+static int rs_find_int_field(const SS* ss, int before, const char* nm);
+
+/* When emitting under u.<arm>., a product-level count/length int still lives
+ * at out-><field> (field-discriminated unions bind the discriminant outside
+ * the arms). */
+static const char* rs_count_pfx(const SS* ss, int before, const char* nm) {
+    int fi = rs_find_int_field(ss, before, nm);
+    if (fi >= 0 && ss->vof[fi] < 0) return "";
+    return cc__fpfx;
+}
+
+static void rs_emit_bytes(SS* ss, EB* e, int* lbl, int ti, const char* fail) {
+    const STerm* t = &ss->terms[ti];
     int k = (*lbl)++;
     /* exactly out-><cfield> bytes, borrowed — the length was parsed, so the
      * payload is opaque: \r\n, NUL, anything. p <= n always, so n - p is safe. */
-    eb_emit(e, cc_gr_bytes_term_text(e->scratch, k, cc__fpfx, t->cfield, t->field, fail));
+    eb_emit(e, cc_gr_bytes_term_text(e->scratch, k, rs_count_pfx(ss, ti, t->cfield),
+                                     t->cfield, cc__fpfx, t->field, fail));
 }
 
-static void rs_emit_items_counted(EB* e, int* lbl, const STerm* t, const char* fail) {
+static void rs_emit_items_counted(SS* ss, EB* e, int* lbl, int ti, const char* fail) {
+    const STerm* t = &ss->terms[ti];
     int k = (*lbl)++;
-    eb_emit(e, cc_gr_items_counted_text(e->scratch, k, t->etype, cc__fpfx, t->field,
-                                          t->cfield, t->cap, fail));
+    eb_emit(e, cc_gr_items_counted_text(e->scratch, k, t->etype,
+                                          rs_count_pfx(ss, ti, t->cfield), t->cfield,
+                                          cc__fpfx, t->field, t->cap, fail));
 }
 
 static void rs_emit_items(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const char* fail) {
@@ -3557,12 +3691,12 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         rs_emit_presence(ss, e, ti);
         break;
     case SK_BIND_ITEMS:
-        if (t->cfield[0]) rs_emit_items_counted(e, lbl, t, fail);
+        if (t->cfield[0]) rs_emit_items_counted(ss, e, lbl, ti, fail);
         else rs_emit_items(ss, g, e, lbl, t, fail);
         rs_emit_presence(ss, e, ti);
         break;
     case SK_BIND_BYTES:
-        rs_emit_bytes(e, lbl, t, fail);
+        rs_emit_bytes(ss, e, lbl, ti, fail);
         rs_emit_presence(ss, e, ti);
         break;
     case SK_FIELDS:
@@ -3576,9 +3710,34 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         rs_emit_presence(ss, e, ti);
         break;
     case SK_UNION: {
-        /* first-byte dispatch; the default arm (if any) takes everything
-         * else. Recursion is bounded: self-referential variants ride the
-         * items depth counter. */
+        /* Prefix mode: first-byte dispatch. Field mode (`by <int>`): the
+         * discriminant is already bound; dispatch on its value with EQ/GE. */
+        if (t->cfield[0]) {
+            eb_emit(e, cc_gr_funion_open_text(e->scratch, cc__fpfx, t->cfield));
+            int arm_i = 0;
+            for (int pass = 0; pass < 2; pass++) {   /* EQ before GE */
+                for (int vi = 0; vi < ss->nuv; vi++) {
+                    if (pass == 0 && ss->uv[vi].constr != 1) continue;
+                    if (pass == 1 && ss->uv[vi].constr != 2) continue;
+                    const char* sep = arm_i++ ? "else " : "";
+                    if (ss->uv[vi].constr == 1)
+                        eb_emit(e, cc_gr_funion_eq_text(e->scratch, sep,
+                                                        ss->uv[vi].constr_imm,
+                                                        cc__sname, ss->uv[vi].name));
+                    else
+                        eb_emit(e, cc_gr_funion_ge_text(e->scratch, sep,
+                                                        ss->uv[vi].constr_imm,
+                                                        cc__sname, ss->uv[vi].name));
+                    snprintf(cc__fpfx, sizeof cc__fpfx, "u.%s.", ss->uv[vi].name);
+                    for (int j = 0; j < ss->uv[vi].nt; j++)
+                        rs_emit_term(ss, g, e, lbl, ss->uv[vi].t[j], fail);
+                    cc__fpfx[0] = '\0';
+                    eb_emit(e, cc_gr_funion_arm_end_text(e->scratch));
+                }
+            }
+            eb_emit(e, cc_gr_funion_fail_text(e->scratch, fail));
+            break;
+        }
         int defv = -1;
         eb_emit(e, cc_gr_union_head_text(e->scratch, fail));
         for (int vi = 0; vi < ss->nuv; vi++) {
@@ -3607,8 +3766,10 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
 }
 
 static int rs_find_int_field(const SS* ss, int before, const char* nm) {
+    signed char scope = ss->vof[before];
     for (int i = 0; i < before; i++) {
-        if (ss->vof[i] != ss->vof[before]) continue;   /* stay in-variant */
+        /* Same variant/arm, or product-level (vof -1) visible inside an arm. */
+        if (ss->vof[i] != scope && !(scope >= 0 && ss->vof[i] == -1)) continue;
         if (ss->terms[i].kind == SK_BIND_INT && strcmp(ss->terms[i].field, nm) == 0) return i;
     }
     return -1;
@@ -3784,16 +3945,29 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             goto done;
         }
         if (ss->uterm >= 0) {
-            if (ss->nbody != 1 || ss->body[0] != ss->uterm) {
-                snprintf(err, err_sz, "@grammar(schema) %s: `one of` must be the "
-                         "entire schema body", name);
-                goto done;
-            }
-            /* dispatch: each variant's leading literal's first byte; at most
-             * one non-literal DEFAULT arm; bytes must be distinct */
-            {
+            const STerm* ut = &ss->terms[ss->uterm];
+            int field_mode = ut->cfield[0] != 0;
+            if (!field_mode) {
+                if (ss->nbody != 1 || ss->body[0] != ss->uterm) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: prefix `one of` must be "
+                             "the entire schema body (use `by <field>` after shared "
+                             "product terms)", name);
+                    goto done;
+                }
+                /* dispatch: each variant's leading literal's first byte; at most
+                 * one non-literal DEFAULT arm; bytes must be distinct */
                 int ndef = 0;
                 for (int i = 0; i < ss->nuv; i++) {
+                    if (ss->uv[i].nt == 0) {
+                        snprintf(err, err_sz, "@grammar(schema) %s: prefix variant "
+                                 "'%s' is empty", name, ss->uv[i].name);
+                        goto done;
+                    }
+                    if (ss->uv[i].constr) {
+                        snprintf(err, err_sz, "@grammar(schema) %s: arm constraints "
+                                 "require `by <field>`", name);
+                        goto done;
+                    }
                     const STerm* ft = &ss->terms[ss->uv[i].t[0]];
                     ss->uv[i].db = (ft->kind == SK_LIT && ft->litlen >= 1)
                                        ? (int)ft->lit[0] : -1;
@@ -3810,6 +3984,44 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                                      name, ss->uv[j].name, ss->uv[i].name);
                             goto done;
                         }
+                }
+            } else {
+                int in_body = 0;
+                for (int i = 0; i < ss->nbody; i++)
+                    if (ss->body[i] == ss->uterm) { in_body = 1; break; }
+                if (!in_body) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: field `one of` must "
+                             "appear in the schema body", name);
+                    goto done;
+                }
+                if (rs_find_int_field(ss, ss->uterm, ut->cfield) < 0) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: `by %s` must name an "
+                             "earlier `int` field of this schema", name, ut->cfield);
+                    goto done;
+                }
+                int n_eq = 0, n_ge = 0;
+                for (int i = 0; i < ss->nuv; i++) {
+                    if (!ss->uv[i].constr) {
+                        snprintf(err, err_sz, "@grammar(schema) %s: field-discriminated "
+                                 "arm '%s' needs [= N] or [>= N]", name, ss->uv[i].name);
+                        goto done;
+                    }
+                    if (ss->uv[i].constr == 1) n_eq++;
+                    else if (ss->uv[i].constr == 2) n_ge++;
+                    for (int j = 0; j < i; j++) {
+                        if (ss->uv[i].constr == 1 && ss->uv[j].constr == 1 &&
+                            ss->uv[i].constr_imm == ss->uv[j].constr_imm) {
+                            snprintf(err, err_sz, "@grammar(schema) %s: arms '%s' and "
+                                     "'%s' share the same [= ...] discriminant",
+                                     name, ss->uv[j].name, ss->uv[i].name);
+                            goto done;
+                        }
+                    }
+                }
+                if (n_eq < 1 || n_ge < 1) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: field `one of` needs "
+                             "at least one [= N] arm and one [>= N] arm", name);
+                    goto done;
                 }
             }
             /* recursion: self items must use the arena form */
@@ -3939,19 +4151,29 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 eb_emit(&e, cc_gr_union_decl_open_text(e.scratch, name));
                 for (int vi = 0; vi < ss->nuv; vi++) {
                     eb_emit(&e, cc_gr_variant_open_text(e.scratch));
+                    int nmembers = 0;
                     for (int j = 0; j < ss->uv[vi].nt; j++) {
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
-                        if (t->kind == SK_BIND_INT)
+                        if (t->kind == SK_BIND_INT) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 0, t->etype, t->field, 0));
-                        else if (t->kind == SK_BIND_FLOAT)
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_FLOAT) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 1, t->etype, t->field, 0));
-                        else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES)
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 2, t->etype, t->field, 0));
-                        else if (t->kind == SK_BIND_ITEMS && t->cap > 0)
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_ITEMS && t->cap > 0) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 3, t->etype, t->field, t->cap));
-                        else if (t->kind == SK_BIND_ITEMS)
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_ITEMS) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 4, t->etype, t->field, 0));
+                            nmembers++;
+                        }
                     }
+                    /* Unit arms (only literals) still need a C member. */
+                    if (nmembers == 0)
+                        eb_emit(&e, cc_gr_uempty_member_text(e.scratch));
                     eb_emit(&e, cc_gr_variant_close_text(e.scratch, ss->uv[vi].name));
                 }
                 eb_emit(&e, cc_gr_union_decl_close_text(e.scratch));

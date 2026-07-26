@@ -188,6 +188,31 @@ items. An out-of-range tag emits zero bytes. If any alternative contains a term
 without a write form, the declaration is rejected rather than generating a
 partial writer.
 
+A product schema may share a prefix with a field-discriminated `one of`:
+
+```c
+@grammar(schema) Bulk {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number
+    one of [
+        nil  [= -1] [ "\r\n" ]
+        data [>= 0] [ "\r\n" payload: bytes len "\r\n" ]
+    ] by len
+~~~~}
+```
+
+`by <int-field>` selects the arm from an earlier product-level int bind. Each
+arm carries `[= N]` or `[>= N]`; the schema needs at least one equality arm and
+one lower-bound arm. Parse binds the int, then dispatches; unknown values are
+parse failures. Write switches on `kind` and emits the discriminant from the
+arm (equality arms emit `N`; lower-bound arms derive the int from a later
+`bytes`/`items` count) rather than from a stored field. Unit arms (literals
+only) are allowed. Prefix `one of` remains the entire schema body; field mode
+may follow shared product terms. One `one of` per schema.
+
 ## Errors and source origin
 
 Malformed grammar declarations are compile-time errors attributed to the
