@@ -12,11 +12,14 @@
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "visitor/pass_common.h"
+#include "visitor/ufcs.h"
 #include "visitor/visitor.h"
 
 #define cc__append_n cc_sb_append
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
+
+static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i);
 
 /* Extract the callee identifier from a plain `ident(...)` call expression.
  *
@@ -49,6 +52,112 @@ static int cc__ru_extract_plain_callee(const char* s, size_t a, size_t b,
     return 1;
 }
 
+/* Resolve `recv.method(...)` / `recv->method(...)` to the default snake_case
+ * callee (`CCListener.accept` → `cc_listener_accept`) when the receiver is a
+ * simple identifier whose declared type is visible earlier in `s`.  Used so
+ * `!>` binders still get the Result error arm type if a UFCS form somehow
+ * reaches unwrap before text/AST UFCS rewriting. */
+static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
+                                       size_t a, size_t b,
+                                       char* out, size_t out_sz) {
+    char method[64];
+    char recv[128];
+    char recv_type[256];
+    size_t i, sep, method_a, method_b, recv_a, recv_b, k;
+    size_t pos;
+    if (!s || !out || out_sz == 0 || a >= b || b > n) return 0;
+    out[0] = 0;
+    while (a < b && isspace((unsigned char)s[a])) a++;
+    while (b > a && isspace((unsigned char)s[b - 1])) b--;
+    if (a >= b || s[b - 1] != ')') return 0;
+    /* Find the top-level call's method separator nearest the final '('. */
+    i = b - 1;
+    {
+        int depth = 0;
+        size_t open = (size_t)-1;
+        while (i > a) {
+            char c = s[i];
+            if (c == ')') depth++;
+            else if (c == '(') {
+                if (depth == 0) { open = i; break; }
+                depth--;
+            }
+            i--;
+        }
+        if (open == (size_t)-1 || open <= a) return 0;
+        k = open;
+        while (k > a && isspace((unsigned char)s[k - 1])) k--;
+        method_b = k;
+        while (k > a && cc_is_ident_char(s[k - 1])) k--;
+        method_a = k;
+        if (method_a >= method_b || method_b - method_a >= sizeof(method)) return 0;
+        while (k > a && isspace((unsigned char)s[k - 1])) k--;
+        if (k > a && s[k - 1] == '.') {
+            sep = k - 1;
+        } else if (k >= a + 2 && s[k - 2] == '-' && s[k - 1] == '>') {
+            sep = k - 2;
+        } else {
+            return 0;
+        }
+        memcpy(method, s + method_a, method_b - method_a);
+        method[method_b - method_a] = 0;
+        recv_b = sep;
+        while (recv_b > a && isspace((unsigned char)s[recv_b - 1])) recv_b--;
+        recv_a = recv_b;
+        while (recv_a > a && cc_is_ident_char(s[recv_a - 1])) recv_a--;
+        if (recv_a >= recv_b || recv_b - recv_a >= sizeof(recv)) return 0;
+        /* Only simple identifier receivers (ln.accept / ln_ptr->accept). */
+        if (recv_a > a && cc_is_ident_char(s[recv_a - 1])) return 0;
+        memcpy(recv, s + recv_a, recv_b - recv_a);
+        recv[recv_b - recv_a] = 0;
+    }
+    /* Scan earlier declarations for `Type recv` / `Type* recv`. */
+    recv_type[0] = 0;
+    pos = 0;
+    while (pos < recv_a) {
+        size_t hit = cc_find_ident_top_level(s, pos, recv_a, recv, strlen(recv));
+        size_t after, before, ty_a, ty_b, stars, tl;
+        if (hit >= recv_a) break;
+        after = hit + strlen(recv);
+        after = cc__skip_ws_comments_forward(s, n, after);
+        if (after < n && s[after] == '(') { pos = after; continue; }
+        before = hit;
+        while (before > 0 && isspace((unsigned char)s[before - 1])) before--;
+        stars = 0;
+        while (before > 0 && s[before - 1] == '*') {
+            stars++;
+            before--;
+            while (before > 0 && isspace((unsigned char)s[before - 1])) before--;
+        }
+        ty_b = before;
+        ty_a = before;
+        while (ty_a > 0 && cc_is_ident_char(s[ty_a - 1])) ty_a--;
+        if (ty_b > ty_a && ty_b - ty_a + stars + 1 < sizeof(recv_type)) {
+            tl = ty_b - ty_a;
+            memcpy(recv_type, s + ty_a, tl);
+            recv_type[tl] = 0;
+            while (stars-- > 0) {
+                size_t cur = strlen(recv_type);
+                if (cur + 1 >= sizeof(recv_type)) break;
+                recv_type[cur] = '*';
+                recv_type[cur + 1] = 0;
+            }
+        }
+        pos = hit + strlen(recv);
+    }
+    if (!recv_type[0]) return 0;
+    if (!cc_ufcs_compose_default_callee(out, out_sz, recv_type, method)) return 0;
+    return 1;
+}
+
+/* Resolve the callee name for binder typing: plain call, else UFCS default. */
+static int cc__ru_extract_callee_for_binder(const char* s, size_t n,
+                                             size_t call_a, size_t call_b,
+                                             char* out, size_t out_sz) {
+    if (cc__ru_extract_plain_callee(s, call_a, call_b, out, out_sz)) return 1;
+    return cc__ru_extract_ufcs_callee(s, n, call_a, call_b, out, out_sz);
+}
+
 /* Emit the error-binder declaration for an unwrap expansion.
  *
  * Emit the "error binder" line for the unified unwrap lowering:
@@ -63,16 +172,38 @@ static int cc__ru_extract_plain_callee(const char* s, size_t a, size_t b,
  * So a single lowering call shape works for BOTH the Result-struct and
  * pointer-returning-call variants of `!>` / `?>` — no source-scan needed
  * to pick between them at pass time. */
-static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i);
+
+/* Pull the error-type suffix out of a mangled `CCResult_<Ok>_<Err>` name.
+ * Uses the last `_` segment after the `CCResult_` prefix when the ok-type
+ * itself contains underscores (e.g. `CCResult_CCSocket_CCNetError`). */
+static int cc__ru_err_type_from_result_name(const char* result_name,
+                                             char* out, size_t out_sz) {
+    const char* p;
+    const char* last_us;
+    size_t len;
+    if (!result_name || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    if (strncmp(result_name, "CCResult_", 9) != 0) return 0;
+    p = result_name + 9;
+    last_us = strrchr(p, '_');
+    if (!last_us || last_us[1] == 0) return 0;
+    len = strlen(last_us + 1);
+    if (len + 1 > out_sz) return 0;
+    memcpy(out, last_us + 1, len);
+    out[len] = 0;
+    return 1;
+}
 
 static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
-                                       const char* s, size_t call_a, size_t call_b,
+                                       const char* s, size_t n,
+                                       size_t call_a, size_t call_b,
                                        const char* tmpv, const char* binder,
                                        const char* file, int line) {
-    /* Prefer the typed binder path when the callee is a plain name whose
-     * declared error type we tracked in the result-fn registry.  Gives
-     * the binder the user-facing error type name (e.g. `CCIoError`) in
-     * diagnostics rather than an anonymous `__typeof__` expansion.
+    /* Prefer the typed binder path when the callee is a plain name (or a
+     * UFCS form we can lower to one) whose declared error type we know.
+     * Gives the binder the user-facing error type name (e.g. `CCNetError`)
+     * rather than an anonymous `__typeof__` expansion — and avoids the
+     * default `__cc_uw_err_at` arm typing the binder as ambient `CCError`.
      *
      * Since parser-mode Result specs now emit distinct typed structs
      * (see `cc/include/ccc/cc_result.cch` + preprocess.c), `(tmp).u.error`
@@ -90,9 +221,42 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
      * fast Ok path. */
     char callee[128];
     char err_type[256];
-    if (cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee)) &&
-        cc_result_fn_registry_get_err_type(callee, strlen(callee),
-                                            err_type, sizeof(err_type))) {
+    char result_type[256];
+    int have_err = 0;
+    if (cc__ru_extract_callee_for_binder(s, n, call_a, call_b, callee, sizeof(callee))) {
+        if (cc_result_fn_registry_get_err_type(callee, strlen(callee),
+                                                err_type, sizeof(err_type))) {
+            have_err = 1;
+        } else {
+            /* Scan for `CCResult_*_<E> <callee>(` (works for composed UFCS
+             * names like `cc_listener_accept` declared in std headers). */
+            size_t pos = 0;
+            size_t clen = strlen(callee);
+            while (pos < n) {
+                size_t hit = cc_find_ident_top_level(s, pos, n, callee, clen);
+                size_t after, p, end, len;
+                if (hit >= n) break;
+                after = cc__skip_ws_comments_forward(s, n, hit + clen);
+                if (after < n && s[after] == '(') {
+                    p = hit;
+                    while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                    end = p;
+                    while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
+                    len = end - p;
+                    if (len > 9 && memcmp(s + p, "CCResult_", 9) == 0 &&
+                        len + 1 <= sizeof(result_type)) {
+                        memcpy(result_type, s + p, len);
+                        result_type[len] = 0;
+                        have_err = cc__ru_err_type_from_result_name(result_type,
+                                                                    err_type, sizeof(err_type));
+                        if (have_err) break;
+                    }
+                }
+                pos = hit + clen;
+            }
+        }
+    }
+    if (have_err) {
         const char* f = file ? file : "<input>";
         size_t fl = strlen(f);
         cc__append_str(out, ol, oc, "cc_rt_diag_record_unwrap_site(");
@@ -828,7 +992,7 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
             emit_rhs_len = mangled_rhs_len;
         }
         cc__append_str(&out, &ol, &oc, "({ ");
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, lhs_a, lhs_b, tmpv, mangled_binder, f, line_no);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, lhs_a, lhs_b, tmpv, mangled_binder, f, line_no);
         cc__append_str(&out, &ol, &oc, "(");
         cc__append_n(&out, &ol, &oc, emit_rhs, emit_rhs_len);
         cc__append_str(&out, &ol, &oc, "); })");
@@ -1593,7 +1757,7 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     cc__append_str(&out, &ol, &oc, "); if (");
     cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
     cc__append_str(&out, &ol, &oc, ") { ");
-    cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, op_line);
+    cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, mangled_binder, f, op_line);
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
         /* Expression body: terminate with `;` so it reads as a statement. */
@@ -1849,7 +2013,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         cc__append_str(&out, &ol, &oc, "); if (");
         cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
         cc__append_str(&out, &ol, &oc, ") { ");
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, binder, ff, line_no);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, binder, ff, line_no);
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
         cc__append_str(&out, &ol, &oc, " } ");
         cc__ru_emit_value(&out, &ol, &oc, result_type, tmpv);
@@ -1959,7 +2123,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
     cc__append_str(&out, &ol, &oc, ") { ");
     if (has_binder) {
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, call_a, call_b, tmpv, mangled_binder, f, line_no);
+        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, mangled_binder, f, line_no);
     }
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (!is_block) {

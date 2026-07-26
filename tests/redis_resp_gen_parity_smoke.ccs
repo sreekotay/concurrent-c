@@ -27,8 +27,6 @@ static int64_t !>(CCError) parse_i64(CCSlice s) {
     }
     return cc_ok(neg ? -v : v);
 }
-static CCIoError net_to_io_error(CCNetError e) { (void)e; return cc_io_error(CC_IO_INVALID_ARGUMENT); }
-
 #include "../real_projects/redis/redis_resp.cch"
 
 /* ---- the HAND reader (the parity ORACLE) ----

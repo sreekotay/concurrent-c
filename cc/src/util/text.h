@@ -958,13 +958,21 @@ static inline int cc_range_contains_token(const char* s, size_t n, const char* t
 /* ---- Declaration helpers ---- */
 
 static inline int cc_is_non_decl_stmt_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "return") == 0 ||
-            strcmp(type_name, "break") == 0 ||
-            strcmp(type_name, "continue") == 0 ||
-            strcmp(type_name, "goto") == 0 ||
-            strcmp(type_name, "case") == 0 ||
-            strcmp(type_name, "default") == 0);
+    if (!type_name || !type_name[0]) return 0;
+    if (strcmp(type_name, "return") == 0 ||
+        strcmp(type_name, "break") == 0 ||
+        strcmp(type_name, "continue") == 0 ||
+        strcmp(type_name, "goto") == 0 ||
+        strcmp(type_name, "case") == 0 ||
+        strcmp(type_name, "default") == 0) {
+        return 1;
+    }
+    /* Call / address-of fragments misparsed as types, e.g.
+     * `cc_listener_close(&ln);` → type=`cc_listener_close(&`, name=`ln`. */
+    for (const char* p = type_name; *p; ++p) {
+        if (*p == '(' || *p == ')' || *p == '&' || *p == '=') return 1;
+    }
+    return 0;
 }
 
 /* ---- Declaration parsing ---- */

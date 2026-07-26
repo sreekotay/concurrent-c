@@ -1,0 +1,58 @@
+/*
+ * Regression: `cc_listener_accept(...) !>(e) { ... }` (and UFCS) must lower
+ * cleanly inside a nursery spawn closure — no overlapping UFCS edits, and
+ * the binder remains `CCNetError` under an ambient `@errhandler(CCError)`.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+static void take_net_err(CCNetError e) {
+    printf("spawn_net_err=%d\n", (int)e);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message ? e.message : "unknown");
+        return 1;
+    }
+
+    CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
+    CCListener* ln_ptr = &ln;
+
+    {
+        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+        server->spawn(() => [ln_ptr, server] {
+            while (true) {
+                CCSocket client = cc_listener_accept(ln_ptr) !>(e) {
+                    if (!server->is_cancelled()) {
+                        take_net_err(e);
+                    }
+                    break;
+                };
+                (void)client;
+                break;
+            }
+        });
+    }
+
+    {
+        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+        server->spawn(() => [ln_ptr, server] {
+            while (true) {
+                CCSocket client = ln_ptr->accept() !>(e) {
+                    if (!server->is_cancelled()) {
+                        take_net_err(e);
+                    }
+                    break;
+                };
+                (void)client;
+                break;
+            }
+        });
+    }
+
+    printf("spawn_accept_unwrap_smoke: PASS\n");
+    return 0;
+}

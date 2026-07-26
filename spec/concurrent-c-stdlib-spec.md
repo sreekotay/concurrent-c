@@ -255,7 +255,7 @@ typedef struct CCStringRef {
 } CCStringRef;  /* 8 bytes on 64-bit little-endian hosts */
 
 CCStringRef cc_string_ref_empty(void);
-CCResult_CCStringRef_CCError cc_string_ref_from_slice(CCArena *arena, CCSlice src);
+CCResult_CCStringRef_CCError cc_slice_to_ref(CCSlice *src, CCArena *arena); /* UFCS: src.to_ref(arena) */
 CCStringRef cc_string_ref_borrow(CCStringRefView *view);           /* probe only */
 CCStringRef cc_string_ref_borrow_slice(CCStringRefView *view, CCSlice src);
 uint32_t cc_string_ref_len(const CCStringRef *r);
@@ -263,12 +263,13 @@ CCSlice cc_string_ref_as_slice(const CCStringRef *r);  /* inline/view: storage m
 int cc_string_ref_is_inline(const CCStringRef *r);
 int cc_string_ref_is_view(const CCStringRef *r);
 int cc_string_ref_is_empty(const CCStringRef *r);
+int cc_string_ref_is_durable(const CCStringRef *r);
 size_t cc_map_hash_string_ref(CCStringRef r);
 int cc_map_eq_string_ref(CCStringRef a, CCStringRef b);
 ```
 
 `Map` / `ArrayMap` sugar accepts `CCStringRef` keys via those hash/eq helpers.
-Borrowed views are for lookup probes only — never insert them.
+Borrowed views are for probes only — do not insert them.
 
 The public constructors, accessors, mutation functions, and lifetime functions
 are:
@@ -1024,13 +1025,16 @@ typedef struct CCIpAddr {
 } CCIpAddr;
 ```
 
-TCP and socket functions are:
+TCP listen, accept, and connect return Result (`T!>(CCNetError)`, lowered as
+`CCResult_*_CCNetError`). On error the handle has `fd == -1`.
 
 ```c
-CCSocket cc_tcp_connect(const char *addr, size_t addr_len, CCNetError *out_err);
-CCListener cc_tcp_listen(const char *addr, size_t addr_len, CCNetError *out_err);
-CCSocket cc_listener_accept(CCListener *listener, CCNetError *out_err);
+CCResult_CCSocket_CCNetError cc_tcp_connect(const char *addr, size_t addr_len);
+CCResult_CCListener_CCNetError cc_tcp_listen(const char *addr, size_t addr_len);
+CCResult_CCSocket_CCNetError cc_listener_accept(CCListener *listener);
 void cc_listener_close(CCListener *listener);
+
+CCIoError cc_net_to_io_error(CCNetError err);
 
 CCSlice cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCNetError *out_err);
 size_t cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err);
@@ -1045,15 +1049,26 @@ CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_e
 ```
 
 `addr` is a length-delimited `host:port`, IPv4 `address:port`, or bracketed
-IPv6 address. A socket read reports remote EOF as zero bytes with
+IPv6 address. Idiomatic use is unwrap sugar on the greppable `cc_*` names:
+
+```c
+CCListener ln = cc_tcp_listen(addr, len) !>;
+CCSocket sock = cc_listener_accept(&ln) !>;
+CCSocket client = cc_tcp_connect(addr, len) !>;
+```
+
+`cc_net_to_io_error` maps connection closed/reset to `CC_IO_CONNECTION_CLOSED`,
+timeout to `CC_IO_BUSY`, and other net errors to `CC_IO_OTHER`.
+
+A socket read reports remote EOF as zero bytes with
 `CC_NET_CONNECTION_CLOSED`. The deadline functions report
 `CC_NET_TIMED_OUT` when the deadline expires. `try_read_into` reports
 `EAGAIN` or `EWOULDBLOCK` by setting `out_would_block` while leaving the error
 as `CC_NET_OK`.
 
 `CCSocket` and `CCListener` UFCS map synchronous method names to
-`cc_socket_*` and `cc_listener_*`. No networking `_async` C callees are
-defined by this API.
+`cc_socket_*` and `cc_listener_*` (including Result-returning `accept`).
+No networking `_async` C callees are defined by this API.
 
 Socket readiness signaling uses:
 

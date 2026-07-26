@@ -195,18 +195,6 @@ static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t 
     });
 }
 
-static CCIoError net_to_io_error(CCNetError err) {
-    switch (err) {
-        case CC_NET_CONNECTION_CLOSED:
-        case CC_NET_CONNECTION_RESET:
-            return cc_io_error(CC_IO_CONNECTION_CLOSED);
-        case CC_NET_TIMED_OUT:
-            return cc_io_error(CC_IO_BUSY);
-        default:
-            return cc_io_error(CC_IO_OTHER);
-    }
-}
-
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);
     if (p) fprintf(stderr, "%s\n", p);
@@ -825,14 +813,15 @@ static CCStringRef !>(CCError) db_clone_key_ref(RedisDb* db, char[:] key) {
     @errhandler(CCError e) { return cc_err(e); }
     CCResult_CCStringRef_CCError rr;
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
-    rr = cc_string_ref_from_slice(&db->key_arena, key);
+    rr = key.to_ref(&db->key_arena);
     if (rr.is_err()) return cc_err(rr.error());
     return cc_ok(rr.value());
 }
 
 static int64_t db_expires_get(RedisDb* db, CCStringRef kh) {
     int64_t* p;
-    if (!db || !db->expires) return 0;
+    /* No-TTL workloads: skip the side-map probe when the table is empty. */
+    if (!db || !db->expires || db->expires.len() == 0) return 0;
     p = db->expires.get_ptr(kh);
     return p ? *p : 0;
 }
@@ -1262,7 +1251,7 @@ static RedisReply db_flush(RedisDb* db) {
     RedisEntry v;
     if (!db || !db->entries) return reply_simple("OK");
     CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-        db_mem_stats_note_key_release((size_t)cc_string_ref_len(&k));
+        db_mem_stats_note_key_release(k.len());
         RedisValue* val = &v.val;
         CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
         db_release_value(db, &doomed);
@@ -1295,7 +1284,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
             int64_t exp = db_expires_get(db, k);
             if (exp != 0 && db_req_now(now_cache) >= exp) continue;
             (void)v;
-            ks = cc_string_ref_as_slice(&k);
+            ks = k.as_slice();
             if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
             matched++;
             cap += ks.len + 24;
@@ -1315,7 +1304,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
                 int64_t exp = db_expires_get(db, k);
                 if (exp != 0 && db_req_now(now_cache) >= exp) continue;
                 (void)v;
-                ks = cc_string_ref_as_slice(&k);
+                ks = k.as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
                 RespGReply elem = wire_bulk(ks);
                 size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
@@ -1911,17 +1900,13 @@ int main(int argc, char** argv) {
     char addr[64];
     snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
 
-    /* cc_tcp_listen uses an out-param, so guard explicitly instead
-     * of !>; everything else in this function uses unwrap sugar. */
-    CCNetError err = CC_NET_OK;
-    CCListener ln = cc_tcp_listen(addr, strlen(addr), &err);
-    if (err != CC_NET_OK) {
+    CCListener ln = cc_tcp_listen(addr, strlen(addr)) !>(e) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-        CCString line = @string(`listen error: ${(int)err}`, &scratch);
+        CCString line = @string(`listen error: ${(int)e}`, &scratch);
         redis_diag_fprintln(&line, &scratch);
         return 1;
-    }
+    };
     @defer cc_listener_close(&ln);
 
     ReqTx req_tx;
@@ -1953,18 +1938,12 @@ int main(int argc, char** argv) {
         server->spawn(() => [ln_ptr, req_tx, req_ch, server] {
             uint64_t next_conn_id = 1;
             while (true) {
-                CCNetError aerr = CC_NET_OK;
-                CCSocket client = ln_ptr->accept(&aerr);
-                if (aerr != CC_NET_OK) {
+                CCSocket client = ln_ptr->accept() !>(e) {
                     if (!server->is_cancelled()) {
-                        char scratch_buf[256];
-                        CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-                        CCString line =
-                            @string(`redis_idiomatic accept error: ${(int)aerr}`, &scratch);
-                        redis_diag_fprintln(&line, &scratch);
+                        fprintf(stderr, "redis_idiomatic accept error: %d\n", (int)e);
                     }
                     break;
-                }
+                };
 
                 /* TCP_NODELAY: redis-benchmark's pipelined pattern
                  * (write N, read N, repeat) interacts with Nagle +

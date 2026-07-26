@@ -3520,12 +3520,26 @@ static int cc__parse_decl_name_and_type_fallback(const char* stmt_start,
     {
         size_t name_len = (size_t)(name_end - name_start);
         size_t type_len = (size_t)(type_end - s);
+        const char* before;
+        /* Reject call arguments (`fn(&name)` / `fn(name)`): the last ident is
+         * not a declarator.  Primary `cc_parse_decl_name_and_type` already
+         * rejects these; this fallback must not invent a poison type. */
+        before = name_start;
+        while (before > s && isspace((unsigned char)before[-1])) before--;
+        if (before > s && (before[-1] == '&' || before[-1] == '(' || before[-1] == ',')) {
+            return 0;
+        }
         if (name_len >= decl_name_sz) name_len = decl_name_sz - 1;
         if (type_len >= decl_type_sz) type_len = decl_type_sz - 1;
         memcpy(decl_name, name_start, name_len);
         decl_name[name_len] = '\0';
         memcpy(decl_type, s, type_len);
         decl_type[type_len] = '\0';
+        if (cc_is_non_decl_stmt_type(decl_type)) {
+            decl_name[0] = '\0';
+            decl_type[0] = '\0';
+            return 0;
+        }
     }
     return 1;
 }
@@ -4219,10 +4233,19 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx || map_decl_like ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
+            /* CC*-prefixed stdlib types follow the snake_case twin convention
+             * (`CCListener.accept` → `cc_listener_accept`) even when the
+             * callee spelling is only visible after header splice.  Requiring
+             * `cc__ufcs_fn_name_in_text` here left pure UFCS call sites
+             * (`ln.accept()` with no explicit `cc_listener_accept` in the TU)
+             * unlowered through canonicalize's pre-splice `!>` expansion,
+             * so binders fell through to the ambient `CCError` _Generic arm. */
+            int is_cc_std = (recv_type_base[0] == 'C' && recv_type_base[1] == 'C' &&
+                             recv_type_base[2] >= 'A' && recv_type_base[2] <= 'Z');
             if (!cc__lookup_ufcs_field_type(fields, field_count, recv_type_base, method_name) &&
                 cc_ufcs_compose_default_callee(wildcard_callee, sizeof(wildcard_callee),
                                                recv_type_base, method_name) &&
-                cc__ufcs_fn_name_in_text(src, n, wildcard_callee)) {
+                (is_cc_std || cc__ufcs_fn_name_in_text(src, n, wildcard_callee))) {
                 wildcard_like = 1;
             } else {
                 i++;
@@ -11922,10 +11945,21 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     /* Shared phase-3 bucket: parser/host-C survival and lowering after
        canonical CC has been established and phase 2 comptime effects are
        conceptually available. */
-    /* Phase-1 result-unwrap operators `?>` (expression) and `!>`
-     * (statement) run before the legacy err-syntax rewrite. The `!>`
-     * statement form lowers to the existing `@err` shorthands which the
-     * legacy pass then processes, so order matters here. */
+    /* UFCS must lower `recv.method(...)` before `!>` / `?>` expand the
+     * call into `__typeof__(call)` / `__cc_uw_*` form.  Expanding first
+     * left UFCS callees like `ln.accept()` inside the unwrap temp, so
+     * `__cc_uw_err_at`'s default arm typed the binder as `CCError` even
+     * when the Result error arm is `CCNetError`.  Seed + text UFCS run
+     * once before unwrap (LHS of `!>`) and once after (method calls that
+     * live only in handler bodies, e.g. `server->is_cancelled()`). */
+    cc__seed_ufcs_receiver_types(chain->src, chain->len);
+    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
+        return -1;
+    }
+    /* Result-unwrap operators `?>` (expression) and `!>` (statement) run
+     * before the legacy err-syntax rewrite. The `!>` statement form lowers
+     * to the existing `@err` shorthands which the legacy pass then
+     * processes, so order matters here. */
     {
         /* Invoke pass_result_unwrap whenever the source still contains `?>`
          * or `!>` operator sigils, OR whenever strict-mode is enabled (in
@@ -11991,13 +12025,11 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc__lower_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__reject_match_syntax(chain->src, chain->len, input_path)) < 0) return -1;
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
-    /* (retired) cc__rewrite_result_constructors used to rewrite typed
-       cc_ok_CCResult_T_E(v) calls to the generic __CC_RESULT_OK(0, 0, v)
-       placeholder when every Result aliased __CCResultGeneric in parser
-       mode.  With real typed structs, the typed ctor calls parse and
-       type-check as-is, so the rewrite is both redundant and harmful
-       (it forced a __CCResultGeneric return into a typed Result slot). */
-    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
+    /* Post-unwrap UFCS: handler bodies and other spans that still carry
+     * member-call surface after `!>` expansion. */
+    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
+        return -1;
+    }
     if (cc_pass_chain_apply(chain, cc__rewrite_result_star_unwrap(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_cc_concurrent(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_link_directives(chain->src, chain->len)) < 0) return -1;

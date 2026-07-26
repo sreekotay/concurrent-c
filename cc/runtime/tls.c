@@ -132,10 +132,12 @@ CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
     *out_err = CC_NET_OK;
 
     /* Connect TCP first */
-    CCSocket sock = cc_tcp_connect(addr, addr_len, out_err);
-    if (*out_err != CC_NET_OK) {
+    CCResult_CCSocket_CCNetError sock_res = cc_tcp_connect(addr, addr_len);
+    if (!sock_res.ok) {
+        *out_err = sock_res.u.error;
         return conn;
     }
+    CCSocket sock = sock_res.u.value;
 
     /* Allocate I/O buffer from arena */
     void* iobuf = cc_arena_alloc(conn_arena, CC_TLS_IOBUF_SIZE);

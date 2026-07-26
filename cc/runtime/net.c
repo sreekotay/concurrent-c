@@ -210,51 +210,49 @@ static int parse_addr(const char* addr, size_t addr_len,
  * TCP Client
  * ============================================================================ */
 
-CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err) {
+CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len) {
     CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
-    *out_err = CC_NET_OK;
+    CCNetError err = CC_NET_OK;
 
     struct sockaddr_storage sa;
     socklen_t sa_len;
-    if (parse_addr(addr, addr_len, &sa, &sa_len, out_err) < 0) {
-        return sock;
+    if (parse_addr(addr, addr_len, &sa, &sa_len, &err) < 0) {
+        return cc_err_CCResult_CCSocket_CCNetError(err);
     }
 
     int fd = socket(sa.ss_family, SOCK_STREAM, 0);
     if (fd < 0) {
-        *out_err = errno_to_net_error(errno);
-        return sock;
+        return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(errno));
     }
 
     if (connect(fd, (struct sockaddr*)&sa, sa_len) < 0) {
-        *out_err = errno_to_net_error(errno);
+        err = errno_to_net_error(errno);
         close(fd);
-        return sock;
+        return cc_err_CCResult_CCSocket_CCNetError(err);
     }
 
     cc__net_disable_sigpipe_best_effort(fd);
     sock.fd = fd;
-    return sock;
+    return cc_ok_CCResult_CCSocket_CCNetError(sock);
 }
 
 /* ============================================================================
  * TCP Server
  * ============================================================================ */
 
-CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err) {
+CCResult_CCListener_CCNetError cc_tcp_listen(const char* addr, size_t addr_len) {
     CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
-    *out_err = CC_NET_OK;
+    CCNetError err = CC_NET_OK;
 
     struct sockaddr_storage sa;
     socklen_t sa_len;
-    if (parse_addr(addr, addr_len, &sa, &sa_len, out_err) < 0) {
-        return ln;
+    if (parse_addr(addr, addr_len, &sa, &sa_len, &err) < 0) {
+        return cc_err_CCResult_CCListener_CCNetError(err);
     }
 
     int fd = socket(sa.ss_family, SOCK_STREAM, 0);
     if (fd < 0) {
-        *out_err = errno_to_net_error(errno);
-        return ln;
+        return cc_err_CCResult_CCListener_CCNetError(errno_to_net_error(errno));
     }
 
     /* Allow address reuse */
@@ -262,33 +260,35 @@ CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err)
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     if (bind(fd, (struct sockaddr*)&sa, sa_len) < 0) {
-        *out_err = errno_to_net_error(errno);
+        err = errno_to_net_error(errno);
         close(fd);
-        return ln;
+        return cc_err_CCResult_CCListener_CCNetError(err);
     }
 
     if (listen(fd, 128) < 0) {
-        *out_err = errno_to_net_error(errno);
+        err = errno_to_net_error(errno);
         close(fd);
-        return ln;
+        return cc_err_CCResult_CCListener_CCNetError(err);
     }
 
     ln.fd = fd;
     ln.watcher = cc__io_watcher_create(fd);
-    return ln;
+    return cc_ok_CCResult_CCListener_CCNetError(ln);
 }
 
-CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
+CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
     CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
-    *out_err = CC_NET_OK;
     int fiber_ctx = cc__fiber_in_context();
+
+    if (!ln || ln->fd < 0) {
+        return cc_err_CCResult_CCSocket_CCNetError(CC_NET_OTHER);
+    }
 
     struct sockaddr_storage client_addr;
     socklen_t client_len = sizeof(client_addr);
     int prep_err = cc__net_prepare_fiber_fd(ln->fd, &ln->flags);
     if (prep_err != 0) {
-        *out_err = errno_to_net_error(prep_err);
-        return sock;
+        return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(prep_err));
     }
 
     while (1) {
@@ -300,29 +300,26 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
         if (fd >= 0) {
             int fd_err = cc__net_set_nonblocking(fd);
             if (fd_err != 0) {
-                *out_err = errno_to_net_error(fd_err);
                 close(fd);
-                return sock;
+                return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(fd_err));
             }
             cc__net_set_cloexec_best_effort(fd);
             cc__net_disable_sigpipe_best_effort(fd);
             sock.fd = fd;
             sock.flags |= CC_NET_FLAG_NONBLOCK;
-            return sock;
+            return cc_ok_CCResult_CCSocket_CCNetError(sock);
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_listener_watcher(ln);
             int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLIN)
                                    : cc__io_wait_fd(ln->fd, POLLIN);
             if (wait_err != 0) {
-                *out_err = errno_to_net_error(wait_err);
-                return sock;
+                return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(wait_err));
             }
             client_len = sizeof(client_addr);
             continue;
         }
-        *out_err = errno_to_net_error(errno);
-        return sock;
+        return cc_err_CCResult_CCSocket_CCNetError(errno_to_net_error(errno));
     }
 }
 

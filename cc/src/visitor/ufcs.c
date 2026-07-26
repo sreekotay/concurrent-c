@@ -262,12 +262,25 @@ static int cc__ufcs_parse_decl_name_and_type_fallback(const char* stmt_start,
     {
         size_t name_len = (size_t)(name_end - name_start);
         size_t type_len = (size_t)(type_end - s);
+        const char* before;
+        /* Reject call arguments (`fn(&name)` / `fn(name)`): last ident is not
+         * a declarator.  Mirror primary `cc_parse_decl_name_and_type`. */
+        before = name_start;
+        while (before > s && isspace((unsigned char)before[-1])) before--;
+        if (before > s && (before[-1] == '&' || before[-1] == '(' || before[-1] == ',')) {
+            return 0;
+        }
         if (name_len >= decl_name_sz) name_len = decl_name_sz - 1;
         if (type_len >= decl_type_sz) type_len = decl_type_sz - 1;
         memcpy(decl_name, name_start, name_len);
         decl_name[name_len] = '\0';
         memcpy(decl_type, s, type_len);
         decl_type[type_len] = '\0';
+        if (cc_is_non_decl_stmt_type(decl_type)) {
+            decl_name[0] = '\0';
+            decl_type[0] = '\0';
+            return 0;
+        }
     }
     return 1;
 }

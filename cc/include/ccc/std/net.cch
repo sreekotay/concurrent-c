@@ -53,9 +53,13 @@ typedef struct CCSocket {
     void* watcher;  /* Internal runtime-owned I/O watcher */
 } CCSocket;
 
-/* Socket-bound readiness signal. */
+/* Socket-bound readiness signal.
+ * Opaque storage for the runtime impl. Prefer long long over long double for
+ * alignment: TCC's sysinclude lacks max_align_t, and on some ILP32 hosts
+ * long double is only 4-byte aligned while _Atomic uint64_t needs 8. */
 #define CC_SOCKET_SIGNAL_STORAGE_SIZE 128
 typedef union CCSocketSignal {
+    long long __cc_align_ll;
     long double __cc_align_ld;
     void* __cc_align_ptr;
     unsigned char __cc_storage[CC_SOCKET_SIGNAL_STORAGE_SIZE];
@@ -90,28 +94,55 @@ typedef struct CCIpAddr {
     } addr;
 } CCIpAddr;
 
+/* Result types for listen / accept / connect (primary Result surface). */
+#ifndef CCResult_CCSocket_CCNetError_DEFINED
+#define CCResult_CCSocket_CCNetError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSocket_CCNetError, CCSocket, CCNetError)
+#endif
+
+#ifndef CCResult_CCListener_CCNetError_DEFINED
+#define CCResult_CCListener_CCNetError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCListener_CCNetError, CCListener, CCNetError)
+#endif
+
+/* Map CCNetError into the shared I/O error domain (channels, files, redis). */
+static inline CCIoError cc_net_to_io_error(CCNetError err) {
+    switch (err) {
+        case CC_NET_CONNECTION_CLOSED:
+        case CC_NET_CONNECTION_RESET:
+            return __cc_io_error_from_kind(CC_IO_CONNECTION_CLOSED);
+        case CC_NET_TIMED_OUT:
+            return __cc_io_error_from_kind(CC_IO_BUSY);
+        default:
+            return __cc_io_error_from_kind(CC_IO_OTHER);
+    }
+}
+
 /* ============================================================================
  * TCP Client
  * ============================================================================ */
 
-/* Connect to addr ("host:port" or "ip:port") */
-CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err);
+/* Connect to addr ("host:port" or "ip:port").
+ * On error the returned socket has fd == -1. */
+CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len);
 
 /* Async variant (requires runtime integration) */
-/* @async CCSocket cc_tcp_connect_async(const char* addr, size_t addr_len, CCNetError* out_err); */
+/* @async CCResult_CCSocket_CCNetError cc_tcp_connect_async(const char* addr, size_t addr_len); */
 
 /* ============================================================================
  * TCP Server
  * ============================================================================ */
 
-/* Listen on addr ("0.0.0.0:8080", "[::]:8080") */
-CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err);
+/* Listen on addr ("0.0.0.0:8080", "[::]:8080").
+ * On error the returned listener has fd == -1. */
+CCResult_CCListener_CCNetError cc_tcp_listen(const char* addr, size_t addr_len);
 
-/* Accept connection (blocking) */
-CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err);
+/* Accept connection (blocking / fiber-parked).
+ * On error the returned socket has fd == -1. */
+CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln);
 
 /* Async accept */
-/* @async CCSocket cc_listener_accept_async(CCListener* ln, CCNetError* out_err); */
+/* @async CCResult_CCSocket_CCNetError cc_listener_accept_async(CCListener* ln); */
 
 /* Close listener */
 void cc_listener_close(CCListener* ln);

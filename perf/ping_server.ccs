@@ -69,12 +69,10 @@ int main(int argc, char** argv) {
     char addr[64];
     snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
 
-    CCNetError err = CC_NET_OK;
-    CCListener ln = cc_tcp_listen(addr, strlen(addr), &err);
-    if (err != CC_NET_OK) {
-        fprintf(stderr, "ping_server listen error: %d\n", err);
+    CCListener ln = cc_tcp_listen(addr, strlen(addr)) !>(e) {
+        fprintf(stderr, "ping_server listen error: %d\n", (int)e);
         return 1;
-    }
+    };
     int one = 1;
     (void)setsockopt(ln.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
@@ -89,9 +87,10 @@ int main(int argc, char** argv) {
 
         server->spawn(() => [ln_ptr, srv] {
             while (1) {
-                CCNetError aerr = CC_NET_OK;
-                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
-                if (aerr != CC_NET_OK) break;
+                CCSocket client = cc_listener_accept(ln_ptr) !>(e) {
+                    (void)e;
+                    break;
+                };
                 CCSocket* pclient = malloc(sizeof(*pclient));
                 if (!pclient) {
                     cc_socket_close(&client);

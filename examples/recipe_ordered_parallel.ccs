@@ -3,18 +3,13 @@
  *
  * Work completes out of order; output must come out in order.
  *
- *   producer: for each item → spawn task → send the HANDLE on tasks_ch
- *   consumer: recv handles in order → await each → FIFO naturally
+ *   producer: for each item → results_tx.send_task(() => work)
+ *   consumer: recv on an ordered channel → each recv awaits the next
+ *             submitted task → FIFO output without a reorder buffer
  *
- * The channel carries task handles, not results. Sending handles in
- * input order and awaiting them in FIFO order yields ordered output
- * without any reorder buffer, even though tasks finish out of order.
- *
- * Why cc_thread_spawn (not n->spawn)? Nursery-spawned tasks are joined
- * by the nursery's @destroy in fire-and-forget fashion; there is no
- * handle to await individually. This recipe needs a first-class task
- * handle that can cross a channel and be awaited out-of-declaration
- * order — that's what cc_thread_spawn / cc_block_on_intptr give us.
+ * Idiom: send_task + ordered recv (same shape as pigz_idiomatic).
+ * send_task spawns immediately and queues a handle; ordered recv
+ * delivers those handles in submission order and awaits each one.
  */
 #include <ccc/std/prelude.cch>
 #include <unistd.h>
@@ -22,28 +17,21 @@
 #define NUM_ITEMS 8
 #define CHAN_CAP  4
 
-typedef struct {
-    int id;
-    int result;
-} Item;
-
 /* Simulate variable-time work: odd ids take longer. */
-void* process_item(void* arg) {
-    Item* item = (Item*)arg;
-    int delay_us = (item->id % 2 == 1) ? 50000 : 10000;
+static int process_item(int id) {
+    int delay_us = (id % 2 == 1) ? 50000 : 10000;
     usleep(delay_us);
-    item->result = item->id * item->id;
-    printf("  [worker] completed item %d (delay=%dms)\n", item->id, delay_us / 1000);
-    return item;
+    int result = id * id;
+    printf("  [worker] completed item %d (delay=%dms)\n", id, delay_us / 1000);
+    return result;
 }
 
 int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
 
-    CCTask[~CHAN_CAP >] tasks_tx;
-    CCTask[~CHAN_CAP <] tasks_rx;
-
-    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx) !> @destroy;
+    int[~CHAN_CAP >] results_tx;
+    int[~CHAN_CAP ordered <] results_rx;
+    CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
 
     printf("=== Ordered Parallel Processing ===\n");
     printf("Processing %d items with variable delays...\n\n", NUM_ITEMS);
@@ -51,32 +39,38 @@ int main(void) {
     {
         CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
 
-        consumer->spawn(() => [tasks_rx] {
+        consumer->spawn(() => [results_rx] {
             printf("\n[consumer] receiving results in order:\n");
-            CCTask task;
-            while (cc_io_avail(tasks_rx.recv(&task))) {
-                /* cc_block_on_intptr: wait for task completion, return its result. */
-                void* result = (void*)cc_block_on_intptr(task);
-                Item* item = (Item*)result;
-                printf("[consumer] item %d: %d^2 = %d\n",
-                       item->id, item->id, item->result);
-                free(item);
+            int result = 0;
+            int expect = 1;
+            while (cc_io_avail(results_rx.recv(&result))) {
+                int want = expect * expect;
+                printf("[consumer] item %d: %d^2 = %d\n", expect, expect, result);
+                if (result != want) {
+                    fprintf(stderr, "ORDER/VALUE: expected %d got %d\n", want, result);
+                    break;
+                }
+                expect++;
+            }
+            if (expect != NUM_ITEMS + 1) {
+                fprintf(stderr, "missing results: got %d of %d\n",
+                        expect - 1, NUM_ITEMS);
             }
         });
 
-        /* Producer in an inner nursery: its @destroy closes tasks_tx once
-         * producer returns, so the consumer sees EOF and drains. */
+        /* Producer in an inner nursery: @destroy closes results_tx once the
+         * producer returns, so the consumer sees EOF after draining. */
         {
             CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
-            (void)producer->close_on(tasks_tx);
+            (void)producer->close_on(results_tx);
 
-            producer->spawn(() => [tasks_tx] {
+            producer->spawn(() => [results_tx] {
                 for (int i = 1; i <= NUM_ITEMS; i++) {
-                    Item* item = malloc(sizeof(Item));
-                    item->id = i;
-                    CCTask task = cc_thread_spawn(process_item, item);
-                    (void)tasks_tx.send(task);
-                    printf("[producer] spawned task for item %d\n", i);
+                    int id = i;
+                    results_tx.send_task(() => [id] {
+                        return process_item(id);
+                    });
+                    printf("[producer] submitted task for item %d\n", i);
                 }
             });
         }

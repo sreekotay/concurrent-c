@@ -62,10 +62,12 @@ static void handle_client(CCSocket sock) {
 
 /* In-process client: connect, send, read echo, close. */
 static void run_test_client(void) {
-    CCNetError err = CC_NET_OK;
-    CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1, &err);
-    if (err != CC_NET_OK) { fprintf(stderr, "dial error: %d\n", err); return; }
+    CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
+        fprintf(stderr, "dial error: %d\n", (int)e);
+        return;
+    };
 
+    CCNetError err = CC_NET_OK;
     const char msg[] = "hello from test\n";
     (void)cc_socket_write(&sock, msg, sizeof(msg) - 1, &err);
     if (err != CC_NET_OK) { cc_socket_close(&sock); return; }
@@ -94,9 +96,10 @@ int main(int argc, char** argv) {
 
     bool test_mode = parse_test_flag(argc, argv);
 
-    CCNetError err = CC_NET_OK;
-    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1, &err);
-    if (err != CC_NET_OK) { printf("listen error: %d\n", err); return 1; }
+    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
+        printf("listen error: %d\n", (int)e);
+        return 1;
+    };
     printf("listening on %s (%s mode)\n", PORT, test_mode ? "test" : "demo");
 
     {
@@ -110,13 +113,12 @@ int main(int argc, char** argv) {
         /* Accept loop on main's fiber. Each accepted socket is handed to a
          * freshly spawned handler; the nursery's @destroy joins them all. */
         do {
-            CCSocket sock = ln.accept(&err);
-            if (err != CC_NET_OK) {
+            CCSocket sock = ln.accept() !>(e) {
                 /* Real-server shutdown path: listener closed, fd gone,
                  * peer unreachable, etc. */
-                printf("accept stopped: %d\n", err);
+                printf("accept stopped: %d\n", (int)e);
                 break;
-            }
+            };
             n->spawn(() => [sock] { handle_client(sock); });
         } while (!test_mode);  /* Test mode bails after one connection so CI is deterministic */
     }

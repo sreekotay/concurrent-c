@@ -1,0 +1,59 @@
+/*
+ * Regression: UFCS `ln.accept() !>(e)` under `@errhandler(CCError)` must
+ * bind `e` as `CCNetError` (Result error arm), not ambient `CCError`.
+ * Same for `ln_ptr->accept()`.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <stdio.h>
+
+static void take_net_err(CCNetError e) {
+    printf("net_err=%d\n", (int)e);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message ? e.message : "unknown");
+        return 1;
+    }
+
+    /* Closed listener: accept fails immediately with a CCNetError. */
+    CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
+    CCListener* ln_ptr = &ln;
+
+    CCSocket s1 = ln.accept() !>(ne) {
+        take_net_err(ne);
+        goto after_value;
+    };
+    (void)s1;
+    fprintf(stderr, "ufcs_accept_errhandler_neterr_smoke: expected value UFCS accept failure\n");
+    return 2;
+after_value:
+
+    CCSocket s2 = ln_ptr->accept() !>(ne) {
+        take_net_err(ne);
+        goto after_ptr;
+    };
+    (void)s2;
+    fprintf(stderr, "ufcs_accept_errhandler_neterr_smoke: expected ptr UFCS accept failure\n");
+    return 3;
+after_ptr:
+
+    /* Also after a successful listen decl (the original Phase-2 probe shape). */
+    CCListener live = cc_tcp_listen("127.0.0.1:18771", 15) !>(ne) {
+        take_net_err(ne);
+        return 4;
+    };
+    cc_listener_close(&live);
+    CCSocket s3 = live.accept() !>(ne) {
+        take_net_err(ne);
+        goto after_live;
+    };
+    (void)s3;
+    fprintf(stderr, "ufcs_accept_errhandler_neterr_smoke: expected post-listen UFCS accept failure\n");
+    return 5;
+after_live:
+
+    printf("ufcs_accept_errhandler_neterr_smoke: PASS\n");
+    return 0;
+}

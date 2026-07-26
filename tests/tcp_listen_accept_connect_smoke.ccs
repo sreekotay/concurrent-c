@@ -1,0 +1,83 @@
+/*
+ * Smoke: cc_tcp_listen / cc_tcp_connect / cc_listener_accept return Result.
+ * Happy path listens, connects, accepts, then closes (no read/write race).
+ * Failure paths cover bad listen address and accept on a closed listener.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <string.h>
+
+#define PORT "127.0.0.1:18765"
+
+static void client_task(void) {
+    CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
+        fprintf(stderr, "tcp_listen_accept_connect_smoke: connect err=%d\n", (int)e);
+        return;
+    };
+    cc_socket_close(&sock);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "tcp_listen_accept_connect_smoke: fatal: %s\n",
+                e.message ? e.message : "unknown");
+        return 1;
+    }
+
+    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
+        fprintf(stderr, "tcp_listen_accept_connect_smoke: listen err=%d\n", (int)e);
+        return 1;
+    };
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => client_task());
+
+        CCSocket client = ln.accept() !>(e) {
+            fprintf(stderr, "tcp_listen_accept_connect_smoke: accept err=%d\n", (int)e);
+            return 2;
+        };
+        if (client.fd < 0) {
+            fprintf(stderr, "tcp_listen_accept_connect_smoke: accept returned invalid fd\n");
+            cc_listener_close(&ln);
+            return 3;
+        }
+        cc_socket_close(&client);
+    }
+
+    cc_listener_close(&ln);
+
+    {
+        int saw_err = 0;
+        CCListener bad = cc_tcp_listen("not-a-host", 10) !>(e) {
+            (void)e;
+            saw_err = 1;
+            goto after_bad_listen;
+        };
+        (void)bad;
+        fprintf(stderr, "tcp_listen_accept_connect_smoke: expected listen failure\n");
+        return 5;
+    after_bad_listen:
+        if (!saw_err) return 5;
+    }
+    {
+        int saw_err = 0;
+        CCListener closed = {.fd = -1, .flags = 0, .watcher = NULL};
+        CCSocket ignored = cc_listener_accept(&closed) !>(e) {
+            (void)e;
+            saw_err = 1;
+            goto after_bad_accept;
+        };
+        (void)ignored;
+        fprintf(stderr, "tcp_listen_accept_connect_smoke: expected accept failure\n");
+        return 6;
+    after_bad_accept:
+        if (!saw_err) return 6;
+    }
+
+    printf("tcp_listen_accept_connect_smoke: PASS\n");
+    return 0;
+}
