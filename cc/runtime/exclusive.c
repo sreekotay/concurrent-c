@@ -167,7 +167,11 @@ static void cc__exclusive_lock_entry(CCExclusiveEntry* e) {
         e->wait_tail = &node;
         cc__spin_unlock(&e->wait_spin);
 
-        CC_FIBER_PARK_IF(&node.ready, 0, "exclusive_lock");
+        /* V2 has no pending-unpark latch: recheck ready after every park so
+         * an unlock that runs between enqueue and park cannot lose the wake. */
+        while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0) {
+            CC_FIBER_PARK("exclusive_lock");
+        }
         /* Woken (or never parked): retry CAS. */
     retry_lock:
         ;
