@@ -1513,9 +1513,7 @@ void cc_emit_plan_warn_duplicate_symbols(const char* src, size_t len,
         if (f->origin_file && f->origin_file[0]) {
             oline = f->origin_line > 0 ? f->origin_line : 1;
         } else {
-            oline = 1;
-            for (size_t k = 0; k < f->site_pos && src && k < len; k++)
-                if (src[k] == '\n') oline++;
+            oline = f->site_line > 0 ? f->site_line : 1;
         }
         char origin[288];
         snprintf(origin, sizeof(origin), "%s:%d", of, oline);
@@ -1566,25 +1564,38 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
      * directives so a downstream C-compiler error inside generated code maps to
      * the template/emit origin, and code after the splice resumes correct
      * attribution.  Compute all line numbers up front against the untouched
-     * (line-aligned) body buffer, since the splice loop mutates *src. */
+     * (line-aligned) body buffer, since the splice loop mutates *src.
+     *
+     * Use the #line/CC_LN ledger — never raw physical newline counts.  The
+     * buffer is inflated by spliced headers / grammar, so a phys count past
+     * the insert site lands past the TU's EOF (caught by test_async_line_map). */
     char relbuf[1024];
     const char* rel_input = cc_path_rel_to_repo(input_path ? input_path : "<input>",
                                                 relbuf, sizeof(relbuf));
     static int restore_lines[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
     static int origin_lines[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
+    static char restore_files[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS][PATH_MAX];
+    static char origin_files[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS][PATH_MAX];
     for (size_t si = 0; si < sched.n; si++) {
         const CCEmitComptimeFragment* f = &cc__comptime_frags[sched.frag_index[si]];
-        int rl = 1;
-        for (size_t k = 0; k < sched.pos[si] && k < *len; k++)
-            if ((*src)[k] == '\n') rl++;
-        restore_lines[si] = rl;
+        const char* rp = NULL;
+        size_t rpl = 0;
+        int rl = cc_user_line_for_offset(*src, *len, sched.pos[si], 1, &rp, &rpl);
+        restore_lines[si] = rl > 0 ? rl : 1;
+        if (rp && rpl > 0 && rpl < sizeof(restore_files[si])) {
+            memcpy(restore_files[si], rp, rpl);
+            restore_files[si][rpl] = '\0';
+        } else {
+            snprintf(restore_files[si], sizeof(restore_files[si]), "%s", rel_input);
+        }
         if (f->origin_file && f->origin_file[0]) {
             origin_lines[si] = f->origin_line > 0 ? f->origin_line : 1;
+            snprintf(origin_files[si], sizeof(origin_files[si]), "%s", f->origin_file);
         } else {
-            int ol = 1;
-            for (size_t k = 0; k < f->site_pos && k < *len; k++)
-                if ((*src)[k] == '\n') ol++;
-            origin_lines[si] = ol;
+            /* site_line was recorded via the ledger (cc__diag_line_for_pos);
+             * never recount newlines to a stale site_pos across rewrites. */
+            origin_lines[si] = f->site_line > 0 ? f->site_line : restore_lines[si];
+            snprintf(origin_files[si], sizeof(origin_files[si]), "%s", restore_files[si]);
         }
     }
     cc_emit_plan_warn_duplicate_symbols(*src, *len, input_path);
@@ -1592,22 +1603,28 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
         size_t si = order[oi];
         size_t frag_i = sched.frag_index[si];
         const CCEmitComptimeFragment* f = &cc__comptime_frags[frag_i];
-        const char* origin_file = (f->origin_file && f->origin_file[0])
-                                  ? f->origin_file : rel_input;
+        const char* origin_file = origin_files[si];
         char block[CC_EMIT_SPLICE_BLOCK_MAX];
+        /* No leading blank before `#line origin` — it would inherit the
+         * previous directive and can map past the TU's EOF. */
+        size_t pos = sched.pos[si];
+        if (pos > 0 && pos <= *len && (*src)[pos - 1] != '\n') {
+            if (cc__emit_splice_at(src, len, pos, "\n", input_path) != 0) return -1;
+            pos += 1;
+        }
         int n = snprintf(block, sizeof(block),
-                         "\n#line %d \"%s\"\n%s%s#line %d \"%s\"\n",
+                         "#line %d \"%s\"\n%s%s#line %d \"%s\"\n",
                          origin_lines[si], origin_file,
                          f->text ? f->text : "",
                          (f->text && f->text[0] && f->text[strlen(f->text) - 1] == '\n') ? "" : "\n",
-                         restore_lines[si], rel_input);
+                         restore_lines[si], restore_files[si]);
         if (n <= 0 || (size_t)n >= sizeof(block)) {
             fprintf(stderr,
                     "%s: error: comptime emit splice block exceeds %d bytes\n",
                     input_path ? input_path : "<input>", CC_EMIT_SPLICE_BLOCK_MAX);
             return -1;
         }
-        if (cc__emit_splice_at(src, len, sched.pos[si], block, input_path) != 0) return -1;
+        if (cc__emit_splice_at(src, len, pos, block, input_path) != 0) return -1;
     }
     return 0;
 }
@@ -2252,11 +2269,21 @@ int cc_emit_plan_format_result_arm(char* out, size_t out_sz,
 void cc_emit_plan_fprint_line_directive(FILE* out, const char* src, size_t offset,
                                         const char* input_path) {
     char rel[1024];
-    int resume_line = 1;
+    char pathbuf[PATH_MAX];
+    const char* lp = NULL;
+    size_t lpl = 0;
+    int resume_line;
+    const char* file;
     if (!out || !src) return;
-    for (size_t i = 0; i < offset; i++) {
-        if (src[i] == '\n') resume_line++;
+    /* Bound the scan to `offset`: callers may pass a non-NUL-terminated span. */
+    resume_line = cc_user_line_for_offset(src, offset, offset, 1, &lp, &lpl);
+    if (resume_line <= 0) resume_line = 1;
+    if (lp && lpl > 0 && lpl < sizeof(pathbuf)) {
+        memcpy(pathbuf, lp, lpl);
+        pathbuf[lpl] = '\0';
+        file = pathbuf;
+    } else {
+        file = cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel));
     }
-    fprintf(out, "#line %d \"%s\"\n", resume_line,
-            cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+    fprintf(out, "#line %d \"%s\"\n", resume_line, file);
 }

@@ -9579,7 +9579,11 @@ char* cc_harvest_local_header_factories(void) {
                 for (size_t k = 0; k < start; k++) if (src[k] == '\n') kwline++;
                 {
                     char ld[PATH_MAX + 64];
-                    snprintf(ld, sizeof(ld), "\n#line %d \"%s\"\n", kwline, path);
+                    /* No leading blank: callers append after a body that already
+                     * ends in `\n`.  An extra newline would map past TU EOF. */
+                    snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", kwline, path);
+                    if (out_len > 0 && out[out_len - 1] != '\n')
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
                 }
                 cc_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
@@ -9736,7 +9740,10 @@ char* cc_harvest_header_comptime_functions(void) {
                     int line = 1;
                     char ld[PATH_MAX + 64];
                     for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
-                    snprintf(ld, sizeof(ld), "\n#line %d \"%s\"\n", line, path);
+                    /* No leading blank — see factory harvest above. */
+                    snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
+                    if (out_len > 0 && out[out_len - 1] != '\n')
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
                     cc_sb_append(&out, &out_len, &out_cap,
                                  src + start, body_r + 1 - start);

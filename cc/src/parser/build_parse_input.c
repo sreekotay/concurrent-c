@@ -90,14 +90,18 @@ int cc_build_parse_input(const char* file_buf,
         char* harvested = cc_harvest_local_header_factories();
         if (harvested) {
             size_t hlen = strlen(harvested);
-            char* nb = (char*)malloc(got + 1 + hlen + 1);
+            /* At most one separator newline: the body usually already ends
+             * with `\n`, and harvested blocks start with `#line`.  A second
+             * blank would inherit the TU's last #line and map past EOF. */
+            size_t sep = (got > 0 && buf[got - 1] == '\n') ? 0 : 1;
+            char* nb = (char*)malloc(got + sep + hlen + 1);
             if (nb) {
                 memcpy(nb, buf, got);
-                nb[got] = '\n';
-                memcpy(nb + got + 1, harvested, hlen + 1);
+                if (sep) nb[got] = '\n';
+                memcpy(nb + got + sep, harvested, hlen + 1);
                 free(buf);
                 buf = nb;
-                got = got + 1 + hlen;
+                got = got + sep + hlen;
             }
             free(harvested);
         }
@@ -106,15 +110,16 @@ int cc_build_parse_input(const char* file_buf,
         char* harvested = cc_harvest_header_comptime_functions();
         if (harvested) {
             size_t hlen = strlen(harvested);
-            char* nb = (char*)malloc(got + 1 + hlen + 1);
+            size_t sep = (got > 0 && buf[got - 1] == '\n') ? 0 : 1;
+            char* nb = (char*)malloc(got + sep + hlen + 1);
             if (!nb) { free(harvested); goto fail_buf; }
             memcpy(nb, buf, got);
-            nb[got] = '\n';
-            memcpy(nb + got + 1, harvested, hlen + 1);
+            if (sep) nb[got] = '\n';
+            memcpy(nb + got + sep, harvested, hlen + 1);
             free(harvested);
             free(buf);
             buf = nb;
-            got += 1 + hlen;
+            got += sep + hlen;
         }
     }
     /* Seam: expand `@comptime for`/`if`, then lower `@emit`/`@string` templates
