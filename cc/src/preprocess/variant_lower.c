@@ -108,13 +108,119 @@ typedef struct {
     int donor_arm;
     unsigned niche_off, niche_width;
     unsigned long long niche_sentinel;
+    /* Schema `one of`: same kind+u layout and projection rules as @variant.
+     * Non-arm members (product-level binds such as a field discriminant) pass
+     * through to C instead of being diagnosed as unknown arms. */
+    int is_schema;
 } CCVaDef;
 
 static _Thread_local CCVaDef g_va[CC_VA_MAX_VARIANTS];
 static _Thread_local int g_va_n = 0;
 static _Thread_local int g_va_tmp_id = 0;
 
+/* Queued by grammar emit; committed at the end of the variant decls pass so
+ * a decls-pass registry reset cannot wipe schema registrations. */
+static _Thread_local CCVaDef g_schema_pending[CC_VA_MAX_VARIANTS];
+static _Thread_local int g_schema_pending_n = 0;
+
 size_t cc_variant_registry_count(void) { return (size_t)g_va_n; }
+
+static int cc__va_find(const char* s, size_t len); /* fwd: used by schema commit */
+
+void cc_variant_schema_pending_clear(void) { g_schema_pending_n = 0; }
+
+int cc_variant_schema_pending_add(const char* name, int narms,
+                                  const char* const* arm_names,
+                                  const int* is_void) {
+    if (!name || !name[0] || narms <= 0 || narms > CC_VA_MAX_ARMS || !arm_names)
+        return -1;
+    if (g_schema_pending_n >= CC_VA_MAX_VARIANTS) return -1;
+    for (int i = 0; i < g_schema_pending_n; i++) {
+        if (strcmp(g_schema_pending[i].name, name) == 0) return 0; /* idempotent */
+    }
+    CCVaDef* d = &g_schema_pending[g_schema_pending_n];
+    memset(d, 0, sizeof(*d));
+    snprintf(d->name, sizeof(d->name), "%s", name);
+    snprintf(d->kindname, sizeof(d->kindname), "%sKind", name);
+    d->narms = narms;
+    d->is_schema = 1;
+    for (int a = 0; a < narms; a++) {
+        if (!arm_names[a] || !arm_names[a][0]) return -1;
+        snprintf(d->arms[a].name, sizeof(d->arms[a].name), "%s", arm_names[a]);
+        d->arms[a].is_void = is_void ? (is_void[a] != 0) : 0;
+        /* Payload type text is unused for schema arms: construction pastes
+         * the designated value into `.u.arm`, and C typechecks the struct. */
+        snprintf(d->arms[a].type, sizeof(d->arms[a].type), "/*schema*/");
+    }
+    g_schema_pending_n++;
+    return 0;
+}
+
+static void cc__va_commit_schema_pending(void) {
+    for (int i = 0; i < g_schema_pending_n; i++) {
+        const CCVaDef* src = &g_schema_pending[i];
+        if (cc__va_find(src->name, strlen(src->name)) >= 0) continue;
+        if (g_va_n >= CC_VA_MAX_VARIANTS) break;
+        g_va[g_va_n++] = *src;
+    }
+    g_schema_pending_n = 0;
+}
+
+static const char* cc__va_surface(const CCVaDef* def) {
+    return def && def->is_schema ? "schema union" : "variant";
+}
+
+/* Schema fill/write helpers (`Name__fill`, `Name__wchk`, …) must keep raw
+ * `.kind` / `.u` stores.  Collect their function-body spans so the ban and
+ * kind-write checks skip generated code. */
+enum { CC_VA_MAX_CG_SPANS = 256 };
+typedef struct { size_t a, b; } CCVaCgSpan;
+
+static int cc__va_collect_codegen_spans(const char* s, size_t n,
+                                        CCVaCgSpan* out, int cap) {
+    static const char* const sfx[] = {
+        "__fill", "__wput", "__wchk", "__wmeasure"
+    };
+    int cnt = 0;
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
+    size_t i = 0;
+    while (i < n && cnt < cap) {
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        if (!cc_is_ident_start(s[i])) { i++; continue; }
+        size_t a = i;
+        while (i < n && cc_is_ident_char(s[i])) i++;
+        size_t len = i - a;
+        int hit = 0;
+        for (size_t k = 0; k < sizeof(sfx) / sizeof(sfx[0]); k++) {
+            size_t sl = strlen(sfx[k]);
+            if (len > sl && memcmp(s + a + len - sl, sfx[k], sl) == 0) {
+                hit = 1;
+                break;
+            }
+        }
+        if (!hit) continue;
+        size_t p = cc_skip_ws_and_comments(s, n, i);
+        if (p >= n || s[p] != '(') continue;
+        size_t rp = 0;
+        if (!cc_find_matching_paren(s, n, p, &rp)) continue;
+        size_t lb = cc_skip_ws_and_comments(s, n, rp + 1);
+        if (lb >= n || s[lb] != '{') continue;
+        size_t rb = 0;
+        if (!cc_find_matching_brace(s, n, lb, &rb)) continue;
+        out[cnt].a = lb;
+        out[cnt].b = rb + 1;
+        cnt++;
+        i = rb + 1;
+    }
+    return cnt;
+}
+
+static int cc__va_in_cg(size_t pos, const CCVaCgSpan* sp, int nsp) {
+    for (int i = 0; i < nsp; i++)
+        if (pos >= sp[i].a && pos < sp[i].b) return 1;
+    return 0;
+}
 
 /* Is variant vi a proven-packed variant (opaque byte layout, §11)? */
 static int cc__va_is_packed(int vi) {
@@ -463,6 +569,8 @@ enum { CC_VA_FORM_VALUE = 0, CC_VA_FORM_PTR = 1, CC_VA_FORM_KIND = 2 };
  * The LAST match before the use wins.  Returns variant index or -1. */
 static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
                                const char* id, size_t idl, int* out_form) {
+    /* Nearest declarator wins.  A later non-variant `T* out` must shadow an
+     * earlier schema/variant `V* out` (generated fill helpers use `out`). */
     int found = -1, form = CC_VA_FORM_VALUE;
     size_t from = 0;
     if (use_pos > n) use_pos = n;
@@ -506,8 +614,12 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
                 if (vi >= 0) {
                     found = vi;
                     form = CC_VA_FORM_KIND;
+                    continue;
                 }
             }
+            /* Nearest decl is some other type — clear any earlier variant hit. */
+            found = -1;
+            form = CC_VA_FORM_VALUE;
         }
     }
     if (found >= 0 && out_form) *out_form = form;
@@ -930,8 +1042,16 @@ static char* cc__va_emit_packed_lowering(CCVaDef* def, const char* src,
 char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input_path) {
     g_va_n = 0;           /* per-TU registry: reset unconditionally */
     g_va_tmp_id = 0;
-    if (!src || n == 0) return NULL;
-    if (!cc_contains_token_top_level(src, n, "@variant")) return NULL;
+    if (!src || n == 0) {
+        cc__va_commit_schema_pending();
+        return NULL;
+    }
+    int has_variant = cc_contains_token_top_level(src, n, "@variant");
+    if (!has_variant) {
+        /* Schema-only TUs still need registry membership for projection. */
+        cc__va_commit_schema_pending();
+        return NULL;
+    }
 
     CCVaEdits edits = {0};
     int nerr = 0;
@@ -1255,8 +1375,10 @@ char* cc_rewrite_variant_decls_text(const char* src, size_t n, const char* input
 
     if (nerr) {
         cc__va_edits_free(&edits);
+        cc__va_commit_schema_pending(); /* still expose schemas for uses diagnostics */
         return (char*)-1;
     }
+    cc__va_commit_schema_pending();
     if (edits.n == 0) {
         cc__va_edits_free(&edits);
         return NULL;
@@ -2362,6 +2484,8 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
     for (int w = 0; w < swcnt; w++)
         (void)cc__va_classify_switch_subject(s, n, &sw[w]);
     int gcnt = cc__va_collect_guards(s, n, guards, CC_VA_MAX_GUARDS);
+    CCVaCgSpan cg[CC_VA_MAX_CG_SPANS];
+    int ncg = cc__va_collect_codegen_spans(s, n, cg, CC_VA_MAX_CG_SPANS);
 
     CCInertScan sc;
     cc_inert_scan_init(&sc, NULL);
@@ -2418,7 +2542,7 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
          * compiler-generated projection lowered for later materialization. */
         if (mlen == 1 && s[mem_a] == 'u') { i = mem_b; continue; }
 
-        /* `.kind` pseudo-member: read ok, write = error. */
+        /* `.kind` pseudo-member: read ok, write = error (except schema codegen). */
         if (mlen == 4 && memcmp(s + mem_a, "kind", 4) == 0) {
             size_t f = cc_skip_ws_and_comments(s, n, mem_b);
             int is_write = 0;
@@ -2432,10 +2556,10 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
                 else if (f + 1 < n && ((s[f] == '+' && s[f + 1] == '+') ||
                                        (s[f] == '-' && s[f + 1] == '-'))) is_write = 1;
             }
-            if (is_write) {
+            if (is_write && !cc__va_in_cg(acc, cg, ncg)) {
                 cc__va_err(s, n, path, acc,
-                           "variant tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('%.*s = (%s){ .arm = ... };')",
-                           (int)(rb - ra), s + ra, def->name);
+                           "%s tag '.kind' is read-only — the tag changes only through construction or whole-variant assignment ('%.*s = (%s){ .arm = ... };')",
+                           cc__va_surface(def), (int)(rb - ra), s + ra, def->name);
                 nerr++;
             }
             i = mem_b;
@@ -2447,6 +2571,9 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
             /* Method call → UFCS territory, leave alone. */
             size_t f = cc_skip_ws_and_comments(s, n, mem_b);
             if (f < n && s[f] == '(') { i = mem_b; continue; }
+            /* Schema product-level fields (e.g. field-mode discriminant) are
+             * ordinary struct members — leave them for the C compile. */
+            if (def->is_schema) { i = mem_b; continue; }
             char arms[512];
             cc__va_arm_list(vi, arms, sizeof(arms));
             const char* sugg = cc__va_suggest_arm(vi, s + mem_a, mlen);
@@ -2464,8 +2591,8 @@ static int cc__va_step_projections(const char* s, size_t n, const char* path, CC
         }
         if (def->arms[ai].is_void) {
             cc__va_err(s, n, path, acc,
-                       "arm '%s' of variant '%s' is void — it has no payload to project; compare '%.*s%skind == %s_%s' or use 'case .%s:' instead",
-                       def->arms[ai].name, def->name,
+                       "arm '%s' of %s '%s' is void — it has no payload to project; compare '%.*s%skind == %s_%s' or use 'case .%s:' instead",
+                       def->arms[ai].name, cc__va_surface(def), def->name,
                        (int)(rb - ra), s + ra, is_arrow ? "->" : ".",
                        def->name, def->arms[ai].name, def->arms[ai].name);
             nerr++;
@@ -2815,15 +2942,17 @@ static int cc__va_step_defers(const char* s, size_t n, const char* path, CCVaEdi
 /* Uses step: packed raw-access guard (spec §11)                         */
 /* ==================================================================== */
 
-/* Ban user-written raw `.u` on every @variant (packed and unpacked) BEFORE
- * the projection step lowers protected arm reads to `.u.arm` (so compiler-
- * generated `.u` never collides with this diagnosis).  Schema one-of types
- * are not in g_va and stay untouched.  `.kind` writes are diagnosed by the
- * projection step. */
+/* Ban user-written raw `.u` on every registered tagged union ( @variant and
+ * schema `one of`) BEFORE the projection step lowers protected arm reads to
+ * `.u.arm` (so compiler-generated `.u` never collides with this diagnosis).
+ * Schema fill/write helpers are exempt via codegen body spans.  `.kind`
+ * writes are diagnosed by the projection step. */
 static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* path, CCVaEdits* ed) {
     (void)ed;
     int nerr = 0;
     if (g_va_n <= 0) return 0;
+    CCVaCgSpan cg[CC_VA_MAX_CG_SPANS];
+    int ncg = cc__va_collect_codegen_spans(s, n, cg, CC_VA_MAX_CG_SPANS);
 
     CCInertScan sc;
     cc_inert_scan_init(&sc, NULL);
@@ -2854,14 +2983,16 @@ static int cc__va_step_packed_raw_access(const char* s, size_t n, const char* pa
         /* Compiler-emitted drop/accessors use `__cc_*` temps (`__cc_vp->u.arm`);
          * those are not user raw reach-in. */
         if (rb > ra + 4 && strncmp(s + ra, "__cc_", 5) == 0) { i = mem_b; continue; }
+        if (cc__va_in_cg(acc, cg, ncg)) { i = mem_b; continue; }
         if (cc__va_is_packed(vi)) {
             cc__va_err(s, n, path, acc,
                        "variant '%s' is @variant(packed): it has no exposed '.u' union — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') instead of reaching into the raw representation",
                        g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
         } else {
             cc__va_err(s, n, path, acc,
-                       "cannot reach into variant '%s' via '.u' — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') or use '@unsafe'",
-                       g_va[vi].name, (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
+                       "cannot reach into %s '%s' via '.u' — project an arm ('%.*s%s<arm>', protected by a kind check / '!>' / '?>') or use '@unsafe'",
+                       cc__va_surface(&g_va[vi]), g_va[vi].name,
+                       (int)(rb - ra), s + ra, is_arrow ? "->" : ".");
         }
         nerr++;
         i = mem_b;

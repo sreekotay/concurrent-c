@@ -50,8 +50,8 @@ escapes (raw `free`, hand `memcpy`, `@unsafe`) go in Gap — same pattern as Rus
 | CVE-2025-39945 | sync cancel before free | **mitigated** (nursery cancel+join) | — | external workqueues / async cancel folklore |
 | CVE-2023-54235 | `thread::scope` joins before borrow ends | **mitigated** (nursery join is the protocol) | — | outer-scope nursery + `&`-captured scalar |
 | SHAPE-T8-adopt-wrong-deleter | n/a (`unsafe` / `from_raw`) | **still_expressible** | `rust_unsafe` | deleter↔allocator trusted |
-| SHAPE-T10-inactive-arm | enum match / inactive ban | **prevented** (protected projection + raw `.u` ban) | — | `@unsafe`; schema wire `.u` |
-| CVE-2015-0286 | non-exhaustive `match` | **prevented** (exhaustive subject-switch + domination) | — | `@unsafe`; schema wire `.u` |
+| SHAPE-T10-inactive-arm | enum match / inactive ban | **prevented** (protected projection + raw `.u` ban; schema `one of` shares the surface) | — | `@unsafe`; compound-literal `.kind`/`.u` interop |
+| CVE-2015-0286 | non-exhaustive `match` | **prevented** (exhaustive subject-switch + domination) | — | `@unsafe`; compound-literal `.kind`/`.u` interop |
 
 **Reading:** Checked index and default-on strict Result surfaces shipped.
 Claim-A misses left: bare `T*` channel handles, and slice `.len` write.

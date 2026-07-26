@@ -21,7 +21,7 @@ cite which family drove it in the rationale.
 | **T7 Shared mutable without owner** | Data race on non-atomic shared state | Channel single-writer; `@scoped` guards | Shared `T*` folklore |
 | **T8 Double free / wrong deleter** | Two owners free; adopt mismatch | Unique slices; move; `@destroy` once | Manual `free` beside `@destroy` |
 | **T9 Wire length vs buffer** | Attacker length > buffer; over-read (Heartbleed-shaped); size wrap → tiny alloc; OOB index write; pointer/length desync | Schema `bytes len`; `cc_*_i64_checked`; Result `at`/`set` (all builds); slice carries `.ptr`+`.len` as one value | Hand `memcpy(dst, p, wire_len)`; bare `size_t a+b`; raw `ptr[i]=` past `len`; writing `.len` on a live slice. Cross-parser HTTP policy is out of corpus |
-| **T10 Wrong representation** | Value stored as text/bytes when a sum type is needed; parse/encode tax hides bugs; inactive-arm use | `@variant` + protected projection; raw `.u` ban; schema `one of`; Result `!>`/`?>` | `@unsafe`; schema wire `.u`; flow-insensitive domination |
+| **T10 Wrong representation** | Value stored as text/bytes when a sum type is needed; parse/encode tax hides bugs; inactive-arm use | `@variant` + protected projection; raw `.u` ban; schema `one of` (same surface); Result `!>`/`?>` | `@unsafe`; compound-literal `.kind`/`.u` interop; flow-insensitive domination |
 
 ## Scoring hint
 

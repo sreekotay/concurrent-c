@@ -1,0 +1,5 @@
+; Shared RESP leaf recognizers for schemas via `use "redis_resp.rules" as Resp`.
+digit:  charset [#'0' - #'9']
+number: keep [opt #'-' some digit]
+lchar:  complement charset [#'\r' #'\n']
+line:   keep [any lchar]

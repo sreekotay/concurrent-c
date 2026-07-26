@@ -4,6 +4,7 @@
 // length/count fields are DERIVED from the data (stored values are ignored),
 // and self-typed `items` recurse (the RESP array variant). An out-of-range
 // kind refuses to emit anything: 0 bytes, the writer's error convention.
+// User construction uses the protected arm surface (not raw `.u`).
 #include <ccc/std/prelude.cch>
 
 @grammar(schema) Reply {~~~~
@@ -45,65 +46,45 @@ int main(void) {
     char buf[256];
     size_t w;
 
-    /* each variant, manually constructed */
+    /* each variant, constructed via arm designators */
     {
-        Reply r;
-        memset(&r, 0, sizeof r);
-        r.kind = Reply_simple;
-        r.u.simple.s = cc_slice_from_buffer((void*)"OK", 2);
+        Reply r = { .simple = { .s = cc_slice_from_buffer((void*)"OK", 2) } };
         w = Reply_write(&r, buf, sizeof buf);
         if (!bytes_are(buf, w, "+OK\r\n")) { printf("FAIL: write simple\n"); return 1; }
 
-        memset(&r, 0, sizeof r);
-        r.kind = Reply_error;
-        r.u.error.msg = cc_slice_from_buffer((void*)"ERR bad key", 11);
+        r = (Reply){ .error = { .msg = cc_slice_from_buffer((void*)"ERR bad key", 11) } };
         w = cc_write(Reply, &r, buf, sizeof buf);
         if (!bytes_are(buf, w, "-ERR bad key\r\n")) { printf("FAIL: write error\n"); return 1; }
 
-        memset(&r, 0, sizeof r);
-        r.kind = Reply_integer;
-        r.u.integer.v = 42;
+        r = (Reply){ .integer = { .v = 42 } };
         w = Reply_write(&r, buf, sizeof buf);
         if (!bytes_are(buf, w, ":42\r\n")) { printf("FAIL: write integer\n"); return 1; }
-        r.u.integer.v = -7;
+        r = (Reply){ .integer = { .v = -7 } };
         w = Reply_write(&r, buf, sizeof buf);
         if (!bytes_are(buf, w, ":-7\r\n")) { printf("FAIL: write negative\n"); return 1; }
 
-        /* bulk: $<len> is DERIVED from data.len — the stored len is a lie */
-        memset(&r, 0, sizeof r);
-        r.kind = Reply_bulk;
-        r.u.bulk.len = 999;
-        r.u.bulk.data = cc_slice_from_buffer((void*)"hello", 5);
+        /* bulk: $<len> is DERIVED from data.len — stored len is a lie */
+        r = (Reply){ .bulk = {
+            .len = 999,
+            .data = cc_slice_from_buffer((void*)"hello", 5)
+        } };
         w = Reply_write(&r, buf, sizeof buf);
         if (!bytes_are(buf, w, "$5\r\nhello\r\n")) { printf("FAIL: write bulk\n"); return 1; }
     }
 
-    /* nested arrays, manually constructed: *<n> derived from items_n; the
-     * array recursion goes through the self-typed element writer */
+    /* nested arrays */
     {
-        Reply inner[1];
-        memset(inner, 0, sizeof inner);
-        inner[0].kind = Reply_simple;
-        inner[0].u.simple.s = cc_slice_from_buffer((void*)"A", 1);
+        Reply inner[1] = {
+            (Reply){ .simple = { .s = cc_slice_from_buffer((void*)"A", 1) } },
+        };
 
-        Reply items[3];
-        memset(items, 0, sizeof items);
-        items[0].kind = Reply_bulk;
-        items[0].u.bulk.len = 7;   /* corrupt: derived */
-        items[0].u.bulk.data = cc_slice_from_buffer((void*)"ab", 2);
-        items[1].kind = Reply_integer;
-        items[1].u.integer.v = 7;
-        items[2].kind = Reply_array;
-        items[2].u.array.n = 42;   /* corrupt: derived */
-        items[2].u.array.items = inner;
-        items[2].u.array.items_n = 1;
+        Reply items[3] = {
+            (Reply){ .bulk = { .len = 7, .data = cc_slice_from_buffer((void*)"ab", 2) } },
+            (Reply){ .integer = { .v = 7 } },
+            (Reply){ .array = { .n = 42, .items = inner, .items_n = 1 } },
+        };
 
-        Reply r;
-        memset(&r, 0, sizeof r);
-        r.kind = Reply_array;
-        r.u.array.n = 999;         /* corrupt: derived */
-        r.u.array.items = items;
-        r.u.array.items_n = 3;
+        Reply r = (Reply){ .array = { .n = 999, .items = items, .items_n = 3 } };
         w = Reply_write(&r, buf, sizeof buf);
         if (!bytes_are(buf, w, "*3\r\n$2\r\nab\r\n:7\r\n*1\r\n+A\r\n")) {
             printf("FAIL: nested array write\n"); return 1; }
@@ -118,22 +99,26 @@ int main(void) {
         if (w != strlen(src) || memcmp(buf, src, w) != 0) {
             printf("FAIL: round-trip (%zu bytes)\n", w); return 1; }
 
-        /* corrupt every stored length/count: derivation must ignore them */
-        r.u.array.n = 999;
-        r.u.array.items[1].u.bulk.len = 77;
-        r.u.array.items[2].u.array.n = -5;
+        /* corrupt every stored length/count under protected projection */
+        if (r.kind == .array) {
+            r.array.n = 999;
+            Reply* items = r.array.items;
+            if (items[1].kind == .bulk) items[1].bulk.len = 77;
+            if (items[2].kind == .array) items[2].array.n = -5;
+        }
         w = Reply_write(&r, buf, sizeof buf);
         if (w != strlen(src) || memcmp(buf, src, w) != 0) {
             printf("FAIL: derived counts not derived\n"); return 1; }
 
-        /* cap: too small is 0 (nothing garbled past cap); exact cap fits */
         if (Reply_write(&r, buf, 5) != 0) { printf("FAIL: overflow accepted\n"); return 1; }
         if (Reply_write(&r, buf, strlen(src) - 1) != 0) {
             printf("FAIL: off-by-one cap accepted\n"); return 1; }
         if (Reply_write(&r, buf, strlen(src)) != strlen(src)) {
             printf("FAIL: exact cap rejected\n"); return 1; }
 
-        /* CCString face mirrors the writer: cc_format and UFCS to_str */
+        size_t need = cc_measure(Reply, &r);
+        if (need != w) { printf("FAIL: cc_measure %zu != write %zu\n", need, w); return 1; }
+        if (r.measure() != need) { printf("FAIL: ufcs measure\n"); return 1; }
         CCString fs = cc_format(Reply, &r, &arena);
         CCSlice fv = cc_string_as_slice(&fs);
         if (fv.len != strlen(src) || memcmp(fv.ptr, src, fv.len) != 0) {
@@ -144,13 +129,13 @@ int main(void) {
             printf("FAIL: ufcs to_str\n"); return 1; }
     }
 
-    /* invalid kind: FAIL LOUDLY — 0 bytes, never garbage */
+    /* invalid kind: compound-literal interop escape (`.kind` designator) */
     {
-        Reply r;
-        memset(&r, 0, sizeof r);
-        r.kind = (ReplyKind)99;
+        Reply r = { .kind = (ReplyKind)99 };
         if (Reply_write(&r, buf, sizeof buf) != 0) {
             printf("FAIL: bad kind accepted\n"); return 1; }
+        if (cc_measure(Reply, &r) != 0) {
+            printf("FAIL: bad kind measured\n"); return 1; }
         CCString bs = cc_format(Reply, &r, &arena);
         if (cc_string_as_slice(&bs).len != 0) {
             printf("FAIL: bad kind formatted\n"); return 1; }
@@ -158,16 +143,11 @@ int main(void) {
 
     /* the DEFAULT arm (no leading literal) writes its terms like any other */
     {
-        Cmd c;
-        memset(&c, 0, sizeof c);
-        c.kind = Cmd_framed;
-        c.u.framed.argc = 3;
+        Cmd c = { .framed = { .argc = 3 } };
         w = Cmd_write(&c, buf, sizeof buf);
         if (!bytes_are(buf, w, "*3\r\n")) { printf("FAIL: framed write\n"); return 1; }
 
-        memset(&c, 0, sizeof c);
-        c.kind = Cmd_plain;
-        c.u.plain.text = cc_slice_from_buffer((void*)"PING", 4);
+        c = (Cmd){ .plain = { .text = cc_slice_from_buffer((void*)"PING", 4) } };
         w = Cmd_write(&c, buf, sizeof buf);
         if (!bytes_are(buf, w, "PING\r\n")) { printf("FAIL: plain write\n"); return 1; }
     }

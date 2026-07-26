@@ -31,6 +31,10 @@
  *   cc_write(Cmd, &v, dst, cap)             schema: FORMAT (inverted parse) ->
  *                                           bytes written, 0 = didn't fit;
  *                                           length/count fields are DERIVED
+ *   cc_measure(Cmd, &v)                     schema: exact encoded size with no
+ *                                           destination (0 = cannot emit /
+ *                                           invalid kind); same derivation as
+ *                                           cc_write. UFCS: v.measure()
  *   cc_format(Cmd, &v, arena)               schema: -> CCString (Cmd_to_str);
  *                                           composes with @string templates
  *                                           (`${cmd.to_str(&a)}`) and the
@@ -107,6 +111,7 @@ typedef struct {
 #define cc_next(T, ...)    T##Reader_next(__VA_ARGS__)
 #define cc_at_end(T, ...)  T##Reader_at_end(__VA_ARGS__)
 #define cc_write(T, ...)   T##_write(__VA_ARGS__)
+#define cc_measure(T, ...) T##_measure(__VA_ARGS__)
 #define cc_format(T, ...)  T##_to_str(__VA_ARGS__)
 #define cc_get(T, ...)     T##_get(__VA_ARGS__)
 #define cc_field(T, ...)   T##_field(__VA_ARGS__)

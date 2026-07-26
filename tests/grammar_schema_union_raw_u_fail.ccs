@@ -1,0 +1,19 @@
+/* Fail: raw `.u` reach-in on a schema `one of` (study Gap T10 / schema wire). */
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Bulk {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number
+    one of [
+        nil  [= -1] [ "\r\n" ]
+        data [>= 0] [ "\r\n" payload: bytes len "\r\n" ]
+    ] by len
+~~~~}
+
+int main(void) {
+    Bulk b = { .data = { .payload = cc_slice_from_buffer((void*)"x", 1) } };
+    return (int)b.u.data.payload.len; /* ERROR: raw schema union reach-in */
+}

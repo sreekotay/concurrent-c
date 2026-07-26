@@ -44,6 +44,7 @@ int main(void) {
     {
         RespCmd c;
         if (sizeof(c.args) != 4 * sizeof(RespArg)) { printf("FAIL: args not inline\n"); return 1; }
+        if (RespCmd_args_cap != 4) { printf("FAIL: RespCmd_args_cap\n"); return 1; }
     }
 
     /* incremental delivery: every proper prefix is WOULD_BLOCK with pos

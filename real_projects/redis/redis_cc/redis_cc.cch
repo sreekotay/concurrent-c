@@ -67,11 +67,11 @@ typedef enum RedisReplyKind {
     REDIS_REPLY_WIRE,
 } RedisReplyKind;
 
-/* Max command arguments AFTER the command word.  Total wire tokens per
- * command = REDIS_ARGV_MAX + 1, which must match the grammar's `cap`
- * in redis_idiomatic.ccs (RespGCmd) and every args[] scratch array.
- * Bounds the variadic commands: DEL/EXISTS/MGET take up to
- * REDIS_ARGV_MAX keys, MSET up to REDIS_ARGV_MAX/2 pairs. */
+/* Max command arguments AFTER the command word.  Wire token cap is
+ * RespGCmd_args_cap (schema `items … cap N`); server TUs static-assert
+ * REDIS_ARGV_MAX + 1 == RespGCmd_args_cap.  Bounds variadic commands:
+ * DEL/EXISTS/MGET take up to REDIS_ARGV_MAX keys, MSET up to
+ * REDIS_ARGV_MAX/2 pairs. */
 #ifndef REDIS_ARGV_MAX
 #define REDIS_ARGV_MAX 7
 #endif

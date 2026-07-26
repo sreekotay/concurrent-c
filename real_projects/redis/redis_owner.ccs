@@ -169,29 +169,27 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 
 #include "redis_resp.cch"
 
+/* RESP leaf rules (shared factory for every schema below). */
+@grammar(rules) Resp {~~~~
+    include "redis_resp.rules"
+~~~~}
+
 /* RESP reader (parity oracle: tests/redis_resp_gen_parity_smoke.ccs).
  * Parse borrows the read buffer; argv is cloned into req->arena after a
- * complete frame.  cap 8 = REDIS_ARGV_MAX+1 wire tokens. */
+ * complete frame.  Wire argv cap is on the framed arm (`cap N` →
+ * RespGCmd_args_cap). */
 @grammar(schema) RespGArg {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-    ]
-    #'$' len: int number "\r\n"
+    use Resp
+    #'$' len: int Resp.number "\r\n"
     data: bytes len
     "\r\n"
 ~~~~}
 
 @grammar(schema) RespGCmd {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-        lchar:  complement charset [#'\r' #'\n']
-        line:   keep [any lchar]
-    ]
+    use Resp
     one of [
-        framed [ #'*' argc: int number "\r\n" args: items RespGArg argc cap 8 ]
-        plain  [ text: line "\r\n" ]
+        framed [ #'*' argc: int Resp.number "\r\n" args: items RespGArg argc cap 8 ]
+        plain  [ text: Resp.line "\r\n" ]
     ]
 ~~~~}
 
@@ -200,29 +198,21 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
  * Non-nil bulk stays a RespGReply arm; nil bulk is RespGBulk (field-
  * discriminated after `$`). */
 @grammar(schema) RespGReply {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-        lchar:  complement charset [#'\r' #'\n']
-        line:   keep [any lchar]
-    ]
+    use Resp
     one of [
-        simple  [ #'+' s: line "\r\n" ]
-        error   [ #'-' msg: line "\r\n" ]
-        integer [ #':' v: int number "\r\n" ]
-        bulk    [ #'$' len: int number "\r\n" data: bytes len "\r\n" ]
-        array   [ #'*' n: int number "\r\n" items: items RespGReply n ]
+        simple  [ #'+' s: Resp.line "\r\n" ]
+        error   [ #'-' msg: Resp.line "\r\n" ]
+        integer [ #':' v: int Resp.number "\r\n" ]
+        bulk    [ #'$' len: int Resp.number "\r\n" data: bytes len "\r\n" ]
+        array   [ #'*' n: int Resp.number "\r\n" items: items RespGReply n ]
     ]
 ~~~~}
 
 /* Bulk that may be nil: `$` then len, then framing by len
  * ($-1\r\n vs $<n>\r\n<bytes>\r\n). Write derives len from the arm. */
 @grammar(schema) RespGBulk {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-    ]
-    #'$' len: int number
+    use Resp
+    #'$' len: int Resp.number
     one of [
         nil  [= -1] [ "\r\n" ]
         data [>= 0] [ "\r\n" payload: bytes len "\r\n" ]
@@ -231,32 +221,23 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 
 /* Array of bulk-or-nil (MGET). */
 @grammar(schema) RespGBulkArray {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-    ]
-    #'*' n: int number "\r\n"
+    use Resp
+    #'*' n: int Resp.number "\r\n"
     elems: items RespGBulk n
 ~~~~}
 
 /* Bulk header alone: "$<len>\r\n" for streaming a payload larger than
  * conn->out_buf (schema-written header, then the payload slice). */
 @grammar(schema) RespGBulkHdr {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-    ]
-    #'$' len: int number "\r\n"
+    use Resp
+    #'$' len: int Resp.number "\r\n"
 ~~~~}
 
 /* Multi-bulk header: "*<n>\r\n".  KEYS writes elements immediately (inline
  * CCStringRef key bytes must not be staged across a later encode). */
 @grammar(schema) RespGArrayHdr {~~~~
-    rules [
-        digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
-    ]
-    #'*' n: int number "\r\n"
+    use Resp
+    #'*' n: int Resp.number "\r\n"
 ~~~~}
 
 static RespParseStatus gen_try_read_args_buffered(RespReader* r,
@@ -277,20 +258,24 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     if (c.kind == RespGCmd_plain) {
         /* whitespace tokenization stays with the hand helper: it is server
          * policy (arg splitting), not wire framing */
-        size_t !>(CCError) pargs = parse_inline_args(c.u.plain.text, args, cap);
+        size_t !>(CCError) pargs = parse_inline_args(c.plain.text, args, cap);
         if (pargs.is_err()) { *err = pargs.error(); return RESP_PARSE_ERROR; }
         *out_argc = pargs.value();
         r->start += pos;
         return RESP_PARSE_OK;
     }
-    if (c.u.framed.args_n < 1 || c.u.framed.args_n > cap) {
-        *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
-        return RESP_PARSE_ERROR;
+    if (c.kind == RespGCmd_framed) {
+        if (c.framed.args_n < 1 || c.framed.args_n > cap) {
+            *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+            return RESP_PARSE_ERROR;
+        }
+        for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+        *out_argc = c.framed.args_n;
+        r->start += pos;
+        return RESP_PARSE_OK;
     }
-    for (size_t i = 0; i < c.u.framed.args_n; i++) args[i] = c.u.framed.args[i].data;
-    *out_argc = c.u.framed.args_n;
-    r->start += pos;
-    return RESP_PARSE_OK;
+    *err = CC_ERROR(CC_ERR_PARSE, "unsupported RESP command shape");
+    return RESP_PARSE_ERROR;
 }
 
 typedef struct RedisCommandSpec {
@@ -407,39 +392,25 @@ static RedisReply reply_wire(CCSlice s) {
 /* RedisReply → socket bytes.  RespGReply is encode-only; NULL_BULK uses
  * RespGBulk's nil arm. */
 static inline RespGReply wire_bulk(CCSlice data) {
-    RespGReply w;
-    w.kind = RespGReply_bulk;
-    w.u.bulk.len = (long long)data.len; /* derived on write; set for hygiene */
-    w.u.bulk.data = data;
-    return w;
+    return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data } };
 }
 
 static inline RespGBulk wire_bulk_or_nil(CCSlice data, bool found) {
-    RespGBulk b;
-    memset(&b, 0, sizeof b);
-    if (!found) {
-        b.kind = RespGBulk_nil;
-        return b;
-    }
-    b.kind = RespGBulk_data;
-    b.u.data.payload = data;
-    return b;
+    if (!found) return (RespGBulk){ .nil = {} };
+    return (RespGBulk){ .data = { .payload = data } };
 }
 
 /* Structured arms → RespGReply.  WIRE and NULL_BULK are not projected here. */
 static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
     switch (reply->kind) {
         case REDIS_REPLY_SIMPLE_STRING:
-            wire->kind = RespGReply_simple;
-            wire->u.simple.s = reply->data;
+            *wire = (RespGReply){ .simple = { .s = reply->data } };
             return true;
         case REDIS_REPLY_ERROR:
-            wire->kind = RespGReply_error;
-            wire->u.error.msg = reply->data;
+            *wire = (RespGReply){ .error = { .msg = reply->data } };
             return true;
         case REDIS_REPLY_INTEGER:
-            wire->kind = RespGReply_integer;
-            wire->u.integer.v = reply->int_value;
+            *wire = (RespGReply){ .integer = { .v = reply->int_value } };
             return true;
         case REDIS_REPLY_BULK_STRING:
             *wire = wire_bulk(reply->data);
@@ -459,7 +430,7 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
         return reply->data.len;
     }
     if (reply->kind == REDIS_REPLY_NULL_BULK) {
-        RespGBulk nil = { .kind = RespGBulk_nil };
+        RespGBulk nil = { .nil = {} };
         return cc_write(RespGBulk, &nil, dst, cap);
     }
     RespGReply wire;
@@ -475,21 +446,18 @@ static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
                                                                  CCArena* reply_arena,
                                                                  size_t cap_hint) {
     @errhandler(CCError e) { return cc_err(e); }
-    size_t cap = cap_hint < 16 ? 16 : cap_hint;
-    for (;;) {
-        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
-        CCSlice out = reply_arena_alloc_slice(reply_arena, cap) !>;
-        size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
-        if (w != 0) {
-            out.len = w;
-            return cc_ok(out);
-        }
-        cc_arena_restore(cp);
-        if (cap >= (size_t)k_reply_encode_cap_max) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
-        }
-        cap *= 2;
+    (void)cap_hint;
+    size_t need = cc_measure(RespGReply, wire);
+    if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
     }
+    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
+    if (w != need) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode mismatch"));
+    }
+    out.len = w;
+    return cc_ok(out);
 }
 
 /* CONFIG GET: two-element array via schema, encoded into reply_arena. */
@@ -506,11 +474,9 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
         items[1] = wire_bulk(cc_slice_from_cstr("no"));
         n = 2;
     }
-    RespGReply arr;
-    arr.kind = RespGReply_array;
-    arr.u.array.n = (long long)n; /* derived on write; set for hygiene */
-    arr.u.array.items = items;
-    arr.u.array.items_n = n;
+    RespGReply arr = {
+        .array = { .n = (long long)n, .items = items, .items_n = n }
+    };
     CCSlice out = reply_wire_encode_into_arena(&arr, reply_arena, 64) !>;
     return cc_ok(reply_wire(out));
 }
@@ -609,6 +575,11 @@ static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
     return cc_ok((RedisRequestSlot){ .conn = conn, .req = req });
 }
 
+/* Wire argv slots = schema items cap (exported as RespGCmd_args_cap). */
+enum { k_argv_cap = RespGCmd_args_cap };
+_Static_assert(REDIS_ARGV_MAX + 1 == RespGCmd_args_cap,
+               "REDIS_ARGV_MAX must equal RespGCmd_args_cap - 1");
+
 static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     RedisConn* conn = it->conn;
     @errhandler(CCError e) { return cc_err(e); }
@@ -616,11 +587,11 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     /* Parse BEFORE taking a pool slot: incomplete frames are the common
      * refill case and must not touch req_pool / argv_buf at all.  Args
      * borrow read_buf until we materialize into req->arena below. */
-    CCSlice args[1 + REDIS_ARGV_MAX] = {0};
+    CCSlice args[k_argv_cap] = {0};
     size_t argc = 0;
     CCError perr = {0};
     RespParseStatus argc_status =
-        gen_try_read_args_buffered(it->reader, args, 1 + REDIS_ARGV_MAX, &argc, &perr);
+        gen_try_read_args_buffered(it->reader, args, k_argv_cap, &argc, &perr);
     if (argc_status == RESP_PARSE_INCOMPLETE) {
         return cc_ok(false);
     }
@@ -842,13 +813,15 @@ static bool redis_conn_write_wire_reply(RedisConn* conn, const RespGReply* wire)
     /* Bigger than the whole out_buf: only bulk payloads can get here
      * (simple/error carry short static messages; integers are <= 22 bytes).
      * Anything else oversized is a bug — fail the write loudly. */
-    if (wire->kind != RespGReply_bulk) return false;
-    RespGBulkHdr hdr = { .len = (long long)wire->u.bulk.data.len };
-    size_t hw = cc_write(RespGBulkHdr, &hdr, conn->out_buf, redis_conn_out_buf_bytes);
-    if (hw == 0) return false;
-    conn->out_len = hw; /* buffer is empty after the flush above */
-    return conn->write_bytes(wire->u.bulk.data) &&
-           conn->write_bytes(cc_slice_from_cstr("\r\n"));
+    if (wire->kind == RespGReply_bulk) {
+        RespGBulkHdr hdr = { .len = (long long)wire->bulk.data.len };
+        size_t hw = cc_write(RespGBulkHdr, &hdr, conn->out_buf, redis_conn_out_buf_bytes);
+        if (hw == 0) return false;
+        conn->out_len = hw; /* buffer is empty after the flush above */
+        return conn->write_bytes(wire->bulk.data) &&
+               conn->write_bytes(cc_slice_from_cstr("\r\n"));
+    }
+    return false;
 }
 
 static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {

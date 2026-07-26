@@ -1242,6 +1242,14 @@ static inline CCString cc_gr_struct_close_text(CCArena* a, const char* n) {
 `, a);
 }
 
+/* Comptime capacity for `items Elem count cap N` — call sites derive array
+ * sizes from this instead of restating N. */
+static inline CCString cc_gr_items_cap_text(CCArena* a, const char* sname,
+                                            const char* field, int cap) {
+    return @string(`enum { ${sname}_${field}_cap = ${cap} };
+`, a);
+}
+
 static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n) {
     return @string(`static int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
         CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
@@ -1272,6 +1280,15 @@ static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
     { int cc_i0 = 0;
     if (!${n}__fill(s, n, &p, arena, out, &cc_i0, 0)) return 0; }
     return p == n;
+}
+`, a);
+}
+
+/* Public measure face: exact encoded size (0 = cannot emit / invalid kind).
+ * Same substrate as cc_write / cc_format; no destination buffer. */
+static inline CCString cc_gr_measure_fn_text(CCArena* a, const char* n) {
+    return @string(`static __attribute__((unused)) size_t ${n}_measure(const ${n}* v) {
+    return ${n}__wmeasure(v);
 }
 `, a);
 }

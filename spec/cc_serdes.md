@@ -92,6 +92,7 @@ NameReader reader = cc_reader(Name, src, len, arena);
 int next = cc_next(Name, &reader, out);
 int ended = cc_at_end(Name, &reader);
 size_t written = cc_write(Name, value, dst, capacity);
+size_t need = cc_measure(Name, value);
 CCString text = cc_format(Name, value, arena);
 int found = cc_get(Name, value, field_name, out_value);
 const CCGramField *field = cc_field(Name, field_name, field_name_len);
@@ -122,7 +123,9 @@ containers in the arena while preserving each leaf's actual provenance.
 `items Elem count cap N` emits an inline `Elem[N]` field and its generated
 count field; parsing does not allocate the item array. A negative count or a
 count greater than `N` is a parse failure. The streaming face reports an
-over-cap count as `Err(CC_ERR_PARSE)`, not `Err(CC_ERR_WOULD_BLOCK)`.
+over-cap count as `Err(CC_ERR_PARSE)`, not `Err(CC_ERR_WOULD_BLOCK)`. The
+emitter also publishes `enum { Name_field_cap = N }` so call sites can size
+buffers from the schema instead of restating the literal.
 
 `cc_get` reflects a field by name into `CCGramValue`; `cc_field` returns its
 static `CCGramField` descriptor. Schemas with conditional members carry a
@@ -132,11 +135,14 @@ report their fields present.
 
 `cc_write` emits the schema's canonical byte structure. It returns the byte
 count on success and zero when the value cannot be emitted or the destination
-capacity is insufficient. Exact capacity is sufficient. `cc_format` uses the
-same writer and returns an arena-backed `CCString`. Both `cc_format(Name,
-value, arena)` and `value.to_str(arena)` resolve to the generated
-`Name_to_str`; the grammar engine registers the schema type for UFCS, so no
-user registration is required.
+capacity is insufficient. Exact capacity is sufficient. `cc_measure` returns
+that same success size with no destination buffer (and zero when the value
+cannot be emitted), so callers can allocate once before `cc_write`.
+`cc_format` uses the same writer and returns an arena-backed `CCString`.
+`cc_format(Name, value, arena)` / `value.to_str(arena)`, `cc_measure(Name,
+value)` / `value.measure()`, and `cc_write(Name, value, dst, cap)` /
+`value.write(dst, cap)` resolve to the generated faces; the grammar engine
+registers the schema type for UFCS, so no user registration is required.
 
 Length and count fields that drive `bytes` or `items` parsing are derived from
 the corresponding value on write. The stored parse-time count does not override
@@ -179,6 +185,15 @@ typedef struct Reply {
     } u;
 } Reply;
 ```
+
+User code consumes a schema `one of` through the same protected surface as
+`@variant`: designated-init construction (`Reply r = { .bulk = { .data = s } };`),
+dominated arm projection (`if (r.kind == .bulk) use(r.bulk.data);`, subject
+`switch`, `!>` / `?>`), and a compile-time ban on raw `.u` reach-in and
+`.kind` writes. Generated parse fill and write helpers retain raw layout
+access. Product-level fields outside the union (field-discriminated `one of`)
+remain ordinary struct members. Designators `{ .kind = … }` / `{ .u.… = … }`
+are an interop escape for compound literals only.
 
 Alternatives dispatch by disjoint leading literals. At most one alternative may
 omit a leading literal; that alternative is the default. Parse stores the
@@ -235,7 +250,8 @@ projection. It builds `CCShapeVal` objects and arrays using the caller's
 Both engines emit specialized ordinary C. Generated entry points have
 deterministic `Name_operation` names. The stable macro surface is `cc_match`,
 `cc_parse`, `cc_collect`, `cc_dom`, `cc_read`, `cc_try_read`, `cc_reader`,
-`cc_next`, `cc_at_end`, `cc_write`, `cc_format`, `cc_get`, and `cc_field`.
+`cc_next`, `cc_at_end`, `cc_write`, `cc_measure`, `cc_format`, `cc_get`, and
+`cc_field`.
 
 The rules engine computes nullability and FIRST sets, dispatches disjoint
 alternatives by lookahead, fuses eligible character-set loops into SWAR scans,

@@ -49,34 +49,62 @@ static int slice_is(CCSlice v, const char* want) {
 int main(void) {
     CCArena arena = cc_arena_create(1 << 20);
 
-    /* each variant parses, tags, and binds into its own union member */
+    /* each variant parses; read via protected arm projection */
     {
         Reply r;
-        if (!Reply_parse("+OK\r\n", 5, &arena, &r) || r.kind != Reply_simple ||
-            !slice_is(r.u.simple.s, "OK")) { printf("FAIL: simple\n"); return 1; }
-        if (!Reply_parse("-ERR bad key\r\n", 14, &arena, &r) || r.kind != Reply_error ||
-            !slice_is(r.u.error.msg, "ERR bad key")) { printf("FAIL: error\n"); return 1; }
-        if (!Reply_parse(":1234\r\n", 7, &arena, &r) || r.kind != Reply_integer ||
-            r.u.integer.v != 1234) { printf("FAIL: integer\n"); return 1; }
-        if (!Reply_parse(":-42\r\n", 6, &arena, &r) || r.u.integer.v != -42) {
+        if (!Reply_parse("+OK\r\n", 5, &arena, &r) || r.kind != Reply_simple) {
+            printf("FAIL: simple\n"); return 1; }
+        if (r.kind == .simple) {
+            if (!slice_is(r.simple.s, "OK")) { printf("FAIL: simple payload\n"); return 1; }
+        }
+        if (!Reply_parse("-ERR bad key\r\n", 14, &arena, &r) || r.kind != Reply_error) {
+            printf("FAIL: error\n"); return 1; }
+        if (r.kind == .error) {
+            if (!slice_is(r.error.msg, "ERR bad key")) { printf("FAIL: error payload\n"); return 1; }
+        }
+        if (!Reply_parse(":1234\r\n", 7, &arena, &r) || r.kind != Reply_integer) {
+            printf("FAIL: integer\n"); return 1; }
+        if (r.kind == .integer) {
+            if (r.integer.v != 1234) { printf("FAIL: integer payload\n"); return 1; }
+        }
+        if (!Reply_parse(":-42\r\n", 6, &arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: negative integer\n"); return 1; }
-        if (!Reply_parse("$5\r\nhello\r\n", 11, &arena, &r) || r.kind != Reply_bulk ||
-            r.u.bulk.len != 5 || !slice_is(r.u.bulk.data, "hello")) {
+        if (r.kind == .integer) {
+            if (r.integer.v != -42) { printf("FAIL: negative payload\n"); return 1; }
+        }
+        if (!Reply_parse("$5\r\nhello\r\n", 11, &arena, &r) || r.kind != Reply_bulk) {
             printf("FAIL: bulk\n"); return 1; }
+        if (r.kind == .bulk) {
+            if (r.bulk.len != 5 || !slice_is(r.bulk.data, "hello")) {
+                printf("FAIL: bulk payload\n"); return 1; }
+        }
     }
 
     /* recursion: an array of mixed replies, and arrays nested in arrays */
     {
         const char* src = "*3\r\n:1\r\n$2\r\nab\r\n*2\r\n+A\r\n-B\r\n";
         Reply r;
-        if (!Reply_parse(src, strlen(src), &arena, &r) || r.kind != Reply_array ||
-            r.u.array.items_n != 3) { printf("FAIL: array parse\n"); return 1; }
-        Reply* it = r.u.array.items;
-        if (it[0].kind != Reply_integer || it[0].u.integer.v != 1) { printf("FAIL: arr[0]\n"); return 1; }
-        if (it[1].kind != Reply_bulk || !slice_is(it[1].u.bulk.data, "ab")) { printf("FAIL: arr[1]\n"); return 1; }
-        if (it[2].kind != Reply_array || it[2].u.array.items_n != 2 ||
-            it[2].u.array.items[0].kind != Reply_simple ||
-            it[2].u.array.items[1].kind != Reply_error) { printf("FAIL: nested\n"); return 1; }
+        if (!Reply_parse(src, strlen(src), &arena, &r) || r.kind != Reply_array) {
+            printf("FAIL: array parse\n"); return 1; }
+        if (r.kind == .array) {
+            if (r.array.items_n != 3) { printf("FAIL: array count\n"); return 1; }
+            Reply* it = r.array.items;
+            if (it[0].kind != Reply_integer) { printf("FAIL: arr[0]\n"); return 1; }
+            if (it[0].kind == .integer) {
+                if (it[0].integer.v != 1) { printf("FAIL: arr[0] val\n"); return 1; }
+            }
+            if (it[1].kind != Reply_bulk) { printf("FAIL: arr[1]\n"); return 1; }
+            if (it[1].kind == .bulk) {
+                if (!slice_is(it[1].bulk.data, "ab")) { printf("FAIL: arr[1] data\n"); return 1; }
+            }
+            if (it[2].kind != Reply_array) { printf("FAIL: nested\n"); return 1; }
+            if (it[2].kind == .array) {
+                if (it[2].array.items_n != 2 ||
+                    it[2].array.items[0].kind != Reply_simple ||
+                    it[2].array.items[1].kind != Reply_error) {
+                    printf("FAIL: nested arms\n"); return 1; }
+            }
+        }
     }
 
     /* streaming face: unknown first byte = PARSE; truncation = WOULD_BLOCK */
@@ -107,10 +135,16 @@ int main(void) {
     /* DEFAULT arm: framed dispatches on '*', anything else is inline */
     {
         Cmd c;
-        if (!Cmd_parse("*3\r\n", 4, &arena, &c) || c.kind != Cmd_framed ||
-            c.u.framed.argc != 3) { printf("FAIL: framed\n"); return 1; }
-        if (!Cmd_parse("PING\r\n", 6, &arena, &c) || c.kind != Cmd_plain ||
-            !slice_is(c.u.plain.text, "PING")) { printf("FAIL: inline\n"); return 1; }
+        if (!Cmd_parse("*3\r\n", 4, &arena, &c) || c.kind != Cmd_framed) {
+            printf("FAIL: framed\n"); return 1; }
+        if (c.kind == .framed) {
+            if (c.framed.argc != 3) { printf("FAIL: framed argc\n"); return 1; }
+        }
+        if (!Cmd_parse("PING\r\n", 6, &arena, &c) || c.kind != Cmd_plain) {
+            printf("FAIL: inline\n"); return 1; }
+        if (c.kind == .plain) {
+            if (!slice_is(c.plain.text, "PING")) { printf("FAIL: inline text\n"); return 1; }
+        }
     }
 
     cc_arena_free(&arena);

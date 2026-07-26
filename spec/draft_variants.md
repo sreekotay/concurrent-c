@@ -37,6 +37,8 @@ typedef struct RedisValue {
 ```
 
 This is the same default enum-and-union layout used by schema `one of`.
+Schema unions use the same protected consumption surface (construction,
+dominated projection, raw `.u` ban); see `spec/cc_serdes.md`.
 `sizeof(Name)` includes the tag and the largest arm. Construction, projection,
 switching, and transition do not allocate.
 

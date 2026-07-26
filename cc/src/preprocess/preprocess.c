@@ -12381,13 +12381,13 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
-    /* @variant declarations + trapped consumption dialect (spec/draft_variants.md).
-     * Runs BEFORE slice/result type lowering so arm types like `T[:]` are
-     * still visible to those passes in the emitted union, and before the
-     * `!>`/`?>` result-unwrap phase-3 passes so projection suffix handlers
-     * are consumed here (a projection is an unwrap whose err-set is the
-     * other arms).  The decls pass resets and repopulates the per-TU
-     * variant registry; the uses pass is a no-op when no @variant exists. */
+    /* @variant + schema `one of` consumption dialect (spec/draft_variants.md,
+     * spec/cc_serdes.md).  Runs BEFORE slice/result type lowering so arm
+     * types like `T[:]` are still visible to those passes in the emitted
+     * union, and before the `!>`/`?>` result-unwrap phase-3 passes so
+     * projection suffix handlers are consumed here.  The decls pass resets
+     * the registry, lowers @variant decls, and commits schema unions queued
+     * by grammar emit; the uses pass is a no-op when the registry is empty. */
     {
         char* vd = cc_rewrite_variant_decls_text(chain->src, chain->len, input_path);
         if (vd == (char*)-1) return -1;

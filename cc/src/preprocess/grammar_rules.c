@@ -68,6 +68,7 @@
  * undefined-function error naming <Name>__r_<rule>.
  */
 #include "preprocess/grammar_engine.h"
+#include "preprocess/variant_lower.h"
 #include "util/text.h"
 
 #include <ctype.h>
@@ -4049,6 +4050,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                       reg ? "use " : "inline rules", reg ? ss->usename : "",
                       rs_formatable(ss, g)
                           ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
+                            " *   cc_measure(T, &v) / v.measure()                   -> T_measure (exact size; 0 = cannot emit)\n"
+                            " *   cc_format(T, &v, arena) / v.to_str(arena)         -> T_to_str\n"
                           : ""));
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
@@ -4180,6 +4183,33 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             }
             if (cnt == 0 && ss->uterm < 0) eb_emit(&e, cc_gr_empty_member_text(e.scratch));
             eb_emit(&e, cc_gr_struct_close_text(e.scratch, name));
+            /* Export each `items ... cap N` as Name_field_cap so callers
+             * share the wire limit instead of duplicating the literal. */
+            for (int ti = 0; ti < ss->nterms; ti++) {
+                const STerm* t = &ss->terms[ti];
+                if (t->kind == SK_BIND_ITEMS && t->cap > 0 && t->field[0])
+                    eb_emit(&e, cc_gr_items_cap_text(e.scratch, name, t->field, t->cap));
+            }
+            /* Register `one of` for the same protected-projection surface as
+             * @variant (raw `.u` ban, dominated arm projection, construction). */
+            if (ss->uterm >= 0 && ss->nuv > 0) {
+                const char* arms[32];
+                int voids[32];
+                int nreg = ss->nuv < 32 ? ss->nuv : 32;
+                for (int vi = 0; vi < nreg; vi++) {
+                    arms[vi] = ss->uv[vi].name;
+                    int nmembers = 0;
+                    for (int j = 0; j < ss->uv[vi].nt; j++) {
+                        const STerm* t = &ss->terms[ss->uv[vi].t[j]];
+                        if (t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT ||
+                            t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES ||
+                            t->kind == SK_BIND_ITEMS)
+                            nmembers++;
+                    }
+                    voids[vi] = (nmembers == 0);
+                }
+                (void)cc_variant_schema_pending_add(name, nreg, arms, voids);
+            }
         }
         eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
         /* zero the struct only when some bind is conditional (inside a
@@ -4244,22 +4274,27 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             int want_write = rs_has_token(src, src_len, name, "_write") ||
                              rs_has_op(src, src_len, "cc_write", name) ||
                              rs_has_dot(src, src_len, name, "write");
+            int want_measure = rs_has_token(src, src_len, name, "_measure") ||
+                               rs_has_op(src, src_len, "cc_measure", name) ||
+                               rs_has_dot(src, src_len, name, "measure") ||
+                               (fmtable && rs_any_method_demand(src, src_len, "measure"));
             int want_tostr = rs_has_token(src, src_len, name, "_to_str") ||
                              rs_has_op(src, src_len, "cc_format", name) ||
                              rs_has_dot(src, src_len, name, "to_str") ||
                              (fmtable && rs_any_method_demand(src, src_len, "to_str"));
             if (!want_write && fmtable &&
-                (want_tostr || rs_any_method_demand(src, src_len, "write")))
-                want_write = 1;   /* element writers / to_str substrate */
-            if ((want_write || want_tostr) && !fmtable) {
+                (want_tostr || want_measure ||
+                 rs_any_method_demand(src, src_len, "write")))
+                want_write = 1;   /* element writers / to_str / measure substrate */
+            if ((want_write || want_tostr || want_measure) && !fmtable) {
                 const char* vn = NULL;
                 const char* td = NULL;
                 if (rs_union_unformatable(ss, g, &vn, &td))
-                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
+                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_measure/_to_str is referenced "
                              "but the schema is not formatable yet (variant '%s': term '%s' "
                              "has no invertible write form)", name, name, vn, td);
                 else
-                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_to_str is referenced "
+                    snprintf(err, err_sz, "@grammar(schema) %s: %s_write/_measure/_to_str is referenced "
                              "but the schema is not formatable yet (directive `fields [...]` has "
                              "no grammar rule to invert — narrow a rule instead: `G.rule [...]`)",
                              name, name);
@@ -4267,8 +4302,12 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 out = NULL;
                 goto done;
             }
-            if (want_write)
+            if (want_write) {
                 rs_emit_write(ss, g, &e, &lbl, name);
+                /* Public measure rides the write triplet (always emitted with
+                 * write so callers can size buffers without a dummy cap). */
+                eb_emit(&e, cc_gr_measure_fn_text(e.scratch, name));
+            }
             if (want_tostr) {
                 /* CCString face: composes with @string templates (a CCString
                  * slot arm exists in the _Generic) and the language's

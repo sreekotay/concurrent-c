@@ -28,6 +28,7 @@
  */
 #include "preprocess/preprocess.h"
 #include "preprocess/grammar_engine.h"
+#include "preprocess/variant_lower.h"
 #include "util/text.h"
 
 #include <stdio.h>
@@ -215,7 +216,13 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
     /* Fast out for grammar-free streams BEFORE the registry reset: the seam
      * now runs in several pipelines per compile, and a no-op pass must not
      * wipe state (pending UFCS types, factories) a later phase consumes. */
-    if (!cc__find_bytes(src, n, CC__GRAMMAR_KW, sizeof(CC__GRAMMAR_KW) - 1)) return NULL;
+    /* Grammar-free streams leave the schema-union queue alone: the seam
+     * often runs twice per compile (prepare, then phase-1).  The second
+     * pass may still see `@grammar` inside manifest comments even though
+     * real decls are gone — clearing must wait until a real declaration
+     * is processed (below), not a byte-scan hit. */
+    if (!cc__find_bytes(src, n, CC__GRAMMAR_KW, sizeof(CC__GRAMMAR_KW) - 1))
+        return NULL;
     while (i < n) {
         char c = src[i];
         /* Skip comments and string/char literals so "@grammar" inside them is inert. */
@@ -249,7 +256,10 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
                  * (pending UFCS types, schema names) on such a pass would
                  * strand state a later phase consumes. Cross-block state
                  * stays per-file: one reset ahead of the first decl. */
-                if (!found) cc__grammar_registry_reset();
+                if (!found) {
+                    cc__grammar_registry_reset();
+                    cc_variant_schema_pending_clear();
+                }
                 char file[512]; int line = 0;
                 char head[1024];
                 const char* ofile;

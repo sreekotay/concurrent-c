@@ -188,20 +188,24 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     }
     if (!rr.value()) return RESP_PARSE_INCOMPLETE;   /* empty window */
     if (c.kind == GCmd_plain) {
-        size_t !>(CCError) a = parse_inline_args(c.u.plain.text, args, cap);
+        size_t !>(CCError) a = parse_inline_args(c.plain.text, args, cap);
         if (a.is_err()) { *err = a.error(); return RESP_PARSE_ERROR; }
         *out_argc = a.value();
         r->start += pos;
         return RESP_PARSE_OK;
     }
-    if (c.u.framed.args_n < 1 || c.u.framed.args_n > cap) {
-        *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
-        return RESP_PARSE_ERROR;
+    if (c.kind == GCmd_framed) {
+        if (c.framed.args_n < 1 || c.framed.args_n > cap) {
+            *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+            return RESP_PARSE_ERROR;
+        }
+        for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+        *out_argc = c.framed.args_n;
+        r->start += pos;
+        return RESP_PARSE_OK;
     }
-    for (size_t i = 0; i < c.u.framed.args_n; i++) args[i] = c.u.framed.args[i].data;
-    *out_argc = c.u.framed.args_n;
-    r->start += pos;
-    return RESP_PARSE_OK;
+    *err = CC_ERROR(CC_ERR_PARSE, "unsupported RESP command shape");
+    return RESP_PARSE_ERROR;
 }
 
 /* ---- parity harness: identical streams, many chunkings, equal event logs ---- */
