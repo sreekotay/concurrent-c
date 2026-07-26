@@ -40,8 +40,8 @@ emitted="$out_dir/redis_idiomatic.c"
 [ -s "$emitted" ] || fail "no emitted C produced"
 
 # (1) async poll fns exist and the machine region is #line-mapped.
-grep -q '__cc_async_owner_loop_[0-9]*_poll' "$emitted" \
-  || fail "owner_loop poll fn not found in emitted C (async lowering shape drifted)"
+grep -q '__cc_async_handle_client_[0-9]*_poll' "$emitted" \
+  || fail "handle_client poll fn not found in emitted C (async lowering shape drifted)"
 n_dirs=$(grep -c '#line [0-9][0-9]* ".*redis_idiomatic\.ccs"' "$emitted" || true)
 [ "$n_dirs" -ge 50 ] \
   || fail "expected >=50 #line directives citing redis_idiomatic.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
@@ -79,6 +79,18 @@ PYEOF
 }
 
 check_no_map_past_eof "$emitted" "$SRC" || exit 1
+
+# (2b) Same checks on the owner-fiber variant, where the async machinery is
+# thickest (owner_loop lives here since the table-lock restructure).
+OWNER_SRC=real_projects/redis/redis_owner.ccs
+[ -f "$OWNER_SRC" ] || fail "missing $OWNER_SRC"
+owner_emitted="$out_dir/redis_owner.c"
+"$CCC" build --no-cache --emit-c-only "$OWNER_SRC" -o "$owner_emitted" >/dev/null 2>&1 \
+  || fail "emit-c-only build of $OWNER_SRC failed"
+[ -s "$owner_emitted" ] || fail "no emitted C produced for $OWNER_SRC"
+grep -q '__cc_async_owner_loop_[0-9]*_poll' "$owner_emitted" \
+  || fail "owner_loop poll fn not found in emitted C (async lowering shape drifted)"
+check_no_map_past_eof "$owner_emitted" "$OWNER_SRC" || exit 1
 
 # (3) Focused pin for the return-through-cleanup blob (pass_defer_syntax.c):
 # a `@defer`-carrying fn whose final statement is a `return` places the
