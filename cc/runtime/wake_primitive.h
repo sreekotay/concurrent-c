@@ -79,6 +79,13 @@ static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expe
             expected, &ts, NULL, 0);
 }
 
+/* Wait with microsecond timeout. Returns on wake, timeout, or spurious. */
+static inline void wake_primitive_wait_timeout_us(wake_primitive* wp, uint32_t expected, uint32_t timeout_us) {
+    struct timespec ts = { .tv_sec = timeout_us / 1000000, .tv_nsec = (timeout_us % 1000000) * 1000L };
+    syscall(SYS_futex, &wp->value, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+            expected, &ts, NULL, 0);
+}
+
 /* Wake one waiting thread */
 static inline void wake_primitive_wake_one(wake_primitive* wp) {
     atomic_fetch_add_explicit(&wp->value, 1, memory_order_release);
@@ -126,6 +133,12 @@ static inline void wake_primitive_wait(wake_primitive* wp, uint32_t expected) {
 static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expected, uint32_t timeout_ms) {
     /* __ulock_wait timeout is in microseconds */
     __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, &wp->value, expected, timeout_ms * 1000);
+}
+
+/* Wait with microsecond timeout. Returns on wake, timeout, or spurious. */
+static inline void wake_primitive_wait_timeout_us(wake_primitive* wp, uint32_t expected, uint32_t timeout_us) {
+    if (timeout_us == 0) timeout_us = 1; /* 0 means wait-forever to ulock */
+    __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, &wp->value, expected, timeout_us);
 }
 
 /* Wake one waiting thread */
@@ -181,6 +194,13 @@ static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expe
         pthread_cond_timedwait(&wp->cond, &wp->mutex, &ts);
     }
     pthread_mutex_unlock(&wp->mutex);
+}
+
+/* Wait with microsecond timeout. Condvar granularity is coarse; round up
+ * to 1ms rather than pretending to sub-ms precision. */
+static inline void wake_primitive_wait_timeout_us(wake_primitive* wp, uint32_t expected, uint32_t timeout_us) {
+    uint32_t ms = (timeout_us + 999) / 1000;
+    wake_primitive_wait_timeout(wp, expected, ms ? ms : 1);
 }
 
 /* Wake one waiting thread */

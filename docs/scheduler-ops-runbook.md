@@ -28,6 +28,10 @@ Performance comparison surface:
 
 - `real_projects/pigz/` (`pigz_idiomatic` vs `pigz_pthread`)
 - Payload: `real_projects/pigz/testdata/text_200mb.bin`
+- `perf/run_neckbeard_challenges.sh` — six cross-language scheduler
+  challenges; the Named Exclusive Lock challenge
+  (`perf/compare_exclusive_named_lock.sh`) exercises the pool-growth
+  hold decision under contention
 
 ## Environment knobs
 
@@ -36,6 +40,11 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_V2_THREADS` / `CC_WORKERS` — worker count
 - `CC_V2_TARGET_ACTIVE`, `CC_V2_SPIN_BEFORE_PARK`, `CC_V2_WAKE_SKIP_DEPTH`
 - `CC_V2_JOIN_SPIN`, `CC_V2_PARK_EXTRAS_AT_STARTUP`, `CC_V2_CORO_POOL_MAX`
+- `CC_V2_EAGER_THREADS` — inline worker-creation cap on the push path
+  (default 2); set to the core count to restore fully-inline pool growth
+- `CC_V2_GROW_RECHECK_US`, `CC_V2_GROW_RATE_US`, `CC_V2_GROW_DEPTH_X`,
+  `CC_V2_GROW_ESCALATE_TICKS` — deferred pool-growth controller (see
+  "Worker pool growth" below)
 - `CC_V2_SYSMON_DETACH=0` — disable unchanged-dispatch worker eviction
 - `CC_V2_STATS=1` / `CC_V2_SYSMON_STATS=1` — counters
 - `CC_DEADLOCK_ABORT=0` — deadlock banner without `_exit(124)`
@@ -58,6 +67,66 @@ For the current `CC_CHAN_*` tracing and isolation flags, see
 
 Use the smallest flag set that answers the question; verbose tracing changes
 timing.
+
+## Worker pool growth
+
+The pool is a ratchet: workers are created on demand and never culled.
+Growth happens on two paths:
+
+- **Inline** — a push that finds work queued and no idle worker creates a
+  pthread directly, but only up to `CC_V2_EAGER_THREADS` workers (default 2).
+- **Deferred** — beyond that, the push CASes a one-shot grow-pending flag
+  (the first requester per episode pays one sysmon wake syscall) and sysmon
+  deliberates.
+
+While a request is pending, sysmon rechecks every `CC_V2_GROW_RECHECK_US`
+(default 25us; unreliable below ~10us due to kernel timeout resolution)
+instead of sleeping its normal 20ms tick. Its slow-tick jobs (worker
+eviction, park deadlines, deadlock detection, safety-net wake) are gated on
+real elapsed time, so they keep their ~20ms cadence during fast rechecks.
+
+Sysmon captures one (queue pops, timestamp) baseline per demand episode and
+tracks the cumulative drain rate. Per recheck it grows one worker iff:
+
+- **rate** — aggregate drain rate is below one pop per worker per
+  `CC_V2_GROW_RATE_US` (default 100us): workers blocked or barely moving; or
+- **depth** — ready-queue depth >= `CC_V2_GROW_DEPTH_X` (default 2) times
+  the current pool size; 0 disables the depth trigger.
+
+The two knobs are independent: the rate is normalized by elapsed time since
+the episode baseline, so a faster recheck cadence changes only reaction
+latency, not the measurement. Lowering `CC_V2_GROW_RATE_US` raises the
+drain-rate bar and biases toward growth.
+
+Otherwise it holds. The episode ends (flag cleared, re-armed by the next
+qualifying push) when the queue drains, the pool reaches its maximum size,
+or `CC_V2_TARGET_ACTIVE` gates admission.
+
+Why holding is correct: CPU-bound fibers don't park, so they generate a
+near-zero pop rate and recruit via the rate trigger; a high pop rate only
+comes from park/wake churn (e.g. contended locks), where extra workers only
+add cache-line traffic. `CC_V2_GROW_RATE_US` has a wide flat optimum
+(50–200us measured equivalent; at 25us and below recruitment starts to
+leak on contended-lock workloads).
+
+`CC_V2_GROW_ESCALATE_TICKS` (default 0 = off) is opt-in insurance: after N
+consecutive slow ticks with a non-empty queue and nobody idle, grow one
+worker per slow tick regardless of the rate test.
+
+With `CC_V2_STATS=1` the dump includes a growth line:
+
+```
+[sched_v2 stats] grow (eager<=2 recheck=25us rate=100us/pop/worker depth_x=2 esc=0): requests=... stall=... backlog=... escalate=... held=... final_threads=4/8
+```
+
+- `requests` — pushes that armed the grow-pending flag (one per episode)
+- `stall` / `backlog` — rechecks that grew via the rate / depth trigger
+- `escalate` — workers added by slow-tick escalation
+- `held` — rechecks that decided not to grow
+- `final_threads` — pool size at exit / cap
+
+A contended-lock workload that holds at a small `final_threads` with a large
+`held` count is the controller working as designed, not a recruitment bug.
 
 ## Build
 

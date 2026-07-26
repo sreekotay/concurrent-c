@@ -245,6 +245,10 @@ typedef struct {
     fiber_v2* head;
     fiber_v2* tail;
     _Atomic size_t count;
+    /* Monotonic pop counter. Read by sysmon's pool-growth recheck: a
+     * counter that hasn't advanced across a recheck window while count>0
+     * means the queue is backlogged with no drainer making progress. */
+    _Atomic uint64_t pops;
 } v2_queue;
 
 static void v2_queue_init(v2_queue* q) {
@@ -252,6 +256,7 @@ static void v2_queue_init(v2_queue* q) {
     q->head = NULL;
     q->tail = NULL;
     atomic_store_explicit(&q->count, 0, memory_order_relaxed);
+    atomic_store_explicit(&q->pops, 0, memory_order_relaxed);
 }
 
 /* Returns the pre-push count (i.e. queue depth before this push).
@@ -280,6 +285,7 @@ static fiber_v2* v2_queue_pop(v2_queue* q) {
         if (!q->head) q->tail = NULL;
         f->next = NULL;
         atomic_fetch_sub_explicit(&q->count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&q->pops, 1, memory_order_relaxed);
     }
     v2_slock_unlock(&q->mu);
     return f;
@@ -681,6 +687,73 @@ static int g_v2_park_extras_at_startup = 0;
 static int g_v2_target_active = 0;
 static _Atomic int g_v2_running_workers = 0;
 
+/* Deferred pool growth (CC_V2_EAGER_THREADS / CC_V2_GROW_RECHECK_US).
+ *
+ * Inline pthread_create from the push path is limited to the first
+ * g_v2_eager_threads workers (default 2: thread #2 is what buys overlap
+ * for the common case and is worth paying for inline). Beyond that a
+ * push that finds work queued and nobody idle does NOT create a thread;
+ * it sets g_v2_grow_pending (one CAS; the winner pays one sysmon wake
+ * syscall) and sysmon deliberates on a fast recheck cadence
+ * (g_v2_grow_recheck_us, default 25us) instead of its normal 20ms tick.
+ * Window floor: below ~10us the kernel timeout resolution makes the
+ * window length unreliable and a healthy pool lands too few pops per
+ * window for the rate test to separate signal from jitter.
+ *
+ * Per recheck, sysmon samples (ready_queue.pops, v2_now_ns) against the
+ * previous sample and computes the drain rate. With depth =
+ * ready_queue.count and n = num_threads, grow one worker iff:
+ *   - the pool's aggregate drain rate is below one pop per worker per
+ *     g_v2_grow_rate_us (workers blocked or barely moving), OR
+ *   - depth >= 2*n (real backlog relative to pool size).
+ * Otherwise hold: a shallow, briskly-draining queue is the signature of
+ * churn (e.g. contended-lock wake cycles) where extra workers only add
+ * cache-line traffic. Both triggers scale with pool size, and the rate
+ * is normalized by measured elapsed time, so the decision is stable
+ * against kernel timeout jitter in the recheck sleep itself.
+ *
+ * An optional slow-tick escalation (CC_V2_GROW_ESCALATE_TICKS, default
+ * off) can additionally grow on sustained backlog regardless of rate;
+ * see g_v2_grow_escalate_ticks.
+ *
+ * The pool remains a ratchet: workers are never culled. Set
+ * CC_V2_EAGER_THREADS to the core count to restore legacy fully-inline
+ * growth. */
+static int g_v2_eager_threads = 2;
+static int g_v2_grow_recheck_us = 25;
+/* Hold threshold, in "microseconds per pop per worker": the pool is
+ * considered healthy while each worker averages at least one pop per
+ * this many us. The recheck cadence and this bar are independent: the
+ * rate is normalized by measured elapsed time since the episode
+ * baseline, so checking more often does not change the measurement,
+ * only the reaction latency. Lowering the bar itself (smaller value)
+ * biases toward growth. CC_V2_GROW_RATE_US. */
+static int g_v2_grow_rate_us = 100;
+/* Depth trigger: grow when ready-queue depth >= this multiple of the
+ * pool size even if the drain rate is healthy. 0 disables the depth
+ * trigger (rate-only growth). CC_V2_GROW_DEPTH_X. */
+static int g_v2_grow_depth_mult = 2;
+/* Slow-tick escalation dwell: grow one worker per slow tick once the
+ * ready queue has stayed non-empty (with nobody idle) for this many
+ * consecutive slow ticks, regardless of the rate test.
+ * CC_V2_GROW_ESCALATE_TICKS.
+ *
+ * Default 0 (disabled): measured across the perf suite, the rate/depth
+ * triggers alone recruit correctly for every workload shape — CPU-bound
+ * fibers don't park, so they produce a near-zero pop rate and grow via
+ * the stall trigger; a high pop rate only comes from park/wake churn,
+ * where holding is right. Escalation's only observed steady-state effect
+ * was converting held contention regimes back to a full (over-recruited)
+ * pool. Kept as opt-in insurance for a workload that pops briskly AND
+ * scales with workers, should one appear. */
+static int g_v2_grow_escalate_ticks = 0;
+static _Atomic int g_v2_grow_pending = 0;
+static _Atomic uint64_t g_v2_grow_requests = 0;   /* producer defers      */
+static _Atomic uint64_t g_v2_grow_stall = 0;      /* recheck: pops slow   */
+static _Atomic uint64_t g_v2_grow_backlog = 0;    /* recheck: deep queue  */
+static _Atomic uint64_t g_v2_grow_escalate = 0;   /* slow-tick escalation */
+static _Atomic uint64_t g_v2_grow_held = 0;       /* recheck decided hold */
+
 /* Coro-pool high-water cap (tunable via CC_V2_CORO_POOL_MAX).
  *
  * fiber_v2_free retains each completed fiber's minicoro allocation (~2 MB
@@ -1061,6 +1134,27 @@ static int sched_v2_try_expand_pool(void) {
     return 1;
 }
 
+/* Ask sysmon to consider growing the pool. First requester per episode
+ * pays one wake syscall; everyone else sees the flag already set. */
+static void sched_v2_request_grow(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_v2_grow_pending, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        V2_STAT_INC(g_v2_grow_requests);
+        wake_primitive_wake_one(&g_v2.sysmon_wake);
+    }
+}
+
+/* Push-path growth: create inline only up to g_v2_eager_threads, defer
+ * the rest to sysmon's recheck. Returns 1 if a thread was created. */
+static int sched_v2_grow_or_defer(void) {
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (n >= g_v2.max_threads) return 0;
+    if (n < g_v2_eager_threads) return sched_v2_try_expand_pool();
+    sched_v2_request_grow();
+    return 0;
+}
+
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
 
 static void sched_v2_enqueue_runnable(fiber_v2* f) {
@@ -1192,13 +1286,13 @@ static void sched_v2_wake(int worker_hint) {
             break;
         }
         if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
-            if (!sched_v2_try_expand_pool()) {
+            if (!sched_v2_grow_or_defer()) {
                 V2_STAT_INC(g_v2_wake_no_idle);
             }
             break;
         }
         if (!sched_v2_try_wake_one()) {
-            (void)sched_v2_try_expand_pool();
+            (void)sched_v2_grow_or_defer();
             break;
         }
     }
@@ -2038,11 +2132,90 @@ static void* sched_v2_sysmon_main(void* arg) {
     /* Stall diagnostic cadence scaled to the (now faster) tick interval:
      * fire at ~2 s of genuine stall, print every ~2 s thereafter. */
     const int STALL_DIAG_TICKS = 2000 / V2_SYSMON_INTERVAL_MS;
+    /* Pool-growth recheck state (see g_v2_grow_pending block comment). */
+    uint64_t grow_base_pops = 0;
+    uint64_t grow_base_ns = 0;
+    int grow_have_baseline = 0;
+    int slow_prev_backlog = 0;
+    uint64_t last_slow_ns = 0;
+    v2_mach_tb_init_once();
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
         uint32_t val = atomic_load_explicit(&g_v2.sysmon_wake.value, memory_order_acquire);
-        wake_primitive_wait_timeout(&g_v2.sysmon_wake, val, V2_SYSMON_INTERVAL_MS);
+        if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {
+            wake_primitive_wait_timeout_us(&g_v2.sysmon_wake, val,
+                                           (uint32_t)g_v2_grow_recheck_us);
+        } else {
+            wake_primitive_wait_timeout(&g_v2.sysmon_wake, val, V2_SYSMON_INTERVAL_MS);
+        }
 
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
+
+        /* Deferred pool growth: decide grow/hold once per recheck window. */
+        if (atomic_load_explicit(&g_v2_grow_pending, memory_order_acquire)) {
+            size_t depth = atomic_load_explicit(&g_v2.ready_queue.count,
+                                                memory_order_relaxed);
+            int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+            int admit_ok = (g_v2_target_active <= 0 ||
+                            atomic_load_explicit(&g_v2_running_workers,
+                                                 memory_order_acquire)
+                                < g_v2_target_active);
+            if (depth == 0 || n >= g_v2.max_threads || !admit_ok) {
+                /* Demand resolved, pool full, or admission-capped: episode
+                 * over. A producer re-arms the flag if demand returns. */
+                atomic_store_explicit(&g_v2_grow_pending, 0, memory_order_release);
+                grow_have_baseline = 0;
+            } else {
+                uint64_t pops = atomic_load_explicit(&g_v2.ready_queue.pops,
+                                                     memory_order_relaxed);
+                uint64_t now = v2_now_ns();
+                if (!grow_have_baseline) {
+                    /* One baseline per demand episode, captured on the
+                     * first recheck (single writer; a producer-side write
+                     * would be clobbered by every push at saturation).
+                     * The rate below is cumulative since episode start. */
+                    grow_base_pops = pops;
+                    grow_base_ns = now;
+                    grow_have_baseline = 1;
+                } else {
+                    uint64_t dp = pops - grow_base_pops;
+                    uint64_t dt = now - grow_base_ns;
+                    /* Need a long-enough sample for the rate to mean
+                     * anything; an early/spurious wake defers the decision
+                     * to the next recheck. */
+                    if (dt >= 10000ull) {
+                        /* Grow on rate: cumulative drain rate below one
+                         * pop per worker per grow_rate_us. Computed as
+                         * dp/dt < n/(rate_us*1000), cross-multiplied to
+                         * stay in integers. */
+                        if (dp * (uint64_t)g_v2_grow_rate_us * 1000ull
+                                < (uint64_t)n * dt) {
+                            V2_STAT_INC(g_v2_grow_stall);
+                            (void)sched_v2_try_expand_pool();
+                        } else if (g_v2_grow_depth_mult > 0 &&
+                                   depth >= (size_t)(g_v2_grow_depth_mult * n)) {
+                            /* Draining briskly, but backlog is deep
+                             * relative to the pool. */
+                            V2_STAT_INC(g_v2_grow_backlog);
+                            (void)sched_v2_try_expand_pool();
+                        } else {
+                            V2_STAT_INC(g_v2_grow_held);
+                        }
+                    }
+                }
+            }
+        } else {
+            grow_have_baseline = 0;
+        }
+
+        /* Everything below assumes ~one V2_SYSMON_INTERVAL_MS between
+         * runs (eviction ages workers by ticks; stall diagnostics count
+         * ticks). During a growth episode the loop spins at recheck
+         * cadence, so gate the slow jobs on real elapsed time. */
+        uint64_t now_ns = v2_now_ns();
+        if (now_ns - last_slow_ns < (uint64_t)V2_SYSMON_INTERVAL_MS * 1000000ull) {
+            continue;
+        }
+        last_slow_ns = now_ns;
 
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
@@ -2069,6 +2242,34 @@ static void* sched_v2_sysmon_main(void* arg) {
         if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
             atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed) > 0) {
             sched_v2_wake(-1);
+        }
+
+        /* Sustained-backlog escalation (growth bias): a queue that stayed
+         * non-empty across two consecutive slow ticks with nobody idle
+         * gets one more worker per tick, even if the recheck's rate test
+         * keeps holding. Steady contention churn and steady short-task
+         * parallelism are indistinguishable from queue dynamics alone;
+         * biasing toward growth bounds the worst case at legacy behavior
+         * (full pool), reached in tens of ms. */
+        if (g_v2_grow_escalate_ticks > 0) {
+            size_t d = atomic_load_explicit(&g_v2.ready_queue.count,
+                                            memory_order_relaxed);
+            int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+            int admit_ok = (g_v2_target_active <= 0 ||
+                            atomic_load_explicit(&g_v2_running_workers,
+                                                 memory_order_acquire)
+                                < g_v2_target_active);
+            if (d > 0 &&
+                atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed) == 0) {
+                slow_prev_backlog++;
+            } else {
+                slow_prev_backlog = 0;
+            }
+            if (slow_prev_backlog >= g_v2_grow_escalate_ticks &&
+                n < g_v2.max_threads && admit_ok) {
+                V2_STAT_INC(g_v2_grow_escalate);
+                (void)sched_v2_try_expand_pool();
+            }
         }
 
         uint64_t cur_run = atomic_load_explicit(&g_v2_sysmon_stall_detect, memory_order_relaxed);
@@ -2225,6 +2426,17 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] grow (eager<=%d recheck=%dus rate=%dus/pop/worker depth_x=%d esc=%d): requests=%llu "
+                    "stall=%llu backlog=%llu escalate=%llu held=%llu final_threads=%d/%d\n",
+            g_v2_eager_threads, g_v2_grow_recheck_us, g_v2_grow_rate_us,
+            g_v2_grow_depth_mult, g_v2_grow_escalate_ticks,
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_requests, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_stall, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_backlog, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_escalate, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_grow_held, memory_order_relaxed),
+            atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed),
+            g_v2.max_threads);
     fprintf(stderr, "[sched_v2 stats] spin_before_park=%d: hit=%llu miss=%llu\n",
             g_v2_spin_before_park,
             (unsigned long long)atomic_load_explicit(&g_v2_worker_spin_hit, memory_order_relaxed),
@@ -2304,6 +2516,49 @@ static void sched_v2_init_impl(void) {
         long v = strtol(tgt_env, &end, 10);
         if (end != tgt_env && v >= 0 && v <= 1024) {
             g_v2_target_active = (int)v;
+        }
+    }
+    /* Inline pthread_create cap for the push path; growth beyond this is
+     * deferred to sysmon's recheck. Set to the core count (or higher) to
+     * restore legacy fully-inline growth. */
+    const char* eager_env = getenv("CC_V2_EAGER_THREADS");
+    if (eager_env) {
+        char* end = NULL;
+        long v = strtol(eager_env, &end, 10);
+        if (end != eager_env && v >= 0 && v <= 1024) {
+            g_v2_eager_threads = (int)v;
+        }
+    }
+    const char* grow_env = getenv("CC_V2_GROW_RECHECK_US");
+    if (grow_env) {
+        char* end = NULL;
+        long v = strtol(grow_env, &end, 10);
+        if (end != grow_env && v >= 1 && v <= 1000000L) {
+            g_v2_grow_recheck_us = (int)v;
+        }
+    }
+    const char* rate_env = getenv("CC_V2_GROW_RATE_US");
+    if (rate_env) {
+        char* end = NULL;
+        long v = strtol(rate_env, &end, 10);
+        if (end != rate_env && v >= 1 && v <= 1000000L) {
+            g_v2_grow_rate_us = (int)v;
+        }
+    }
+    const char* depth_env = getenv("CC_V2_GROW_DEPTH_X");
+    if (depth_env) {
+        char* end = NULL;
+        long v = strtol(depth_env, &end, 10);
+        if (end != depth_env && v >= 0 && v <= 100000L) {
+            g_v2_grow_depth_mult = (int)v;
+        }
+    }
+    const char* esc_env = getenv("CC_V2_GROW_ESCALATE_TICKS");
+    if (esc_env) {
+        char* end = NULL;
+        long v = strtol(esc_env, &end, 10);
+        if (end != esc_env && v >= 0 && v <= 10000L) {
+            g_v2_grow_escalate_ticks = (int)v;
         }
     }
     /* Coro-pool high-water cap. 0 disables the cap (legacy unbounded pool). */
