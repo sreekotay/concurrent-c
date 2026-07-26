@@ -1034,6 +1034,15 @@ static int sched_v2_try_wake_one(void) {
 /* Start one additional worker lazily. Returns 1 if a thread was created. */
 static int sched_v2_try_expand_pool(void) {
     if (!g_v2.allow_expand) return 0;
+    /* Saturated fast path: once the pool is full it stays full (num_threads
+     * only grows), so a full-pool observation here is stable and skipping
+     * the mutex is always correct. Under lock-heavy saturation every push
+     * whose wake finds no idle worker lands here; without this check each
+     * of those pays a contended pthread mutex round trip on the wake path. */
+    if (atomic_load_explicit(&g_v2.num_threads, memory_order_acquire)
+        >= g_v2.max_threads) {
+        return 0;
+    }
     pthread_mutex_lock(&g_v2.start_mu);
     int new_id = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
     if (new_id >= g_v2.max_threads) {
