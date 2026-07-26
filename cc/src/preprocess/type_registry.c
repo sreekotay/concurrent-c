@@ -297,6 +297,20 @@ const char* cc_type_registry_lookup_alias(CCTypeRegistry* reg, const char* alias
     return NULL;
 }
 
+size_t cc_type_registry_alias_count(CCTypeRegistry* reg) {
+    return reg ? reg->alias_count : 0;
+}
+
+const char* cc_type_registry_alias_name_at(CCTypeRegistry* reg, size_t idx) {
+    if (!reg || idx >= reg->alias_count) return NULL;
+    return reg->aliases[idx].alias_name;
+}
+
+const char* cc_type_registry_alias_type_at(CCTypeRegistry* reg, size_t idx) {
+    if (!reg || idx >= reg->alias_count) return NULL;
+    return reg->aliases[idx].type_name;
+}
+
 int cc_type_registry_add_field(CCTypeRegistry* reg,
                                const char* struct_name,
                                const char* field_name,

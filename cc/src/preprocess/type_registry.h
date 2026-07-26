@@ -34,6 +34,9 @@ int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const ch
 const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_name);
 int cc_type_registry_add_alias(CCTypeRegistry* reg, const char* alias_name, const char* type_name);
 const char* cc_type_registry_lookup_alias(CCTypeRegistry* reg, const char* alias_name);
+size_t cc_type_registry_alias_count(CCTypeRegistry* reg);
+const char* cc_type_registry_alias_name_at(CCTypeRegistry* reg, size_t idx);
+const char* cc_type_registry_alias_type_at(CCTypeRegistry* reg, size_t idx);
 int cc_type_registry_add_field(CCTypeRegistry* reg,
                                const char* struct_name,
                                const char* field_name,

@@ -12,6 +12,7 @@
 #include "comptime/hook_compile.h"
 #include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/type_graph.h"
 #include "util/text.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
@@ -344,6 +345,18 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         return -1;
     }
     free(file_buf);
+    /* Preprocess registered Map/ArrayMap instantiations on the type graph;
+     * seed UFCS method tables now — emitted DECL_UFCS markers are not in the
+     * comptime buffer that collect_type_registrations already scanned. */
+    if (symbols) {
+        CCTypeGraph* graph = cc_type_graph_get_global();
+        size_t n_map = graph ? cc_type_graph_map_count(graph) : 0;
+        for (size_t mi = 0; mi < n_map; mi++) {
+            const CCTypeInstantiation* inst = cc_type_graph_get_map(graph, mi);
+            if (inst && inst->mangled_name && inst->mangled_name[0])
+                (void)cc_symbols_register_map_ufcs(symbols, inst->mangled_name);
+        }
+    }
     char* pp_buf = prep.buffer;
     {
         size_t st_len = 0;

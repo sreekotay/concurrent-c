@@ -149,6 +149,49 @@ static void cc__format_vec_container_decl(char** buf, size_t* len, size_t* cap,
     cc__emit_container_cc_type_info(buf, len, cap, inst->mangled_name);
 }
 
+/* Seed Map/ArrayMap UFCS method tables from the type graph.  The emitted
+ * `CC_*_MAP_DECL_UFCS` markers live in host-C output and are not present in
+ * the comptime/canonical buffers that `cc_symbols_collect_type_registrations`
+ * scans — so nested-only methods (e.g. live_bytes) would otherwise never
+ * enter the table. */
+static void cc__seed_map_ufcs_from_type_graph(CCSymbolTable* symbols) {
+    CCTypeGraph* graph;
+    CCTypeRegistry* reg;
+    size_t n;
+    size_t i;
+    if (!symbols) return;
+    graph = cc_type_graph_get_global();
+    if (!graph) return;
+    n = cc_type_graph_map_count(graph);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* inst = cc_type_graph_get_map(graph, i);
+        if (!inst || !inst->mangled_name || !inst->mangled_name[0]) continue;
+        (void)cc_symbols_register_map_ufcs(symbols, inst->mangled_name);
+    }
+    /* Typedef aliases (NestedUfcsMap / RedisDbMap → ArrayMap_…) must key the
+     * same callees; AST receivers often report the typedef name. */
+    reg = cc_type_graph_active_registry(graph);
+    if (!reg) return;
+    n = cc_type_registry_alias_count(reg);
+    for (i = 0; i < n; i++) {
+        const char* alias = cc_type_registry_alias_name_at(reg, i);
+        const char* target = cc_type_registry_alias_type_at(reg, i);
+        char base[256];
+        size_t blen;
+        if (!alias || !target) continue;
+        while (*target == ' ' || *target == '\t') target++;
+        blen = strlen(target);
+        while (blen > 0 && (target[blen - 1] == '*' || target[blen - 1] == ' ' ||
+                            target[blen - 1] == '\t'))
+            blen--;
+        if (blen == 0 || blen >= sizeof(base)) continue;
+        memcpy(base, target, blen);
+        base[blen] = '\0';
+        if (strncmp(base, "ArrayMap_", 9) != 0 && strncmp(base, "Map_", 4) != 0) continue;
+        (void)cc_symbols_register_map_ufcs_alias(symbols, alias, base);
+    }
+}
+
 static void cc__format_map_container_decl(char** buf, size_t* len, size_t* cap,
                                           const CCTypeInstantiation* inst) {
     const char* hash_fn = "cc_map_hash_i32";
@@ -3949,6 +3992,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             cc__ufcs_pending_free(&pending);
             goto fail;
         }
+        /* Type-graph maps are known by now (preprocess registered them);
+         * seed method tables before any UFCS rewrite. */
+        cc__seed_map_ufcs_from_type_graph(ctx->symbols);
         if (cc__collect_legacy_ufcs_registrations(&pending, ctx->input_path,
                                                   reg_src, reg_src_len) != 0) {
             cc__ufcs_pending_free(&pending);
@@ -4603,6 +4649,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
             if (temp_reg) cc_type_registry_set_global(temp_reg);
             cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
+            cc__seed_map_ufcs_from_type_graph(ctx->symbols);
             CCEditBuffer eb;
             cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
             if (cc__collect_ufcs_edits(final_ufcs_root, ctx, &eb) < 0) {

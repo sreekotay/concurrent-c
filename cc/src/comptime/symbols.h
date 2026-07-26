@@ -77,6 +77,16 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
                                   unsigned* out_offset, unsigned* out_width,
                                   unsigned long long* out_sentinel);
  int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee);
+/* Seed the Map/ArrayMap method table (`len`/`cap`/`live_bytes`/…) for one
+ * concrete mangled name.  Prefer this over scanning emitted
+ * `CC_*_MAP_DECL_UFCS` markers: those land in the host-C buffer after the
+ * symbols collect pass has already run. */
+ int cc_symbols_register_map_ufcs(CCSymbolTable* t, const char* map_name);
+/* Like register_map_ufcs, but the table key is `alias_name` while callees
+ * stay `mangled_name_method` (typedef NestedUfcsMap → ArrayMap_int_int). */
+ int cc_symbols_register_map_ufcs_alias(CCSymbolTable* t,
+                                        const char* alias_name,
+                                        const char* mangled_name);
  int cc_symbols_lookup_type_ufcs_value(CCSymbolTable* t,
                                       const char* type_name,
                                       const char* method,

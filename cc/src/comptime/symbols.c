@@ -737,11 +737,49 @@ static int cc__record_map_decl_ufcs(CCSymbolTable* t, const char* map_name) {
     char pattern[256];
     char callee[256];
     if (!t || !map_name || !map_name[0]) return EINVAL;
+    /* Exact name + `Name*` so both value and pointer receivers hit the table
+     * (NestedUfcsMap / ArrayMap_int_int / ArrayMap_int_int*). */
+    if (snprintf(pattern, sizeof(pattern), "%s", map_name) >= (int)sizeof(pattern)) return ENAMETOOLONG;
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        if (snprintf(callee, sizeof(callee), "%s_%s", map_name, methods[i]) >= (int)sizeof(callee)) {
+            return ENAMETOOLONG;
+        }
+        if (cc_symbols_add_type_ufcs_value(t, pattern, methods[i], callee) != 0) return ENOMEM;
+    }
     if (snprintf(pattern, sizeof(pattern), "%s*", map_name) >= (int)sizeof(pattern)) return ENAMETOOLONG;
     for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
         if (snprintf(callee, sizeof(callee), "%s_%s", map_name, methods[i]) >= (int)sizeof(callee)) {
             return ENAMETOOLONG;
         }
+        if (cc_symbols_add_type_ufcs_value(t, pattern, methods[i], callee) != 0) return ENOMEM;
+    }
+    return 0;
+}
+
+int cc_symbols_register_map_ufcs(CCSymbolTable* t, const char* map_name) {
+    return cc__record_map_decl_ufcs(t, map_name);
+}
+
+int cc_symbols_register_map_ufcs_alias(CCSymbolTable* t,
+                                       const char* alias_name,
+                                       const char* mangled_name) {
+    static const char* methods[] = {
+        "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy",
+        "len", "cap", "live_bytes"
+    };
+    char pattern[256];
+    char callee[256];
+    if (!t || !alias_name || !alias_name[0] || !mangled_name || !mangled_name[0]) return EINVAL;
+    if (snprintf(pattern, sizeof(pattern), "%s", alias_name) >= (int)sizeof(pattern)) return ENAMETOOLONG;
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        if (snprintf(callee, sizeof(callee), "%s_%s", mangled_name, methods[i]) >= (int)sizeof(callee))
+            return ENAMETOOLONG;
+        if (cc_symbols_add_type_ufcs_value(t, pattern, methods[i], callee) != 0) return ENOMEM;
+    }
+    if (snprintf(pattern, sizeof(pattern), "%s*", alias_name) >= (int)sizeof(pattern)) return ENAMETOOLONG;
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        if (snprintf(callee, sizeof(callee), "%s_%s", mangled_name, methods[i]) >= (int)sizeof(callee))
+            return ENAMETOOLONG;
         if (cc_symbols_add_type_ufcs_value(t, pattern, methods[i], callee) != 0) return ENOMEM;
     }
     return 0;
