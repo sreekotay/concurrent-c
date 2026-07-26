@@ -2,7 +2,7 @@
  * Named exclusive lock table (v1).
  *
  * Lock word: 0 free, 1 locked, 2 contended.
- * Uncontended lock and unlock CAS operations are inlined in the header.
+ * Uncontended lock CAS and unlock fetch-sub are inlined in the header.
  *
  * A waiter changes LOCKED to CONTENDED under wait_spin before enqueueing.
  * Contended unlock hands ownership directly to one waiter and never
@@ -114,7 +114,7 @@ static int cc__exclusive_try_lock(CCExclusiveEntry* e) {
         memory_order_acquire, memory_order_relaxed);
 }
 
-/* Caller observed CONTENDED. Transfer ownership to the queue head. */
+/* Caller changed CONTENDED to LOCKED. Transfer ownership to the queue head. */
 static void cc__exclusive_handoff(CCExclusiveEntry* e) {
     cc__spin_lock(&e->wait_spin);
     CCExclusiveWaiter* w = e->wait_head;
@@ -191,8 +191,6 @@ static void cc__exclusive_lock_entry(CCExclusiveEntry* e) {
 void cc_exclusive_guard_unlock_impl(void* entry) {
     CCExclusiveEntry* e = (CCExclusiveEntry*)entry;
     if (!e) abort();
-    if (atomic_load_explicit(&e->locked, memory_order_acquire)
-            != CC_EXCL_CONTENDED) abort();
     cc__exclusive_handoff(e);
 }
 
