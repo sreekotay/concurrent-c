@@ -1,18 +1,30 @@
 /*
  * Named exclusive sections (v1).
  *
- *   CCExclusive* excl = cc_exclusive_create();
+ *   CCArena arena = @create(kilobytes(128)) @destroy;
+ *   CCExclusive* excl = cc_exclusive_create(&arena);         // map starts at 64
+ *   // or: excl = cc_exclusive_create_sized(&arena, 256);    // hint → pow2
  *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
- *   CCExclusiveGuard g = m.lock();
+ *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
- *   g.unlock();                              // idempotent (local NULL check)
- *   // also: excl->lock(name);  g.destroy();  excl->destroy();
+ *   g.release();   // idempotent; also g.destroy() / @destroy
+ *   m.free();      // user-explicit: drop name from map, return entry to pool
  *
- * Double-release is fully local: a released guard holds a NULL entry.
+ * Prefer acquire/release over lock/unlock: release is intentionally
+ * idempotent (NULL entry after first call), so a second release is a local
+ * no-op and should not read as a double-unlock bug in review.
+ *
+ * Storage (section header, discovery map, mutex entries) is allocated from
+ * the caller-supplied arena.  Mutex entries come from an arena pool on that
+ * arena (64-byte aligned).  free_mutex is explicit: it removes the name from
+ * the discovery map and returns the entry to the pool.  destroy tears down
+ * the create mutex and releases discovery-map tables; pooled entry storage
+ * remains until the arena is freed.  The map starts at 64 slots (or the
+ * sized hint, rounded up to a power of two) and grows under the create lock.
  *
  * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
- * Uncontended lock is an inlined CAS; unlock is an inlined swap to FREE.
- * Contended unlock wakes one queued waiter, which re-contends (barging):
+ * Uncontended acquire is an inlined CAS; release is an inlined swap to FREE.
+ * Contended release wakes one queued waiter, which re-contends (barging):
  * the lock stays available while the woken fiber is being scheduled.
  *
  * The lock word is the first field of the runtime entry, so a guard is a
@@ -23,6 +35,7 @@
 #ifndef CCC_CC_EXCLUSIVE_CCH
 #define CCC_CC_EXCLUSIVE_CCH
 
+#include <ccc/cc_arena.cch>
 #include <stdint.h>
 #include <stdatomic.h>
 
@@ -43,20 +56,33 @@ typedef struct CCExclusiveMutex {
 } CCExclusiveMutex;
 
 typedef struct CCExclusiveGuard {
-    void* _entry; /* NULL when not held */
+    void* _entry; /* NULL when not held / after release */
 } CCExclusiveGuard;
 
-CCExclusive* cc_exclusive_create(void);
+/* Allocates section header + discovery map from `arena`.  Mutex entries are
+ * arena-allocated on first resolve.  Returns NULL if arena is NULL/OOM.
+ * Default initial map capacity is 64 (grows on demand). */
+CCExclusive* cc_exclusive_create(CCArena* arena);
+/* Like create, with an initial map capacity hint (rounded up to a power of
+ * two; 0 means the default).  Same idea as sizing an arena up front. */
+CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap);
+/* Tears down the create mutex and releases discovery-map tables; mutex
+ * entry storage remains until the arena is freed. */
 void cc_exclusive_destroy(CCExclusive* excl);
 
 CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
 
+/* User-explicit reclaim: remove `name` from the discovery map and return the
+ * mutex entry to the section's arena pool.  Requires the mutex not held and
+ * no waiters; other handles to the same name become invalid. */
+void cc_exclusive_mutex_free(CCExclusiveMutex* m);
+
 /* Blocks until the entry's lock is owned by the caller. */
 void cc_exclusive_lock_entry_slow(void* entry);
-/* Called after an unlock swap observed CONTENDED: wake one waiter. */
+/* Called after a release swap observed CONTENDED: wake one waiter. */
 void cc_exclusive_unlock_contended(void* entry);
 
-static inline CCExclusiveGuard cc_exclusive_mutex_lock(CCExclusiveMutex* m) {
+static inline CCExclusiveGuard cc_exclusive_mutex_acquire(CCExclusiveMutex* m) {
     CCExclusiveGuard g;
     g._entry = NULL;
     if (!m || !m->_entry) return g;
@@ -72,12 +98,13 @@ static inline CCExclusiveGuard cc_exclusive_mutex_lock(CCExclusiveMutex* m) {
     return g;
 }
 
-static inline CCExclusiveGuard cc_exclusive_lock(CCExclusive* excl, uint64_t name) {
+static inline CCExclusiveGuard cc_exclusive_acquire(CCExclusive* excl, uint64_t name) {
     CCExclusiveMutex m = cc_exclusive_mutex(excl, name);
-    return cc_exclusive_mutex_lock(&m);
+    return cc_exclusive_mutex_acquire(&m);
 }
 
-static inline void cc_exclusive_guard_unlock(CCExclusiveGuard* g) {
+/* Idempotent: a second call is a local no-op (entry already NULL). */
+static inline void cc_exclusive_guard_release(CCExclusiveGuard* g) {
     if (!g || !g->_entry) return;
     void* entry = g->_entry;
     g->_entry = NULL;
@@ -90,7 +117,7 @@ static inline void cc_exclusive_guard_unlock(CCExclusiveGuard* g) {
 }
 
 static inline void cc_exclusive_guard_destroy(CCExclusiveGuard* g) {
-    cc_exclusive_guard_unlock(g);
+    cc_exclusive_guard_release(g);
 }
 
 #ifdef __cplusplus

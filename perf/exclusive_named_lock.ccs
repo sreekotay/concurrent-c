@@ -6,17 +6,17 @@
  * is spawn → work → join. Overlap is earned by the workload.
  *
  * Zipf path (product-shaped mix of hot/cold names, lock BY NAME):
- *   for I: k = zipf_pick(); g = excl->lock(k); row[k]++; g.unlock();
+ *   for I: k = zipf_pick(); g = excl->acquire(k); row[k]++; g.release();
  *   Expect sum(row[0..KEYS)) == W*I.
  *   The name→lock directory lookup is part of every iteration — that is the
  *   product being measured. No pre-resolved handles in this path.
  *
  * Serial fast path (one resolved mutex, no spawn/scheduler):
- *   one caller performs W*I lock/unlock pairs with cs_spins=0.
+ *   one caller performs W*I acquire/release pairs with cs_spins=0.
  *   This isolates uncontended lock-pair cost from directory + scheduling.
  *
  * Idioms (each language's reasonable concurrent-read directory):
- *   CC:   CCExclusive domain; excl->lock(name) (lock-free probe + CAS)
+ *   CC:   CCExclusive domain; excl->acquire(name) (lock-free probe + CAS)
  *   Go:   sync.Mutex per name via sync.Map (lock-free read path)
  *   Rust: std::sync::Mutex per name via RwLock<HashMap> (read lock + Arc)
  *   Zig:  std.Io.Mutex per name via pthread rwlock + HashMap
@@ -144,9 +144,9 @@ static void worker_zipf(int worker_id, int iters, int spins, int keys) {
     Rng rng = rng_for_worker(worker_id);
     for (int i = 0; i < iters; i++) {
         int k = zipf_pick(g_zipf_cum, keys, &rng);
-        CCExclusiveGuard g = g_excl->lock((uint64_t)k);
+        CCExclusiveGuard g = g_excl->acquire((uint64_t)k);
         row_bump(&g_rows[k], spins);
-        g.unlock();
+        g.release();
     }
 }
 
@@ -183,9 +183,9 @@ static double run_serial_fastpath(int64_t iters) {
     CCExclusiveMutex m = g_excl->mutex(1000);
     double t0 = time_now_ms();
     for (int64_t i = 0; i < iters; i++) {
-        CCExclusiveGuard g = m.lock();
+        CCExclusiveGuard g = m.acquire();
         row_bump(&g_rows[0], 0);
-        g.unlock();
+        g.release();
     }
     double t1 = time_now_ms();
 
@@ -222,11 +222,13 @@ int main(void) {
     if (trials > 64) trials = 64;
     zipf_init(g_zipf_cum, keys, g_zipf_s);
 
-    g_excl = cc_exclusive_create();
+    CCArena excl_arena = @create(kilobytes(128)) @destroy;
+    g_excl = cc_exclusive_create(&excl_arena);
     if (!g_excl) {
         fprintf(stderr, "cc_exclusive_create failed\n");
         return 1;
     }
+    @defer cc_exclusive_destroy(g_excl);
 
     printf("exclusive_named_lock lang=cc\n");
     printf("  workers=%d iters/worker=%d timed_trials=%d warmup=1 "

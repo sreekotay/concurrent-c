@@ -2923,6 +2923,7 @@ This section specifies:
 - **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
+- **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections
 
 ---
 
@@ -4480,6 +4481,130 @@ For bail-out without a value (statement context), use `!>` with an `@errhandler`
 
 ---
 
+### 8.10 Named Exclusive Sections (`CCExclusive`)
+
+When several fibers must briefly mutate the same named resource, a **named exclusive section** (`CCExclusive`) provides per-name mutual exclusion within one domain. Prefer channels and single-writer ownership when possible.
+
+Each `CCExclusive` is its own name space: the same `uint64_t` name in one domain resolves to the same mutex; different domains never collide.
+
+**Rule (short critical sections):** Critical sections under an exclusive guard must be short. Do not `@await`, park, or otherwise suspend while holding a guard. Holding a guard stalls other waiters on that name.
+
+#### 8.10.1 Construction and storage
+
+Construction allocates the section header and discovery map from a caller-supplied `CCArena*`. Mutex entries are allocated from an arena pool on that same arena on first resolve.
+
+```c
+CCArena arena = @create(kilobytes(128)) @destroy;
+CCExclusive* excl = cc_exclusive_create(&arena);
+// or: excl = cc_exclusive_create_sized(&arena, 256);  // initial map hint
+```
+
+- `cc_exclusive_create(arena)` is equivalent to `cc_exclusive_create_sized(arena, 64)`.
+- `cc_exclusive_create_sized(arena, initial_cap)` rounds `initial_cap` up to the next power of two (minimum 2). `initial_cap == 0` selects the default capacity (64).
+- Both functions return `NULL` when `arena` is `NULL` or allocation fails.
+
+The discovery map is an open-addressing table keyed by `uint64_t` name. It grows under an internal create mutex when load is high (approximately 75% full): capacity doubles, live entries are rehashed, and the prior table is retired. Retired tables are released with `cc_arena_release` at `cc_exclusive_destroy`, not at grow time, so lock-free lookups never observe a freed table.
+
+#### 8.10.2 Mutex resolve
+
+Resolve a name once and reuse the handle:
+
+```c
+CCExclusiveMutex m = excl->mutex(name);   // UFCS: cc_exclusive_mutex(excl, name)
+```
+
+`cc_exclusive_mutex` returns a `CCExclusiveMutex` carrying the section pointer, the name, and a cached runtime entry pointer. The first resolve for a name allocates a 64-byte-aligned entry (one cache line per entry, for false-share isolation) from the section's arena pool and inserts it into the discovery map. Subsequent resolves of the same name in the same domain return the same entry.
+
+For hot loops, resolve once outside the loop rather than calling `excl->acquire(name)` each iteration (which resolves on every call).
+
+#### 8.10.3 Acquire and release
+
+The surface uses **acquire** / **release**, not lock / unlock:
+
+```c
+CCExclusiveGuard g = m.acquire();   // UFCS: cc_exclusive_mutex_acquire(&m)
+... short critical section ...
+g.release();                      // UFCS: cc_exclusive_guard_release(&g)
+```
+
+By-name acquire is also available:
+
+```c
+CCExclusiveGuard g = excl->acquire(name);  // UFCS: cc_exclusive_acquire(excl, name)
+```
+
+**Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word. This is intentional so end-of-hold cleanup does not read as a double-unlock bug in review.
+
+`g.destroy()` and `@destroy` on a guard are aliases for `g.release()`.
+
+An acquire blocks until the caller owns the named entry. Uncontended acquire is an inlined compare-and-swap on the entry lock word; contended acquire uses a slow path that may park the current fiber.
+
+#### 8.10.4 Explicit mutex free
+
+```c
+m.free();   // UFCS: cc_exclusive_mutex_free(&m)
+```
+
+Explicit free removes the name from the discovery map (leaving a tombstone for probing) and returns the entry to the section's arena pool. It requires the mutex not be held and no waiters queued; violating this aborts. Other `CCExclusiveMutex` handles that still reference the freed name become invalid. Freeing an already-cleared handle is a no-op. The same name may be resolved again afterward (possibly reusing the pooled entry).
+
+#### 8.10.5 Destroy and arena lifetime
+
+```c
+excl->destroy();   // UFCS: cc_exclusive_destroy(excl)
+```
+
+Destroy tears down the internal create mutex and releases discovery-map tables (current and retired) via `cc_arena_release`. Pooled mutex entry storage remains allocated until the caller's arena is freed or reset.
+
+**Rule (arena lifetime):** The caller must keep the supplying arena alive for the entire lifetime of the section. Do not `cc_arena_reset` or `cc_arena_free` the arena while a `CCExclusive` built from it is still live.
+
+#### 8.10.6 Lock semantics
+
+Each mutex entry's lock word uses three states:
+
+| Value | Constant              | Meaning                                      |
+| ----- | --------------------- | -------------------------------------------- |
+| 0     | `CC_EXCL_FREE`        | Unlocked                                     |
+| 1     | `CC_EXCL_LOCKED`      | Locked, no known waiters                     |
+| 2     | `CC_EXCL_CONTENDED`    | Locked; waiters may be queued                |
+
+The lock word is the first field of the runtime entry; a guard holds a single entry pointer and the inline fast paths cast it directly.
+
+- **Uncontended acquire:** compare-and-swap `FREE → LOCKED`.
+- **Release:** atomic swap to `FREE`; if the previous value was `CONTENDED`, wake exactly one queued waiter.
+- **Contended path:** uses a barging wake protocol — the lock stays available while a woken fiber is being scheduled; the woken fiber re-contends rather than inheriting ownership directly.
+
+In fiber context, contended waiters park on the scheduler after a bounded spin. Outside fiber context (plain OS threads with no fiber runtime), acquire spins until the lock is taken.
+
+**Runtime API (normative):**
+
+```c
+CCExclusive* cc_exclusive_create(CCArena* arena);
+CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap);
+void cc_exclusive_destroy(CCExclusive* excl);
+
+CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
+void cc_exclusive_mutex_free(CCExclusiveMutex* m);
+
+CCExclusiveGuard cc_exclusive_mutex_acquire(CCExclusiveMutex* m);
+CCExclusiveGuard cc_exclusive_acquire(CCExclusive* excl, uint64_t name);
+void cc_exclusive_guard_release(CCExclusiveGuard* g);
+void cc_exclusive_guard_destroy(CCExclusiveGuard* g);
+
+void cc_exclusive_lock_entry_slow(void* entry);      /* slow acquire path */
+void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
+```
+
+**UFCS surface (normative):**
+
+- `excl->mutex(name)` — resolve
+- `excl->acquire(name)` — resolve and acquire
+- `excl->destroy()` — tear down section
+- `m.acquire()` — acquire resolved mutex
+- `m.free()` — explicit reclaim
+- `g.release()` / `g.destroy()` — release guard
+
+---
+
 ## 9. Standard Library (UFCS-First Design)
 
 This section defines the core standard library using **UFCS-first design**: method syntax is primary and UFCS lowering is type-directed and library-owned.
@@ -6017,7 +6142,7 @@ The following must be diagnosed at compile time:
 | Result forward — unbound binder                               | `@err(X);` where `X` is not the enclosing `!>` binder                                                                | §3.1        |
 | Result forward — dead code                                    | statement following `@err(e);` in the same block                                                                     | §3.1        |
 | Handler non-divergent                                         | Forward-reached `@errhandler` body last statement is not one of the approved divergent forms                         | §3.1        |
-| Unhandled result call                                         | bare `f();` where `f` returns `T!>(E)` (phase-1: gated on `CC_STRICT_RESULT_UNWRAP=1`)                               | §3.1        |
+| Unhandled result call                                         | bare `f();` where `f` returns `T!>(E)`                                                                               | §3.1        |
 
 
 ### B.2 Runtime Errors (Debug Builds)

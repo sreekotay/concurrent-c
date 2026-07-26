@@ -5,11 +5,12 @@
  * fibers must briefly mutate the same named resource, use a CCExclusive
  * domain:
  *
- *   CCExclusive* excl = cc_exclusive_create();
+ *   CCArena arena = @create(kilobytes(64)) @destroy;
+ *   CCExclusive* excl = cc_exclusive_create(&arena);       // or create_sized
  *   CCExclusiveMutex m = excl->mutex(name);   // resolve once
- *   CCExclusiveGuard g = m.lock();
+ *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
- *   g.unlock();                              // idempotent (local held bit)
+ *   g.release();                              // idempotent (local held bit)
  *   excl->destroy();
  *
  * Same name in one domain ⇒ same lock. Different domains never collide.
@@ -33,18 +34,18 @@ static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
 static void bump_shared(int iters) {
     CCExclusiveMutex m = g_excl->mutex(1); /* resolve once per worker */
     for (int i = 0; i < iters; i++) {
-        CCExclusiveGuard g = m.lock();
+        CCExclusiveGuard g = m.acquire();
         g_shared.value++;
-        g.unlock();
+        g.release();
     }
 }
 
 static void bump_private(int worker_id, int iters) {
     CCExclusiveMutex m = g_excl->mutex((uint64_t)(100 + worker_id));
     for (int i = 0; i < iters; i++) {
-        CCExclusiveGuard g = m.lock();
+        CCExclusiveGuard g = m.acquire();
         g_private[worker_id].value++;
-        g.unlock();
+        g.release();
     }
 }
 
@@ -54,7 +55,8 @@ int main(void) {
         return 1;
     }
 
-    g_excl = cc_exclusive_create();
+    CCArena excl_arena = @create(kilobytes(64)) @destroy;
+    g_excl = cc_exclusive_create(&excl_arena);
     if (!g_excl) {
         fprintf(stderr, "cc_exclusive_create failed\n");
         return 1;

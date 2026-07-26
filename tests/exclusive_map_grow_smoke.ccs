@@ -1,0 +1,46 @@
+/*
+ * Resolve more names than the initial discovery-map capacity and confirm
+ * locks still work after grow (1024 → 2048).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+#define NAMES 1500
+
+int main(void) {
+    CCArena arena = @create(megabytes(1)) @destroy;
+    /* Sized hint 100 → 128; still grows through 1500 names. */
+    CCExclusive* excl = cc_exclusive_create_sized(&arena, 100);
+    if (!excl) return 1;
+    @defer cc_exclusive_destroy(excl);
+
+    int64_t sum = 0;
+    for (int i = 1; i <= NAMES; i++) {
+        CCExclusiveMutex m = excl->mutex((uint64_t)i);
+        CCExclusiveGuard g = m.acquire();
+        sum += i;
+        g.release();
+    }
+
+    /* Re-resolve a pre-grow and post-grow name. */
+    {
+        CCExclusiveGuard g = excl->acquire(1);
+        sum += 1;
+        g.release();
+    }
+    {
+        CCExclusiveGuard g = excl->acquire(NAMES);
+        sum += NAMES;
+        g.release();
+    }
+
+    int64_t expect = (int64_t)NAMES * (NAMES + 1) / 2 + 1 + NAMES;
+    if (sum != expect) {
+        fprintf(stderr, "FAIL sum=%lld expect=%lld\n",
+                (long long)sum, (long long)expect);
+        return 1;
+    }
+    printf("exclusive_map_grow_smoke: OK (%d names)\n", NAMES);
+    return 0;
+}

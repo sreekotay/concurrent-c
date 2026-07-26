@@ -1,0 +1,42 @@
+/*
+ * Explicit mutex free drops the name and returns the entry to the pool;
+ * the same name can be resolved again afterward.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = @create(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create_sized(&arena, 8);
+    if (!excl) return 1;
+    @defer cc_exclusive_destroy(excl);
+
+    CCExclusiveMutex a = excl->mutex(1);
+    CCExclusiveMutex b = excl->mutex(2);
+    {
+        CCExclusiveGuard g = a.acquire();
+        g.release();
+    }
+    a.free(); /* drops key 1; entry back to pool */
+
+    /* Name 1 is gone; resolve again (may reuse pooled entry). */
+    CCExclusiveMutex a2 = excl->mutex(1);
+    {
+        CCExclusiveGuard g = a2.acquire();
+        g.release();
+    }
+
+    /* Freeing again is safe after free (no-op on cleared handle). */
+    a.free();
+
+    {
+        CCExclusiveGuard g = b.acquire();
+        g.release();
+    }
+    b.free();
+    a2.free();
+
+    printf("exclusive_mutex_free_smoke: OK\n");
+    return 0;
+}
