@@ -4,6 +4,7 @@
 // See the CC file header for the contract.
 //
 // Idiom: sync.Map of *sync.Mutex, create-on-first-use via LoadOrStore.
+// Zipf locks by name each iteration (directory lookup on the hot path).
 // Timing: before spawn through Wait (no start-gun).
 package main
 
@@ -150,16 +151,13 @@ func runZipf(workers, iters, spins, keys int) float64 {
 		id := w
 		go func() {
 			defer wg.Done()
-			ms := make([]*sync.Mutex, keys)
-			for k := 0; k < keys; k++ {
-				ms[k] = mutexFor(uint64(k))
-			}
 			r := rngForWorker(id)
 			for i := 0; i < iters; i++ {
 				k := zipfPick(zipfCum[:keys], keys, &r)
-				ms[k].Lock()
+				m := mutexFor(uint64(k))
+				m.Lock()
 				rowBump(&rows[k], spins)
-				ms[k].Unlock()
+				m.Unlock()
 			}
 		}()
 	}
@@ -178,36 +176,19 @@ func runZipf(workers, iters, spins, keys int) float64 {
 	return ms
 }
 
-func runUncontended(workers, iters, spins int) float64 {
-	for i := 0; i < workers; i++ {
-		rows[i].value = 0
-	}
-
+func runSerialFastpath(iters int) float64 {
+	rows[0].value = 0
+	m := mutexFor(1000)
 	t0 := time.Now()
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		id := w
-		go func() {
-			defer wg.Done()
-			m := mutexFor(uint64(1000 + id))
-			for i := 0; i < iters; i++ {
-				m.Lock()
-				rowBump(&rows[id], spins)
-				m.Unlock()
-			}
-		}()
+	for i := 0; i < iters; i++ {
+		m.Lock()
+		rowBump(&rows[0], 0)
+		m.Unlock()
 	}
-	wg.Wait()
 	ms := float64(time.Since(t0).Microseconds()) / 1000.0
 
-	var sum int64
-	for w := 0; w < workers; w++ {
-		sum += rows[w].value
-	}
-	expect := int64(workers * iters)
-	if sum != expect {
-		fmt.Fprintf(os.Stderr, "UNCONTENDED CHECK FAIL: got=%d expect=%d\n", sum, expect)
+	if rows[0].value != int64(iters) {
+		fmt.Fprintf(os.Stderr, "FASTPATH CHECK FAIL: got=%d expect=%d\n", rows[0].value, iters)
 		os.Exit(1)
 	}
 	return ms
@@ -249,38 +230,39 @@ func main() {
 		"cs_spins=%d keys=%d zipf_s=%.3f\n",
 		workers, iters, trials, spins, keys, zipfS)
 	fmt.Printf("  total_lock_ops/trial=%d\n", workers*iters)
-	fmt.Printf("  note=sync.Mutex per name via sync.Map; Zipf uses CS work; "+
-		"uncontended is lock micro (spins=0); no start-gun; goroutines GOMAXPROCS=%d; "+
-		"time includes spawn+join\n", workers)
+	fmt.Printf("  note=zipf locks BY NAME each iter (directory+lock+scheduler "+
+		"product, spawn+join, no start-gun, GOMAXPROCS=%d); serial_fastpath is "+
+		"one resolved mutex, one caller, spins=0, no scheduler\n", workers)
 
 	warm := iters
 	if warm > 1000 {
 		warm = 1000
 	}
 	_ = runZipf(workers, warm, spins, keys)
-	_ = runUncontended(workers, warm, 0)
+	_ = runSerialFastpath(workers * warm)
 
 	zSamples := make([]float64, trials)
-	uSamples := make([]float64, trials)
+	fSamples := make([]float64, trials)
+	totalOps := workers * iters
 	for t := 0; t < trials; t++ {
 		zSamples[t] = runZipf(workers, iters, spins, keys)
-		uSamples[t] = runUncontended(workers, iters, 0)
-		fmt.Printf("  trial %d: zipf_ms=%.3f uncontended_ms=%.3f\n",
-			t+1, zSamples[t], uSamples[t])
+		fSamples[t] = runSerialFastpath(totalOps)
+		fmt.Printf("  trial %d: zipf_ms=%.3f serial_fastpath_ms=%.3f\n",
+			t+1, zSamples[t], fSamples[t])
 	}
 
 	zMed := median(zSamples)
-	uMed := median(uSamples)
-	totalOps := float64(workers * iters)
+	fMed := median(fSamples)
+	ops := float64(totalOps)
 	zOps := 0.0
-	uOps := 0.0
+	fOps := 0.0
 	if zMed > 0 {
-		zOps = totalOps / (zMed / 1000.0)
+		zOps = ops / (zMed / 1000.0)
 	}
-	if uMed > 0 {
-		uOps = totalOps / (uMed / 1000.0)
+	if fMed > 0 {
+		fOps = ops / (fMed / 1000.0)
 	}
 	fmt.Printf("RESULT lang=go zipf_median_ms=%.3f zipf_ops_s=%.0f "+
-		"uncontended_median_ms=%.3f uncontended_ops_s=%.0f\n",
-		zMed, zOps, uMed, uOps)
+		"serial_fastpath_median_ms=%.3f serial_fastpath_ops_s=%.0f\n",
+		zMed, zOps, fMed, fOps)
 }

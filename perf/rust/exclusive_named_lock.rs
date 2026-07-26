@@ -4,7 +4,9 @@
 //! `perf/go/exclusive_named_lock.go`, and `perf/zig/exclusive_named_lock.zig`.
 //!
 //! Idiom: `std::sync::Mutex` per name, create-on-first-use via
-//! `Mutex<HashMap<u64, Arc<Mutex<()>>>>`. OS threads via `thread::scope`.
+//! `RwLock<HashMap<u64, Arc<Mutex<()>>>>` (read lock on the hot path).
+//! Zipf locks by name each iteration (directory lookup on the hot path).
+//! OS threads via `thread::scope`.
 //! Timing: before spawn through join (no start-gun).
 //!
 //! Build:
@@ -12,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -91,19 +93,26 @@ fn env_f64(name: &str, fallback: f64) -> f64 {
     }
 }
 
-fn mutex_for(dir: &Mutex<HashMap<u64, Arc<Mutex<()>>>>, name: u64) -> Arc<Mutex<()>> {
-    let mut g = dir.lock().unwrap();
-    g.entry(name)
+type LockDir = RwLock<HashMap<u64, Arc<Mutex<()>>>>;
+
+fn mutex_for(dir: &LockDir, name: u64) -> Arc<Mutex<()>> {
+    if let Some(m) = dir.read().unwrap().get(&name) {
+        return m.clone();
+    }
+    dir.write()
+        .unwrap()
+        .entry(name)
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
 }
 
 fn cs_work(spins: usize) {
+    // black_box each iteration: with it only at the end, LLVM replaces the
+    // loop with a closed-form sum and the critical section does no work.
     let mut x = 0i32;
     for i in 0..spins {
-        x = x.wrapping_add(i as i32);
+        x = std::hint::black_box(x.wrapping_add(i as i32));
     }
-    std::convert::identity(x);
 }
 
 fn row_bump(row: &mut Row, spins: usize) {
@@ -146,7 +155,7 @@ fn median(samples: &[f64]) -> f64 {
 }
 
 fn run_zipf(
-    dir: &Mutex<HashMap<u64, Arc<Mutex<()>>>>,
+    dir: &LockDir,
     rows: &mut [Row; MAX_KEYS],
     cum: &[f64],
     workers: usize,
@@ -164,12 +173,11 @@ fn run_zipf(
         for id in 0..workers {
             let cum = cum;
             scope.spawn(move || {
-                let ms: Vec<Arc<Mutex<()>>> =
-                    (0..keys).map(|k| mutex_for(dir, k as u64)).collect();
                 let mut rng = Rng::for_worker(id);
                 for _ in 0..iters {
                     let k = zipf_pick(cum, keys, &mut rng);
-                    let _g = ms[k].lock().unwrap();
+                    let m = mutex_for(dir, k as u64);
+                    let _g = m.lock().unwrap();
                     let rows = unsafe { &mut *(rows_addr as *mut [Row; MAX_KEYS]) };
                     row_bump(&mut rows[k], spins);
                 }
@@ -187,37 +195,18 @@ fn run_zipf(
     ms
 }
 
-fn run_uncontended(
-    dir: &Mutex<HashMap<u64, Arc<Mutex<()>>>>,
-    rows: &mut [Row; MAX_KEYS],
-    workers: usize,
-    iters: usize,
-    spins: usize,
-) -> f64 {
-    for row in rows.iter_mut().take(workers) {
-        row.value = 0;
-    }
-    let rows_addr = rows.as_mut_ptr() as usize;
-
+fn run_serial_fastpath(dir: &LockDir, rows: &mut [Row; MAX_KEYS], iters: usize) -> f64 {
+    rows[0].value = 0;
+    let m = mutex_for(dir, 1000);
     let t0 = Instant::now();
-    thread::scope(|scope| {
-        for id in 0..workers {
-            scope.spawn(move || {
-                let m = mutex_for(dir, 1000 + id as u64);
-                for _ in 0..iters {
-                    let _g = m.lock().unwrap();
-                    let rows = unsafe { &mut *(rows_addr as *mut [Row; MAX_KEYS]) };
-                    row_bump(&mut rows[id], spins);
-                }
-            });
-        }
-    });
+    for _ in 0..iters {
+        let _g = m.lock().unwrap();
+        row_bump(&mut rows[0], 0);
+    }
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    let sum: i64 = (0..workers).map(|w| rows[w].value).sum();
-    let expect = (workers * iters) as i64;
-    if sum != expect {
-        eprintln!("UNCONTENDED CHECK FAIL: got={sum} expect={expect}");
+    if rows[0].value != iters as i64 {
+        eprintln!("FASTPATH CHECK FAIL: got={} expect={iters}", rows[0].value);
         std::process::exit(1);
     }
     ms
@@ -237,7 +226,7 @@ fn main() {
         keys = MAX_KEYS;
     }
 
-    let dir: Mutex<HashMap<u64, Arc<Mutex<()>>>> = Mutex::new(HashMap::new());
+    let dir: LockDir = RwLock::new(HashMap::new());
     let mut rows: [Row; MAX_KEYS] = [Row::default(); MAX_KEYS];
     let mut cum = vec![0.0; keys];
     zipf_init(&mut cum, keys, zipf_s);
@@ -249,43 +238,44 @@ fn main() {
     );
     println!("  total_lock_ops/trial={}", workers * iters);
     println!(
-        "  note=std::sync::Mutex per name via HashMap; Zipf uses CS work; \
-         uncontended is lock micro (spins=0); no start-gun; OS threads; \
-         time includes spawn+join"
+        "  note=zipf locks BY NAME each iter (directory+lock+scheduler \
+         product, spawn+join, no start-gun, OS threads); serial_fastpath is \
+         one resolved mutex, one caller, spins=0, no scheduler"
     );
 
     let warm = if iters > 1000 { 1000 } else { iters };
     let _ = run_zipf(&dir, &mut rows, &cum, workers, warm, spins, keys);
-    let _ = run_uncontended(&dir, &mut rows, workers, warm, 0);
+    let _ = run_serial_fastpath(&dir, &mut rows, workers * warm);
 
     let mut z_samples = vec![0.0; trials];
-    let mut u_samples = vec![0.0; trials];
+    let mut f_samples = vec![0.0; trials];
+    let total_ops = workers * iters;
     for t in 0..trials {
         z_samples[t] = run_zipf(&dir, &mut rows, &cum, workers, iters, spins, keys);
-        u_samples[t] = run_uncontended(&dir, &mut rows, workers, iters, 0);
+        f_samples[t] = run_serial_fastpath(&dir, &mut rows, total_ops);
         println!(
-            "  trial {}: zipf_ms={:.3} uncontended_ms={:.3}",
+            "  trial {}: zipf_ms={:.3} serial_fastpath_ms={:.3}",
             t + 1,
             z_samples[t],
-            u_samples[t]
+            f_samples[t]
         );
     }
 
     let z_med = median(&z_samples);
-    let u_med = median(&u_samples);
-    let total_ops = (workers * iters) as f64;
+    let f_med = median(&f_samples);
+    let ops = total_ops as f64;
     let z_ops = if z_med > 0.0 {
-        total_ops / (z_med / 1000.0)
+        ops / (z_med / 1000.0)
     } else {
         0.0
     };
-    let u_ops = if u_med > 0.0 {
-        total_ops / (u_med / 1000.0)
+    let f_ops = if f_med > 0.0 {
+        ops / (f_med / 1000.0)
     } else {
         0.0
     };
     println!(
         "RESULT lang=rust zipf_median_ms={z_med:.3} zipf_ops_s={z_ops:.0} \
-         uncontended_median_ms={u_med:.3} uncontended_ops_s={u_ops:.0}"
+         serial_fastpath_median_ms={f_med:.3} serial_fastpath_ops_s={f_ops:.0}"
     );
 }

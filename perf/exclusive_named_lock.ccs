@@ -5,23 +5,21 @@
  * same Zipf + CS work, same checks. No start-gun / ready barrier: wall time
  * is spawn → work → join. Overlap is earned by the workload.
  *
- * Zipf path (product-shaped mix of hot/cold names):
- *   resolve mutex handles for names 0..KEYS-1 once per worker
- *   for I: k = zipf_pick(); g = m[k].lock(); row[k]++; g.unlock();
+ * Zipf path (product-shaped mix of hot/cold names, lock BY NAME):
+ *   for I: k = zipf_pick(); g = excl->lock(k); row[k]++; g.unlock();
  *   Expect sum(row[0..KEYS)) == W*I.
+ *   The name→lock directory lookup is part of every iteration — that is the
+ *   product being measured. No pre-resolved handles in this path.
  *
- * Uncontended path (CAS fast-path micro only — always cs_spins=0):
- *   worker w uses private name=(1000+w) / row[w]
- *   Expect sum(row[w]) == W*I.
- *   CC_EXCL_WORK is intentionally not applied here: with non-zero CS work
- *   this path becomes a parallel CPU throughput test (OS threads vs fibers),
- *   not a lock microbench.
+ * Serial fast path (one resolved mutex, no spawn/scheduler):
+ *   one caller performs W*I lock/unlock pairs with cs_spins=0.
+ *   This isolates uncontended lock-pair cost from directory + scheduling.
  *
- * Idioms:
- *   CC:   CCExclusive domain; mutex(name) once; guard lock (CAS + fiber park)
- *   Go:   sync.Mutex per name via sync.Map
- *   Rust: std::sync::Mutex per name via HashMap
- *   Zig:  std.Io.Mutex per name via HashMap
+ * Idioms (each language's reasonable concurrent-read directory):
+ *   CC:   CCExclusive domain; excl->lock(name) (lock-free probe + CAS)
+ *   Go:   sync.Mutex per name via sync.Map (lock-free read path)
+ *   Rust: std::sync::Mutex per name via RwLock<HashMap> (read lock + Arc)
+ *   Zig:  std.Io.Mutex per name via pthread rwlock + HashMap
  *
  * Env (shared across languages):
  *   CC_EXCL_WORKERS  default 8
@@ -143,29 +141,11 @@ static Rng rng_for_worker(int worker_id) {
 }
 
 static void worker_zipf(int worker_id, int iters, int spins, int keys) {
-    /* Heap: fiber stacks are small; MAX_KEYS mutex copies would be large. */
-    CCExclusiveMutex* ms =
-        (CCExclusiveMutex*)malloc((size_t)keys * sizeof(CCExclusiveMutex));
-    if (!ms) abort();
-    for (int k = 0; k < keys; k++) {
-        ms[k] = g_excl->mutex((uint64_t)k);
-    }
     Rng rng = rng_for_worker(worker_id);
     for (int i = 0; i < iters; i++) {
         int k = zipf_pick(g_zipf_cum, keys, &rng);
-        CCExclusiveMutex* mk = &ms[k];
-        CCExclusiveGuard g = mk->lock();
+        CCExclusiveGuard g = g_excl->lock((uint64_t)k);
         row_bump(&g_rows[k], spins);
-        g.unlock();
-    }
-    free(ms);
-}
-
-static void worker_uncontended(int worker_id, int iters, int spins) {
-    CCExclusiveMutex m = g_excl->mutex((uint64_t)(1000 + worker_id));
-    for (int i = 0; i < iters; i++) {
-        CCExclusiveGuard g = m.lock();
-        row_bump(&g_rows[worker_id], spins);
         g.unlock();
     }
 }
@@ -198,29 +178,20 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
     return t1 - t0;
 }
 
-static double run_uncontended(int workers, int iters, int spins) {
-    memset(g_rows, 0, sizeof(g_rows));
-
+static double run_serial_fastpath(int64_t iters) {
+    g_rows[0].value = 0;
+    CCExclusiveMutex m = g_excl->mutex(1000);
     double t0 = time_now_ms();
-    {
-        CCNursery* n = cc_nursery_create(NULL)
-            !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
-            @destroy;
-        for (int w = 0; w < workers; w++) {
-            int id = w;
-            n->spawn(() => [id, iters, spins] {
-                worker_uncontended(id, iters, spins);
-            });
-        }
+    for (int64_t i = 0; i < iters; i++) {
+        CCExclusiveGuard g = m.lock();
+        row_bump(&g_rows[0], 0);
+        g.unlock();
     }
     double t1 = time_now_ms();
 
-    int64_t sum = 0;
-    for (int w = 0; w < workers; w++) sum += g_rows[w].value;
-    int64_t expect = (int64_t)workers * (int64_t)iters;
-    if (sum != expect) {
-        fprintf(stderr, "UNCONTENDED CHECK FAIL: got=%lld expect=%lld\n",
-                (long long)sum, (long long)expect);
+    if (g_rows[0].value != iters) {
+        fprintf(stderr, "FASTPATH CHECK FAIL: got=%lld expect=%lld\n",
+                (long long)g_rows[0].value, (long long)iters);
         abort();
     }
     return t1 - t0;
@@ -263,32 +234,33 @@ int main(void) {
            workers, iters, trials, spins, keys, g_zipf_s);
     printf("  total_lock_ops/trial=%lld\n",
            (long long)workers * (long long)iters);
-    printf("  note=excl->mutex(name) once + m.lock()/g.unlock(); Zipf uses "
-           "CS work; uncontended is lock micro (spins=0); no start-gun; "
-           "nursery; time includes spawn+join\n");
+    printf("  note=zipf locks BY NAME each iter (directory+lock+scheduler "
+           "product, spawn+join, no start-gun); serial_fastpath is one "
+           "resolved mutex, one caller, spins=0, no scheduler\n");
 
     int warm = iters > 1000 ? 1000 : iters;
     (void)run_zipf(workers, warm, spins, keys);
-    (void)run_uncontended(workers, warm, 0);
+    (void)run_serial_fastpath((int64_t)workers * (int64_t)warm);
 
     double z_samples[64];
-    double u_samples[64];
+    double f_samples[64];
+    int64_t total_ops = (int64_t)workers * (int64_t)iters;
     for (int t = 0; t < trials; t++) {
         z_samples[t] = run_zipf(workers, iters, spins, keys);
-        u_samples[t] = run_uncontended(workers, iters, 0);
-        printf("  trial %d: zipf_ms=%.3f uncontended_ms=%.3f\n",
-               t + 1, z_samples[t], u_samples[t]);
+        f_samples[t] = run_serial_fastpath(total_ops);
+        printf("  trial %d: zipf_ms=%.3f serial_fastpath_ms=%.3f\n",
+               t + 1, z_samples[t], f_samples[t]);
     }
 
     double z_med = median_ms(z_samples, trials);
-    double u_med = median_ms(u_samples, trials);
-    double total_ops = (double)workers * (double)iters;
-    double z_ops = (z_med > 0) ? (total_ops / (z_med / 1000.0)) : 0;
-    double u_ops = (u_med > 0) ? (total_ops / (u_med / 1000.0)) : 0;
+    double f_med = median_ms(f_samples, trials);
+    double ops = (double)total_ops;
+    double z_ops = (z_med > 0) ? (ops / (z_med / 1000.0)) : 0;
+    double f_ops = (f_med > 0) ? (ops / (f_med / 1000.0)) : 0;
 
     printf("RESULT lang=cc zipf_median_ms=%.3f zipf_ops_s=%.0f "
-           "uncontended_median_ms=%.3f uncontended_ops_s=%.0f\n",
-           z_med, z_ops, u_med, u_ops);
+           "serial_fastpath_median_ms=%.3f serial_fastpath_ops_s=%.0f\n",
+           z_med, z_ops, f_med, f_ops);
 
     g_excl->destroy();
     g_excl = NULL;

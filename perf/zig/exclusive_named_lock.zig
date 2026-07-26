@@ -4,9 +4,10 @@
 // perf/go/exclusive_named_lock.go, and perf/rust/exclusive_named_lock.rs.
 //
 // Idiom (Zig 0.16): std.Io.Mutex per name (futex mutex via Io.Threaded),
-// create-on-first-use via AutoHashMap under a directory mutex. OS threads
-// (std.Thread.spawn + join). Timing is before spawn through join (no
-// start-gun).
+// create-on-first-use via AutoHashMap under Io.RwLock (shared read on the
+// hot path). Zipf locks by name each iteration (directory lookup on the hot
+// path). OS threads (std.Thread.spawn + join). Timing is before spawn
+// through join (no start-gun).
 //
 // Build:
 //   zig build-exe exclusive_named_lock.zig -O ReleaseFast -lc \
@@ -54,8 +55,9 @@ const Rng = struct {
     }
 };
 
-var dir_mu: Io.Mutex = .init;
+var dir_rw: Io.RwLock = .init;
 var dir: ?std.AutoHashMap(u64, *Io.Mutex) = null;
+var g_io: Io = undefined;
 var rows: [MAX_KEYS]Row = [_]Row{.{}} ** MAX_KEYS;
 var zipf_cum: [MAX_KEYS]f64 = [_]f64{0} ** MAX_KEYS;
 
@@ -78,8 +80,17 @@ fn ensureDir() *std.AutoHashMap(u64, *Io.Mutex) {
 }
 
 fn mutexFor(name: u64) !*Io.Mutex {
-    Io.Threaded.mutexLock(&dir_mu);
-    defer Io.Threaded.mutexUnlock(&dir_mu);
+    dir_rw.lockSharedUncancelable(g_io);
+    if (dir) |*d| {
+        if (d.get(name)) |m| {
+            dir_rw.unlockShared(g_io);
+            return m;
+        }
+    }
+    dir_rw.unlockShared(g_io);
+
+    dir_rw.lockUncancelable(g_io);
+    defer dir_rw.unlock(g_io);
     const d = ensureDir();
     if (d.get(name)) |m| return m;
     const m = try std.heap.page_allocator.create(Io.Mutex);
@@ -89,12 +100,14 @@ fn mutexFor(name: u64) !*Io.Mutex {
 }
 
 fn csWork(spins: usize) void {
+    // doNotOptimizeAway each iteration: with it only at the end, LLVM
+    // replaces the loop with a closed-form sum and the CS does no work.
     var x: i32 = 0;
     var i: usize = 0;
     while (i < spins) : (i += 1) {
         x +%= @intCast(i);
+        std.mem.doNotOptimizeAway(x);
     }
-    std.mem.doNotOptimizeAway(x);
 }
 
 fn rowBump(r: *Row, spins: usize) void {
@@ -149,33 +162,13 @@ const ZipfCtx = struct {
 };
 
 fn zipfWorker(ctx: ZipfCtx) void {
-    var ms: [MAX_KEYS]*Io.Mutex = undefined;
-    var k: usize = 0;
-    while (k < ctx.keys) : (k += 1) {
-        ms[k] = mutexFor(k) catch @panic("mutexFor");
-    }
     var r = Rng.forWorker(ctx.worker_id);
     var i: usize = 0;
     while (i < ctx.iters) : (i += 1) {
         const name = zipfPick(zipf_cum[0..ctx.keys], ctx.keys, &r);
-        Io.Threaded.mutexLock(ms[name]);
-        rowBump(&rows[name], ctx.spins);
-        Io.Threaded.mutexUnlock(ms[name]);
-    }
-}
-
-const UncCtx = struct {
-    worker_id: usize,
-    iters: usize,
-    spins: usize,
-};
-
-fn uncWorker(ctx: UncCtx) void {
-    const m = mutexFor(1000 + ctx.worker_id) catch @panic("mutexFor");
-    var i: usize = 0;
-    while (i < ctx.iters) : (i += 1) {
+        const m = mutexFor(name) catch @panic("mutexFor");
         Io.Threaded.mutexLock(m);
-        rowBump(&rows[ctx.worker_id], ctx.spins);
+        rowBump(&rows[name], ctx.spins);
         Io.Threaded.mutexUnlock(m);
     }
 }
@@ -208,28 +201,21 @@ fn runZipf(workers: usize, iters: usize, spins: usize, keys: usize) !f64 {
     return ms;
 }
 
-fn runUncontended(workers: usize, iters: usize, spins: usize) !f64 {
-    var w: usize = 0;
-    while (w < workers) : (w += 1) rows[w].value = 0;
-
-    var threads: [MAX_WORKERS]std.Thread = undefined;
+fn runSerialFastpath(iters: usize) !f64 {
+    rows[0].value = 0;
+    const m = try mutexFor(1000);
     const t0 = monoNs();
-    for (0..workers) |id| {
-        threads[id] = try std.Thread.spawn(.{}, uncWorker, .{UncCtx{
-            .worker_id = id,
-            .iters = iters,
-            .spins = spins,
-        }});
+    var i: usize = 0;
+    while (i < iters) : (i += 1) {
+        Io.Threaded.mutexLock(m);
+        rowBump(&rows[0], 0);
+        Io.Threaded.mutexUnlock(m);
     }
-    for (0..workers) |id| threads[id].join();
     const ms = @as(f64, @floatFromInt(monoNs() - t0)) / 1_000_000.0;
 
-    var sum: i64 = 0;
-    w = 0;
-    while (w < workers) : (w += 1) sum += rows[w].value;
-    const expect: i64 = @intCast(workers * iters);
-    if (sum != expect) {
-        _ = c.printf("UNCONTENDED CHECK FAIL: got=%lld expect=%lld\n", sum, expect);
+    const expect: i64 = @intCast(iters);
+    if (rows[0].value != expect) {
+        _ = c.printf("FASTPATH CHECK FAIL: got=%lld expect=%lld\n", rows[0].value, expect);
         std.process.exit(1);
     }
     return ms;
@@ -250,6 +236,11 @@ pub fn main() !void {
     }
     zipfInit(zipf_cum[0..keys], keys, zipf_s);
 
+    // g_io services only the rwlock's contended path; reads are CAS-only.
+    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    g_io = threaded.io();
+
     _ = c.printf("exclusive_named_lock lang=zig\n");
     _ = c.printf(
         "  workers=%zu iters/worker=%zu timed_trials=%zu warmup=1 cs_spins=%zu keys=%zu zipf_s=%.3f\n",
@@ -261,30 +252,31 @@ pub fn main() !void {
         zipf_s,
     );
     _ = c.printf("  total_lock_ops/trial=%zu\n", workers * iters);
-    _ = c.printf("  note=std.Io.Mutex per name via HashMap; Zipf uses CS work; uncontended is lock micro (spins=0); no start-gun; OS threads; time includes spawn+join\n");
+    _ = c.printf("  note=zipf locks BY NAME each iter (directory+lock+scheduler product, spawn+join, no start-gun, OS threads); serial_fastpath is one resolved mutex, one caller, spins=0, no scheduler\n");
 
     const warm = if (iters > 1000) @as(usize, 1000) else iters;
     _ = try runZipf(workers, warm, spins, keys);
-    _ = try runUncontended(workers, warm, 0);
+    _ = try runSerialFastpath(workers * warm);
 
     var z_samples: [64]f64 = undefined;
-    var u_samples: [64]f64 = undefined;
+    var f_samples: [64]f64 = undefined;
+    const total_ops = workers * iters;
     for (0..trials) |t| {
         z_samples[t] = try runZipf(workers, iters, spins, keys);
-        u_samples[t] = try runUncontended(workers, iters, 0);
-        _ = c.printf("  trial %zu: zipf_ms=%.3f uncontended_ms=%.3f\n", t + 1, z_samples[t], u_samples[t]);
+        f_samples[t] = try runSerialFastpath(total_ops);
+        _ = c.printf("  trial %zu: zipf_ms=%.3f serial_fastpath_ms=%.3f\n", t + 1, z_samples[t], f_samples[t]);
     }
 
     const z_med = median(z_samples[0..trials]);
-    const u_med = median(u_samples[0..trials]);
-    const total_ops: f64 = @floatFromInt(workers * iters);
-    const z_ops = if (z_med > 0) total_ops / (z_med / 1000.0) else 0.0;
-    const u_ops = if (u_med > 0) total_ops / (u_med / 1000.0) else 0.0;
+    const f_med = median(f_samples[0..trials]);
+    const ops: f64 = @floatFromInt(total_ops);
+    const z_ops = if (z_med > 0) ops / (z_med / 1000.0) else 0.0;
+    const f_ops = if (f_med > 0) ops / (f_med / 1000.0) else 0.0;
     _ = c.printf(
-        "RESULT lang=zig zipf_median_ms=%.3f zipf_ops_s=%.0f uncontended_median_ms=%.3f uncontended_ops_s=%.0f\n",
+        "RESULT lang=zig zipf_median_ms=%.3f zipf_ops_s=%.0f serial_fastpath_median_ms=%.3f serial_fastpath_ops_s=%.0f\n",
         z_med,
         z_ops,
-        u_med,
-        u_ops,
+        f_med,
+        f_ops,
     );
 }

@@ -6,19 +6,21 @@
 #       CC_EXCL_WORKERS / CC_EXCL_ITERS / CC_EXCL_TRIALS
 #       CC_EXCL_WORK (default 32) / CC_EXCL_KEYS (64) / CC_EXCL_ZIPF_S (1.0)
 #   * Same workload:
-#       Zipf: resolve mutexes 0..KEYS-1 once; each iter zipf-pick + RMW under lock
-#             (CC_EXCL_WORK applies here — product-shaped CS)
-#       Uncontended: private per-worker name; always cs_spins=0 (lock micro only)
+#       Zipf: lock BY NAME each iter: zipf-pick + directory lookup + RMW under
+#             lock (CC_EXCL_WORK applies here — directory+lock+scheduler
+#             product throughput; no pre-resolved handles)
+#       Serial fast path: one resolved mutex; one caller performs W*I pairs;
+#                         always cs_spins=0; no parallel scheduler
 #   * Identical Zipf RNG (xorshift64) + CDF across languages
 #   * No start-gun: wall time is spawn → work → join; overlap is earned
 #   * Warmup + median of timed trials; correctness checks on counters
-#   * Idiomatic locks per language:
-#       CC:   excl->mutex(name) once, then guard lock (CAS + fiber park) + nursery
-#       Go:   mutexFor(name) once, then sync.Mutex + goroutines
-#       Rust: mutex_for(name) once, then std::sync::Mutex + OS threads
-#       Zig:  mutexFor(name) once, then std.Io.Mutex + OS threads
-#   * Do not read uncontended_ops/s as "with CS work": that would mix lock
-#     cost with parallel CPU throughput (OS threads vs cooperative fibers).
+#   * Idiomatic named locks per language (concurrent-read directory):
+#       CC:   excl->lock(name) (lock-free probe + CAS + fiber park) + nursery
+#       Go:   mutexFor(name) via sync.Map, sync.Mutex + goroutines
+#       Rust: mutex_for(name) via RwLock<HashMap>+Arc, std Mutex + OS threads
+#       Zig:  mutexFor(name) via Io.RwLock+HashMap, Io.Mutex + OS threads
+#   * Zipf intentionally includes each runtime's directory + scheduler
+#     behavior. Serial fast path intentionally excludes both.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -90,15 +92,15 @@ fi
 echo "================================================================="
 echo "SUMMARY (median lock-ops/s; higher is better)"
 echo "================================================================="
-printf "%-14s %18s %18s\n" "lang" "zipf_ops/s" "uncontended_ops/s"
+printf "%-14s %18s %22s\n" "lang" "zipf_product_ops/s" "serial_fastpath_ops/s"
 for label in cc go rust zig; do
   log="$OUT/excl_${label}.txt"
   [ -f "$log" ] || continue
   line=$(grep '^RESULT ' "$log" || true)
   [ -n "$line" ] || continue
   z=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^zipf_ops_s=/) {split($i,a,"="); print a[2]}}')
-  u=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^uncontended_ops_s=/) {split($i,a,"="); print a[2]}}')
-  printf "%-14s %18s %18s\n" "$label" "$z" "$u"
+  f=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^serial_fastpath_ops_s=/) {split($i,a,"="); print a[2]}}')
+  printf "%-14s %18s %22s\n" "$label" "$z" "$f"
 done
 echo ""
 echo "Interpret with the fairness contract at the top of this script."
