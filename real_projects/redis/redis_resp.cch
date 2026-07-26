@@ -1,3 +1,10 @@
+/* Connection read buffer: one contiguous ring used for RESP framing.
+ * Cap is the per-connection command-size ceiling — a single request
+ * (array header + all bulk args) must fit; oversized frames fail the
+ * fill with an I/O error and the connection closes.  Real Redis accepts
+ * much larger values (hundreds of MB); this port documents the bound
+ * instead of pretending unbounded.  Callers size `data`/`cap` (today:
+ * 64 KiB on each connection fiber stack). */
 typedef struct RespReader {
     char* data;
     size_t start;
@@ -89,6 +96,7 @@ static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t 
         while (pos < line.len && data[pos] != ' ') pos++;
         args[argc++] = CCSlice_sub(&line, start, pos);
     }
-    if (argc == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty inline command"));
+    /* Blank inline line (`\r\n` / whitespace-only): argc 0.  Callers skip
+     * like Redis — do not turn it into a parse error. */
     return cc_ok(argc);
 }

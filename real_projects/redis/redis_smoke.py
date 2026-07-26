@@ -11,7 +11,8 @@ kills it on exit; pass --no-spawn to target an already-running server.
 Coverage:
   - basics: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX, APPEND/STRLEN/TYPE,
     DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
-    DBSIZE/FLUSHDB/FLUSHALL, KEYS glob, CONFIG GET, inline commands
+    DBSIZE/FLUSHDB/FLUSHALL, KEYS glob, CONFIG GET, inline commands,
+    blank-inline / *0 no-ops (connection stays up)
   - wire parity: byte-exact replies for every RESP shape (simple, error,
     integer, bulk, empty bulk, nil, empty array, mixed bulk+nil array)
   - expiry: EXPIRE/PEXPIRE/TTL/PTTL/PERSIST semantics + lazy expiration
@@ -213,6 +214,9 @@ def test_basics(port):
     check("inline SET", c.read_reply(), "OK")
     c.send_raw(b"GET inlinek\r\n")
     check("inline GET", c.read_reply(), b"inlinev")
+    # Redis silently ignores blank inline lines and empty multibulk (*0).
+    c.send_raw(b"\r\n\r\n*0\r\nPING\r\n")
+    check("noop then PING", c.read_reply(), "PONG")
     check("cleanup2", c.cmd("FLUSHALL"), "OK")
     c.close()
 

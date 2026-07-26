@@ -660,7 +660,12 @@ static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, DbCmdClock* clock
         if (exp == 0) return reply_integer(-1);
         int64_t rem = exp - clock.now();
         if (rem < 0) rem = 0;
-        return reply_integer(in_ms ? rem : (rem + 999) / 1000);
+        if (in_ms) return reply_integer(rem);
+        /* Ceiling to seconds.  Clamped INT64_MAX deadlines (set_with_ttl /
+         * expire_rel_ms) make bare `rem + 999` overflow to a negative TTL. */
+        CCResult_int64_t_CCError adj = cc_add_i64_checked(rem, 999);
+        if (adj.is_err()) return reply_integer(INT64_MAX / 1000);
+        return reply_integer(adj.value() / 1000);
     }
 }
 
@@ -674,7 +679,7 @@ static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, DbCmdClock* c
 }
 
 /* MGET → WIRE array in reply_arena.  Pass 1 reaps; pass 2 re-reads with
- * a stable clock. */
+ * a stable clock; encode size from cc_measure (one alloc). */
 static RedisReply !>(CCError) db_mget(RedisDb* db,
                                       CCSlice* keys,
                                       size_t nkeys,
@@ -685,12 +690,8 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
         (void)db_lookup_live(db, keys[i], clock);
     }
 
-    CCSlice vals[REDIS_ARGV_MAX];
-    bool found[REDIS_ARGV_MAX];
-    /* Capacity hint, not wire math: per-element schema overhead is well
-     * under 24 bytes (nil is 5); cc_write's 0-on-didn't-fit catches any
-     * shortfall below and the loop doubles. */
-    size_t cap = 16;
+    CCSlice vals[REDIS_ARGV_MAX] = {0};
+    bool found[REDIS_ARGV_MAX] = {0};
     for (size_t i = 0; i < nkeys; ++i) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         found[i] = cell != NULL;
@@ -701,8 +702,8 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
                     vals[i] = val->str.as_slice();
                     break;
                 case .num: {
-                    /* boundary render into the reply arena: stays valid
-                     * through the (possibly repeated) encode below */
+                    /* Render into reply_arena so the measured write keeps
+                     * stable bytes for the encode below. */
                     int64_t n = val->num;
                     char[:] text = @string(`${n}`);
                     CCSlice bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
@@ -711,9 +712,6 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
                     break;
                 }
             }
-            cap += vals[i].len + 24;
-        } else {
-            cap += 8;
         }
     }
 
@@ -721,25 +719,22 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
     for (size_t i = 0; i < nkeys; ++i)
         elems[i] = wire_bulk_or_nil(vals[i], found[i]);
 
-    for (;;) {
-        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
-        CCSlice out = reply_arena_alloc_slice(reply_arena, cap) !>;
-        RespGBulkArray arr;
-        memset(&arr, 0, sizeof arr);
-        arr.n = (long long)nkeys;
-        arr.elems = elems;
-        arr.elems_n = nkeys;
-        size_t w = cc_write(RespGBulkArray, &arr, (char*)out.ptr, out.len);
-        if (w != 0) {
-            out.len = w;
-            return cc_ok(reply_wire(out));
-        }
-        cc_arena_restore(cp);
-        if (cap >= (size_t)k_reply_encode_cap_max) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "mget reply encode overflow"));
-        }
-        cap *= 2; /* re-encode is safe: no map mutation since pass 1 reaped */
+    RespGBulkArray arr;
+    memset(&arr, 0, sizeof arr);
+    arr.n = (long long)nkeys;
+    arr.elems = elems;
+    arr.elems_n = nkeys;
+    size_t need = cc_measure(RespGBulkArray, &arr);
+    if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "mget reply encode overflow"));
     }
+    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    size_t w = cc_write(RespGBulkArray, &arr, (char*)out.ptr, out.len);
+    if (w != need) {
+        return cc_err(CC_ERROR(CC_ERR_INTERNAL, "mget encode: write size != measure"));
+    }
+    out.len = w;
+    return cc_ok(reply_wire(out));
 }
 
 static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
@@ -788,10 +783,10 @@ static RedisReply db_flush(RedisDb* db) {
     return reply_simple("OK");
 }
 
-/* KEYS → WIRE array in reply_arena.  Count, then encode; write each bulk
- * immediately so inline CCSlicePacked key bytes are copied before the next
- * dense-row step (staging RespGReply items for a later cc_write mis-encodes
- * under --release). */
+/* KEYS → WIRE array in reply_arena.  Measure pass (exact size), then encode;
+ * write each bulk immediately so inline CCSlicePacked key bytes are copied
+ * before the next dense-row step (staging RespGReply items for a later
+ * batched write mis-encodes under --release). */
 static RedisReply !>(CCError) db_keys(RedisDb* db,
                                       char[:] pattern,
                                       CCArena* reply_arena,
@@ -805,7 +800,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     const char* pat = (const char*)pattern.ptr;
 
     size_t matched = 0;
-    size_t cap = 16;
+    size_t body = 0;
     size_t n = (db && db->entries) ? db->entries.len() : 0;
     for (size_t i = 0; i < n; ++i) {
         CCSlicePacked* kp = db->entries.key_ptr(i);
@@ -815,38 +810,49 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         CCSlice ks = kp->as_slice();
         if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
         matched++;
-        cap += ks.len + 24;
-    }
-
-    for (;;) {
-        CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
-        CCSlice out = reply_arena_alloc_slice(reply_arena, cap) !>;
-        char* dst = (char*)out.ptr;
-        RespGArrayHdr hdr = { .n = (long long)matched };
-        size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
-        bool fit = off != 0;
-        for (size_t i = 0; fit && i < n; ++i) {
-            CCSlicePacked* kp = db->entries.key_ptr(i);
-            if (!kp) continue;
-            int64_t exp = db_expires_get(db, *kp);
-            if (exp != 0 && clock.now() >= exp) continue;
-            CCSlice ks = kp->as_slice();
-            if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
-            RespGReply elem = wire_bulk(ks);
-            size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
-            if (w == 0) { fit = false; break; }
-            off += w;
-        }
-        if (fit) {
-            out.len = off;
-            return cc_ok(reply_wire(out));
-        }
-        cc_arena_restore(cp);
-        if (cap >= (size_t)k_reply_encode_cap_max) {
+        RespGReply elem = wire_bulk(ks);
+        size_t m = cc_measure(RespGReply, &elem);
+        if (m == 0) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
         }
-        cap *= 2;
+        body += m;
     }
+
+    RespGArrayHdr hdr = { .n = (long long)matched };
+    size_t hdr_sz = cc_measure(RespGArrayHdr, &hdr);
+    if (hdr_sz == 0) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
+    }
+    size_t need = hdr_sz + body;
+    if (need > (size_t)k_reply_encode_cap_max) {
+        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
+    }
+
+    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    char* dst = (char*)out.ptr;
+    size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
+    if (off != hdr_sz) {
+        return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: hdr write != measure"));
+    }
+    for (size_t i = 0; i < n; ++i) {
+        CCSlicePacked* kp = db->entries.key_ptr(i);
+        if (!kp) continue;
+        int64_t exp = db_expires_get(db, *kp);
+        if (exp != 0 && clock.now() >= exp) continue;
+        CCSlice ks = kp->as_slice();
+        if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+        RespGReply elem = wire_bulk(ks);
+        size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
+        if (w == 0) {
+            return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: bulk write failed"));
+        }
+        off += w;
+    }
+    if (off != need) {
+        return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: write size != measure"));
+    }
+    out.len = off;
+    return cc_ok(reply_wire(out));
 }
 
 /* Seconds → relative ms for EXPIRE/SETEX, clamped instead of overflowing. */

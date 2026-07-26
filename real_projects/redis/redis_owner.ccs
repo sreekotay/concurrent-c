@@ -31,6 +31,10 @@
  * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
  * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value
  * live).  CC_REDIS_MEM_REPORT=1 adds verbose Mach/arena dump at owner-ready.
+ *
+ * Command-size bound: each connection's RESP read buffer is 64 KiB.  A
+ * single request must fit entirely; larger frames fail the fill and close
+ * the connection (documented design bound — not Redis's ~512 MB values).
  */
 
 #include <ccc/std/prelude.cch>
@@ -245,37 +249,44 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err) {
-    size_t pos = 0;
-    RespGCmd c;
-    bool !>(CCError) tr = RespGCmd_try_read((const char*)(r->data + r->start),
-                                            r->end - r->start, &pos, NULL, &c);
-    if (tr.is_err()) {
-        if (tr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
-        *err = tr.error();
-        return RESP_PARSE_ERROR;
-    }
-    if (!tr.value()) return RESP_PARSE_INCOMPLETE;
-    if (c.kind == RespGCmd_plain) {
-        /* whitespace tokenization stays with the hand helper: it is server
-         * policy (arg splitting), not wire framing */
-        size_t !>(CCError) pargs = parse_inline_args(c.plain.text, args, cap);
-        if (pargs.is_err()) { *err = pargs.error(); return RESP_PARSE_ERROR; }
-        *out_argc = pargs.value();
-        r->start += pos;
-        return RESP_PARSE_OK;
-    }
-    if (c.kind == RespGCmd_framed) {
-        if (c.framed.args_n < 1 || c.framed.args_n > cap) {
-            *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+    /* Loop so Redis-style no-ops (blank inline `\r\n`, empty multibulk `*0`)
+     * are consumed without killing the connection; keep reading until a
+     * real command, incomplete frame, or hard error. */
+    while (1) {
+        size_t pos = 0;
+        RespGCmd c;
+        bool !>(CCError) tr = RespGCmd_try_read((const char*)(r->data + r->start),
+                                                r->end - r->start, &pos, NULL, &c);
+        if (tr.is_err()) {
+            if (tr.error().kind == CC_ERR_WOULD_BLOCK) return RESP_PARSE_INCOMPLETE;
+            *err = tr.error();
             return RESP_PARSE_ERROR;
         }
-        for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
-        *out_argc = c.framed.args_n;
-        r->start += pos;
-        return RESP_PARSE_OK;
+        if (!tr.value()) return RESP_PARSE_INCOMPLETE;
+        if (c.kind == RespGCmd_plain) {
+            /* whitespace tokenization stays with the hand helper: it is server
+             * policy (arg splitting), not wire framing */
+            size_t !>(CCError) pargs = parse_inline_args(c.plain.text, args, cap);
+            if (pargs.is_err()) { *err = pargs.error(); return RESP_PARSE_ERROR; }
+            r->start += pos;
+            if (pargs.value() == 0) continue; /* blank inline — Redis ignores */
+            *out_argc = pargs.value();
+            return RESP_PARSE_OK;
+        }
+        if (c.kind == RespGCmd_framed) {
+            if (c.framed.args_n > cap) {
+                *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
+                return RESP_PARSE_ERROR;
+            }
+            r->start += pos;
+            if (c.framed.args_n == 0) continue; /* *0 — Redis no-op */
+            for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+            *out_argc = c.framed.args_n;
+            return RESP_PARSE_OK;
+        }
+        *err = CC_ERROR(CC_ERR_PARSE, "unsupported RESP command shape");
+        return RESP_PARSE_ERROR;
     }
-    *err = CC_ERROR(CC_ERR_PARSE, "unsupported RESP command shape");
-    return RESP_PARSE_ERROR;
 }
 
 typedef struct RedisCommandSpec {
@@ -440,15 +451,12 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
     return cc_write(RespGReply, &wire, dst, cap);
 }
 
-/* Encode into reply_arena.  `cap_hint` is a guess; cc_write 0-on-miss +
- * checkpoint/restore + double until fit (or overflow). */
+/* Encode into reply_arena via cc_measure (exact size; one alloc + write). */
 enum { k_reply_encode_cap_max = 1 << 30 };
 
 static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
-                                                                 CCArena* reply_arena,
-                                                                 size_t cap_hint) {
+                                                        CCArena* reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)cap_hint;
     size_t need = cc_measure(RespGReply, wire);
     if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
@@ -479,7 +487,7 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
     RespGReply arr = {
         .array = { .n = (long long)n, .items = items, .items_n = n }
     };
-    CCSlice out = reply_wire_encode_into_arena(&arr, reply_arena, 64) !>;
+    CCSlice out = reply_wire_encode_into_arena(&arr, reply_arena) !>;
     return cc_ok(reply_wire(out));
 }
 
@@ -1068,7 +1076,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
     };
     conn->sock = &client;
 
-    /* Large enough for pipelined redis-benchmark without constant compact moves. */
+    /* 64 KiB: command-size ceiling (see file header) and pipeline headroom. */
     char read_buf[64 * 1024];
     RespReader reader;
     @nonblocking { reader = rr_init(read_buf, sizeof(read_buf)); }
