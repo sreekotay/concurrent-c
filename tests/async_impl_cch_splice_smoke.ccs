@@ -1,0 +1,32 @@
+/* @async after an impl-grade .cch splice must lower correctly.
+ *
+ * The preprocessor splices the helper raw with #line brackets, so the
+ * stub AST's logical line for `worker` is far below its physical offset.
+ * Async lowering used to map those logical lines with raw newline
+ * counting and excised / mis-anchored the function body. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+#include "async_impl_cch_splice_helper.cch"
+
+@async int worker(int base, int scale) {
+    char[:] a = cc_slice_from_cstr("40");
+    char[:] b = cc_slice_from_cstr("2");
+    int64_t s = splice_pad_sum(a, b);
+    int64_t pad = splice_pad_fold((int64_t)base);
+    return (int)(s + pad + (int64_t)scale);
+}
+
+@async int run(void) {
+    int v = @await worker(0, 0);
+    return v;
+}
+
+int main(void) {
+    CCTaskIntptr t = run();
+    int got = cc_block_on(int, t);
+    printf("got=%d\n", got);
+    /* 40+2 from header sum, plus pad fold 0..9 = 45 → 87 */
+    return got == 87 ? 0 : 1;
+}

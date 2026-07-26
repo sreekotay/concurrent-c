@@ -96,4 +96,28 @@ static inline int cc_span_logical_line_candidates(const char* s, size_t n,
     return count;
 }
 
+/* Map an AST logical (file, line[, col]) to a buffer offset.  When the
+ * buffer carries `#line` / `# <n> "file"` directives (impl-grade .cch
+ * splices, grammar expansions, …), raw newline counting is wrong —
+ * TCC's stub AST speaks logical lines.  Prefer the last ledger match
+ * (outer/main-file occurrence after nested splices), then fall back to
+ * physical newlines when the buffer has no matching directive. */
+static inline size_t cc_offset_for_logical_line(const char* s, size_t n,
+                                               const char* want_file, int want_line) {
+    size_t cand[32];
+    int nc = cc_span_logical_line_candidates(s, n, want_file, want_line, cand, 32);
+    if (nc > 0) return cand[nc - 1];
+    return cc__offset_of_line_1based(s, n, want_line);
+}
+
+static inline size_t cc_offset_for_logical_line_col(const char* s, size_t n,
+                                                   const char* want_file,
+                                                   int want_line, int col_no) {
+    size_t loff = cc_offset_for_logical_line(s, n, want_file, want_line);
+    if (col_no <= 1) return loff;
+    size_t off = loff + (size_t)(col_no - 1);
+    if (off > n) off = n;
+    return off;
+}
+
 #endif /* CC_VISITOR_TEXT_SPAN_H */

@@ -1833,7 +1833,63 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
             continue;
         }
         if (src[p] == '#') {
+            /* Skip whole #if/#ifdef/#ifndef … #endif regions.  A one-line
+             * skip used to land the container anchor between `#define FOO_DEFINED 1`
+             * and the body of an already-satisfied `#ifndef`, so ArrayMap
+             * monomorphs for builtin payloads (e.g. int64_t) were nested
+             * inside a dead branch and never compiled — while user-typed
+             * payloads (delayed past a local typedef) stayed healthy. */
+            size_t kw = p + 1;
+            while (kw < line_end && (src[kw] == ' ' || src[kw] == '\t')) kw++;
+            int is_if = 0;
+            if (kw + 2 <= line_end && memcmp(src + kw, "if", 2) == 0 &&
+                (kw + 2 == line_end || !cc_is_ident_char(src[kw + 2])))
+                is_if = 1;
+            else if (kw + 5 <= line_end && memcmp(src + kw, "ifdef", 5) == 0 &&
+                     (kw + 5 == line_end || !cc_is_ident_char(src[kw + 5])))
+                is_if = 1;
+            else if (kw + 6 <= line_end && memcmp(src + kw, "ifndef", 6) == 0 &&
+                     (kw + 6 == line_end || !cc_is_ident_char(src[kw + 6])))
+                is_if = 1;
+            if (is_if) {
+                int depth = 1;
+                size_t q = (line_end < len) ? line_end + 1 : line_end;
+                while (q < len && depth > 0) {
+                    size_t ls = q, le = q;
+                    while (le < len && src[le] != '\n') le++;
+                    size_t r = ls;
+                    while (r < le && (src[r] == ' ' || src[r] == '\t' || src[r] == '\r')) r++;
+                    if (r < le && src[r] == '#') {
+                        size_t k = r + 1;
+                        while (k < le && (src[k] == ' ' || src[k] == '\t')) k++;
+                        if (k + 2 <= le && memcmp(src + k, "if", 2) == 0 &&
+                            (k + 2 == le || !cc_is_ident_char(src[k + 2])))
+                            depth++;
+                        else if (k + 5 <= le && memcmp(src + k, "ifdef", 5) == 0 &&
+                                 (k + 5 == le || !cc_is_ident_char(src[k + 5])))
+                            depth++;
+                        else if (k + 6 <= le && memcmp(src + k, "ifndef", 6) == 0 &&
+                                 (k + 6 == le || !cc_is_ident_char(src[k + 6])))
+                            depth++;
+                        else if (k + 5 <= le && memcmp(src + k, "endif", 5) == 0 &&
+                                 (k + 5 == le || !cc_is_ident_char(src[k + 5])))
+                            depth--;
+                    }
+                    q = (le < len) ? le + 1 : le;
+                }
+                pos = q;
+                continue;
+            }
+            /* Also consume backslash-continued physical lines so a
+             * multi-line `#define … _Generic( \\` (result unwrap arms)
+             * cannot host the container insert mid-macro. */
             pos = (line_end < len) ? line_end + 1 : line_end;
+            while (line_end > line_start && src[line_end - 1] == '\\' && pos < len) {
+                line_start = pos;
+                line_end = line_start;
+                while (line_end < len && src[line_end] != '\n') line_end++;
+                pos = (line_end < len) ? line_end + 1 : line_end;
+            }
             continue;
         }
         if ((p + 7 <= line_end && memcmp(src + p, "typedef", 7) == 0 && !cc_is_ident_char(src[p + 7])) ||

@@ -1,0 +1,58 @@
+/*
+ * Bulky impl-grade header: enough statement-level CC to shift physical
+ * line numbers via #line splice so an @async fn after the include would
+ * be mis-located if async lowering mapped AST lines with raw newlines.
+ */
+#ifndef ASYNC_IMPL_CCH_SPLICE_HELPER_CCH
+#define ASYNC_IMPL_CCH_SPLICE_HELPER_CCH
+
+#include <ccc/std/prelude.cch>
+
+@variant SplicePadVal {
+    num: int64_t;
+    flag: int;
+};
+
+static int64_t !>(CCError) splice_pad_parse(char[:] s) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int64_t v = s.to_i64() !>;
+    return cc_ok(v);
+}
+
+static int64_t splice_pad_sum(char[:] a, char[:] b) {
+    SplicePadVal pv = { .num = 0 };
+    @defer (void)pv;
+    int64_t x = splice_pad_parse(a) !> { return -1; };
+    int64_t y = splice_pad_parse(b) !> { return -1; };
+    pv = (SplicePadVal){ .num = x + y };
+    int64_t out = pv.num !> { return -1; };
+    return out;
+}
+
+/* Padding so the physical gap between include site and the caller's
+ * @async is large enough that a wrong (physical) offset lands mid-body. */
+static int64_t splice_pad_0(int64_t v) { return v + 0; }
+static int64_t splice_pad_1(int64_t v) { return v + 1; }
+static int64_t splice_pad_2(int64_t v) { return v + 2; }
+static int64_t splice_pad_3(int64_t v) { return v + 3; }
+static int64_t splice_pad_4(int64_t v) { return v + 4; }
+static int64_t splice_pad_5(int64_t v) { return v + 5; }
+static int64_t splice_pad_6(int64_t v) { return v + 6; }
+static int64_t splice_pad_7(int64_t v) { return v + 7; }
+static int64_t splice_pad_8(int64_t v) { return v + 8; }
+static int64_t splice_pad_9(int64_t v) { return v + 9; }
+static int64_t splice_pad_fold(int64_t v) {
+    v = splice_pad_0(v);
+    v = splice_pad_1(v);
+    v = splice_pad_2(v);
+    v = splice_pad_3(v);
+    v = splice_pad_4(v);
+    v = splice_pad_5(v);
+    v = splice_pad_6(v);
+    v = splice_pad_7(v);
+    v = splice_pad_8(v);
+    v = splice_pad_9(v);
+    return v;
+}
+
+#endif /* ASYNC_IMPL_CCH_SPLICE_HELPER_CCH */

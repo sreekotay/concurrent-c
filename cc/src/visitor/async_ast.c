@@ -82,7 +82,10 @@ static size_t cc__node_start_off(const CCASTRoot* root, const char* src,
         if (so != (size_t)-1) return so;
     }
     if (nd->line_start <= 0) return 0;
-    return cc__offset_of_line_col_1based(src, len, nd->line_start, nd->col_start > 0 ? nd->col_start : 1);
+    /* AST lines are logical (TCC honors #line); physical newline walks
+     * miss impl-grade .cch splices. */
+    return cc_offset_for_logical_line_col(src, len, nd->file, nd->line_start,
+                                          nd->col_start > 0 ? nd->col_start : 1);
 }
 
 static size_t cc__node_end_off(const CCASTRoot* root, const char* src,
@@ -93,7 +96,8 @@ static size_t cc__node_end_off(const CCASTRoot* root, const char* src,
         if (eo != (size_t)-1) return eo;
     }
     if (nd->line_end <= 0) return 0;
-    return cc__offset_of_line_col_1based(src, len, nd->line_end, nd->col_end > 0 ? nd->col_end : 1);
+    return cc_offset_for_logical_line_col(src, len, nd->file, nd->line_end,
+                                          nd->col_end > 0 ? nd->col_end : 1);
 }
 
 static int cc__split_trailing_array_suffix(const char* ty,
@@ -1330,17 +1334,19 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
     if (!(se > ss && se <= src_len)) {
         int ls = n[stmt_idx].line_start > 0 ? n[stmt_idx].line_start : 1;
         int le = n[stmt_idx].line_end > 0 ? n[stmt_idx].line_end : ls;
-        ss = cc__offset_of_line_1based(src, src_len, ls);
-        se = (le + 1 > le) ? cc__offset_of_line_1based(src, src_len, le + 1) : src_len;
+        const char* file = n[stmt_idx].file;
+        ss = cc_offset_for_logical_line(src, src_len, file, ls);
+        se = (le + 1 > le) ? cc_offset_for_logical_line(src, src_len, file, le + 1)
+                           : src_len;
         if (se > src_len) se = src_len;
         if (se < ss) se = ss;
     }
     char* full = cc__dup_slice(src, ss, se);
     if (!full) full = strdup("");
     const char* kw = n[stmt_idx].aux_s1;
-    /* Buffer-physical line of the stmt (== user line; upstream passes are
-     * line-neutral).  Recorder line_start can be re-pinned to a use-site
-     * after text rewrites, so derive from the resolved offset instead. */
+    /* User line via the #line ledger (buffer may contain spliced headers).
+     * Recorder line_start can be re-pinned to a use-site after text
+     * rewrites, so derive from the resolved offset instead. */
     out->line = cc__line_at_off(src, ss, 1);
 
     /* Bare compound statement `{ ... }` (recorded as a STMT with a BLOCK child) */
@@ -1649,8 +1655,9 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         if (!(se > ss && se <= src_len)) {
             int ls = n[block_idx].line_start > 0 ? n[block_idx].line_start : 1;
             int le = n[block_idx].line_end > 0 ? n[block_idx].line_end : ls;
-            ss = cc__offset_of_line_1based(src, src_len, ls);
-            se = cc__offset_of_line_1based(src, src_len, le + 1);
+            const char* file = n[block_idx].file;
+            ss = cc_offset_for_logical_line(src, src_len, file, ls);
+            se = cc_offset_for_logical_line(src, src_len, file, le + 1);
         }
         if (se > src_len) se = src_len;
         if (se < ss) se = ss;
@@ -1700,8 +1707,10 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
             st[i].line = n[refs[i].idx].line_start > 0 ? n[refs[i].idx].line_start : 0;
             int ls = n[refs[i].idx].line_start > 0 ? n[refs[i].idx].line_start : 1;
             int le = n[refs[i].idx].line_end > 0 ? n[refs[i].idx].line_end : ls;
-            size_t ss = cc__offset_of_line_1based(src, src_len, ls);
-            size_t se = (le + 1 > le) ? cc__offset_of_line_1based(src, src_len, le + 1) : src_len;
+            const char* file = n[refs[i].idx].file;
+            size_t ss = cc_offset_for_logical_line(src, src_len, file, ls);
+            size_t se = (le + 1 > le) ? cc_offset_for_logical_line(src, src_len, file, le + 1)
+                                      : src_len;
             if (se > src_len) se = src_len;
             if (se < ss) se = ss;
             char* full = cc__dup_slice(src, ss, se);
@@ -3044,7 +3053,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
            Stub-AST block node spans can be short for function bodies (decls are tracked under a child DECL node),
            so we avoid using `body_block`'s end span for replacement. */
         int ls = n[i].line_start > 0 ? n[i].line_start : 1;
-        size_t s0 = cc__offset_of_line_1based(in_src, in_len, ls);
+        size_t s0 = cc_offset_for_logical_line(in_src, in_len, n[i].file, ls);
         size_t scan = s0;
         /* Find the '@async' marker for this decl (best-effort),
          * otherwise start at the recorded line.
@@ -3114,7 +3123,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             if (e < in_len) e++;
         } else {
             /* Fallback: use decl line only. */
-            e = cc__offset_of_line_1based(in_src, in_len, ls + 1);
+            e = cc_offset_for_logical_line(in_src, in_len, n[i].file, ls + 1);
         }
         size_t s = scan;
 
@@ -3132,8 +3141,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 if (!(be > bs && be <= in_len)) {
                     int bls = n[b].line_start > 0 ? n[b].line_start : 1;
                     int ble = n[b].line_end > 0 ? n[b].line_end : bls;
-                    bs = cc__offset_of_line_1based(in_src, in_len, bls);
-                    be = cc__offset_of_line_1based(in_src, in_len, ble + 1);
+                    bs = cc_offset_for_logical_line(in_src, in_len, n[b].file, bls);
+                    be = cc_offset_for_logical_line(in_src, in_len, n[b].file, ble + 1);
                 }
                 if (be > in_len) be = in_len;
                 if (be < bs) be = bs;
@@ -3271,19 +3280,24 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             /* Ensure this declaration is actually inside the brace-bounded function body.
                This prevents accidentally hoisting decls from other functions when stub-AST parentage is noisy. */
             if (fn->lbrace && fn->rbrace) {
-                size_t decl_off = cc__offset_of_line_1based(cur, cur_len, n[i].line_start > 0 ? n[i].line_start : 1);
-                if (n[i].col_start > 0) decl_off = cc__offset_of_line_col_1based(cur, cur_len, n[i].line_start, n[i].col_start);
+                int dls = n[i].line_start > 0 ? n[i].line_start : 1;
+                size_t decl_off = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
+                if (n[i].col_start > 0)
+                    decl_off = cc_offset_for_logical_line_col(cur, cur_len, n[i].file,
+                                                             n[i].line_start, n[i].col_start);
                 if (!(decl_off > fn->lbrace && decl_off < fn->rbrace)) continue;
             }
             if (is_scalar) {
-                size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start > 0 ? n[i].line_start : 1);
+                int dls = n[i].line_start > 0 ? n[i].line_start : 1;
+                size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
                 size_t hi = lo;
                 if (n[i].col_start > 0) {
-                    hi = cc__offset_of_line_col_1based(cur, cur_len, n[i].line_start, n[i].col_start);
+                    hi = cc_offset_for_logical_line_col(cur, cur_len, n[i].file,
+                                                       n[i].line_start, n[i].col_start);
                     if (hi > cur_len) hi = cur_len;
                     if (hi < lo) hi = lo;
                 } else {
-                    hi = cc__offset_of_line_1based(cur, cur_len, (n[i].line_start > 0 ? n[i].line_start : 1) + 1);
+                    hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls + 1);
                     if (hi > cur_len) hi = cur_len;
                 }
                 const char* seg = (lo < cur_len) ? (cur + lo) : "";
@@ -3308,8 +3322,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) {
                 int keep_channel_result_tmp = 0;
                 if (strncmp(n[i].aux_s1, "__cc_pu_s_", 11) == 0 && n[i].line_start > 0) {
-                    size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start);
-                    size_t hi = cc__offset_of_line_1based(cur, cur_len, n[i].line_start + 1);
+                    size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
+                    size_t hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
                     if (hi > cur_len) hi = cur_len;
                     if (lo < hi) {
                         const char* line = cur + lo;
@@ -3349,8 +3363,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 /* Prefer the type text from the actual (rewritten) source so we don't emit
                    non-C spellings like `struct <anonymous>*` in the final output. */
                 if (n[i].line_start > 0 && n[i].aux_s1) {
-                    size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start);
-                    size_t hi = cc__offset_of_line_1based(cur, cur_len, n[i].line_start + 1);
+                    size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
+                    size_t hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
                     if (hi > cur_len) hi = cur_len;
                     if (lo < hi) {
                         const char* ls = cur + lo;
