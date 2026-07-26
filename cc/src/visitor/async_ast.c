@@ -3046,13 +3046,42 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         int ls = n[i].line_start > 0 ? n[i].line_start : 1;
         size_t s0 = cc__offset_of_line_1based(in_src, in_len, ls);
         size_t scan = s0;
-        /* Find '@async' near the declaration line (best-effort), otherwise start at line. */
-        for (size_t t = s0; t + 6 < in_len && t < s0 + 512; t++) {
-            if (in_src[t] == '@') {
-                size_t u = t + 1;
-                while (u < in_len && (in_src[u] == ' ' || in_src[u] == '\t')) u++;
-                if (u + 5 < in_len && memcmp(in_src + u, "async", 5) == 0) { scan = t; break; }
+        /* Find the '@async' marker for this decl (best-effort),
+         * otherwise start at the recorded line.
+         *
+         * TCC's stub AST records `line_start` at the line where the
+         * declarator COMPLETES (the body-`{` line), not where the
+         * declaration begins.  For a single-line signature the two
+         * coincide, but when the parameter list spans multiple source
+         * lines the marker (and the whole signature head) sits on
+         * EARLIER lines.  A forward-only search from `s0` then misses
+         * it — or latches onto the NEXT function's marker — and the
+         * fn-name lookup below drifts to a later use of the name
+         * (typically a call site), so the replacement region starts
+         * mid-signature and the continuation lines of the parameter
+         * list are dropped from the rewritten output.
+         *
+         * Anchor on the body `{` instead: the first top-level `{` at or
+         * after the recorded line start (comment/string-aware, so a
+         * `{` in a comment on the decl line can't bait it) is the body
+         * opener whether or not the signature is split.  The `@async`
+         * marker for THIS decl is then the NEAREST marker BEFORE that
+         * brace: markers only occur at declaration level, so any
+         * earlier hit belongs to a previous function and any later hit
+         * sits past our body opener. */
+        {
+            size_t anchor = cc_find_char_top_level(in_src, s0, in_len, '{');
+            size_t win_end = anchor < in_len ? anchor
+                                             : (s0 + 512 < in_len ? s0 + 512 : in_len);
+            size_t lo = (s0 > 8192) ? s0 - 8192 : 0;
+            size_t best = in_len;
+            for (size_t q = lo; q < win_end; ) {
+                size_t m = cc_find_substr_top_level(in_src, q, win_end, "@async", 6);
+                if (m >= win_end) break;
+                if (m + 6 >= in_len || !cc__is_ident_char(in_src[m + 6])) best = m;
+                q = m + 6;
             }
+            if (best < in_len) scan = best;
         }
         size_t lbrace = 0, rbrace = 0;
         /* Find first '{' after the function name — comment/string-aware.

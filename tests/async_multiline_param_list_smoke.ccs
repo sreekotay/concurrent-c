@@ -1,0 +1,91 @@
+/* Smoke: an `@async` function whose parameter list spans multiple
+ * source lines must lower correctly.
+ *
+ * Regression guard for the declaration-start scan in
+ * `cc/src/visitor/async_ast.c` (@async candidate discovery).
+ *
+ * TCC's stub AST records a function's `line_start` at the line where
+ * the declarator COMPLETES (the body-`{` line), not where the
+ * declaration begins.  The async pass used to start its `@async` /
+ * function-name scan at that line and only searched FORWARD.  For a
+ * single-line signature the two coincide and everything works; but
+ * when the parameter list is split across lines, e.g.
+ *
+ *     @async int handle_conn(ConnInfo info, int base, long scale,
+ *                            int bias) {
+ *
+ * the scan started at the continuation line (`int bias) {`), missed
+ * the `@async` marker and the real signature head, and the name
+ * lookup drifted forward to the NEXT occurrence of the name —
+ * typically a call site.  Depending on what followed, the pass either
+ * failed outright with
+ *
+ *     CC: async_ast: failed to build statement list for @async
+ *         function 'handle_conn' (no body block + no braces)
+ *
+ * or found a bogus `{`, emitted the generated frame typedef spliced
+ * mid-signature (keeping only the FIRST line of the signature and
+ * dropping the continuation), and died in the final-UFCS reparse with
+ * `error: ',' expected (got ';')`.
+ *
+ * With the fix, the pass walks BACKWARD from the recorded line to the
+ * start of the declaration (position after the previous top-level
+ * `;` / `}`, backing out of the parameter list's unmatched `(` if the
+ * recorded line sits inside it) and looks for `@async` from there
+ * with the comment/string-aware substring search.
+ *
+ * This test keeps the scanner honest by combining:
+ *   - a signature split mid-parameter-list (the production trigger),
+ *     with 4 parameters including a struct passed BY VALUE;
+ *   - a second variant with the body `{` alone on its own line, so
+ *     the recorded line is not inside the parameter list at all;
+ *   - a doc comment between the two decls that mentions the function
+ *     name with a parenthesized call AND the `@async` sigil — bait
+ *     that the widened backward window must skip, not match.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+typedef struct ConnInfo {
+    int id;
+    int weight;
+} ConnInfo;
+
+@async int handle_conn(ConnInfo info, int base, long scale,
+                       int bias) {
+    return info.id * info.weight + base + (int)scale + bias;
+}
+
+/*
+ * Doc comment bait for the widened scan window: it mentions
+ * shifted_sum(fake_a, fake_b) with parens, and even the @async sigil.
+ * The declaration-start scan below must skip this comment entirely.
+ */
+@async long shifted_sum(long a,
+                        long b,
+                        int shift)
+{
+    return (a + b) << shift;
+}
+
+@async int driver(void) {
+    ConnInfo info = { .id = 6, .weight = 7 };
+    int h = @await handle_conn(info, 100, 20L,
+                               3);
+    long s = @await shifted_sum(3L, 5L, 4);
+    return h + (int)s;   /* 165 + 128 = 293 */
+}
+
+int main(void) {
+    CCTaskIntptr t = driver();
+    int r = cc_block_on(int, t);
+    if (r != 293) {
+        fprintf(stderr, "want 293, got %d\n", r);
+        return 1;
+    }
+    printf("multiline_param_list: OK\n");
+    return 0;
+}
