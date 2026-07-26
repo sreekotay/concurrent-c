@@ -67,7 +67,9 @@ struct JsonNode {
             JsonNode*   head; } u;              /* ARR/OBJ: first child (members are key,val pairs) */
     JsonNode* next;                             /* sibling link */
 };
-_Static_assert(sizeof(JsonNode) == 24, "compact node is 24 bytes");
+/* LP64: 8+8+8=24; ILP32: 8+4+4=16 (meta keeps 8-byte align, no hole). */
+_Static_assert(sizeof(JsonNode) == sizeof(uint64_t) + 2 * sizeof(void*),
+               "compact node is meta + two pointers");
 
 typedef enum { JSON_OK = 1, JSON_BAD = -1 } JsonStatus;
 
