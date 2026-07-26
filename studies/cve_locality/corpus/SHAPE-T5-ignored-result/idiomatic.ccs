@@ -1,7 +1,7 @@
 /*
  * SHAPE-T5 — ignored Result: PREVENTED on the T!>(E) surface.
  *
- * Ill-formed under CC_STRICT_RESULT_UNWRAP=1
+ * Ill-formed by default
  * (tests/result_unwrap_unhandled_bare_fail.ccs):
  *   int !>(CCError) step(void);
  *   step();   // ERROR: unhandled-result

@@ -3,6 +3,17 @@
 **Status:** living study — not a product claim.  
 **Question:** which real CVEs would idiomatic Concurrent-C have prevented, mitigated, left expressible, or ruled out of scope — counting **locality**, **SERDES**, and **`@variant`** — and which misses should become language work?
 
+## Selection axis
+
+Corpus entries are shapes where **safe Rust claim A** closes (or would close) a
+bug class that ordinary C left open. The scorecard compares Concurrent-C’s
+protected surface on that axis — not how often CC wins among all CVEs.
+
+Broaden within reach of idiomatic locality / SERDES / `@variant` seams.
+Application-level policy and failures inside third-party libraries (opaque
+APIs, product logic) are outside the instrument: omit them; Concurrent-C has
+little normative claim there.
+
 This folder is a feedback loop, same spirit as `real_projects/`:
 
 - **Hits** support the thesis (ownership seams *or* truthful wire *or* data-model sums).  
