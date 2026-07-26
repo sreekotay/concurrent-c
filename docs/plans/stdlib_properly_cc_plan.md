@@ -40,7 +40,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 | **One job per tool** | e.g. `materialize_in` vs `clone_into`; `read` vs `read_into`. |
 | **Spec** | Present-tense normative under `spec/` only. |
 
-**Good templates today:** `std/slice.cch`, `cc_channel.cch`, `std/io.cch` (mostly), `std/process.cch`, `std/exec.cch`, `std/string_ref.cch`.
+**Good templates today:** `std/slice.cch`, `cc_channel.cch`, `std/io.cch` (mostly), `std/process.cch`, `std/exec.cch`, `std/slice_packed.cch`.
 
 **Primary fix targets:** `std/tls.cch`, `std/dns.cch` (net listen/accept/connect/read/write + HTTP Result-primary landed); weaker: `cc_file_open`, `std/future.cch` out_err.
 
@@ -62,7 +62,8 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 |--------|------|-------|
 | Arena | `cc_arena.cch` | Vocabulary: `@create` / `cc_arena_heap` / `cc_arena_create` / `cc_arena_create_buffer`. Bless `@create` + heap alias; don’t teach three names. |
 | Slice std | `std/slice.cch` | Partial win (`materialize_in`, checked `at`)—template for net buffers. |
-| String | `std/string.cch` | Some push helpers still NULL-fail vs Result. |
+| Slice packed | `std/slice_packed.cch` | Dense held twin of `CCSliceHdr` (SSO / SDS / probe view). Map-key sugar wired. |
+| String | `std/string.cch` | Growable owner. Some push helpers still NULL-fail vs Result. |
 
 ### Concurrency
 

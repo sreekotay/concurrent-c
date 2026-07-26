@@ -19,7 +19,7 @@
  * Command surface: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX/APPEND/STRLEN,
  * TYPE, DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
  * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute ms deadline in
- * a side `expires` map keyed by CCStringRef, checked on access; no active
+ * a side `expires` map keyed by CCSlicePacked, checked on access; no active
  * cycle), DBSIZE,
  * FLUSHDB/FLUSHALL, KEYS (glob), CONFIG GET, CC.MEMLOG.  Functional smoke:
  * `python3 redis_smoke.py`.
@@ -234,7 +234,7 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 ~~~~}
 
 /* Multi-bulk header: "*<n>\r\n".  KEYS writes elements immediately (inline
- * CCStringRef key bytes must not be staged across a later encode). */
+ * CCSlicePacked key bytes must not be staged across a later encode). */
 @grammar(schema) RespGArrayHdr {~~~~
     use Resp
     #'*' n: int Resp.number "\r\n"

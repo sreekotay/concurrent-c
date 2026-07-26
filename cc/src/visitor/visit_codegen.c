@@ -202,8 +202,8 @@ static void cc__format_map_container_decl(char** buf, size_t* len, size_t* cap,
         hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
     } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
         hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
-    } else if (strcmp(inst->type1, "CCStringRef") == 0) {
-        hash_fn = "cc_map_hash_string_ref"; eq_fn = "cc_map_eq_string_ref";
+    } else if (strcmp(inst->type1, "CCSlicePacked") == 0) {
+        hash_fn = "cc_map_hash_slice_packed"; eq_fn = "cc_map_eq_slice_packed";
     } else if (strstr(inst->type1, "64") != NULL) {
         hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
     } else if (strstr(inst->type1, "slice") != NULL ||

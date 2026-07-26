@@ -2162,7 +2162,7 @@ typedef struct CCMapKeyHashEq {
 static const CCMapKeyHashEq cc__map_key_hasheq[] = {
     { "int",          0, "cc_map_hash_i32",         "cc_map_eq_i32"         },
     { "CCSliceHdr",   0, "cc_map_hash_slice_hdr",   "cc_map_eq_slice_hdr"   },
-    { "CCStringRef",  0, "cc_map_hash_string_ref",  "cc_map_eq_string_ref"  },
+    { "CCSlicePacked",  0, "cc_map_hash_slice_packed",  "cc_map_eq_slice_packed"  },
     { "64",           1, "cc_map_hash_u64",         "cc_map_eq_u64"         },
     { "slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },
     { "Slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },

@@ -1,62 +1,62 @@
-/* CCStringRef: 8B SSO or arena length-prefixed payload; map key. */
+/* CCSlicePacked: 8B SSO or arena length-prefixed payload; map key. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));
-    CCStringRef a;
-    CCStringRef b;
-    CCStringRef long_ref;
+    CCSlicePacked a;
+    CCSlicePacked b;
+    CCSlicePacked long_p;
     CCSlice s;
-    ArrayMap::[CCStringRef, int] m;
+    ArrayMap::[CCSlicePacked, int] m;
     int *p;
     char long_buf[64];
     size_t i;
 
     if (!arena.base) return 1;
-    if (sizeof(CCStringRef) != sizeof(void *)) return 2;
+    if (sizeof(CCSlicePacked) != sizeof(void *)) return 2;
 
-    a = cc_string_ref_empty();
-    if (!cc_string_ref_is_empty(&a) || cc_string_ref_len(&a) != 0) return 3;
+    a = cc_slice_packed_empty();
+    if (!cc_slice_packed_is_empty(&a) || cc_slice_packed_len(&a) != 0) return 3;
 
     {
         CCSlice hi = cc_slice_from_buffer((void *)"hi", 2);
-        CCResult_CCStringRef_CCError rr = hi.to_ref(&arena);
+        CCResult_CCSlicePacked_CCError rr = hi.to_packed(&arena);
         if (rr.is_err()) return 100;
         a = rr.value();
     }
-    if (!cc_string_ref_is_inline(&a) || cc_string_ref_len(&a) != 2) return 4;
-    s = cc_string_ref_as_slice(&a);
+    if (!cc_slice_packed_is_inline(&a) || cc_slice_packed_len(&a) != 2) return 4;
+    s = cc_slice_packed_as_slice(&a);
     if (s.len != 2 || memcmp(s.ptr, "hi", 2) != 0) return 5;
 
     {
         CCSlice hi = cc_slice_from_buffer((void *)"hi", 2);
-        CCResult_CCStringRef_CCError rr = hi.to_ref(&arena);
+        CCResult_CCSlicePacked_CCError rr = hi.to_packed(&arena);
         if (rr.is_err()) return 101;
         b = rr.value();
     }
-    if (!cc_map_eq_string_ref(a, b)) return 6;
+    if (!cc_map_eq_slice_packed(a, b)) return 6;
 
     for (i = 0; i < sizeof(long_buf); i++) long_buf[i] = (char)('A' + (i % 26));
     {
         CCSlice long_s = cc_slice_from_buffer(long_buf, sizeof(long_buf));
-        CCResult_CCStringRef_CCError rr = long_s.to_ref(&arena);
+        CCResult_CCSlicePacked_CCError rr = long_s.to_packed(&arena);
         if (rr.is_err()) return 102;
-        long_ref = rr.value();
+        long_p = rr.value();
     }
-    if (cc_string_ref_is_inline(&long_ref) || cc_string_ref_len(&long_ref) != sizeof(long_buf))
+    if (cc_slice_packed_is_inline(&long_p) || cc_slice_packed_len(&long_p) != sizeof(long_buf))
         return 7;
-    s = cc_string_ref_as_slice(&long_ref);
+    s = cc_slice_packed_as_slice(&long_p);
     if (s.len != sizeof(long_buf) || memcmp(s.ptr, long_buf, sizeof(long_buf)) != 0) return 8;
 
-    m = array_map_new::[CCStringRef, int](&arena);
+    m = array_map_new::[CCSlicePacked, int](&arena);
     if (!m) return 9;
     if (m.insert(a, 11) != 0) return 10;
-    if (m.insert(long_ref, 22) != 0) return 11;
+    if (m.insert(long_p, 22) != 0) return 11;
     p = m.get_ptr(b);
     if (!p || *p != 11) return 12;
-    p = m.get_ptr(long_ref);
+    p = m.get_ptr(long_p);
     if (!p || *p != 22) return 13;
     if (m.len() != 2) return 14;
 
@@ -66,16 +66,16 @@ int main(void) {
 
     /* Borrowed view probes the map without copying long keys. */
     {
-        CCStringRefView view;
-        CCStringRef probe = cc_string_ref_borrow_slice(
+        CCSlicePackedView view;
+        CCSlicePacked probe = cc_slice_packed_borrow_slice(
             &view, cc_slice_from_buffer(long_buf, sizeof(long_buf)));
         p = m.get_ptr(probe);
         if (!p || *p != 22) return 17;
-        if (!cc_string_ref_is_view(&probe)) return 18;
-        if (cc_string_ref_is_durable(&probe)) return 19;
-        if (!cc_string_ref_is_durable(&a)) return 20;
+        if (!cc_slice_packed_is_view(&probe)) return 18;
+        if (cc_slice_packed_is_durable(&probe)) return 19;
+        if (!cc_slice_packed_is_durable(&a)) return 20;
     }
 
-    printf("string_ref_smoke: ok\n");
+    printf("slice_packed_smoke: ok\n");
     return 0;
 }

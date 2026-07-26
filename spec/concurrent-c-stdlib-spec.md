@@ -92,7 +92,8 @@ family-specific mappings are listed below.
 
 The language specification defines the `CCSlice`, `CCSliceUnique`,
 `CCSliceShared`, and `CCSliceHdr` ABI and ownership rules. The standard library
-also uses `CCSliceArray`, a pointer-length sequence of `CCSlice` values.
+also defines `CCSlicePacked` (pointer-sized held slice) and uses `CCSliceArray`,
+a pointer-length sequence of `CCSlice` values.
 
 Construction and lifetime functions are:
 
@@ -175,6 +176,37 @@ Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
 `at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
 outside this surface.
 
+### Packed slice handles
+
+`<ccc/std/slice_packed.cch>` (prelude) defines `CCSlicePacked`: a pointer-sized
+**held** slice for dense keys and interned payloads — the packed twin of
+`CCSliceHdr`'s fat `{ptr,len}` hold. Small payloads stay inline in the word;
+larger ones point at an arena `[u32 len][bytes…]` block (SDS-style). The
+handle does not grow or free — the arena owns heap bytes. Ephemeral borrows
+remain `char[:]` / `CCSlice`. `CCString` remains the growable owner.
+
+```c
+typedef struct CCSlicePacked {
+    uintptr_t w;
+} CCSlicePacked;  /* 8 bytes on 64-bit little-endian hosts */
+
+CCSlicePacked cc_slice_packed_empty(void);
+CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CCArena *arena); /* UFCS: src.to_packed(arena) */
+CCSlicePacked cc_slice_packed_borrow(CCSlicePackedView *view);           /* probe only */
+CCSlicePacked cc_slice_packed_borrow_slice(CCSlicePackedView *view, CCSlice src);
+uint32_t cc_slice_packed_len(const CCSlicePacked *r);
+CCSlice cc_slice_packed_as_slice(const CCSlicePacked *r);  /* inline/view: storage must stay live */
+int cc_slice_packed_is_inline(const CCSlicePacked *r);
+int cc_slice_packed_is_view(const CCSlicePacked *r);
+int cc_slice_packed_is_empty(const CCSlicePacked *r);
+int cc_slice_packed_is_durable(const CCSlicePacked *r);
+size_t cc_map_hash_slice_packed(CCSlicePacked r);
+int cc_map_eq_slice_packed(CCSlicePacked a, CCSlicePacked b);
+```
+
+`Map` / `ArrayMap` sugar accepts `CCSlicePacked` keys via those hash/eq helpers.
+Borrowed views are for probes only — do not insert them.
+
 `<ccc/std/string.cch>` provides:
 
 ```c
@@ -242,34 +274,8 @@ typedef struct CCString {
 } CCString;
 ```
 
-`<ccc/std/string_ref.cch>` (prelude) defines `CCStringRef`: a pointer-sized
-string **value** for dense keys and interned payloads. Small strings stay
-inline in the word; larger ones point at an arena `[u32 len][bytes…]` block
-(SDS-style). The handle does not grow or free — the arena owns heap bytes.
-Ephemeral borrows remain `char[:]` / `CCSlice`. `CCString` remains the
-growable owner.
-
-```c
-typedef struct CCStringRef {
-    uintptr_t w;
-} CCStringRef;  /* 8 bytes on 64-bit little-endian hosts */
-
-CCStringRef cc_string_ref_empty(void);
-CCResult_CCStringRef_CCError cc_slice_to_ref(CCSlice *src, CCArena *arena); /* UFCS: src.to_ref(arena) */
-CCStringRef cc_string_ref_borrow(CCStringRefView *view);           /* probe only */
-CCStringRef cc_string_ref_borrow_slice(CCStringRefView *view, CCSlice src);
-uint32_t cc_string_ref_len(const CCStringRef *r);
-CCSlice cc_string_ref_as_slice(const CCStringRef *r);  /* inline/view: storage must stay live */
-int cc_string_ref_is_inline(const CCStringRef *r);
-int cc_string_ref_is_view(const CCStringRef *r);
-int cc_string_ref_is_empty(const CCStringRef *r);
-int cc_string_ref_is_durable(const CCStringRef *r);
-size_t cc_map_hash_string_ref(CCStringRef r);
-int cc_map_eq_string_ref(CCStringRef a, CCStringRef b);
-```
-
-`Map` / `ArrayMap` sugar accepts `CCStringRef` keys via those hash/eq helpers.
-Borrowed views are for probes only — do not insert them.
+Dense held keys use `CCSlicePacked` (see Packed slice handles above), not
+`CCString`.
 
 The public constructors, accessors, mutation functions, and lifetime functions
 are:
@@ -621,7 +627,7 @@ delete may reorder).
 Sugar `ArrayMap::[K, V]` / `array_map_new::[K, V]` /
 `array_map_new_count::[K, V]` lowers to the `ArrayMap_<K>_<V>` family with the
 same key hash/eq selection as `Map::[K, V]` for built-in key kinds (`int`,
-`uint64_t`, `CCSlice`, `CCSliceHdr`).
+`uint64_t`, `CCSlice`, `CCSliceHdr`, `CCSlicePacked`).
 
 Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`, `remove`,
 `del`, `len`, `cap`, `live_bytes`, `clear`, and `destroy` to the generated

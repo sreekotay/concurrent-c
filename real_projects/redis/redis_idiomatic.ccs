@@ -156,7 +156,7 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 ~~~~}
 
 /* Multi-bulk header: "*<n>\r\n".  KEYS writes elements immediately (inline
- * CCStringRef key bytes must not be staged across a later encode). */
+ * CCSlicePacked key bytes must not be staged across a later encode). */
 @grammar(schema) RespGArrayHdr {~~~~
     use Resp
     #'*' n: int Resp.number "\r\n"
