@@ -32,8 +32,6 @@ static void bench_abort(const char* msg) {
 
 static void reply_init_inline(BenchWireReply* wr, uint64_t seq) {
     memset(wr, 0, sizeof(*wr));
-    wr->reply.conn_id = seq;
-    wr->reply.request_id = seq;
     wr->reply.kind = REDIS_REPLY_WIRE;
     wr->data_inline = 1;
     int len = snprintf(wr->inline_buf, sizeof(wr->inline_buf),

@@ -502,7 +502,8 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
 #include "redis_db.cch"
 
 /* Locking policy for each kind — kept with the arms below, not in the
- * name→arity map.  Exceptions only; everything else takes the table. */
+ * name→arity map.  Exhaustive: a new RedisCommandKind must choose a hold
+ * (silent default TABLE would stall the server under a bad arm). */
 static RedisCmdHold hold_for(RedisCommandKind kind) {
     switch (kind) {
         case REDIS_CMD_SET:
@@ -510,7 +511,32 @@ static RedisCmdHold hold_for(RedisCommandKind kind) {
         case REDIS_CMD_CONFIG_GET:
         case REDIS_CMD_CC_MEMLOG:
             return REDIS_HOLD_NONE;
-        default:
+        case REDIS_CMD_PING:
+        case REDIS_CMD_ECHO:
+        case REDIS_CMD_GET:
+        case REDIS_CMD_SETNX:
+        case REDIS_CMD_SETEX:
+        case REDIS_CMD_PSETEX:
+        case REDIS_CMD_APPEND:
+        case REDIS_CMD_STRLEN:
+        case REDIS_CMD_TYPE:
+        case REDIS_CMD_DEL:
+        case REDIS_CMD_EXISTS:
+        case REDIS_CMD_INCR:
+        case REDIS_CMD_DECR:
+        case REDIS_CMD_INCRBY:
+        case REDIS_CMD_DECRBY:
+        case REDIS_CMD_MGET:
+        case REDIS_CMD_MSET:
+        case REDIS_CMD_EXPIRE:
+        case REDIS_CMD_PEXPIRE:
+        case REDIS_CMD_TTL:
+        case REDIS_CMD_PTTL:
+        case REDIS_CMD_PERSIST:
+        case REDIS_CMD_DBSIZE:
+        case REDIS_CMD_FLUSHDB:
+        case REDIS_CMD_FLUSHALL:
+        case REDIS_CMD_KEYS:
             return REDIS_HOLD_TABLE;
     }
 }
