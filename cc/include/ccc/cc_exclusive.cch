@@ -11,9 +11,8 @@
  * Double-release is fully local: `g.held` on the stack token.
  *
  * Lock word: 0 free, 1 locked, 2 contended.
- * Uncontended lock is an inlined CAS; unlock is an inlined fetch-sub.
- * Contended unlock hands ownership directly to one queued waiter without
- * publishing FREE.
+ * Uncontended lock and unlock are inlined CAS operations. Contended unlock
+ * hands ownership directly to one queued waiter without publishing FREE.
  *
  * Each CCExclusive is its own name space. Later: @create / guard @destroy.
  */
@@ -87,13 +86,10 @@ static inline void cc_exclusive_guard_unlock(CCExclusiveGuard* g) {
     g->_entry = NULL;
     if (!entry || !state) return;
 
-    /*
-     * LOCKED -> FREE is the uncontended fast path. CONTENDED -> LOCKED
-     * reserves ownership while the runtime hands it to the queue head.
-     */
-    int previous = atomic_fetch_sub_explicit(state, 1, memory_order_release);
-    if (previous == CC_EXCL_LOCKED) return;
-    if (previous != CC_EXCL_CONTENDED) __builtin_trap();
+    int expected = CC_EXCL_LOCKED;
+    if (atomic_compare_exchange_strong_explicit(
+            state, &expected, CC_EXCL_FREE,
+            memory_order_release, memory_order_relaxed)) return;
     cc_exclusive_guard_unlock_impl(entry);
 }
 
