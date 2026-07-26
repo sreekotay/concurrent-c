@@ -7,6 +7,7 @@
 //   - Uses system zlib via @cImport (fair benchmark comparison)
 
 const std = @import("std");
+const Io = std.Io;
 const c = @cImport({
     @cInclude("zlib.h");
 });
@@ -15,6 +16,15 @@ const BLOCK_SIZE: usize = 128 * 1024;
 const CHAN_CAP: usize = 16;
 
 const gzip_header = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03 };
+
+// Services the contended mutex/condvar paths (futex wait/wake) and file IO.
+var g_io: Io = undefined;
+
+fn printFd(fd: c_int, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    _ = std.c.write(fd, s.ptr, s.len);
+}
 
 const CompressedResult = struct {
     data: []const u8,
@@ -25,20 +35,20 @@ const CompressedResult = struct {
 const Slot = struct {
     result: ?CompressedResult = null,
     ready: bool = false,
-    mu: std.Thread.Mutex = .{},
-    cv: std.Thread.Condition = .{},
+    mu: Io.Mutex = .init,
+    cv: Io.Condition = .init,
 
     fn setDone(self: *Slot) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(g_io);
+        defer self.mu.unlock(g_io);
         self.ready = true;
-        self.cv.signal();
+        self.cv.signal(g_io);
     }
 
     fn waitDone(self: *Slot) void {
-        self.mu.lock();
-        defer self.mu.unlock();
-        while (!self.ready) self.cv.wait(&self.mu);
+        self.mu.lockUncancelable(g_io);
+        defer self.mu.unlock(g_io);
+        while (!self.ready) self.cv.waitUncancelable(g_io, &self.mu);
     }
 };
 
@@ -49,41 +59,41 @@ fn BoundedQueue(comptime T: type, comptime cap: usize) type {
         tail: usize = 0,
         len: usize = 0,
         closed: bool = false,
-        mu: std.Thread.Mutex = .{},
-        not_full: std.Thread.Condition = .{},
-        not_empty: std.Thread.Condition = .{},
+        mu: Io.Mutex = .init,
+        not_full: Io.Condition = .init,
+        not_empty: Io.Condition = .init,
 
         const Self = @This();
 
         fn push(self: *Self, item: T) void {
-            self.mu.lock();
-            defer self.mu.unlock();
-            while (self.len == cap) self.not_full.wait(&self.mu);
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
+            while (self.len == cap) self.not_full.waitUncancelable(g_io, &self.mu);
             self.buffer[self.tail] = item;
             self.tail = (self.tail + 1) % cap;
             self.len += 1;
-            self.not_empty.signal();
+            self.not_empty.signal(g_io);
         }
 
         fn pop(self: *Self) ?T {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
             while (self.len == 0) {
                 if (self.closed) return null;
-                self.not_empty.wait(&self.mu);
+                self.not_empty.waitUncancelable(g_io, &self.mu);
             }
             const item = self.buffer[self.head];
             self.head = (self.head + 1) % cap;
             self.len -= 1;
-            self.not_full.signal();
+            self.not_full.signal(g_io);
             return item;
         }
 
         fn close(self: *Self) void {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
             self.closed = true;
-            self.not_empty.broadcast();
+            self.not_empty.broadcast(g_io);
         }
     };
 }
@@ -149,23 +159,33 @@ fn worker(block_buf: []u8, data_len: usize, slot: *Slot, alloc: std.mem.Allocato
     slot.setDone();
 }
 
-fn consumerThread(queue: *SlotQueue, out_file: std.fs.File, alloc: std.mem.Allocator) void {
+fn consumerThread(queue: *SlotQueue, out_file: Io.File, alloc: std.mem.Allocator) void {
     while (queue.pop()) |slot| {
         slot.waitDone();
         if (slot.result) |result| {
-            out_file.writeAll(result.data) catch {};
+            out_file.writeStreamingAll(g_io, result.data) catch {};
             alloc.free(result.buf);
         }
         alloc.destroy(slot);
     }
 }
 
-fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Allocator) !void {
-    const in_file = try std.fs.cwd().openFile(in_path, .{});
-    defer in_file.close();
+// Fill `buf` from `file`, returning the number of bytes read (0 at EOF).
+fn readFull(file: Io.File, buf: []u8) usize {
+    var n: usize = 0;
+    while (n < buf.len) {
+        const amt = file.readStreaming(g_io, &.{buf[n..]}) catch break;
+        n += amt;
+    }
+    return n;
+}
 
-    const out_file = try std.fs.cwd().createFile(out_path, .{});
-    defer out_file.close();
+fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Allocator) !void {
+    const in_file = try Io.Dir.cwd().openFile(g_io, in_path, .{});
+    defer in_file.close(g_io);
+
+    const out_file = try Io.Dir.cwd().createFile(g_io, out_path, .{});
+    defer out_file.close(g_io);
 
     var queue: SlotQueue = .{};
 
@@ -173,10 +193,7 @@ fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Alloca
 
     while (true) {
         const buf = try alloc.alloc(u8, BLOCK_SIZE);
-        const n = in_file.read(buf) catch {
-            alloc.free(buf);
-            break;
-        };
+        const n = readFull(in_file, buf);
         if (n == 0) {
             alloc.free(buf);
             break;
@@ -196,33 +213,29 @@ fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Alloca
     con.join();
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const alloc = std.heap.c_allocator;
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
 
-    if (args.len < 2) {
-        var ebuf: [256]u8 = undefined;
-        var ew = std.fs.File.stderr().writer(&ebuf);
-        try ew.interface.print("Usage: {s} <file>\n", .{args[0]});
-        try ew.interface.flush();
+    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    g_io = threaded.io();
+
+    const argv = init.args.vector;
+    if (argv.len < 2) {
+        printFd(2, "Usage: {s} <file>\n", .{std.mem.span(argv[0])});
         std.process.exit(1);
     }
 
-    const in_path = args[1];
+    const in_path = std.mem.span(argv[1]);
     const out_path = try std.fmt.allocPrint(alloc, "{s}.gz", .{in_path});
     defer alloc.free(out_path);
 
     try compressFile(in_path, out_path, alloc);
 
-    var obuf: [4096]u8 = undefined;
-    var ow = std.fs.File.stdout().writer(&obuf);
-    const out = &ow.interface;
-    try out.print("Compressed {s} -> {s}\n", .{ in_path, out_path });
-    try out.print("Stats: {d} bytes in, {d} bytes out, {d} blocks\n", .{
+    printFd(1, "Compressed {s} -> {s}\n", .{ in_path, out_path });
+    printFd(1, "Stats: {d} bytes in, {d} bytes out, {d} blocks\n", .{
         @atomicLoad(i64, &g_bytes_in, .seq_cst),
         @atomicLoad(i64, &g_bytes_out, .seq_cst),
         @atomicLoad(i32, &g_blocks_done, .seq_cst),
     });
-    try out.flush();
 }

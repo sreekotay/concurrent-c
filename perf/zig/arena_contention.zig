@@ -12,7 +12,13 @@ var success_count: i64 = 0;
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stdout().writeAll(s) catch {};
+    _ = std.c.write(1, s.ptr, s.len);
+}
+
+fn monoNs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
 fn mallocWorker() void {
@@ -34,7 +40,7 @@ pub fn main() !void {
     printf("Threads: {d} | Allocs per thread: {d}\n", .{ NUM_THREADS, ALLOCS_PER_THREAD });
     printf("=================================================================\n\n", .{});
 
-    const start = std.time.nanoTimestamp();
+    const start = monoNs();
 
     var threads: [NUM_THREADS]std.Thread = undefined;
     for (0..NUM_THREADS) |i| {
@@ -44,7 +50,7 @@ pub fn main() !void {
         threads[i].join();
     }
 
-    const elapsed = std.time.nanoTimestamp() - start;
+    const elapsed = monoNs() - start;
     const success = @atomicLoad(i64, &success_count, .seq_cst);
     const elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
     const elapsed_sec = elapsed_ms / 1000.0;

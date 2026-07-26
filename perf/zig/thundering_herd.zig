@@ -29,7 +29,7 @@ var count: i64 = 0;
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stdout().writeAll(s) catch {};
+    _ = std.c.write(1, s.ptr, s.len);
 }
 
 fn waiter(_: usize) callconv(.c) ?*anyopaque {

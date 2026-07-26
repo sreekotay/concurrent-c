@@ -16,13 +16,21 @@ var stop: i32 = 0;
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stdout().writeAll(s) catch {};
+    _ = std.c.write(1, s.ptr, s.len);
+}
+
+fn sleepNs(ns: u64) void {
+    var ts: std.c.timespec = .{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
 }
 
 fn heartbeatFn() void {
     printf("[Heartbeat] Started\n", .{});
     while (@atomicLoad(i32, &stop, .seq_cst) == 0) {
-        std.Thread.sleep(HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms);
+        sleepNs(HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms);
         const val = @atomicRmw(i64, &heartbeats, .Add, 1, .monotonic) + 1;
         printf("[Heartbeat] Tick {d}\n", .{val});
     }
@@ -60,7 +68,7 @@ pub fn main() !void {
         _ = try std.Thread.spawn(.{}, hog, .{i});
     }
 
-    std.Thread.sleep(TEST_DURATION_NS);
+    sleepNs(TEST_DURATION_NS);
 
     const final = @atomicLoad(i64, &heartbeats, .seq_cst);
     printf("\n=================================================================\n", .{});

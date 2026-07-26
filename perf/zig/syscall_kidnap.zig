@@ -24,7 +24,7 @@ var stop: i32 = 0;
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stdout().writeAll(s) catch {};
+    _ = std.c.write(1, s.ptr, s.len);
 }
 
 fn kidnapper() void {
@@ -56,7 +56,10 @@ pub fn main() !void {
         threads[i] = try std.Thread.spawn(.{}, kidnapper, .{});
     }
 
-    std.Thread.sleep(TEST_DURATION_NS);
+    rawNanosleep(
+        @intCast(TEST_DURATION_NS / std.time.ns_per_s),
+        @intCast(TEST_DURATION_NS % std.time.ns_per_s),
+    );
     @atomicStore(i32, &stop, 1, .seq_cst);
 
     hb.join();

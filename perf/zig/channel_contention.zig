@@ -3,6 +3,7 @@
 // Measures baseline (1x1) vs contention (NxM) throughput.
 
 const std = @import("std");
+const Io = std.Io;
 
 const DEFAULT_MESSAGES: usize = 1_000_000;
 const DEFAULT_TRIALS: usize = 15;
@@ -11,16 +12,23 @@ const DEFAULT_CONSUMERS: usize = 8;
 const CHAN_CAP: usize = 1024;
 
 var sink: i64 = 0;
+var g_io: Io = undefined;
 
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stdout().writeAll(s) catch {};
+    _ = std.c.write(1, s.ptr, s.len);
 }
 
-fn envIntOrDefault(name: []const u8, default: usize) usize {
-    const val = std.posix.getenv(name) orelse return default;
-    return std.fmt.parseInt(usize, val, 10) catch default;
+fn envIntOrDefault(name: [*:0]const u8, default: usize) usize {
+    const val = std.c.getenv(name) orelse return default;
+    return std.fmt.parseInt(usize, std.mem.span(val), 10) catch default;
+}
+
+fn monoNs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
 fn BoundedQueue(comptime T: type, comptime cap: usize) type {
@@ -30,46 +38,46 @@ fn BoundedQueue(comptime T: type, comptime cap: usize) type {
         tail: usize = 0,
         len: usize = 0,
         closed: bool = false,
-        mu: std.Thread.Mutex = .{},
-        not_full: std.Thread.Condition = .{},
-        not_empty: std.Thread.Condition = .{},
+        mu: Io.Mutex = .init,
+        not_full: Io.Condition = .init,
+        not_empty: Io.Condition = .init,
 
         const Self = @This();
 
         fn push(self: *Self, item: T) void {
-            self.mu.lock();
-            defer self.mu.unlock();
-            while (self.len == cap) self.not_full.wait(&self.mu);
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
+            while (self.len == cap) self.not_full.waitUncancelable(g_io, &self.mu);
             self.buffer[self.tail] = item;
             self.tail = (self.tail + 1) % cap;
             self.len += 1;
-            self.not_empty.signal();
+            self.not_empty.signal(g_io);
         }
 
         fn pop(self: *Self) ?T {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
             while (self.len == 0) {
                 if (self.closed) return null;
-                self.not_empty.wait(&self.mu);
+                self.not_empty.waitUncancelable(g_io, &self.mu);
             }
             const item = self.buffer[self.head];
             self.head = (self.head + 1) % cap;
             self.len -= 1;
-            self.not_full.signal();
+            self.not_full.signal(g_io);
             return item;
         }
 
         fn close(self: *Self) void {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
             self.closed = true;
-            self.not_empty.broadcast();
+            self.not_empty.broadcast(g_io);
         }
 
         fn reset(self: *Self) void {
-            self.mu.lock();
-            defer self.mu.unlock();
+            self.mu.lockUncancelable(g_io);
+            defer self.mu.unlock(g_io);
             self.head = 0;
             self.tail = 0;
             self.len = 0;
@@ -119,7 +127,7 @@ fn runSharedCase(alloc: std.mem.Allocator, producers: usize, consumers: usize, m
     defer alloc.free(sums);
     @memset(sums, 0);
 
-    const start = std.time.nanoTimestamp();
+    const start = monoNs();
 
     const consumer_threads = try alloc.alloc(std.Thread, consumers);
     defer alloc.free(consumer_threads);
@@ -155,12 +163,17 @@ fn runSharedCase(alloc: std.mem.Allocator, producers: usize, consumers: usize, m
     for (sums) |s| total += s;
     _ = @atomicRmw(i64, &sink, .Add, total, .monotonic);
 
-    const elapsed = std.time.nanoTimestamp() - start;
+    const elapsed = monoNs() - start;
     return @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
 }
 
 pub fn main() !void {
     const alloc = std.heap.c_allocator;
+
+    // g_io services only the contended mutex/condvar paths (futex wait/wake).
+    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    g_io = threaded.io();
 
     const messages = envIntOrDefault("CC_CONTENTION_ITERATIONS", DEFAULT_MESSAGES);
     const trials = envIntOrDefault("CC_CONTENTION_TRIALS", DEFAULT_TRIALS);
