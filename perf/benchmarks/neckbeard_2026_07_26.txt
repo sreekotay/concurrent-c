@@ -1,0 +1,237 @@
+=== Neckbeard Challenges (six cross-language) ===
+Date: Sun Jul 26 05:34:05 EDT 2026
+Commit: 2e0e8efa + uncommitted adaptive pool-growth controller (eager=2, recheck=25us, rate=100us/pop/worker, depth_x=2, esc=0)
+Command: ./perf/run_neckbeard_challenges.sh
+Notes: first record at adaptive-growth defaults; Zig benchmarks ported to 0.16; named exclusive lock added as challenge 6.
+
+=================================================================
+CONCURRENT-C: THE NECKBEARD CHALLENGES
+=================================================================
+Running all robustness and fairness comparisons...
+
+[1/6] Syscall Kidnapping Challenge...
+--- Running Pthread (Adler) ---
+  Heartbeats: 29 | Kidnappers Completed: 100 / 100 | walltime: 4s
+--- Running Concurrent-C ---
+  Heartbeats: 30 | Kidnappers Completed: 100 / 100 | walltime: 4s
+--- Running Go ---
+  Heartbeats: 28 | Kidnappers Completed: 100 / 100 | walltime: 4s
+--- Running Zig ---
+  Heartbeats: 30 | Kidnappers Completed: 100 / 100 | walltime: 4s
+
+
+=================================================================
+VERDICT
+=================================================================
+Implementation       Heartbeats   Kidnappers Completed  
+Pthread (Adler)      29           100 / 100             
+Concurrent-C         30           100 / 100             
+Go                   28           100 / 100             
+Zig                  30           100 / 100             
+-----------------------------------------------------------------
+Liveness: all runtimes should tick ~30 heartbeats.
+Throughput: a 1:1 runtime (pthread/go/zig) drains all 100 kidnappers
+in ~2s. A *non-promoting* M:N runtime capped at 16 workers would top out
+near (16 workers * 3s / 2s) = 24 kidnappers — but that is NOT CC.
+CC's V2 sysmon does syscall-age eviction + orphan-and-replace: a worker
+pinned in a blocking syscall is detached off-pool and a fresh worker takes
+its slot, so CC drains all 100 like the 1:1 runtimes. The 24 figure is
+the baseline CC's promotion beats; read the 'Kidnappers Completed' column.
+=================================================================
+
+[2/6] Thundering Herd Challenge...
+--- Running Pthread (condvar, idiomatic) ---
+=================================================================
+PTHREAD (CONDVAR) — idiomatic wake-one baseline
+=================================================================
+
+Sample 1: Latency to wake 1st waiter:   0.4950 ms
+Sample 2: Latency to wake 1st waiter:   0.0060 ms
+Sample 3: Latency to wake 1st waiter:   0.0080 ms
+Sample 4: Latency to wake 1st waiter:   0.0080 ms
+Sample 5: Latency to wake 1st waiter:   0.0310 ms
+
+--- Running Pthread (pipe, thundering herd) ---
+=================================================================
+PTHREAD (PIPE / THUNDERING HERD) — worst case
+=================================================================
+
+Sample 1: Latency to wake 1st waiter:   1.5690 ms
+Sample 2: Latency to wake 1st waiter:   0.7170 ms
+Sample 3: Latency to wake 1st waiter:   0.6420 ms
+Sample 4: Latency to wake 1st waiter:   0.7620 ms
+Sample 5: Latency to wake 1st waiter:   0.8950 ms
+
+--- Running Concurrent-C ---
+=================================================================
+THUNDERING HERD TEST: Wake-up latency with 1000 waiters
+=================================================================
+
+Sample 1: Latency to wake 1st waiter:   0.1060 ms
+Sample 2: Latency to wake 1st waiter:   0.0660 ms
+Sample 3: Latency to wake 1st waiter:   0.0260 ms
+Sample 4: Latency to wake 1st waiter:   0.0200 ms
+Sample 5: Latency to wake 1st waiter:   0.0450 ms
+
+--- Running Go ---
+=================================================================
+GO THUNDERING HERD CHALLENGE
+Waiters: 1000 | Samples: 5
+=================================================================
+
+Sample 1: Latency to wake 1st waiter:   0.0262 ms
+Sample 2: Latency to wake 1st waiter:   0.0079 ms
+Sample 3: Latency to wake 1st waiter:   0.0157 ms
+Sample 4: Latency to wake 1st waiter:   0.0065 ms
+Sample 5: Latency to wake 1st waiter:   0.0117 ms
+
+--- Running Zig ---
+=================================================================
+ZIG THUNDERING HERD CHALLENGE (pthread_cond, via C interop)
+Waiters: 1000 | Samples: 5
+=================================================================
+
+Sample 1: Latency to wake 1st waiter:   0.0190 ms
+Sample 2: Latency to wake 1st waiter:   0.0190 ms
+Sample 3: Latency to wake 1st waiter:   0.1250 ms
+Sample 4: Latency to wake 1st waiter:   0.0210 ms
+Sample 5: Latency to wake 1st waiter:   0.0230 ms
+
+=================================================================
+RESULTS — wake-one latency, 1000 parked consumers
+=================================================================
+Implementation               Avg Latency (ms)   Wake primitive
+Pthread (condvar)            0.1096             pthread_cond_signal (exclusive, kernel futex)
+Pthread (pipe herd)          0.9170             pipe write (NON-exclusive wait queue -> herd)
+Concurrent-C                 0.0526             chan wake-one (user-space, no syscall)
+Go                           0.8447             chan wake-one (Go runtime, sudog queue)
+Zig                          0.8678             std.Thread.Condition.signal (pthread_cond equiv.)
+-----------------------------------------------------------------
+Tradeoffs:
+  - condvar, Zig, and CC-chan all wake exactly one waiter; condvar/
+    Zig pay a kernel futex round-trip per wake, CC-chan pays scheduler
+    dispatch in user-space.
+  - Go wakes one goroutine via its runtime's sudog queue (no kernel
+    syscall for the wake path itself).
+  - pipe row is NOT a competing baseline: it's the textbook herd case,
+    reported to show what a naive 'wake via fd' design costs at N=1000.
+=================================================================
+
+[3/6] Channel Isolation Challenge...
+min / mean / max
+--------------------------------------------------------------------------
+Implementation       Baseline (ms)          Contention (ms)        Interference %        
+Pthread              4.70 / 4.78 / 4.88     38.71 / 44.99 / 50.62  702.26 / 843.10 / 970.64
+Concurrent-C         2.29 / 2.45 / 2.85     4.36 / 4.69 / 5.14     70.60 / 92.29 / 108.77
+Go                   5.42 / 5.53 / 5.67     6.31 / 6.66 / 6.87     16.43 / 20.51 / 24.88 
+Zig                  5.79 / 6.43 / 6.82     21.44 / 48.60 / 89.29  227.73 / 659.05 / 1325.87
+
+Headline = absolute Contention (ms). Interference % is derived and
+baseline-relative: a faster happy path inflates it, so a low % can just
+mean a slow baseline. Read absolute ms in both states — CC bounds the
+worst case without taxing the median.
+
+[4/6] Noisy Neighbor Challenge...
+--- Running Pthread (Baseline) ---
+Pthread (Baseline) Heartbeats: 29  Peak threads: 17
+
+--- Running Concurrent-C (4w) ---
+Concurrent-C (4w) Heartbeats: 29  Peak threads: 18
+
+--- Running Go (4P) ---
+Go (4P) Heartbeats: 25  Peak threads: 6
+
+--- Running Zig ---
+Zig Heartbeats: 29  Peak threads: 17
+
+
+=================================================================
+VERDICT  (expected 30 heartbeats; 3s @ 100ms)
+=================================================================
+Implementation         Heartbeats   Peak Threads  
+Pthread (1:1)          29           17            
+Concurrent-C (4w)      29           18            
+Go (4P)                25           6             
+Zig (1:1)              29           17            
+=================================================================
+
+[5/6] Arena Contention Challenge...
+--- Running Pthread Per-Thread Arena ---
+=================================================================
+PTHREAD PER-THREAD ARENA: 16 threads x 62500 allocs
+Total allocations: 1000000
+=================================================================
+
+Results:
+  Success: 1000000
+  Time:    1.36 ms
+  Throughput: 737.46 M allocs/sec
+=================================================================
+
+--- Running Concurrent-C Per-Fiber Arena ---
+=================================================================
+CC PER-FIBER ARENA: 16 fibers x 62500 allocs
+Total allocations: 1000000
+=================================================================
+
+Results:
+  Success: 1000000
+  Fail:    0
+  Time:    1.99 ms
+  Throughput: 502.01 M allocs/sec
+=================================================================
+
+=================================================================
+FINAL VERDICT
+=================================================================
+Implementation       Throughput (M/sec)  
+Pthread (Arena)      737.46              
+Concurrent-C (Arena) 502.01              
+-----------------------------------------------------------------
+RESULT: COMPARABLE - Pthread per-thread arena matches or beats CC per-fiber arena.
+Note: CC and Pthread here are true bump arenas (pointer-bump, no per-alloc
+free) — apples-to-apples. The harness Go/Zig arena rows are DIFFERENT
+strategies, not a like-for-like ranking: Go's non-escaping make([]byte,16)
+is stack-promoted by escape analysis (verified 'does not escape' — it never
+reaches mcache), and Zig uses c_allocator malloc/free per alloc. Read this
+as CC-vs-Pthread bump-arena parity; cross-language is context only.
+=================================================================
+
+--- Running Go (non-escaping alloc, stack-promoted) ---
+=================================================================
+GO HEAP ALLOCATION CHALLENGE
+Goroutines: 16 | Allocs per routine: 62500
+=================================================================
+
+Results:
+  Success: 1000000
+  Time:    0.17 ms
+  Throughput: 5759.54 M allocs/sec
+=================================================================
+
+--- Running Zig ---
+=================================================================
+ZIG HEAP ALLOCATION CHALLENGE
+Threads: 16 | Allocs per thread: 62500
+=================================================================
+
+Results:
+  Success: 1000000
+  Time:    11.21 ms
+  Throughput: 89.25 M allocs/sec
+=================================================================
+
+[6/6] Named Exclusive Lock Challenge...
+SUMMARY (median lock-ops/s; higher is better)
+=================================================================
+lang           zipf_product_ops/s  serial_fastpath_ops/s
+cc                       40960524              457796853
+go                       23441163              367731556
+rust                      3206081              212394070
+zig                       6970615              437636761
+
+Interpret with the fairness contract at the top of this script.
+
+=================================================================
+ALL CHALLENGES COMPLETED
+=================================================================

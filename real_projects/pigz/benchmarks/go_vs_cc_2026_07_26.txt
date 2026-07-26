@@ -1,0 +1,51 @@
+# pigz Full Comparison: CC vs Go vs Zig vs Original
+# Date: Sun Jul 26 05:35:19 EDT 2026
+# Commit: 2e0e8efa + uncommitted adaptive pool-growth controller (eager=2, recheck=25us, rate=100us/pop/worker, depth_x=2, esc=0)
+# Command: ./bench_go_vs_cc.sh
+# Notes: first record at adaptive-growth defaults; pigz_zig.zig ported to Zig 0.16 (Zig row restored).
+
+==========================================================
+pigz Full Comparison: CC vs Go vs Zig vs Original
+==========================================================
+Input:  /Users/skotay/Documents/code/concurrent-c/real_projects/pigz/testdata/text_100mb.bin (100 MB)
+Runs:   10  (interleaved, best reported)
+OS:     Darwin 25.0.0
+==========================================================
+
+Measuring RSS (one pass per binary)...
+
+Running 10 interleaved rounds...
+Round  CC (Idiomatic)  CC (Full)       CC (Pthread)    CC (Hybrid)     Go (CGO+zlib)   Zig             Original pigz 
+    1  0.430           0.431           0.408           0.413           0.446           0.409           0.447         
+    2  0.420           0.439           0.421           0.453           0.443           0.673           0.498         
+    3  0.432           0.441           0.421           0.425           0.457           0.404           0.427         
+    4  0.410           0.432           0.420           0.411           0.448           0.413           0.431         
+    5  0.542           0.431           0.553           0.424           0.474           0.491           0.442         
+    6  0.406           0.462           0.422           0.405           0.452           0.418           0.437         
+    7  0.416           0.433           0.419           0.408           0.762           0.461           0.466         
+    8  0.428           0.452           0.505           0.530           0.490           0.414           0.471         
+    9  0.431           0.441           0.446           0.417           0.444           0.417           0.435         
+   10  0.428           0.459           0.435           0.420           0.455           0.430           0.448         
+
+============================================================================
+FINAL SUMMARY  (best of 10 interleaved runs)
+============================================================================
+Implementation  | Best(s)  | Worst(s) | Var      | Throughput   | Max RSS  | Bin Size
+--------------- | -------- | -------- | -------- | ------------ | -------- | --------
+CC (Idiomatic)  | 0.406s   | 0.542s   | 1.33x    | 246.3 MB/s   | 14MB     | 130K    
+CC (Full)       | 0.431s   | 0.462s   | 1.07x    | 232.0 MB/s   | 29MB     | 182K    
+CC (Pthread)    | 0.408s   | 0.553s   | 1.36x    | 245.1 MB/s   | 13MB     | 130K    
+CC (Hybrid)     | 0.405s   | 0.530s   | 1.31x    | 246.9 MB/s   | 14MB     | 130K    
+Go (CGO+zlib)   | 0.443s   | 0.762s   | 1.72x    | 225.7 MB/s   | 26MB     | 1.6M    
+Zig             | 0.404s   | 0.673s   | 1.67x    | 247.5 MB/s   | 16MB     | 372K    
+Original pigz   | 0.427s   | 0.498s   | 1.17x    | 234.2 MB/s   | 8MB      | 106K    
+============================================================================
+
+Ratios vs CC (Pthread):
+  CC (Idiomatic)   0.995x
+  CC (Full)        1.056x
+  CC (Pthread)     1.000x
+  CC (Hybrid)      0.993x
+  Go (CGO+zlib)    1.086x
+  Zig              0.990x
+  Original pigz    1.047x

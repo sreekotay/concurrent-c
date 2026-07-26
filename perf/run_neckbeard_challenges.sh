@@ -1,15 +1,16 @@
 #!/bin/bash
 # run_neckbeard_challenges.sh - Run all robustness and fairness comparisons
 #
-# Runs the five "Neckbeard" benchmarks end-to-end and prints each sub-script's
+# Runs the six "Neckbeard" benchmarks end-to-end and prints each sub-script's
 # native per-language results + verdict block verbatim.  The per-language
 # metadata (kidnappers drained, wake primitive, peak threads, allocation time,
 # message counts, etc.) matters and was being stripped by the old single-scalar
 # summary tables, so we just forward the sub-script output now.
 #
 # The sub-scripts compare_syscall.sh / compare_herd.sh /
-# compare_contention_stability.sh / compare_preemption.sh all run Pthread, CC,
-# Go and Zig internally, so the harness does not re-invoke them.
+# compare_contention_stability.sh / compare_preemption.sh /
+# compare_exclusive_named_lock.sh all run the per-language variants
+# internally, so the harness does not re-invoke them.
 # compare_arena.sh only covers Pthread + CC, so Go/Zig are still run here.
 
 set -e
@@ -77,7 +78,7 @@ trap 'rm -rf "$TMPDIR_HARNESS"' EXIT
 # ---------------------------------------------------------------------------
 # 1. Syscall Kidnapping
 # ---------------------------------------------------------------------------
-echo "[1/5] Syscall Kidnapping Challenge..."
+echo "[1/6] Syscall Kidnapping Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_syscall.sh" > "$TMPDIR_HARNESS/syscall.out" 2>&1; then
         print_results "$TMPDIR_HARNESS/syscall.out"
@@ -93,7 +94,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # 2. Thundering Herd
 # ---------------------------------------------------------------------------
-echo "[2/5] Thundering Herd Challenge..."
+echo "[2/6] Thundering Herd Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_herd.sh" > "$TMPDIR_HARNESS/herd.out" 2>&1; then
         print_results "$TMPDIR_HARNESS/herd.out"
@@ -109,7 +110,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # 3. Channel Isolation
 # ---------------------------------------------------------------------------
-echo "[3/5] Channel Isolation Challenge..."
+echo "[3/6] Channel Isolation Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_contention_stability.sh" 5 \
             > "$TMPDIR_HARNESS/contention.out" 2>&1; then
@@ -127,7 +128,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # 4. Noisy Neighbor (preemption)
 # ---------------------------------------------------------------------------
-echo "[4/5] Noisy Neighbor Challenge..."
+echo "[4/6] Noisy Neighbor Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_preemption.sh" > "$TMPDIR_HARNESS/preempt.out" 2>&1; then
         print_results "$TMPDIR_HARNESS/preempt.out"
@@ -143,7 +144,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # 5. Arena Contention (CC+Pthread from sub-script, Go+Zig run separately)
 # ---------------------------------------------------------------------------
-echo "[5/5] Arena Contention Challenge..."
+echo "[5/6] Arena Contention Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_arena.sh" > "$TMPDIR_HARNESS/arena.out" 2>&1; then
         print_results "$TMPDIR_HARNESS/arena.out"
@@ -175,6 +176,24 @@ if [ "$SKIP_ZIG" -eq 0 ]; then
         echo "  [WARN] Zig arena_contention failed (exit $?)."
         tail -20 "$TMPDIR_HARNESS/arena_zig.out"
     fi
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# 6. Named Exclusive Lock (CC vs Go vs Rust vs Zig)
+# ---------------------------------------------------------------------------
+echo "[6/6] Named Exclusive Lock Challenge..."
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_exclusive_named_lock.sh" > "$TMPDIR_HARNESS/excl.out" 2>&1; then
+        # The sub-script's summary table is the interesting part; the
+        # per-language trial logs land in perf/out/excl_<lang>.txt.
+        sed -n '/^SUMMARY (median/,$p' "$TMPDIR_HARNESS/excl.out"
+    else
+        echo "  [WARN] compare_exclusive_named_lock.sh failed (exit $?). Last lines:"
+        tail -30 "$TMPDIR_HARNESS/excl.out"
+    fi
+else
+    echo "  (skipped — CCC not available)"
 fi
 echo ""
 
