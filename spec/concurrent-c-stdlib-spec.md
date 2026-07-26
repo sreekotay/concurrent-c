@@ -1133,7 +1133,8 @@ The shipped runtime does not define these two extension functions.
 ## HTTP
 
 `<ccc/std/http.cch>` provides a synchronous libcurl-backed client and requires
-linkage with `curl`.
+linkage with `curl`. Request APIs are Result-primary: the Ok arm is
+`CCHttpResponse` and the Err arm is `CCHttpErrorInfo`.
 
 ```c
 typedef enum CCHttpError {
@@ -1186,18 +1187,20 @@ The API is:
 
 ```c
 CCHttpClientConfig cc_http_client_config_default(void);
-CCHttpResponse cc_http_get(CCArena *arena, const char *url, size_t url_len, CCHttpErrorInfo *out_err);
-CCHttpResponse cc_http_post(CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len, CCHttpErrorInfo *out_err);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_get(CCArena *arena, const char *url, size_t url_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_post(CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len);
 CCHttpClient cc_http_client_new(CCHttpClientConfig config);
 CCHttpClient cc_http_client_default(void);
-CCHttpResponse cc_http_client_get(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, CCHttpErrorInfo *out_err);
-CCHttpResponse cc_http_client_post(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len, CCHttpErrorInfo *out_err);
-CCHttpResponse cc_http_client_request(CCHttpClient *client, CCArena *arena, CCHttpRequest request, CCHttpErrorInfo *out_err);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_get(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_post(CCHttpClient *client, CCArena *arena, const char *url, size_t url_len, const char *body, size_t body_len);
+CCHttpResponse!>(CCHttpErrorInfo) cc_http_client_request(CCHttpClient *client, CCArena *arena, CCHttpRequest request);
 ```
 
-Response and error-info slices are arena-backed. The default configuration
-uses a 30-second timeout, follows at most ten redirects, limits a response to
-64 MiB, and verifies TLS certificates. HTTP does not define `_async` callees.
+Response body, headers, final URL, and any arena-backed error `message` use
+the caller-supplied request arena and share that lifetime. `message` may also
+be empty or refer to a static string. The default configuration uses a
+30-second timeout, follows at most ten redirects, limits a response to 64 MiB,
+and verifies TLS certificates. HTTP does not define `_async` callees.
 
 URL parsing is:
 
@@ -1211,7 +1214,7 @@ typedef struct CCParsedUrl {
     CCSlice fragment;
 } CCParsedUrl;
 
-CCParsedUrl cc_url_parse(const char *url, size_t url_len, CCHttpError *out_err);
+CCParsedUrl!>(CCHttpError) cc_url_parse(const char *url, size_t url_len);
 ```
 
 The component slices point into the supplied URL buffer.

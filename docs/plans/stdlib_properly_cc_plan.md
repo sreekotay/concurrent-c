@@ -42,7 +42,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 
 **Good templates today:** `std/slice.cch`, `cc_channel.cch`, `std/io.cch` (mostly), `std/process.cch`, `std/exec.cch`, `std/string_ref.cch`.
 
-**Primary fix targets:** `std/net.cch`, `std/http.cch`, `std/tls.cch`, `std/dns.cch`; weaker: `cc_file_open`, `std/future.cch` out_err.
+**Primary fix targets:** `std/tls.cch`, `std/dns.cch` (net listen/accept/connect/read/write + HTTP Result-primary landed); weaker: `cc_file_open`, `std/future.cch` out_err.
 
 ---
 
@@ -85,13 +85,14 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 | Module | Path | Drift |
 |--------|------|-------|
 | Net | `std/net.cch`, `cc/runtime/net.c` | Listen/accept/connect + socket read/write are Result-primary. Remaining: UDP/DNS/peer_addr/shutdown still `CCNetError*` out-params. |
-| DNS / TLS / HTTP | `std/dns.cch`, `std/tls.cch`, `std/http.cch` | Same culture. DNS decls duplicated with net. |
+| HTTP | `std/http.cch`, `cc/runtime/http.c` | Result-primary (`CCHttpResponse!>(CCHttpErrorInfo)`, `cc_url_parse` → `CCParsedUrl!>(CCHttpError)`). |
+| DNS / TLS | `std/dns.cch`, `std/tls.cch` | Out-param culture. DNS decls duplicated with net. |
 
 ### Real projects
 
 - **redis_idiomatic.ccs:** Result + arenas + `try_send_into`; listen/accept/fill/write use `!>`. Net drift left is UDP/DNS/HTTP if any.
 - **pigz_idiomatic.ccs:** Ordered `send_task` + arenas; little net. Arena spelling mixed.
-- **Examples:** Result recipe gold; `recipe_tcp_echo` listen/accept/connect/read/write use `!>` / `cc_io_avail`; HTTP still out-param; `recipe_ordered_parallel` aligned with pigz.
+- **Examples:** Result recipe gold; `recipe_tcp_echo` listen/accept/connect/read/write use `!>` / `cc_io_avail`; `recipe_http_get` uses Result `cc_http_get` + `!>`; `recipe_ordered_parallel` aligned with pigz.
 
 ---
 
@@ -178,9 +179,24 @@ try busy → fill-layer `cc_ok(false)`); `recipe_tcp_echo` + `ping_server`;
 present-tense for model B. Listen/accept stay on `CCNetError`; byte I/O uses
 `CCIoError` so redis `@errhandler` I/O culture matches without out-params.
 
-### Phase 3 — HTTP
+### Phase 3 — HTTP: done
 
-Primary `cc_http_get` (etc.) return Result; error arm keeps rich info (`CCHttpErrorInfo` or equivalent) with explicit arena rules for messages. Flip `recipe_http_get.ccs` to `@errhandler` / `!>`.
+Primary signatures (same `cc_*` names, Result return):
+
+```c
+CCHttpResponse resp = cc_http_get(arena, url, len) !>;
+CCHttpResponse resp = cc_http_post(arena, url, len, body, body_len) !>;
+CCHttpResponse resp = cc_http_client_get(&client, arena, url, len) !>;
+CCParsedUrl u = cc_url_parse(url, len) !>;
+```
+
+Landed: Result-primary `cc_http_get` / `cc_http_post` / `cc_http_client_get` /
+`cc_http_client_post` / `cc_http_client_request` with Err arm
+`CCHttpErrorInfo` (rich code + optional net_error + message); `cc_url_parse`
+→ `CCParsedUrl!>(CCHttpError)`; `recipe_http_get.ccs` uses `!>` for HTTP and
+`@errhandler(CCError)` for nursery; HTTP stdlib spec present-tense
+Result-primary with caller-arena lifetime for response/error slices. No
+public `*_result` sidecar or taught `CCHttpErrorInfo*` out-param.
 
 ### Phase 4 — TLS / DNS
 
@@ -222,7 +238,7 @@ Mechanical bridge inside a branch (old body called with `&err` then wrapped) is 
 |-------|--------|
 | 1 | README + arena recipe clarity; pigz spelling consistency optional |
 | 2 | **redis** listen/accept/fill/write; **tcp echo** Result showcase end-to-end |
-| 3 | **http get** matches result recipe |
+| 3 | **http get** matches result recipe — done |
 | 5 | pigz open paths if they still check `int` |
 | 6 | capture recipes honest about shared state |
 
@@ -241,7 +257,7 @@ Mechanical bridge inside a branch (old body called with `&err` then wrapped) is 
 
 ## Open questions
 
-1. **Net error domain (partially resolved):** Listen/accept/connect keep `CCNetError` for address/connect fidelity. Socket byte read/write use `CCIoError` (files/channels/redis). Full unify still open for UDP/DNS/TLS/HTTP.
+1. **Net error domain (partially resolved):** Listen/accept/connect keep `CCNetError` for address/connect fidelity. Socket byte read/write use `CCIoError` (files/channels/redis). HTTP keeps rich `CCHttpErrorInfo` as the Result Err arm. Full unify still open for UDP/DNS/TLS.
 2. **EOF for `socket.read` — resolved (model B):** `Ok(false)` + out-slice/count for clean FIN; RST/failures are `Err`; try would-block is `Err(CC_IO_BUSY)`.
 3. **Prelude:** Keep net opt-in vs `std/prelude_net.cch` umbrella?
 4. **Capabilities:** In-scope for this program or separate (redis/pigz getenv)?
@@ -251,4 +267,4 @@ Mechanical bridge inside a branch (old body called with `&err` then wrapped) is 
 
 ## Suggested next PR
 
-**Phase 2 read/write/fill — landed.** Next: Phase 3 HTTP Result-primary, or remaining net out-params (UDP/DNS/peer_addr/shutdown).
+**Phase 3 HTTP — landed.** Next: Phase 4 TLS/DNS Result-primary, or remaining net out-params (UDP/peer_addr/shutdown).

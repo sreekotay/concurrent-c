@@ -3,7 +3,7 @@
  *
  * Demonstrates:
  *   - Parallel HTTP requests with explicit nursery handles
- *   - cc_http_get for simple requests
+ *   - Result-primary cc_http_get with !> / @errhandler
  *   - Arena-based response memory
  *   - @link("curl") for automatic library linking
  *
@@ -32,19 +32,16 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
         CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
         if (!scratch.base) abort();
         CCArena* arena = &scratch;
-        CCHttpErrorInfo err = {0};
-        CCHttpResponse resp = cc_http_get(arena, g_urls[idx], strlen(g_urls[idx]), &err);
-
-        if (err.code == CC_HTTP_OK) {
-            status_p[idx] = resp.status;
-            body_len_p[idx] = resp.body.len;
-            printf("[%d] %s -> %d (%zu bytes)\n",
-                   idx, g_urls[idx], resp.status, resp.body.len);
-        } else {
+        /* Soft-fail per URL so offline CI can SKIP instead of fatal. */
+        CCHttpResponse resp = cc_http_get(arena, g_urls[idx], strlen(g_urls[idx])) !>(e) {
             status_p[idx] = -1;
-            printf("[%d] %s -> ERROR %d\n", idx, g_urls[idx], err.code);
-        }
-    
+            printf("[%d] %s -> ERROR %d\n", idx, g_urls[idx], (int)e.code);
+            return;
+        };
+        status_p[idx] = resp.status;
+        body_len_p[idx] = resp.body.len;
+        printf("[%d] %s -> %d (%zu bytes)\n",
+               idx, g_urls[idx], resp.status, resp.body.len);
     }
 }
 

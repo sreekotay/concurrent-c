@@ -13,6 +13,7 @@
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
 #include "net.cch"  /* For CCNetError in CCHttpErrorInfo */
 
 /* ============================================================================
@@ -30,11 +31,13 @@ typedef enum CCHttpError {
     CC_HTTP_BODY_TOO_LARGE,
 } CCHttpError;
 
-/* Extended error info */
+/* Extended error info — Result error arm for request APIs.
+ * `message` is empty, a static string, or arena-backed from the
+ * caller's request arena (same lifetime as response body slices). */
 typedef struct CCHttpErrorInfo {
     CCHttpError code;
     CCNetError net_error;       /* If code == CC_HTTP_NET_ERROR */
-    CCSlice message;            /* Human-readable (arena-allocated) */
+    CCSlice message;            /* Human-readable */
 } CCHttpErrorInfo;
 
 /* ============================================================================
@@ -85,21 +88,27 @@ static inline CCHttpClientConfig cc_http_client_config_default(void) {
     };
 }
 
+/* Result types for request APIs (primary Result surface). */
+#ifndef CCResult_CCHttpResponse_CCHttpErrorInfo_DEFINED
+#define CCResult_CCHttpResponse_CCHttpErrorInfo_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCHttpResponse_CCHttpErrorInfo, CCHttpResponse, CCHttpErrorInfo)
+#endif
+
 /* ============================================================================
  * Simple API
  * ============================================================================ */
 
-/* Simple GET request */
-CCHttpResponse cc_http_get(CCArena* arena, const char* url, size_t url_len, CCHttpErrorInfo* out_err);
+/* Simple GET request. Response/error message slices use `arena`. */
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_get(CCArena* arena, const char* url, size_t url_len);
 
-/* Simple POST request */
-CCHttpResponse cc_http_post(CCArena* arena, const char* url, size_t url_len,
-                            const char* body, size_t body_len, CCHttpErrorInfo* out_err);
+/* Simple POST request. Response/error message slices use `arena`. */
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_post(CCArena* arena, const char* url, size_t url_len,
+                            const char* body, size_t body_len);
 
 /* Async variants */
-/* @async CCHttpResponse cc_http_get_async(CCArena* arena, const char* url, size_t url_len, CCHttpErrorInfo* out_err); */
-/* @async CCHttpResponse cc_http_post_async(CCArena* arena, const char* url, size_t url_len,
-                                            const char* body, size_t body_len, CCHttpErrorInfo* out_err); */
+/* @async CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_get_async(CCArena* arena, const char* url, size_t url_len); */
+/* @async CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_post_async(CCArena* arena, const char* url, size_t url_len,
+                                            const char* body, size_t body_len); */
 
 /* ============================================================================
  * Configurable Client
@@ -120,21 +129,21 @@ static inline CCHttpClient cc_http_client_default(void) {
 }
 
 /* Request methods */
-CCHttpResponse cc_http_client_get(CCHttpClient* client, CCArena* arena,
-                                   const char* url, size_t url_len, CCHttpErrorInfo* out_err);
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_get(CCHttpClient* client, CCArena* arena,
+                                   const char* url, size_t url_len);
 
-CCHttpResponse cc_http_client_post(CCHttpClient* client, CCArena* arena,
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_post(CCHttpClient* client, CCArena* arena,
                                     const char* url, size_t url_len,
-                                    const char* body, size_t body_len, CCHttpErrorInfo* out_err);
+                                    const char* body, size_t body_len);
 
 /* Full request control */
-CCHttpResponse cc_http_client_request(CCHttpClient* client, CCArena* arena,
-                                        CCHttpRequest req, CCHttpErrorInfo* out_err);
+CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_request(CCHttpClient* client, CCArena* arena,
+                                        CCHttpRequest req);
 
 /* Async variants */
-/* @async CCHttpResponse cc_http_client_get_async(...); */
-/* @async CCHttpResponse cc_http_client_post_async(...); */
-/* @async CCHttpResponse cc_http_client_request_async(...); */
+/* @async CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_get_async(...); */
+/* @async CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_post_async(...); */
+/* @async CCResult_CCHttpResponse_CCHttpErrorInfo cc_http_client_request_async(...); */
 
 /* ============================================================================
  * URL Parsing (helpers)
@@ -149,8 +158,13 @@ typedef struct CCParsedUrl {
     CCSlice fragment;   /* "section" (without #) */
 } CCParsedUrl;
 
+#ifndef CCResult_CCParsedUrl_CCHttpError_DEFINED
+#define CCResult_CCParsedUrl_CCHttpError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCParsedUrl_CCHttpError, CCParsedUrl, CCHttpError)
+#endif
+
 /* Parse URL into components (all slices point into original URL) */
-CCParsedUrl cc_url_parse(const char* url, size_t url_len, CCHttpError* out_err);
+CCResult_CCParsedUrl_CCHttpError cc_url_parse(const char* url, size_t url_len);
 
 /* ============================================================================
  * Implementation (header-only)

@@ -7,6 +7,7 @@
 
 #include "ir/ir.h"
 #include "ir/verifier.h"
+#include "result_spec.h"
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
@@ -174,16 +175,28 @@ static int cc__ru_extract_callee_for_binder(const char* s, size_t n,
  * to pick between them at pass time. */
 
 /* Pull the error-type suffix out of a mangled `CCResult_<Ok>_<Err>` name.
- * Uses the last `_` segment after the `CCResult_` prefix when the ok-type
- * itself contains underscores (e.g. `CCResult_CCSocket_CCNetError`). */
+ * Prefer the stdlib-predeclared table (exact ok/err split) so Err types that
+ * themselves contain underscores (e.g. `CCHttpErrorInfo`) are not truncated
+ * by the last-`_` heuristic.  Fall back to the last `_` segment after the
+ * `CCResult_` prefix when the ok-type itself contains underscores
+ * (e.g. `CCResult_CCSocket_CCNetError`). */
 static int cc__ru_err_type_from_result_name(const char* result_name,
                                              char* out, size_t out_sz) {
     const char* p;
     const char* last_us;
     size_t len;
+    const CCStdlibPredeclaredResult* pre;
     if (!result_name || !out || out_sz == 0) return 0;
     out[0] = 0;
     if (strncmp(result_name, "CCResult_", 9) != 0) return 0;
+    pre = cc_result_spec_lookup_stdlib_predeclared(result_name);
+    if (pre && pre->err_type) {
+        len = strlen(pre->err_type);
+        if (len + 1 > out_sz) return 0;
+        memcpy(out, pre->err_type, len);
+        out[len] = 0;
+        return 1;
+    }
     p = result_name + 9;
     last_us = strrchr(p, '_');
     if (!last_us || last_us[1] == 0) return 0;
