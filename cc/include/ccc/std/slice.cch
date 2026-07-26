@@ -258,6 +258,39 @@ static inline CCResult_bool_CCError CCSlice_set(CCSlice* s, size_t idx, char c) 
     return cc_slice_set(s, idx, c);
 }
 
+/*
+ * In-place shrink to `n` bytes (all builds): `n > len` → CC_ERR_INVALID_ARG.
+ *
+ *   out.truncate(off) !>;      // narrow a fill buffer to the bytes written
+ *
+ * Shrink-only, so the window never names memory the slice did not already
+ * name. `ptr`, `id`, and `alen` are left alone: provenance and uniqueness
+ * survive, and `cc_slice_destroy` still resolves the deleter from the
+ * registered base. The pointer receiver never copies, so this is available on
+ * a move-only `T[:!]` owner, where a view-producing `sub` is not.
+ *
+ * Growing back toward `alen` is deliberately absent: those bytes may be
+ * uninitialized, which is a read-of-garbage the length alone cannot rule out.
+ */
+static inline CCResult_bool_CCError cc_slice_truncate(CCSlice* s, size_t n) {
+    if (!s) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice truncate: null slice"));
+    }
+    if (n > s->len) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "slice truncate: length exceeds current length"));
+    }
+    s->len = n;
+    return cc_ok_CCResult_bool_CCError(true);
+}
+static inline CCResult_bool_CCError CCSlice_truncate(CCSlice* s, size_t n) {
+    return cc_slice_truncate(s, n);
+}
+static inline CCResult_bool_CCError CCSliceUnique_truncate(CCSliceUnique* s, size_t n) {
+    return cc_slice_truncate((CCSlice*)s, n);
+}
+
 static inline CCResult_int64_t_CCError cc_add_i64_checked(int64_t a, int64_t b) {
     int64_t r;
 #ifdef CC__HAS_OVERFLOW_BUILTINS

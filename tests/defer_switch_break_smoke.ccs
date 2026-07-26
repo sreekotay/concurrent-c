@@ -1,0 +1,91 @@
+#include <stdio.h>
+
+static int g_cleanup = 0;
+
+static void cleanup_one(void) {
+    g_cleanup++;
+}
+
+/* Regression: `@defer` in a switch case must run before `break`. */
+static int switch_case_break_defer(int x) {
+    switch (x) {
+    case 1: {
+        @defer cleanup_one();
+        break;
+    }
+    default:
+        return 2;
+    }
+    return 0;
+}
+
+/* Nested-block workaround must keep working (cleanup on inner `}`). */
+static int nested_block_defer(int x) {
+    switch (x) {
+    case 1: {
+        {
+            @defer cleanup_one();
+        }
+        break;
+    }
+    default:
+        return 2;
+    }
+    return 0;
+}
+
+/* Same jump-past-`}` bug for loop `break`. */
+static int loop_break_defer(void) {
+    for (int i = 0; i < 1; i++) {
+        @defer cleanup_one();
+        break;
+    }
+    return 0;
+}
+
+/* Conditional break also needs brace-wrapping when injecting cleanup. */
+static int if_break_defer(int cond) {
+    switch (cond) {
+    case 1: {
+        @defer cleanup_one();
+        if (cond) break;
+        return 3;
+    }
+    default:
+        return 2;
+    }
+    return 0;
+}
+
+int main(void) {
+    g_cleanup = 0;
+    if (switch_case_break_defer(1) != 0) return 10;
+    if (g_cleanup != 1) {
+        printf("defer_switch_break_smoke: FAIL switch_case cleanup=%d\n", g_cleanup);
+        return 1;
+    }
+
+    g_cleanup = 0;
+    if (nested_block_defer(1) != 0) return 11;
+    if (g_cleanup != 1) {
+        printf("defer_switch_break_smoke: FAIL nested_block cleanup=%d\n", g_cleanup);
+        return 1;
+    }
+
+    g_cleanup = 0;
+    if (loop_break_defer() != 0) return 12;
+    if (g_cleanup != 1) {
+        printf("defer_switch_break_smoke: FAIL loop_break cleanup=%d\n", g_cleanup);
+        return 1;
+    }
+
+    g_cleanup = 0;
+    if (if_break_defer(1) != 0) return 13;
+    if (g_cleanup != 1) {
+        printf("defer_switch_break_smoke: FAIL if_break cleanup=%d\n", g_cleanup);
+        return 1;
+    }
+
+    printf("defer_switch_break_smoke: OK\n");
+    return 0;
+}

@@ -1,0 +1,67 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!a.valid()) return 1;
+
+    /* Shrink a fill buffer to the bytes actually written. */
+    CCSlice out = cc_arena_alloc_slice_bytes(&a, 64);
+    if (!out.ptr || out.len != 64) return 2;
+    memcpy(out.ptr, "PONG", 4);
+    void* base = out.ptr;
+    uint64_t id = out.id;
+    size_t alen = out.alen;
+
+    out.truncate(4) !>;
+    if (out.len != 4) return 3;
+    /* Pointer, provenance, and allocation extent all survive the narrow. */
+    if (out.ptr != base || out.id != id || out.alen != alen) return 4;
+    if (memcmp(out.ptr, "PONG", 4) != 0) return 5;
+
+    /* Idempotent at the current length, and to zero. */
+    out.truncate(4) !>;
+    if (out.len != 4) return 6;
+    out.truncate(0) !>;
+    if (out.len != 0 || out.ptr != base) return 7;
+
+    /* A length longer than the slice is refused, not silently accepted:
+     * this is the shape that turns a wire length into an over-read. */
+    CCSlice ans = cc_arena_alloc_slice_bytes(&a, 16);
+    if (!ans.ptr) return 8;
+    CCResult_bool_CCError lying = cc_slice_truncate(&ans, 4096);
+    if (!lying.is_err()) return 9;
+    if (ans.len != 16) return 10;
+
+    /* Refused even within the allocation: truncate never grows back into
+     * bytes that may be uninitialized. */
+    ans.truncate(8) !>;
+    if (ans.len != 8) return 11;
+    CCResult_bool_CCError regrow = cc_slice_truncate(&ans, 16);
+    if (!regrow.is_err()) return 12;
+    if (ans.len != 8) return 13;
+
+    /* Null receiver is an error, not a crash. */
+    CCResult_bool_CCError nul = cc_slice_truncate(NULL, 0);
+    if (!nul.is_err()) return 14;
+
+    /* The case `sub` cannot serve: a move-only owner. The pointer receiver
+     * does not copy, so the move checker is satisfied, uniqueness is kept,
+     * and `destroy` still frees the registered base. */
+    CCSliceUnique u = cc_adopt(malloc(64), 64, free) !> @destroy;
+    if (u.len != 64 || !cc_slice_is_unique_id(u.id)) return 15;
+    u.truncate(8) !>;
+    if (u.len != 8) return 16;
+    if (!cc_slice_is_unique_id(u.id)) return 17;
+    if (u.alen != 64) return 18;
+
+    puts("slice_truncate_smoke: PASS");
+    return 0;
+}

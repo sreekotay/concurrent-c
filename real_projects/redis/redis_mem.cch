@@ -1,5 +1,6 @@
-/* Memory diagnostics for redis_idiomatic (Mach footprint, arena slabs, live bytes).
- * Included into redis_idiomatic.ccs after RedisDb / g_db_mem_stats exist. */
+/* Memory diagnostics (Mach footprint, arena slabs, live bytes).
+ * Included into redis_idiomatic.ccs / redis_owner.ccs after RedisDb exists.
+ * Log prefix stays `redis_idiomatic:` so bench_robust mem_gap parsers match. */
 #ifndef REDIS_IDIOMATIC_MEM_CCH
 #define REDIS_IDIOMATIC_MEM_CCH
 

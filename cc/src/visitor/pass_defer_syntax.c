@@ -622,10 +622,12 @@ static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) 
     return 1;
 }
 
-static int cc__is_if_controlled_continue(const char* s, size_t len, size_t cont_i) {
+/* True when `stmt_i` is the statement of `if (...)<stmt>` (no braces), so a
+ * multi-statement defer rewrite must wrap the injection in `{ ... }`. */
+static int cc__is_if_controlled_stmt(const char* s, size_t len, size_t stmt_i) {
     (void)len;
-    if (!s || cont_i == 0) return 0;
-    size_t j = cont_i;
+    if (!s || stmt_i == 0) return 0;
+    size_t j = stmt_i;
     while (j > 0 && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
     if (j == 0 || s[j - 1] != ')') return 0;
 
@@ -683,6 +685,20 @@ static int cc__find_loop_body_open_after_control(const char* s, size_t len, size
     if (j >= len || s[j] != '(') return 0;
     if (!cc_find_matching_paren(s, len, j, &close_paren)) return 0;
     body_i = cc_skip_ws_and_comments(s, len, close_paren + 1);
+    if (body_i < len && s[body_i] == '{') {
+        *out_open_i = body_i;
+        return 1;
+    }
+    return 0;
+}
+
+/* `do { ... } while (...);` — body `{` follows the keyword directly. */
+static int cc__find_do_body_open(const char* s, size_t len, size_t kw_i, size_t* out_open_i) {
+    size_t j, body_i;
+    if (!s || !out_open_i) return 0;
+    j = kw_i;
+    while (j < len && cc__is_ident_char(s[j])) j++;
+    body_i = cc_skip_ws_and_comments(s, len, j);
     if (body_i < len && s[body_i] == '{') {
         *out_open_i = body_i;
         return 1;
@@ -783,6 +799,10 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
     size_t pending_loop_body_open = (size_t)-1;
     int loop_body_depths[256];
     int loop_body_count = 0;
+    /* Innermost switch/loop body depths for `break` (ordered by nesting). */
+    size_t pending_breakable_body_open = (size_t)-1;
+    int breakable_body_depths[256];
+    int breakable_body_count = 0;
 
     for (size_t i = 0; i < in_len; i++) {
         char ch = in_src[i];
@@ -875,6 +895,18 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             size_t loop_open = 0;
             if (cc__find_loop_body_open_after_control(in_src, in_len, i, &loop_open)) {
                 pending_loop_body_open = loop_open;
+                pending_breakable_body_open = loop_open;
+            }
+        } else if (cc__token_is(in_src, in_len, i, "do")) {
+            size_t do_open = 0;
+            if (cc__find_do_body_open(in_src, in_len, i, &do_open)) {
+                pending_loop_body_open = do_open;
+                pending_breakable_body_open = do_open;
+            }
+        } else if (cc__token_is(in_src, in_len, i, "switch")) {
+            size_t switch_open = 0;
+            if (cc__find_loop_body_open_after_control(in_src, in_len, i, &switch_open)) {
+                pending_breakable_body_open = switch_open;
             }
         }
 
@@ -1202,7 +1234,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
 
             int loop_body_depth = loop_body_depths[loop_body_count - 1];
             int has_defers = 0;
-            int is_if_ctl = cc__is_if_controlled_continue(in_src, in_len, i);
+            int is_if_ctl = cc__is_if_controlled_stmt(in_src, in_len, i);
             for (int d = depth; d >= loop_body_depth; d--) {
                 int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
                 for (int k = 0; k < defer_counts[dd]; k++) {
@@ -1221,6 +1253,59 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 cc__emit_always_defers_for_depth_range(&out, &outl, &outc, in_src, i,
                                                        defers, defer_counts,
                                                        depth, loop_body_depth);
+                changed = 1;
+            }
+            cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+            if (has_defers && is_if_ctl) {
+                cc__append_str(&out, &outl, &outc, "\n");
+                cc__append_missing_indent_to(&out, &outl, &outc, cc__source_line_indent_len(in_src, i));
+                cc__append_str(&out, &outl, &outc, "}");
+            }
+
+            for (size_t k = i; k < stmt_end; k++) {
+                if (in_src[k] == '\n') line_no++;
+            }
+            i = stmt_end - 1;
+            continue;
+        }
+
+        /* `break;` exits scopes nested inside the nearest switch/loop body
+         * before jumping past that construct.  Without this rewrite, defers
+         * injected only at `}` are skipped (e.g. `@defer` in a switch case
+         * followed by `break`). */
+        if (cc__token_is(in_src, in_len, i, "break") && breakable_body_count > 0) {
+            size_t stmt_end = 0;
+            if (!cc__scan_stmt_end_semicolon(in_src, in_len, i, &stmt_end)) {
+                char rel[1024];
+                const char* f = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                                  "malformed 'break' while lowering @defer (expected ';')");
+                for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
+                free(out);
+                return -1;
+            }
+
+            int break_body_depth = breakable_body_depths[breakable_body_count - 1];
+            int has_defers = 0;
+            int is_if_ctl = cc__is_if_controlled_stmt(in_src, in_len, i);
+            for (int d = depth; d >= break_body_depth; d--) {
+                int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                for (int k = 0; k < defer_counts[dd]; k++) {
+                    if (defers[dd][k].cond == DEFER_ALWAYS) {
+                        has_defers = 1;
+                        break;
+                    }
+                }
+                if (has_defers) break;
+            }
+
+            if (has_defers) {
+                if (is_if_ctl) {
+                    cc__append_str(&out, &outl, &outc, "{\n");
+                }
+                cc__emit_always_defers_for_depth_range(&out, &outl, &outc, in_src, i,
+                                                       defers, defer_counts,
+                                                       depth, break_body_depth);
                 changed = 1;
             }
             cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
@@ -1493,6 +1578,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             if (loop_body_count > 0 && loop_body_depths[loop_body_count - 1] == d) {
                 loop_body_count--;
             }
+            if (breakable_body_count > 0 && breakable_body_depths[breakable_body_count - 1] == d) {
+                breakable_body_count--;
+            }
             if (depth > 0) depth--;
             cc__append_n(&out, &outl, &outc, &ch, 1);
             continue;
@@ -1530,6 +1618,10 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             if (pending_loop_body_open == i) {
                 if (loop_body_count < 256) loop_body_depths[loop_body_count++] = dd;
                 pending_loop_body_open = (size_t)-1;
+            }
+            if (pending_breakable_body_open == i) {
+                if (breakable_body_count < 256) breakable_body_depths[breakable_body_count++] = dd;
+                pending_breakable_body_open = (size_t)-1;
             }
             cc__append_n(&out, &outl, &outc, &ch, 1);
             /* Prologue on its own lines (human-readable emitted C), with a

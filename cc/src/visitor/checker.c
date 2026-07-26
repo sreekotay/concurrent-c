@@ -989,7 +989,16 @@ static int cc__subtree_should_apply_slice_copy_rule(const StubNodeView* nodes,
             stack[sp++] = cl->child[i];
         }
     }
-    return rhs_seen && !other_ident && !saw_member;
+    /* A call in the initializer means the lhs receives that call's result, not
+       a copy of the rhs. This matters because the checker runs before UFCS
+       lowering, where a method's receiver is recorded as a *sibling* of the
+       call node: `u.set(0, 'x')` becomes a call named `set` over the literal
+       args with `u` alongside it, and no member node. With only literals
+       beside it the rhs is the sole identifier, so the subtree was
+       indistinguishable from `t = u`. Any second identifier argument already
+       suppressed the rule via `other_ident`, so keying on the call treats
+       those alike instead of rejecting only the all-literal spelling. */
+    return rhs_seen && !other_ident && !saw_member && call_n == 0;
 }
 
 static int cc__walk(int idx,

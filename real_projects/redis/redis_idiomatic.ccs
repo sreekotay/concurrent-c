@@ -1,35 +1,22 @@
 /*
- * redis_idiomatic.ccs
+ * redis_idiomatic.ccs — default Concurrent-C Redis server.
  *
- * One-writer concurrency via an N:1 request channel.  Only the owner
- * fiber touches RedisDb; client fibers pipeline requests and drain the
- * matching replies on a per-connection 1:1 reply channel.  Serialization
- * is by channel topology, not worker pinning, so the scheduler is free
- * to use any number of OS threads.  Pipeline depth is bounded by
- * `k_pipeline_reply_cap` (reply-channel capacity / client submit window).
+ * Shared DB behind one table-wide named exclusive section (CCExclusive).
+ * Each connection fiber parses, then executes against RedisDb while
+ * holding that mutex.  No owner fiber, no request/reply channels.
  *
- * Owner replies use reserve-then-write (`try_send_into`): admit a slot,
- * build into it, then `ensure_owned` (materialize payload into reply_arena;
- * kind unchanged).  Structured vs WIRE is a form choice at the builder;
- * socket write is where structured replies become RESP.  RespGReply /
- * cc_write are encode tools, not channel types.
+ * Request path: argv slices borrow the connection read buffer (no clone,
+ * no handoff).  Each command's relationship to the hold is a field in the
+ * command table (RedisCmdHold), and run_pipeline_window is the only place
+ * that acquires: hold covers DB mutate/snapshot, RESP encode and socket
+ * writes run after release.  SET preps its value outside the hold; install
+ * borrow-looks up and clones the key into key_arena only on miss.
  *
- * Conn lifetime without refcounts — see the RedisConn block below.
- *
- * Command surface: PING/ECHO, GET/SET/SETNX/SETEX/PSETEX/APPEND/STRLEN,
- * TYPE, DEL/EXISTS (variadic), INCR/DECR/INCRBY/DECRBY, MGET/MSET,
- * EXPIRE/PEXPIRE/TTL/PTTL/PERSIST (lazy expiration: absolute ms deadline in
- * a side `expires` map keyed by CCStringRef, checked on access; no active
- * cycle), DBSIZE,
- * FLUSHDB/FLUSHALL, KEYS (glob), CONFIG GET, CC.MEMLOG.  Functional smoke:
- * `python3 redis_smoke.py`.
+ * RedisConn (including out_buf) lives on the connection fiber stack; a
+ * connection costs one heap allocation (its reply arena).
  *
  * Build: `make redis_idiomatic`.  Bench: `./bench_robust.sh`.
- * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
- * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value
- * live).  CC_REDIS_MEM_REPORT=1 adds verbose Mach/arena dump at owner-ready.
- * CC.MEMLOG [phase] dumps arenas + accounting without restart; see
- * bench_robust.sh / bench_then_memlog.sh.
+ * Channel/owner-fiber variant (historical): `redis_owner.ccs`.
  */
 
 #include <ccc/std/prelude.cch>
@@ -39,14 +26,12 @@
 #include <ccc/std/string.cch>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <string.h>
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
-#include <errno.h>
 #include <sys/socket.h>
-#include <netinet/in.h>   /* IPPROTO_TCP (not transitive from tcp.h on glibc) */
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/resource.h>
 #if defined(__APPLE__)
@@ -54,97 +39,35 @@
 #include <mach/task_info.h>
 #endif
 #include "redis_cc/redis_cc.cch"
-#include <ccc/std/task.cch>
-#include <ccc/cc_sched.cch>
-#include <ccc/cc_closure.cch>
-#include <ccc/cc_type.cch>
 
+/* The one concurrency primitive this variant uses: a named exclusive
+ * section.  main creates a single CCExclusive and resolves one mutex;
+ * connection fibers acquire it around DB mutate / snapshot only. */
+#include <ccc/cc_exclusive.cch>
 
-/* Compile-time channel geometry: embedded in CC endpoint types and must match
- * handle_client's per-round submit cap (same value as reply channel depth). */
+/* The whole table is one name — this variant never shards. */
+enum { k_table_lock_name = 1 };
+
+/* Window cap bounds how many pipelined commands run per parsed batch.
+ * out_buf holds serialized replies between flushes: a window of small
+ * replies fits, and anything larger flushes mid-window. */
 enum {
-    k_request_chan_cap = 256,
-    k_pipeline_reply_cap = 16,
+    k_pipeline_window_cap = 16,
     redis_conn_out_buf_bytes = 1024,
 };
 
-typedef struct RedisPipelineWindow {
-    size_t cap;
-    size_t submitted;
-    size_t replies_pending;
-} RedisPipelineWindow;
-
-typedef enum RedisPipelineStatus {
-    REDIS_PIPELINE_OK = 0,
-    REDIS_PIPELINE_OWNER_UNAVAILABLE,
-    REDIS_PIPELINE_REPLY_CLOSED,
-    REDIS_PIPELINE_WRITE_FAILED,
-} RedisPipelineStatus;
-
-static inline RedisPipelineWindow redis_pipeline_window_start(void) {
-    return (RedisPipelineWindow){
-        .cap = (size_t)k_pipeline_reply_cap,
-        .submitted = 0,
-        .replies_pending = 0,
-    };
-}
-
-static inline bool redis_pipeline_window_has_room(const RedisPipelineWindow* window) {
-    return window && window->submitted < window->cap;
-}
-
-static inline bool redis_pipeline_window_is_full(const RedisPipelineWindow* window) {
-    return window && window->submitted == window->cap;
-}
-
-static inline void redis_pipeline_window_accept(RedisPipelineWindow* window) {
-    window->submitted++;
-    window->replies_pending++;
-}
-
-/* Replies must match submission order (RESP).  `ordered` = per-sender FIFO;
- * single owner sender ⇒ total order. */
-typedef RedisReply[~k_pipeline_reply_cap 1:1 >] ReplyTx;
-typedef RedisReply[~k_pipeline_reply_cap 1:1 ordered <] ReplyRx;
-
-/* Conn lifetime (no refcounts):
- *   1. Client submits a request (inflight++); req->conn borrows this conn.
- *   2. Owner builds the reply inside try_send_into (builder may still borrow
- *      req / DB), then releases the request pool slot.
- *   3. Client drains reply_rx (inflight--).  Drain-to-zero — or reply-channel
- *      close after owner exit — is the teardown join; then @destroy may free.
- * Payload ownership across step 2 is redis_reply_ensure_owned. */
+/* Per-connection state, on the connection fiber's stack.  reply_arena
+ * holds oversized replies (arrays, big bulks) for the current window and
+ * is reset when the window ends; out_buf batches serialized replies
+ * between flushes. */
 typedef struct RedisConn {
-    uint64_t conn_id;
-    uint64_t next_request_id;
-    size_t inflight;           /* client: submit++ / drain--; teardown join */
-    CCArenaPool req_pool;      /* per-conn RedisRequest slots */
-    CCArena reply_arena;       /* reply payload bytes; reset per pipeline window */
-    ReplyTx reply_tx;
-    ReplyRx reply_rx;
-    CCSocket* sock;            /* handle_client stack; outlives conn */
+    CCArena reply_arena;
+    CCSocket* sock;
     size_t out_len;
     char out_buf[redis_conn_out_buf_bytes];
 } RedisConn;
 
-/* Shared N:1 request channel; Rx is ordered so each conn's requests run
- * in submission order. */
-typedef RedisRequest*[~k_request_chan_cap N:1 >] ReqTx;
-typedef RedisRequest*[~k_request_chan_cap N:1 ordered <] ReqRx;
-
-static RedisConn* redis_conn_create(uint64_t conn_id);
-static void redis_conn_destroy(RedisConn* conn);
-static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
-/* Defined with the reply path below; the owner's array-reply builders
- * (MGET/KEYS) allocate through it into conn->reply_arena. */
 static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
-
-/* After drain-to-zero (see RedisConn lifetime), free the conn. */
-@comptime {
-    (void)cc_type_register("RedisConn*", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("redis_conn_destroy"),
-    });
-}
 
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);
@@ -153,15 +76,15 @@ static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
 
 static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
     size_t len = strlen(cstr);
-    if (s.len != len) return false;
+    if (s.len != len) return 0;
     for (size_t i = 0; i < len; ++i) {
         char a = ((const char*)s.ptr)[i];
         char b = cstr[i];
         if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
         if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
-        if (a != b) return false;
+        if (a != b) return 0;
     }
-    return true;
+    return 1;
 }
 
 /* Args: char[:].to_i64().  Num cells render at read boundaries via @string. */
@@ -169,8 +92,9 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 #include "redis_resp.cch"
 
 /* RESP reader (parity oracle: tests/redis_resp_gen_parity_smoke.ccs).
- * Parse borrows the read buffer; argv is cloned into req->arena after a
- * complete frame.  cap 8 = REDIS_ARGV_MAX+1 wire tokens. */
+ * Parse borrows the read buffer; argv slices stay borrowed for the whole
+ * window (no refill happens while a window is executing).  cap 8 =
+ * REDIS_ARGV_MAX+1 wire tokens. */
 @grammar(schema) RespGArg {~~~~
     rules [
         digit:  charset [#'0' - #'9']
@@ -270,43 +194,61 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     return RESP_PARSE_OK;
 }
 
+/* How a command relates to the table hold.  run_pipeline_window switches on
+ * this and is the only acquire site, so locking policy lives in the command
+ * table below rather than in the window loop. */
+typedef enum RedisCmdHold {
+    /* acquire -> execute -> own bulk -> release */
+    REDIS_HOLD_TABLE = 0,
+    /* no hold: mutates nothing, and a torn read of DB stats is acceptable */
+    REDIS_HOLD_NONE,
+    /* prep the value outside -> acquire -> install -> release */
+    REDIS_HOLD_INSTALL,
+} RedisCmdHold;
+
+/* min/max_args count arguments after the command word; max_args < 0 is
+ * variadic, and args_multiple > 0 additionally requires a whole number of
+ * groups (MSET pairs).  Arity is checked once, here, so command handlers
+ * may index argv up to min_args without rechecking. */
 typedef struct RedisCommandSpec {
     RedisCommandKind kind;
     int min_args;
-    int max_args;      /* -1 means unbounded */
-    int args_multiple; /* 0 means no divisibility constraint */
+    int max_args;
+    int args_multiple;
+    RedisCmdHold hold;
 } RedisCommandSpec;
 
 @comptime {
+    /* name -> { kind, min_args, max_args, args_multiple, hold } */
     CCStaticMapEntry commands[] = {
-        { "PING",      "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0 }" },
-        { "ECHO",      "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0 }" },
-        { "GET",       "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0 }" },
-        { "SET",       "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0 }" },
-        { "SETNX",     "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0 }" },
-        { "SETEX",     "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0 }" },
-        { "PSETEX",    "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0 }" },
-        { "APPEND",    "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0 }" },
-        { "STRLEN",    "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0 }" },
-        { "TYPE",      "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0 }" },
-        { "DEL",       "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0 }" },
-        { "EXISTS",    "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0 }" },
-        { "INCR",      "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0 }" },
-        { "DECR",      "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0 }" },
-        { "INCRBY",    "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0 }" },
-        { "DECRBY",    "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0 }" },
-        { "MGET",      "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0 }" },
-        { "MSET",      "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2 }" },
-        { "EXPIRE",    "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0 }" },
-        { "PEXPIRE",   "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0 }" },
-        { "TTL",       "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0 }" },
-        { "PTTL",      "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0 }" },
-        { "PERSIST",   "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0 }" },
-        { "DBSIZE",    "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0 }" },
-        { "FLUSHDB",   "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0 }" },
-        { "FLUSHALL",  "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0 }" },
-        { "KEYS",      "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0 }" },
-        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0 }" },
+        { "PING", "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0, REDIS_HOLD_TABLE }" },
+        { "ECHO", "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "GET", "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "SET", "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0, REDIS_HOLD_INSTALL }" },
+        { "SETNX", "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "SETEX", "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0, REDIS_HOLD_TABLE }" },
+        { "PSETEX", "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0, REDIS_HOLD_TABLE }" },
+        { "APPEND", "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "STRLEN", "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "TYPE", "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "DEL", "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0, REDIS_HOLD_TABLE }" },
+        { "EXISTS", "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0, REDIS_HOLD_TABLE }" },
+        { "INCR", "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "DECR", "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "INCRBY", "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "DECRBY", "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "MGET", "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0, REDIS_HOLD_TABLE }" },
+        { "MSET", "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2, REDIS_HOLD_TABLE }" },
+        { "EXPIRE", "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "PEXPIRE", "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0, REDIS_HOLD_TABLE }" },
+        { "TTL", "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "PTTL", "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "PERSIST", "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "DBSIZE", "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0, REDIS_HOLD_TABLE }" },
+        { "FLUSHDB", "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0, REDIS_HOLD_TABLE }" },
+        { "FLUSHALL", "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0, REDIS_HOLD_TABLE }" },
+        { "KEYS", "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0, REDIS_HOLD_TABLE }" },
+        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0, REDIS_HOLD_NONE }" },
     };
     static_map("redis_commands", "RedisCommandSpec", commands,
                sizeof(commands) / sizeof(commands[0]),
@@ -314,17 +256,17 @@ typedef struct RedisCommandSpec {
 }
 
 /* `argc` counts arguments after the command word.  FLUSHDB/FLUSHALL accept an
- * optional ASYNC/SYNC token, though this single-owner server always flushes
- * synchronously.  Unknown names and invalid arity share one miss result. */
-static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
+ * optional ASYNC/SYNC token, though this server always flushes
+ * synchronously.  Unknown names and invalid arity share one miss (NULL). */
+static const RedisCommandSpec* cmd_spec(char[:] cmd, size_t argc) {
     const RedisCommandSpec* spec = redis_commands_get(cmd);
     if (!spec ||
         argc < (size_t)spec->min_args ||
         (spec->max_args >= 0 && argc > (size_t)spec->max_args) ||
         (spec->args_multiple > 0 && argc % (size_t)spec->args_multiple != 0)) {
-        return (RedisCommandKind)-1;
+        return NULL;
     }
-    return spec->kind;
+    return spec;
 }
 
 /* Initialize only the fields read for each reply kind; avoid whole-struct
@@ -386,7 +328,7 @@ static RedisReply reply_wire(CCSlice s) {
 static inline RespGReply wire_bulk(CCSlice data) {
     RespGReply w;
     w.kind = RespGReply_bulk;
-    w.u.bulk.len = (long long)data.len; /* derived on write; set for hygiene */
+    w.u.bulk.len = (long long)data.len;
     w.u.bulk.data = data;
     return w;
 }
@@ -397,24 +339,24 @@ static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
         case REDIS_REPLY_SIMPLE_STRING:
             wire->kind = RespGReply_simple;
             wire->u.simple.s = reply->data;
-            return true;
+            return 1;
         case REDIS_REPLY_ERROR:
             wire->kind = RespGReply_error;
             wire->u.error.msg = reply->data;
-            return true;
+            return 1;
         case REDIS_REPLY_INTEGER:
             wire->kind = RespGReply_integer;
             wire->u.integer.v = reply->int_value;
-            return true;
+            return 1;
         case REDIS_REPLY_BULK_STRING:
             *wire = wire_bulk(reply->data);
-            return true;
+            return 1;
         default:
-            return false;
+            return 0;
     }
 }
 
-/* Serialize a channel RedisReply into dst.  WIRE copies; structured uses
+/* Serialize a RedisReply into dst.  WIRE copies; structured uses
  * RespGReply/cc_write; NULL_BULK uses RespGBulkHdr. */
 static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
     if (!reply || !dst) return 0;
@@ -425,11 +367,11 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
     }
     if (reply->kind == REDIS_REPLY_NULL_BULK) {
         RespGBulkHdr nil = { .len = -1 };
-        return cc_write(RespGBulkHdr, &nil, dst, cap);
+        return RespGBulkHdr_write(&nil, dst, cap);
     }
     RespGReply wire;
     if (!redis_reply_to_wire(reply, &wire)) return 0;
-    return cc_write(RespGReply, &wire, dst, cap);
+    return RespGReply_write(&wire, dst, cap);
 }
 
 /* Encode into reply_arena.  `cap_hint` is a guess; cc_write 0-on-miss +
@@ -437,14 +379,14 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
 enum { k_reply_encode_cap_max = 1 << 30 };
 
 static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
-                                                                 CCArena* reply_arena,
-                                                                 size_t cap_hint) {
+                                                        CCArena* reply_arena,
+                                                        size_t cap_hint) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t cap = cap_hint < 16 ? 16 : cap_hint;
     for (;;) {
         CCArenaCheckpoint cp = cc_arena_checkpoint(reply_arena);
         CCSlice out = reply_arena_alloc_slice(reply_arena, cap) !>;
-        size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
+        size_t w = RespGReply_write(wire, (char*)out.ptr, out.len);
         if (w != 0) {
             out.len = w;
             return cc_ok(out);
@@ -473,61 +415,69 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
     }
     RespGReply arr;
     arr.kind = RespGReply_array;
-    arr.u.array.n = (long long)n; /* derived on write; set for hygiene */
+    arr.u.array.n = (long long)n;
     arr.u.array.items = items;
     arr.u.array.items_n = n;
     CCSlice out = reply_wire_encode_into_arena(&arr, reply_arena, 64) !>;
     return cc_ok(reply_wire(out));
 }
 
-static bool !>(CCError) decode_request_shape(CCSlice* args,
-                                             size_t argc,
-                                             RedisCommandKind* out_kind,
-                                             size_t* out_arg_start,
-                                             size_t* out_argc) {
-    if (argc < 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
+/* argv slots per command: the command word plus REDIS_ARGV_MAX arguments.
+ * Must match the `cap` on RespGCmd's args rule. */
+enum { k_argv_cap = REDIS_ARGV_MAX + 1 };
 
-    if (slice_eq_ignore_case(args[0], "CONFIG")) {
-        if (argc != 3 || !slice_eq_ignore_case(args[1], "GET")) {
+/* A decoded command.  args are slices borrowing the connection read
+ * buffer — valid until the next rr_fill, i.e. for the current window.
+ * arg_start skips the command word (and any subcommand token), so
+ * `args + arg_start` is the argv a handler sees and `argc` its length. */
+typedef struct RedisCmd {
+    RedisCommandKind kind;
+    RedisCmdHold hold;
+    CCSlice args[k_argv_cap];
+    size_t arg_start;
+    size_t argc;
+} RedisCmd;
+
+/* Fill kind / hold / arg_start / argc from the raw tokens already parsed
+ * into out->args.  CONFIG GET is the one two-word command: its subcommand
+ * token is consumed here so handlers only ever see a flat argv. */
+static bool !>(CCError) decode_request_shape(RedisCmd* out, size_t raw_argc) {
+    if (raw_argc < 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
+
+    if (slice_eq_ignore_case(out->args[0], "CONFIG")) {
+        if (raw_argc != 3 || !slice_eq_ignore_case(out->args[1], "GET")) {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
         }
-        *out_kind = REDIS_CMD_CONFIG_GET;
-        *out_arg_start = 2;
-        *out_argc = 1;
-        return cc_ok(true);
+        out->kind = REDIS_CMD_CONFIG_GET;
+        out->hold = REDIS_HOLD_NONE;   /* answers from static text only */
+        out->arg_start = 2;
+        out->argc = 1;
+        return cc_ok(1);
     }
 
-    RedisCommandKind kind = cmd_kind(args[0], argc - 1);
-    if ((int)kind < 0) {
+    const RedisCommandSpec* spec = cmd_spec(out->args[0], raw_argc - 1);
+    if (!spec) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
     }
 
-    *out_kind = kind;
-    *out_arg_start = 1;
-    *out_argc = argc - 1;
-    return cc_ok(true);
+    out->kind = spec->kind;
+    out->hold = spec->hold;
+    out->arg_start = 1;
+    out->argc = raw_argc - 1;
+    return cc_ok(1);
 }
 
-/* Non-blocking iterator over pipelined requests in the buffered reader.
- *   ok(true), *out = req  → handed to owner (slot released after commit;
- *                           see RedisConn lifetime).
+/* Non-blocking iterator over pipelined commands in the buffered reader.
+ *   ok(true), *out = cmd  → complete command decoded.
  *   ok(false)             → need rr_fill (mid-message).
- *   err(e)                → parse/alloc failure; slot already returned.
- * Borrows `reader` and `conn`. */
+ *   err(e)                → parse failure.
+ * Borrows `reader`. */
 typedef struct ReqIter {
     RespReader* reader;
-    RedisConn* conn;
 } ReqIter;
 
-typedef struct RedisRequestSlot {
-    RedisConn* conn;
-    RedisRequest* req;
-} RedisRequestSlot;
-
-/* Direct boundaries from handle_client: iterator setup is pure; refill uses
- * fiber-aware socket I/O and may park the fiber, never the OS worker. */
-@noblock static ReqIter rr_req_iter(RespReader* reader, RedisConn* conn) {
-    ReqIter it = { .reader = reader, .conn = conn };
+@noblock static ReqIter rr_req_iter(RespReader* reader) {
+    ReqIter it = { .reader = reader };
     return it;
 }
 
@@ -535,184 +485,128 @@ typedef struct RedisRequestSlot {
     return rr_fill(reader, sock);
 }
 
-static void redis_request_slot_release(RedisRequestSlot* slot) {
-    if (!slot || !slot->req) return;
-    redis_conn_release_slot(slot->conn, slot->req);
-    slot->conn = NULL;
-    slot->req = NULL;
-}
-
-static RedisRequest* redis_request_slot_commit(RedisRequestSlot* slot) {
-    if (!slot || !slot->conn || !slot->req) return NULL;
-    RedisRequest* req = slot->req;
-    /* req borrows conn for the owner hop (RedisConn lifetime §1–2). */
-    req->conn = slot->conn;
-    slot->conn = NULL;
-    slot->req = NULL;
-    return req;
-}
-
-static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
-    /* The pool slot IS a RedisRequest; req->arena wraps the trailing
-     * req->argv_buf for argv clones (heap-spills on overflow). */
-    RedisRequest* req = (RedisRequest*)cc_arena_pool_alloc(&conn->req_pool);
-    if (!req) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
-    }
-    /* No full-struct memset: sizeof(RedisRequest) is ~450 B (dominated
-     * by the 368-byte argv_buf scratch) and zeroing it per-request
-     * showed up as a hot leaf in GET profiling.  All fields we read
-     * downstream are written explicitly below; argv_buf is just the
-     * arena's backing store so uninitialized bytes are fine. */
-    req->arena = cc_arena_create_buffer(req->argv_buf,
-                                        sizeof(req->argv_buf),
-                                        CC_ARENA_GROWABLE);
-    if (!cc_arena_valid(&req->arena)) {
-        cc_arena_pool_free(&conn->req_pool, req);
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
-    }
-    return cc_ok((RedisRequestSlot){ .conn = conn, .req = req });
-}
-
-static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
-    RedisConn* conn = it->conn;
-    @errhandler(CCError e) { return cc_err(e); }
-
-    /* Parse BEFORE taking a pool slot: incomplete frames are the common
-     * refill case and must not touch req_pool / argv_buf at all.  Args
-     * borrow read_buf until we materialize into req->arena below. */
-    CCSlice args[1 + REDIS_ARGV_MAX] = {0};
-    size_t argc = 0;
+static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
+    size_t raw_argc = 0;
     CCError perr = {0};
     RespParseStatus argc_status =
-        gen_try_read_args_buffered(it->reader, args, 1 + REDIS_ARGV_MAX, &argc, &perr);
+        gen_try_read_args_buffered(it->reader, out->args, k_argv_cap,
+                                   &raw_argc, &perr);
     if (argc_status == RESP_PARSE_INCOMPLETE) {
-        return cc_ok(false);
+        return cc_ok(0);
     }
     if (argc_status == RESP_PARSE_ERROR) return cc_err(perr);
 
-    RedisCommandKind kind = REDIS_CMD_PING;
-    size_t arg_start = 0;
-    size_t req_argc = 0;
-    decode_request_shape(args, argc, &kind, &arg_start, &req_argc) !>(e) { return cc_err(e); };
-
-    RedisRequestSlot slot = redis_conn_request_slot(conn) !>;
-    @defer redis_request_slot_release(&slot);
-    RedisRequest* req = slot.req;
-
-    req->conn_id = conn->conn_id;
-    req->request_id = conn->next_request_id;
-    req->kind = kind;
-    req->argc = req_argc;
-    for (size_t i = 0; i < req_argc; ++i) {
-        req->argv[i] = cc_slice_clone(&req->arena, args[arg_start + i]);
-        if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
-        }
-    }
-
-    *out = redis_request_slot_commit(&slot);
-    return cc_ok(true);
+    decode_request_shape(out, raw_argc) !>(e) { return cc_err(e); };
+    return cc_ok(1);
 }
 
 #include "redis_db.cch"
 
-/* Owner dispatch (@noblock).  Builders may borrow req/DB; ensure_owned runs
- * before the slot is released.  `now` sampled at most once (db_req_now). */
-@noblock static RedisReply !>(CCError) execute_request_body(RedisDb* db,
-                                                           RedisRequest* req,
-                                                           CCArena* reply_arena) {
+/* One command against the DB, under whatever hold its RedisCmdHold policy
+ * asked for — REDIS_HOLD_TABLE commands run with the table held, and the
+ * returned reply may still borrow DB memory, so the caller materializes
+ * bulk into reply_arena before releasing.  Arity was checked by cmd_spec,
+ * so arms index argv up to their min_args freely. */
+@noblock static RedisReply !>(CCError) execute_cmd(RedisDb* db,
+                                                   const RedisCmd* cmd,
+                                                   CCArena* reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
+    const CCSlice* argv = cmd->args + cmd->arg_start;
+    size_t argc = cmd->argc;
     int64_t now = -1;
-    switch (req->kind) {
+    switch (cmd->kind) {
         case REDIS_CMD_PING:
-            if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
+            if (argc == 1) return cc_ok(reply_bulk(argv[0]));
             return cc_ok(reply_simple("PONG"));
         case REDIS_CMD_ECHO:
-            return cc_ok(reply_bulk(req->argv[0]));
+            return cc_ok(reply_bulk(argv[0]));
         case REDIS_CMD_CONFIG_GET:
-            return config_get_reply(req->argv[0], reply_arena);
+            return config_get_reply(argv[0], reply_arena);
         case REDIS_CMD_GET:
-            return db_get(db, req->argv[0], reply_arena, &now);
+            return db_get(db, argv[0], reply_arena, &now);
         case REDIS_CMD_SET:
-            return db_set(db, req->argv[0], req->argv[1], 0);
+            /* REDIS_HOLD_INSTALL routes SET to db_set_install instead. */
+            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
+                                   "ERR SET is not an execute_cmd arm"));
         case REDIS_CMD_SETNX:
-            return db_setnx(db, req->argv[0], req->argv[1], &now);
+            return db_setnx(db, argv[0], argv[1], &now);
         case REDIS_CMD_SETEX: {
-            char[:] secs_arg = req->argv[1];
+            char[:] secs_arg = argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
-            return db_set_with_ttl(db, req->argv[0], req->argv[2],
+            return db_set_with_ttl(db, argv[0], argv[2],
                                    expire_seconds_to_rel_ms(seconds), &now);
         }
         case REDIS_CMD_PSETEX: {
-            char[:] ms_arg = req->argv[1];
+            char[:] ms_arg = argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &now);
+            return db_set_with_ttl(db, argv[0], argv[2], ms, &now);
         }
         case REDIS_CMD_APPEND:
-            return db_append(db, req->argv[0], req->argv[1], &req->arena, &now);
+            return db_append(db, argv[0], argv[1], reply_arena, &now);
         case REDIS_CMD_STRLEN:
-            return cc_ok(db_strlen(db, req->argv[0], &now));
+            return cc_ok(db_strlen(db, argv[0], &now));
         case REDIS_CMD_TYPE:
-            return cc_ok(db_type(db, req->argv[0], &now));
+            return cc_ok(db_type(db, argv[0], &now));
         case REDIS_CMD_DEL:
-            return cc_ok(db_del(db, req->argv, req->argc, &now));
+            return cc_ok(db_del(db, (CCSlice*)argv, argc, &now));
         case REDIS_CMD_EXISTS:
-            return cc_ok(db_exists(db, req->argv, req->argc, &now));
+            return cc_ok(db_exists(db, (CCSlice*)argv, argc, &now));
         case REDIS_CMD_INCR:
-            return db_incrby(db, req->argv[0], 1, &now);
+            return db_incrby(db, argv[0], 1, &now);
         case REDIS_CMD_DECR:
-            return db_incrby(db, req->argv[0], -1, &now);
+            return db_incrby(db, argv[0], -1, &now);
         case REDIS_CMD_INCRBY: {
-            char[:] delta_arg = req->argv[1];
+            char[:] delta_arg = argv[1];
             int64_t delta = delta_arg.to_i64() !>;
-            return db_incrby(db, req->argv[0], delta, &now);
+            return db_incrby(db, argv[0], delta, &now);
         }
         case REDIS_CMD_DECRBY: {
-            char[:] delta_arg = req->argv[1];
+            char[:] delta_arg = argv[1];
             int64_t delta = delta_arg.to_i64() !>;
             int64_t neg = cc_sub_i64_checked(0, delta) !> {
-                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
-                                       "ERR decrement would overflow"));
+                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR decrement would overflow"));
             };
-            return db_incrby(db, req->argv[0], neg, &now);
+            return db_incrby(db, argv[0], neg, &now);
         }
         case REDIS_CMD_MGET:
-            return db_mget(db, req->argv, req->argc, reply_arena, &now);
+            return db_mget(db, (CCSlice*)argv, argc, reply_arena, &now);
         case REDIS_CMD_MSET:
-            return db_mset(db, req->argv, req->argc);
+            return db_mset(db, (CCSlice*)argv, argc);
         case REDIS_CMD_EXPIRE: {
-            char[:] secs_arg = req->argv[1];
+            char[:] secs_arg = argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
-            return db_expire_rel_ms(db, req->argv[0],
+            return db_expire_rel_ms(db, argv[0],
                                    expire_seconds_to_rel_ms(seconds), &now);
         }
         case REDIS_CMD_PEXPIRE: {
-            char[:] ms_arg = req->argv[1];
+            char[:] ms_arg = argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return db_expire_rel_ms(db, req->argv[0], ms, &now);
+            return db_expire_rel_ms(db, argv[0], ms, &now);
         }
         case REDIS_CMD_TTL:
-            return cc_ok(db_ttl(db, req->argv[0], false, &now));
+            return cc_ok(db_ttl(db, argv[0], 0, &now));
         case REDIS_CMD_PTTL:
-            return cc_ok(db_ttl(db, req->argv[0], true, &now));
+            return cc_ok(db_ttl(db, argv[0], 1, &now));
         case REDIS_CMD_PERSIST:
-            return db_persist(db, req->argv[0], &now);
+            return db_persist(db, argv[0], &now);
         case REDIS_CMD_DBSIZE:
             return cc_ok(db_dbsize(db, &now));
         case REDIS_CMD_FLUSHDB:
         case REDIS_CMD_FLUSHALL:
             return cc_ok(db_flush(db));
         case REDIS_CMD_KEYS:
-            return db_keys(db, req->argv[0], reply_arena, &now);
+            return db_keys(db, argv[0], reply_arena, &now);
         case REDIS_CMD_CC_MEMLOG: {
-            /* Optional phase tag: CC.MEMLOG [phase].  Diagnostics may block stderr. */
+            /* Optional phase tag: CC.MEMLOG [phase].  REDIS_HOLD_NONE: these
+             * are diagnostics that may block on stderr, and a concurrent
+             * writer can only skew counters a report already treats as
+             * approximate. */
             const char* phase = "cc-memlog";
             char phase_buf[64];
-            if (req->argc >= 1 && req->argv[0].ptr && req->argv[0].len > 0) {
-                size_t n = req->argv[0].len < sizeof(phase_buf) - 1 ? req->argv[0].len
-                                                                    : sizeof(phase_buf) - 1;
-                memcpy(phase_buf, req->argv[0].ptr, n);
+            if (argc >= 1 && argv[0].ptr && argv[0].len > 0) {
+                size_t n = argv[0].len < sizeof(phase_buf) - 1 ? argv[0].len
+                                                             : sizeof(phase_buf) - 1;
+                memcpy(phase_buf, argv[0].ptr, n);
                 phase_buf[n] = '\0';
                 phase = phase_buf;
             }
@@ -725,10 +619,16 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     }
 }
 
-/* Payload ownership for the reply channel (RedisConn lifetime §2).
- * materialize_in only — kind unchanged.  Empty / canonical / already in
- * reply_arena are no-ops (PONG/OK stay static; GET-str copies DB bytes;
- * WIRE arrays built in-arena stay put).  Encode belongs at socket write. */
+/* Result → reply.  A failed command answers with a RESP error line, so the
+ * window loop writes exactly one reply per command either way. */
+static RedisReply reply_or_err(CCResult_RedisReply_CCError built) {
+    return built.is_err() ? err_reply(built.error()) : built.value();
+}
+
+/* Materialize reply->data into reply_arena so encode/write can run after
+ * the table release.  Used for GET bulks (and other BULK_STRING replies).
+ * materialize_in only — kind unchanged; static text / already-owned slices
+ * are no-ops. */
 @noblock static inline bool !>(CCError) redis_reply_ensure_owned(RedisReply* reply,
                                                                       CCArena* reply_arena) {
     if (!reply || !reply_arena) {
@@ -736,16 +636,6 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     }
     return reply->data.materialize_in(reply_arena);
 }
-
-@noblock static RedisReply !>(CCError) execute_request(RedisDb* db,
-                                                       RedisRequest* req,
-                                                       CCArena* reply_arena) {
-    @errhandler(CCError e) { return cc_err(e); }
-    RedisReply reply = execute_request_body(db, req, reply_arena) !>;
-    redis_reply_ensure_owned(&reply, reply_arena) !>;
-    return cc_ok(reply);
-}
-
 
 static bool write_all(CCSocket* sock, CCSlice data) {
     size_t off = 0;
@@ -757,16 +647,16 @@ static bool write_all(CCSocket* sock, CCSlice data) {
                                             data.len - off,
                                             &deadline) !>(e) {
             (void)e;
-            return false;
+            return 0;
         };
-        if (n == 0) return false;
+        if (n == 0) return 0;
         off += n;
     }
-    return true;
+    return 1;
 }
 
 static bool redis_conn_flush_out(RedisConn* conn) {
-    if (!conn || conn->out_len == 0) return true;
+    if (!conn || conn->out_len == 0) return 1;
     CCSlice data = {
         .ptr = conn->out_buf,
         .len = conn->out_len,
@@ -776,66 +666,45 @@ static bool redis_conn_flush_out(RedisConn* conn) {
 }
 
 static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
-    if (!conn || data.len == 0) return true;
+    if (!conn || data.len == 0) return 1;
     if (data.len > redis_conn_out_buf_bytes) {
         return conn->flush_out() && write_all(conn->sock, data);
     }
     if (conn->out_len + data.len > redis_conn_out_buf_bytes) {
-        if (!conn->flush_out()) return false;
+        if (!conn->flush_out()) return 0;
     }
     memcpy(conn->out_buf + conn->out_len, data.ptr, data.len);
     conn->out_len += data.len;
-    return true;
+    return 1;
 }
 
-/* One schema-written reply into conn->out_buf.  cc_write's 0-on-didn't-fit
- * drives the existing buffer discipline: try the remaining space, flush and
- * retry into the whole buffer, and only a reply bigger than the buffer
- * itself falls through to streaming (schema-written bulk header, then the
- * payload slice, then the closing CRLF pair). */
-static bool redis_conn_write_wire_reply(RedisConn* conn, const RespGReply* wire) {
-    size_t w = cc_write(RespGReply, wire, conn->out_buf + conn->out_len,
-                        redis_conn_out_buf_bytes - conn->out_len);
-    if (w == 0) {
-        if (!conn->flush_out()) return false;
-        w = cc_write(RespGReply, wire, conn->out_buf, redis_conn_out_buf_bytes);
-    }
-    if (w != 0) {
-        conn->out_len += w;
-        return true;
-    }
-    /* Bigger than the whole out_buf: only bulk payloads can get here
-     * (simple/error carry short static messages; integers are <= 22 bytes).
-     * Anything else oversized is a bug — fail the write loudly. */
-    if (wire->kind != RespGReply_bulk) return false;
-    RespGBulkHdr hdr = { .len = (long long)wire->u.bulk.data.len };
-    size_t hw = cc_write(RespGBulkHdr, &hdr, conn->out_buf, redis_conn_out_buf_bytes);
-    if (hw == 0) return false;
-    conn->out_len = hw; /* buffer is empty after the flush above */
-    return conn->write_bytes(wire->u.bulk.data) &&
-           conn->write_bytes(cc_slice_from_cstr("\r\n"));
-}
-
+/* The one reply→wire path.  cc_write's 0-on-didn't-fit drives the buffer
+ * discipline: try the space left in out_buf, then flush and retry into the
+ * whole buffer.  Only a reply larger than out_buf itself falls through to
+ * streaming — opaque wire bytes go straight out, and a bulk goes as
+ * schema-written header, payload slice, closing CRLF. */
 static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
-    if (!conn || !reply) return false;
-    size_t w = cc_write(RedisReply, reply,
-                        conn->out_buf + conn->out_len,
-                        redis_conn_out_buf_bytes - conn->out_len);
+    if (!conn || !reply) return 0;
+    size_t w = RedisReply_write(reply, conn->out_buf + conn->out_len,
+                                redis_conn_out_buf_bytes - conn->out_len);
     if (w == 0) {
-        if (!conn->flush_out()) return false;
-        w = cc_write(RedisReply, reply, conn->out_buf, redis_conn_out_buf_bytes);
+        if (!conn->flush_out()) return 0;
+        w = RedisReply_write(reply, conn->out_buf, redis_conn_out_buf_bytes);
     }
     if (w != 0) {
         conn->out_len += w;
-        return true;
+        return 1;
     }
-    if (reply->kind == REDIS_REPLY_WIRE) {
-        return conn->write_bytes(reply->data);
-    }
-    if (reply->kind != REDIS_REPLY_BULK_STRING) return false;
-    RespGReply wire;
-    if (!redis_reply_to_wire(reply, &wire)) return false;
-    return conn->write_wire_reply(&wire);
+
+    /* Streaming path; the retry above flushed, so out_buf is empty. */
+    if (reply->kind == REDIS_REPLY_WIRE) return conn->write_bytes(reply->data);
+    if (reply->kind != REDIS_REPLY_BULK_STRING) return 0;
+    RespGBulkHdr hdr = { .len = (long long)reply->data.len };
+    size_t hw = RespGBulkHdr_write(&hdr, conn->out_buf, redis_conn_out_buf_bytes);
+    if (hw == 0) return 0;
+    conn->out_len = hw;
+    return conn->write_bytes(reply->data) &&
+           conn->write_bytes(cc_slice_from_cstr("\r\n"));
 }
 
 static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
@@ -844,109 +713,34 @@ static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t 
     return cc_ok(s);
 }
 
-/* First reply_arena slab: enough for ~k_pipeline_reply_cap hot replies; larger
- * payloads spill to heap blocks. */
-/* Connection setup allocates local runtime resources but performs no
- * externally-dependent wait. */
-@noblock static RedisConn* redis_conn_create(uint64_t conn_id) {
-    RedisConn* conn = calloc(1, sizeof(*conn));
-    if (!conn) return NULL;
-
-    ReplyTx reply_tx;
-    ReplyRx reply_rx;
-    CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
-    if (!reply_ch) { free(conn); return NULL; }
-
-    const size_t reply_arena_initial = 16 * 1024;
-    conn->reply_arena = cc_arena_heap(reply_arena_initial);
-    if (!conn->reply_arena.base) {
-        cc_channel_free(reply_tx);
-        free(conn);
-        return NULL;
-    }
-    conn->reply_arena.block_max = 0;
-    if (cc_arena_pool(&conn->req_pool, sizeof(RedisRequest)) != 0) {
-        cc_arena_free(&conn->reply_arena);
-        cc_channel_free(reply_tx);
-        free(conn);
-        return NULL;
-    }
-    conn->reply_tx = reply_tx;
-    conn->reply_rx = reply_rx;
-    conn->inflight = 0;
-    conn->conn_id = conn_id;
-    conn->next_request_id = 1;
-    return conn;
-}
-
-static void redis_conn_destroy(RedisConn* conn) {
-    /* Only after RedisConn lifetime §3 (drain-to-zero / channel close). */
-    cc_arena_free(&conn->reply_arena);
-    cc_arena_pool_destroy(&conn->req_pool);
-    cc_channel_free(conn->reply_tx);
-    free(conn);
-}
-
 /* One-shot error-reporting path: serialize directly into conn->out_buf
  * and flush immediately. */
 static bool redis_conn_write_reply_now(RedisConn* conn, RedisReply reply) {
     return conn->write_reply(&reply) && conn->flush_out();
 }
 
-/* Free req arena spill and return the pool slot.  @noblock is load-bearing
- * on the owner hot path (blocking-pool dispatch was ~3x slower on SET). */
-@noblock static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req) {
-    if (!req || !conn) return;
-    cc_arena_free(&req->arena);
-    cc_arena_pool_free(&conn->req_pool, req);
-}
-
-/* Teardown join (RedisConn lifetime §3): discard one reply per inflight. */
-static void redis_conn_drain_inflight(RedisConn* conn) {
-    RedisReply discard = {0};
-    if (!conn) return;
-    while (conn->inflight > 0 &&
-           cc_io_avail(cc_channel_recv(conn->reply_rx, &discard))) {
-        conn->inflight--;
-    }
-}
-
-/* @defer backstop if the iteration exits before an explicit release. */
-@noblock static void owner_release_pending(RedisConn* conn, RedisRequest** req) {
-    if (req && *req) {
-        redis_conn_release_slot(conn, *req);
-        *req = NULL;
-    }
-}
-
-
+/* Window teardown: every reply landed in out_buf or the socket, so the
+ * arena contents are dead. */
 static inline void reply_arena_reset(RedisConn* conn) {
     if (!conn) return;
     cc_arena_reset(&conn->reply_arena);
 }
 
-/* Owner loop: drain requests, execute, reply.  `db` is stack-local so
- * it can't outlive the owner and nobody else can take its address. */
-@async int owner_loop(ReqRx req_rx) {
-    RedisDb db = {0};
-    bool db_ready = false;
-    db_ready = db_init(&db, 1024);
-    if (!db_ready) {
+/* DB construction, preload, and memory reporting, at server scope (the
+ * memlog label strings match historical redis_idiomatic parsers). */
+static bool db_setup(RedisDb* db) {
+    if (!db_init(db, 1024)) {
         char scratch_buf[256];
-        @nonblocking {
-            CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
-            CCString line = @string("redis_idiomatic: db_init failed (out of memory?)", &scratch);
-            redis_diag_fprintln(&line, &scratch);
-        }
-        return 1;
+        CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
+        CCString line = @string("redis_idiomatic: db_init failed (out of memory?)", &scratch);
+        redis_diag_fprintln(&line, &scratch);
+        return 0;
     }
     int preload_keys = db_preload_key_count();
     if (preload_keys > 0) {
-        bool preload_ok = false;
-        preload_ok = db_preload_keys_ok(&db, preload_keys);
-        if (!preload_ok) {
+        if (!db_preload_keys_ok(db, preload_keys)) {
             fprintf(stderr, "redis_idiomatic: preload failed\n");
-            return 1;
+            return 0;
         }
         size_t preload_key_count = (size_t)preload_keys;
         char preload_scratch_buf[128];
@@ -957,143 +751,126 @@ static inline void reply_arena_reset(RedisConn* conn) {
                 @string(`redis_idiomatic: preloaded ${preload_key_count} keys`, &preload_scratch);
             redis_diag_fprintln(&line, &preload_scratch);
         }
-        db_dump_mem_stats(&db, "post-preload");
-        redis_mem_emit_gap(&db, "post-preload");
+        db_dump_mem_stats(db, "post-preload");
+        redis_mem_emit_gap(db, "post-preload");
     }
-    redis_mem_report(&db, "owner-ready");
-    @defer db_free_all(&db);
 
-    /* The request loop is the owner CPU/fiber hot path.  Its direct sync
-     * boundary helpers carry @noblock; cold startup retains the default
-     * blocking policy. */
-    RedisRequest* req = NULL;
-    while (cc_io_avail(req_rx.recv(&req))) {
-        if (!req || !req->conn) continue;
-
-        RedisConn* conn = req->conn;
-        @defer owner_release_pending(conn, &req);
-        @errhandler(CCError e) {
-            if (req) { redis_conn_release_slot(conn, req); req = NULL; }
-            cc_channel_close(conn->reply_tx, cc_io_error(e));
-            return 0;
-        }
-
-        /* Reserve-then-write.  [dbp = &db]: value-capture pointer (not [&db]). */
-        CCResult_bool_CCIoError queued =
-            conn->reply_tx.try_send_into(
-                (slot, arena) => [dbp = &db, req] {
-                    CCResult_RedisReply_CCError built =
-                        execute_request(dbp, req, arena);
-                    if (built.is_err()) *slot = err_reply(built.error());
-                    else *slot = built.value();
-                    return NULL;
-                },
-                &conn->reply_arena);
-        if (cc_is_err(queued)) {
-            cc_channel_close(conn->reply_tx, queued.error());
-            continue;
-        }
-        if (!cc_value(queued)) {
-            cc_channel_close(conn->reply_tx, cc_io_error(CC_IO_CONNECTION_CLOSED));
-            continue;
-        }
-        redis_conn_release_slot(conn, req);
-        req = NULL;
-    }
-    return 0;
+    /* Tag kept as owner-ready for bench_then_memlog / baseline greps. */
+    redis_mem_report(db, "owner-ready");
+    return 1;
 }
 
-/* Direct boundaries from handle_client.  Channel/socket waits are fiber-aware:
- * these helpers may park the current fiber but do not block the OS worker. */
-@noblock static RedisPipelineStatus !>(CCError) submit_pipeline_window(RedisConn* conn,
-                                                            ReqTx req_tx,
-                                                            ReqIter* req_iter,
-                                                            RedisPipelineWindow* window) {
+/* Drain up to k_pipeline_window_cap already-buffered commands.  Every hold
+ * in the server is taken here, from the command's RedisCmdHold policy:
+ *
+ *   REDIS_HOLD_NONE     execute, no hold
+ *   REDIS_HOLD_INSTALL  prep value -> hold -> install -> release
+ *   REDIS_HOLD_TABLE    hold -> execute -> own bulk -> release
+ *
+ * In every arm the hold covers DB mutate/snapshot only: the guard releases
+ * at the end of its arm — including on an error return — so RESP encoding
+ * and the socket write always happen unheld.  End of window flushes out_buf.
+ *
+ * Returns ok(false) when the connection is gone (client closed / write
+ * failed), err(e) on parse errors the caller reports, ok(true) with
+ * *n_out = commands run otherwise.  The reply arena resets on exit. */
+@noblock static bool !>(CCError) run_pipeline_window(RedisConn* conn,
+                                                     RedisDb* db,
+                                                     CCExclusiveMutex* table,
+                                                     ReqIter* req_iter,
+                                                     size_t* n_out) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (!window) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "pipeline window null"));
-
-    window->submitted = 0;
-    window->replies_pending = 0;
-    while (redis_pipeline_window_has_room(window)) {
-        RedisRequest* req = NULL;
-        bool has = rr_req_iter_next(req_iter, &req) !>;
-        if (!has) break;
-        conn->next_request_id++;
-        CCResult_bool_CCIoError send_res = cc_channel_send(req_tx, req);
-        if (cc_is_err(send_res) || !send_res.u.value) {
-            redis_conn_release_slot(conn, req);
-            return cc_ok(REDIS_PIPELINE_OWNER_UNAVAILABLE);
-        }
-        redis_pipeline_window_accept(window);
-        conn->inflight++;
-    }
-
-    return cc_ok(REDIS_PIPELINE_OK);
-}
-
-@noblock static RedisPipelineStatus drain_pipeline_window(RedisConn* conn, RedisPipelineWindow* window) {
-    if (!window) return REDIS_PIPELINE_REPLY_CLOSED;
     @defer reply_arena_reset(conn);
-    while (window->replies_pending > 0) {
-        RedisReply reply = {0};
-        CCResult_bool_CCIoError recv_res = cc_channel_recv(conn->reply_rx, &reply);
-        if (cc_is_err(recv_res) || !recv_res.u.value) return REDIS_PIPELINE_REPLY_CLOSED;
-        window->replies_pending--;
-        conn->inflight--;
-        if (!conn->write_reply(&reply)) return REDIS_PIPELINE_WRITE_FAILED;
+
+    size_t n = 0;
+    *n_out = 0;
+    while (n < (size_t)k_pipeline_window_cap) {
+        RedisCmd cmd;
+        bool has = rr_cmd_next(req_iter, &cmd) !>;
+        if (!has) break;
+        n++;
+        *n_out = n;
+
+        RedisReply reply;
+        switch (cmd.hold) {
+            case REDIS_HOLD_NONE:
+                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                break;
+
+            case REDIS_HOLD_INSTALL: {
+                /* Value goes durable outside the hold; inside, install
+                 * borrow-looks up and swings, or clones the key into
+                 * key_arena and inserts (no discarded key on overwrite). */
+                const CCSlice* argv = cmd.args + cmd.arg_start;
+                CCString pre_val = db_prep_value(argv[1]) !>;
+                CCExclusiveGuard g = table->acquire();
+                @defer g.release();
+                reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
+                break;
+            }
+
+            case REDIS_HOLD_TABLE: {
+                CCExclusiveGuard g = table->acquire();
+                @defer g.release();
+                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                /* Own bulk before release: encode must never read DB memory
+                 * once another fiber can mutate it. */
+                if (reply.kind == REDIS_REPLY_BULK_STRING) {
+                    redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
+                }
+                break;
+            }
+
+            default:
+                reply = reply_error("ERR unknown hold policy");
+                break;
+        }
+
+        if (!conn->write_reply(&reply)) return cc_ok(0);
     }
 
-    /* One socket write for the whole submitted pipeline window. */
-    if (conn->out_len > 0 && !conn->flush_out()) return REDIS_PIPELINE_WRITE_FAILED;
-    return REDIS_PIPELINE_OK;
+    /* End of window: flush outside the hold. */
+    if (conn->out_len > 0 && !conn->flush_out()) return cc_ok(0);
+    return cc_ok(1);
 }
 
-/* Per-connection driver.  One outer iteration = one pipeline window:
- * submit / drain / flush / rr_fill (phases labeled inline). */
-@async int handle_client(CCSocket client, ReqTx req_tx, uint64_t conn_id) {
+/* Connection fiber: read, parse, and run windows until the client goes
+ * away.  This fiber does the work itself; `table` is its only link to the
+ * other connections. */
+@async int handle_client(CCSocket client, RedisDb* db, CCExclusiveMutex table) {
     @defer cc_socket_close(&client);
-    /* @destroy runs RedisConn lifetime §3, then redis_conn_destroy. */
-    RedisConn* conn = redis_conn_create(conn_id) !> { return 1; }     @destroy {
-        redis_conn_drain_inflight(conn);
-    };
+
+    /* All connection state on the fiber stack; the reply arena is the
+     * connection's only heap allocation. */
+    RedisConn conn_state = {0};
+    RedisConn* conn = &conn_state;
+    conn->reply_arena = cc_arena_heap(16 * 1024);
+    if (!conn->reply_arena.base) return 1;
+    conn->reply_arena.block_max = 0;
+    @defer cc_arena_free(&conn->reply_arena);
     conn->sock = &client;
 
     /* Large enough for pipelined redis-benchmark without constant compact moves. */
     char read_buf[64 * 1024];
     RespReader reader;
     @nonblocking { reader = rr_init(read_buf, sizeof(read_buf)); }
-    ReqIter req_iter = rr_req_iter(&reader, conn);
-    while (true) {
-        /* Any CCError surfaced via !> in this window becomes one
-         * err_reply and we tear down via the outer @defer. */
+    ReqIter req_iter = rr_req_iter(&reader);
+    while (1) {
+        /* Parse errors turn into RESP errors on the wire, then close. */
         @errhandler(CCError e) {
             (void)conn->write_reply_now(err_reply(e));
             return 0;
         }
 
-        /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
-         * accepted request owes exactly one RedisReply back on reply_rx. */
-        RedisPipelineWindow window = redis_pipeline_window_start();
-        RedisPipelineStatus submit_status =
-            submit_pipeline_window(conn, req_tx, &req_iter, &window) !>;
-        if (submit_status == REDIS_PIPELINE_OWNER_UNAVAILABLE) {
-            (void)conn->write_reply_now(reply_error("ERR owner channel unavailable"));
-            return 0;
-        }
-        if (submit_status != REDIS_PIPELINE_OK) return 0;
+        size_t n_cmds = 0;
+        bool window_ok =
+            run_pipeline_window(conn, db, &table, &req_iter, &n_cmds) !>;
+        if (!window_ok) return 0;
 
-        /* Drain/flush: exactly one RedisReply per submitted request. */
-        RedisPipelineStatus drain_status = drain_pipeline_window(conn, &window);
-        if (drain_status != REDIS_PIPELINE_OK) return 0;
+        /* A full window with bytes still buffered means more pipelined
+         * commands are ready — run another window before refilling. */
+        if (n_cmds == (size_t)k_pipeline_window_cap && reader.start < reader.end) continue;
 
-        /* If the socket read already buffered more complete/partial commands
-         * and this window stopped only because of k_pipeline_reply_cap, keep
-         * parsing before parking on another read.  Otherwise -P larger than
-         * the reply-channel depth can leave commands stranded in read_buf
-         * while the fiber waits for new socket readiness that may never arrive. */
-        if (redis_pipeline_window_is_full(&window) && reader.start < reader.end) continue;
-
-        /* rr_fill: park until more bytes arrive or EOF. */
         bool more = redis_rr_fill(&reader, &client) !>(e) {
             conn->write_reply_now(io_err_reply(e));
             return 0;
@@ -1138,10 +915,22 @@ int main(int argc, char** argv) {
     };
     @defer cc_listener_close(&ln);
 
-    ReqTx req_tx;
-    ReqRx req_rx;
-    CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx) !> @destroy;
+    /* The DB lives at server scope and is shared by every connection. */
+    RedisDb db = {0};
+    if (!db_setup(&db)) return 1;
+    @defer db_free_all(&db);
 
+    /* One exclusive section, one mutex name for the whole table. */
+    CCArena excl_arena = @create(kilobytes(16)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&excl_arena);
+    if (!excl) {
+        fprintf(stderr, "redis_idiomatic: cc_exclusive_create failed\n");
+        return 1;
+    }
+    @defer cc_exclusive_destroy(excl);
+    CCExclusiveMutex table = excl->mutex(k_table_lock_name);
+
+    RedisDb* dbp = &db;
     CCListener* ln_ptr = &ln;
 
     printf("redis_idiomatic listening on %s\n", addr);
@@ -1149,13 +938,10 @@ int main(int argc, char** argv) {
 
     {
         CCNursery* server = cc_nursery_create(NULL) !> @destroy;
-        /* On cancel, close req_tx so owner_loop's recv returns
-         * Ok(false) and the owner exits cleanly. */
-        (void)server->close_on(req_tx);
 
         static const int shutdown_sigs[] = { SIGINT, SIGTERM };
         if (server->cancel_on_signals(shutdown_sigs,
-                                         sizeof(shutdown_sigs) / sizeof(shutdown_sigs[0])) != 0) {
+                                      sizeof(shutdown_sigs) / sizeof(shutdown_sigs[0])) != 0) {
             char scratch_buf[256];
             CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
             CCString line =
@@ -1164,9 +950,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        server->spawn(() => [ln_ptr, req_tx, req_ch, server] {
-            uint64_t next_conn_id = 1;
-            while (true) {
+        server->spawn(() => [ln_ptr, dbp, table, server] {
+            while (1) {
                 CCSocket client = ln_ptr->accept() !>(e) {
                     if (!server->is_cancelled()) {
                         fprintf(stderr, "redis_idiomatic accept error: %d\n", (int)e);
@@ -1180,13 +965,9 @@ int main(int argc, char** argv) {
                 int one = 1;
                 (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-                uint64_t id = next_conn_id++;
-                (void)server->spawn_async(handle_client(client, req_tx, id));
+                (void)server->spawn_async(handle_client(client, dbp, table));
             }
-            cc_channel_close(req_ch);
         });
-
-        (void)server->spawn_async(owner_loop(req_rx));
     }
 
     return 0;

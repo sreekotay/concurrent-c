@@ -1,6 +1,7 @@
 #!/bin/bash
-# Head-to-head: upstream redis-server vs redis_idiomatic vs redis_lock.
-# Same knobs as bench_robust.sh (subset). Warmup round discarded.
+# Head-to-head: upstream redis-server vs redis_idiomatic (default exclusive)
+# vs redis_owner (channel / owner-fiber).  Same knobs as bench_robust.sh
+# (subset). Warmup round discarded.
 #
 #   ./bench_lock_cmp.sh
 #   REPEATS=3 PIPELINE=16 CLIENTS=50 ./bench_lock_cmp.sh
@@ -11,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
-LOCK_BIN="${LOCK_BIN:-$SCRIPT_DIR/out/redis_lock}"
+OWNER_BIN="${OWNER_BIN:-$SCRIPT_DIR/out/redis_owner}"
 
 REPEATS="${REPEATS:-4}"
 REQUESTS="${REQUESTS:-300000}"
@@ -21,13 +22,13 @@ RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
-LOCK_PORT="${LOCK_PORT:-6395}"
+OWNER_PORT="${OWNER_PORT:-6395}"
 
 need() { [[ -x "$1" ]] || { echo "missing $2 at $1" >&2; exit 1; }; }
 need "$BENCH_BIN" "redis-benchmark"
 need "$UPSTREAM_BIN" "redis-server"
 need "$IDIOMATIC_BIN" "redis_idiomatic"
-need "$LOCK_BIN" "redis_lock"
+need "$OWNER_BIN" "redis_owner"
 
 TMP="$(mktemp -d -t bench_lock_cmp.XXXXXX)"
 echo "tmp: $TMP" >&2
@@ -51,18 +52,18 @@ PY
 PIDS="$!"
 "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP/idiomatic.log" 2>&1 &
 PIDS="$PIDS $!"
-"$LOCK_BIN" "$LOCK_PORT" >"$TMP/lock.log" 2>&1 &
+"$OWNER_BIN" "$OWNER_PORT" >"$TMP/owner.log" 2>&1 &
 PIDS="$PIDS $!"
 
 wait_port "$UPSTREAM_PORT"
 wait_port "$IDIOMATIC_PORT"
-wait_port "$LOCK_PORT"
+wait_port "$OWNER_PORT"
 
 port_for() {
     case "$1" in
         upstream) echo "$UPSTREAM_PORT" ;;
         idiomatic) echo "$IDIOMATIC_PORT" ;;
-        lock) echo "$LOCK_PORT" ;;
+        owner) echo "$OWNER_PORT" ;;
     esac
 }
 
@@ -84,7 +85,7 @@ for r in $(seq 0 "$REPEATS"); do
     tag=$([[ $r == 0 ]] && echo "[warmup]" || echo "[round $r/$REPEATS]")
     echo >&2 "$tag"
     for cmd in "${CMDS[@]}"; do
-        order_str="$(python3 -c "import random; L=['upstream','idiomatic','lock']; random.shuffle(L); print(' '.join(L))")"
+        order_str="$(python3 -c "import random; L=['upstream','idiomatic','owner']; random.shuffle(L); print(' '.join(L))")"
         read -ra ORDER <<< "$order_str"
         for label in "${ORDER[@]}"; do
             out="$TMP/${label}_${cmd}_r${r}.log"
@@ -116,7 +117,7 @@ by = defaultdict(list)
 for r in rows:
     by[(r["cmd"], r["label"])].append(float(r["rps"]))
 cmds = sorted({r["cmd"] for r in rows}, key=lambda c: ["set","get","incr"].index(c) if c in ("set","get","incr") else 99)
-labels = ["upstream", "idiomatic", "lock"]
+labels = ["upstream", "idiomatic", "owner"]
 print()
 print(f"{'cmd':<6} {'label':<10} {'median':>10} {'mean':>10} {'min':>10} {'max':>10}")
 print("-" * 60)
@@ -126,15 +127,17 @@ for cmd in cmds:
         if not xs: continue
         med = statistics.median(xs)
         print(f"{cmd:<6} {lab:<10} {med/1e6:9.3f}M {statistics.mean(xs)/1e6:9.3f}M {min(xs)/1e6:9.3f}M {max(xs)/1e6:9.3f}M")
-    # relative to idiomatic
     idi = by.get((cmd, "idiomatic"), [])
-    loc = by.get((cmd, "lock"), [])
+    own = by.get((cmd, "owner"), [])
     up = by.get((cmd, "upstream"), [])
-    if idi and loc:
-        im, lm = statistics.median(idi), statistics.median(loc)
-        print(f"       lock/idiomatic = {lm/im:.2%}   lock/upstream = {lm/statistics.median(up):.2%}" if up else f"       lock/idiomatic = {lm/im:.2%}")
+    if idi and own:
+        im, om = statistics.median(idi), statistics.median(own)
+        line = f"       idiomatic/owner = {im/om:.2%}"
+        if up:
+            line += f"   idiomatic/upstream = {im/statistics.median(up):.2%}"
+        print(line)
     print()
 print(f"config: -c $CLIENTS -P $PIPELINE -n $REQUESTS -r $RANDOM_KEYS repeats=$REPEATS")
 print(f"bins: idiomatic=$IDIOMATIC_BIN")
-print(f"      lock=$LOCK_BIN")
+print(f"      owner=$OWNER_BIN")
 PY
