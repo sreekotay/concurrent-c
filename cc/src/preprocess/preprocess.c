@@ -4226,6 +4226,18 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         chan_rx = (strncmp(recv_type_base, "CCChanRx_", 9) == 0 ||
                    strcmp(recv_type_base, "CCChanRx") == 0 ||
                    strcmp(recv_type_base, "CCChanRx*") == 0);
+        if (strcmp(recv_type_base, "CCChan") == 0 ||
+            strcmp(recv_type_base, "CCChan*") == 0) {
+            /* Raw CCChan UFCS (recv/try_recv/close/free) is owned by the
+               compiler's channel dispatch (cc_ufcs_channel_callee), which
+               supplies the element-size argument the snake_case twin
+               (`cc_chan_recv(ch, out, size)`) requires.  The wildcard
+               composer below would emit a two-argument `cc_chan_recv(ch,
+               out)` and fail arity checking, so skip these call sites and
+               let the AST UFCS pass lower them. */
+            i++;
+            continue;
+        }
         map_decl_like = cc__source_declares_map_ufcs(src, n, recv_type_base);
         if (!(strncmp(recv_type_base, "CCVec_", 6) == 0 ||
               strncmp(recv_type_base, "ArrayMap_", 9) == 0 ||
