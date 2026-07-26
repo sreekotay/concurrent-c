@@ -186,14 +186,25 @@ typedef struct Reply {
 } Reply;
 ```
 
-User code consumes a schema `one of` through the same protected surface as
-`@variant`: designated-init construction (`Reply r = { .bulk = { .data = s } };`),
-dominated arm projection (`if (r.kind == .bulk) use(r.bulk.data);`, subject
-`switch`, `!>` / `?>`), and a compile-time ban on raw `.u` reach-in and
-`.kind` writes. Generated parse fill and write helpers retain raw layout
-access. Product-level fields outside the union (field-discriminated `one of`)
-remain ordinary struct members. Designators `{ .kind = … }` / `{ .u.… = … }`
-are an interop escape for compound literals only.
+### Access model
+
+A schema `one of` is a tagged sum with the same **protected consumption
+surface** as a default-layout `@variant`:
+
+- construction names exactly one arm (`Reply r = { .bulk = { .data = s } };`);
+- arm projection requires kind/switch/`!>`/`?>` domination;
+- user source cannot write `.kind` or reach into `.u`.
+
+Generated parse fill and write helpers retain raw layout access. Product-level
+fields outside the union (field-discriminated `one of`) remain ordinary struct
+members. Designators `{ .kind = … }` / `{ .u.… = … }` are an interop escape for
+compound literals only.
+
+Default-layout `@variant` and schema `one of` share the `NameKind` + `union u`
+shape and the access rules above. They are not the same type family: schemas
+add wire parse/write/measure faces; variants add destructor/transition and
+optional packing. Packed `@variant` representations are not layout-compatible
+with schema `one of`.
 
 Alternatives dispatch by disjoint leading literals. At most one alternative may
 omit a leading literal; that alternative is the default. Parse stores the

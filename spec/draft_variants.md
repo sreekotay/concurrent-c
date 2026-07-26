@@ -37,8 +37,10 @@ typedef struct RedisValue {
 ```
 
 This is the same default enum-and-union layout used by schema `one of`.
-Schema unions use the same protected consumption surface (construction,
-dominated projection, raw `.u` ban); see `spec/cc_serdes.md`.
+Default-layout variants and schema `one of` share that layout and the same
+protected consumption surface (construction, dominated projection, raw `.u`
+ban); see `spec/cc_serdes.md`. They remain distinct families: schemas own
+wire faces; variants own destructor/transition and packing.
 `sizeof(Name)` includes the tag and the largest arm. Construction, projection,
 switching, and transition do not allocate.
 
@@ -199,5 +201,6 @@ it never silently falls back to the default representation.
 Construction, braced assignment, read-only `.kind`, protected projection,
 checked subject switch, destruction, and transition have the same semantics as
 the default layout. `.kind` is decoded by generated accessors. Packed variants
-expose neither a writable tag field nor a raw union and make no layout-
-compatibility promise with schema `one of`.
+expose neither a writable tag field nor a raw union. The shared layout promise
+with schema `one of` applies only to the default (unpacked) representation;
+packed niche layout is not schema-compatible.

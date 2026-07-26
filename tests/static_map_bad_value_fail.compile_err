@@ -1,0 +1,1 @@
+static_map: entry "bad": value is not valid C initializer text (')_{' looks like a mistyped compound literal — use '){')

@@ -1,0 +1,19 @@
+/* Fail: static_map value strings are pasted into generated C. A mistyped
+ * compound literal must fail at the map with the key name — not cascade into
+ * a distant parser error on unrelated user code. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/static_map.cch>
+
+typedef struct Spec { int n; } Spec;
+
+@comptime {
+    CCStaticMapEntry entries[] = {
+        { "ok", "(Spec){ 1 }" },
+        { "bad", "(Spec)_{ 2 }" },
+    };
+    static_map("demo", "Spec", entries,
+               sizeof(entries) / sizeof(entries[0]),
+               CC_STATIC_MAP_CASE_SENSITIVE);
+}
+
+int main(void) { return 0; }

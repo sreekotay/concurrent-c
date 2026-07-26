@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <ccc/cc_instantiate.cch>
 #include <ccc/cc_slice.cch>
@@ -27,6 +28,10 @@ enum {
  * ASCII case-insensitive matching. Generated surface:
  *
  *   static const value_type* <name>_get(CCSlice key);
+ *
+ * Values are pasted into `static const T values[] = { <value>, ... }`.
+ * Broken fragments are rejected here (keyed) instead of letting TCC fail
+ * later on a distant, #line-confused user location.
  */
 @comptime void static_map(const char* name,
                           const char* value_type,
@@ -46,6 +51,7 @@ enum {
     int16_t slots[512];
     size_t key_lens[256];
     uint32_t hashes[256];
+    char emsg[320];
 
     if (!name || !name[0] || !value_type || !value_type[0] ||
         !entries || count == 0 || count > 256) {
@@ -58,6 +64,53 @@ enum {
             strchr(entries[i].key, '"') || strchr(entries[i].key, '\\')) {
             cc_emit_error("static_map: keys must be simple string literals");
             return;
+        }
+        /* Validate value C-initializer text (balance + common typo). */
+        {
+            const char* v = entries[i].value;
+            int paren = 0, brace = 0, brack = 0;
+            int in_str = 0, in_chr = 0;
+            const char* bad = NULL;
+            size_t vi;
+            if (!v[0]) bad = "empty value";
+            for (vi = 0; !bad && v[vi]; vi++) {
+                char c = v[vi];
+                if (in_str) {
+                    if (c == '\\' && v[vi + 1]) { vi++; continue; }
+                    if (c == '"') in_str = 0;
+                    continue;
+                }
+                if (in_chr) {
+                    if (c == '\\' && v[vi + 1]) { vi++; continue; }
+                    if (c == '\'') in_chr = 0;
+                    continue;
+                }
+                if (c == '"') { in_str = 1; continue; }
+                if (c == '\'') { in_chr = 1; continue; }
+                /* `(Type)_{` — underscore is a legal ident char, so TCC
+                 * accepts `Type_` then fails much later on `{`. */
+                if (c == ')' && v[vi + 1] == '_' && v[vi + 2] == '{')
+                    bad = "')_{' looks like a mistyped compound literal — use '){'";
+                else if (c == '(') paren++;
+                else if (c == ')') {
+                    if (--paren < 0) bad = "unbalanced ')'";
+                } else if (c == '{') brace++;
+                else if (c == '}') {
+                    if (--brace < 0) bad = "unbalanced '}'";
+                } else if (c == '[') brack++;
+                else if (c == ']') {
+                    if (--brack < 0) bad = "unbalanced ']'";
+                }
+            }
+            if (!bad && (in_str || in_chr)) bad = "unterminated string/char literal";
+            if (!bad && (paren || brace || brack)) bad = "unbalanced brackets";
+            if (bad) {
+                snprintf(emsg, sizeof(emsg),
+                         "static_map: entry \"%s\": value is not valid C initializer text (%s)",
+                         entries[i].key, bad);
+                cc_emit_error(emsg);
+                return;
+            }
         }
         key_lens[i] = strlen(entries[i].key);
         for (j = 0; j < i; j++) {
@@ -127,8 +180,10 @@ enum {
         "static const %s %s__values[%zu] = {\n",
         value_type, name, count);
     for (i = 0; i < count; i++) {
+        /* Key comment keeps a greppable breadcrumb if a value still fails
+         * downstream parse (validation above catches the common cases). */
         cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
-            "    %s,\n", entries[i].value);
+            "    /* %s */ %s,\n", entries[i].key, entries[i].value);
     }
     cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
         "};\n"

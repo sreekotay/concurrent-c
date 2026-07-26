@@ -394,7 +394,7 @@ static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
     CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
     size_t w = RespGReply_write(wire, (char*)out.ptr, out.len);
     if (w != need) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode mismatch"));
+        return cc_err(CC_ERROR(CC_ERR_INTERNAL, "reply encode: write size != measure"));
     }
     out.len = w;
     return cc_ok(out);
