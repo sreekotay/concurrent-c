@@ -1763,6 +1763,9 @@ static int cc__build_target_objs_rec(int idx,
                 h = cc__fnv1a64_str(h, t_cc_flags);
                 h = cc__fnv1a64_str(h, getenv("CFLAGS"));
                 h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                // Semantic env: changing it changes the diagnostics the emit
+                // stage produces, so a cached artifact must not be reused.
+                h = cc__fnv1a64_str(h, getenv("CC_STRICT_RESULT_UNWRAP"));
                 // bake in const bindings
                 if (cfg) {
                     h = cc__fnv1a64_i64(h, (long long)cfg->const_count);
@@ -1959,6 +1962,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, opt->cc_flags);
         h = cc__fnv1a64_str(h, getenv("CFLAGS"));
         h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+        h = cc__fnv1a64_str(h, getenv("CC_STRICT_RESULT_UNWRAP"));
         h = cc__fnv1a64_i64(h, (long long)opt->no_build);
         h = cc__fnv1a64_i64(h, (long long)opt->cli_count);
         for (size_t i = 0; i < opt->cli_count; ++i) {
@@ -3661,6 +3665,7 @@ static int run_build_mode(int argc, char** argv) {
                 h = cc__fnv1a64_str(h, cc_flags);
                 h = cc__fnv1a64_str(h, getenv("CFLAGS"));
                 h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                h = cc__fnv1a64_str(h, getenv("CC_STRICT_RESULT_UNWRAP"));
                 h = cc__fnv1a64_i64(h, (long long)no_build);
                 // bake in const bindings + CLI -D (already merged into bindings)
                 h = cc__fnv1a64_i64(h, (long long)binding_count);

@@ -21,7 +21,7 @@ Both passes are text-rewrite passes over CC source, converging in a short fixed-
 Inside `cc__apply_phase3_host_lowering_passes` (used by the normal preprocess-to-string path):
 
 1. `cc__rewrite_unwrap_destroy_suffix` — guard: source contains `@destroy` *and* (`!>` or `?>`). Rewrites success-destructor suffixes into `@defer` blocks before either the unwrap or defer passes see them.
-2. `cc__rewrite_result_unwrap` — guard: source contains `?>` or `!>`, or `CC_STRICT_RESULT_UNWRAP=1`.
+2. `cc__rewrite_result_unwrap` — guard: source contains `?>` or `!>`, or strict mode is on (the default).
 3. `cc__rewrite_err_syntax` — guard: source contains `@errhandler`, `@err`, `=<!`, or `<?`.
 4. `cc__lower_with_deadline_syntax`
 5. `cc__rewrite_match_syntax`
@@ -140,7 +140,7 @@ The expression-position `!>(e) @err(e);` form relies on the `@err(IDENT);` forwa
 
 ## Unhandled-result diagnostic
 
-Triggered only when `CC_STRICT_RESULT_UNWRAP=1`. It runs as the final step of `cc__rewrite_result_unwrap`, after all `?>` / `!>` sites have already been lowered into `cc_is_ok` / `cc_is_err` temporaries — so by construction any residual `NAME(...)` at statement position is unconsumed.
+On by default; opt out with `CC_STRICT_RESULT_UNWRAP=0`. It runs as the final step of `cc__rewrite_result_unwrap`, after all `?>` / `!>` sites have already been lowered into `cc_is_ok` / `cc_is_err` temporaries — so by construction any residual `NAME(...)` at statement position is unconsumed.
 
 Gates (all must be true for the diagnostic to fire):
 
@@ -154,7 +154,7 @@ Conservative by design: a label prefix (`LBL: f();`) is a false negative, and in
 
 ## Transition flag
 
-- `**CC_STRICT_RESULT_UNWRAP=1`** — enables the unhandled-result diagnostic. Phase 3 will flip the default to on.
+- **`CC_STRICT_RESULT_UNWRAP=0`** — disables the unhandled-result diagnostic. The diagnostic is on by default; the variable is part of the build cache key, so toggling it rebuilds rather than reusing a stale artifact.
 - No flag is needed to enable `?>` / `!>` parsing and lowering; those operators are live unconditionally.
 
 ## Tests (new surface)
@@ -213,7 +213,7 @@ Conservative by design: a label prefix (`LBL: f();`) is a false negative, and in
 | `tests/result_unwrap_bang_forward_deadcode_fail.ccs`      | A statement after `@err(e);` in the same block is unreachable and rejected.                           |
 | `tests/result_unwrap_handler_no_diverge_fail.ccs`         | `@errhandler` body without a divergent tail is rejected at declaration site.                          |
 | `tests/result_unwrap_handler_no_diverge_void_fail.ccs`    | Same, in a `void`-returning function.                                                                 |
-| `tests/result_unwrap_unhandled_bare_fail.ccs`             | With `CC_STRICT_RESULT_UNWRAP=1`, a bare result-typed call is an error (`unhandled-result`).          |
+| `tests/result_unwrap_unhandled_bare_fail.ccs`             | By default, a bare result-typed call is an error (`unhandled-result`).          |
 
 
 ## Legacy `@err` / `=<!` surface

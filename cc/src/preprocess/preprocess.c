@@ -12451,9 +12451,10 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
         /* Invoke pass_result_unwrap whenever the source still contains `?>`
          * or `!>` operator sigils, OR whenever strict-mode is enabled (in
          * which case the final unhandled-result scan must run even if the
-         * operators are absent). */
+         * operators are absent).  Strict mode is on unless opted out with
+         * `CC_STRICT_RESULT_UNWRAP=0`. */
         const char* strict_env = getenv("CC_STRICT_RESULT_UNWRAP");
-        int strict_on = (strict_env && strict_env[0] == '1' && strict_env[1] == 0);
+        int strict_on = !(strict_env && strict_env[0] == '0' && strict_env[1] == 0);
         int has_ops = chain->src && chain->len > 0 &&
             (cc_contains_token_top_level(chain->src, chain->len, "?>") ||
              cc_contains_token_top_level(chain->src, chain->len, "!>"));

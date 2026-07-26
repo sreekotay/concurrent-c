@@ -1,6 +1,6 @@
-// Slice 7: without CC_STRICT_RESULT_UNWRAP=1, a bare call to a
-// result-returning function is still accepted — the result value is
-// evaluated and discarded.  Phase-1 safety: existing code compiles.
+// Slice 7: the unhandled-result diagnostic is on by default; with
+// CC_STRICT_RESULT_UNWRAP=0 a bare call to a result-returning function is
+// still accepted — the result value is evaluated and discarded.
 #include <stdio.h>
 
 int !> (CCError) f(void) {

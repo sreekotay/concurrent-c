@@ -2404,7 +2404,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
 /* ------------------------------------------------------------------
  * Slice 7: unhandled-result call diagnostic.
  *
- * Gated on env var `CC_STRICT_RESULT_UNWRAP=1`.  Runs as a final pass
+ * On by default; opt out with `CC_STRICT_RESULT_UNWRAP=0`.  Runs as a final pass
  * AFTER `?>` and `!>` have been lowered, so every legitimate consumer
  * has wrapped the underlying call in an assignment / ternary
  * construct.  What remains textually as `NAME(...)` at statement
@@ -2436,7 +2436,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
 
 static int cc__strict_enabled(void) {
     const char* e = getenv("CC_STRICT_RESULT_UNWRAP");
-    return (e && e[0] == '1' && e[1] == 0);
+    return !(e && e[0] == '0' && e[1] == 0);
 }
 
 /* Walk backwards from `from` (exclusive) skipping whitespace.  Returns

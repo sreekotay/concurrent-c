@@ -1611,7 +1611,9 @@ static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
     const char* strict_env = getenv("CC_STRICT_RESULT_UNWRAP");
     int strict_had_env = strict_env != NULL;
     char* strict_saved = strict_env ? strdup(strict_env) : NULL;
-    unsetenv("CC_STRICT_RESULT_UNWRAP");
+    /* Strict mode is on by default, so suppressing it for the reparse means
+     * setting the opt-out explicitly — unsetting would now enable it. */
+    setenv("CC_STRICT_RESULT_UNWRAP", "0", 1);
     char* pp_buf = cc_preprocess_emit_splice(pp_in, pp_in_len, input_path, 1);
     if (pp_buf && !diet_broken_by) {
         /* The splice inserts declaration blocks at known anchors and copies

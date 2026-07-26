@@ -1,6 +1,6 @@
-// Slice 7: with CC_STRICT_RESULT_UNWRAP=1, every legitimate
-// consumption form still compiles cleanly.  Covers `?>`, `!>`, result
-// assignment, `return`, and the `(void)` escape (Slice 8).
+// Slice 7: under the default strict scan, every legitimate consumption
+// form still compiles cleanly.  Covers `?>`, `!>`, result assignment,
+// `return`, and the `(void)` escape (Slice 8).
 #include <stdio.h>
 
 int !> (CCError) f(int x) {
