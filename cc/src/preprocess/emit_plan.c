@@ -1198,26 +1198,48 @@ static int cc__exec_failed = 0;
  * diagnostic — collisions and violations are loud, never silent.  Real global
  * symbols so both the libtcc executor and dynamic_lookup dylibs resolve them. */
 static int cc__diag_line_for_pos(size_t pos) {
+    const char* lp = NULL;
+    size_t lpl = 0;
+    if (!cc__reflect_src) return 1;
+    return cc_user_line_for_offset(cc__reflect_src, cc__reflect_src_len, pos, 1, &lp, &lpl);
+}
+
+/* Resolve (file,line) for a comptime diagnostic site, honoring #line/CC_LN
+ * ledger entries so spliced headers blame the .cch, not the including TU. */
+static void cc__diag_origin_for_pos(size_t pos, char* file_out, size_t file_cap, int* line_out) {
+    const char* lp = NULL;
+    size_t lpl = 0;
     int line = 1;
-    if (!cc__reflect_src) return line;
-    size_t lim = pos < cc__reflect_src_len ? pos : cc__reflect_src_len;
-    for (size_t i = 0; i < lim; i++)
-        if (cc__reflect_src[i] == '\n') line++;
-    return line;
+    if (file_out && file_cap) file_out[0] = '\0';
+    if (cc__reflect_src) {
+        line = cc_user_line_for_offset(cc__reflect_src, cc__reflect_src_len, pos, 1, &lp, &lpl);
+        if (lp && lpl > 0 && file_out && file_cap > 1) {
+            size_t n = lpl < file_cap - 1 ? lpl : file_cap - 1;
+            memcpy(file_out, lp, n);
+            file_out[n] = '\0';
+        }
+    }
+    if (line_out) *line_out = line;
 }
 
 void cc_emit_error(const char* msg) {
-    fprintf(stderr, "%s:%d: error: %s\n",
-            cc__diag_input_path ? cc__diag_input_path : "<input>",
-            cc__diag_line_for_pos(cc__host_site_pos),
+    char file[PATH_MAX];
+    int line = 1;
+    const char* f;
+    cc__diag_origin_for_pos(cc__host_site_pos, file, sizeof(file), &line);
+    f = file[0] ? file : (cc__diag_input_path ? cc__diag_input_path : "<input>");
+    fprintf(stderr, "%s:%d: error: %s\n", f, line,
             msg && msg[0] ? msg : "comptime error");
     cc__exec_failed = 1;
 }
 
 void cc_emit_warning(const char* msg) {
-    fprintf(stderr, "%s:%d: warning: %s\n",
-            cc__diag_input_path ? cc__diag_input_path : "<input>",
-            cc__diag_line_for_pos(cc__host_site_pos),
+    char file[PATH_MAX];
+    int line = 1;
+    const char* f;
+    cc__diag_origin_for_pos(cc__host_site_pos, file, sizeof(file), &line);
+    f = file[0] ? file : (cc__diag_input_path ? cc__diag_input_path : "<input>");
+    fprintf(stderr, "%s:%d: warning: %s\n", f, line,
             msg && msg[0] ? msg : "comptime warning");
 }
 

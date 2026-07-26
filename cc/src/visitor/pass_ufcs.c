@@ -762,25 +762,44 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
 
         if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
             char rel[1024];
+            char file_buf[1024];
             char recv_expr[256];
-            const char* file = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            const char* lp = NULL;
+            size_t lpl = 0;
+            int user_line = cc_user_line_for_offset(in_src, in_len, sp.start, 1, &lp, &lpl);
+            const char* raw_file = NULL;
+            /* Prefer the buffer ledger (#line / CC_LN), then the AST node's
+             * logical file from TCC, then the including TU.  Never blame the
+             * TU for a call that lives in a spliced .cch. */
+            if (lp && lpl > 0 && lpl < sizeof(file_buf)) {
+                memcpy(file_buf, lp, lpl);
+                file_buf[lpl] = '\0';
+                raw_file = file_buf;
+            } else if (nodes[i].file && nodes[i].file[0]) {
+                raw_file = nodes[i].file;
+                user_line = nodes[i].line_start;
+            } else {
+                raw_file = ctx->input_path ? ctx->input_path : "<input>";
+                user_line = nodes[i].line_start;
+            }
+            const char* file = cc_path_rel_to_repo(raw_file, rel, sizeof(rel));
             int col = nodes[i].col_start > 0 ? nodes[i].col_start : 1;
             cc__ufcs_extract_receiver_expr(expr, recv_expr, sizeof(recv_expr));
             if (nodes[i].recv_type && nodes[i].recv_type[0]) {
-                cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
                                   "no UFCS method '%s' for receiver type '%s'",
                                   nodes[i].method ? nodes[i].method : "<unknown>",
                                   nodes[i].recv_type);
             } else {
-                cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
                                   "cannot resolve UFCS method '%s' because the receiver type is unknown",
                                   nodes[i].method ? nodes[i].method : "<unknown>");
             }
             if (recv_expr[0]) {
-                cc_pass_note(file, nodes[i].line_start, col, "receiver expression: %s", recv_expr);
+                cc_pass_note(file, user_line, col, "receiver expression: %s", recv_expr);
             }
-            cc_pass_note(file, nodes[i].line_start, col, "offending call: %s", expr);
-            cc_pass_note(file, nodes[i].line_start, col,
+            cc_pass_note(file, user_line, col, "offending call: %s", expr);
+            cc_pass_note(file, user_line, col,
                          "hint: UFCS dispatch is strict; register an exact or wildcard owner, or call the lowered function explicitly");
             err = -1;
         } else if (rewrite_rc != CC_UFCS_REWRITE_OK) {

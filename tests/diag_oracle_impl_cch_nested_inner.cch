@@ -1,0 +1,1 @@
+static size_t nested_len(LocalMap m) { return m ? m.len() : 0; }

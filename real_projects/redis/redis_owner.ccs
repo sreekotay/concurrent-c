@@ -400,7 +400,8 @@ static inline RespGBulk wire_bulk_or_nil(CCSlice data, bool found) {
     return (RespGBulk){ .data = { .payload = data } };
 }
 
-/* Structured arms → RespGReply.  WIRE and NULL_BULK are not projected here. */
+/* Structured arms → RespGReply.  WIRE and NULL_BULK are handled by the
+ * caller (RedisReply_write); listing them keeps the switch exhaustive. */
 static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
     switch (reply->kind) {
         case REDIS_REPLY_SIMPLE_STRING:
@@ -415,7 +416,8 @@ static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
         case REDIS_REPLY_BULK_STRING:
             *wire = wire_bulk(reply->data);
             return true;
-        default:
+        case REDIS_REPLY_WIRE:
+        case REDIS_REPLY_NULL_BULK:
             return false;
     }
 }

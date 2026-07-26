@@ -6,10 +6,10 @@
  * holding that mutex.  No owner fiber, no request/reply channels.
  *
  * Request path: argv slices borrow the connection read buffer (no clone,
- * no handoff).  Each command's relationship to the hold is a field in the
- * command table (RedisCmdHold), and run_pipeline_window is the only place
- * that acquires: hold covers DB mutate/snapshot, RESP encode and socket
- * writes run after release.  SET preps its value outside the hold; install
+ * no handoff).  Hold policy lives with the command arms (`hold_for`); the
+ * name map is kind + arity only.  run_pipeline_window is the only acquire
+ * site: hold covers DB mutate/snapshot, RESP encode and socket writes run
+ * after release.  SET preps its value outside the hold; install
  * borrow-looks up and clones the key into key_arena only on miss.
  *
  * RedisConn (including out_buf) lives on the connection fiber stack; a
@@ -200,9 +200,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     return RESP_PARSE_ERROR;
 }
 
-/* How a command relates to the table hold.  run_pipeline_window switches on
- * this and is the only acquire site, so locking policy lives in the command
- * table below rather than in the window loop. */
+/* How a command relates to the table hold.  Chosen by hold_for(kind) next
+ * to the execute arms; run_pipeline_window is the only acquire site. */
 typedef enum RedisCmdHold {
     /* acquire -> execute -> own bulk -> release */
     REDIS_HOLD_TABLE = 0,
@@ -215,46 +214,46 @@ typedef enum RedisCmdHold {
 /* min/max_args count arguments after the command word; max_args < 0 is
  * variadic, and args_multiple > 0 additionally requires a whole number of
  * groups (MSET pairs).  Arity is checked once, here, so command handlers
- * may index argv up to min_args without rechecking. */
+ * may index argv up to min_args without rechecking.  Hold policy is not
+ * here — see hold_for. */
 typedef struct RedisCommandSpec {
     RedisCommandKind kind;
     int min_args;
     int max_args;
     int args_multiple;
-    RedisCmdHold hold;
 } RedisCommandSpec;
 
 @comptime {
-    /* name -> { kind, min_args, max_args, args_multiple, hold } */
+    /* name -> { kind, min_args, max_args, args_multiple } */
     CCStaticMapEntry commands[] = {
-        { "PING", "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0, REDIS_HOLD_TABLE }" },
-        { "ECHO", "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "GET", "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "SET", "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0, REDIS_HOLD_INSTALL }" },
-        { "SETNX", "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "SETEX", "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0, REDIS_HOLD_TABLE }" },
-        { "PSETEX", "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0, REDIS_HOLD_TABLE }" },
-        { "APPEND", "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "STRLEN", "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "TYPE", "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "DEL", "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0, REDIS_HOLD_TABLE }" },
-        { "EXISTS", "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0, REDIS_HOLD_TABLE }" },
-        { "INCR", "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "DECR", "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "INCRBY", "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "DECRBY", "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "MGET", "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0, REDIS_HOLD_TABLE }" },
-        { "MSET", "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2, REDIS_HOLD_TABLE }" },
-        { "EXPIRE", "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "PEXPIRE", "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0, REDIS_HOLD_TABLE }" },
-        { "TTL", "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "PTTL", "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "PERSIST", "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "DBSIZE", "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0, REDIS_HOLD_TABLE }" },
-        { "FLUSHDB", "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0, REDIS_HOLD_TABLE }" },
-        { "FLUSHALL", "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0, REDIS_HOLD_TABLE }" },
-        { "KEYS", "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0, REDIS_HOLD_TABLE }" },
-        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0, REDIS_HOLD_NONE }" },
+        { "PING", "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0 }" },
+        { "ECHO", "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0 }" },
+        { "GET", "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0 }" },
+        { "SET", "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0 }" },
+        { "SETNX", "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0 }" },
+        { "SETEX", "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0 }" },
+        { "PSETEX", "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0 }" },
+        { "APPEND", "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0 }" },
+        { "STRLEN", "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0 }" },
+        { "TYPE", "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0 }" },
+        { "DEL", "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0 }" },
+        { "EXISTS", "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0 }" },
+        { "INCR", "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0 }" },
+        { "DECR", "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0 }" },
+        { "INCRBY", "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0 }" },
+        { "DECRBY", "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0 }" },
+        { "MGET", "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0 }" },
+        { "MSET", "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2 }" },
+        { "EXPIRE", "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0 }" },
+        { "PEXPIRE", "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0 }" },
+        { "TTL", "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0 }" },
+        { "PTTL", "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0 }" },
+        { "PERSIST", "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0 }" },
+        { "DBSIZE", "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0 }" },
+        { "FLUSHDB", "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0 }" },
+        { "FLUSHALL", "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0 }" },
+        { "KEYS", "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0 }" },
+        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0 }" },
     };
     static_map("redis_commands", "RedisCommandSpec", commands,
                sizeof(commands) / sizeof(commands[0]),
@@ -340,7 +339,8 @@ static inline RespGBulk wire_bulk_or_nil(CCSlice data, bool found) {
     return (RespGBulk){ .data = { .payload = data } };
 }
 
-/* Structured arms → RespGReply.  WIRE and NULL_BULK are not projected here. */
+/* Structured arms → RespGReply.  WIRE and NULL_BULK are handled by the
+ * caller (RedisReply_write); listing them keeps the switch exhaustive. */
 static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
     switch (reply->kind) {
         case REDIS_REPLY_SIMPLE_STRING:
@@ -355,9 +355,11 @@ static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {
         case REDIS_REPLY_BULK_STRING:
             *wire = wire_bulk(reply->data);
             return 1;
-        default:
+        case REDIS_REPLY_WIRE:
+        case REDIS_REPLY_NULL_BULK:
             return 0;
     }
+    return 0;
 }
 
 /* Serialize a RedisReply into dst.  WIRE copies; structured uses
@@ -432,15 +434,14 @@ _Static_assert(REDIS_ARGV_MAX + 1 == RespGCmd_args_cap,
  * `args + arg_start` is the argv a handler sees and `argc` its length. */
 typedef struct RedisCmd {
     RedisCommandKind kind;
-    RedisCmdHold hold;
     CCSlice args[k_argv_cap];
     size_t arg_start;
     size_t argc;
 } RedisCmd;
 
-/* Fill kind / hold / arg_start / argc from the raw tokens already parsed
- * into out->args.  CONFIG GET is the one two-word command: its subcommand
- * token is consumed here so handlers only ever see a flat argv. */
+/* Fill kind / arg_start / argc from the raw tokens already parsed into
+ * out->args.  CONFIG GET is the one two-word command: its subcommand token
+ * is consumed here so handlers only ever see a flat argv. */
 static bool !>(CCError) decode_request_shape(RedisCmd* out, size_t raw_argc) {
     if (raw_argc < 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
 
@@ -449,7 +450,6 @@ static bool !>(CCError) decode_request_shape(RedisCmd* out, size_t raw_argc) {
             return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
         }
         out->kind = REDIS_CMD_CONFIG_GET;
-        out->hold = REDIS_HOLD_NONE;   /* answers from static text only */
         out->arg_start = 2;
         out->argc = 1;
         return cc_ok(1);
@@ -461,7 +461,6 @@ static bool !>(CCError) decode_request_shape(RedisCmd* out, size_t raw_argc) {
     }
 
     out->kind = spec->kind;
-    out->hold = spec->hold;
     out->arg_start = 1;
     out->argc = raw_argc - 1;
     return cc_ok(1);
@@ -502,11 +501,25 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
 
 #include "redis_db.cch"
 
-/* One command against the DB, under whatever hold its RedisCmdHold policy
- * asked for — REDIS_HOLD_TABLE commands run with the table held, and the
- * returned reply may still borrow DB memory, so the caller materializes
- * bulk into reply_arena before releasing.  Arity was checked by cmd_spec,
- * so arms index argv up to their min_args freely. */
+/* Locking policy for each kind — kept with the arms below, not in the
+ * name→arity map.  Exceptions only; everything else takes the table. */
+static RedisCmdHold hold_for(RedisCommandKind kind) {
+    switch (kind) {
+        case REDIS_CMD_SET:
+            return REDIS_HOLD_INSTALL;
+        case REDIS_CMD_CONFIG_GET:
+        case REDIS_CMD_CC_MEMLOG:
+            return REDIS_HOLD_NONE;
+        default:
+            return REDIS_HOLD_TABLE;
+    }
+}
+
+/* One command against the DB under a REDIS_HOLD_TABLE / _NONE hold.
+ * SET is install-only (see hold_for) and does not appear here.  Returned
+ * bulk may still borrow DB memory, so the caller materializes into
+ * reply_arena before releasing.  Arity was checked by cmd_spec, so arms
+ * index argv up to their min_args freely. */
 @noblock static RedisReply !>(CCError) execute_cmd(RedisDb* db,
                                                    const RedisCmd* cmd,
                                                    CCArena* reply_arena) {
@@ -524,10 +537,6 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
             return config_get_reply(argv[0], reply_arena);
         case REDIS_CMD_GET:
             return db_get(db, argv[0], reply_arena, &clock);
-        case REDIS_CMD_SET:
-            /* REDIS_HOLD_INSTALL routes SET to db_set_install instead. */
-            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
-                                   "ERR SET is not an execute_cmd arm"));
         case REDIS_CMD_SETNX:
             return db_setnx(db, argv[0], argv[1], &clock);
         case REDIS_CMD_SETEX: {
@@ -597,10 +606,9 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
         case REDIS_CMD_KEYS:
             return db_keys(db, argv[0], reply_arena, &clock);
         case REDIS_CMD_CC_MEMLOG: {
-            /* Optional phase tag: CC.MEMLOG [phase].  REDIS_HOLD_NONE: these
-             * are diagnostics that may block on stderr, and a concurrent
-             * writer can only skew counters a report already treats as
-             * approximate. */
+            /* Optional phase tag: CC.MEMLOG [phase].  hold_for → NONE: may
+             * block on stderr; a concurrent writer can only skew counters a
+             * report already treats as approximate. */
             const char* phase = "cc-memlog";
             char phase_buf[64];
             if (argc >= 1 && argv[0].ptr && argv[0].len > 0) {
@@ -761,7 +769,7 @@ static bool db_setup(RedisDb* db) {
 }
 
 /* Drain up to k_pipeline_window_cap already-buffered commands.  Every hold
- * in the server is taken here, from the command's RedisCmdHold policy:
+ * in the server is taken here, via hold_for(cmd.kind):
  *
  *   REDIS_HOLD_NONE     execute, no hold
  *   REDIS_HOLD_INSTALL  prep value -> hold -> install -> release
@@ -792,7 +800,7 @@ static bool db_setup(RedisDb* db) {
         *n_out = n;
 
         RedisReply reply;
-        switch (cmd.hold) {
+        switch (hold_for(cmd.kind)) {
             case REDIS_HOLD_NONE:
                 reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
                 break;
@@ -803,27 +811,28 @@ static bool db_setup(RedisDb* db) {
                  * key_arena and inserts (no discarded key on overwrite). */
                 const CCSlice* argv = cmd.args + cmd.arg_start;
                 CCString pre_val = db_prep_value(argv[1]) !>;
-                CCExclusiveGuard g = table->acquire();
-                @defer g.release();
-                reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
-                break;
-            }
-
-            case REDIS_HOLD_TABLE: {
-                CCExclusiveGuard g = table->acquire();
-                @defer g.release();
-                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
-                /* Own bulk before release: encode must never read DB memory
-                 * once another fiber can mutate it. */
-                if (reply.kind == REDIS_REPLY_BULK_STRING) {
-                    redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
+                {
+                    CCExclusiveGuard g = table->acquire();
+                    @defer g.destroy();
+                    reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
                 }
                 break;
             }
 
-            default:
-                reply = reply_error("ERR unknown hold policy");
+            case REDIS_HOLD_TABLE: {
+                {
+                    CCExclusiveGuard g = table->acquire();
+                    @defer g.destroy();
+                    reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                    /* Own bulk before release: encode must never read DB
+                     * memory once another fiber can mutate it. */
+                    if (reply.kind == REDIS_REPLY_BULK_STRING) {
+                        redis_reply_ensure_owned(&reply,
+                                                 &conn->reply_arena) !>;
+                    }
+                }
                 break;
+            }
         }
 
         if (!conn->write_reply(&reply)) return cc_ok(0);
@@ -915,20 +924,28 @@ int main(int argc, char** argv) {
     };
     @defer cc_listener_close(&ln);
 
-    /* The DB lives at server scope and is shared by every connection. */
+    /* The DB lives at server scope and is shared by every connection.
+     * Exclusive handles are zeroed up front so function-level @defer
+     * cleanup is safe if an earlier return is rewritten to goto cleanup
+     * before create runs (destroy/free are null-safe). */
     RedisDb db = {0};
+    CCArena excl_arena = {0};
+    CCExclusive* excl = NULL;
+    CCExclusiveMutex table = {0};
     if (!db_setup(&db)) return 1;
     @defer db_free_all(&db);
 
     /* One exclusive section, one mutex name for the whole table. */
-    CCArena excl_arena = @create(kilobytes(16)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&excl_arena);
+    excl_arena = cc_arena_heap(kilobytes(16));
+    @defer excl_arena.destroy();
+    excl = cc_exclusive_create(&excl_arena);
     if (!excl) {
         fprintf(stderr, "redis_idiomatic: cc_exclusive_create failed\n");
         return 1;
     }
+    table = excl->mutex(k_table_lock_name);
+    @defer cc_exclusive_mutex_free(&table);
     @defer cc_exclusive_destroy(excl);
-    CCExclusiveMutex table = excl->mutex(k_table_lock_name);
 
     RedisDb* dbp = &db;
     CCListener* ln_ptr = &ln;

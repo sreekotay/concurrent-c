@@ -9293,11 +9293,32 @@ char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     int changed = 0;
+    /* Track #line/CC_LN ledger while walking so a UFCS splice can restore the
+     * including file after the nested body — otherwise every line below the
+     * splice stays attributed to the nested .cch (host-C and AST diagnostics). */
+    char cur_file[PATH_MAX];
+    int cur_line = 1;
+    int have_file = 0;
+    cur_file[0] = '\0';
     if (!src || n == 0 || g_lowered_local_header_count == 0) return NULL;
     while (i < n) {
         size_t line_end = i;
         size_t path_s = 0, path_e = 0;
+        long ledger_n = 0;
+        const char* ledger_p = NULL;
+        size_t ledger_pl = 0;
+        int is_ledger = 0;
         while (line_end < n && src[line_end] != '\n') line_end++;
+        is_ledger = cc_ledger_parse_line(src, i, line_end, &ledger_n, &ledger_p, &ledger_pl) &&
+                    ledger_n > 0;
+        if (is_ledger) {
+            cur_line = (int)ledger_n; /* next physical line is user line n */
+            if (ledger_p && ledger_pl > 0 && ledger_pl < sizeof(cur_file)) {
+                memcpy(cur_file, ledger_p, ledger_pl);
+                cur_file[ledger_pl] = '\0';
+                have_file = 1;
+            }
+        }
         if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e)) {
             const CCLoweredLocalHeader* h =
                 cc__find_lowered_header_by_include_path(src + i + path_s, path_e - path_s);
@@ -9306,6 +9327,7 @@ char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n) {
                 size_t body_len = 0;
                 if (cc__read_file_text(h->lowered_path, &body, &body_len) == 0 && body &&
                     cc__lowered_header_needs_ufcs_splice(body, body_len)) {
+                    int include_line = cur_line;
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#line 1 \"");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, h->source_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "\"\n");
@@ -9318,8 +9340,15 @@ char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, CC_LOCAL_CCH_END_MARK);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, h->lowered_path);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "*/\n");
+                    if (have_file) {
+                        char ld[PATH_MAX + 64];
+                        snprintf(ld, sizeof(ld), "#line %d \"%s\"\n",
+                                 include_line + 1, cur_file);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+                    }
                     free(body);
                     changed = 1;
+                    cur_line = include_line + 1;
                     i = (line_end < n) ? line_end + 1 : line_end;
                     continue;
                 }
@@ -9329,6 +9358,7 @@ char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n) {
         cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
         if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
         i = (line_end < n) ? line_end + 1 : line_end;
+        if (!is_ledger) cur_line++;
     }
     if (!changed) {
         free(out);
@@ -9364,21 +9394,42 @@ int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n) {
             break;
         }
         hit_off = (size_t)(hit - in);
-        if (hit_off > i) cc_sb_append(&out, &out_len, &out_cap, in + i, hit_off - i);
         path_s = hit + begin_len;
         path_e = strstr(path_s, "*/");
         if (!path_e) {
+            if (hit_off > i) cc_sb_append(&out, &out_len, &out_cap, in + i, hit_off - i);
             cc_sb_append(&out, &out_len, &out_cap, hit, in_len - hit_off);
             break;
         }
         path_len = (size_t)(path_e - path_s);
         if (path_len == 0 || path_len >= sizeof(path)) {
+            if (hit_off > i) cc_sb_append(&out, &out_len, &out_cap, in + i, hit_off - i);
             cc_sb_append(&out, &out_len, &out_cap, hit, begin_len);
             i = hit_off + begin_len;
             continue;
         }
         memcpy(path, path_s, path_len);
         path[path_len] = '\0';
+        /* Drop the `#line 1 "<source.cch>"` the splice inserted immediately
+         * before the begin mark.  Leaving it orphans every subsequent line
+         * onto the nested header after writeback restores `#include`. */
+        {
+            size_t prefix_end = hit_off;
+            const char* src_path = cc_lowered_header_source_for(path);
+            if (src_path && hit_off > i && in[hit_off - 1] == '\n') {
+                size_t ls = hit_off - 1;
+                long ln = 0;
+                const char* lp = NULL;
+                size_t lpl = 0;
+                while (ls > i && in[ls - 1] != '\n') ls--;
+                if (cc_ledger_parse_line(in, ls, hit_off - 1, &ln, &lp, &lpl) && ln == 1 &&
+                    lp && lpl == strlen(src_path) && memcmp(lp, src_path, lpl) == 0) {
+                    prefix_end = ls;
+                }
+            }
+            if (prefix_end > i)
+                cc_sb_append(&out, &out_len, &out_cap, in + i, prefix_end - i);
+        }
         body_s = path_e + 2;
         if (*body_s == '\n') body_s++;
         end = body_s;

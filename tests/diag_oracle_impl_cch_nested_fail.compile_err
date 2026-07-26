@@ -1,0 +1,5 @@
+# Oracle: undeclared call lives in the outer impl-grade .cch after a nested
+# UFCS-spliced include. Must blame the outer .cch physical line, not the
+# nested header and not the including TU (+ splice-space line).
+diag_oracle_impl_cch_nested_outer.cch:4:
+cc_diag_oracle_undeclared_in_spliced_outer

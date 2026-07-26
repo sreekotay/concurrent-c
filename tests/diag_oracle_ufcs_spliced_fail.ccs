@@ -1,0 +1,19 @@
+/* Diagnostics oracle: "no UFCS method" inside an impl-grade spliced .cch
+ * (after a nested UFCS include) must blame the outer .cch, not the TU. */
+#include <ccc/std/prelude.cch>
+#include "diag_oracle_ufcs_spliced_outer.cch"
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(16));
+    DiagUfcsMap m = array_map_new::[int, int](&a);
+    if (!m) return 1;
+    int[~1 >] tx;
+    int[~1 <] rx;
+    cc_channel_pair(&tx, &rx);
+    (void)diag_ufcs_bad(rx);
+    (void)diag_ufcs_nested_len(m);
+    diag_ufcs_map_destroy(m);
+    tx.close();
+    a.destroy();
+    return 0;
+}

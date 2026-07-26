@@ -1,0 +1,5 @@
+@variant LocalVal { num: int64_t; flag: void; };
+typedef ArrayMap::[int, int] LocalMap;
+#include "diag_oracle_impl_cch_nested_inner.cch"
+static int after_nested(void) { return cc_diag_oracle_undeclared_in_spliced_outer(1); }
+static void local_destroy(LocalMap m) { if (m) m.destroy(); }

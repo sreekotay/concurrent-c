@@ -92,8 +92,6 @@ typedef struct RedisRequest {
 } RedisRequest;
 
 typedef struct RedisReply {
-    uint64_t conn_id;
-    uint64_t request_id;
     RedisReplyKind kind;
     CCSlice data;
     int64_t int_value;

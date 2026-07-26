@@ -1,0 +1,4 @@
+# Oracle: unresolved UFCS in an impl-grade .cch after a nested UFCS splice
+# attributes to the outer header's physical line (not the including TU).
+diag_oracle_ufcs_spliced_outer.cch:4:
+no UFCS method 'missing'
