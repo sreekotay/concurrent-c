@@ -40,22 +40,25 @@ static void handle_client(CCSocket sock) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     if (!a.base) { cc_socket_close(&sock); return; }
 
-    CCNetError err = CC_NET_OK;
-    CCSlice peer = cc_socket_peer_addr(&sock, &a, &err);
-    if (err == CC_NET_OK) {
+    CCNetError peer_err = CC_NET_OK;
+    CCSlice peer = cc_socket_peer_addr(&sock, &a, &peer_err);
+    if (peer_err == CC_NET_OK) {
         printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
     }
 
     for (;;) {
         cc_arena_reset(&a);
-        CCSlice data = cc_socket_read(&sock, &a, 1024, &err);
-        if (err != CC_NET_OK || data.len == 0) {
+        CCSlice data;
+        if (!cc_io_avail(cc_socket_read(&sock, &a, 1024, &data))) {
             printf("client disconnected\n");
             break;
         }
         printf("echo %zu bytes\n", data.len);
-        (void)cc_socket_write(&sock, data.ptr, data.len, &err);
-        if (err != CC_NET_OK) break;
+        size_t written = cc_socket_write(&sock, data.ptr, data.len) !>(e) {
+            (void)e;
+            break;
+        };
+        (void)written;
     }
     cc_socket_close(&sock);
 }
@@ -67,13 +70,22 @@ static void run_test_client(void) {
         return;
     };
 
-    CCNetError err = CC_NET_OK;
     const char msg[] = "hello from test\n";
-    (void)cc_socket_write(&sock, msg, sizeof(msg) - 1, &err);
-    if (err != CC_NET_OK) { cc_socket_close(&sock); return; }
+    size_t nw = cc_socket_write(&sock, msg, sizeof(msg) - 1) !>(e) {
+        fprintf(stderr, "write error: %s\n", cc_io_error_str(e));
+        cc_socket_close(&sock);
+        return;
+    };
+    (void)nw;
 
     char buf[64] = {0};
-    size_t got = cc_socket_read_into(&sock, buf, sizeof(buf) - 1, &err);
+    size_t got = 0;
+    bool ok = cc_socket_read_into(&sock, buf, sizeof(buf) - 1, &got) !>(e) {
+        fprintf(stderr, "read error: %s\n", cc_io_error_str(e));
+        cc_socket_close(&sock);
+        return;
+    };
+    if (!ok) got = 0;
     printf("test client got %zu bytes: %.*s", got, (int)got, buf);
     cc_socket_close(&sock);
 }

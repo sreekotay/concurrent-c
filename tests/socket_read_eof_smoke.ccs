@@ -1,0 +1,128 @@
+/*
+ * Smoke: socket read EOF model B.
+ *   - data → Ok(true) with payload
+ *   - clean peer close (FIN) → Ok(false), not an error
+ *   - UFCS read_into lowers to cc_socket_read_into
+ *   - try_read: FIN → Ok(false); EAGAIN → Err(CC_IO_BUSY)
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+static int g_errors = 0;
+
+static void fail(const char* msg) {
+    fprintf(stderr, "socket_read_eof_smoke: %s\n", msg);
+    g_errors++;
+}
+
+static void peer_send_and_close(int fd) {
+    const char msg[] = "hi";
+    if (write(fd, msg, sizeof(msg) - 1) != (ssize_t)(sizeof(msg) - 1)) {
+        fail("peer write");
+    }
+    close(fd);
+}
+
+int main(void) {
+    int fds[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        perror("socketpair");
+        return 1;
+    }
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) {
+            close(fds[0]);
+            close(fds[1]);
+            return 2;
+        }
+        int peer_fd = fds[1];
+        fds[1] = -1;
+        n->spawn(() => [peer_fd] { peer_send_and_close(peer_fd); });
+
+        CCSocket sock = { .fd = fds[0] };
+        fds[0] = -1;
+
+        char buf[16];
+        size_t nbytes = 0;
+        /* UFCS must lower to the same Result-returning cc_socket_read_into. */
+        CCResult_bool_CCIoError res = sock.read_into(buf, sizeof(buf), &nbytes);
+        if (cc_is_err(res) || !cc_value(res) || nbytes != 2 || memcmp(buf, "hi", 2) != 0) {
+            fail("expected Ok(true) with hi via UFCS");
+        }
+
+        nbytes = 0;
+        res = sock.read_into(buf, sizeof(buf), &nbytes);
+        if (cc_is_err(res) || cc_value(res) || nbytes != 0) {
+            fail("expected Ok(false) on clean close via UFCS");
+        }
+
+        /* Greppable twin + !> with inline handler. */
+        nbytes = 0;
+        bool got = cc_socket_read_into(&sock, buf, sizeof(buf), &nbytes) !>(e) {
+            fprintf(stderr, "unexpected read err: %s\n", cc_io_error_str(e));
+            fail("greppable read_into");
+            return 3;
+        };
+        if (got) fail("expected Ok(false) after FIN already observed");
+
+        cc_socket_close(&sock);
+    }
+
+    /* try_read three-way: FIN vs EAGAIN */
+    {
+        int pair[2] = {-1, -1};
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+            perror("socketpair try");
+            return 4;
+        }
+        int flags = fcntl(pair[0], F_GETFL, 0);
+        if (flags < 0 || fcntl(pair[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+            fail("fcntl nonblock");
+        }
+        CCSocket sock = { .fd = pair[0] };
+        char buf[8];
+        size_t nbytes = 0;
+
+        CCResult_bool_CCIoError busy = cc_socket_try_read_into(&sock, buf, sizeof(buf), &nbytes);
+        if (!(cc_is_err(busy) && cc_error(busy).kind == CC_IO_BUSY)) {
+            fail("expected Err(BUSY) on empty nonblocking read");
+        }
+
+        if (write(pair[1], "x", 1) != 1) fail("write x");
+        bool got = cc_socket_try_read_into(&sock, buf, sizeof(buf), &nbytes) !>(e) {
+            fprintf(stderr, "try_read data err: %s\n", cc_io_error_str(e));
+            fail("try_read data");
+            return 5;
+        };
+        if (!got || nbytes != 1 || buf[0] != 'x') fail("expected Ok(true) data on try_read");
+
+        close(pair[1]);
+        pair[1] = -1;
+        nbytes = 0;
+        got = cc_socket_try_read_into(&sock, buf, sizeof(buf), &nbytes) !>(e) {
+            fprintf(stderr, "try_read fin err: %s\n", cc_io_error_str(e));
+            fail("try_read fin");
+            return 6;
+        };
+        if (got || nbytes != 0) fail("expected Ok(false) FIN on try_read");
+
+        cc_socket_close(&sock);
+        if (pair[1] >= 0) close(pair[1]);
+    }
+
+    if (g_errors != 0) {
+        fprintf(stderr, "socket_read_eof_smoke: FAIL errors=%d\n", g_errors);
+        return 7;
+    }
+    printf("socket_read_eof_smoke: PASS\n");
+    return 0;
+}

@@ -1036,12 +1036,12 @@ void cc_listener_close(CCListener *listener);
 
 CCIoError cc_net_to_io_error(CCNetError err);
 
-CCSlice cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCNetError *out_err);
-size_t cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err);
-size_t cc_socket_read_into_deadline(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err, const CCDeadline *deadline);
-size_t cc_socket_try_read_into(CCSocket *socket, char *buf, size_t max_bytes, CCNetError *out_err, bool *out_would_block);
-size_t cc_socket_write(CCSocket *socket, const char *data, size_t len, CCNetError *out_err);
-size_t cc_socket_write_deadline(CCSocket *socket, const char *data, size_t len, CCNetError *out_err, const CCDeadline *deadline);
+CCResult_bool_CCIoError cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCSlice *out);
+CCResult_bool_CCIoError cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out);
+CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket *socket, char *buf, size_t max_bytes, size_t *out, const CCDeadline *deadline);
+CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out);
+CCResult_size_t_CCIoError cc_socket_write(CCSocket *socket, const char *data, size_t len);
+CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket *socket, const char *data, size_t len, const CCDeadline *deadline);
 void cc_socket_shutdown(CCSocket *socket, CCShutdownMode mode, CCNetError *out_err);
 void cc_socket_close(CCSocket *socket);
 CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
@@ -1060,15 +1060,28 @@ CCSocket client = cc_tcp_connect(addr, len) !>;
 `cc_net_to_io_error` maps connection closed/reset to `CC_IO_CONNECTION_CLOSED`,
 timeout to `CC_IO_BUSY`, and other net errors to `CC_IO_OTHER`.
 
-A socket read reports remote EOF as zero bytes with
-`CC_NET_CONNECTION_CLOSED`. The deadline functions report
-`CC_NET_TIMED_OUT` when the deadline expires. `try_read_into` reports
-`EAGAIN` or `EWOULDBLOCK` by setting `out_would_block` while leaving the error
-as `CC_NET_OK`.
+Socket byte read and write return `CCIoError` Results (same domain as files and
+channels). Blocking and deadline reads use EOF model B:
+
+- `Ok(true)` — bytes available; payload is written to the out-parameter
+- `Ok(false)` — clean peer close (`recv` returned 0 / FIN); not an error
+- `Err(e)` — RST, timeout, and other failures
+
+Deadline expiry is `Err` with `CC_IO_BUSY`. Non-blocking `cc_socket_try_read_into`
+is three-way: `Ok(true)` / `Ok(false)` as above, and would-block (`EAGAIN` /
+`EWOULDBLOCK`) as `Err` with `CC_IO_BUSY` — never `Ok(false)`. Writes return
+`size_t!>(CCIoError)` with the number of bytes written (may be short); there is
+no EOF story for writes.
+
+```c
+while (cc_io_avail(cc_socket_read(sock, arena, n, &data))) { /* ... */ }
+size_t n = 0;
+bool got = sock.read_into(buf, cap, &n) !>;
+```
 
 `CCSocket` and `CCListener` UFCS map synchronous method names to
-`cc_socket_*` and `cc_listener_*` (including Result-returning `accept`).
-No networking `_async` C callees are defined by this API.
+`cc_socket_*` and `cc_listener_*` (including Result-returning `accept` and
+`read_into`). No networking `_async` C callees are defined by this API.
 
 Socket readiness signaling uses:
 

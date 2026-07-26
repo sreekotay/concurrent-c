@@ -30,27 +30,19 @@
 /* Low-level I/O: read from socket into BearSSL engine */
 static int br_low_read(void* ctx, unsigned char* buf, size_t len) {
     CCSocket* sock = (CCSocket*)ctx;
-    CCNetError err;
-    CCSlice data = cc_socket_read(sock, NULL, len, &err);  /* TODO: need temp arena */
-    if (err != CC_NET_OK) {
-        return -1;
-    }
-    if (data.len == 0) {
-        return 0;  /* EOF */
-    }
-    memcpy(buf, data.ptr, data.len);
-    return (int)data.len;
+    size_t n = 0;
+    CCResult_bool_CCIoError res = cc_socket_read_into(sock, (char*)buf, len, &n);
+    if (cc_is_err(res)) return -1;
+    if (!cc_value(res)) return 0;  /* clean EOF (FIN) */
+    return (int)n;
 }
 
 /* Low-level I/O: write from BearSSL engine to socket */
 static int br_low_write(void* ctx, const unsigned char* buf, size_t len) {
     CCSocket* sock = (CCSocket*)ctx;
-    CCNetError err;
-    size_t written = cc_socket_write(sock, (const char*)buf, len, &err);
-    if (err != CC_NET_OK) {
-        return -1;
-    }
-    return (int)written;
+    CCResult_size_t_CCIoError res = cc_socket_write(sock, (const char*)buf, len);
+    if (cc_is_err(res)) return -1;
+    return (int)cc_value(res);
 }
 
 #endif /* CC_HAS_BEARSSL */

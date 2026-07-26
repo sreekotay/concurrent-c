@@ -69,6 +69,24 @@ static CCNetError errno_to_net_error(int err) {
     }
 }
 
+/* Map OS errno into the socket byte-I/O Result domain (CCIoError). */
+static CCIoError errno_to_io_error(int err) {
+    if (err == EAGAIN || err == EWOULDBLOCK) {
+        return cc_io_error_os(CC_IO_BUSY, err);
+    }
+    if (err == ETIMEDOUT) {
+        return cc_io_error_os(CC_IO_BUSY, err);
+    }
+    if (err == ECONNRESET || err == EPIPE) {
+        return cc_io_error_os(CC_IO_CONNECTION_CLOSED, err);
+    }
+    CCIoError mapped = cc_net_to_io_error(errno_to_net_error(err));
+    if (mapped.os_code == 0 && err != 0) {
+        mapped.os_code = err;
+    }
+    return mapped;
+}
+
 static int cc__net_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return errno;
@@ -338,28 +356,26 @@ void cc_listener_close(CCListener* ln) {
 }
 
 /* ============================================================================
- * Socket I/O
+ * Socket I/O (Result-primary, EOF model B)
  * ============================================================================ */
 
-size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err) {
-    return cc_socket_read_into_deadline(sock, buf, max_bytes, out_err, NULL);
+CCResult_bool_CCIoError cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, size_t* out) {
+    return cc_socket_read_into_deadline(sock, buf, max_bytes, out, NULL);
 }
 
-size_t cc_socket_read_into_deadline(CCSocket* sock,
-                                    char* buf,
-                                    size_t max_bytes,
-                                    CCNetError* out_err,
-                                    const CCDeadline* deadline) {
-    *out_err = CC_NET_OK;
-    if (!buf && max_bytes > 0) {
-        *out_err = CC_NET_OTHER;
-        return 0;
+CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket* sock,
+                                                    char* buf,
+                                                    size_t max_bytes,
+                                                    size_t* out,
+                                                    const CCDeadline* deadline) {
+    if (out) *out = 0;
+    if (!sock || (!buf && max_bytes > 0) || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
-        *out_err = errno_to_net_error(prep_err);
-        return 0;
+        return cc_err_CCResult_bool_CCIoError(errno_to_io_error(prep_err));
     }
     struct timespec ts;
     const struct timespec* abs_deadline = cc_deadline_as_timespec(deadline, &ts);
@@ -368,12 +384,14 @@ size_t cc_socket_read_into_deadline(CCSocket* sock,
         ssize_t n = read(sock->fd, buf, max_bytes);
         if (n > 0) {
             cc__net_trace_read("read_ok", sock->fd, n, 0);
-            return (size_t)n;
+            *out = (size_t)n;
+            return cc_ok_CCResult_bool_CCIoError(true);
         }
         if (n == 0) {
+            /* Clean peer close (FIN) — Ok(false), not an error. */
             cc__net_trace_read("read_eof", sock->fd, n, 0);
-            *out_err = CC_NET_CONNECTION_CLOSED;
-            return 0;
+            *out = 0;
+            return cc_ok_CCResult_bool_CCIoError(false);
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__net_trace_read("wait_begin", sock->fd, n, errno);
@@ -382,87 +400,94 @@ size_t cc_socket_read_into_deadline(CCSocket* sock,
                                    : cc__io_wait_fd_deadline(sock->fd, POLLIN, abs_deadline);
             cc__net_trace_read("wait_end", sock->fd, n, wait_err);
             if (wait_err != 0) {
-                *out_err = errno_to_net_error(wait_err);
-                return 0;
+                return cc_err_CCResult_bool_CCIoError(errno_to_io_error(wait_err));
             }
             continue;
         }
         cc__net_trace_read("read_err", sock->fd, n, errno);
-        *out_err = errno_to_net_error(errno);
-        return 0;
+        return cc_err_CCResult_bool_CCIoError(errno_to_io_error(errno));
     }
 }
 
-size_t cc_socket_try_read_into(CCSocket* sock,
-                               char* buf,
-                               size_t max_bytes,
-                               CCNetError* out_err,
-                               bool* out_would_block) {
-    *out_err = CC_NET_OK;
-    if (out_would_block) *out_would_block = false;
-    if (!buf && max_bytes > 0) {
-        *out_err = CC_NET_OTHER;
-        return 0;
+CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,
+                                               char* buf,
+                                               size_t max_bytes,
+                                               size_t* out) {
+    if (out) *out = 0;
+    if (!sock || (!buf && max_bytes > 0) || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
-        *out_err = errno_to_net_error(prep_err);
-        return 0;
+        return cc_err_CCResult_bool_CCIoError(errno_to_io_error(prep_err));
     }
 
     ssize_t n = read(sock->fd, buf, max_bytes);
     if (n > 0) {
         cc__net_trace_read("try_read_ok", sock->fd, n, 0);
-        return (size_t)n;
+        *out = (size_t)n;
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
     if (n == 0) {
+        /* Clean peer close (FIN) — distinct from would-block. */
         cc__net_trace_read("try_read_eof", sock->fd, n, 0);
-        *out_err = CC_NET_CONNECTION_CLOSED;
-        return 0;
+        *out = 0;
+        return cc_ok_CCResult_bool_CCIoError(false);
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
         cc__net_trace_read("try_read_would_block", sock->fd, n, errno);
-        if (out_would_block) *out_would_block = true;
-        return 0;
+        return cc_err_CCResult_bool_CCIoError(cc_io_error_os(CC_IO_BUSY, errno));
     }
     cc__net_trace_read("try_read_err", sock->fd, n, errno);
-    *out_err = errno_to_net_error(errno);
-    return 0;
+    return cc_err_CCResult_bool_CCIoError(errno_to_io_error(errno));
 }
 
-CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err) {
-    CCSlice result = {0};
-    *out_err = CC_NET_OK;
+CCResult_bool_CCIoError cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out) {
+    if (out) *out = (CCSlice){0};
+    if (!sock || !arena || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
+    }
+    if (max_bytes == 0) {
+        *out = (CCSlice){0};
+        return cc_ok_CCResult_bool_CCIoError(false);
+    }
 
     char* buf = cc_arena_alloc(arena, max_bytes, 1);
     if (!buf) {
-        *out_err = CC_NET_OTHER;
-        return result;
+        return cc_err_CCResult_bool_CCIoError(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     }
 
-    size_t n = cc_socket_read_into(sock, buf, max_bytes, out_err);
-    if (*out_err == CC_NET_OK && n > 0) {
-        result.ptr = buf;
-        result.len = n;
+    size_t n = 0;
+    CCResult_bool_CCIoError status = cc_socket_read_into(sock, buf, max_bytes, &n);
+    if (cc_is_err(status)) return status;
+    if (!cc_value(status)) {
+        *out = (CCSlice){0};
+        return cc_ok_CCResult_bool_CCIoError(false);
     }
-    return result;
+    out->ptr = buf;
+    out->len = n;
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
-size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err) {
-    return cc_socket_write_deadline(sock, data, len, out_err, NULL);
+CCResult_size_t_CCIoError cc_socket_write(CCSocket* sock, const char* data, size_t len) {
+    return cc_socket_write_deadline(sock, data, len, NULL);
 }
 
-size_t cc_socket_write_deadline(CCSocket* sock,
-                                const char* data,
-                                size_t len,
-                                CCNetError* out_err,
-                                const CCDeadline* deadline) {
-    *out_err = CC_NET_OK;
+CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket* sock,
+                                                  const char* data,
+                                                  size_t len,
+                                                  const CCDeadline* deadline) {
+    if (!sock || (!data && len > 0)) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    }
+    if (len == 0) {
+        return cc_ok_CCResult_size_t_CCIoError(0);
+    }
+
     int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
-        *out_err = errno_to_net_error(prep_err);
-        return 0;
+        return cc_err_CCResult_size_t_CCIoError(errno_to_io_error(prep_err));
     }
     struct timespec ts;
     const struct timespec* abs_deadline = cc_deadline_as_timespec(deadline, &ts);
@@ -470,20 +495,18 @@ size_t cc_socket_write_deadline(CCSocket* sock,
     while (1) {
         ssize_t n = send(sock->fd, data, len, CC__NET_SEND_FLAGS);
         if (n >= 0) {
-            return (size_t)n;
+            return cc_ok_CCResult_size_t_CCIoError((size_t)n);
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
             int wait_err = watcher ? cc__io_watcher_wait_deadline(watcher, POLLOUT, abs_deadline)
                                    : cc__io_wait_fd_deadline(sock->fd, POLLOUT, abs_deadline);
             if (wait_err != 0) {
-                *out_err = errno_to_net_error(wait_err);
-                return 0;
+                return cc_err_CCResult_size_t_CCIoError(errno_to_io_error(wait_err));
             }
             continue;
         }
-        *out_err = errno_to_net_error(errno);
-        return 0;
+        return cc_err_CCResult_size_t_CCIoError(errno_to_io_error(errno));
     }
 }
 

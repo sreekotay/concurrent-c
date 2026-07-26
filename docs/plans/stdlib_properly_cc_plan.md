@@ -84,14 +84,14 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 
 | Module | Path | Drift |
 |--------|------|-------|
-| Net | `std/net.cch`, `cc/runtime/net.c` | Listen/accept/connect are Result-primary + `cc_net_to_io_error`. Remaining: socket read/write/fill and UDP/DNS still `CCNetError*` out-params. |
+| Net | `std/net.cch`, `cc/runtime/net.c` | Listen/accept/connect + socket read/write are Result-primary. Remaining: UDP/DNS/peer_addr/shutdown still `CCNetError*` out-params. |
 | DNS / TLS / HTTP | `std/dns.cch`, `std/tls.cch`, `std/http.cch` | Same culture. DNS decls duplicated with net. |
 
 ### Real projects
 
-- **redis_idiomatic.ccs:** Result + arenas + `try_send_into`; listen/accept use `!>`. Remaining net drift is socket fill/read EOF.
+- **redis_idiomatic.ccs:** Result + arenas + `try_send_into`; listen/accept/fill/write use `!>`. Net drift left is UDP/DNS/HTTP if any.
 - **pigz_idiomatic.ccs:** Ordered `send_task` + arenas; little net. Arena spelling mixed.
-- **Examples:** Result recipe gold; `recipe_tcp_echo` listen/accept/connect use `!>`; HTTP still out-param; `recipe_ordered_parallel` aligned with pigz.
+- **Examples:** Result recipe gold; `recipe_tcp_echo` listen/accept/connect/read/write use `!>` / `cc_io_avail`; HTTP still out-param; `recipe_ordered_parallel` aligned with pigz.
 
 ---
 
@@ -151,13 +151,32 @@ CCSocket client = cc_tcp_connect(addr, len) !>;
 Landed: Result-primary `cc_tcp_listen` / `cc_tcp_connect` / `cc_listener_accept`,
 stdlib `cc_net_to_io_error`, redis + `recipe_tcp_echo` + `ping_server` callers,
 `tests/tcp_listen_accept_connect_smoke.ccs`, present-tense Networking spec for
-those three ops. On error, handles have `fd == -1`. Note: prefer greppable
-`cc_listener_accept` with `!>` when a `CCError` `@errhandler` is in scope;
-`ln.accept() !>` can mis-bind the error type until unwrap/UFCS ordering is fixed.
+those three ops. On error, handles have `fd == -1`.
 
-**Follow-up slice:** `cc_socket_read` / write / fill paths; preserve redis `rr_fill` behavior deliberately when choosing EOF shape.
+**Follow-up slice (socket read / write / fill): done.**
 
-**Risk (remaining):** EOF model for read/fill is the risky fork — leave listen/accept alone.
+EOF model B — byte reads return `bool!>(CCIoError)` (file/channel domain):
+
+| Outcome | Result |
+|---------|--------|
+| Got bytes | `Ok(true)` + out payload |
+| Clean peer close (FIN) | `Ok(false)` — not an error |
+| RST / timeout / other | `Err(...)` |
+| try_read would-block | `Err(CC_IO_BUSY)` — never `Ok(false)` |
+
+```c
+while (cc_io_avail(cc_socket_read(sock, arena, n, &data))) { /* ... */ }
+size_t n = 0;
+bool got = cc_socket_read_into(sock, buf, cap, &n) !>;
+size_t w = cc_socket_write(sock, p, len) !>;
+```
+
+Landed: Result-primary `cc_socket_read` / `read_into` / `read_into_deadline` /
+`try_read_into` / `write` / `write_deadline`; redis `rr_fill` (FIN → `cc_ok(false)`,
+try busy → fill-layer `cc_ok(false)`); `recipe_tcp_echo` + `ping_server`;
+`tests/socket_read_eof_smoke.ccs` + adapted deadline smokes; Networking spec
+present-tense for model B. Listen/accept stay on `CCNetError`; byte I/O uses
+`CCIoError` so redis `@errhandler` I/O culture matches without out-params.
 
 ### Phase 3 — HTTP
 
@@ -202,7 +221,7 @@ Mechanical bridge inside a branch (old body called with `&err` then wrapped) is 
 | Phase | Impact |
 |-------|--------|
 | 1 | README + arena recipe clarity; pigz spelling consistency optional |
-| 2 | **redis** listen/accept; **tcp echo** becomes Result showcase (reinforces result recipe) |
+| 2 | **redis** listen/accept/fill/write; **tcp echo** Result showcase end-to-end |
 | 3 | **http get** matches result recipe |
 | 5 | pigz open paths if they still check `int` |
 | 6 | capture recipes honest about shared state |
@@ -222,14 +241,14 @@ Mechanical bridge inside a branch (old body called with `&err` then wrapped) is 
 
 ## Open questions
 
-1. **Net error domain:** Keep `CCNetError` as Result `E`, or unify into `CCIoError`? (Fidelity vs one `@errhandler` type.)
-2. **EOF for `socket.read`:** Empty slice + `CC_NET_CONNECTION_CLOSED` vs channel-like `Ok(false)` + out-slice? Highest redis-risk fork—decide in the read/fill slice, not the listen slice.
+1. **Net error domain (partially resolved):** Listen/accept/connect keep `CCNetError` for address/connect fidelity. Socket byte read/write use `CCIoError` (files/channels/redis). Full unify still open for UDP/DNS/TLS/HTTP.
+2. **EOF for `socket.read` — resolved (model B):** `Ok(false)` + out-slice/count for clean FIN; RST/failures are `Err`; try would-block is `Err(CC_IO_BUSY)`.
 3. **Prelude:** Keep net opt-in vs `std/prelude_net.cch` umbrella?
 4. **Capabilities:** In-scope for this program or separate (redis/pigz getenv)?
 5. **Arena alloc UFCS:** Implement `arena.alloc_T` or bless `cc_arena_alloc_T*` as the permanent C twin?
 
 ---
 
-## Suggested first PR
+## Suggested next PR
 
-**Phase 2 first slice — landed** (listen/accept/connect Result-primary). Next PR: socket read/write/fill EOF slice.
+**Phase 2 read/write/fill — landed.** Next: Phase 3 HTTP Result-primary, or remaining net out-params (UDP/DNS/peer_addr/shutdown).

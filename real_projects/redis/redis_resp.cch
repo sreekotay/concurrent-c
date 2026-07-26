@@ -49,19 +49,24 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
 
     size_t n = 0;
     if (nonblocking) {
-        CCNetError net_err = CC_NET_OK;
-        bool would_block = false;
-        n = cc_socket_try_read_into(sock, r->data + r->end, max_bytes, &net_err, &would_block);
-        if (would_block) return cc_ok(false);
-        if (net_err != CC_NET_OK) return cc_err(cc_net_to_io_error(net_err));
+        /* Socket try is three-way: Ok(true)=data, Ok(false)=FIN, Err(BUSY)=EAGAIN.
+         * At the fill layer, would-block means "no progress now" → Ok(false). */
+        CCResult_bool_CCIoError res =
+            cc_socket_try_read_into(sock, r->data + r->end, max_bytes, &n);
+        if (cc_is_err(res)) {
+            CCIoError e = cc_error(res);
+            if (e.kind == CC_IO_BUSY) return cc_ok(false);
+            return cc_err(e);
+        }
+        if (!cc_value(res)) return cc_ok(false);  /* FIN */
     } else {
-        CCNetError err = CC_NET_OK;
         const int read_deadline_ms = 60000;
         CCDeadline deadline = cc_deadline_after_ms(read_deadline_ms);
-        n = cc_socket_read_into_deadline(sock, r->data + r->end, max_bytes, &err, &deadline);
-        if (err != CC_NET_OK) return cc_err(cc_net_to_io_error(err));
+        CCResult_bool_CCIoError res =
+            cc_socket_read_into_deadline(sock, r->data + r->end, max_bytes, &n, &deadline);
+        if (cc_is_err(res)) return cc_err(cc_error(res));
+        if (!cc_value(res)) return cc_ok(false);  /* FIN */
     }
-    if (n == 0) return cc_ok(false);
     r->end += n;
     return cc_ok(true);
 }

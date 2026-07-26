@@ -16,12 +16,14 @@ static int env_int_or_default(const char* name, int fallback, int min_value) {
     return parsed < min_value ? fallback : parsed;
 }
 
-static size_t write_all(CCSocket* sock, const char* data, size_t len, CCNetError* out_err) {
+static size_t write_all(CCSocket* sock, const char* data, size_t len) {
     size_t off = 0;
-    *out_err = CC_NET_OK;
     while (off < len) {
-        size_t n = cc_socket_write(sock, data + off, len - off, out_err);
-        if (*out_err != CC_NET_OK || n == 0) return off;
+        size_t n = cc_socket_write(sock, data + off, len - off) !>(e) {
+            (void)e;
+            return off;
+        };
+        if (n == 0) return off;
         off += n;
     }
     return off;
@@ -40,13 +42,12 @@ static void handle_client(CCSocket client) {
     int one = 1;
     (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    CCNetError err = CC_NET_OK;
     char byte = 0;
     const char reply = 'P';
     while (1) {
-        size_t n = cc_socket_read_into(&client, &byte, 1, &err);
-        if (err != CC_NET_OK || n == 0) break;
-        if (write_all(&client, &reply, 1, &err) != 1 || err != CC_NET_OK) break;
+        size_t n = 0;
+        if (!cc_io_avail(cc_socket_read_into(&client, &byte, 1, &n))) break;
+        if (write_all(&client, &reply, 1) != 1) break;
         if (record_reply_and_should_exit()) {
             fflush(stdout);
             fflush(stderr);

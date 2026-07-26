@@ -29,7 +29,7 @@ typedef enum CCNetError {
     CC_NET_OK = 0,
     CC_NET_CONNECTION_REFUSED,
     CC_NET_CONNECTION_RESET,
-    CC_NET_CONNECTION_CLOSED,   /* Normal remote close */
+    CC_NET_CONNECTION_CLOSED,   /* Legacy/other ops; byte reads use Ok(false) for FIN */
     CC_NET_TIMED_OUT,
     CC_NET_HOST_UNREACHABLE,
     CC_NET_NETWORK_UNREACHABLE,
@@ -54,15 +54,14 @@ typedef struct CCSocket {
 } CCSocket;
 
 /* Socket-bound readiness signal.
- * Opaque storage for the runtime impl. Prefer long long over long double for
- * alignment: TCC's sysinclude lacks max_align_t, and on some ILP32 hosts
- * long double is only 4-byte aligned while _Atomic uint64_t needs 8. */
+ * Opaque storage for the runtime impl. On i386, long long / long double are
+ * only 4-byte aligned while _Atomic uint64_t needs 8 — force that with
+ * _Alignas(8) rather than relying on max_align_t (missing in TCC sysinclude). */
 #define CC_SOCKET_SIGNAL_STORAGE_SIZE 128
 typedef union CCSocketSignal {
+    _Alignas(8) unsigned char __cc_storage[CC_SOCKET_SIGNAL_STORAGE_SIZE];
     long long __cc_align_ll;
-    long double __cc_align_ld;
     void* __cc_align_ptr;
-    unsigned char __cc_storage[CC_SOCKET_SIGNAL_STORAGE_SIZE];
 } CCSocketSignal;
 
 /* TCP listener */
@@ -118,6 +117,9 @@ static inline CCIoError cc_net_to_io_error(CCNetError err) {
     }
 }
 
+/* Socket byte I/O uses the shared CCIoError Result domain (files/channels).
+ * Listen/accept/connect keep CCNetError for address/connect fidelity. */
+
 /* ============================================================================
  * TCP Client
  * ============================================================================ */
@@ -149,42 +151,47 @@ void cc_listener_close(CCListener* ln);
 
 /* ============================================================================
  * Socket I/O (implements Duplex-like interface)
+ *
+ * Byte reads follow EOF model B (same shape as files / channels):
+ *   Ok(true)  — got bytes (payload in out-param)
+ *   Ok(false) — clean peer close (recv == 0 / FIN); not an error
+ *   Err(e)    — RST, timeout, and other failures
+ *
+ * Non-blocking try_read is three-way: Ok(true)/Ok(false) as above;
+ * would-block (EAGAIN) is Err with CC_IO_BUSY — never Ok(false).
+ *
+ * Usage: while (cc_io_avail(cc_socket_read(sock, arena, n, &data))) { ... }
  * ============================================================================ */
 
-/* Read up to max_bytes into arena. Returns slice of actual bytes read.
- * Returns empty slice with CC_NET_CONNECTION_CLOSED on EOF. */
-CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+/* Read up to max_bytes into arena; payload in *out. */
+CCResult_bool_CCIoError cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out);
 
-/* Read up to max_bytes directly into caller buffer. Returns bytes read.
- * Returns 0 with CC_NET_CONNECTION_CLOSED on EOF. */
-size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err);
-size_t cc_socket_read_into_deadline(CCSocket* sock,
-                                    char* buf,
-                                    size_t max_bytes,
-                                    CCNetError* out_err,
-                                    const CCDeadline* deadline);
+/* Read up to max_bytes into caller buffer; byte count in *out. */
+CCResult_bool_CCIoError cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, size_t* out);
+CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket* sock,
+                                                    char* buf,
+                                                    size_t max_bytes,
+                                                    size_t* out,
+                                                    const CCDeadline* deadline);
 
-/* Non-blocking read into caller buffer.
- * On EAGAIN/EWOULDBLOCK, returns 0 with *out_would_block=true and CC_NET_OK. */
-size_t cc_socket_try_read_into(CCSocket* sock,
-                               char* buf,
-                               size_t max_bytes,
-                               CCNetError* out_err,
-                               bool* out_would_block);
+/* Non-blocking read into caller buffer (three-way; see above). */
+CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,
+                                               char* buf,
+                                               size_t max_bytes,
+                                               size_t* out);
 
 /* Async read */
-/* @async CCSlice cc_socket_read_async(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
+/* @async CCResult_bool_CCIoError cc_socket_read_async(...); */
 
-/* Write data. Returns bytes written. */
-size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err);
-size_t cc_socket_write_deadline(CCSocket* sock,
-                                const char* data,
-                                size_t len,
-                                CCNetError* out_err,
-                                const CCDeadline* deadline);
+/* Write data. Returns bytes written (may be short); no EOF story. */
+CCResult_size_t_CCIoError cc_socket_write(CCSocket* sock, const char* data, size_t len);
+CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket* sock,
+                                                  const char* data,
+                                                  size_t len,
+                                                  const CCDeadline* deadline);
 
 /* Async write */
-/* @async size_t cc_socket_write_async(CCSocket* sock, const char* data, size_t len, CCNetError* out_err); */
+/* @async CCResult_size_t_CCIoError cc_socket_write_async(...); */
 
 /* Shutdown modes */
 typedef enum CCShutdownMode {

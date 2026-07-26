@@ -1520,7 +1520,6 @@ static void db_free_all(RedisDb* db) {
 }
 
 static bool write_all(CCSocket* sock, CCSlice data) {
-    CCNetError err = CC_NET_OK;
     size_t off = 0;
     const int write_deadline_ms = 1000;
     CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
@@ -1528,9 +1527,11 @@ static bool write_all(CCSocket* sock, CCSlice data) {
         size_t n = cc_socket_write_deadline(sock,
                                             (const char*)data.ptr + off,
                                             data.len - off,
-                                            &err,
-                                            &deadline);
-        if (err != CC_NET_OK || n == 0) return false;
+                                            &deadline) !>(e) {
+            (void)e;
+            return false;
+        };
+        if (n == 0) return false;
         off += n;
     }
     return true;
