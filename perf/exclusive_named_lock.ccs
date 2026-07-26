@@ -1,0 +1,296 @@
+/*
+ * exclusive_named_lock.ccs — named exclusive sections (Concurrent-C)
+ *
+ * Fair cross-language protocol (see also go/, rust/, zig/). Same env knobs,
+ * same Zipf + CS work, same checks. No start-gun / ready barrier: wall time
+ * is spawn → work → join. Overlap is earned by the workload.
+ *
+ * Zipf path (product-shaped mix of hot/cold names):
+ *   resolve mutex handles for names 0..KEYS-1 once per worker
+ *   for I: k = zipf_pick(); g = m[k].lock(); row[k]++; g.unlock();
+ *   Expect sum(row[0..KEYS)) == W*I.
+ *
+ * Uncontended path (CAS fast-path micro only — always cs_spins=0):
+ *   worker w uses private name=(1000+w) / row[w]
+ *   Expect sum(row[w]) == W*I.
+ *   CC_EXCL_WORK is intentionally not applied here: with non-zero CS work
+ *   this path becomes a parallel CPU throughput test (OS threads vs fibers),
+ *   not a lock microbench.
+ *
+ * Idioms:
+ *   CC:   CCExclusive domain; mutex(name) once; guard lock (CAS + fiber park)
+ *   Go:   sync.Mutex per name via sync.Map
+ *   Rust: std::sync::Mutex per name via HashMap
+ *   Zig:  std.Io.Mutex per name via HashMap
+ *
+ * Env (shared across languages):
+ *   CC_EXCL_WORKERS  default 8
+ *   CC_EXCL_ITERS    default 200000   // lock pairs per worker
+ *   CC_EXCL_TRIALS   default 7        // timed trials after 1 warmup
+ *   CC_EXCL_WORK     default 32       // Zipf CS spins only
+ *   CC_EXCL_KEYS     default 64       // Zipf name space
+ *   CC_EXCL_ZIPF_S   default 1.0      // Zipf exponent (weight ~ 1/(k+1)^s)
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+
+#define DEFAULT_WORKERS 8
+#define DEFAULT_ITERS   200000
+#define DEFAULT_TRIALS  7
+#define DEFAULT_WORK    32
+#define DEFAULT_KEYS    64
+#define DEFAULT_ZIPF_S  1.0
+#define MAX_WORKERS     256
+#define MAX_KEYS        4096
+#define CACHE_LINE      64
+
+typedef struct {
+    int64_t value;
+    char _pad[CACHE_LINE - sizeof(int64_t)];
+} Row;
+
+typedef struct {
+    uint64_t state;
+} Rng;
+
+static Row g_rows[MAX_KEYS];
+static CCExclusive* g_excl;
+static double g_zipf_cum[MAX_KEYS];
+static double g_zipf_s;
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int env_int(const char* name, int fallback, int min_v) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    int n = atoi(v);
+    return n < min_v ? min_v : n;
+}
+
+static double env_double(const char* name, double fallback) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    char* end = NULL;
+    double n = strtod(v, &end);
+    if (end == v || n <= 0.0) return fallback;
+    return n;
+}
+
+static void cs_work(int spins) {
+    volatile int x = 0;
+    for (int i = 0; i < spins; i++) x += i;
+    (void)x;
+}
+
+static void row_bump(Row* row, int spins) {
+    int64_t v = row->value;
+    cs_work(spins);
+    row->value = v + 1;
+}
+
+static uint64_t rng_next(Rng* r) {
+    uint64_t x = r->state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    r->state = x;
+    return x;
+}
+
+static double rng_unit(Rng* r) {
+    /* top 53 bits → [0, 1) */
+    return (double)(rng_next(r) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+static void zipf_init(double* cum, int keys, double s) {
+    double total = 0.0;
+    for (int k = 0; k < keys; k++) {
+        double w = 1.0 / pow((double)(k + 1), s);
+        total += w;
+        cum[k] = total;
+    }
+    for (int k = 0; k < keys; k++) cum[k] /= total;
+}
+
+static int zipf_pick(const double* cum, int keys, Rng* r) {
+    double u = rng_unit(r);
+    int lo = 0;
+    int hi = keys - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (cum[mid] < u) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static Rng rng_for_worker(int worker_id) {
+    Rng r;
+    r.state = 0x9E3779B97F4A7C15ULL ^ ((uint64_t)worker_id * 0xD1B54A32D192ED03ULL);
+    if (r.state == 0) r.state = 1;
+    return r;
+}
+
+static void worker_zipf(int worker_id, int iters, int spins, int keys) {
+    /* Heap: fiber stacks are small; MAX_KEYS mutex copies would be large. */
+    CCExclusiveMutex* ms =
+        (CCExclusiveMutex*)malloc((size_t)keys * sizeof(CCExclusiveMutex));
+    if (!ms) abort();
+    for (int k = 0; k < keys; k++) {
+        ms[k] = g_excl->mutex((uint64_t)k);
+    }
+    Rng rng = rng_for_worker(worker_id);
+    for (int i = 0; i < iters; i++) {
+        int k = zipf_pick(g_zipf_cum, keys, &rng);
+        CCExclusiveMutex* mk = &ms[k];
+        CCExclusiveGuard g = mk->lock();
+        row_bump(&g_rows[k], spins);
+        g.unlock();
+    }
+    free(ms);
+}
+
+static void worker_uncontended(int worker_id, int iters, int spins) {
+    CCExclusiveMutex m = g_excl->mutex((uint64_t)(1000 + worker_id));
+    for (int i = 0; i < iters; i++) {
+        CCExclusiveGuard g = m.lock();
+        row_bump(&g_rows[worker_id], spins);
+        g.unlock();
+    }
+}
+
+static double run_zipf(int workers, int iters, int spins, int keys) {
+    memset(g_rows, 0, sizeof(g_rows));
+
+    double t0 = time_now_ms();
+    {
+        CCNursery* n = cc_nursery_create(NULL)
+            !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
+            @destroy;
+        for (int w = 0; w < workers; w++) {
+            int id = w;
+            n->spawn(() => [id, iters, spins, keys] {
+                worker_zipf(id, iters, spins, keys);
+            });
+        }
+    }
+    double t1 = time_now_ms();
+
+    int64_t sum = 0;
+    for (int k = 0; k < keys; k++) sum += g_rows[k].value;
+    int64_t expect = (int64_t)workers * (int64_t)iters;
+    if (sum != expect) {
+        fprintf(stderr, "ZIPF CHECK FAIL: got=%lld expect=%lld\n",
+                (long long)sum, (long long)expect);
+        abort();
+    }
+    return t1 - t0;
+}
+
+static double run_uncontended(int workers, int iters, int spins) {
+    memset(g_rows, 0, sizeof(g_rows));
+
+    double t0 = time_now_ms();
+    {
+        CCNursery* n = cc_nursery_create(NULL)
+            !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
+            @destroy;
+        for (int w = 0; w < workers; w++) {
+            int id = w;
+            n->spawn(() => [id, iters, spins] {
+                worker_uncontended(id, iters, spins);
+            });
+        }
+    }
+    double t1 = time_now_ms();
+
+    int64_t sum = 0;
+    for (int w = 0; w < workers; w++) sum += g_rows[w].value;
+    int64_t expect = (int64_t)workers * (int64_t)iters;
+    if (sum != expect) {
+        fprintf(stderr, "UNCONTENDED CHECK FAIL: got=%lld expect=%lld\n",
+                (long long)sum, (long long)expect);
+        abort();
+    }
+    return t1 - t0;
+}
+
+static double median_ms(double* samples, int n) {
+    for (int i = 1; i < n; i++) {
+        double key = samples[i];
+        int j = i - 1;
+        while (j >= 0 && samples[j] > key) {
+            samples[j + 1] = samples[j];
+            j--;
+        }
+        samples[j + 1] = key;
+    }
+    return samples[n / 2];
+}
+
+int main(void) {
+    int workers = env_int("CC_EXCL_WORKERS", DEFAULT_WORKERS, 1);
+    int iters = env_int("CC_EXCL_ITERS", DEFAULT_ITERS, 1);
+    int trials = env_int("CC_EXCL_TRIALS", DEFAULT_TRIALS, 1);
+    int spins = env_int("CC_EXCL_WORK", DEFAULT_WORK, 0);
+    int keys = env_int("CC_EXCL_KEYS", DEFAULT_KEYS, 1);
+    g_zipf_s = env_double("CC_EXCL_ZIPF_S", DEFAULT_ZIPF_S);
+    if (workers > MAX_WORKERS) workers = MAX_WORKERS;
+    if (keys > MAX_KEYS) keys = MAX_KEYS;
+    if (trials > 64) trials = 64;
+    zipf_init(g_zipf_cum, keys, g_zipf_s);
+
+    g_excl = cc_exclusive_create();
+    if (!g_excl) {
+        fprintf(stderr, "cc_exclusive_create failed\n");
+        return 1;
+    }
+
+    printf("exclusive_named_lock lang=cc\n");
+    printf("  workers=%d iters/worker=%d timed_trials=%d warmup=1 "
+           "cs_spins=%d keys=%d zipf_s=%.3f\n",
+           workers, iters, trials, spins, keys, g_zipf_s);
+    printf("  total_lock_ops/trial=%lld\n",
+           (long long)workers * (long long)iters);
+    printf("  note=excl->mutex(name) once + m.lock()/g.unlock(); Zipf uses "
+           "CS work; uncontended is lock micro (spins=0); no start-gun; "
+           "nursery; time includes spawn+join\n");
+
+    int warm = iters > 1000 ? 1000 : iters;
+    (void)run_zipf(workers, warm, spins, keys);
+    (void)run_uncontended(workers, warm, 0);
+
+    double z_samples[64];
+    double u_samples[64];
+    for (int t = 0; t < trials; t++) {
+        z_samples[t] = run_zipf(workers, iters, spins, keys);
+        u_samples[t] = run_uncontended(workers, iters, 0);
+        printf("  trial %d: zipf_ms=%.3f uncontended_ms=%.3f\n",
+               t + 1, z_samples[t], u_samples[t]);
+    }
+
+    double z_med = median_ms(z_samples, trials);
+    double u_med = median_ms(u_samples, trials);
+    double total_ops = (double)workers * (double)iters;
+    double z_ops = (z_med > 0) ? (total_ops / (z_med / 1000.0)) : 0;
+    double u_ops = (u_med > 0) ? (total_ops / (u_med / 1000.0)) : 0;
+
+    printf("RESULT lang=cc zipf_median_ms=%.3f zipf_ops_s=%.0f "
+           "uncontended_median_ms=%.3f uncontended_ops_s=%.0f\n",
+           z_med, z_ops, u_med, u_ops);
+
+    g_excl->destroy();
+    g_excl = NULL;
+    return 0;
+}

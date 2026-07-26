@@ -33,6 +33,7 @@
 #include "select.c"
 #include "dir.c"
 #include "process.c"
+#include "exclusive.c"
 
 #ifdef CC_ENABLE_ASYNC
 #include "async_chan.c"

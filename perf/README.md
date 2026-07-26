@@ -58,6 +58,7 @@ Run an individual benchmark directly:
 
 | Benchmark | What it measures |
 |-----------|------------------|
+| `exclusive_named_lock.ccs` | Named exclusive sections: Zipf name mix (+ CS work) vs uncontended lock micro (spins=0). Compare via `compare_exclusive_named_lock.sh`. |
 | `arena_contention_storm.ccs` | Per-fiber private-arena allocation throughput. |
 | `cancellation_avalanche.ccs` | Teardown speed and cleanup correctness for blocked task trees. |
 | `mpmc_worker_pool.ccs` | Buffered producer -> worker-pool throughput and work distribution. |

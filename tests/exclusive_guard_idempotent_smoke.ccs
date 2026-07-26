@@ -1,0 +1,36 @@
+/*
+ * Guard double-unlock is a local no-op (held bit), not a lock-word protocol.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCExclusive* excl = cc_exclusive_create();
+    if (!excl) return 1;
+
+    CCExclusiveMutex m = excl->mutex(42);
+    int x = 0;
+    {
+        CCExclusiveGuard g = m.lock();
+        x++;
+        g.unlock();
+        g.unlock(); /* must be safe */
+        g.destroy(); /* alias; still safe */
+    }
+
+    /* Still usable after double-unlock. */
+    {
+        CCExclusiveGuard g = m.lock();
+        x++;
+        g.unlock();
+    }
+
+    if (x != 2) {
+        fprintf(stderr, "FAIL x=%d\n", x);
+        return 1;
+    }
+    excl->destroy();
+    printf("exclusive_guard_idempotent_smoke: OK\n");
+    return 0;
+}

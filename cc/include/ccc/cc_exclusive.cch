@@ -1,0 +1,112 @@
+/*
+ * Named exclusive sections (v1).
+ *
+ *   CCExclusive* excl = cc_exclusive_create();
+ *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
+ *   CCExclusiveGuard g = m.lock();
+ *   ... short critical section (do not @await) ...
+ *   g.unlock();                              // idempotent (local `held`)
+ *   // also: excl->lock(name);  g.destroy();  excl->destroy();
+ *
+ * Double-release is fully local: `g.held` on the stack token.
+ *
+ * Lock word: 0 free, 1 locked, 2 locked+waiters.
+ * Uncontended lock/unlock are inlined (CAS 0→1 / CAS 1→0).
+ * Contended unlock wakes waiters via the runtime (retry CAS; no handoff).
+ *
+ * Each CCExclusive is its own name space. Later: @create / guard @destroy.
+ */
+#ifndef CCC_CC_EXCLUSIVE_CCH
+#define CCC_CC_EXCLUSIVE_CCH
+
+#include <stdint.h>
+#include <stdatomic.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct CCExclusive CCExclusive;
+
+/* locked word values (shared by header fast path + runtime). */
+#define CC_EXCL_FREE      0
+#define CC_EXCL_LOCKED    1
+#define CC_EXCL_CONTENDED 2
+
+/* Resolved name → lock entry. Cheap to copy; stable for the life of excl. */
+typedef struct CCExclusiveMutex {
+    CCExclusive* excl;
+    uint64_t name;
+    _Atomic int* _state; /* hot lock CAS */
+    void* _entry;        /* unlock / slow-lock cookie */
+} CCExclusiveMutex;
+
+typedef struct CCExclusiveGuard {
+    _Atomic int* _state;
+    void* _entry;
+    int held; /* 1 while this guard still owns the section */
+} CCExclusiveGuard;
+
+CCExclusive* cc_exclusive_create(void);
+void cc_exclusive_destroy(CCExclusive* excl);
+
+CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
+
+/* Slow lock (park). Receiver is pointer for UFCS (`m.lock()`). */
+CCExclusiveGuard cc_exclusive_mutex_lock_slow(CCExclusiveMutex* m);
+/* Contended unlock: drain waiter list + unpark (state already handled). */
+void cc_exclusive_guard_unlock_impl(void* entry);
+
+static inline CCExclusiveGuard cc_exclusive_mutex_lock(CCExclusiveMutex* m) {
+    CCExclusiveGuard g;
+    g._state = NULL;
+    g._entry = NULL;
+    g.held = 0;
+    if (!m || !m->_state) return g;
+
+    int expected = CC_EXCL_FREE;
+    if (atomic_compare_exchange_weak_explicit(
+            m->_state, &expected, CC_EXCL_LOCKED,
+            memory_order_acquire, memory_order_relaxed)) {
+        g._state = m->_state;
+        g._entry = m->_entry;
+        g.held = 1;
+        return g;
+    }
+    return cc_exclusive_mutex_lock_slow(m);
+}
+
+static inline CCExclusiveGuard cc_exclusive_lock(CCExclusive* excl, uint64_t name) {
+    CCExclusiveMutex m = cc_exclusive_mutex(excl, name);
+    return cc_exclusive_mutex_lock(&m);
+}
+
+static inline void cc_exclusive_guard_unlock(CCExclusiveGuard* g) {
+    if (!g || !g->held) return;
+    g->held = 0;
+    _Atomic int* state = g->_state;
+    void* entry = g->_entry;
+    g->_state = NULL;
+    g->_entry = NULL;
+    if (!state) return;
+
+    /* Uncontended: CAS LOCKED → FREE. Failure order acquire syncs with the
+     * waiter's release store of CONTENDED. */
+    int expected = CC_EXCL_LOCKED;
+    if (atomic_compare_exchange_strong_explicit(
+            state, &expected, CC_EXCL_FREE,
+            memory_order_release, memory_order_acquire)) {
+        return;
+    }
+    if (entry) cc_exclusive_guard_unlock_impl(entry);
+}
+
+static inline void cc_exclusive_guard_destroy(CCExclusiveGuard* g) {
+    cc_exclusive_guard_unlock(g);
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CCC_CC_EXCLUSIVE_CCH */
