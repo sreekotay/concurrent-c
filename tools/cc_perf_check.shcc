@@ -4,9 +4,9 @@
  * Bash oracle: tools/cc_perf_check.sh (make perf-regress-oracle).
  *
  * Usage:
- *   ./tools/cc_perf_check.ccscript
- *   ./tools/cc_perf_check.ccscript --update
- *   ./tools/cc_perf_check.ccscript --current /tmp/metrics.txt
+ *   ./tools/cc_perf_check.shcc
+ *   ./tools/cc_perf_check.shcc --update
+ *   ./tools/cc_perf_check.shcc --current /tmp/metrics.txt
  *       (skip capture; compare baseline against an existing metrics file)
  */
 

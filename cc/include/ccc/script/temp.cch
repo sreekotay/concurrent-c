@@ -1,5 +1,5 @@
 /*
- * Temp file with Result create + @destroy cleanup for .ccscript.
+ * Temp file with Result create + @destroy cleanup for .shcc.
  *
  *   CCTempFile tmp = cc_temp_file(&a) !> @destroy;
  */

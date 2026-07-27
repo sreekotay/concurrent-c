@@ -500,11 +500,11 @@ static void cc_init_paths(const char* argv0) {
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [options] <input.ccs|.ccscript> [output]\n", prog);
-    fprintf(stderr, "  %s <input.ccscript> [args...]                  (auto-run; shebang-friendly)\n", prog);
-    fprintf(stderr, "  %s run <input.ccs|.ccscript> [-- <args...>]      (shorthand for build run)\n", prog);
-    fprintf(stderr, "  %s build [options] <input.ccs|.ccscript> <output>\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs|.ccscript> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s [options] <input.ccs|.shcc> [output]\n", prog);
+    fprintf(stderr, "  %s <input.shcc> [args...]                  (auto-run; shebang-friendly)\n", prog);
+    fprintf(stderr, "  %s run <input.ccs|.shcc> [-- <args...>]      (shorthand for build run)\n", prog);
+    fprintf(stderr, "  %s build [options] <input.ccs|.shcc> <output>\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs|.shcc> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
@@ -575,8 +575,8 @@ static int cc__clean_artifacts(int all) {
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s build [step] [options] <input.ccs|.ccscript> [output]\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs|.ccscript> [-o bin/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s build [step] [options] <input.ccs|.shcc> [output]\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs|.shcc> [-o bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
@@ -3096,10 +3096,10 @@ static int run_build_mode(int argc, char** argv) {
             fprintf(mk, "CC_GEN_C_%s :=", name);
             for (size_t j = 0; j < t->src_count; ++j) {
                 const char* src = t->srcs[j];
-                // .ccs / .ccscript files get lowered to .c
+                // .ccs / .shcc files get lowered to .c
                 size_t slen = strlen(src);
                 size_t ext_len = 0;
-                if (slen > 9 && strcmp(src + slen - 9, ".ccscript") == 0) ext_len = 9;
+                if (slen > 5 && strcmp(src + slen - 5, ".shcc") == 0) ext_len = 5;
                 else if (slen > 4 && strcmp(src + slen - 4, ".ccs") == 0) ext_len = 4;
                 if (ext_len) {
                     // Extract basename without extension
@@ -4055,12 +4055,12 @@ int main(int argc, char **argv) {
      * made the root build.cc match itself twice).  Flags and their values
      * are skipped; the scan stops at the first real positional or "--".
      *
-     * Shebang / direct invoke: a first positional ending in `.ccscript`
+     * Shebang / direct invoke: a first positional ending in `.shcc`
      * implies `run`.  Args after the script path are program args
      * (inserted after `--`), so
      *   #!/usr/bin/env -S ./cc/bin/ccc
-     *   ./tools/foo.ccscript --flag
-     * becomes `ccc build run ./tools/foo.ccscript -- --flag`. */
+     *   ./tools/foo.shcc --flag
+     * becomes `ccc build run ./tools/foo.shcc -- --flag`. */
     {
         int sub_idx = 0;
         int script_idx = 0;
@@ -4072,7 +4072,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
-            else if (cc__ends_with(a, ".ccscript")) script_idx = i;
+            else if (cc__ends_with(a, ".shcc")) script_idx = i;
             break;
         }
         if (sub_idx > 0) {

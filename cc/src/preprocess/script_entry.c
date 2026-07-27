@@ -6,10 +6,10 @@
 
 #include "util/text.h"
 
-int cc_path_is_ccscript(const char* path) {
+int cc_path_is_shcc(const char* path) {
     if (!path) return 0;
     size_t n = strlen(path);
-    return n >= 9 && strcmp(path + n - 9, ".ccscript") == 0;
+    return n >= 5 && strcmp(path + n - 5, ".shcc") == 0;
 }
 
 /* True when a top-level `main` function definition is present. */
@@ -954,7 +954,7 @@ static int cc__append_task_dispatch(char* out, size_t* o, size_t need,
         "            argv[argc] = NULL;\n"
         "        }\n";
     static const char unknown_head[] =
-        "        fprintf(stderr, \"ccscript: unknown task @%s\\n\", __cc_task);\n"
+        "        fprintf(stderr, \"shcc: unknown task @%s\\n\", __cc_task);\n"
         "        fprintf(stderr, \"tasks:\\n\");\n";
     static const char unknown_tail[] =
         "        return 2;\n"
@@ -989,7 +989,7 @@ char* cc_script_rewrite_source(const char* path,
                                const char* src,
                                size_t len,
                                size_t* out_len) {
-    if (!cc_path_is_ccscript(path) || !src) return NULL;
+    if (!cc_path_is_shcc(path) || !src) return NULL;
 
     size_t body_off = cc__script_skip_shebang(src, len);
     const char* body = src + body_off;
@@ -1000,7 +1000,7 @@ char* cc_script_rewrite_source(const char* path,
      * statement-start rewinds for `!>` / `@err` stay within the function
      * (file-scope handler + synthetic main confused pass_err_syntax). */
     static const char prelude[] =
-        "/* .ccscript entry: auto prelude */\n"
+        "/* .shcc entry: auto prelude */\n"
         "#include <ccc/script/prelude.cch>\n"
         "\n";
     static const char default_eh[] =
@@ -1015,7 +1015,7 @@ char* cc_script_rewrite_source(const char* path,
         "\n    return 0;\n"
         "}\n";
     static const char main_stmt_err[] =
-        "#error \".ccscript: explicit main cannot coexist with top-level statements\"\n";
+        "#error \".shcc: explicit main cannot coexist with top-level statements\"\n";
 
     size_t pre_len = sizeof(prelude) - 1;
     size_t eh_len = sizeof(default_eh) - 1;
@@ -1049,9 +1049,9 @@ char* cc_script_rewrite_source(const char* path,
     if (has_main) {
         if (has_main_chunk) {
             fprintf(stderr,
-                    "%s: .ccscript with explicit main cannot also have "
+                    "%s: .shcc with explicit main cannot also have "
                     "top-level statements\n",
-                    path ? path : "<ccscript>");
+                    path ? path : "<shcc>");
             need = pre_len + (sizeof(main_stmt_err) - 1) + body_len + 1;
             out = (char*)malloc(need);
             if (!out) { free(chunks); return NULL; }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Bash oracle for tools/cc_perf_check.ccscript (primary: make perf-regress).
+# Bash oracle for tools/cc_perf_check.shcc (primary: make perf-regress).
 #
-# Prefer the .ccscript twin for day-to-day use:
-#   ./tools/cc_perf_check.ccscript
-#   ./tools/cc_perf_check.ccscript --update
+# Prefer the .shcc twin for day-to-day use:
+#   ./tools/cc_perf_check.shcc
+#   ./tools/cc_perf_check.shcc --update
 #   make perf-regress
 # This script stays as a side-by-side oracle (make perf-regress-oracle).
 #
@@ -203,7 +203,7 @@ check_wall
 echo
 if [[ $regressions -gt 0 ]]; then
   echo "perf check: FAIL — $regressions regression(s), $warnings warning(s)"
-  echo "perf check: if this is an intentional change, run ./tools/cc_perf_check.ccscript --update"
+  echo "perf check: if this is an intentional change, run ./tools/cc_perf_check.shcc --update"
   exit 1
 fi
 if [[ $warnings -gt 0 ]]; then

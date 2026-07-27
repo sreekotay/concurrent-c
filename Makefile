@@ -218,11 +218,11 @@ perf-baseline: cc tools
 	@./scripts/capture_baseline.sh
 
 perf-regress: cc tools
-	@./tools/perf.ccscript @perf_regress
+	@./tools/perf.shcc @perf_regress
 
-# Bash oracle for the .ccscript twin (same metrics / tolerances).
+# Bash oracle for the .shcc twin (same metrics / tolerances).
 perf-regress-oracle: cc tools
-	@./tools/perf.ccscript @perf_oracle
+	@./tools/perf.shcc @perf_oracle
 
 # Run examples, stress, and perf in one go.
 full-check: examples-check stress-check perf-check

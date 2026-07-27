@@ -235,7 +235,7 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     file_buf[got] = '\0';
     fclose(f);
 
-    /* .ccscript: auto-prelude, default @errhandler, synthetic main. */
+    /* .shcc: auto-prelude, default @errhandler, synthetic main. */
     {
         size_t script_len = 0;
         char* script = cc_script_rewrite_source(input_path, file_buf, got, &script_len);

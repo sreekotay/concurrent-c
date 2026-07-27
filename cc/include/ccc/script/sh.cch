@@ -1,5 +1,5 @@
 /*
- * Thin process wrappers for .ccscript orchestration.
+ * Thin process wrappers for .shcc orchestration.
  */
 #ifndef CC_SCRIPT_SH_H
 #define CC_SCRIPT_SH_H

@@ -14,7 +14,7 @@ This specification defines:
 - Surface syntax and compile-time rules
 - Observable runtime contract
 - Lowering to C
-- Script entry (`.ccscript`) and the script library partner to the stdlib (§9.5)
+- Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -711,7 +711,7 @@ revision defines multi-line tag bodies.
 | `@deprecated [<text>]` | Marks the declaration deprecated. |
 | `@example <text>` | Short usage example. |
 | `@see <ref>` | Cross-reference (name, path, or URI). |
-| `@task <text>` | One-line summary override for `.ccscript` `@` task listing (§9.5.2a). When present, compact task UIs prefer this text over the leading summary. |
+| `@task <text>` | One-line summary override for `.shcc` `@` task listing (§9.5.2a). When present, compact task UIs prefer this text over the leading summary. |
 
 ```c
 /**
@@ -5069,7 +5069,7 @@ Primitive numeric types get UFCS methods for common operations:
 
 ---
 
-### 9.5 Script Library (`.ccscript` / `ccc/script/`)
+### 9.5 Script Library (`.shcc` / `ccc/script/`)
 
 The **script library** (`cc_scriptlib`) is the scripting partner to the standard
 library. It targets short Concurrent-C programs that orchestrate tools: read
@@ -5082,8 +5082,9 @@ defined in `concurrent-c-stdlib-spec.md` and §9.
 
 #### 9.5.1 Language and file extension
 
-A `.ccscript` translation unit is the same language as `.ccs`. The driver
-applies an entry rewrite before the ordinary Concurrent-C pipeline:
+A `.shcc` translation unit is the same language as `.ccs`. The `.shcc`
+extension is distinct from the `.ccs` / `.cch` source and header pair. The
+driver applies an entry rewrite before the ordinary Concurrent-C pipeline:
 
 1. Strip a leading `#!` shebang line when present.
 2. Force-include `<ccc/script/prelude.cch>` at translation-unit scope.
@@ -5104,15 +5105,15 @@ applies an entry rewrite before the ordinary Concurrent-C pipeline:
 
 #### 9.5.2 Driver invocation
 
-`ccc` treats a first positional argument ending in `.ccscript` as an implicit
+`ccc` treats a first positional argument ending in `.shcc` as an implicit
 `run` (shebang-friendly):
 
 ```text
-ccc [ccc-flags...] path/to/tool.ccscript [script-args...]
+ccc [ccc-flags...] path/to/tool.shcc [script-args...]
 ```
 
 Args after the script path are program arguments (inserted after `--` for the
-build-run step). Explicit `ccc run path.ccscript [-- args...]` remains valid.
+build-run step). Explicit `ccc run path.shcc [-- args...]` remains valid.
 
 Recommended shebang:
 
@@ -5130,10 +5131,10 @@ when that argument begins with `@`:
 
 | Invocation | Behavior |
 | ---------- | -------- |
-| `tool.ccscript` | Run the synthetic-main statement body (default script). |
-| `tool.ccscript @` | Print discovered tasks (sorted) to stdout; exit 0. Each line is the task name, and when a CCDoc one-line summary is available (§2.4), a summary column. |
-| `tool.ccscript @name args…` | Strip `@name` from `argv`, then `return name(argc', argv')`. |
-| `tool.ccscript @unknown …` | Print an error and the task list (with summaries when present) to stderr; exit 2. |
+| `tool.shcc` | Run the synthetic-main statement body (default script). |
+| `tool.shcc @` | Print discovered tasks (sorted) to stdout; exit 0. Each line is the task name, and when a CCDoc one-line summary is available (§2.4), a summary column. |
+| `tool.shcc @name args…` | Strip `@name` from `argv`, then `return name(argc', argv')`. |
+| `tool.shcc @unknown …` | Print an error and the task list (with summaries when present) to stderr; exit 2. |
 
 A **task** is a translation-unit function definition of the form
 
@@ -5155,8 +5156,8 @@ A CCDoc block immediately before a task supplies its listing summary: `@task`
 tag text when present, otherwise the leading one-line summary (§2.4).
 
 ```text
-./tools/perf.ccscript @perf_regress --update
-./tools/perf.ccscript @
+./tools/perf.shcc @perf_regress --update
+./tools/perf.shcc @
 ```
 
 #### 9.5.3 Prelude and headers
@@ -5251,7 +5252,7 @@ io.write_all(out.as_slice()) !>;
 
 Example (parse → map → report) uses the same prelude, a top-level `@grammar`
 and helpers at TU scope, and statement body in synthetic `main` — see
-`tools/cc_perf_check.ccscript` and `examples/serdes/json/tools/minify.ccscript`.
+`tools/cc_perf_check.shcc` and `examples/serdes/json/tools/minify.shcc`.
 
 #### 9.5.7 Out of scope for scriptlib
 
@@ -7319,6 +7320,6 @@ These rules prevent ABI surprises and ensure the implementation can generate bor
 ## Summary
 
 The main body defines source syntax, static semantics, and observable behavior.
-§9.5 defines `.ccscript` entry rewriting and the `ccc/script/` orchestration
+§9.5 defines `.shcc` entry rewriting and the `ccc/script/` orchestration
 surface. Appendix J defines the shipped C lowering contract. Focused
 specifications define scheduler and channel runtime state machines.

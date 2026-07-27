@@ -1,5 +1,5 @@
 /*
- * Auto-included by the driver for every .ccscript translation unit.
+ * Auto-included by the driver for every .shcc translation unit.
  * Default @errhandler is injected by the script entry rewrite (Concurrent-C
  * surface that must not pass through .cch → .h lowering).
  */

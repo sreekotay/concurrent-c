@@ -4,7 +4,7 @@ Syntax highlighting for Concurrent-C source, headers, and scripts:
 
 - `*.ccs` (Concurrent-C source)
 - `*.cch` (Concurrent-C headers)
-- `*.ccscript` (Concurrent-C scripts; same language as `.ccs`)
+- `*.shcc` (Concurrent-C scripts; same language as `.ccs`, outside the `.ccs`/`.cch` pair)
 
 Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax constructs like:
 
@@ -40,9 +40,9 @@ cd /path/to/concurrent-c
 
 2. Reload VS Code (`Developer: Reload Window`).
 
-3. Open a `.ccs`, `.cch`, or `.ccscript` file; the language mode should be **Concurrent-C**.
+3. Open a `.ccs`, `.cch`, or `.shcc` file; the language mode should be **Concurrent-C**.
 
-A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.ccscript`.
+A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.shcc`.
 
 ## Develop / tweak the grammar
 

@@ -10184,7 +10184,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
         char* raw = NULL;
         size_t raw_len = 0;
         if (cc__read_file_text(input_path, &raw, &raw_len) == 0 && raw) {
-            /* .ccscript entry wrap before grammar splice / include-expand so
+            /* .shcc entry wrap before grammar splice / include-expand so
              * comptime registration sees the auto-prelude. */
             {
                 size_t script_len = 0;
@@ -10202,7 +10202,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
                 expand_src = spliced;
                 expand_len = strlen(spliced);
             }
-            if (expand_src != raw || cc_path_is_ccscript(input_path)) {
+            if (expand_src != raw || cc_path_is_shcc(input_path)) {
                 snprintf(tmp_grammar_path, sizeof(tmp_grammar_path), "/tmp/cc_pp_gram_XXXXXX");
                 int fd = mkstemp(tmp_grammar_path);
                 if (fd >= 0) {

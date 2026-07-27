@@ -65,6 +65,6 @@ if [[ "${INSTALL_CURSOR}" -eq 1 ]]; then
   echo
 fi
 
-echo "Open a .ccs, .cch, or .ccscript file and confirm language mode is 'Concurrent-C'."
+echo "Open a .ccs, .cch, or .shcc file and confirm language mode is 'Concurrent-C'."
 
 

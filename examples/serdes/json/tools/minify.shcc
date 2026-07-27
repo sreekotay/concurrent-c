@@ -2,8 +2,8 @@
 /*
  * Twin of minify.py: strip structural JSON whitespace, preserve string bytes.
  *
- * Usage:  ./minify.ccscript < twitter.json > twitter_min.json
- *         (or: ccc minify.ccscript < ...)
+ * Usage:  ./minify.shcc < twitter.json > twitter_min.json
+ *         (or: ccc minify.shcc < ...)
  * Side-by-side with: examples/serdes/json/tools/minify.py
  */
 

@@ -3,11 +3,11 @@
 
 #include <stddef.h>
 
-/* 1 if path ends with .ccscript */
-int cc_path_is_ccscript(const char* path);
+/* 1 if path ends with .shcc */
+int cc_path_is_shcc(const char* path);
 
 /*
- * Rewrite a .ccscript source buffer:
+ * Rewrite a .shcc source buffer:
  *   - strip shebang
  *   - force-include <ccc/script/prelude.cch>
  *   - if no top-level main: split the body so TU-scope items stay outside
@@ -20,7 +20,7 @@ int cc_path_is_ccscript(const char* path);
  *   - explicit main + top-level statements → #error (and stderr diag)
  *
  * Returns malloc'd rewritten text and sets *out_len.
- * Returns NULL (and leaves *out_len unchanged) when path is not .ccscript
+ * Returns NULL (and leaves *out_len unchanged) when path is not .shcc
  * or on allocation failure — caller keeps the original buffer.
  */
 char* cc_script_rewrite_source(const char* path,

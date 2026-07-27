@@ -2,9 +2,9 @@
 /*
  * Make-facing task runner for compiler perf checks.
  *
- *   ./tools/perf.ccscript @                 - list tasks
- *   ./tools/perf.ccscript @perf_regress ... - primary .ccscript check
- *   ./tools/perf.ccscript @perf_oracle ...  - bash oracle twin
+ *   ./tools/perf.shcc @                 - list tasks
+ *   ./tools/perf.shcc @perf_regress ... - primary .shcc check
+ *   ./tools/perf.shcc @perf_oracle ...  - bash oracle twin
  *
  * Extra argv after the task name is forwarded to the underlying tool
  * (e.g. --update, --current PATH).
@@ -38,14 +38,14 @@ static int cc__forward_tool(int argc, char **argv, const char *rel_tool) {
 }
 
 /**
- * Primary compiler perf regression check (.ccscript).
+ * Primary compiler perf regression check (.shcc).
  */
 static int perf_regress(int argc, char **argv) {
-    return cc__forward_tool(argc, argv, "tools/cc_perf_check.ccscript");
+    return cc__forward_tool(argc, argv, "tools/cc_perf_check.shcc");
 }
 
 /**
- * @task Bash oracle for the .ccscript twin
+ * @task Bash oracle for the .shcc twin
  */
 static int perf_oracle(int argc, char **argv) {
     @errhandler(CCError e) {

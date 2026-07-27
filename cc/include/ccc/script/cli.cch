@@ -1,5 +1,5 @@
 /*
- * Tiny CLI helpers for .ccscript tools.
+ * Tiny CLI helpers for .shcc tools.
  */
 #ifndef CC_SCRIPT_CLI_H
 #define CC_SCRIPT_CLI_H

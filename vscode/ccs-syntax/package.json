@@ -1,8 +1,8 @@
 {
   "name": "concurrent-c-syntax",
   "displayName": "Concurrent-C Syntax",
-  "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch, *.ccscript), a C-preprocessor-based language.",
-  "version": "0.3.0",
+  "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch, *.shcc), a C-preprocessor-based language.",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -20,12 +20,12 @@
           "concurrent-c",
           "ccc",
           "ccs",
-          "ccscript"
+          "shcc"
         ],
         "extensions": [
           ".ccs",
           ".cch",
-          ".ccscript"
+          ".shcc"
         ],
         "configuration": "./language-configuration.json"
       }

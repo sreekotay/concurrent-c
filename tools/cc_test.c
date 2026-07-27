@@ -839,7 +839,7 @@ int main(int argc, char** argv) {
         (void)run_cmd_redirect_timeout("./cc/bin/ccc clean", NULL, NULL, verbose, 0);
     }
 
-    /* Collect all .c / .ccs / .ccscript files under tests/ recursively.
+    /* Collect all .c / .ccs / .shcc files under tests/ recursively.
      * Sibling config files (`tests/<stem>.env`, `.stdout`, `.args`,
      * `.compile_err`, etc.) are still keyed by bare stem in the top-level
      * tests/ dir for back-compat; subdir tests must therefore have stems
@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (!(ends_with(nm, ".c") || ends_with(nm, ".ccs") ||
-                      ends_with(nm, ".ccscript")))
+                      ends_with(nm, ".shcc")))
                     continue;
                 if (all_n == all_cap) {
                     int nc = all_cap ? all_cap * 2 : 64;
@@ -936,7 +936,7 @@ int main(int argc, char** argv) {
         char ce[512];
         snprintf(ce, sizeof(ce), "%s/%s.compile_err", tdir, stem);
         if (file_exists(ce)) compile_fail = 1;
-        else if (ends_with(name, "_fail.ccs") || ends_with(name, "_fail.ccscript"))
+        else if (ends_with(name, "_fail.ccs") || ends_with(name, "_fail.shcc"))
             compile_fail = 1;
 
         ran++;
