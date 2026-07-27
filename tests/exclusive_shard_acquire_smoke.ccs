@@ -1,0 +1,51 @@
+/*
+ * CCShardMask + CCExclusive multi-acquire (UFCS): sorted unique names and
+ * contiguous ranges, composed as the stdlib sharded-map locking spine.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = @create(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena);
+    CCShardMask shards;
+    CCExclusiveGuard gs[8];
+    size_t n;
+    uint64_t names[4];
+    int shared = 0;
+
+    if (!excl) return 1;
+    @defer excl->destroy();
+
+    shards = cc_shard_mask_make(8);
+    if (shards.count != 8 || shards.mask != 7) return 2;
+    if (shards.index(0x11u) != 1) return 3;
+    if (cc_shard_mask_clamp(10, 64).count != 8) return 4;
+    if (cc_shard_mask_clamp(3, 64).count != 2) return 5;
+    shards = cc_shard_mask_auto(64);
+    if (shards.count == 0 || (shards.count & (shards.count - 1u)) != 0) return 6;
+
+    /* Unsorted + duplicate names → one ascending unique acquire. */
+    names[0] = 3;
+    names[1] = 1;
+    names[2] = 3;
+    names[3] = 2;
+    n = excl->acquire_sorted(names, 4, gs, 8);
+    if (n != 3) return 7;
+    shared++;
+    cc_exclusive_guards_release(gs, n);
+
+    n = excl->acquire_range(0, 4, gs, 8);
+    if (n != 4) return 8;
+    shared++;
+    cc_exclusive_guards_release(gs, n);
+
+    /* Cap too small → no locks held. */
+    n = excl->acquire_range(0, 4, gs, 2);
+    if (n != 0) return 9;
+
+    if (shared != 2) return 10;
+    puts("exclusive_shard_acquire_smoke: PASS");
+    return 0;
+}

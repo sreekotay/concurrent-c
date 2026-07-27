@@ -4581,13 +4581,43 @@ By-name acquire is also available:
 CCExclusiveGuard g = excl->acquire(name);  // UFCS: cc_exclusive_acquire(excl, name)
 ```
 
+Multi-name acquire is deadlock-safe: names are always taken in ascending order.
+
+```c
+CCExclusiveGuard gs[8];
+size_t n = excl->acquire_sorted(names, count, gs, 8);
+  // UFCS: cc_exclusive_acquire_sorted(excl, names, count, gs, 8)
+size_t n = excl->acquire_range(0, shard_count, gs, 8);  /* [lo, hi) */
+  // UFCS: cc_exclusive_acquire_range(excl, 0, shard_count, gs, 8)
+cc_exclusive_guards_release(gs, n);
+```
+
+`acquire_sorted` accepts unsorted input and deduplicates; both return `0` (no
+locks held) when the unique name count exceeds `out_cap` or
+`CC_EXCLUSIVE_ACQUIRE_MULTI_MAX` (64). Partial acquires are rolled back.
+
 **Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word. This is intentional so end-of-hold cleanup does not read as a double-unlock bug in review.
 
 `g.destroy()` and `@destroy` on a guard are aliases for `g.release()`.
 
 An acquire blocks until the caller owns the named entry. Uncontended acquire is an inlined compare-and-swap on the entry lock word; contended acquire uses a slow path that may park the current fiber.
 
-#### 8.10.4 Explicit mutex free
+#### 8.10.4 Hash-shard geometry (`CCShardMask`)
+
+Compose `CCExclusive` names `0 .. count-1` with a power-of-two shard mask:
+
+```c
+CCShardMask shards = cc_shard_mask_auto(64);       /* pow2(ncpu), clamped */
+size_t i = shards.index(hash);                     /* hash & mask */
+CCShardMask m = cc_shard_mask_clamp(n, max);       /* floor n to pow2 in 1..max */
+CCShardMask m = cc_shard_mask_make(8);             /* exact pow2, else {0,0} */
+```
+
+This is the Concurrent-C concurrent-map spine: N maps (or map pairs) + exclusive
+names `0..N-1` + `shards.index(key_hash)`. Hold policy (one key / key set /
+all shards) stays at the application layer.
+
+#### 8.10.5 Explicit mutex free
 
 ```c
 m.free();   // UFCS: cc_exclusive_mutex_free(&m)
@@ -4595,7 +4625,7 @@ m.free();   // UFCS: cc_exclusive_mutex_free(&m)
 
 Explicit free removes the name from the discovery map (leaving a tombstone for probing) and returns the entry to the section's arena pool. It requires the mutex not be held and no waiters queued; violating this aborts. Other `CCExclusiveMutex` handles that still reference the freed name become invalid. Freeing an already-cleared handle is a no-op. The same name may be resolved again afterward (possibly reusing the pooled entry).
 
-#### 8.10.5 Destroy and arena lifetime
+#### 8.10.6 Destroy and arena lifetime
 
 ```c
 excl->destroy();   // UFCS: cc_exclusive_destroy(excl)
@@ -4605,7 +4635,7 @@ Destroy tears down the internal create mutex and releases discovery-map tables (
 
 **Rule (arena lifetime):** The caller must keep the supplying arena alive for the entire lifetime of the section. Do not `cc_arena_reset` or `cc_arena_free` the arena while a `CCExclusive` built from it is still live.
 
-#### 8.10.6 Lock semantics
+#### 8.10.7 Lock semantics
 
 Each mutex entry's lock word uses three states:
 
@@ -4635,8 +4665,19 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m);
 
 CCExclusiveGuard cc_exclusive_mutex_acquire(CCExclusiveMutex* m);
 CCExclusiveGuard cc_exclusive_acquire(CCExclusive* excl, uint64_t name);
+size_t cc_exclusive_acquire_sorted(CCExclusive* excl, const uint64_t* names,
+                                   size_t count, CCExclusiveGuard* out,
+                                   size_t out_cap);
+size_t cc_exclusive_acquire_range(CCExclusive* excl, uint64_t lo, uint64_t hi,
+                                  CCExclusiveGuard* out, size_t out_cap);
+void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n);
 void cc_exclusive_guard_release(CCExclusiveGuard* g);
 void cc_exclusive_guard_destroy(CCExclusiveGuard* g);
+
+CCShardMask cc_shard_mask_make(size_t count);
+CCShardMask cc_shard_mask_clamp(size_t n, size_t max);
+CCShardMask cc_shard_mask_auto(size_t max);
+size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash);
 
 void cc_exclusive_lock_entry_slow(void* entry);      /* slow acquire path */
 void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
@@ -4646,10 +4687,13 @@ void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
 
 - `excl->mutex(name)` — resolve
 - `excl->acquire(name)` — resolve and acquire
+- `excl->acquire_sorted(names, count, out, out_cap)` — unique ascending multi-acquire
+- `excl->acquire_range(lo, hi, out, out_cap)` — contiguous ascending multi-acquire
 - `excl->destroy()` — tear down section
 - `m.acquire()` — acquire resolved mutex
 - `m.free()` — explicit reclaim
 - `g.release()` / `g.destroy()` — release guard
+- `shards.index(hash)` — `CCShardMask` routing
 
 ---
 
@@ -5083,8 +5127,8 @@ defined in `concurrent-c-stdlib-spec.md` and §9.
 #### 9.5.1 Language and file extension
 
 A `.shcc` translation unit is the same language as `.ccs`. The `.shcc`
-extension is distinct from the `.ccs` / `.cch` source and header pair. The
-driver applies an entry rewrite before the ordinary Concurrent-C pipeline:
+extension is distinct from the `.ccs` / `.cch` source and header pair. The driver
+applies an entry rewrite before the ordinary Concurrent-C pipeline:
 
 1. Strip a leading `#!` shebang line when present.
 2. Force-include `<ccc/script/prelude.cch>` at translation-unit scope.

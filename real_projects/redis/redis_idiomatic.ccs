@@ -2,11 +2,11 @@
  * redis_idiomatic.ccs — default Concurrent-C Redis server.
  *
  * Shared DB behind a sharded named exclusive section (CCExclusive): each
- * hash shard of RedisDb has its own mutex name.  Connection fibers acquire
- * one shard (single-key), a sorted set of shards (multi-key), or all shards
- * (DBSIZE/FLUSH/KEYS/MEMLOG).  No owner fiber, no request/reply channels.
+ * hash shard of RedisDb has its own mutex name (0..N-1).  Connection fibers
+ * use excl->acquire / acquire_sorted / acquire_range with CCShardMask
+ * geometry from the stdlib.  No owner fiber, no request/reply channels.
  *
- * Shard count is automatic (next power of two of online CPUs, 1..64).
+ * Shard count is cc_shard_mask_auto (pow2 of ncpu, 1..64).
  * Optional CC_REDIS_SHARDS overrides for benches only — not a user knob.
  *
  * Request path: argv slices borrow the connection read buffer (no clone,
@@ -564,96 +564,54 @@ static RedisCmdHold hold_for(RedisCommandKind kind) {
     abort();
 }
 
-/* Shard count: next power-of-two of online CPUs, clamped to
- * 1..REDIS_DB_MAX_SHARDS.  CC_REDIS_SHARDS, if set to a valid value, overrides
- * (bench / A/B only — operators are not expected to set it). */
-static size_t redis_auto_shard_count(void) {
-    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-    size_t n;
-    size_t p;
-    if (ncpu < 1) ncpu = 1;
-    n = (size_t)ncpu;
-    if (n > (size_t)REDIS_DB_MAX_SHARDS) n = (size_t)REDIS_DB_MAX_SHARDS;
-    p = 1u;
-    while (p < n) {
-        if (p > ((size_t)REDIS_DB_MAX_SHARDS / 2u)) return (size_t)REDIS_DB_MAX_SHARDS;
-        p <<= 1;
-    }
-    return p;
-}
-
-/* Writes *src_out as a short label for the startup log. */
+/* Shard count via CCShardMask: auto is pow2(ncpu) clamped to
+ * REDIS_DB_MAX_SHARDS.  CC_REDIS_SHARDS overrides for bench / A/B only. */
 static size_t redis_shard_count(const char** src_out) {
     const char* s = getenv("CC_REDIS_SHARDS");
     unsigned long n;
     char* end = NULL;
+    CCShardMask mask;
     if (!s || !s[0]) {
         if (src_out) *src_out = "auto from ncpu";
-        return redis_auto_shard_count();
+        mask = cc_shard_mask_auto((size_t)REDIS_DB_MAX_SHARDS);
+        return mask.count ? mask.count : 1u;
     }
     n = strtoul(s, &end, 10);
-    if (end == s || (end && *end != 0) || n == 0 || n > (unsigned long)REDIS_DB_MAX_SHARDS) {
+    if (end == s || (end && *end != 0) || n == 0 ||
+        n > (unsigned long)REDIS_DB_MAX_SHARDS) {
         if (src_out) *src_out = "auto from ncpu (bad CC_REDIS_SHARDS)";
-        return redis_auto_shard_count();
+        mask = cc_shard_mask_auto((size_t)REDIS_DB_MAX_SHARDS);
+        return mask.count ? mask.count : 1u;
     }
-    /* Round down to power of two (same clamp family as auto). */
-    {
-        size_t p = 1u;
-        while ((p << 1) <= (size_t)n) p <<= 1;
-        if (src_out) *src_out = "CC_REDIS_SHARDS override";
-        return p;
-    }
+    if (src_out) *src_out = "CC_REDIS_SHARDS override";
+    mask = cc_shard_mask_clamp((size_t)n, (size_t)REDIS_DB_MAX_SHARDS);
+    return mask.count ? mask.count : 1u;
 }
 
-static void shard_guards_release(CCExclusiveGuard* guards, size_t n) {
-    while (n > 0) {
-        n--;
-        cc_exclusive_guard_destroy(&guards[n]);
-    }
-}
-
-static void shard_guards_acquire_one(CCExclusive* excl,
-                                     size_t shard,
-                                     CCExclusiveGuard* guards,
-                                     size_t* n_out) {
-    guards[0] = cc_exclusive_acquire(excl, (uint64_t)shard);
-    *n_out = 1;
-}
-
-static void shard_guards_acquire_all(CCExclusive* excl,
-                                     RedisDb* db,
-                                     CCExclusiveGuard* guards,
-                                     size_t* n_out) {
+/* Unique shard ids for keys[0], keys[stride], … then acquire_sorted. */
+static size_t shard_guards_acquire_key_set(CCExclusive* excl,
+                                           RedisDb* db,
+                                           const CCSlice* keys,
+                                           size_t nkeys,
+                                           size_t stride,
+                                           CCExclusiveGuard* guards,
+                                           size_t guards_cap) {
+    uint64_t names[REDIS_DB_MAX_SHARDS];
+    size_t nnames = 0;
     size_t i;
-    size_t n = 0;
-    for (i = 0; i < db->shard_count; ++i) {
-        guards[n++] = cc_exclusive_acquire(excl, (uint64_t)i);
-    }
-    *n_out = n;
-}
-
-/* Mark shards for keys[0], keys[stride], ...; acquire ascending. */
-static void shard_guards_acquire_key_set(CCExclusive* excl,
-                                         RedisDb* db,
-                                         const CCSlice* keys,
-                                         size_t nkeys,
-                                         size_t stride,
-                                         CCExclusiveGuard* guards,
-                                         size_t* n_out) {
-    unsigned char seen[REDIS_DB_MAX_SHARDS];
-    size_t i;
-    size_t n = 0;
-    memset(seen, 0, sizeof(seen));
     if (stride == 0) stride = 1;
     for (i = 0; i < nkeys; i += stride) {
         size_t si = db_shard_index_for_key(db, keys[i]);
-        if (si < (size_t)REDIS_DB_MAX_SHARDS) seen[si] = 1;
+        size_t j;
+        int seen = 0;
+        for (j = 0; j < nnames; j++) {
+            if (names[j] == (uint64_t)si) { seen = 1; break; }
+        }
+        if (!seen && nnames < (size_t)REDIS_DB_MAX_SHARDS) {
+            names[nnames++] = (uint64_t)si;
+        }
     }
-    for (i = 0; i < db->shard_count; ++i) {
-        if (!seen[i]) continue;
-        guards[n++] = cc_exclusive_acquire(excl, (uint64_t)i);
-    }
-    *n_out = n;
+    return excl->acquire_sorted(names, nnames, guards, guards_cap);
 }
 
 /* One command against the DB under a KEY/KEYS/ALL/NONE hold.
@@ -983,17 +941,19 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
                  * borrow-looks up and swings, or clones the key into
                  * key_arena and inserts (no discarded key on overwrite). */
                 CCString pre_val = db_prep_value(argv[1]) !>;
-                shard_guards_acquire_one(excl, db_shard_index_for_key(db, argv[0]),
-                                         guards, &n_guards);
-                @defer shard_guards_release(guards, n_guards);
+                guards[0] = excl->acquire(
+                    (uint64_t)db_shard_index_for_key(db, argv[0]));
+                n_guards = 1;
+                @defer cc_exclusive_guards_release(guards, n_guards);
                 reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
                 break;
             }
 
             case REDIS_HOLD_KEY: {
-                shard_guards_acquire_one(excl, db_shard_index_for_key(db, argv[0]),
-                                         guards, &n_guards);
-                @defer shard_guards_release(guards, n_guards);
+                guards[0] = excl->acquire(
+                    (uint64_t)db_shard_index_for_key(db, argv[0]));
+                n_guards = 1;
+                @defer cc_exclusive_guards_release(guards, n_guards);
                 reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
                 if (reply.kind == REDIS_REPLY_BULK_STRING) {
                     redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
@@ -1003,9 +963,10 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
 
             case REDIS_HOLD_KEYS: {
                 size_t stride = (cmd.kind == REDIS_CMD_MSET) ? 2u : 1u;
-                shard_guards_acquire_key_set(excl, db, argv, argc, stride,
-                                             guards, &n_guards);
-                @defer shard_guards_release(guards, n_guards);
+                n_guards = shard_guards_acquire_key_set(
+                    excl, db, argv, argc, stride, guards,
+                    (size_t)REDIS_DB_MAX_SHARDS);
+                @defer cc_exclusive_guards_release(guards, n_guards);
                 reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
                 if (reply.kind == REDIS_REPLY_BULK_STRING) {
                     redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
@@ -1014,8 +975,10 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
             }
 
             case REDIS_HOLD_ALL: {
-                shard_guards_acquire_all(excl, db, guards, &n_guards);
-                @defer shard_guards_release(guards, n_guards);
+                n_guards = excl->acquire_range(
+                    0, (uint64_t)db->shard_count, guards,
+                    (size_t)REDIS_DB_MAX_SHARDS);
+                @defer cc_exclusive_guards_release(guards, n_guards);
                 reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
                 if (reply.kind == REDIS_REPLY_BULK_STRING) {
                     redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;

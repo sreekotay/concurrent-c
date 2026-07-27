@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct CCExclusiveWaiter {
     void* fiber;
@@ -753,4 +754,12 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     m->_entry = NULL;
     m->excl = NULL;
     m->name = 0;
+}
+
+CCShardMask cc_shard_mask_auto(size_t max) {
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    size_t n;
+    if (ncpu < 1) ncpu = 1;
+    n = (size_t)ncpu;
+    return cc_shard_mask_clamp(n, max);
 }
