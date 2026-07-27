@@ -1,0 +1,29 @@
+/* Expression-position `!>;` with header static-inline Result callees.
+ *
+ * Guards the regression where `cc__ru_find_callee_result_type` only scanned
+ * the current TU buffer, so `#include`'d helpers like `cc_stdio_read_all`
+ * fell back to `__typeof__(call)` / `__cc_uw_value` and TCC reparse died.
+ *
+ * Covers both the direct callee and UFCS-lowered form.  Stdin may be empty
+ * under `cc_test` (no `.stdin` sidecar); the pin is that unwrap typed-lowers.
+ */
+#include <ccc/script/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = @create(megabytes(1)) @destroy;
+    CCStdio io = @create(&a) @destroy;
+
+    CCSlice direct = cc_stdio_read_all(&io) !>;
+    (void)direct;
+
+    char[:] in = io.read_all() !>;
+    io.write_all(in) !>;
+
+    printf("result_unwrap_stdio_expr_bang_smoke: PASS len=%zu\n", in.len);
+    return 0;
+}

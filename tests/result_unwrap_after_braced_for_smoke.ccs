@@ -1,0 +1,52 @@
+/* Statement-position `!>;` immediately after a braced `for` must not
+ * treat the loop as part of the unwrap LHS.
+ *
+ * Regression: `cc__err_stmt_start_backward` walked through the for's
+ * closing `}` (to skip semicolons inside preceding brace blocks) and
+ * never stopped after that block, so `@err` / IR-lowered `!>` expansion
+ * emitted `__typeof__(for (...) { ... } call(...))` and TCC failed with
+ * "expression expected before 'for'".  Single-statement (unbraced) for
+ * was fine because its trailing `;` already bounded the scan.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static CCResult_int_CCError take(int n) {
+    return cc_ok_CCResult_int_CCError(n);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    char[:] in = cc_slice_from_buffer("{ \"a\" : 1 }", 11);
+    int n = 0;
+    bool instr = false;
+
+    /* Shape under test: braced for with nested if/else, then `!>;`. */
+    for (size_t i = 0; i < in.len; i++) {
+        char ch = in.ptr[i];
+        if (instr) {
+            n++;
+            if (ch == '"') instr = false;
+        } else {
+            n++;
+            if (ch == '"') instr = true;
+        }
+    }
+    int got = take(n) !>;
+
+    /* Control: single-stmt for still works with a following `!>;`. */
+    int m = 0;
+    for (size_t i = 0; i < in.len; i++) m++;
+    int got2 = take(m) !>;
+
+    if (got != 11 || got2 != 11) {
+        fprintf(stderr, "bad counts: got=%d got2=%d\n", got, got2);
+        return 2;
+    }
+    printf("result_unwrap_after_braced_for_smoke: PASS\n");
+    return 0;
+}

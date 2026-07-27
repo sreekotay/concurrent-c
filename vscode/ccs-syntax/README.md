@@ -1,19 +1,23 @@
 # Concurrent-C Syntax (VS Code)
 
-Syntax highlighting for Concurrent-C source and headers:
+Syntax highlighting for Concurrent-C source, headers, and scripts:
 
 - `*.ccs` (Concurrent-C source)
 - `*.cch` (Concurrent-C headers)
+- `*.ccscript` (Concurrent-C scripts; same language as `.ccs`)
 
 Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax constructs like:
 
-- `@create(...) @destroy` lifecycle declarations
-- `@defer label: { ... }`
-- `@async` function modifier
+- `@create(...) @destroy` / `@detach` lifecycle declarations
+- `@defer` / `@defer(err|ok)` / `@cancel`
+- `@async` / `@await` / `@blocking` / `@nonblocking`
+- `@errhandler` / `@err` / result unwrap (`!>`, `?>`)
+- `@string` / `@emit` backtick templates (`${…}`, `$~tag{…}`, `${{…}}` verbatim)
+- `@grammar(rules|schema) Name {~~~~ … ~~~~}` SERDES fences
+- `@variant` / `@variant(packed)`
 - UFCS-style task operations like `n->spawn(...)` / `n->wait()`
 - UFCS-style `value.method(...)` / `ptr->method(...)` calls
-- Core keywords like `await`, `try`, `catch`, `unsafe`, `comptime`
-- Type sugar like `T?`, `T!>(E)`, `T[:]`, `T[~N ...]`
+- Type sugar like `T?`, `T!>(E)`, `T[:]`, `T[:!]`, `T[~N …]`
 - Duration literals like `10ms`
 
 ## Install (local, no marketplace)
@@ -36,7 +40,9 @@ cd /path/to/concurrent-c
 
 2. Reload VS Code (`Developer: Reload Window`).
 
-3. Open a `.ccs` or `.cch` file; the language mode should be **Concurrent-C**.
+3. Open a `.ccs`, `.cch`, or `.ccscript` file; the language mode should be **Concurrent-C**.
+
+A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.ccscript`.
 
 ## Develop / tweak the grammar
 
@@ -44,5 +50,3 @@ cd /path/to/concurrent-c
 - Language config (comments/brackets): `language-configuration.json`
 
 After edits, reload the window to see changes.
-
-

@@ -1,0 +1,42 @@
+/* Statement `!>;` after a braced for that contains `'\t'`/`'\n'`/`'\r'`
+ * char escapes.  Guards the regression where backward `@err` LHS scan
+ * mis-parsed those escapes and typeof-captured the preceding for. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static CCResult_size_t_CCError write_ok(CCSlice s) {
+    size_t n = fwrite(s.ptr, 1, s.len, stdout);
+    if (n != s.len && ferror(stdout))
+        return cc_err_CCResult_size_t_CCError(CC_ERROR(CC_ERR_IO, "write"));
+    return cc_ok_CCResult_size_t_CCError(n);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "%s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    const char* raw = "{ \"a\" : 1,\t\"b\" : \"x y\" }\n";
+    CCSlice in = cc_slice_from_buffer((void*)raw, strlen(raw));
+    CCVec::[char] out = cc_vec_new::[char](&a);
+    bool instr = false;
+    bool esc = false;
+    for (size_t i = 0; i < in.len; i++) {
+        char ch = in.ptr[i];
+        if (instr) {
+            out.push(ch);
+            if (esc) esc = false;
+            else if (ch == '\\') esc = true;
+            else if (ch == '"') instr = false;
+        } else {
+            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+                continue;
+            out.push(ch);
+            if (ch == '"') instr = true;
+        }
+    }
+    write_ok(out.as_slice()) !>;
+    return 0;
+}

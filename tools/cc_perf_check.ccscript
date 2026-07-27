@@ -1,0 +1,176 @@
+#!/usr/bin/env -S ./cc/bin/ccc run
+/*
+ * Idealized .ccscript twin of tools/cc_perf_check.sh
+ *
+ * DESIGN PROBE — not runnable yet.
+ * Shape: scripty like the bash tool (sections + small check helpers),
+ * with @grammar + Map:: instead of eval, and io.println instead of printf.
+ *
+ * .ccscript defaults (driver / script prelude):
+ *   - auto-include <ccc/script/prelude.cch>
+ *   - module-level @errhandler: print to stderr, return 1
+ *     (so !> works with no local handler; override by writing your own)
+ *
+ * Side-by-side with: tools/cc_perf_check.sh
+ */
+
+/* prelude auto-included for .ccscript — includes default @errhandler */
+
+CCArena a = @create(megabytes(4)) @destroy;
+CCStdio io = @create(&a) @destroy;
+int regressions = 0;
+int warnings = 0;
+
+@grammar(schema) Metric {~~~~
+    rules [
+        ident: keep [some charset [#'a'-#'z' #'_']]
+        value: keep [some charset [#'0'-#'9' #'.' #'+' #'-']]
+    ]
+    name: ident #'=' val: value "\n"
+~~~~}
+
+@grammar(schema) MetricsFile {~~~~
+    /* wish: skip blank lines and '#' comments */
+    rows: items Metric many
+~~~~}
+
+typedef Map::[char[:], double] Metrics;
+
+static Metrics load_metrics(const char* path) !>(CCIoError) {
+    CCSlice bytes = cc_file_read_path(path, &a) !>;
+    MetricsFile file = MetricsFile_parse(bytes, &a) !>;
+    Metrics m = map_new::[char[:], double](&a);
+    for (size_t i = 0; i < file.rows.len; i++) {
+        Metric row = file.rows.items[i];
+        double v = row.val.to_f64() !>;   /* UFCS → cc_slice_to_f64 */
+        m.insert(row.name, v);
+    }
+    return m;
+}
+
+/* Same jobs as the bash check_eq / check_le / check_loc / check_wall —
+ * a little duplication is fine; each helper reads top-to-bottom. */
+
+static void check_eq(Metrics base, Metrics cur, char[:] name) {
+    double* b = base.get(name);
+    double* n = cur.get(name);
+    if (!b || !n) { io.println(`  ${name}  SKIP    (missing)`); return; }
+    if (*n == *b)      io.println(`  ${name}  OK      (=${*n})`);
+    else if (*n < *b)  io.println(`  ${name}  IMPROVED (${*b} -> ${*n})`);
+    else {
+        io.println(`  ${name}  FAIL    (baseline=${*b} current=${*n})`);
+        regressions++;
+    }
+}
+
+static void check_le(Metrics base, Metrics cur, char[:] name) {
+    double* b = base.get(name);
+    double* n = cur.get(name);
+    if (!b || !n) { io.println(`  ${name}  SKIP    (missing)`); return; }
+    if (*n < *b)       io.println(`  ${name}  IMPROVED (${*b} -> ${*n})`);
+    else if (*n == *b) io.println(`  ${name}  OK      (=${*n})`);
+    else {
+        io.println(`  ${name}  FAIL    (baseline=${*b} current=${*n}, increase=${*n - *b})`);
+        regressions++;
+    }
+}
+
+static void check_loc(Metrics base, Metrics cur, char[:] name) {
+    double* b = base.get(name);
+    double* n = cur.get(name);
+    if (!b || !n) { io.println(`  ${name}  SKIP    (missing)`); return; }
+    if (*n <= *b) {
+        io.println(`  ${name}  OK      (=${*n} vs baseline ${*b})`);
+        return;
+    }
+    double pct = (*n - *b) * 100.0 / *b;
+    if (pct > 25.0) {
+        io.println(`  ${name}  NOTICE  (=${*n} vs baseline ${*b}, +${pct}%)`);
+        warnings++;
+    } else {
+        io.println(`  ${name}  OK      (=${*n} vs baseline ${*b}, +${pct}%)`);
+    }
+}
+
+static void check_wall(Metrics base, Metrics cur) {
+    char[:] name = @slice("wall_real_seconds");
+    double* b = base.get(name);
+    double* n = cur.get(name);
+    if (!b || !n) { io.println(`  ${name}  SKIP    (missing)`); return; }
+    double pct = (*n - *b) * 100.0 / *b;
+    if (pct <= 5.0)
+        io.println(`  ${name}  OK      (=${*n}s vs baseline ${*b}s, ${pct}%)`);
+    else if (pct <= 30.0)
+        io.println(`  ${name}  INFO    (=${*n}s vs baseline ${*b}s, ${pct}% — OS-noise band)`);
+    else {
+        io.println(`  ${name}  NOTICE  (=${*n}s vs baseline ${*b}s, ${pct}% — large jump)`);
+        warnings++;
+    }
+}
+
+/* --- script body (mirrors the bash flow) ---
+ * No local @errhandler — module default handles !>; (print + exit 1).
+ * Override with @errhandler(...) { … } if you want custom messaging. */
+
+bool update = cc_cli_flag(argc, argv, "--update");
+const char* root = cc_script_repo_root(argv[0], &a) !>;
+CCSlice baseline = cc_path_join(root, "perf/compiler_baseline.txt", &a);
+
+if (!cc_path_exists(baseline.ptr)) {
+    io.eprintln(`perf check: no baseline at ${baseline}`);
+    io.eprintln(`perf check: run ./scripts/capture_baseline.sh first`);
+    return 1;
+}
+
+CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+
+io.println(`perf check: capturing current metrics (this takes ~60s)...`);
+CCSlice capture = cc_path_join(root, "scripts/capture_baseline.sh", &a);
+cc_sh_run(capture.cstr(&a), tmp.path.cstr(&a), &a) !>;
+
+if (update) {
+    cc_file_copy(tmp.path, baseline, &a) !>;
+    io.println(`perf check: baseline updated. New contents:`);
+    io.print_file(baseline);
+    return 0;
+}
+
+Metrics base = load_metrics(baseline.ptr) !>;
+Metrics cur  = load_metrics(tmp.path.ptr) !>;
+
+io.println(``);
+io.println(`perf check: comparing current vs baseline (${baseline})`);
+
+io.println(``);
+io.println(`Static metrics (must equal baseline):`);
+check_eq(base, cur, @slice("reparse_sites_visit_codegen"));
+
+io.println(``);
+io.println(`LOC metrics (growth > +25% prints a notice):`);
+check_loc(base, cur, @slice("loc_visit_codegen"));
+check_loc(base, cur, @slice("loc_closure_pass"));
+check_loc(base, cur, @slice("loc_visitor_dir"));
+
+io.println(``);
+io.println(`Dynamic metrics (must be <= baseline):`);
+check_eq(base, cur, @slice("suite_tests"));
+check_le(base, cur, @slice("reparses_phase3"));
+check_le(base, cur, @slice("reparses_statement_lowering"));
+check_le(base, cur, @slice("reparses_async_lowering"));
+check_le(base, cur, @slice("reparses_final_ufcs"));
+check_le(base, cur, @slice("reparses_total"));
+
+io.println(``);
+io.println(`Wall-clock (informational only — too noisy on developer machines to gate on):`);
+check_wall(base, cur);
+
+io.println(``);
+if (regressions > 0) {
+    io.println(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`);
+    io.println(`perf check: if intentional, re-run with --update`);
+    return 1;
+}
+if (warnings > 0)
+    io.println(`perf check: OK with ${warnings} warning(s) (no regressions)`);
+else
+    io.println(`perf check: OK`);

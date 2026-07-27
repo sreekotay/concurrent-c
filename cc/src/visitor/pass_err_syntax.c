@@ -263,26 +263,118 @@ static int cc__err_pos_in_line_comment(const char* s, size_t pos) {
     return 0;
 }
 
-/* Statement start: scan backward for ';' or block '{' at paren/bracket/brace depth 0 (strings skipped).
- * Brace depth: when scanning backward, '}' increases nesting (still inside that block); '{' decreases.
- * Without this, a ';' inside a preceding @errhandler { ... } is mistaken for the boundary before @err. */
+/* When scanning backward and landing on a `'`/`"`, that quote is the
+ * closing delimiter of a literal (in source order).  Naive
+ * "enter string mode + treat `\\` as escape while walking backward"
+ * mis-parses `'\n'` / `'\t'` / `'\\'`: the escape skip consumes the
+ * opening quote and leaves the scanner stuck in-string, so later `;`
+ * / `}` boundaries are ignored and a following `!>` typeof-captures
+ * the preceding statement.  Resolve the opener with a forward scan
+ * from the line start (proper C escape rules) and jump to it. */
+static void cc__err_skip_string_or_char_backward(const char* s, size_t* i) {
+    size_t close = *i;
+    char qch = s[close];
+    if (qch != '"' && qch != '\'') return;
+    size_t line_start = close;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t k = line_start;
+    size_t open = close;
+    int in_q = 0;
+    char cur_q = 0;
+    while (k <= close) {
+        char c = s[k];
+        if (!in_q) {
+            if (c == '"' || c == '\'') {
+                in_q = 1;
+                cur_q = c;
+                open = k;
+                if (k == close) break;
+                k++;
+                continue;
+            }
+            k++;
+            continue;
+        }
+        if (c == '\\' && k + 1 <= close) {
+            k += 2;
+            continue;
+        }
+        if (c == cur_q) {
+            if (k == close) {
+                *i = open;
+                return;
+            }
+            in_q = 0;
+            cur_q = 0;
+            k++;
+            continue;
+        }
+        k++;
+    }
+    *i = open;
+}
+
+/* Token after a stmt-level `}` continues the *current* statement
+ * (`if { } else ...`, do-while `while`).  Otherwise the `{ ... }` was a
+ * preceding statement (`for { }`, `@errhandler { }`, plain compound) and
+ * the current `@err` LHS starts right after that `}`.  Mirrors
+ * `cc__ud_is_stmt_continuation_after_rbrace` in pass_unwrap_destroy.c. */
+static int cc__err_is_stmt_continuation_after_rbrace(const char* s, size_t n, size_t pos) {
+    size_t j = pos;
+    while (j < n) {
+        if (s[j] == '/' && j + 1 < n && s[j + 1] == '/') {
+            j += 2;
+            while (j < n && s[j] != '\n') j++;
+            continue;
+        }
+        if (s[j] == '/' && j + 1 < n && s[j + 1] == '*') {
+            j += 2;
+            while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) j++;
+            if (j + 1 < n) j += 2;
+            continue;
+        }
+        char c = s[j];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { j++; continue; }
+        break;
+    }
+    if (j >= n) return 0;
+    if (j + 4 <= n && memcmp(s + j, "else", 4) == 0) {
+        char nx = (j + 4 < n) ? s[j + 4] : '\0';
+        if (!(nx == '_' || (nx >= 'a' && nx <= 'z') ||
+              (nx >= 'A' && nx <= 'Z') || (nx >= '0' && nx <= '9')))
+            return 1;
+    }
+    if (j + 5 <= n && memcmp(s + j, "while", 5) == 0) {
+        char nx = (j + 5 < n) ? s[j + 5] : '\0';
+        if (!(nx == '_' || (nx >= 'a' && nx <= 'z') ||
+              (nx >= 'A' && nx <= 'Z') || (nx >= '0' && nx <= '9')))
+            return 1;
+    }
+    return 0;
+}
+
+/* Statement start: scan backward for ';' or block '{' at paren/bracket/brace
+ * depth 0 (strings skipped).  Brace depth: when scanning backward, '}'
+ * increases nesting (still inside that block); '{' decreases.  Skipping
+ * balanced blocks avoids mistaking a ';' inside a preceding
+ * `@errhandler { ... }` for the boundary before `@err`.
+ *
+ * A stmt-level `}` that is NOT followed by a continuation keyword
+ * (`else` / `while`) ends a preceding brace-balanced statement
+ * (`for { ... }`, `if { ... }`, `@errhandler { ... }`, …).  The current
+ * statement starts immediately after that `}` — otherwise a following
+ * `call() @err;` / `call() !>;` would typeof-capture the preceding
+ * loop/if as its LHS. */
 static size_t cc__err_stmt_start_backward(const char* s, size_t err_at) {
     int par = 0, brk = 0;
     int br = 0;
-    int in_str = 0;
-    char qch = 0;
+    /* Byte after a stmt-level preceding `}` (see above).  `(size_t)-1`
+     * means none seen yet / last `}` was a continuation. */
+    size_t post_preceding_block = (size_t)-1;
     size_t i = err_at;
     while (i > 0) {
         i--;
         char c = s[i];
-        if (in_str) {
-            if (c == '\\' && i > 0) {
-                i--;
-                continue;
-            }
-            if (c == qch) in_str = 0;
-            continue;
-        }
         /* Block/line comments: treat the commented-out bytes as
          * non-code so braces, parens, semicolons inside them do not
          * terminate the LHS scan. */
@@ -295,8 +387,8 @@ static size_t cc__err_stmt_start_backward(const char* s, size_t err_at) {
             continue;
         }
         if (c == '"' || c == '\'') {
-            in_str = 1;
-            qch = c;
+            /* Jump to opener; next loop iteration steps before it. */
+            cc__err_skip_string_or_char_backward(s, &i);
             continue;
         }
         if (c == ')')
@@ -309,11 +401,23 @@ static size_t cc__err_stmt_start_backward(const char* s, size_t err_at) {
             if (brk) brk--;
         } else if (par == 0 && brk == 0) {
             if (c == '}') {
+                /* Outermost `}` at stmt level: remember the post-`}`
+                 * position unless `else` / `while` continues this stmt. */
+                if (br == 0) {
+                    if (!cc__err_is_stmt_continuation_after_rbrace(s, err_at, i + 1))
+                        post_preceding_block = i + 1;
+                    else
+                        post_preceding_block = (size_t)-1;
+                }
                 br++;
             } else if (c == '{') {
-                if (br)
+                if (br) {
                     br--;
-                else
+                    /* Finished a balanced preceding `{ ... }` with no
+                     * trailing `;` — current stmt starts after its `}`. */
+                    if (br == 0 && post_preceding_block != (size_t)-1)
+                        return post_preceding_block;
+                } else
                     return i + 1;
             } else if (c == ';' && br == 0) {
                 return i + 1;

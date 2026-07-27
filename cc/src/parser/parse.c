@@ -12,6 +12,7 @@
 #include "comptime/hook_compile.h"
 #include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/script_entry.h"
 #include "preprocess/type_graph.h"
 #include "util/text.h"
 #include "visitor/pass_create.h"
@@ -160,95 +161,16 @@ static char* cc__neutralize_comments_preserve_layout_parse(const char* src, size
     return out;
 }
 
+/* Was: rewrite `CCResult_*_{unwrap,error,is_err,...}(...)` → `__cc_parser_result_*`.
+ * Disabled — stubs are only prototyped for TU-discovered result specs, so
+ * header helpers (e.g. `CCResult_CCSlice_CCError_unwrap`) became undeclared
+ * calls that TCC typed as `int`, and `CCSlice x = result !>;` failed with
+ * "'{' expected (got ';')".  Real `CC_DECL_RESULT_SPEC` static inlines are
+ * already in scope at every valid call site (same as reparse-diet). */
 static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, size_t n) {
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    size_t last_emit = 0;
-
-    if (!src || n == 0) return NULL;
-    while (i < n) {
-        i = cc_skip_ws_and_comments(src, n, i);
-        if (i >= n) break;
-        if (src[i] == '"' || src[i] == '\'') {
-            char q = src[i++];
-            while (i < n) {
-                if (src[i] == '\\' && i + 1 < n) {
-                    i += 2;
-                    continue;
-                }
-                if (src[i] == q) {
-                    i++;
-                    break;
-                }
-                i++;
-            }
-            continue;
-        }
-        if (!cc_is_ident_start(src[i])) {
-            i++;
-            continue;
-        }
-
-        size_t ident_start = i;
-        while (i < n && cc_is_ident_char(src[i])) i++;
-        size_t ident_end = i;
-        size_t ident_len = ident_end - ident_start;
-        const char* parser_method = NULL;
-        size_t suffix_len = 0;
-        size_t j;
-        size_t paren_end = 0;
-
-        if (ident_len <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
-
-        j = cc_skip_ws_and_comments(src, n, ident_end);
-        if (j >= n || src[j] != '(') continue;
-
-        if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
-            parser_method = "unwrap_or";
-            suffix_len = 10;
-        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_is_err", 7) == 0) {
-            parser_method = "is_err";
-            suffix_len = 7;
-        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_is_ok", 6) == 0) {
-            parser_method = "is_ok";
-            suffix_len = 6;
-        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_unwrap", 7) == 0) {
-            parser_method = "unwrap";
-            suffix_len = 7;
-        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_error", 6) == 0) {
-            parser_method = "error";
-            suffix_len = 6;
-        } else {
-            continue;
-        }
-
-        if (!cc_find_matching_paren(src, n, j, &paren_end)) continue;
-
-        {
-            size_t p = cc_skip_ws_and_comments(src, n, j + 1);
-            if (p < paren_end && cc_is_ident_start(src[p])) {
-                size_t first_tok_end = p + 1;
-                while (first_tok_end < paren_end && cc_is_ident_char(src[first_tok_end])) first_tok_end++;
-                p = cc_skip_ws_and_comments(src, n, first_tok_end);
-                if (p < paren_end && (cc_is_ident_start(src[p]) || src[p] == '*')) {
-                    i = paren_end + 1;
-                    continue;
-                }
-            }
-        }
-
-        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, "__cc_parser_result_");
-        cc_sb_append_cstr(&out, &out_len, &out_cap, parser_method);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-        cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_len - suffix_len);
-        last_emit = ident_end;
-    }
-
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
+    (void)src;
+    (void)n;
+    return NULL;
 }
 
 typedef struct {
@@ -312,6 +234,17 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     size_t got = fread(file_buf, 1, (size_t)file_len, f);
     file_buf[got] = '\0';
     fclose(f);
+
+    /* .ccscript: auto-prelude, default @errhandler, synthetic main. */
+    {
+        size_t script_len = 0;
+        char* script = cc_script_rewrite_source(input_path, file_buf, got, &script_len);
+        if (script) {
+            free(file_buf);
+            file_buf = script;
+            got = script_len;
+        }
+    }
 
     /* Phase 1 -> 2: include-expand once for comptime discovery, collect type
        registrations, then stash the buffer on the AST root so visit_codegen

@@ -170,6 +170,7 @@ print_editor_tool_hints() {
 
   echo "Workspace debug configs: $ROOT_DIR/.vscode/tasks.json and $ROOT_DIR/.vscode/launch.json"
   echo "Reload VS Code / Cursor after install so the syntax extension is picked up."
+  echo "Syntax covers .ccs, .cch, and .ccscript (language mode: Concurrent-C)."
 }
 
 check_prefix_writable() {

@@ -1,0 +1,37 @@
+/* Raw `.ptr[i]` on CCSlice / char[:] must be field access + index
+ * (untracked Gap), not a void-typed expression. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    (void)a;
+
+    CCSlice in = cc_slice_from_buffer("hi", 2);
+    char ch0 = in.ptr[0];
+    char ch1 = in.ptr[1];
+    if (ch0 != 'h' || ch1 != 'i') {
+        fprintf(stderr, "CCSlice.ptr index: got %c%c want hi\n", ch0, ch1);
+        return 1;
+    }
+
+    char[:] s = cc_slice_from_buffer("ok", 2);
+    char c0 = s.ptr[0];
+    char c1 = s.ptr[1];
+    if (c0 != 'o' || c1 != 'k') {
+        fprintf(stderr, "char[:].ptr index: got %c%c want ok\n", c0, c1);
+        return 2;
+    }
+
+    /* Write through the Gap path. */
+    char buf[2] = {'x', 'y'};
+    CCSlice m = cc_slice_from_buffer(buf, 2);
+    m.ptr[0] = 'z';
+    if (buf[0] != 'z' || m.ptr[1] != 'y') {
+        fprintf(stderr, "CCSlice.ptr store failed\n");
+        return 3;
+    }
+
+    printf("slice_ptr_index_ufcs_smoke: OK\n");
+    return 0;
+}

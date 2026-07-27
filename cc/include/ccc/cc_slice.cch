@@ -2,7 +2,7 @@
  * Slice ABI and helpers.
  *
  * Layout matches the codegen contract: {ptr,len,id,alen} (32 bytes on 64-bit).
- * - ptr  : data pointer
+ * - ptr  : data pointer (`char*` so `s.ptr[i]` indexes bytes; ABI width matches `T*`)
  * - len  : logical length of the view
  * - id   : provenance/uniqueness token (0 if not tracked)
  * - alen : available length from ptr to the end of the original allocation
@@ -45,7 +45,8 @@
 #define CC_SLICE_ID_CANONICAL_ALLOC CC_SLICE_ID_ALLOC_MASK
 
 typedef struct {
-    void *ptr;
+    /* `char*` so `s.ptr[i]` is a well-formed byte Gap (not void-typed). */
+    char *ptr;
     size_t len;
     uint64_t id;   // allocation id | flags
     size_t alen;
@@ -65,7 +66,7 @@ typedef CCSlice CCSliceShared;
 /* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
  * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
 typedef struct {
-    void *ptr;
+    char *ptr;
     size_t len;
 } CCSliceHdr;
 
@@ -165,7 +166,7 @@ static inline CCSlice cc__slice_sub_value(CCSlice s, size_t start, size_t end) {
         id |= CC_SLICE_ID_SUBSLICE;
     }
     CCSlice sub = {
-        .ptr = base ? (void *)(base + start) : NULL,
+        .ptr = base ? (char *)(base + start) : NULL,
         .len = end - start,
         .id = id,
         // Preserve allocation length (not view length).

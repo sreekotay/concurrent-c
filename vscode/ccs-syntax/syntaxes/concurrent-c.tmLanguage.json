@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#preprocessor" },
+    { "include": "#ccs_grammar" },
     { "include": "#template_strings" },
     { "include": "#strings" },
     { "include": "#cc_literals" },
@@ -50,6 +51,42 @@
         }
       ]
     },
+    "ccs_grammar": {
+      "patterns": [
+        {
+          "name": "meta.grammar.concurrent-c",
+          "begin": "\\B@(grammar)\\s*(\\()\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\))\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\{)([^\\s}]+)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.concurrent-c" },
+            "2": { "name": "punctuation.section.parens.begin.concurrent-c" },
+            "3": { "name": "support.type.grammar-engine.concurrent-c" },
+            "4": { "name": "punctuation.section.parens.end.concurrent-c" },
+            "5": { "name": "entity.name.type.grammar.concurrent-c" },
+            "6": { "name": "punctuation.definition.grammar-fence.begin.concurrent-c" },
+            "7": { "name": "punctuation.definition.grammar-fence.sentinel.concurrent-c" }
+          },
+          "end": "(\\7)(\\})",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.grammar-fence.sentinel.concurrent-c" },
+            "2": { "name": "punctuation.definition.grammar-fence.end.concurrent-c" }
+          },
+          "contentName": "meta.grammar.body.concurrent-c",
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#strings" },
+            {
+              "name": "keyword.control.grammar-dsl.concurrent-c",
+              "match": "\\b(include|use|rules|as|one|of|items|many|keep|some|charset|optional)\\b"
+            },
+            {
+              "name": "constant.other.byte-char.concurrent-c",
+              "match": "#'(?:\\\\.|[^\\\\'])'"
+            },
+            { "include": "#numbers" }
+          ]
+        }
+      ]
+    },
     "template_strings": {
       "patterns": [
         {
@@ -62,6 +99,7 @@
           "endCaptures": {
             "0": { "name": "punctuation.definition.string.end.concurrent-c" }
           },
+          "applyEndPatternLast": true,
           "patterns": [
             { "name": "constant.character.escape.concurrent-c", "match": "\\\\[`$\\\\nrt\"']" },
             { "include": "#template_interpolations" }
@@ -72,8 +110,28 @@
     "template_interpolations": {
       "patterns": [
         {
+          "name": "meta.interpolation.verbatim.concurrent-c",
+          "begin": "(?<!\\\\)(\\$)(\\{\\{)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.interpolation.begin.concurrent-c" },
+            "2": { "name": "punctuation.section.embedded.begin.concurrent-c" }
+          },
+          "end": "\\}\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.embedded.end.concurrent-c" }
+          },
+          "contentName": "string.unquoted.verbatim.concurrent-c",
+          "applyEndPatternLast": true,
+          "patterns": [
+            {
+              "name": "constant.character.verbatim.concurrent-c",
+              "match": "(?:[^`}]|`|\\}(?!\\}))+"
+            }
+          ]
+        },
+        {
           "name": "meta.interpolation.tagged.concurrent-c",
-          "begin": "(\\$)(\\~)([A-Za-z_][A-Za-z0-9_]*)(\\{)",
+          "begin": "(?<!\\\\)(\\$)(\\~)([A-Za-z_][A-Za-z0-9_]*)(\\{)",
           "beginCaptures": {
             "1": { "name": "punctuation.definition.interpolation.begin.concurrent-c" },
             "2": { "name": "punctuation.definition.tag.tilde.concurrent-c" },
@@ -91,6 +149,7 @@
             { "include": "#numbers" },
             { "include": "#cc_literals" },
             { "include": "#ccs_ufcs" },
+            { "include": "#ccs_at_keywords" },
             { "include": "#cc_keywords" },
             { "include": "#cc_type_sugar" },
             { "include": "#cc_channel_type" },
@@ -102,7 +161,7 @@
         },
         {
           "name": "meta.interpolation.concurrent-c",
-          "begin": "(\\$)(\\{)",
+          "begin": "(?<!\\\\)(\\$)(\\{)(?!\\{)",
           "beginCaptures": {
             "1": { "name": "punctuation.definition.interpolation.begin.concurrent-c" },
             "2": { "name": "punctuation.section.embedded.begin.concurrent-c" }
@@ -118,6 +177,7 @@
             { "include": "#numbers" },
             { "include": "#cc_literals" },
             { "include": "#ccs_ufcs" },
+            { "include": "#ccs_at_keywords" },
             { "include": "#cc_keywords" },
             { "include": "#cc_type_sugar" },
             { "include": "#cc_channel_type" },
@@ -177,11 +237,15 @@
       "patterns": [
         {
           "name": "keyword.control.concurrent-c",
-          "match": "\\B@(errhandler|err|with_deadline|with_shield|latency_sensitive|create|destroy|defer|async|await|noblock|scoped|nursery|arena|unsafe|atomic|match|lock|link|for|comptime|string|slice)\\b"
+          "match": "\\B@(errhandler|with_deadline|with_shield|latency_sensitive|nonblocking|blocking|noblock|grammar|variant|create|destroy|detach|defer|async|await|cancel|scoped|nursery|arena|unsafe|atomic|match|lock|link|emit|string|slice|comptime|err|for)\\b"
         },
         {
           "name": "entity.name.label.concurrent-c",
           "match": "(?<=\\B@defer\\s+)[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        },
+        {
+          "name": "keyword.control.concurrent-c",
+          "match": "(?<=\\B@defer\\s*\\(\\s*)(err|ok)(?=\\s*\\))"
         },
         {
           "name": "keyword.control.concurrent-c",
@@ -190,6 +254,10 @@
         {
           "name": "keyword.control.concurrent-c",
           "match": "(?<=\\B@for\\s+)await\\b"
+        },
+        {
+          "name": "keyword.control.concurrent-c",
+          "match": "(?<=\\B@variant\\s*\\(\\s*)packed(?=\\s*\\))"
         }
       ]
     },
@@ -219,6 +287,14 @@
     },
     "cc_type_sugar": {
       "patterns": [
+        {
+          "name": "meta.type.result.concurrent-c",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\s*!>)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.type.concurrent-c" },
+            "2": { "name": "keyword.operator.result-type.concurrent-c" }
+          }
+        },
         {
           "name": "meta.type.optional.concurrent-c",
           "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\?)(?!\\s*:)",
@@ -354,5 +430,3 @@
     }
   }
 }
-
-

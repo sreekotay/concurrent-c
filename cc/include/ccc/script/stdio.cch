@@ -1,0 +1,128 @@
+/*
+ * Script-facing stdio bound to an arena.
+ *
+ *   CCStdio io = @create(&a) @destroy;
+ *   char[:] in = io.read_all() !>;
+ *   io.write_all(out.as_slice()) !>;
+ */
+#ifndef CC_SCRIPT_STDIO_H
+#define CC_SCRIPT_STDIO_H
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_io_error.cch>
+#include <ccc/std/io.cch>
+#include <ccc/std/slice.cch>
+
+typedef struct CCStdio {
+    CCArena *arena;
+} CCStdio;
+
+static inline CCStdio cc_stdio_create(CCArena *arena) {
+    CCStdio io;
+    io.arena = arena;
+    return io;
+}
+
+static inline void cc_stdio_destroy(CCStdio *io) {
+    if (io) io->arena = NULL;
+}
+
+/* Read stdin to EOF into the bound arena (works for pipes and files). */
+static inline CCResult_CCSlice_CCError cc_stdio_read_all(CCStdio *io) {
+    if (!io || !io->arena) {
+        return cc_err_CCResult_CCSlice_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStdio.read_all: no arena"));
+    }
+    CCArena *arena = io->arena;
+    size_t total_cap = 4096;
+    size_t total_len = 0;
+    char *total = (char *)cc_arena_alloc(arena, total_cap, 1);
+    if (!total) {
+        return cc_err_CCResult_CCSlice_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStdio.read_all: alloc"));
+    }
+    for (;;) {
+        char buf[4096];
+        size_t n = fread(buf, 1, sizeof(buf), stdin);
+        if (n == 0) {
+            if (ferror(stdin)) {
+                return cc_err_CCResult_CCSlice_CCError(
+                    CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+            }
+            break;
+        }
+        while (total_len + n > total_cap) {
+            size_t new_cap = total_cap * 2;
+            char *new_buf = (char *)cc_arena_alloc(arena, new_cap, 1);
+            if (!new_buf) {
+                return cc_err_CCResult_CCSlice_CCError(
+                    CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStdio.read_all: grow"));
+            }
+            memcpy(new_buf, total, total_len);
+            total = new_buf;
+            total_cap = new_cap;
+        }
+        memcpy(total + total_len, buf, n);
+        total_len += n;
+    }
+    CCSlice slice = cc_slice_from_parts(total, total_len, CC_SLICE_ID_UNTRACKED, total_cap);
+    return cc_ok_CCResult_CCSlice_CCError(slice);
+}
+
+static inline CCResult_size_t_CCError cc_stdio_write_all(CCStdio *io, CCSlice data) {
+    (void)io;
+    CCResult_size_t_CCIoError r = cc_std_out_write(data);
+    if (cc_is_err(r)) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
+    }
+    return cc_ok_CCResult_size_t_CCError(cc_value(r));
+}
+
+static inline CCResult_size_t_CCError cc_stdio_println(CCStdio *io, CCSlice data) {
+    (void)io;
+    CCResult_size_t_CCIoError r = cc_std_out_write(data);
+    if (cc_is_err(r)) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
+    }
+    size_t n = cc_value(r);
+    if (fputc('\n', stdout) == EOF) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+    }
+    return cc_ok_CCResult_size_t_CCError(n + 1);
+}
+
+static inline CCResult_size_t_CCError cc_stdio_eprintln(CCStdio *io, CCSlice data) {
+    (void)io;
+    CCResult_size_t_CCIoError r = cc_std_err_write(data);
+    if (cc_is_err(r)) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
+    }
+    size_t n = cc_value(r);
+    if (fputc('\n', stderr) == EOF) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+    }
+    return cc_ok_CCResult_size_t_CCError(n + 1);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCStdio", (CCTypeHooks){
+        .create = cc_type_create_call("cc_stdio_create"),
+        .destroy = cc_type_destroy_call("cc_stdio_destroy"),
+    });
+}
+#endif
+
+#endif /* CC_SCRIPT_STDIO_H */

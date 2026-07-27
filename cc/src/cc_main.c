@@ -500,10 +500,10 @@ static void cc_init_paths(const char* argv0) {
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [options] <input.ccs> [output]\n", prog);
-    fprintf(stderr, "  %s run <input.ccs> [-- <args...>]      (shorthand for build run)\n", prog);
-    fprintf(stderr, "  %s build [options] <input.ccs> <output>\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s [options] <input.ccs|.ccscript> [output]\n", prog);
+    fprintf(stderr, "  %s run <input.ccs|.ccscript> [-- <args...>]      (shorthand for build run)\n", prog);
+    fprintf(stderr, "  %s build [options] <input.ccs|.ccscript> <output>\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs|.ccscript> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
@@ -574,8 +574,8 @@ static int cc__clean_artifacts(int all) {
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s build [step] [options] <input.ccs> [output]\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs> [-o bin/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s build [step] [options] <input.ccs|.ccscript> [output]\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs|.ccscript> [-o bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
@@ -3095,14 +3095,17 @@ static int run_build_mode(int argc, char** argv) {
             fprintf(mk, "CC_GEN_C_%s :=", name);
             for (size_t j = 0; j < t->src_count; ++j) {
                 const char* src = t->srcs[j];
-                // Only .ccs files get lowered to .c
+                // .ccs / .ccscript files get lowered to .c
                 size_t slen = strlen(src);
-                if (slen > 4 && strcmp(src + slen - 4, ".ccs") == 0) {
+                size_t ext_len = 0;
+                if (slen > 9 && strcmp(src + slen - 9, ".ccscript") == 0) ext_len = 9;
+                else if (slen > 4 && strcmp(src + slen - 4, ".ccs") == 0) ext_len = 4;
+                if (ext_len) {
                     // Extract basename without extension
                     const char* base = strrchr(src, '/');
                     base = base ? base + 1 : src;
                     char stem[256];
-                    size_t stem_len = strlen(base) - 4;
+                    size_t stem_len = strlen(base) - ext_len;
                     if (stem_len >= sizeof(stem)) stem_len = sizeof(stem) - 1;
                     memcpy(stem, base, stem_len);
                     stem[stem_len] = '\0';

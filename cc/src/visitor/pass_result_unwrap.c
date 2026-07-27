@@ -311,7 +311,7 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
     size_t pos = 0;
     while (pos < n) {
         size_t hit = cc_find_ident_top_level(s, pos, n, callee, callee_len);
-        if (hit >= n) return 0;
+        if (hit >= n) break;
         size_t after = cc__skip_ws_comments_forward(s, n, hit + callee_len);
         if (after < n && s[after] == '(') {
             size_t p = hit;
@@ -372,6 +372,14 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
             }
         }
         pos = hit + callee_len;
+    }
+
+    /* Header static-inline callees are invisible in the current buffer
+     * (`#include <...>` is not expanded here).  Consult the registry seeded
+     * when included .cch trees were registered / when surface `T !>(E) name`
+     * forms were rewritten. */
+    if (cc_result_fn_registry_get_result_type(callee, callee_len, out, out_sz)) {
+        return 1;
     }
     return 0;
 }

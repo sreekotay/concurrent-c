@@ -20,6 +20,7 @@
 #include "comptime/symbols.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/script_entry.h"
 #include "preprocess/comptime_prepare.h"
 #include "preprocess/emit_limits.h"
 #include "preprocess/template_scan.h"
@@ -5994,14 +5995,17 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                          * not treated as functions. */
                                         size_t q = cc_skip_ws_and_comments(src, n, v);
                                         if (q < n && src[q] == '(') {
-                                            /* Record the fn name *and* the declared textual
-                                             * error type so `pass_result_unwrap.c` can emit a
-                                             * typed binder for `!>(e)` / `?>(e)` forms.  The
-                                             * err_type slice here is the unmangled source
-                                             * text (e.g. "CCIoError"). */
+                                            /* Record the fn name, declared textual error
+                                             * type, and concrete CCResult_T_E so unwrap can
+                                             * emit typed binders / expression-position `!>;`
+                                             * even when the callee lives in an unexpanded
+                                             * header.  err_type is unmangled source text
+                                             * (e.g. "CCIoError"). */
                                             cc_result_fn_registry_add_typed(var_name, vn_len,
                                                                              src + err_start,
-                                                                             err_end - err_start);
+                                                                             err_end - err_start,
+                                                                             type_name,
+                                                                             strlen(type_name));
                                         }
                                     }
                                 }
@@ -8725,6 +8729,11 @@ static void cc__register_included_cch_tree(const char* source_path) {
     (void)cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root));
     if (cc__read_file_text(abs_src, &src, &n) != 0) return;
 
+    /* Register Result-returning callees declared in this header so
+     * expression-position `!>;` can resolve their concrete CCResult_T_E
+     * without include-expanding the TU buffer. */
+    cc_result_fn_registry_scan_source(src, n);
+
     while (i < n) {
         size_t line_end = i, p, path_s, path_e;
         char open = 0, close = 0;
@@ -10175,15 +10184,32 @@ char* cc_preprocess_include_expanded(const char* input_path) {
         char* raw = NULL;
         size_t raw_len = 0;
         if (cc__read_file_text(input_path, &raw, &raw_len) == 0 && raw) {
+            /* .ccscript entry wrap before grammar splice / include-expand so
+             * comptime registration sees the auto-prelude. */
+            {
+                size_t script_len = 0;
+                char* script = cc_script_rewrite_source(input_path, raw, raw_len, &script_len);
+                if (script) {
+                    free(raw);
+                    raw = script;
+                    raw_len = script_len;
+                }
+            }
             char* spliced = cc_rewrite_grammar_decls_text(raw, raw_len, input_path);
+            const char* expand_src = raw;
+            size_t expand_len = raw_len;
             if (spliced && spliced != (char*)-1) {
+                expand_src = spliced;
+                expand_len = strlen(spliced);
+            }
+            if (expand_src != raw || cc_path_is_ccscript(input_path)) {
                 snprintf(tmp_grammar_path, sizeof(tmp_grammar_path), "/tmp/cc_pp_gram_XXXXXX");
                 int fd = mkstemp(tmp_grammar_path);
                 if (fd >= 0) {
-                    size_t sl = strlen(spliced);
                     FILE* tf = fdopen(fd, "wb");
                     if (tf) {
-                        if (fwrite(spliced, 1, sl, tf) == sl) expand_path = tmp_grammar_path;
+                        if (fwrite(expand_src, 1, expand_len, tf) == expand_len)
+                            expand_path = tmp_grammar_path;
                         fclose(tf);
                     } else {
                         close(fd);
