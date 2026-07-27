@@ -758,8 +758,8 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
 
 CCShardMask cc_shard_mask_auto(size_t max) {
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-    size_t n;
     if (ncpu < 1) ncpu = 1;
-    n = (size_t)ncpu;
-    return cc_shard_mask_clamp(n, max);
+    /* Ceil to next pow2 so non-pow2 host counts (6/12/24) do not silently
+     * run at half the shard fan-out; clamp still floors explicit overrides. */
+    return cc_shard_mask_ceil((size_t)ncpu, max);
 }

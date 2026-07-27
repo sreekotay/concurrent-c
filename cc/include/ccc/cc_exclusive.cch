@@ -227,7 +227,16 @@ static inline CCShardMask cc_shard_mask_clamp(size_t n, size_t max) {
     return cc_shard_mask_make(p);
 }
 
-/* Next power-of-two of online CPU count, clamped to 1..max (max floored
+/* Ceil `n` to the next power of two, then clamp into 1..max. */
+static inline CCShardMask cc_shard_mask_ceil(size_t n, size_t max) {
+    size_t p = 1u;
+    if (n == 0) n = 1u;
+    while (p < n && (p << 1) > p) p <<= 1;
+    if (p < n) p = n; /* shift overflow — clamp will floor to max pow2 */
+    return cc_shard_mask_clamp(p, max);
+}
+
+/* Next power-of-two of online CPU count, then clamp to 1..max (max floored
  * to pow2).  Defined in the runtime (needs sysconf). */
 CCShardMask cc_shard_mask_auto(size_t max);
 

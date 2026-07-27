@@ -6,7 +6,7 @@
  * use excl->acquire / acquire_sorted / acquire_range with CCShardMask
  * geometry from the stdlib.  No owner fiber, no request/reply channels.
  *
- * Shard count is cc_shard_mask_auto (pow2 of ncpu, 1..64).
+ * Shard count is cc_shard_mask_auto (next pow2 of ncpu, 1..64).
  * Optional CC_REDIS_SHARDS overrides for benches only — not a user knob.
  *
  * Request path: argv slices borrow the connection read buffer (no clone,
@@ -564,8 +564,8 @@ static RedisCmdHold hold_for(RedisCommandKind kind) {
     abort();
 }
 
-/* Shard count via CCShardMask: auto is pow2(ncpu) clamped to
- * REDIS_DB_MAX_SHARDS.  CC_REDIS_SHARDS overrides for bench / A/B only. */
+/* Shard count via CCShardMask: auto is next-pow2(ncpu) clamped to
+ * REDIS_DB_MAX_SHARDS.  CC_REDIS_SHARDS overrides floor via clamp. */
 static size_t redis_shard_count(const char** src_out) {
     const char* s = getenv("CC_REDIS_SHARDS");
     unsigned long n;

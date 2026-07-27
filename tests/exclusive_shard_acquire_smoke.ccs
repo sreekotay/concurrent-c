@@ -22,7 +22,10 @@ int main(void) {
     if (shards.count != 8 || shards.mask != 7) return 2;
     if (shards.index(0x11u) != 1) return 3;
     if (cc_shard_mask_clamp(10, 64).count != 8) return 4;
-    if (cc_shard_mask_clamp(3, 64).count != 2) return 5;
+    if (cc_shard_mask_clamp(3, 64).count != 2) return 5; /* floor */
+    if (cc_shard_mask_ceil(6, 64).count != 8) return 11;  /* ceil */
+    if (cc_shard_mask_ceil(3, 64).count != 4) return 12;
+    if (cc_shard_mask_ceil(8, 64).count != 8) return 13;
     shards = cc_shard_mask_auto(64);
     if (shards.count == 0 || (shards.count & (shards.count - 1u)) != 0) return 6;
 

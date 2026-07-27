@@ -4608,8 +4608,9 @@ An acquire blocks until the caller owns the named entry. Uncontended acquire is 
 Compose `CCExclusive` names `0 .. count-1` with a power-of-two shard mask:
 
 ```c
-CCShardMask shards = cc_shard_mask_auto(64);       /* pow2(ncpu), clamped */
+CCShardMask shards = cc_shard_mask_auto(64);       /* next pow2(ncpu), then clamp */
 size_t i = shards.index(hash);                     /* hash & mask */
+CCShardMask m = cc_shard_mask_ceil(n, max);        /* ceil n to pow2, then clamp */
 CCShardMask m = cc_shard_mask_clamp(n, max);       /* floor n to pow2 in 1..max */
 CCShardMask m = cc_shard_mask_make(8);             /* exact pow2, else {0,0} */
 ```
@@ -4677,6 +4678,7 @@ void cc_exclusive_guard_destroy(CCExclusiveGuard* g);
 
 CCShardMask cc_shard_mask_make(size_t count);
 CCShardMask cc_shard_mask_clamp(size_t n, size_t max);
+CCShardMask cc_shard_mask_ceil(size_t n, size_t max);
 CCShardMask cc_shard_mask_auto(size_t max);
 size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash);
 
