@@ -59,6 +59,27 @@ void cc_comptime_fn_registry_set_prelude(const char* prelude) {
     cc__comptime_fn_rebuild_blob();
 }
 
+void cc_comptime_fn_registry_append_prelude(const char* text) {
+    size_t old_len, add_len;
+    char* nb;
+    if (!text || !text[0]) return;
+    if (!cc__comptime_fn_prelude || !cc__comptime_fn_prelude[0]) {
+        cc_comptime_fn_registry_set_prelude(text);
+        return;
+    }
+    if (strstr(cc__comptime_fn_prelude, text)) return;
+    old_len = strlen(cc__comptime_fn_prelude);
+    add_len = strlen(text);
+    nb = (char*)malloc(old_len + 1 + add_len + 1);
+    if (!nb) return;
+    memcpy(nb, cc__comptime_fn_prelude, old_len);
+    nb[old_len] = '\n';
+    memcpy(nb + old_len + 1, text, add_len + 1);
+    free(cc__comptime_fn_prelude);
+    cc__comptime_fn_prelude = nb;
+    cc__comptime_fn_rebuild_blob();
+}
+
 static void cc__comptime_fn_rebuild_blob(void) {
     free(cc__comptime_fn_defs_blob);
     cc__comptime_fn_defs_blob = NULL;

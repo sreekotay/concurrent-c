@@ -247,18 +247,30 @@ static inline size_t cc_map_hash_slice_packed(CCSlicePacked r) {
     const unsigned char *p = (const unsigned char *)s.ptr;
     size_t i;
     for (i = 0; i < s.len; ++i) h ^= p[i], h *= 16777619;
+    /* Murmur-style finalizer so high bits (ArrayMap hash frag) avalanche. */
+    h ^= h >> 16;
+    h *= (size_t)0x85ebca6bu;
+    h ^= h >> 13;
+    h *= (size_t)0xc2b2ae35u;
+    h ^= h >> 16;
     return h;
 }
 
 static inline int cc_map_eq_slice_packed(CCSlicePacked a, CCSlicePacked b) {
+    uint32_t la;
+    uint32_t lb;
     CCSlice sa;
     CCSlice sb;
     if (a.w == b.w) return 1;
+    la = cc_slice_packed_len(&a);
+    lb = cc_slice_packed_len(&b);
+    if (la != lb) return 0;
+    if (la == 0) return 1;
+    /* Inline packs full payload in `w`; unequal words ⇒ unequal keys. */
+    if (cc_slice_packed_is_inline(&a) && cc_slice_packed_is_inline(&b)) return 0;
     sa = cc_slice_packed_as_slice(&a);
     sb = cc_slice_packed_as_slice(&b);
-    return sa.len == sb.len &&
-           (sa.len == 0 ||
-            (sa.ptr && sb.ptr && memcmp(sa.ptr, sb.ptr, sa.len) == 0));
+    return sa.ptr && sb.ptr && memcmp(sa.ptr, sb.ptr, (size_t)la) == 0;
 }
 
 #endif /* CC_STD_SLICE_PACKED_H */

@@ -588,7 +588,11 @@ and ignore the final argument.
 ### Array maps
 
 `<ccc/std/array_map.cch>` defines arena-backed array-map families with a pow2
-`uint32_t` probe index and a dense `(key, value)` row store:
+`uint32_t` probe index and a dense `(key, value)` row store. Occupied probe
+slots store an 8-bit hash fragment in the high byte and a 24-bit dense
+index+1 in the low bits; lookup rejects fragment mismatches before key
+equality. Live dense length is at most `2^24 - 2` so an occupied slot never
+collides with the tomb sentinel:
 
 ```c
 #define CC_ARRAY_MAP_DECL(K, V, Name, HASH_FN, EQ_FN) /* declares the Name family */
@@ -635,38 +639,45 @@ family.
 
 ### Static maps
 
-`<ccc/std/static_map.cch>` provides a comptime perfect-hash map:
+`<ccc/std/static_map.cch>` provides a comptime perfect-hash map. The
+user-facing call takes a typed entry array:
 
 ```c
-typedef struct CCStaticMapEntry {
-    const char *key;
-    const char *value; /* C initializer source for one value_type */
-} CCStaticMapEntry;
-
 enum {
     CC_STATIC_MAP_CASE_SENSITIVE = 0,
     CC_STATIC_MAP_ASCII_CI = 1,
 };
 
-@comptime void static_map(const char *name,
-                          const char *value_type,
-                          const void *entries,
-                          size_t count,
-                          int flags);
+typedef struct Entry {
+    const char *key;
+    ValueType value; /* flat POD integers/enums only */
+} Entry;
+
+@comptime {
+    Entry entries[] = {
+        { "GET", { /* fields */ } },
+    };
+    static_map("name", entries, CC_STATIC_MAP_ASCII_CI);
+}
 ```
 
-`entries` is an array of `CCStaticMapEntry`. At the comptime call site the
-function searches for a collision-free FNV-1a seed into a power-of-two slot
-table and emits keys, values, slots, and:
+Each entry type has a `const char *key` field and a real typed `value`
+field. Values are ordinary compound literals — there is no stringified
+initializer. The compiler rewrites the three-argument call into an
+internal form that carries the value type name and layout (`sizeof` /
+address offsets). At the call site the function searches for a
+collision-free FNV-1a seed into a power-of-two slot table and emits
+keys, values, slots, and:
 
 ```c
-static const value_type *name_get(CCSlice key);
+static const ValueType *name_get(CCSlice key);
 ```
 
 Lookup is `hash(key) -> slot -> verify -> &value`, with exact or ASCII
 case-insensitive verification according to `flags`. A miss returns null.
-Invalid arguments, duplicate keys (under the selected match policy), keys
-requiring C-string escaping, and failure to construct a perfect hash are
+Invalid arguments, non-POD value fields, unreproducible value layout,
+duplicate keys (under the selected match policy), keys requiring
+C-string escaping, and failure to construct a perfect hash are
 compile-time errors.
 
 ### Hash helpers

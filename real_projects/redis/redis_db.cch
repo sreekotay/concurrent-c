@@ -8,9 +8,9 @@
  * every variant compiles its own static copy, C header-library style.
  *
  * Concurrency-agnostic: nothing in here synchronizes.  The including
- * variant owns serialization of every call — redis_idiomatic.ccs by
- * holding a table-wide named exclusive lock, redis_owner.ccs by routing
- * all execution through one owner fiber.
+ * variant owns serialization — redis_idiomatic.ccs by per-shard (or
+ * all-shard) named exclusive locks; redis_owner.ccs by one owner fiber
+ * (always init with shard_count=1).
  *
  * Include AFTER redis_cc/redis_cc.cch (types) and after the reply
  * builders (reply_simple/reply_bulk/reply_integer/reply_null/reply_wire,
@@ -46,13 +46,45 @@ typedef ArrayMap::[CCSlicePacked, RedisEntry] RedisDbMap;
 /* key → absolute expire ms; absent / missing ⇒ no TTL. */
 typedef ArrayMap::[CCSlicePacked, int64_t] RedisExpiresMap;
 
+/* One hash shard: entries + expires share the same key→shard mapping. */
+typedef struct RedisDbShard {
+    RedisDbMap entries;
+    RedisExpiresMap expires;
+} RedisDbShard;
+
+enum { REDIS_DB_MAX_SHARDS = 64 };
+
 typedef struct RedisDb {
     CCArena map_arena;
     CCArena key_arena;
     CCArena value_arena;
-    RedisDbMap entries;
-    RedisExpiresMap expires;
+    size_t shard_count; /* power of two, 1..REDIS_DB_MAX_SHARDS */
+    size_t shard_mask;  /* shard_count - 1 */
+    RedisDbShard* shards;
 } RedisDb;
+
+/* Key → shard index (same hash as ArrayMap key routing). */
+static size_t db_shard_index_for_key(const RedisDb* db, char[:] key) {
+    CCSlicePackedView view;
+    CCSlicePacked kh;
+    if (!db || db->shard_count == 0) return 0;
+    kh = db_key_packed_borrow(&view, key);
+    return cc_map_hash_slice_packed(kh) & db->shard_mask;
+}
+
+static size_t db_shard_index_for_packed(const RedisDb* db, CCSlicePacked kh) {
+    if (!db || db->shard_count == 0) return 0;
+    return cc_map_hash_slice_packed(kh) & db->shard_mask;
+}
+
+static RedisDbShard* db_shard_at(RedisDb* db, size_t i) {
+    if (!db || !db->shards || i >= db->shard_count) return NULL;
+    return &db->shards[i];
+}
+
+static RedisDbShard* db_shard_for_key(RedisDb* db, char[:] key) {
+    return db_shard_at(db, db_shard_index_for_key(db, key));
+}
 
 typedef struct RedisDbMemStats {
     size_t key_alloc_count;
@@ -114,10 +146,19 @@ static void db_free_arenas_only(RedisDb* db) {
     db->value_arena.destroy();
 }
 
-static bool db_init(RedisDb* db, size_t bucket_count) {
+/* `shard_count` must be a power of two in 1..REDIS_DB_MAX_SHARDS.
+ * Per-shard bucket hint is bucket_count / shard_count (min 8). */
+static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
+    size_t i;
+    size_t per_shard;
     if (!db || bucket_count == 0) return false;
+    if (shard_count == 0 || shard_count > (size_t)REDIS_DB_MAX_SHARDS) return false;
+    if ((shard_count & (shard_count - 1u)) != 0) return false;
     const size_t map_value_heap_root = 1024;
     const size_t key_arena_root = 4096;
+    memset(db, 0, sizeof(*db));
+    db->shard_count = shard_count;
+    db->shard_mask = shard_count - 1u;
     if (!db_init_overflow_arena(&db->map_arena, map_value_heap_root)) return false;
     db->key_arena = cc_arena_heap(key_arena_root);
     if (!db->key_arena.valid()) {
@@ -128,20 +169,40 @@ static bool db_init(RedisDb* db, size_t bucket_count) {
         db_free_arenas_only(db);
         return false;
     }
-    db->entries = array_map_new_count::[CCSlicePacked, RedisEntry](&db->map_arena, bucket_count);
-    if (!db->entries) {
+    db->shards = (RedisDbShard*)cc_arena_alloc(&db->map_arena,
+                                               shard_count * sizeof(RedisDbShard),
+                                               _Alignof(RedisDbShard));
+    if (!db->shards) {
         db_free_arenas_only(db);
         return false;
     }
-    /* Side expires dict starts small; grows only for keys that get a TTL. */
-    db->expires = array_map_new::[CCSlicePacked, int64_t](&db->map_arena);
-    if (!db->expires) {
-        db->entries.destroy();
-        db->entries = NULL;
-        db_free_arenas_only(db);
-        return false;
+    memset(db->shards, 0, shard_count * sizeof(RedisDbShard));
+    per_shard = bucket_count / shard_count;
+    if (per_shard < 8u) per_shard = 8u;
+    for (i = 0; i < shard_count; ++i) {
+        db->shards[i].entries =
+            array_map_new_count::[CCSlicePacked, RedisEntry](&db->map_arena, per_shard);
+        if (!db->shards[i].entries) goto fail;
+        /* Side expires dict starts small; grows only for keys that get a TTL. */
+        db->shards[i].expires = array_map_new::[CCSlicePacked, int64_t](&db->map_arena);
+        if (!db->shards[i].expires) goto fail;
     }
     return true;
+fail:
+    for (i = 0; i < shard_count; ++i) {
+        RedisDbShard* sh = &db->shards[i];
+        if (sh->expires) {
+            sh->expires.destroy();
+            sh->expires = NULL;
+        }
+        if (sh->entries) {
+            sh->entries.destroy();
+            sh->entries = NULL;
+        }
+    }
+    db->shards = NULL;
+    db_free_arenas_only(db);
+    return false;
 }
 
 static void db_release_value(RedisDb* db, CCString* value) {
@@ -253,9 +314,12 @@ static void !>(CCError) db_entry_store_str(RedisDb* db, RedisValue* val, char[:]
 static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
     CCSlicePackedView view;
     CCSlicePacked kh;
-    if (!db || !db->entries) return NULL;
+    RedisDbShard* sh;
+    if (!db || !db->shards) return NULL;
+    sh = db_shard_for_key(db, key);
+    if (!sh || !sh->entries) return NULL;
     kh = db_key_packed_borrow(&view, key);
-    return db->entries.get_ptr(kh);
+    return sh->entries.get_ptr(kh);
 }
 
 /* ---- lazy expiration ----
@@ -294,9 +358,12 @@ static CCSlicePacked !>(CCError) db_clone_key_packed(RedisDb* db, char[:] key) {
 
 static int64_t db_expires_get(RedisDb* db, CCSlicePacked kh) {
     int64_t* p;
+    RedisDbShard* sh;
     /* No-TTL workloads: skip the side-map probe when the table is empty. */
-    if (!db || !db->expires || db->expires.len() == 0) return 0;
-    p = db->expires.get_ptr(kh);
+    if (!db || !db->shards) return 0;
+    sh = db_shard_at(db, db_shard_index_for_packed(db, kh));
+    if (!sh || !sh->expires || sh->expires.len() == 0) return 0;
+    p = sh->expires.get_ptr(kh);
     return p ? *p : 0;
 }
 
@@ -317,22 +384,23 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
     @errhandler(CCError e) { return cc_err(e); }
     CCSlicePackedView view;
     CCSlicePacked kh = db_key_packed_borrow(&view, key);
-    if (!db || !db->expires) {
+    RedisDbShard* sh = db_shard_for_key(db, key);
+    if (!db || !sh || !sh->expires) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db expires without map"));
     }
     if (when == 0) {
-        (void)db->expires.del(kh);
+        (void)sh->expires.del(kh);
         return cc_ok();
     }
     {
-        int64_t* p = db->expires.get_ptr(kh);
+        int64_t* p = sh->expires.get_ptr(kh);
         if (p) {
             *p = when;
             return cc_ok();
         }
     }
     CCSlicePacked owned = db_clone_key_packed(db, key) !>;
-    if (db->expires.insert(owned, when) != 0) {
+    if (sh->expires.insert(owned, when) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
     }
     return cc_ok();
@@ -346,8 +414,10 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSlicePackedView view;
     CCSlicePacked kh = db_key_packed_borrow(&view, key);
-    if (db->expires) (void)db->expires.del(kh);
-    if (!db->entries.del(kh)) return;
+    RedisDbShard* sh = db_shard_for_key(db, key);
+    if (!sh) return;
+    if (sh->expires) (void)sh->expires.del(kh);
+    if (!sh->entries || !sh->entries.del(kh)) return;
     db_mem_stats_note_key_release(key.len);
     db_release_value(db, &doomed);
 }
@@ -365,10 +435,15 @@ static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
 }
 
 static void !>(CCError) db_insert_value(RedisDb* db, CCSlicePacked owned_key, RedisEntry entry) {
-    if (!db || !db->entries) {
+    RedisDbShard* sh;
+    if (!db || !db->shards) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
-    if (db->entries.insert(owned_key, entry) != 0) {
+    sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
+    if (!sh || !sh->entries) {
+        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
+    }
+    if (sh->entries.insert(owned_key, entry) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
     }
     return cc_ok();
@@ -392,7 +467,8 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
     db_mem_stats_note_key_alloc(key.len);
     if (expires_at_ms != 0) {
         /* Reuse the same durable key word in the side table (no second clone). */
-        if (db->expires.insert(owned_key, expires_at_ms) != 0) {
+        RedisDbShard* sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
+        if (!sh || !sh->expires || sh->expires.insert(owned_key, expires_at_ms) != 0) {
             return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
         }
     }
@@ -406,7 +482,7 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
  * in place — that IS its reap. */
 static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value, int64_t expires_at_ms) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    if (!db || !db->shards) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
     RedisEntry* cell = db_find_entry(db, key);
     if (cell) {
@@ -433,20 +509,21 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
                                              char[:] key,
                                              CCString owned_value,
                                              int64_t expires_at_ms) {
-    if (!db || !db->entries) {
+    if (!db || !db->shards) {
         db_release_value(db, &owned_value);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
     }
 
     RedisEntry* cell = db_find_entry(db, key);
     if (cell) {
+        RedisDbShard* sh = db_shard_for_key(db, key);
         RedisValue* val = &cell->val;
         if (val->kind == .str) {
             CCString doomed = val->str;
             db_release_value(db, &doomed);
         }
         *val = (RedisValue){ .str = owned_value };
-        if (expires_at_ms != 0 || (db->expires && db->expires.len() > 0)) {
+        if (expires_at_ms != 0 || (sh && sh->expires && sh->expires.len() > 0)) {
             void !>(CCError) exp = db_expires_set(db, key, expires_at_ms);
             if (exp.is_err()) return cc_err(exp.error());
         }
@@ -469,7 +546,8 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
         }
         db_mem_stats_note_key_alloc(key.len);
         if (expires_at_ms != 0) {
-            if (db->expires.insert(owned_key, expires_at_ms) != 0) {
+            RedisDbShard* sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
+            if (!sh || !sh->expires || sh->expires.insert(owned_key, expires_at_ms) != 0) {
                 /* Entry is live without TTL — same as a plain SET that later
                  * fails EXPIRE; surface OOM rather than rolling back. */
                 return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
@@ -503,7 +581,7 @@ static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
  * timed out counts as absent for both (lookup_live reaps it first). */
 static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* clock) {
     int64_t removed = 0;
-    if (!db || !db->entries) return reply_integer(0);
+    if (!db || !db->shards) return reply_integer(0);
     for (size_t i = 0; i < nkeys; ++i) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
         if (!cell) continue;
@@ -602,7 +680,7 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
  * cell untouched. */
 static RedisReply !>(CCError) db_incrby(RedisDb* db, char[:] key, int64_t delta, DbCmdClock* clock) {
     @errhandler(CCError e) { return cc_err(e); }
-    if (!db || !db->entries) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    if (!db || !db->shards) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
     RedisEntry* cell = db_lookup_live(db, key, clock);
 
@@ -749,14 +827,19 @@ static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
  * (not deleted — no map mutation during iteration). */
 static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
     int64_t n = 0;
+    size_t si;
     CCSlicePacked k;
     RedisEntry v;
-    if (!db || !db->entries) return reply_integer(0);
-    CC_ARRAY_MAP_FOREACH(db->entries, k, v) {
-        int64_t exp = db_expires_get(db, k);
-        if (exp != 0 && clock.now() >= exp) continue;
-        (void)v;
-        n++;
+    if (!db || !db->shards) return reply_integer(0);
+    for (si = 0; si < db->shard_count; ++si) {
+        RedisDbShard* sh = &db->shards[si];
+        if (!sh->entries) continue;
+        CC_ARRAY_MAP_FOREACH(sh->entries, k, v) {
+            int64_t exp = db_expires_get(db, k);
+            if (exp != 0 && clock.now() >= exp) continue;
+            (void)v;
+            n++;
+        }
     }
     return reply_integer(n);
 }
@@ -767,19 +850,26 @@ static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
  * until db teardown).  Dense at_ptr/key_ptr so release hits the live cell
  * (same discipline as get_ptr — not a by-value FOREACH alias). */
 static RedisReply db_flush(RedisDb* db) {
-    if (!db || !db->entries) return reply_simple("OK");
-    size_t n = db->entries.len();
-    for (size_t i = 0; i < n; ++i) {
-        CCSlicePacked* k = db->entries.key_ptr(i);
-        RedisEntry* cell = db->entries.at_ptr(i);
-        if (!k || !cell) continue;
-        db_mem_stats_note_key_release(k->len());
-        RedisValue* val = &cell->val;
-        CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
-        db_release_value(db, &doomed);
+    size_t si;
+    if (!db || !db->shards) return reply_simple("OK");
+    for (si = 0; si < db->shard_count; ++si) {
+        RedisDbShard* sh = &db->shards[si];
+        size_t n;
+        size_t i;
+        if (!sh->entries) continue;
+        n = sh->entries.len();
+        for (i = 0; i < n; ++i) {
+            CCSlicePacked* k = sh->entries.key_ptr(i);
+            RedisEntry* cell = sh->entries.at_ptr(i);
+            if (!k || !cell) continue;
+            db_mem_stats_note_key_release(k->len());
+            RedisValue* val = &cell->val;
+            CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
+            db_release_value(db, &doomed);
+        }
+        sh->entries.clear();
+        if (sh->expires) sh->expires.clear();
     }
-    db->entries.clear();
-    if (db->expires) db->expires.clear();
     return reply_simple("OK");
 }
 
@@ -801,21 +891,30 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
 
     size_t matched = 0;
     size_t body = 0;
-    size_t n = (db && db->entries) ? db->entries.len() : 0;
-    for (size_t i = 0; i < n; ++i) {
-        CCSlicePacked* kp = db->entries.key_ptr(i);
-        if (!kp) continue;
-        int64_t exp = db_expires_get(db, *kp);
-        if (exp != 0 && clock.now() >= exp) continue;
-        CCSlice ks = kp->as_slice();
-        if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
-        matched++;
-        RespGReply elem = wire_bulk(ks);
-        size_t m = cc_measure(RespGReply, &elem);
-        if (m == 0) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
+    size_t si;
+    if (!db || !db->shards) {
+        /* empty DB — still a valid empty array reply */
+    } else {
+        for (si = 0; si < db->shard_count; ++si) {
+            RedisDbShard* sh = &db->shards[si];
+            size_t n = sh->entries ? sh->entries.len() : 0;
+            size_t i;
+            for (i = 0; i < n; ++i) {
+                CCSlicePacked* kp = sh->entries.key_ptr(i);
+                if (!kp) continue;
+                int64_t exp = db_expires_get(db, *kp);
+                if (exp != 0 && clock.now() >= exp) continue;
+                CCSlice ks = kp->as_slice();
+                if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+                matched++;
+                RespGReply elem = wire_bulk(ks);
+                size_t m = cc_measure(RespGReply, &elem);
+                if (m == 0) {
+                    return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
+                }
+                body += m;
+            }
         }
-        body += m;
     }
 
     RespGArrayHdr hdr = { .n = (long long)matched };
@@ -834,19 +933,26 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     if (off != hdr_sz) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: hdr write != measure"));
     }
-    for (size_t i = 0; i < n; ++i) {
-        CCSlicePacked* kp = db->entries.key_ptr(i);
-        if (!kp) continue;
-        int64_t exp = db_expires_get(db, *kp);
-        if (exp != 0 && clock.now() >= exp) continue;
-        CCSlice ks = kp->as_slice();
-        if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
-        RespGReply elem = wire_bulk(ks);
-        size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
-        if (w == 0) {
-            return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: bulk write failed"));
+    if (db && db->shards) {
+        for (si = 0; si < db->shard_count; ++si) {
+            RedisDbShard* sh = &db->shards[si];
+            size_t n = sh->entries ? sh->entries.len() : 0;
+            size_t i;
+            for (i = 0; i < n; ++i) {
+                CCSlicePacked* kp = sh->entries.key_ptr(i);
+                if (!kp) continue;
+                int64_t exp = db_expires_get(db, *kp);
+                if (exp != 0 && clock.now() >= exp) continue;
+                CCSlice ks = kp->as_slice();
+                if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
+                RespGReply elem = wire_bulk(ks);
+                size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
+                if (w == 0) {
+                    return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: bulk write failed"));
+                }
+                off += w;
+            }
         }
-        off += w;
     }
     if (off != need) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: write size != measure"));
@@ -909,14 +1015,21 @@ static bool db_preload_keys_ok(RedisDb* db, int count) {
 }
 
 static void db_free_all(RedisDb* db) {
+    size_t i;
     if (!db) return;
-    if (db->expires) {
-        db->expires.destroy();
-        db->expires = NULL;
-    }
-    if (db->entries) {
-        db->entries.destroy();
-        db->entries = NULL;
+    if (db->shards) {
+        for (i = 0; i < db->shard_count; ++i) {
+            RedisDbShard* sh = &db->shards[i];
+            if (sh->expires) {
+                sh->expires.destroy();
+                sh->expires = NULL;
+            }
+            if (sh->entries) {
+                sh->entries.destroy();
+                sh->entries = NULL;
+            }
+        }
+        db->shards = NULL;
     }
     db_free_arenas_only(db);
 }

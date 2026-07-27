@@ -4,8 +4,9 @@ This project mirrors the structure of `real_projects/pigz/`, but targets Redis.
 
 The supported Concurrent-C Redis variants are:
 
-- `redis_idiomatic.ccs` — default server (table-wide `CCExclusive`; connection
-  fibers execute in place). Benchmark target for `./bench_robust.sh`.
+- `redis_idiomatic.ccs` — default server (hash-sharded `CCExclusive` by CPU
+  count; connection fibers execute in place). Benchmark target for
+  `./bench_robust.sh`.
 - `redis_owner.ccs` — channel / single-owner-fiber variant (historical).
 - `redis_cc/redis_cc.ccs` — future modular production port (scaffold).
 
@@ -46,12 +47,13 @@ Default (`redis_idiomatic`) shape:
 1. accept loop
 2. one fiber per client connection
 3. RESP decode on the connection side
-4. execute under a table-wide named exclusive (`CCExclusive`)
+4. execute under a per-shard named exclusive (`CCExclusive`; shard count =
+   next power of two of online CPUs — no user tuning). Optional
+   `CC_REDIS_SHARDS` is a bench override only.
 5. RESP encode on the connection side after release
 
 `redis_owner` instead routes commands over channels to a single owner fiber
-(step 4–5 differ). The main future scaling knob is shard / per-key exclusives,
-not a different programming model.
+(step 4–5 differ; always one shard).
 
 ## Bootstrap
 
@@ -77,4 +79,4 @@ CLIENTS_SWEEP="1 5 50" ./bench_conn_sweep.sh   # RSS vs concurrent clients
 `REPEATS` runs the suite multiple times and reports median/range summaries.
 
 `redis_cc` remains a scaffold for the eventual modular port. `redis_idiomatic`
-(table lock) is the current default runnable implementation.
+is the current default runnable implementation.

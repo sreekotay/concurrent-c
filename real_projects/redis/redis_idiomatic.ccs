@@ -1,9 +1,13 @@
 /*
  * redis_idiomatic.ccs — default Concurrent-C Redis server.
  *
- * Shared DB behind one table-wide named exclusive section (CCExclusive).
- * Each connection fiber parses, then executes against RedisDb while
- * holding that mutex.  No owner fiber, no request/reply channels.
+ * Shared DB behind a sharded named exclusive section (CCExclusive): each
+ * hash shard of RedisDb has its own mutex name.  Connection fibers acquire
+ * one shard (single-key), a sorted set of shards (multi-key), or all shards
+ * (DBSIZE/FLUSH/KEYS/MEMLOG).  No owner fiber, no request/reply channels.
+ *
+ * Shard count is automatic (next power of two of online CPUs, 1..64).
+ * Optional CC_REDIS_SHARDS overrides for benches only — not a user knob.
  *
  * Request path: argv slices borrow the connection read buffer (no clone,
  * no handoff).  Hold policy lives with the command arms (`hold_for`); the
@@ -45,19 +49,17 @@
 #include "redis_cc/redis_cc.cch"
 
 /* The one concurrency primitive this variant uses: a named exclusive
- * section.  main creates a single CCExclusive and resolves one mutex;
- * connection fibers acquire it around DB mutate / snapshot only. */
+ * section.  Mutex names are shard ids 0..N-1; connection fibers acquire
+ * around DB mutate / snapshot only. */
 #include <ccc/cc_exclusive.cch>
 
-/* The whole table is one name — this variant never shards. */
-enum { k_table_lock_name = 1 };
-
 /* Window cap bounds how many pipelined commands run per parsed batch.
- * out_buf holds serialized replies between flushes: a window of small
- * replies fits, and anything larger flushes mid-window. */
+ * out_buf coalesces serialized replies until end-of-window (or overflow):
+ * sized for a full pipeline of typical small GET/INCR replies so mid-window
+ * flush+re-encode stays rare.  Invisible to clients — same reply shape. */
 enum {
     k_pipeline_window_cap = 16,
-    redis_conn_out_buf_bytes = 1024,
+    redis_conn_out_buf_bytes = 8192,
 };
 
 /* Per-connection state, on the connection fiber's stack.  reply_arena
@@ -211,15 +213,19 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     }
 }
 
-/* How a command relates to the table hold.  Chosen by hold_for(kind) next
+/* How a command relates to shard holds.  Chosen by hold_for(kind) next
  * to the execute arms; run_pipeline_window is the only acquire site. */
 typedef enum RedisCmdHold {
-    /* acquire -> execute -> own bulk -> release */
-    REDIS_HOLD_TABLE = 0,
-    /* no hold: mutates nothing, and a torn read of DB stats is acceptable */
+    /* acquire argv[0]'s shard -> execute -> own bulk -> release */
+    REDIS_HOLD_KEY = 0,
+    /* no hold: mutates nothing */
     REDIS_HOLD_NONE,
-    /* prep the value outside -> acquire -> install -> release */
+    /* prep value outside -> acquire key shard -> install -> release */
     REDIS_HOLD_INSTALL,
+    /* acquire unique key shards in ascending id order */
+    REDIS_HOLD_KEYS,
+    /* acquire every shard 0..N-1 in order */
+    REDIS_HOLD_ALL,
 } RedisCmdHold;
 
 /* min/max_args count arguments after the command word; max_args < 0 is
@@ -234,41 +240,44 @@ typedef struct RedisCommandSpec {
     int args_multiple;
 } RedisCommandSpec;
 
+typedef struct RedisCommandEntry {
+    const char* key;
+    RedisCommandSpec value;
+} RedisCommandEntry;
+
 @comptime {
     /* name -> { kind, min_args, max_args, args_multiple } */
-    CCStaticMapEntry commands[] = {
-        { "PING", "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0 }" },
-        { "ECHO", "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0 }" },
-        { "GET", "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0 }" },
-        { "SET", "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0 }" },
-        { "SETNX", "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0 }" },
-        { "SETEX", "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0 }" },
-        { "PSETEX", "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0 }" },
-        { "APPEND", "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0 }" },
-        { "STRLEN", "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0 }" },
-        { "TYPE", "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0 }" },
-        { "DEL", "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0 }" },
-        { "EXISTS", "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0 }" },
-        { "INCR", "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0 }" },
-        { "DECR", "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0 }" },
-        { "INCRBY", "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0 }" },
-        { "DECRBY", "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0 }" },
-        { "MGET", "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0 }" },
-        { "MSET", "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2 }" },
-        { "EXPIRE", "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0 }" },
-        { "PEXPIRE", "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0 }" },
-        { "TTL", "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0 }" },
-        { "PTTL", "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0 }" },
-        { "PERSIST", "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0 }" },
-        { "DBSIZE", "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0 }" },
-        { "FLUSHDB", "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0 }" },
-        { "FLUSHALL", "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0 }" },
-        { "KEYS", "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0 }" },
-        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0 }" },
+    RedisCommandEntry commands[] = {
+        { "PING", { REDIS_CMD_PING, 0, 1, 0 } },
+        { "ECHO", { REDIS_CMD_ECHO, 1, 1, 0 } },
+        { "GET", { REDIS_CMD_GET, 1, 1, 0 } },
+        { "SET", { REDIS_CMD_SET, 2, 2, 0 } },
+        { "SETNX", { REDIS_CMD_SETNX, 2, 2, 0 } },
+        { "SETEX", { REDIS_CMD_SETEX, 3, 3, 0 } },
+        { "PSETEX", { REDIS_CMD_PSETEX, 3, 3, 0 } },
+        { "APPEND", { REDIS_CMD_APPEND, 2, 2, 0 } },
+        { "STRLEN", { REDIS_CMD_STRLEN, 1, 1, 0 } },
+        { "TYPE", { REDIS_CMD_TYPE, 1, 1, 0 } },
+        { "DEL", { REDIS_CMD_DEL, 1, -1, 0 } },
+        { "EXISTS", { REDIS_CMD_EXISTS, 1, -1, 0 } },
+        { "INCR", { REDIS_CMD_INCR, 1, 1, 0 } },
+        { "DECR", { REDIS_CMD_DECR, 1, 1, 0 } },
+        { "INCRBY", { REDIS_CMD_INCRBY, 2, 2, 0 } },
+        { "DECRBY", { REDIS_CMD_DECRBY, 2, 2, 0 } },
+        { "MGET", { REDIS_CMD_MGET, 1, -1, 0 } },
+        { "MSET", { REDIS_CMD_MSET, 2, -1, 2 } },
+        { "EXPIRE", { REDIS_CMD_EXPIRE, 2, 2, 0 } },
+        { "PEXPIRE", { REDIS_CMD_PEXPIRE, 2, 2, 0 } },
+        { "TTL", { REDIS_CMD_TTL, 1, 1, 0 } },
+        { "PTTL", { REDIS_CMD_PTTL, 1, 1, 0 } },
+        { "PERSIST", { REDIS_CMD_PERSIST, 1, 1, 0 } },
+        { "DBSIZE", { REDIS_CMD_DBSIZE, 0, 0, 0 } },
+        { "FLUSHDB", { REDIS_CMD_FLUSHDB, 0, 1, 0 } },
+        { "FLUSHALL", { REDIS_CMD_FLUSHALL, 0, 1, 0 } },
+        { "KEYS", { REDIS_CMD_KEYS, 1, 1, 0 } },
+        { "CC.MEMLOG", { REDIS_CMD_CC_MEMLOG, 0, 1, 0 } },
     };
-    static_map("redis_commands", "RedisCommandSpec", commands,
-               sizeof(commands) / sizeof(commands[0]),
-               CC_STATIC_MAP_ASCII_CI);
+    static_map("redis_commands", commands, CC_STATIC_MAP_ASCII_CI);
 }
 
 /* `argc` counts arguments after the command word.  FLUSHDB/FLUSHALL accept an
@@ -510,8 +519,7 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
 #include "redis_db.cch"
 
 /* Locking policy for each kind — kept with the arms below, not in the
- * name→arity map.  Exhaustive: a new RedisCommandKind must choose a hold
- * (silent default TABLE would stall the server under a bad arm). */
+ * name→arity map.  Exhaustive: a new RedisCommandKind must choose a hold. */
 static RedisCmdHold hold_for(RedisCommandKind kind) {
     switch (kind) {
         case REDIS_CMD_SET:
@@ -528,34 +536,127 @@ static RedisCmdHold hold_for(RedisCommandKind kind) {
         case REDIS_CMD_APPEND:
         case REDIS_CMD_STRLEN:
         case REDIS_CMD_TYPE:
-        case REDIS_CMD_DEL:
-        case REDIS_CMD_EXISTS:
         case REDIS_CMD_INCR:
         case REDIS_CMD_DECR:
         case REDIS_CMD_INCRBY:
         case REDIS_CMD_DECRBY:
-        case REDIS_CMD_MGET:
-        case REDIS_CMD_MSET:
         case REDIS_CMD_EXPIRE:
         case REDIS_CMD_PEXPIRE:
         case REDIS_CMD_TTL:
         case REDIS_CMD_PTTL:
         case REDIS_CMD_PERSIST:
+            return REDIS_HOLD_KEY;
+        case REDIS_CMD_DEL:
+        case REDIS_CMD_EXISTS:
+        case REDIS_CMD_MGET:
+        case REDIS_CMD_MSET:
+            return REDIS_HOLD_KEYS;
         case REDIS_CMD_DBSIZE:
         case REDIS_CMD_FLUSHDB:
         case REDIS_CMD_FLUSHALL:
         case REDIS_CMD_KEYS:
-            return REDIS_HOLD_TABLE;
         case REDIS_CMD_CC_MEMLOG:
-            /* db_dump walks arena ->prev; concurrent grow can tear a link. */
-            return REDIS_HOLD_TABLE;
+            /* Global walk / arena dump: hold every shard. */
+            return REDIS_HOLD_ALL;
     }
     /* No default: keep -Wswitch exhaustiveness.  Out-of-range kind is UB
      * without this — abort rather than return garbage to run_pipeline_window. */
     abort();
 }
 
-/* One command against the DB under a REDIS_HOLD_TABLE / _NONE hold.
+/* Shard count: next power-of-two of online CPUs, clamped to
+ * 1..REDIS_DB_MAX_SHARDS.  CC_REDIS_SHARDS, if set to a valid value, overrides
+ * (bench / A/B only — operators are not expected to set it). */
+static size_t redis_auto_shard_count(void) {
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    size_t n;
+    size_t p;
+    if (ncpu < 1) ncpu = 1;
+    n = (size_t)ncpu;
+    if (n > (size_t)REDIS_DB_MAX_SHARDS) n = (size_t)REDIS_DB_MAX_SHARDS;
+    p = 1u;
+    while (p < n) {
+        if (p > ((size_t)REDIS_DB_MAX_SHARDS / 2u)) return (size_t)REDIS_DB_MAX_SHARDS;
+        p <<= 1;
+    }
+    return p;
+}
+
+/* Writes *src_out as a short label for the startup log. */
+static size_t redis_shard_count(const char** src_out) {
+    const char* s = getenv("CC_REDIS_SHARDS");
+    unsigned long n;
+    char* end = NULL;
+    if (!s || !s[0]) {
+        if (src_out) *src_out = "auto from ncpu";
+        return redis_auto_shard_count();
+    }
+    n = strtoul(s, &end, 10);
+    if (end == s || (end && *end != 0) || n == 0 || n > (unsigned long)REDIS_DB_MAX_SHARDS) {
+        if (src_out) *src_out = "auto from ncpu (bad CC_REDIS_SHARDS)";
+        return redis_auto_shard_count();
+    }
+    /* Round down to power of two (same clamp family as auto). */
+    {
+        size_t p = 1u;
+        while ((p << 1) <= (size_t)n) p <<= 1;
+        if (src_out) *src_out = "CC_REDIS_SHARDS override";
+        return p;
+    }
+}
+
+static void shard_guards_release(CCExclusiveGuard* guards, size_t n) {
+    while (n > 0) {
+        n--;
+        cc_exclusive_guard_destroy(&guards[n]);
+    }
+}
+
+static void shard_guards_acquire_one(CCExclusive* excl,
+                                     size_t shard,
+                                     CCExclusiveGuard* guards,
+                                     size_t* n_out) {
+    guards[0] = cc_exclusive_acquire(excl, (uint64_t)shard);
+    *n_out = 1;
+}
+
+static void shard_guards_acquire_all(CCExclusive* excl,
+                                     RedisDb* db,
+                                     CCExclusiveGuard* guards,
+                                     size_t* n_out) {
+    size_t i;
+    size_t n = 0;
+    for (i = 0; i < db->shard_count; ++i) {
+        guards[n++] = cc_exclusive_acquire(excl, (uint64_t)i);
+    }
+    *n_out = n;
+}
+
+/* Mark shards for keys[0], keys[stride], ...; acquire ascending. */
+static void shard_guards_acquire_key_set(CCExclusive* excl,
+                                         RedisDb* db,
+                                         const CCSlice* keys,
+                                         size_t nkeys,
+                                         size_t stride,
+                                         CCExclusiveGuard* guards,
+                                         size_t* n_out) {
+    unsigned char seen[REDIS_DB_MAX_SHARDS];
+    size_t i;
+    size_t n = 0;
+    memset(seen, 0, sizeof(seen));
+    if (stride == 0) stride = 1;
+    for (i = 0; i < nkeys; i += stride) {
+        size_t si = db_shard_index_for_key(db, keys[i]);
+        if (si < (size_t)REDIS_DB_MAX_SHARDS) seen[si] = 1;
+    }
+    for (i = 0; i < db->shard_count; ++i) {
+        if (!seen[i]) continue;
+        guards[n++] = cc_exclusive_acquire(excl, (uint64_t)i);
+    }
+    *n_out = n;
+}
+
+/* One command against the DB under a KEY/KEYS/ALL/NONE hold.
  * SET is install-only (see hold_for) and does not appear here.  Returned
  * bulk may still borrow DB memory, so the caller materializes into
  * reply_arena before releasing.  Arity was checked by cmd_spec, so arms
@@ -727,33 +828,55 @@ static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
     return 1;
 }
 
-/* The one reply→wire path.  cc_write's 0-on-didn't-fit drives the buffer
- * discipline: try the space left in out_buf, then flush and retry into the
- * whole buffer.  Only a reply larger than out_buf itself falls through to
- * streaming — opaque wire bytes go straight out, and a bulk goes as
- * schema-written header, payload slice, closing CRLF. */
-static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
-    if (!conn || !reply) return 0;
-    size_t w = RedisReply_write(reply, conn->out_buf + conn->out_len,
-                                redis_conn_out_buf_bytes - conn->out_len);
-    if (w == 0) {
-        if (!conn->flush_out()) return 0;
-        w = RedisReply_write(reply, conn->out_buf, redis_conn_out_buf_bytes);
+/* Exact wire size (no payload copy).  Used so out_buf flush happens before
+ * encode — never pay RedisReply_write twice on a nearly-full buffer. */
+static size_t RedisReply_measure(const RedisReply* reply) {
+    if (!reply) return 0;
+    if (reply->kind == REDIS_REPLY_WIRE) return reply->data.len;
+    if (reply->kind == REDIS_REPLY_NULL_BULK) {
+        RespGBulk nil = { .nil = {} };
+        return cc_measure(RespGBulk, &nil);
     }
-    if (w != 0) {
-        conn->out_len += w;
-        return 1;
+    RespGReply wire;
+    if (!redis_reply_to_wire(reply, &wire)) return 0;
+    return cc_measure(RespGReply, &wire);
+}
+
+/* The one reply→wire path.  Measure first, flush if the reply will not fit
+ * in the remaining out_buf, then encode once.  Replies larger than out_buf
+ * stream (opaque WIRE bytes, or bulk header + payload + CRLF). */
+static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
+    size_t need;
+    size_t room;
+    size_t w;
+    if (!conn || !reply) return 0;
+    need = RedisReply_measure(reply);
+    if (need == 0) {
+        /* Empty WIRE is a valid no-op; anything else failed to measure. */
+        return reply->kind == REDIS_REPLY_WIRE;
     }
 
-    /* Streaming path; the retry above flushed, so out_buf is empty. */
-    if (reply->kind == REDIS_REPLY_WIRE) return conn->write_bytes(reply->data);
-    if (reply->kind != REDIS_REPLY_BULK_STRING) return 0;
-    RespGBulkHdr hdr = { .len = (long long)reply->data.len };
-    size_t hw = RespGBulkHdr_write(&hdr, conn->out_buf, redis_conn_out_buf_bytes);
-    if (hw == 0) return 0;
-    conn->out_len = hw;
-    return conn->write_bytes(reply->data) &&
-           conn->write_bytes(cc_slice_from_cstr("\r\n"));
+    if (need > (size_t)redis_conn_out_buf_bytes) {
+        if (conn->out_len > 0 && !conn->flush_out()) return 0;
+        if (reply->kind == REDIS_REPLY_WIRE) return conn->write_bytes(reply->data);
+        if (reply->kind != REDIS_REPLY_BULK_STRING) return 0;
+        RespGBulkHdr hdr = { .len = (long long)reply->data.len };
+        size_t hw = RespGBulkHdr_write(&hdr, conn->out_buf, redis_conn_out_buf_bytes);
+        if (hw == 0) return 0;
+        conn->out_len = hw;
+        return conn->write_bytes(reply->data) &&
+               conn->write_bytes(cc_slice_from_cstr("\r\n"));
+    }
+
+    room = (size_t)redis_conn_out_buf_bytes - conn->out_len;
+    if (need > room) {
+        if (!conn->flush_out()) return 0;
+    }
+    w = RedisReply_write(reply, conn->out_buf + conn->out_len,
+                         (size_t)redis_conn_out_buf_bytes - conn->out_len);
+    if (w != need) return 0;
+    conn->out_len += w;
+    return 1;
 }
 
 static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
@@ -777,14 +900,16 @@ static inline void reply_arena_reset(RedisConn* conn) {
 
 /* DB construction, preload, and memory reporting, at server scope (the
  * memlog label strings match historical redis_idiomatic parsers). */
-static bool db_setup(RedisDb* db) {
-    if (!db_init(db, 1024)) {
+static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
+    if (!db_init(db, 1024, shard_count)) {
         char scratch_buf[256];
         CCArena scratch = @create(scratch_buf, sizeof(scratch_buf)) @destroy;
         CCString line = @string("redis_idiomatic: db_init failed (out of memory?)", &scratch);
         redis_diag_fprintln(&line, &scratch);
         return 0;
     }
+    fprintf(stderr, "redis_idiomatic: shards=%zu (%s)\n", db->shard_count,
+            shard_src ? shard_src : "auto from ncpu");
     int preload_keys = db_preload_key_count();
     if (preload_keys > 0) {
         if (!db_preload_keys_ok(db, preload_keys)) {
@@ -813,10 +938,12 @@ static bool db_setup(RedisDb* db) {
  * in the server is taken here, via hold_for(cmd.kind):
  *
  *   REDIS_HOLD_NONE     execute, no hold
- *   REDIS_HOLD_INSTALL  prep value -> hold -> install -> release
- *   REDIS_HOLD_TABLE    hold -> execute -> own bulk -> release
+ *   REDIS_HOLD_INSTALL  prep value -> key shard -> install -> release
+ *   REDIS_HOLD_KEY      key shard -> execute -> own bulk -> release
+ *   REDIS_HOLD_KEYS     sorted key shards -> execute -> own bulk -> release
+ *   REDIS_HOLD_ALL      all shards -> execute -> own bulk -> release
  *
- * In every arm the hold covers DB mutate/snapshot only: the guard releases
+ * In every arm the hold covers DB mutate/snapshot only: the guards release
  * at the end of its arm — including on an error return — so RESP encoding
  * and the socket write always happen unheld.  End of window flushes out_buf.
  *
@@ -825,7 +952,7 @@ static bool db_setup(RedisDb* db) {
  * *n_out = commands run otherwise.  The reply arena resets on exit. */
 @noblock static bool !>(CCError) run_pipeline_window(RedisConn* conn,
                                                      RedisDb* db,
-                                                     CCExclusiveMutex* table,
+                                                     CCExclusive* excl,
                                                      ReqIter* req_iter,
                                                      size_t* n_out) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -841,6 +968,11 @@ static bool db_setup(RedisDb* db) {
         *n_out = n;
 
         RedisReply reply;
+        const CCSlice* argv = cmd.args + cmd.arg_start;
+        size_t argc = (size_t)cmd.argc;
+        CCExclusiveGuard guards[REDIS_DB_MAX_SHARDS];
+        size_t n_guards = 0;
+
         switch (hold_for(cmd.kind)) {
             case REDIS_HOLD_NONE:
                 reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
@@ -850,27 +982,43 @@ static bool db_setup(RedisDb* db) {
                 /* Value goes durable outside the hold; inside, install
                  * borrow-looks up and swings, or clones the key into
                  * key_arena and inserts (no discarded key on overwrite). */
-                const CCSlice* argv = cmd.args + cmd.arg_start;
                 CCString pre_val = db_prep_value(argv[1]) !>;
-                {
-                    CCExclusiveGuard g = table->acquire();
-                    @defer g.destroy();
-                    reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
+                shard_guards_acquire_one(excl, db_shard_index_for_key(db, argv[0]),
+                                         guards, &n_guards);
+                @defer shard_guards_release(guards, n_guards);
+                reply = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
+                break;
+            }
+
+            case REDIS_HOLD_KEY: {
+                shard_guards_acquire_one(excl, db_shard_index_for_key(db, argv[0]),
+                                         guards, &n_guards);
+                @defer shard_guards_release(guards, n_guards);
+                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                if (reply.kind == REDIS_REPLY_BULK_STRING) {
+                    redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
                 }
                 break;
             }
 
-            case REDIS_HOLD_TABLE: {
-                {
-                    CCExclusiveGuard g = table->acquire();
-                    @defer g.destroy();
-                    reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
-                    /* Own bulk before release: encode must never read DB
-                     * memory once another fiber can mutate it. */
-                    if (reply.kind == REDIS_REPLY_BULK_STRING) {
-                        redis_reply_ensure_owned(&reply,
-                                                 &conn->reply_arena) !>;
-                    }
+            case REDIS_HOLD_KEYS: {
+                size_t stride = (cmd.kind == REDIS_CMD_MSET) ? 2u : 1u;
+                shard_guards_acquire_key_set(excl, db, argv, argc, stride,
+                                             guards, &n_guards);
+                @defer shard_guards_release(guards, n_guards);
+                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                if (reply.kind == REDIS_REPLY_BULK_STRING) {
+                    redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
+                }
+                break;
+            }
+
+            case REDIS_HOLD_ALL: {
+                shard_guards_acquire_all(excl, db, guards, &n_guards);
+                @defer shard_guards_release(guards, n_guards);
+                reply = reply_or_err(execute_cmd(db, &cmd, &conn->reply_arena));
+                if (reply.kind == REDIS_REPLY_BULK_STRING) {
+                    redis_reply_ensure_owned(&reply, &conn->reply_arena) !>;
                 }
                 break;
             }
@@ -885,9 +1033,8 @@ static bool db_setup(RedisDb* db) {
 }
 
 /* Connection fiber: read, parse, and run windows until the client goes
- * away.  This fiber does the work itself; `table` is its only link to the
- * other connections. */
-@async int handle_client(CCSocket client, RedisDb* db, CCExclusiveMutex table) {
+ * away.  `excl` is the shared shard-lock domain. */
+@async int handle_client(CCSocket client, RedisDb* db, CCExclusive* excl) {
     @defer cc_socket_close(&client);
 
     /* All connection state on the fiber stack; the reply arena is the
@@ -914,7 +1061,7 @@ static bool db_setup(RedisDb* db) {
 
         size_t n_cmds = 0;
         bool window_ok =
-            run_pipeline_window(conn, db, &table, &req_iter, &n_cmds) !>;
+            run_pipeline_window(conn, db, excl, &req_iter, &n_cmds) !>;
         if (!window_ok) return 0;
 
         /* A full window with bytes still buffered means more pipelined
@@ -972,26 +1119,26 @@ int main(int argc, char** argv) {
     RedisDb db = {0};
     CCArena excl_arena = {0};
     CCExclusive* excl = NULL;
-    CCExclusiveMutex table = {0};
-    if (!db_setup(&db)) return 1;
+    const char* shard_src = NULL;
+    size_t shard_count = redis_shard_count(&shard_src);
+    if (!db_setup(&db, shard_count, shard_src)) return 1;
     @defer db_free_all(&db);
 
-    /* One exclusive section, one mutex name for the whole table. */
-    excl_arena = cc_arena_heap(kilobytes(16));
+    /* One exclusive section; mutex names are shard ids 0..N-1. */
+    excl_arena = cc_arena_heap(kilobytes(64));
     @defer excl_arena.destroy();
-    excl = cc_exclusive_create(&excl_arena);
+    excl = cc_exclusive_create_sized(&excl_arena, shard_count * 2u);
     if (!excl) {
         fprintf(stderr, "redis_idiomatic: cc_exclusive_create failed\n");
         return 1;
     }
-    table = excl->mutex(k_table_lock_name);
-    @defer cc_exclusive_mutex_free(&table);
     @defer cc_exclusive_destroy(excl);
 
     RedisDb* dbp = &db;
+    CCExclusive* exclp = excl;
     CCListener* ln_ptr = &ln;
 
-    printf("redis_idiomatic listening on %s\n", addr);
+    printf("redis_idiomatic listening on %s shards=%zu\n", addr, db.shard_count);
     fflush(stdout);
 
     {
@@ -1008,7 +1155,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        server->spawn(() => [ln_ptr, dbp, table, server] {
+        server->spawn(() => [ln_ptr, dbp, exclp, server] {
             while (1) {
                 CCSocket client = ln_ptr->accept() !>(e) {
                     if (!server->is_cancelled()) {
@@ -1023,7 +1170,7 @@ int main(int argc, char** argv) {
                 int one = 1;
                 (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-                (void)server->spawn_async(handle_client(client, dbp, table));
+                (void)server->spawn_async(handle_client(client, dbp, exclp));
             }
         });
     }

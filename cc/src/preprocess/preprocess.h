@@ -200,6 +200,11 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
  * is visibly used/declared in this file's text. NULL = no changes. */
 char* cc_rewrite_type_scoped_calls_text(const char* src, size_t n);
 
+/* `static_map(name, entries, flags)` → typed internal call with inferred
+ * value type + layout (sizeof / address offsets).  NULL = no 3-arg sites;
+ * (char*)-1 = malformed (diagnostic printed). */
+char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* input_path);
+
 /* Scan a backtick template literal starting at tick_pos (which must point at '`').
  * On success sets *tick_end_out to the closing backtick index and returns 0. */
 int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);

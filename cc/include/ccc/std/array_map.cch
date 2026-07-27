@@ -5,6 +5,11 @@
  * key+value slot.  For tiny K/V, the inline open-addressing `map` (Jackson)
  * often has better locality.
  *
+ * Occupied probe slots pack an 8-bit hash fragment in the high byte and a
+ * 24-bit dense index+1 in the low bits, so lookup can reject mismatches
+ * without touching dense rows / EQ_FN.  Dense length is capped just below
+ * 2^24 so an occupied pack never collides with the tomb sentinel.
+ *
  * EQ_FN returns non-zero when keys are equal (same convention as cc_map_eq_*).
  */
 #ifndef CC_STD_ARRAY_MAP_H
@@ -14,6 +19,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <ccc/cc_arena.cch>
 
 /* Sugar: ArrayMap::[K,V] / array_map_new::[K,V] / array_map_new_count::[K,V]. */
@@ -35,10 +41,41 @@ enum {
     CC_ARRAY_MAP_EMPTY = 0u,
     CC_ARRAY_MAP_TOMB = 0xffffffffu,
     CC_ARRAY_MAP_MIN_BUCKETS = 8u,
+    CC_ARRAY_MAP_IDX_MASK = 0x00ffffffu,
+    CC_ARRAY_MAP_FRAG_SHIFT = 24u,
+    /* Max live dense rows: idx (= di+1) stays in 1..0xfffffe so pack != TOMB. */
+    CC_ARRAY_MAP_MAX_LEN = 0x00fffffeu,
 };
 
 static inline size_t cc_array_map_quad(uint32_t displacement) {
     return ((size_t)displacement * (size_t)displacement + (size_t)displacement) / 2u;
+}
+
+/* High 8 bits of the hash (uncorrelated with low bits used for home bucket). */
+static inline uint32_t cc_array_map_hash_frag8(size_t hash) {
+    return (uint32_t)(hash >> ((sizeof(size_t) - 1u) * (size_t)CHAR_BIT)) & 0xffu;
+}
+
+static inline uint32_t cc_array_map_pack_slot(size_t dense_index, size_t hash) {
+    uint32_t idx = (uint32_t)dense_index + 1u;
+    uint32_t frag = cc_array_map_hash_frag8(hash);
+    return (frag << CC_ARRAY_MAP_FRAG_SHIFT) | (idx & CC_ARRAY_MAP_IDX_MASK);
+}
+
+static inline size_t cc_array_map_slot_dense(uint32_t slot) {
+    return (size_t)(slot & CC_ARRAY_MAP_IDX_MASK) - 1u;
+}
+
+static inline uint32_t cc_array_map_slot_frag(uint32_t slot) {
+    return slot >> CC_ARRAY_MAP_FRAG_SHIFT;
+}
+
+static inline void cc_array_map_prefetch(const void *p) {
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(p, 0, 1);
+#else
+    (void)p;
+#endif
 }
 
 #define CC_ARRAY_MAP_DECL(K, V, Name, HASH_FN, EQ_FN)                                 \
@@ -132,7 +169,7 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
                 for (d = 0; d < 2048u; d++) {                                         \
                     size_t b = (h + cc_array_map_quad(d)) & mask;                     \
                     if (nb[b] == CC_ARRAY_MAP_EMPTY) {                                \
-                        nb[b] = (uint32_t)(i + 1u);                                   \
+                        nb[b] = cc_array_map_pack_slot(i, h);                         \
                         break;                                                        \
                     }                                                                 \
                 }                                                                     \
@@ -220,10 +257,12 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
                                                                                       \
     static inline size_t Name##__lookup(const Name *m, K key, size_t *out_bucket) {   \
         size_t h;                                                                     \
+        uint32_t want_frag;                                                           \
         uint32_t d;                                                                   \
         size_t first_tomb = SIZE_MAX;                                                 \
         if (!m || !m->buckets || !m->bucket_mask) return SIZE_MAX;                    \
         h = (size_t)(HASH_FN(key));                                                   \
+        want_frag = cc_array_map_hash_frag8(h);                                       \
         for (d = 0; d < 2048u; d++) {                                                 \
             size_t b = (h + cc_array_map_quad(d)) & m->bucket_mask;                   \
             uint32_t slot = m->buckets[b];                                            \
@@ -236,9 +275,12 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
                 if (first_tomb == SIZE_MAX) first_tomb = b;                           \
                 continue;                                                             \
             }                                                                         \
+            if (cc_array_map_slot_frag(slot) != want_frag) continue;                  \
             {                                                                         \
-                size_t di = (size_t)slot - 1u;                                        \
-                if (di < m->len && (EQ_FN(m->dense[di].key, key))) {                  \
+                size_t di = cc_array_map_slot_dense(slot);                            \
+                if (di >= m->len) continue;                                           \
+                cc_array_map_prefetch(&m->dense[di]);                                 \
+                if (EQ_FN(m->dense[di].key, key)) {                                   \
                     if (out_bucket) *out_bucket = b;                                  \
                     return di;                                                        \
                 }                                                                     \
@@ -271,7 +313,9 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
     static inline int Name##_insert(Name *m, K key, V val) {                          \
         size_t bucket = 0;                                                            \
         size_t di;                                                                    \
+        size_t h;                                                                     \
         if (!m) return -1;                                                            \
+        if (m->len >= (size_t)CC_ARRAY_MAP_MAX_LEN) return -1;                        \
         di = Name##__lookup(m, key, &bucket);                                         \
         if (di != SIZE_MAX) {                                                         \
             m->dense[di].val = val;                                                   \
@@ -287,9 +331,10 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
         if (bucket == SIZE_MAX || !m->buckets) return -1;                             \
         if (m->buckets[bucket] == CC_ARRAY_MAP_TOMB && m->tomb_count)                 \
             m->tomb_count--;                                                          \
+        h = (size_t)(HASH_FN(key));                                                   \
         m->dense[m->len].key = key;                                                   \
         m->dense[m->len].val = val;                                                   \
-        m->buckets[bucket] = (uint32_t)(m->len + 1u);                                 \
+        m->buckets[bucket] = cc_array_map_pack_slot(m->len, h);                       \
         m->len++;                                                                     \
         return 0;                                                                     \
     }                                                                                 \
@@ -308,9 +353,10 @@ static inline size_t cc_array_map_quad(uint32_t displacement) {
             K moved_key = m->dense[last].key;                                         \
             size_t mb = 0;                                                            \
             size_t mdi = Name##__lookup(m, moved_key, &mb);                           \
+            size_t mh = (size_t)(HASH_FN(moved_key));                                 \
             m->dense[di] = m->dense[last];                                            \
             if (mdi != SIZE_MAX && mb != SIZE_MAX)                                    \
-                m->buckets[mb] = (uint32_t)(di + 1u);                                 \
+                m->buckets[mb] = cc_array_map_pack_slot(di, mh);                      \
         }                                                                             \
         m->len--;                                                                     \
         return true;                                                                  \

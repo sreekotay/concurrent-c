@@ -2,30 +2,41 @@
 #include <ccc/std/static_map.cch>
 #include <stdio.h>
 
+/* Enum field in the value type — same shape redis_idiomatic uses with
+ * RedisCommandKind from a shared header. */
+typedef enum CmdKind {
+    CMD_GET = 1,
+    CMD_MGET = 2,
+    CMD_SET = 3,
+} CmdKind;
+
 typedef struct CommandSpec {
-    int kind;
+    CmdKind kind;
     int min_args;
     int max_args;
 } CommandSpec;
 
+typedef struct CommandEntry {
+    const char* key;
+    CommandSpec value;
+} CommandEntry;
+
 @comptime {
-    CCStaticMapEntry entries[] = {
-        { "GET",  "(CommandSpec){ 1, 1, 1 }" },
-        { "MGET", "(CommandSpec){ 2, 1, -1 }" },
-        { "SET",  "(CommandSpec){ 3, 2, 2 }" },
+    CommandEntry entries[] = {
+        { "GET",  { CMD_GET, 1, 1 } },
+        { "MGET", { CMD_MGET, 1, -1 } },
+        { "SET",  { CMD_SET, 2, 2 } },
     };
-    static_map("commands", "CommandSpec", entries,
-               sizeof(entries) / sizeof(entries[0]),
-               CC_STATIC_MAP_ASCII_CI);
+    static_map("commands", entries, CC_STATIC_MAP_ASCII_CI);
 }
 
 int main(void) {
     const CommandSpec* get = commands_get(cc_slice_from_cstr("get"));
     const CommandSpec* mget = commands_get(cc_slice_from_cstr("MGET"));
     const CommandSpec* set = commands_get(cc_slice_from_cstr("Set"));
-    if (!get || get->kind != 1 || get->min_args != 1) return 1;
-    if (!mget || mget->kind != 2 || mget->max_args != -1) return 2;
-    if (!set || set->kind != 3) return 3;
+    if (!get || get->kind != CMD_GET || get->min_args != 1) return 1;
+    if (!mget || mget->kind != CMD_MGET || mget->max_args != -1) return 2;
+    if (!set || set->kind != CMD_SET || set->min_args != 2) return 3;
     if (commands_get(cc_slice_from_cstr("NOPE"))) return 4;
     puts("comptime_static_map_smoke: PASS");
     return 0;

@@ -8,6 +8,39 @@ static size_t redis_map_live_payload_bytes(RedisDbMap map) {
     return map ? map.live_bytes() : 0;
 }
 
+static size_t redis_db_map_live_bytes(const RedisDb* db) {
+    size_t sum = 0;
+    size_t i;
+    if (!db || !db->shards) return 0;
+    for (i = 0; i < db->shard_count; ++i) {
+        RedisDbMap m = db->shards[i].entries;
+        sum += redis_map_live_payload_bytes(m);
+    }
+    return sum;
+}
+
+static size_t redis_db_map_len(const RedisDb* db) {
+    size_t sum = 0;
+    size_t i;
+    if (!db || !db->shards) return 0;
+    for (i = 0; i < db->shard_count; ++i) {
+        RedisDbMap m = db->shards[i].entries;
+        if (m) sum += m.len();
+    }
+    return sum;
+}
+
+static size_t redis_db_map_buckets(const RedisDb* db) {
+    size_t sum = 0;
+    size_t i;
+    if (!db || !db->shards) return 0;
+    for (i = 0; i < db->shard_count; ++i) {
+        RedisDbMap m = db->shards[i].entries;
+        if (m) sum += m.cap();
+    }
+    return sum;
+}
+
 static void db_mem_stats_note_key_alloc(size_t bytes) {
     g_db_mem_stats.key_alloc_count++;
     g_db_mem_stats.key_alloc_bytes += bytes;
@@ -89,7 +122,7 @@ static size_t redis_mem_arenas_gross_B(const RedisDb* db) {
 static void redis_mem_emit_gap(const RedisDb* db, const char* phase) {
     uint64_t footprint = 0;
     const char* source = "none";
-    size_t map_live = (db && db->entries) ? redis_map_live_payload_bytes(db->entries) : 0;
+    size_t map_live = redis_db_map_live_bytes(db);
     size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
     size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
     size_t logical = map_live + key_live + value_live;
@@ -156,29 +189,24 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
             tag ? tag : "?",
             redis_mem_worker_hint(),
             cc_sched_get_num_workers());
-    if (db && db->entries) {
-        size_t cap = db->entries.cap();
-        size_t n = db->entries.len();
-        size_t dense_cap = db->entries->dense_cap;
-        size_t map_alloc = db->entries.live_bytes();
-        size_t index_bytes = cap * sizeof(uint32_t);
-        size_t dense_bytes = dense_cap * sizeof(*db->entries->dense);
+    if (db && db->shards) {
+        size_t n = redis_db_map_len(db);
+        size_t cap = redis_db_map_buckets(db);
+        size_t map_alloc = redis_db_map_live_bytes(db);
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] map len=%zu buckets=%zu dense_cap=%zu "
-                "live_bytes=%zu (index~%.2fMiB + dense~%.2fMiB; array_map)\n",
+                "redis_idiomatic: mem[%s] map shards=%zu len=%zu buckets=%zu "
+                "live_bytes=%zu (sharded array_map)\n",
                 tag ? tag : "?",
+                db->shard_count,
                 n,
                 cap,
-                dense_cap,
-                map_alloc,
-                index_bytes / (1024.0 * 1024.0),
-                dense_bytes / (1024.0 * 1024.0));
+                map_alloc);
         fprintf(stderr,
                 "redis_idiomatic: mem[%s] model: map/value arenas fixed root+overflow; "
                 "key arena growable — large map/value allocs use heap-overflow malloc\n",
                 tag ? tag : "?");
         if (have_mach_footprint) {
-            size_t map_live = redis_map_live_payload_bytes(db->entries);
+            size_t map_live = map_alloc;
             size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
             size_t value_live =
                 g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
@@ -215,7 +243,7 @@ static void redis_mem_report(const RedisDb* db, const char* tag) {
     const char* want = getenv("CC_REDIS_MEM_REPORT");
     if (want && want[0]) {
         redis_mem_report_impl(db, tag);
-        if (db && db->entries) {
+        if (db && db->shards) {
             db_dump_mem_stats((RedisDb*)(void*)db, tag);
         }
         return;
@@ -236,11 +264,11 @@ static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char*
 }
 
 static void db_dump_mem_stats(RedisDb* db, const char* tag) {
-    size_t map_live = db ? redis_map_live_payload_bytes(db->entries) : 0;
+    size_t map_live = redis_db_map_live_bytes(db);
     size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
     size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
-    size_t map_count = (db && db->entries) ? db->entries.len() : 0;
-    size_t map_buckets = (db && db->entries) ? db->entries.cap() : 0;
+    size_t map_count = redis_db_map_len(db);
+    size_t map_buckets = redis_db_map_buckets(db);
     fprintf(stderr,
             "redis_idiomatic: mem[%s] entries=%zu buckets=%zu keys allocs=%zu bytes=%zu live=%zu | "
             "values allocs=%zu bytes=%zu live=%zu | map_live=%zu | total_live=%zu\n",

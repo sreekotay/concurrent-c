@@ -296,40 +296,43 @@ typedef struct RedisCommandSpec {
     int args_multiple; /* 0 means no divisibility constraint */
 } RedisCommandSpec;
 
+typedef struct RedisCommandEntry {
+    const char* key;
+    RedisCommandSpec value;
+} RedisCommandEntry;
+
 @comptime {
-    CCStaticMapEntry commands[] = {
-        { "PING",      "(RedisCommandSpec){ REDIS_CMD_PING, 0, 1, 0 }" },
-        { "ECHO",      "(RedisCommandSpec){ REDIS_CMD_ECHO, 1, 1, 0 }" },
-        { "GET",       "(RedisCommandSpec){ REDIS_CMD_GET, 1, 1, 0 }" },
-        { "SET",       "(RedisCommandSpec){ REDIS_CMD_SET, 2, 2, 0 }" },
-        { "SETNX",     "(RedisCommandSpec){ REDIS_CMD_SETNX, 2, 2, 0 }" },
-        { "SETEX",     "(RedisCommandSpec){ REDIS_CMD_SETEX, 3, 3, 0 }" },
-        { "PSETEX",    "(RedisCommandSpec){ REDIS_CMD_PSETEX, 3, 3, 0 }" },
-        { "APPEND",    "(RedisCommandSpec){ REDIS_CMD_APPEND, 2, 2, 0 }" },
-        { "STRLEN",    "(RedisCommandSpec){ REDIS_CMD_STRLEN, 1, 1, 0 }" },
-        { "TYPE",      "(RedisCommandSpec){ REDIS_CMD_TYPE, 1, 1, 0 }" },
-        { "DEL",       "(RedisCommandSpec){ REDIS_CMD_DEL, 1, -1, 0 }" },
-        { "EXISTS",    "(RedisCommandSpec){ REDIS_CMD_EXISTS, 1, -1, 0 }" },
-        { "INCR",      "(RedisCommandSpec){ REDIS_CMD_INCR, 1, 1, 0 }" },
-        { "DECR",      "(RedisCommandSpec){ REDIS_CMD_DECR, 1, 1, 0 }" },
-        { "INCRBY",    "(RedisCommandSpec){ REDIS_CMD_INCRBY, 2, 2, 0 }" },
-        { "DECRBY",    "(RedisCommandSpec){ REDIS_CMD_DECRBY, 2, 2, 0 }" },
-        { "MGET",      "(RedisCommandSpec){ REDIS_CMD_MGET, 1, -1, 0 }" },
-        { "MSET",      "(RedisCommandSpec){ REDIS_CMD_MSET, 2, -1, 2 }" },
-        { "EXPIRE",    "(RedisCommandSpec){ REDIS_CMD_EXPIRE, 2, 2, 0 }" },
-        { "PEXPIRE",   "(RedisCommandSpec){ REDIS_CMD_PEXPIRE, 2, 2, 0 }" },
-        { "TTL",       "(RedisCommandSpec){ REDIS_CMD_TTL, 1, 1, 0 }" },
-        { "PTTL",      "(RedisCommandSpec){ REDIS_CMD_PTTL, 1, 1, 0 }" },
-        { "PERSIST",   "(RedisCommandSpec){ REDIS_CMD_PERSIST, 1, 1, 0 }" },
-        { "DBSIZE",    "(RedisCommandSpec){ REDIS_CMD_DBSIZE, 0, 0, 0 }" },
-        { "FLUSHDB",   "(RedisCommandSpec){ REDIS_CMD_FLUSHDB, 0, 1, 0 }" },
-        { "FLUSHALL",  "(RedisCommandSpec){ REDIS_CMD_FLUSHALL, 0, 1, 0 }" },
-        { "KEYS",      "(RedisCommandSpec){ REDIS_CMD_KEYS, 1, 1, 0 }" },
-        { "CC.MEMLOG", "(RedisCommandSpec){ REDIS_CMD_CC_MEMLOG, 0, 1, 0 }" },
+    RedisCommandEntry commands[] = {
+        { "PING",      { REDIS_CMD_PING, 0, 1, 0 } },
+        { "ECHO",      { REDIS_CMD_ECHO, 1, 1, 0 } },
+        { "GET",       { REDIS_CMD_GET, 1, 1, 0 } },
+        { "SET",       { REDIS_CMD_SET, 2, 2, 0 } },
+        { "SETNX",     { REDIS_CMD_SETNX, 2, 2, 0 } },
+        { "SETEX",     { REDIS_CMD_SETEX, 3, 3, 0 } },
+        { "PSETEX",    { REDIS_CMD_PSETEX, 3, 3, 0 } },
+        { "APPEND",    { REDIS_CMD_APPEND, 2, 2, 0 } },
+        { "STRLEN",    { REDIS_CMD_STRLEN, 1, 1, 0 } },
+        { "TYPE",      { REDIS_CMD_TYPE, 1, 1, 0 } },
+        { "DEL",       { REDIS_CMD_DEL, 1, -1, 0 } },
+        { "EXISTS",    { REDIS_CMD_EXISTS, 1, -1, 0 } },
+        { "INCR",      { REDIS_CMD_INCR, 1, 1, 0 } },
+        { "DECR",      { REDIS_CMD_DECR, 1, 1, 0 } },
+        { "INCRBY",    { REDIS_CMD_INCRBY, 2, 2, 0 } },
+        { "DECRBY",    { REDIS_CMD_DECRBY, 2, 2, 0 } },
+        { "MGET",      { REDIS_CMD_MGET, 1, -1, 0 } },
+        { "MSET",      { REDIS_CMD_MSET, 2, -1, 2 } },
+        { "EXPIRE",    { REDIS_CMD_EXPIRE, 2, 2, 0 } },
+        { "PEXPIRE",   { REDIS_CMD_PEXPIRE, 2, 2, 0 } },
+        { "TTL",       { REDIS_CMD_TTL, 1, 1, 0 } },
+        { "PTTL",      { REDIS_CMD_PTTL, 1, 1, 0 } },
+        { "PERSIST",   { REDIS_CMD_PERSIST, 1, 1, 0 } },
+        { "DBSIZE",    { REDIS_CMD_DBSIZE, 0, 0, 0 } },
+        { "FLUSHDB",   { REDIS_CMD_FLUSHDB, 0, 1, 0 } },
+        { "FLUSHALL",  { REDIS_CMD_FLUSHALL, 0, 1, 0 } },
+        { "KEYS",      { REDIS_CMD_KEYS, 1, 1, 0 } },
+        { "CC.MEMLOG", { REDIS_CMD_CC_MEMLOG, 0, 1, 0 } },
     };
-    static_map("redis_commands", "RedisCommandSpec", commands,
-               sizeof(commands) / sizeof(commands[0]),
-               CC_STATIC_MAP_ASCII_CI);
+    static_map("redis_commands", commands, CC_STATIC_MAP_ASCII_CI);
 }
 
 /* `argc` counts arguments after the command word.  FLUSHDB/FLUSHALL accept an
@@ -948,7 +951,7 @@ static inline void reply_arena_reset(RedisConn* conn) {
 @async int owner_loop(ReqRx req_rx) {
     RedisDb db = {0};
     bool db_ready = false;
-    db_ready = db_init(&db, 1024);
+    db_ready = db_init(&db, 1024, 1);
     if (!db_ready) {
         char scratch_buf[256];
         @nonblocking {

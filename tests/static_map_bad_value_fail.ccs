@@ -1,19 +1,23 @@
-/* Fail: static_map value strings are pasted into generated C. A mistyped
- * compound literal must fail at the map with the key name — not cascade into
- * a distant parser error on unrelated user code. */
+/* Fail: static_map value types must be flat POD integer/enum structs.
+ * A pointer field is rejected at the map with a keyed comptime error. */
 #include <ccc/std/prelude.cch>
 #include <ccc/std/static_map.cch>
 
-typedef struct Spec { int n; } Spec;
+typedef struct Spec {
+    int n;
+    const char* label;
+} Spec;
+
+typedef struct SpecEntry {
+    const char* key;
+    Spec value;
+} SpecEntry;
 
 @comptime {
-    CCStaticMapEntry entries[] = {
-        { "ok", "(Spec){ 1 }" },
-        { "bad", "(Spec)_{ 2 }" },
+    SpecEntry entries[] = {
+        { "ok", { 1, "x" } },
     };
-    static_map("demo", "Spec", entries,
-               sizeof(entries) / sizeof(entries[0]),
-               CC_STATIC_MAP_CASE_SENSITIVE);
+    static_map("demo", entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
 
 int main(void) { return 0; }

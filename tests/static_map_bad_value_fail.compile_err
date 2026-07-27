@@ -1,1 +1,1 @@
-static_map: entry "bad": value is not valid C initializer text (')_{' looks like a mistyped compound literal — use '){')
+static_map: value field 'label' of type 'const char*' is not a POD integer/enum

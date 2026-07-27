@@ -60,6 +60,18 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         *inout_len = strlen(factory);
     }
 
+    /* Typed static_map(name, entries, flags) → layout-carrying internal call
+     * before @comptime if/for so the executor sees the expanded arity. */
+    {
+        char* sm = cc_rewrite_static_map_calls_text(*inout_buf, *inout_len, input_path);
+        if (sm == (char*)-1) return -1;
+        if (sm) {
+            free(*inout_buf);
+            *inout_buf = sm;
+            *inout_len = strlen(sm);
+        }
+    }
+
     resolved = cc__resolve_comptime_if(*inout_buf, *inout_len, input_path);
     if (resolved == (char*)-1) return -1;
     if (resolved) {

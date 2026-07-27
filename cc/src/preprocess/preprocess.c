@@ -11504,6 +11504,393 @@ void cc_ct_free_fields(CCCtField* fields, size_t n) {
     cc__ct_free_fields(fields, n);
 }
 
+/* ---- static_map call-site rewrite (typed value inference) ------------ */
+
+/* Growable byte buffer for the rewrite output. */
+typedef struct { char* p; size_t len, cap; } CCSmBuf;
+
+static int cc__sm_append(CCSmBuf* b, const char* s, size_t n) {
+    if (n == 0) return 1;
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 4096;
+        while (nc < b->len + n + 1) nc *= 2;
+        char* np = (char*)realloc(b->p, nc);
+        if (!np) return 0;
+        b->p = np; b->cap = nc;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+    return 1;
+}
+
+/* Trim ASCII whitespace from [*s, *s+*len). */
+static void cc__sm_trim(const char** s, size_t* len) {
+    const char* p = *s;
+    size_t l = *len;
+    while (l && (p[0] == ' ' || p[0] == '\t' || p[0] == '\n' || p[0] == '\r')) { p++; l--; }
+    while (l && (p[l - 1] == ' ' || p[l - 1] == '\t' || p[l - 1] == '\n' || p[l - 1] == '\r')) l--;
+    *s = p; *len = l;
+}
+
+/* Split the top-level (comma-separated) arguments of a call whose parenthesized
+ * body is src[open+1 .. close).  Records each argument's [start,end) span.
+ * Returns the argument count, or -1 if it exceeds `max`. */
+static int cc__sm_split_args(const char* src, size_t open, size_t close,
+                             size_t* starts, size_t* ends, int max) {
+    int nargs = 0;
+    size_t depth = 0;
+    size_t argstart = open + 1;
+    CCScannerState s; cc_scanner_init(&s);
+    size_t i = open + 1;
+    while (i < close) {
+        if (cc_scanner_skip_non_code(&s, src, close, &i)) continue;
+        char c = src[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') { if (depth) depth--; }
+        else if (c == ',' && depth == 0) {
+            if (nargs >= max) return -1;
+            starts[nargs] = argstart; ends[nargs] = i; nargs++;
+            argstart = i + 1;
+        }
+        i++;
+    }
+    if (nargs >= max) return -1;
+    starts[nargs] = argstart; ends[nargs] = close; nargs++;
+    return nargs;
+}
+
+/* Find the declared element type of the array variable `var` by locating its
+ * nearest declaration (`<Type> var[`) before `call_start`.  Takes only the
+ * identifier immediately preceding `var` (optionally after `struct`/`enum`/
+ * storage-class keywords) so comments between the prior statement and the
+ * declaration cannot poison the scan.  Returns 1 on success. */
+static int cc__sm_find_entry_type(const char* src, size_t n, const char* var,
+                                  size_t vlen, size_t call_start,
+                                  char* out, size_t out_sz) {
+    size_t best = 0;
+    int found = 0;
+    size_t i = 0;
+    while (i + vlen <= call_start) {
+        size_t after, a, q, te, ts;
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        if (memcmp(src + i, var, vlen) != 0) { i++; continue; }
+        after = i + vlen;
+        if (after < n && cc_is_ident_char(src[after])) { i++; continue; }
+        a = after;
+        while (a < n && (src[a] == ' ' || src[a] == '\t' || src[a] == '\n' || src[a] == '\r')) a++;
+        if (a >= n || src[a] != '[') { i++; continue; }
+        /* Immediately preceding identifier is the typedef / tag name. */
+        q = i;
+        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
+                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
+        te = q;
+        while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
+        ts = q;
+        if (te > ts) { best = i; found = 1; }
+        i = after;
+    }
+    if (!found) return 0;
+    {
+        size_t q = best;
+        size_t te, ts;
+        const char* t;
+        size_t tl;
+        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
+                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
+        te = q;
+        while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
+        ts = q;
+        t = src + ts;
+        tl = te - ts;
+        if (tl == 0 || tl + 1 >= out_sz) return 0;
+        memcpy(out, t, tl);
+        out[tl] = '\0';
+        return 1;
+    }
+}
+
+/* True when a top-level `typedef …;` span defines the type name `name`
+ * (trailing typedef-name, or `typedef enum/struct name …`). */
+static int cc__sm_typedef_defines(const char* decl, size_t len, const char* name) {
+    size_t nlen, i, end, start, p;
+    if (!decl || !name || !name[0] || len < 8) return 0;
+    nlen = strlen(name);
+    i = len;
+    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
+                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    if (i == 0 || decl[i - 1] != ';') return 0;
+    i--;
+    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
+                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    end = i;
+    while (i > 0 && cc_is_ident_char(decl[i - 1])) i--;
+    start = i;
+    if (end > start && (end - start) == nlen && memcmp(decl + start, name, nlen) == 0)
+        return 1;
+    /* Tag form: typedef enum Name / typedef struct Name */
+    p = 0;
+    while (p < len && (decl[p] == ' ' || decl[p] == '\t' ||
+                       decl[p] == '\n' || decl[p] == '\r')) p++;
+    if (p + 7 > len || memcmp(decl + p, "typedef", 7) != 0 ||
+        (p + 7 < len && cc_is_ident_char(decl[p + 7]))) return 0;
+    p = cc_skip_ws_len(decl, len, p + 7);
+    if (p + 4 <= len && memcmp(decl + p, "enum", 4) == 0 &&
+        (p + 4 == len || !cc_is_ident_char(decl[p + 4])))
+        p = cc_skip_ws_len(decl, len, p + 4);
+    else if (p + 6 <= len && memcmp(decl + p, "struct", 6) == 0 &&
+             (p + 6 == len || !cc_is_ident_char(decl[p + 6])))
+        p = cc_skip_ws_len(decl, len, p + 6);
+    else if (p + 5 <= len && memcmp(decl + p, "union", 5) == 0 &&
+             (p + 5 == len || !cc_is_ident_char(decl[p + 5])))
+        p = cc_skip_ws_len(decl, len, p + 5);
+    else return 0;
+    if (p + nlen <= len && memcmp(decl + p, name, nlen) == 0 &&
+        (p + nlen == len || !cc_is_ident_char(decl[p + nlen])))
+        return 1;
+    return 0;
+}
+
+/* Extract a top-level `typedef … Name;` from `src`.  Caller frees. */
+static char* cc__sm_extract_typedef_from(const char* src, size_t n, const char* name) {
+    CCScannerState scan;
+    size_t i = 0, depth = 0;
+    if (!src || !name || !name[0]) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t start, semi;
+        char* out;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '{') { depth++; i++; continue; }
+        if (src[i] == '}') { if (depth) depth--; i++; continue; }
+        if (depth != 0) { i++; continue; }
+        if (!cc_match_ident_kw(src, n, i, "typedef")) { i++; continue; }
+        start = i;
+        semi = cc__span_to_top_semicolon(src, n, i + 7);
+        if (semi == 0 || semi > n) { i++; continue; }
+        if (cc__sm_typedef_defines(src + start, semi - start, name)) {
+            out = (char*)malloc(semi - start + 1);
+            if (!out) return NULL;
+            memcpy(out, src + start, semi - start);
+            out[semi - start] = '\0';
+            return out;
+        }
+        i = semi;
+    }
+    return NULL;
+}
+
+/* Find `typedef … name;` in the TU text or any registered included .cch. */
+static char* cc__sm_find_typedef(const char* src, size_t n, const char* name) {
+    char* d = cc__sm_extract_typedef_from(src, n, name);
+    size_t h;
+    if (d) return d;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        d = cc__sm_extract_typedef_from(fsrc, fn, name);
+        free(fsrc);
+        if (d) return d;
+    }
+    return NULL;
+}
+
+/* Install entry/value/enum typedefs into the comptime executor prelude so the
+ * typed entry array can compile inside the standalone comptime TU. */
+static int cc__sm_install_types_for_call(const char* src, size_t n,
+                                         const char* entry_type,
+                                         const char* value_type) {
+    CCCtField* vfields = NULL;
+    size_t vnf = 0;
+    size_t f;
+    char* vdecl;
+    char* edecl;
+    if (!entry_type || !value_type) return 0;
+
+    /* Named types used by value fields first (enums / nested structs). */
+    if (cc_ct_reflect_struct_fields(src, n, value_type, &vfields, &vnf)) {
+        for (f = 0; f < vnf; f++) {
+            const char* t = vfields[f].type;
+            char tbuf[160];
+            const char* ts;
+            size_t tl;
+            char* d;
+            char nm[160];
+            if (!t) continue;
+            snprintf(tbuf, sizeof(tbuf), "%s", t);
+            ts = tbuf; tl = strlen(ts);
+            cc__sm_trim(&ts, &tl);
+            if (tl == 0 || tl >= sizeof(tbuf)) continue;
+            for (;;) {
+                if (tl > 5 && memcmp(ts, "const", 5) == 0 &&
+                    (ts[5] == ' ' || ts[5] == '\t')) {
+                    ts += 5; tl -= 5; cc__sm_trim(&ts, &tl); continue;
+                }
+                if (tl > 8 && memcmp(ts, "volatile", 8) == 0 &&
+                    (ts[8] == ' ' || ts[8] == '\t')) {
+                    ts += 8; tl -= 8; cc__sm_trim(&ts, &tl); continue;
+                }
+                break;
+            }
+            if (tl == 0 || ts[tl - 1] == '*') continue;
+            if (tl + 1 >= sizeof(nm)) continue;
+            memcpy(nm, ts, tl); nm[tl] = '\0';
+            /* Skip obvious C scalar spellings — only named typedefs matter. */
+            if (!strcmp(nm, "char") || !strcmp(nm, "int") || !strcmp(nm, "short") ||
+                !strcmp(nm, "long") || !strcmp(nm, "unsigned") || !strcmp(nm, "signed") ||
+                !strcmp(nm, "size_t") || !strcmp(nm, "bool") || !strcmp(nm, "_Bool") ||
+                strstr(nm, "int8_t") || strstr(nm, "int16_t") || strstr(nm, "int32_t") ||
+                strstr(nm, "int64_t") || strstr(nm, "uint8_t") || strstr(nm, "uint16_t") ||
+                strstr(nm, "uint32_t") || strstr(nm, "uint64_t"))
+                continue;
+            d = cc__sm_find_typedef(src, n, nm);
+            if (d) {
+                cc_comptime_fn_registry_append_prelude(d);
+                free(d);
+            }
+        }
+        cc_ct_free_fields(vfields, vnf);
+    }
+
+    vdecl = cc__sm_find_typedef(src, n, value_type);
+    if (vdecl) {
+        cc_comptime_fn_registry_append_prelude(vdecl);
+        free(vdecl);
+    }
+    edecl = cc__sm_find_typedef(src, n, entry_type);
+    if (edecl) {
+        cc_comptime_fn_registry_append_prelude(edecl);
+        free(edecl);
+    }
+    return 1;
+}
+
+char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* input_path) {
+    if (!src || n == 0) return NULL;
+    if (!strstr(src, "static_map")) return NULL;
+
+    CCSmBuf out = { 0 };
+    int changed = 0;
+    int failed = 0;
+    size_t i = 0;
+    CCScannerState s; cc_scanner_init(&s);
+
+    while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&s, src, n, &i)) {
+            if (!cc__sm_append(&out, src + before, i - before)) { failed = 1; break; }
+            continue;
+        }
+        if (!cc_match_ident_kw(src, n, i, "static_map")) {
+            if (!cc__sm_append(&out, src + i, 1)) { failed = 1; break; }
+            i++;
+            continue;
+        }
+        /* Candidate `static_map` token: locate its argument list. */
+        size_t j = cc_skip_ws_and_comments(src, n, i + (sizeof("static_map") - 1));
+        size_t rparen = 0;
+        if (j >= n || src[j] != '(' || !cc_find_matching_paren(src, n, j, &rparen)) {
+            if (!cc__sm_append(&out, src + i, 1)) { failed = 1; break; }
+            i++;
+            continue;
+        }
+        size_t starts[8], ends[8];
+        int nargs = cc__sm_split_args(src, j, rparen, starts, ends, 8);
+        if (nargs != 3) {
+            /* Header definition (typed params) or already-expanded call: copy. */
+            if (!cc__sm_append(&out, src + i, 1)) { failed = 1; break; }
+            i++;
+            continue;
+        }
+        const char* a0 = src + starts[0]; size_t a0l = ends[0] - starts[0];
+        const char* a1 = src + starts[1]; size_t a1l = ends[1] - starts[1];
+        const char* a2 = src + starts[2]; size_t a2l = ends[2] - starts[2];
+        cc__sm_trim(&a0, &a0l);
+        cc__sm_trim(&a1, &a1l);
+        cc__sm_trim(&a2, &a2l);
+        if (a0l == 0 || a0[0] != '"') {
+            if (!cc__sm_append(&out, src + i, 1)) { failed = 1; break; }
+            i++;
+            continue;
+        }
+        /* arg1 must be a plain array-variable identifier. */
+        int simple = a1l > 0;
+        for (size_t k = 0; simple && k < a1l; k++)
+            if (!cc_is_ident_char(a1[k])) simple = 0;
+        if (!simple) {
+            fprintf(stderr, "%s: error: static_map: second argument must be a "
+                            "typed entry array variable\n",
+                    input_path ? input_path : "<input>");
+            failed = 1; break;
+        }
+
+        char entry_type[192];
+        if (!cc__sm_find_entry_type(src, n, a1, a1l, i, entry_type, sizeof(entry_type))) {
+            fprintf(stderr, "%s: error: static_map: cannot find the declaration of "
+                            "entry array '%.*s'\n",
+                    input_path ? input_path : "<input>", (int)a1l, a1);
+            failed = 1; break;
+        }
+        CCCtField* fields = NULL;
+        size_t nf = 0;
+        if (!cc_ct_reflect_struct_fields(src, n, entry_type, &fields, &nf)) {
+            fprintf(stderr, "%s: error: static_map: cannot reflect entry type '%s' "
+                            "of array '%.*s'\n",
+                    input_path ? input_path : "<input>", entry_type, (int)a1l, a1);
+            failed = 1; break;
+        }
+        char value_type[160];
+        value_type[0] = '\0';
+        for (size_t f = 0; f < nf; f++) {
+            if (fields[f].name && strcmp(fields[f].name, "value") == 0) {
+                snprintf(value_type, sizeof(value_type), "%s", fields[f].type ? fields[f].type : "");
+                break;
+            }
+        }
+        cc_ct_free_fields(fields, nf);
+        if (!value_type[0]) {
+            fprintf(stderr, "%s: error: static_map: entry type '%s' has no 'value' field\n",
+                    input_path ? input_path : "<input>", entry_type);
+            failed = 1; break;
+        }
+
+        /* Typed arrays live in the comptime TU; install their types there. */
+        (void)cc__sm_install_types_for_call(src, n, entry_type, value_type);
+
+        /* Build the fully-typed internal call.  Layout crosses as real C:
+         * sizeof for count/stride/value_size and address arithmetic for the
+         * key/value offsets — no stringified initializer anywhere. */
+        char repl[1024];
+        char v[192];
+        snprintf(v, sizeof(v), "%.*s", (int)a1l, a1);
+        int rn = snprintf(repl, sizeof(repl),
+            "static_map(%.*s, \"%s\", (const void*)(%s), "
+            "sizeof(%s) / sizeof((%s)[0]), sizeof((%s)[0]), "
+            "(size_t)((const char*)&(%s)[0].key - (const char*)&(%s)[0]), "
+            "(size_t)((const char*)&(%s)[0].value - (const char*)&(%s)[0]), "
+            "sizeof((%s)[0].value), %.*s)",
+            (int)a0l, a0, value_type,
+            v, v, v, v, v, v, v, v, v, (int)a2l, a2);
+        if (rn < 0 || (size_t)rn >= sizeof(repl)) {
+            fprintf(stderr, "%s: error: static_map: rewritten call too large\n",
+                    input_path ? input_path : "<input>");
+            failed = 1; break;
+        }
+        if (!cc__sm_append(&out, repl, (size_t)rn)) { failed = 1; break; }
+        changed = 1;
+        i = rparen + 1;
+        s.at_line_start = 0;
+    }
+
+    if (failed) { free(out.p); return (char*)-1; }
+    if (!changed) { free(out.p); return NULL; }
+    if (!out.p) return NULL;
+    return out.p;
+}
+
 /* ---- enum reflection (edge-push #1) ---------------------------------- */
 
 static void cc__ct_free_enum_members(CCCtEnumMember* m, size_t n) {
@@ -11733,17 +12120,34 @@ int cc_ct_reflect_type_kind(const char* src, size_t len, const char* type_name) 
         }
         if (all_prim && nwords > 0) return CC_REFLECT_KIND_PRIMITIVE;
     }
-    /* Aggregate vs enum: locate the body by name (handles typedef / tag forms). */
+    /* Aggregate vs enum: locate the body by name (handles typedef / tag forms).
+     * Also search registered included .cch sources so header enums/structs
+     * (e.g. RedisCommandKind) resolve for typed static_map POD checks. */
     {
         char nm[256];
         size_t nl = e - s;
+        size_t bo, bc;
+        size_t h;
         if (nl >= sizeof(nm)) return CC_REFLECT_KIND_UNKNOWN;
         memcpy(nm, type_name + s, nl); nm[nl] = 0;
-        size_t bo, bc;
         if (cc__ct_find_enum_body(src, len, nm, nl, &bo, &bc))
             return CC_REFLECT_KIND_ENUM;
         if (cc__ct_find_struct_body(src, len, nm, nl, &bo, &bc))
             return CC_REFLECT_KIND_STRUCT;
+        for (h = 0; h < g_included_cch_source_count; h++) {
+            char* fsrc = NULL;
+            size_t fn = 0;
+            int kind = CC_REFLECT_KIND_UNKNOWN;
+            if (!g_included_cch_sources[h]) continue;
+            if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+                continue;
+            if (cc__ct_find_enum_body(fsrc, fn, nm, nl, &bo, &bc))
+                kind = CC_REFLECT_KIND_ENUM;
+            else if (cc__ct_find_struct_body(fsrc, fn, nm, nl, &bo, &bc))
+                kind = CC_REFLECT_KIND_STRUCT;
+            free(fsrc);
+            if (kind != CC_REFLECT_KIND_UNKNOWN) return kind;
+        }
     }
     return CC_REFLECT_KIND_UNKNOWN;
 }

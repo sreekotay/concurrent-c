@@ -78,6 +78,16 @@ UPSTREAM_PID=$!
 CC_WORKERS_OVERRIDE="${CC_WORKERS:-}"
 env_prefix=""
 [[ -n "$CC_WORKERS_OVERRIDE"   ]] && env_prefix+="CC_WORKERS=$CC_WORKERS_OVERRIDE "
+# Forward shard count when set (default inside binary is 16; 1 = table-wide lock).
+[[ -n "${CC_REDIS_SHARDS:-}"   ]] && env_prefix+="CC_REDIS_SHARDS=$CC_REDIS_SHARDS "
+# Scheduler pool-growth knobs (see docs/scheduler-ops-runbook.md).
+for _k in CC_V2_EAGER_THREADS CC_V2_GROW_RATE_US CC_V2_GROW_DEPTH_X \
+          CC_V2_GROW_RECHECK_US CC_V2_GROW_ESCALATE_TICKS CC_V2_STATS \
+          CC_V2_TARGET_ACTIVE; do
+    if [[ -n "${!_k:-}" ]]; then
+        env_prefix+="${_k}=${!_k} "
+    fi
+done
 if [[ -n "$env_prefix" ]]; then
     env $env_prefix "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$TMP_DIR/idiomatic.log" 2>&1 &
 else

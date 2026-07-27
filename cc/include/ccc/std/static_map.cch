@@ -10,11 +10,6 @@
 
 #ifndef CC_STATIC_MAP_TYPES_DEFINED
 #define CC_STATIC_MAP_TYPES_DEFINED
-typedef struct CCStaticMapEntry {
-    const char* key;
-    const char* value; /* C initializer source for one `value_type` */
-} CCStaticMapEntry;
-
 enum {
     CC_STATIC_MAP_CASE_SENSITIVE = 0,
     CC_STATIC_MAP_ASCII_CI = 1,
@@ -23,102 +18,164 @@ enum {
 
 /* Emit a frozen CCSlice -> value_type map at the comptime call site.
  *
+ * The user-facing call is:
+ *
+ *   @comptime {
+ *       RedisCommandEntry commands[] = {
+ *           { "GET", { REDIS_CMD_GET, 1, 1, 0 } },
+ *           { "SET", { REDIS_CMD_SET, 2, 2, 0 } },
+ *       };
+ *       static_map("redis_commands", commands, CC_STATIC_MAP_ASCII_CI);
+ *   }
+ *
+ * `entries` is an array of a user struct with a `const char *key` field and a
+ * real typed `value` field.  There is no stringified initializer: values are
+ * ordinary typed compound literals the C front end checks.  The compiler
+ * rewrites the three-argument call, inferring the value type from the array
+ * element type and supplying the element/value layout via `sizeof` and address
+ * arithmetic, into the internal form below.  The comptime function reads the
+ * typed `.value` fields straight from the live comptime-evaluated array and
+ * serializes each POD integer/enum field into a real typed initializer.
+ *
+ * Generated surface (unchanged in spirit):
+ *
+ *   static const value_type *<name>_get(CCSlice key);
+ *
  * Lookup is a minimal perfect hash: hash(key) -> slot -> verify -> &value.
- * `entries` must be an array of CCStaticMapEntry; `flags` selects exact or
- * ASCII case-insensitive matching. Generated surface:
- *
- *   static const value_type* <name>_get(CCSlice key);
- *
- * Values are pasted into `static const T values[] = { <value>, ... }`.
- * Broken fragments are rejected here (keyed) instead of letting TCC fail
- * later on a distant, #line-confused user location.
- */
+ * `flags` selects exact or ASCII case-insensitive matching.  Value fields must
+ * be POD integers or enums; a field of any other kind (pointer, float, nested
+ * aggregate) is a keyed comptime error, as is a value layout the model cannot
+ * reproduce, a duplicate key, a key needing C-string escaping, or a failure to
+ * construct a perfect hash. */
 @comptime void static_map(const char* name,
                           const char* value_type,
-                          const void* raw_entries,
+                          const void* entries,
                           size_t count,
+                          size_t stride,
+                          size_t key_off,
+                          size_t value_off,
+                          size_t value_size,
                           int flags) {
-    typedef struct {
-        const char* key;
-        const char* value;
-    } Entry;
-    const Entry* entries = (const Entry*)raw_entries;
     int ascii_ci = (flags & CC_STATIC_MAP_ASCII_CI) != 0;
+    const char* base = (const char*)entries;
     size_t i, j;
     size_t table_size = 0;
     uint32_t seed = 0;
     int found = 0;
     int16_t slots[512];
     size_t key_lens[256];
-    uint32_t hashes[256];
+    const char* keys[256];
     char emsg[320];
 
+    /* POD value-field layout modeled from reflection (ints/enums only). */
+    char fnames[64][64];
+    int  foffs[64];
+    int  fsizes[64];
+    int  fsign[64];
+    int  nfields = 0;
+
     if (!name || !name[0] || !value_type || !value_type[0] ||
-        !entries || count == 0 || count > 256) {
+        !entries || count == 0 || count > 256 || stride == 0 || value_size == 0) {
         cc_emit_error("static_map: invalid arguments");
         return;
     }
 
-    for (i = 0; i < count; i++) {
-        if (!entries[i].key || !entries[i].value ||
-            strchr(entries[i].key, '"') || strchr(entries[i].key, '\\')) {
-            cc_emit_error("static_map: keys must be simple string literals");
+    /* Model the value struct's layout from its POD integer/enum fields, then
+     * check the modeled size against the real sizeof passed by the call-site
+     * rewrite.  A mismatch means the type is not a flat POD of the kinds this
+     * serializer reproduces — reject it rather than emit wrong bytes. */
+    {
+        int nf = cc_reflect_field_count(value_type);
+        size_t off = 0;
+        int max_align = 1;
+        if (nf <= 0 || nf > 64) {
+            snprintf(emsg, sizeof(emsg),
+                     "static_map: value type '%s' is not a reflectable POD struct",
+                     value_type);
+            cc_emit_error(emsg);
             return;
         }
-        /* Validate value C-initializer text (balance + common typo). */
-        {
-            const char* v = entries[i].value;
-            int paren = 0, brace = 0, brack = 0;
-            int in_str = 0, in_chr = 0;
-            const char* bad = NULL;
-            size_t vi;
-            if (!v[0]) bad = "empty value";
-            for (vi = 0; !bad && v[vi]; vi++) {
-                char c = v[vi];
-                if (in_str) {
-                    if (c == '\\' && v[vi + 1]) { vi++; continue; }
-                    if (c == '"') in_str = 0;
-                    continue;
-                }
-                if (in_chr) {
-                    if (c == '\\' && v[vi + 1]) { vi++; continue; }
-                    if (c == '\'') in_chr = 0;
-                    continue;
-                }
-                if (c == '"') { in_str = 1; continue; }
-                if (c == '\'') { in_chr = 1; continue; }
-                /* `(Type)_{` — underscore is a legal ident char, so TCC
-                 * accepts `Type_` then fails much later on `{`. */
-                if (c == ')' && v[vi + 1] == '_' && v[vi + 2] == '{')
-                    bad = "')_{' looks like a mistyped compound literal — use '){'";
-                else if (c == '(') paren++;
-                else if (c == ')') {
-                    if (--paren < 0) bad = "unbalanced ')'";
-                } else if (c == '{') brace++;
-                else if (c == '}') {
-                    if (--brace < 0) bad = "unbalanced '}'";
-                } else if (c == '[') brack++;
-                else if (c == ']') {
-                    if (--brack < 0) bad = "unbalanced ']'";
-                }
+        for (i = 0; i < (size_t)nf; i++) {
+            char fty[128];
+            const char* t;
+            int sz = 0, al = 0, uns = 0, ok = 0;
+            cc_reflect_field_name(value_type, (int)i, fnames[i], (int)sizeof(fnames[i]));
+            cc_reflect_field_type(value_type, (int)i, fty, (int)sizeof(fty));
+
+            /* Trim leading whitespace and a leading const/volatile. */
+            t = fty;
+            for (;;) {
+                while (*t == ' ' || *t == '\t') t++;
+                if (strncmp(t, "const", 5) == 0 && (t[5] == ' ' || t[5] == '\t')) { t += 5; continue; }
+                if (strncmp(t, "volatile", 8) == 0 && (t[8] == ' ' || t[8] == '\t')) { t += 8; continue; }
+                break;
             }
-            if (!bad && (in_str || in_chr)) bad = "unterminated string/char literal";
-            if (!bad && (paren || brace || brack)) bad = "unbalanced brackets";
-            if (bad) {
+
+            if      (!strcmp(t, "char") || !strcmp(t, "signed char"))      { sz = 1; al = 1; uns = 0; ok = 1; }
+            else if (!strcmp(t, "unsigned char"))                          { sz = 1; al = 1; uns = 1; ok = 1; }
+            else if (!strcmp(t, "_Bool") || !strcmp(t, "bool"))            { sz = 1; al = 1; uns = 1; ok = 1; }
+            else if (!strcmp(t, "int8_t"))                                 { sz = 1; al = 1; uns = 0; ok = 1; }
+            else if (!strcmp(t, "uint8_t"))                                { sz = 1; al = 1; uns = 1; ok = 1; }
+            else if (!strcmp(t, "short") || !strcmp(t, "short int") ||
+                     !strcmp(t, "signed short"))                          { sz = 2; al = 2; uns = 0; ok = 1; }
+            else if (!strcmp(t, "unsigned short"))                         { sz = 2; al = 2; uns = 1; ok = 1; }
+            else if (!strcmp(t, "int16_t"))                                { sz = 2; al = 2; uns = 0; ok = 1; }
+            else if (!strcmp(t, "uint16_t"))                               { sz = 2; al = 2; uns = 1; ok = 1; }
+            else if (!strcmp(t, "int") || !strcmp(t, "signed") ||
+                     !strcmp(t, "signed int"))                            { sz = 4; al = 4; uns = 0; ok = 1; }
+            else if (!strcmp(t, "unsigned") || !strcmp(t, "unsigned int")) { sz = 4; al = 4; uns = 1; ok = 1; }
+            else if (!strcmp(t, "int32_t"))                                { sz = 4; al = 4; uns = 0; ok = 1; }
+            else if (!strcmp(t, "uint32_t"))                               { sz = 4; al = 4; uns = 1; ok = 1; }
+            else if (!strcmp(t, "long") || !strcmp(t, "long int") ||
+                     !strcmp(t, "signed long"))                           { sz = 8; al = 8; uns = 0; ok = 1; }
+            else if (!strcmp(t, "unsigned long"))                          { sz = 8; al = 8; uns = 1; ok = 1; }
+            else if (!strcmp(t, "long long") || !strcmp(t, "signed long long")) { sz = 8; al = 8; uns = 0; ok = 1; }
+            else if (!strcmp(t, "unsigned long long"))                     { sz = 8; al = 8; uns = 1; ok = 1; }
+            else if (!strcmp(t, "int64_t"))                                { sz = 8; al = 8; uns = 0; ok = 1; }
+            else if (!strcmp(t, "uint64_t") || !strcmp(t, "size_t"))       { sz = 8; al = 8; uns = 1; ok = 1; }
+            else if (cc_reflect_kind(t) == CC_REFLECT_KIND_ENUM)           { sz = 4; al = 4; uns = 0; ok = 1; }
+
+            if (!ok) {
                 snprintf(emsg, sizeof(emsg),
-                         "static_map: entry \"%s\": value is not valid C initializer text (%s)",
-                         entries[i].key, bad);
+                         "static_map: value field '%s' of type '%s' is not a POD integer/enum",
+                         fnames[i], fty);
                 cc_emit_error(emsg);
                 return;
             }
+            off = (off + (size_t)al - 1) & ~((size_t)al - 1);
+            foffs[i] = (int)off;
+            fsizes[i] = sz;
+            fsign[i] = !uns;
+            off += (size_t)sz;
+            if (al > max_align) max_align = al;
         }
-        key_lens[i] = strlen(entries[i].key);
+        off = (off + (size_t)max_align - 1) & ~((size_t)max_align - 1);
+        nfields = nf;
+        if (off != value_size) {
+            snprintf(emsg, sizeof(emsg),
+                     "static_map: value type '%s' layout not modeled (computed %zu != sizeof %zu)",
+                     value_type, off, value_size);
+            cc_emit_error(emsg);
+            return;
+        }
+    }
+
+    /* Read the typed keys from the live comptime array and validate them. */
+    for (i = 0; i < count; i++) {
+        const char* k = NULL;
+        memcpy(&k, base + i * stride + key_off, sizeof(const char*));
+        if (!k || strchr(k, '"') || strchr(k, '\\')) {
+            cc_emit_error("static_map: keys must be simple string literals");
+            return;
+        }
+        keys[i] = k;
+        key_lens[i] = strlen(k);
         for (j = 0; j < i; j++) {
             if (key_lens[i] != key_lens[j]) continue;
             int same = 1;
-            for (size_t k = 0; k < key_lens[i]; k++) {
-                unsigned char a = (unsigned char)entries[i].key[k];
-                unsigned char b = (unsigned char)entries[j].key[k];
+            for (size_t m = 0; m < key_lens[i]; m++) {
+                unsigned char a = (unsigned char)keys[i][m];
+                unsigned char b = (unsigned char)keys[j][m];
                 if (ascii_ci) {
                     if (a >= 'a' && a <= 'z') a = (unsigned char)(a - 'a' + 'A');
                     if (b >= 'a' && b <= 'z') b = (unsigned char)(b - 'a' + 'A');
@@ -142,13 +199,12 @@ enum {
             for (i = 0; i < count; i++) {
                 uint32_t h = seed;
                 for (j = 0; j < key_lens[i]; j++) {
-                    unsigned char c = (unsigned char)entries[i].key[j];
+                    unsigned char c = (unsigned char)keys[i][j];
                     if (ascii_ci && c >= 'a' && c <= 'z')
                         c = (unsigned char)(c - 'a' + 'A');
                     h ^= c;
                     h *= 16777619u;
                 }
-                hashes[i] = h;
                 size_t slot = (size_t)(h & (uint32_t)(table_size - 1));
                 if (slots[slot] >= 0) { ok = 0; break; }
                 slots[slot] = (int16_t)i;
@@ -166,7 +222,7 @@ enum {
         "static const char* const %s__keys[%zu] = {\n", name, count);
     for (i = 0; i < count; i++) {
         cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
-            "    \"%s\",\n", entries[i].key);
+            "    \"%s\",\n", keys[i]);
     }
     cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
         "};\n"
@@ -180,10 +236,27 @@ enum {
         "static const %s %s__values[%zu] = {\n",
         value_type, name, count);
     for (i = 0; i < count; i++) {
-        /* Key comment keeps a greppable breadcrumb if a value still fails
-         * downstream parse (validation above catches the common cases). */
-        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
-            "    /* %s */ %s,\n", entries[i].key, entries[i].value);
+        int f;
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE, "    /* %s */ {", keys[i]);
+        for (f = 0; f < nfields; f++) {
+            const unsigned char* vp =
+                (const unsigned char*)(base + i * stride + value_off + (size_t)foffs[f]);
+            unsigned long long u = 0;
+            memcpy(&u, vp, (size_t)fsizes[f]);
+            if (fsign[f]) {
+                int bits = fsizes[f] * 8;
+                long long s;
+                if (bits < 64 && ((u >> (bits - 1)) & 1ull))
+                    u |= ~((1ull << bits) - 1ull);
+                s = (long long)u;
+                cc_emit_format(CC_EMIT_AT_COMPTIME_SITE, "%s %lld",
+                               f ? "," : "", s);
+            } else {
+                cc_emit_format(CC_EMIT_AT_COMPTIME_SITE, "%s %lluu",
+                               f ? "," : "", u);
+            }
+        }
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE, " },\n");
     }
     cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
         "};\n"
