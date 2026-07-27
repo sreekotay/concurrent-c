@@ -1,0 +1,15 @@
+/* Fail: only CCError handler in scope; unwrap carries CCIoError. */
+#include <ccc/std/io.h>
+
+static int !> (CCIoError) always_err_io(void) {
+    return cc_err(cc_io_error(CC_IO_OTHER));
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    always_err_io() !>;
+    return 0;
+}

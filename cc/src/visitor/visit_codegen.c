@@ -3375,21 +3375,36 @@ static const char* cc__string_helper_for_literal_codegen(const char* family,
             invalid = 1;
             break;
         }
-        if (!invalid && has_operator && has_digit) {
+        if (invalid) return NULL;
+        if (has_operator && has_digit) {
             strncpy(type_buf, has_float_marker ? "double" : "int", type_buf_sz - 1);
             type_buf[type_buf_sz - 1] = '\0';
             return cc__string_helper_for_type_codegen(family, type_buf);
         }
     }
     {
+        /* Pure numeric token with optional type suffix (42ull, 1.0f). */
         char suffix[8];
         size_t suf_len = 0;
         const char* p = e;
+        const char* num_end;
+        int has_digit = 0;
         while (p > s && isalpha((unsigned char)p[-1]) && suf_len + 1 < sizeof(suffix)) {
             suffix[suf_len++] = (char)tolower((unsigned char)p[-1]);
             p--;
         }
         suffix[suf_len] = '\0';
+        num_end = p;
+        for (p = s; p < num_end; ++p) {
+            char c = *p;
+            if (isdigit((unsigned char)c)) {
+                has_digit = 1;
+                continue;
+            }
+            if (c == '.' || c == '+' || c == '-' || c == 'e' || c == 'E') continue;
+            return NULL;
+        }
+        if (!has_digit) return NULL;
         if (strstr(suffix, "ull") || (strchr(suffix, 'u') && strstr(suffix, "ll"))) {
             strncpy(type_buf, "unsigned long long", type_buf_sz - 1);
         } else if (strstr(suffix, "ll")) {
@@ -3400,6 +3415,8 @@ static const char* cc__string_helper_for_literal_codegen(const char* family,
             strncpy(type_buf, "unsigned", type_buf_sz - 1);
         } else if (strchr(suffix, 'l')) {
             strncpy(type_buf, "long", type_buf_sz - 1);
+        } else if (strchr(suffix, 'f')) {
+            strncpy(type_buf, "float", type_buf_sz - 1);
         } else {
             strncpy(type_buf, "int", type_buf_sz - 1);
         }

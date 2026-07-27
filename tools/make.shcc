@@ -14,6 +14,13 @@
 static int examples_check() {
     CCArena a = @create(megabytes(1)) @destroy;
     CCStdio io = @create(&a) @destroy;
+
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "  spawn failed: %s (os=%d)\n",
+                cc_io_error_str(e), e.os_code);
+        return 1;
+    }
+
     int failed = 0;
 
     io.println(@slice("=== Checking examples compile ===")) !>;
@@ -26,23 +33,10 @@ static int examples_check() {
         cmd.arg_slice(path);
         cmd.arg("-o");
         cmd.arg("/dev/null");
-        CCResult_int_CCIoError st = cmd.status();
-        if (cc_is_err(st)) {
-            CCIoError e = cc_error(st);
-            CCString msg = @string(
-                `  spawn failed: ${cc_io_error_str(e)} (os=${e.os_code})`, &a);
-            io.eprintln(msg.as_slice()) !>;
-            return 1;
-        }
-        int rc = cc_value(st);
-        if (rc == 0) {
-            CCString line = @string(`  ${path}  OK`, &a);
-            io.println(line.as_slice()) !>;
-        } else {
-            CCString line = @string(`  ${path}  FAIL`, &a);
-            io.println(line.as_slice()) !>;
-            failed++;
-        }
+        int rc = cmd.status() !>;
+        CCString line = @string(`  ${path}  ${(rc == 0) ? "OK" : "FAIL"}`, &a);
+        io.println(line.as_slice()) !>;
+        if (rc != 0) failed++;
     }
 
     if (failed > 0) {

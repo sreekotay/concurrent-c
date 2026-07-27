@@ -756,8 +756,9 @@ Path arguments are NUL-terminated borrows (`char[:0]`). After the final entry,
 Entry names and glob paths are arena-backed `char[:0]`. `cc_dir_create` does
 not create parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and
 recursive `**`; `cc_glob_match` matches a single name with `*` and `?`.
-`cc_glob` returns a `CCSliceArray` of NUL-terminated path borrows (same
-aggregate used by slice split helpers).
+`cc_glob` takes the pattern first and the arena last; it returns a
+`CCSliceArray` of NUL-terminated path borrows (same aggregate used by slice
+split helpers). UFCS: `files.len()`, `files.get(i)` → `char[:0]`.
 
 The accessor functions are:
 

@@ -12,6 +12,7 @@
 #include "util/result_fn_registry.h"
 #include "util/text.h"
 #include "util/text_scan.h"
+#include "visitor/errhandler_lookup.h"
 #include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
 #include "visitor/visitor.h"
@@ -1230,69 +1231,23 @@ static void cc__pu_extract_param_name(const char* decl, size_t dl,
     }
 }
 
-/* Find the lexically-nearest `@errhandler(DECL) { BODY }` registration
- * strictly preceding `pos` in `s`.  On success writes the trimmed
- * declaration text (into out_decl / *out_decl_len) and the body text
- * (into *out_body / *out_body_len).  The returned body pointer aliases
- * into the input buffer; the caller must not free it.  Also writes the
- * source byte offset of the `@` of the matching `@errhandler` into
- * *out_decl_pos (so callers can recover its line number for diagnostics).
- * Returns 1 on success, 0 if no registration is found.
- *
- * The scan is string/comment aware and uses a simple "latest-wins"
- * policy which is adequate for the tests in this slice: the handler
- * registered closest to the `!>` position wins regardless of intervening
- * scope changes.  A richer scope model can be layered on later if a
- * real-world program exposes a gap. */
+/* Find the in-scope `@errhandler` whose parameter type matches Result E
+ * of the call at [call_a, call_b).  Brace-scoped; fail closed on miss.
+ * Body aliases into `s`.  *out_have_handlers / *out_err_type aid diagnostics. */
 static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
+                                        size_t call_a, size_t call_b,
                                         char* out_decl, size_t out_decl_sz,
                                         size_t* out_decl_len,
                                         const char** out_body,
                                         size_t* out_body_len,
-                                        size_t* out_decl_pos) {
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    int found = 0;
-    size_t end = (pos <= n) ? pos : n;
-    size_t i = 0;
-    while (i < end) {
-        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
-        char ch = s[i];
-
-        if (ch != '@') { i++; continue; }
-        if (i + 11 > n) { i++; continue; }
-        if (memcmp(s + i, "@errhandler", 11) != 0) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(s[i - 1])) { i++; continue; }
-        if (i + 11 < n && cc_is_ident_char(s[i + 11])) { i++; continue; }
-        size_t j = i + 11;
-        while (j < n && isspace((unsigned char)s[j])) j++;
-        if (j >= n || s[j] != '(') { i++; continue; }
-        size_t rpar = 0;
-        if (!cc_find_matching_paren(s, n, j, &rpar)) { i++; continue; }
-        size_t decl_a = j + 1, decl_b = rpar;
-        while (decl_a < decl_b && isspace((unsigned char)s[decl_a])) decl_a++;
-        while (decl_b > decl_a && isspace((unsigned char)s[decl_b - 1])) decl_b--;
-        size_t k = rpar + 1;
-        while (k < n && isspace((unsigned char)s[k])) k++;
-        if (k >= n || s[k] != '{') { i++; continue; }
-        size_t rbrace = 0;
-        if (!cc_find_matching_brace(s, n, k, &rbrace)) { i++; continue; }
-        /* A valid registration that sits before `pos`.  Record as the
-         * running best and continue scanning so a later (closer) one
-         * overwrites. */
-        size_t dl = decl_b - decl_a;
-        if (dl >= out_decl_sz) dl = out_decl_sz - 1;
-        memcpy(out_decl, s + decl_a, dl);
-        out_decl[dl] = 0;
-        if (out_decl_len) *out_decl_len = dl;
-        *out_body = s + k + 1;
-        *out_body_len = rbrace - (k + 1);
-        if (out_decl_pos) *out_decl_pos = i;
-        found = 1;
-        /* Jump past the body to avoid re-scanning into it. */
-        i = rbrace + 1;
-    }
-    return found;
+                                        size_t* out_decl_pos,
+                                        char* out_err_type, size_t out_err_type_sz,
+                                        int* out_have_handlers) {
+    return cc_errhandler_find_for_call(s, n, pos, call_a, call_b,
+                                       out_decl, out_decl_sz, out_decl_len,
+                                       out_body, out_body_len, out_decl_pos,
+                                       out_err_type, out_err_type_sz,
+                                       out_have_handlers);
 }
 
 /* ---- Handler divergence check (Feature C) ------------------------
@@ -1617,7 +1572,7 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
                     int err_line = op_line;
                     cc__line_from_pos(src, body_src_off + i, &err_line);
                     cc_pass_error_cat(relf, err_line, 1, CC_ERR_SYNTAX,
-                                      "@err(%s) forward has no enclosing @errhandler in scope",
+                                      "@err(%s) forward has no matching '@errhandler' in scope",
                                       idname);
                     free(out);
                     return -1;
@@ -1707,8 +1662,7 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
                                    int op_line,
                                    size_t splice_from, size_t splice_to,
                                    char** out_buf, size_t* out_len) {
-    /* Locate the nearest enclosing @errhandler registration so we can
-     * inline its body when an `@err(binder);` forward appears. */
+    /* Type-matched in-scope @errhandler for `@err(binder);` forwards. */
     char outer_decl[256];
     size_t outer_decl_len = 0;
     const char* outer_body = NULL;
@@ -1716,11 +1670,16 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     size_t outer_decl_pos = 0;
     int outer_found = 0;
     char outer_param[128];
+    char outer_err_type[128];
+    int outer_have_handlers = 0;
     outer_param[0] = 0;
-    if (cc__pu_find_outer_errhandler(s, n, call_a,
+    outer_err_type[0] = 0;
+    if (cc__pu_find_outer_errhandler(s, n, call_a, call_a, call_b,
                                      outer_decl, sizeof(outer_decl), &outer_decl_len,
                                      &outer_body, &outer_body_len,
-                                     &outer_decl_pos)) {
+                                     &outer_decl_pos,
+                                     outer_err_type, sizeof(outer_err_type),
+                                     &outer_have_handlers)) {
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
                                   outer_param, sizeof(outer_param));
         outer_found = 1;
@@ -1951,19 +1910,23 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         return 0;
     }
 
-    /* Locate the nearest enclosing @errhandler (needed for bare form and
-     * for any `@err(binder);` forwards inside a user-provided body). */
+    /* Type-matched in-scope @errhandler (bare `!>;` and `@err` forwards). */
     char outer_decl[256];
     size_t outer_decl_len = 0;
     const char* outer_body = NULL;
     size_t outer_body_len = 0;
     size_t outer_decl_pos = 0;
     char outer_param[128];
+    char outer_err_type[128];
+    int outer_have_handlers = 0;
     outer_param[0] = 0;
+    outer_err_type[0] = 0;
     int outer_found = cc__pu_find_outer_errhandler(
-        s, n, call_a,
+        s, n, call_a, call_a, call_b,
         outer_decl, sizeof(outer_decl), &outer_decl_len,
-        &outer_body, &outer_body_len, &outer_decl_pos);
+        &outer_body, &outer_body_len, &outer_decl_pos,
+        outer_err_type, sizeof(outer_err_type),
+        &outer_have_handlers);
     if (outer_found) {
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
                                   outer_param, sizeof(outer_param));
@@ -1973,8 +1936,16 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
      * inline the outer handler body. */
     if (s[scan] == ';' && !has_binder) {
         if (!outer_found) {
-            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
-                              "'!>;' at expression position requires an enclosing '@errhandler' in scope");
+            char msg[256];
+            if (!outer_have_handlers) {
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                                  "'!>;' at expression position requires an enclosing '@errhandler' in scope");
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "no matching '@errhandler' for error type '%s'",
+                         outer_err_type[0] ? outer_err_type : "CCError");
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX, msg);
+            }
             return -1;
         }
         if (!cc__pu_body_diverges(outer_body, outer_body_len)) {

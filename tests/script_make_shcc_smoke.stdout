@@ -1,0 +1,3 @@
+make: use @examples_check (or @ to list)
+---
+examples_check  Compile-check top-level examples (--emit-c-only).

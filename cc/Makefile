@@ -107,6 +107,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
 	src/visitor/pass_channel_syntax.c \
+	src/visitor/errhandler_lookup.c \
 	src/visitor/pass_err_syntax.c \
 	src/visitor/pass_result_unwrap.c \
 	src/visitor/pass_unwrap_destroy.c \

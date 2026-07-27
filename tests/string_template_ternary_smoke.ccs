@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena arena = @create(kilobytes(4)) @destroy;
+    int rc = 0;
+    CCString ok = @string(`status=${(rc == 0) ? "OK" : "FAIL"}`, &arena);
+    assert(strcmp(cc_string_cstr(&ok, &arena), "status=OK") == 0);
+
+    rc = 1;
+    CCString fail = @string(`status=${(rc == 0) ? "OK" : "FAIL"}`, &arena);
+    assert(strcmp(cc_string_cstr(&fail, &arena), "status=FAIL") == 0);
+
+    /* Digit-leading ternaries must not be mistyped as int. */
+    CCString dig = @string(`${0 ? "OK" : "FAIL"}`, &arena);
+    assert(strcmp(cc_string_cstr(&dig, &arena), "FAIL") == 0);
+
+    printf("string_template_ternary_smoke: PASS\n");
+    return 0;
+}

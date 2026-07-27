@@ -1,0 +1,15 @@
+/* Fail: matching handler lives in a left sibling block (out of scope). */
+static int !> (CCError) always_err_cc(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "cc");
+}
+
+int main(void) {
+    {
+        @errhandler(CCError e) {
+            (void)e;
+            return 1;
+        }
+    }
+    always_err_cc() !>;
+    return 0;
+}

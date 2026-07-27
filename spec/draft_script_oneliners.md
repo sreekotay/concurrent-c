@@ -40,12 +40,12 @@ pass a literal `-n`/`-p`). The process `argv[0]` is the synthetic unit name
 
 ### 1.1 Predeclared names
 
-In a `-e` / `-E` program — and in a `.shcc` unit’s synthetic `main` wrap for
-top-level statements — the following names are predeclared. Each declaration
-is emitted only when its identifier appears as a code token in that body
-(comments and string/character literals are ignored) and the body does not
-already declare the name. `@task` bodies are not predeclared; they declare
-`a` / `io` / … explicitly when needed.
+In a `-e` / `-E` program body and in a `.shcc` unit’s synthetic `main` wrap
+(top-level statements only), the following names are predeclared. Each
+declaration is emitted only when its identifier appears as a code token in
+that body (comments and string/character literals are ignored) and the body
+does not already declare the name. `@task` bodies never receive these
+predecls; they declare `a` / `io` / `in` / `args` explicitly when needed.
 
 | Name | Type | Declaration |
 | ---- | ---- | ----------- |
@@ -89,9 +89,12 @@ loop body, so `continue` skips the print and `break` ends the loop.
 ### 1.3 Result consumption
 
 `-e` / `-E` programs follow the same result-consumption rules as every other
-unit (§3.1). No mode relaxes the unhandled-result diagnostic. The injected
-default `@errhandler` makes bare `!>` a complete failure policy for
-one-liner use: message to stderr, exit 1.
+unit (§3.1), including type-matched `@errhandler` dispatch. No mode relaxes
+the unhandled-result diagnostic. The injected default `@errhandler(CCError)`
+(in synthetic `main` and in each `@task` body) makes bare `!>` a complete
+failure policy for `CCError` / untyped unwraps: message to stderr, exit 1.
+A script may register additional handlers for other error types in the same
+scope; they coexist with the default by type match.
 
 ## 2. Toolbox
 

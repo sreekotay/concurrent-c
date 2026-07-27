@@ -979,6 +979,9 @@ const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
     if (!type_name) return NULL;
     cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
     if (!cc__walk_receiver_postfix(reg, &p, resolved_type, sizeof(resolved_type))) return NULL;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    /* Require full consumption so `rc == 0 ? …` is not typed as `rc`. */
+    if (*p) return NULL;
     if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
     return resolved_type;
 }
@@ -1031,6 +1034,8 @@ const char* cc_type_registry_resolve_receiver_expr_at(CCTypeRegistry* reg,
     if (!type_name) return NULL;
     cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
     if (!cc__walk_receiver_postfix(reg, &p, resolved_type, sizeof(resolved_type))) return NULL;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p) return NULL;
     if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
     return resolved_type;
 }
@@ -1060,12 +1065,27 @@ const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* 
 
     if ((isdigit((unsigned char)p[0])) ||
         ((p[0] == '+' || p[0] == '-') && len > 1 && isdigit((unsigned char)p[1]))) {
+        /* Pure numeric literal only — reject ternaries / comparisons that
+         * merely begin with a digit (`0 ? "OK" : "FAIL"`). */
+        size_t i = (p[0] == '+' || p[0] == '-') ? 1 : 0;
         int saw_dot = 0;
         int saw_exp = 0;
-        for (size_t i = 0; i < len; ++i) {
+        for (; i < len; ++i) {
             char c = p[i];
-            if (c == '.') saw_dot = 1;
-            else if (c == 'e' || c == 'E') saw_exp = 1;
+            if (isdigit((unsigned char)c)) continue;
+            if (c == '.' && !saw_dot && !saw_exp) {
+                saw_dot = 1;
+                continue;
+            }
+            if ((c == 'e' || c == 'E') && !saw_exp) {
+                saw_exp = 1;
+                if (i + 1 < len && (p[i + 1] == '+' || p[i + 1] == '-')) i++;
+                continue;
+            }
+            if (c == 'f' || c == 'F' || c == 'u' || c == 'U' || c == 'l' ||
+                c == 'L')
+                continue;
+            return NULL;
         }
         return (saw_dot || saw_exp) ? "double" : "int";
     }

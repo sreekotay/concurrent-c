@@ -8,6 +8,7 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
+#include "visitor/errhandler_lookup.h"
 #include "visitor/pass_common.h"
 #include "visitor/visitor.h"
 
@@ -20,8 +21,20 @@ typedef struct {
     char* body;
     size_t body_len;
     char param_decl[192];
+    char param_type[128];
     char param_name[64];
 } CCErrFrame;
+
+static CCErrFrame* cc__err_stk_find(CCErrFrame* stk, int stk_n,
+                                    const char* err_type) {
+    int i;
+    if (!stk || !err_type || !err_type[0]) return NULL;
+    for (i = stk_n - 1; i >= 0; i--) {
+        if (cc_errhandler_types_equal(stk[i].param_type, err_type))
+            return &stk[i];
+    }
+    return NULL;
+}
 
 #define CC_ERR_STK_MAX 64
 
@@ -1011,7 +1024,17 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                 if (dl >= sizeof(fr->param_decl)) dl = sizeof(fr->param_decl) - 1;
                 memcpy(fr->param_decl, in_src + decl_a, dl);
                 fr->param_decl[dl] = 0;
-                cc__extract_param_name(fr->param_decl, fr->param_name, sizeof(fr->param_name));
+                if (!cc_errhandler_split_param_decl(
+                        fr->param_decl,
+                        fr->param_type, sizeof(fr->param_type),
+                        fr->param_name, sizeof(fr->param_name))) {
+                    char rel[1024];
+                    const char* f =
+                        cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                    cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX,
+                                      "expected typed parameter in @errhandler(...)");
+                    goto fail;
+                }
             }
             size_t inner_a = bopen + 1, inner_b = bclose;
             cc__trim_slice(in_src, inner_a, inner_b, &inner_a, &inner_b);
@@ -1230,6 +1253,9 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
 
             CCErrFrame* def = NULL;
             if (!has_local) {
+                char err_type[128];
+                size_t call_a = (has_assign && has_colon_def) ? def_a : expr_a;
+                size_t call_b = (has_assign && has_colon_def) ? def_b : expr_b;
                 if (stk_n <= 0) {
                     char rel[1024];
                     const char* f =
@@ -1238,7 +1264,25 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     free(local_body);
                     goto fail;
                 }
-                def = &stk[stk_n - 1];
+                err_type[0] = 0;
+                if (!cc_errhandler_resolve_call_err_type(in_src, in_len, call_a, call_b,
+                                                         err_type, sizeof(err_type))) {
+                    /* Untyped / pointer unwrap → ambient CCError binder. */
+                    memcpy(err_type, "CCError", sizeof("CCError"));
+                }
+                def = cc__err_stk_find(stk, stk_n, err_type);
+                if (!def) {
+                    char rel[1024];
+                    char msg[256];
+                    const char* f =
+                        cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                    snprintf(msg, sizeof(msg),
+                             "no matching '@errhandler' for error type '%s'",
+                             err_type);
+                    cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, msg);
+                    free(local_body);
+                    goto fail;
+                }
             }
 
             int id = ++g_err_id;
@@ -1335,9 +1379,15 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                 size_t err_span_a = (has_assign && has_colon_def) ? def_a : expr_a;
                 size_t err_span_b = (has_assign && has_colon_def) ? def_b : expr_b;
                 if (has_local) {
-                    const CCErrFrame* outer_d = (stk_n > 0) ? &stk[stk_n - 1] : NULL;
+                    char local_type[128];
+                    const CCErrFrame* outer_d = NULL;
                     int dg = 1;
-                    char* lb_exp =
+                    char* lb_exp;
+                    local_type[0] = 0;
+                    if (cc_errhandler_split_param_decl(local_decl, local_type,
+                                                       sizeof(local_type), NULL, 0))
+                        outer_d = cc__err_stk_find(stk, stk_n, local_type);
+                    lb_exp =
                         cc__expand_delegations(local_body, local_body_len, local_param, outer_d, NULL, &dg);
                     free(local_body);
                     local_body = NULL;
