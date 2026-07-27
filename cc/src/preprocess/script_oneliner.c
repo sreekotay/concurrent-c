@@ -127,7 +127,7 @@ static char* cc__ol_wrap_expr_print(const char* src, size_t len, size_t* out_len
     elen = cc__ol_trim_expr(src, len, &a, &b);
     /* io.println(@string(`${EXPR}`)) !>;\n */
     need = sizeof("io.println(@string(`${") - 1 + elen +
-           sizeof("`)) !>;\n") - 1 + 1;
+           sizeof("}`)) !>;\n") - 1 + 1;
     out = (char*)malloc(need);
     if (!out) return NULL;
     o = 0;
@@ -137,8 +137,8 @@ static char* cc__ol_wrap_expr_print(const char* src, size_t len, size_t* out_len
         memcpy(out + o, src + a, elen);
         o += elen;
     }
-    memcpy(out + o, "`)) !>;\n", 8);
-    o += 8;
+    memcpy(out + o, "}`)) !>;\n", sizeof("}`)) !>;\n") - 1);
+    o += sizeof("}`)) !>;\n") - 1;
     out[o] = '\0';
     if (out_len) *out_len = o;
     return out;
