@@ -181,9 +181,10 @@ outside this surface.
 `<ccc/std/slice_packed.cch>` (prelude) defines `CCSlicePacked`: a pointer-sized
 **held** slice for dense keys and interned payloads — the packed twin of
 `CCSliceHdr`'s fat `{ptr,len}` hold. Small payloads stay inline in the word;
-larger ones point at an arena `[u32 len][bytes…]` block (SDS-style). The
-handle does not grow or free — the arena owns heap bytes. Ephemeral borrows
-remain `char[:]` / `CCSlice`. `CCString` remains the growable owner.
+larger ones point at an arena `[u32 len][bytes…]` block (SDS-style). Inline
+forms need no free; heap forms release with `cc_slice_packed_release` when the
+arena supports individual reclaim (heap-overflow). Ephemeral borrows remain
+`char[:]` / `CCSlice`. `CCString` remains the growable owner.
 
 ```c
 typedef struct CCSlicePacked {
@@ -194,6 +195,7 @@ CCSlicePacked cc_slice_packed_empty(void);
 CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CCArena *arena); /* UFCS: src.to_packed(arena) */
 CCSlicePacked cc_slice_packed_borrow(CCSlicePackedView *view);           /* probe only */
 CCSlicePacked cc_slice_packed_borrow_slice(CCSlicePackedView *view, CCSlice src);
+void cc_slice_packed_release(CCArena *arena, CCSlicePacked *r); /* heap only; clears *r */
 uint32_t cc_slice_packed_len(const CCSlicePacked *r);
 CCSlice cc_slice_packed_as_slice(const CCSlicePacked *r);  /* inline/view: storage must stay live */
 int cc_slice_packed_is_inline(const CCSlicePacked *r);
@@ -611,6 +613,7 @@ V *Name_get(Name *map, K key);
 V *Name_get_ptr(Name *map, K key);
 V *Name_at_ptr(Name *map, size_t i);   /* dense row i in [0, len) */
 K *Name_key_ptr(Name *map, size_t i);  /* dense row i in [0, len) */
+K *Name_find_key_ptr(Name *map, K key); /* stored key equal to key, or null */
 bool Name_remove(Name *map, K key);
 bool Name_del(Name *map, K key);
 size_t Name_len(const Name *map);
@@ -624,18 +627,19 @@ on success and `-1` on failure. `get` / `get_ptr` return a pointer into the
 dense store or null. `at_ptr` / `key_ptr` index the dense row store (live
 indices `[0, len)`); out of range returns null. Prefer them (or `get_ptr`)
 over by-value `CC_ARRAY_MAP_FOREACH` when releasing or mutating owned values.
-`cap` is the probe-table capacity (power of two), not the dense row capacity.
-`CC_ARRAY_MAP_FOREACH` iterates dense rows in insertion order (swap-remove on
-delete may reorder).
+`find_key_ptr` returns a pointer to the stored key equal to `key` (for owned-key
+reclaim before `del`). `cap` is the probe-table capacity (power of two), not the
+dense row capacity. `CC_ARRAY_MAP_FOREACH` iterates dense rows in insertion order
+(swap-remove on delete may reorder).
 
 Sugar `ArrayMap::[K, V]` / `array_map_new::[K, V]` /
 `array_map_new_count::[K, V]` lowers to the `ArrayMap_<K>_<V>` family with the
 same key hash/eq selection as `Map::[K, V]` for built-in key kinds (`int`,
 `uint64_t`, `CCSlice`, `CCSliceHdr`, `CCSlicePacked`).
 
-Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`, `remove`,
-`del`, `len`, `cap`, `live_bytes`, `clear`, and `destroy` to the generated
-family.
+Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`,
+`find_key_ptr`, `remove`, `del`, `len`, `cap`, `live_bytes`, `clear`, and
+`destroy` to the generated family.
 
 ### Static maps
 

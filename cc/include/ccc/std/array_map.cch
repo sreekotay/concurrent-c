@@ -310,6 +310,13 @@ static inline void cc_array_map_prefetch(const void *p) {
         return &m->dense[i].key;                                                      \
     }                                                                                 \
                                                                                       \
+    /* Pointer to the stored key equal to `key` (for owned-key reclaim). */         \
+    static inline K *Name##_find_key_ptr(Name *m, K key) {                            \
+        size_t di = Name##__lookup(m, key, NULL);                                     \
+        if (di == SIZE_MAX) return NULL;                                              \
+        return &m->dense[di].key;                                                     \
+    }                                                                                 \
+                                                                                      \
     static inline int Name##_insert(Name *m, K key, V val) {                          \
         size_t bucket = 0;                                                            \
         size_t di;                                                                    \

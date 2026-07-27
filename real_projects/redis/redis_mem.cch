@@ -42,23 +42,27 @@ static size_t redis_db_map_buckets(const RedisDb* db) {
 }
 
 static void db_mem_stats_note_key_alloc(size_t bytes) {
-    g_db_mem_stats.key_alloc_count++;
-    g_db_mem_stats.key_alloc_bytes += bytes;
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.key_alloc_count, 1);
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.key_alloc_bytes, bytes);
 }
 
 static void db_mem_stats_note_key_release(size_t bytes) {
-    g_db_mem_stats.key_release_count++;
-    g_db_mem_stats.key_release_bytes += bytes;
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.key_release_count, 1);
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.key_release_bytes, bytes);
 }
 
 static void db_mem_stats_note_value_alloc(size_t bytes) {
-    g_db_mem_stats.value_alloc_count++;
-    g_db_mem_stats.value_alloc_bytes += bytes;
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.value_alloc_count, 1);
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.value_alloc_bytes, bytes);
 }
 
 static void db_mem_stats_note_value_release(size_t bytes) {
-    g_db_mem_stats.value_release_count++;
-    g_db_mem_stats.value_release_bytes += bytes;
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.value_release_count, 1);
+    CC_ATOMIC_FETCH_ADD(&g_db_mem_stats.value_release_bytes, bytes);
+}
+
+static size_t db_mem_stats_live(size_t alloc_bytes, size_t release_bytes) {
+    return alloc_bytes >= release_bytes ? alloc_bytes - release_bytes : 0;
 }
 
 static void db_dump_mem_stats(RedisDb* db, const char* tag);
@@ -123,8 +127,10 @@ static void redis_mem_emit_gap(const RedisDb* db, const char* phase) {
     uint64_t footprint = 0;
     const char* source = "none";
     size_t map_live = redis_db_map_live_bytes(db);
-    size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
-    size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+    size_t key_live = db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.key_alloc_bytes),
+                                        CC_ATOMIC_LOAD(&g_db_mem_stats.key_release_bytes));
+    size_t value_live = db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.value_alloc_bytes),
+                                          CC_ATOMIC_LOAD(&g_db_mem_stats.value_release_bytes));
     size_t logical = map_live + key_live + value_live;
     size_t arenas_gross = redis_mem_arenas_gross_B(db);
     size_t workers = redis_mem_worker_hint();
@@ -202,14 +208,16 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
                 cap,
                 map_alloc);
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] model: map/value arenas fixed root+overflow; "
-                "key arena growable — large map/value allocs use heap-overflow malloc\n",
+                "redis_idiomatic: mem[%s] model: map/key/value arenas fixed root+overflow; "
+                "large allocs use heap-overflow malloc and can be released per key/value\n",
                 tag ? tag : "?");
         if (have_mach_footprint) {
             size_t map_live = map_alloc;
-            size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
+            size_t key_live = db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.key_alloc_bytes),
+                                                CC_ATOMIC_LOAD(&g_db_mem_stats.key_release_bytes));
             size_t value_live =
-                g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+                db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.value_alloc_bytes),
+                                  CC_ATOMIC_LOAD(&g_db_mem_stats.value_release_bytes));
             size_t logical_live = key_live + value_live + map_live;
             if (logical_live > 0) {
                 double ratio = (double)mach_phys_footprint / (double)logical_live;
@@ -265,8 +273,10 @@ static void redis_db_fprint_arena_slab_chain_detail(const char* tag, const char*
 
 static void db_dump_mem_stats(RedisDb* db, const char* tag) {
     size_t map_live = redis_db_map_live_bytes(db);
-    size_t key_live = g_db_mem_stats.key_alloc_bytes - g_db_mem_stats.key_release_bytes;
-    size_t value_live = g_db_mem_stats.value_alloc_bytes - g_db_mem_stats.value_release_bytes;
+    size_t key_live = db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.key_alloc_bytes),
+                                        CC_ATOMIC_LOAD(&g_db_mem_stats.key_release_bytes));
+    size_t value_live = db_mem_stats_live(CC_ATOMIC_LOAD(&g_db_mem_stats.value_alloc_bytes),
+                                          CC_ATOMIC_LOAD(&g_db_mem_stats.value_release_bytes));
     size_t map_count = redis_db_map_len(db);
     size_t map_buckets = redis_db_map_buckets(db);
     fprintf(stderr,
@@ -275,21 +285,21 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             tag ? tag : "db",
             map_count,
             map_buckets,
-            g_db_mem_stats.key_alloc_count,
-            g_db_mem_stats.key_alloc_bytes,
+            (size_t)CC_ATOMIC_LOAD(&g_db_mem_stats.key_alloc_count),
+            (size_t)CC_ATOMIC_LOAD(&g_db_mem_stats.key_alloc_bytes),
             key_live,
-            g_db_mem_stats.value_alloc_count,
-            g_db_mem_stats.value_alloc_bytes,
+            (size_t)CC_ATOMIC_LOAD(&g_db_mem_stats.value_alloc_count),
+            (size_t)CC_ATOMIC_LOAD(&g_db_mem_stats.value_alloc_bytes),
             value_live,
             map_live,
             key_live + value_live + map_live);
     if (db) {
-        /* Arena roots (B): must match db_init() map/value heap root and key root. */
+        /* Arena roots (B): must match db_init() map/key/value heap-overflow roots. */
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(growable) value=%u(heap_overflow)\n",
+                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(heap_overflow) value=%u(heap_overflow)\n",
                 tag ? tag : "db",
                 1024u,
-                4096u,
+                1024u,
                 1024u);
         redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
         redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);

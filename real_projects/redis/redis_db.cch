@@ -21,7 +21,8 @@
 #define REDIS_DB_CCH
 
 /* Three DB arenas: map (table blob), key (cloned key bytes), value (CCString
- * backing).  Map/value: fixed root + heap overflow; key: growable slabs. */
+ * backing).  Each uses a tiny root + heap overflow so packed keys / values
+ * can be released individually on DEL/FLUSH. */
 
 /* Probe key: stack borrow of request bytes (not durable — do not insert). */
 static inline CCSlicePacked db_key_packed_borrow(CCSlicePackedView* view, char[:] key) {
@@ -87,17 +88,18 @@ static RedisDbShard* db_shard_for_key(RedisDb* db, char[:] key) {
 }
 
 typedef struct RedisDbMemStats {
-    size_t key_alloc_count;
-    size_t key_alloc_bytes;
-    size_t key_release_count;
-    size_t key_release_bytes;
-    size_t value_alloc_count;
-    size_t value_alloc_bytes;
-    size_t value_release_count;
-    size_t value_release_bytes;
+    /* Atomic: shards update concurrently under per-shard exclusive holds. */
+    cc_atomic_size key_alloc_count;
+    cc_atomic_size key_alloc_bytes;
+    cc_atomic_size key_release_count;
+    cc_atomic_size key_release_bytes;
+    cc_atomic_size value_alloc_count;
+    cc_atomic_size value_alloc_bytes;
+    cc_atomic_size value_release_count;
+    cc_atomic_size value_release_bytes;
 } RedisDbMemStats;
 
-static RedisDbMemStats g_db_mem_stats = {0};
+static RedisDbMemStats g_db_mem_stats;
 
 #include "redis_mem.cch"
 #include "redis_glob.cch"
@@ -155,13 +157,12 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     if (shard_count == 0 || shard_count > (size_t)REDIS_DB_MAX_SHARDS) return false;
     if ((shard_count & (shard_count - 1u)) != 0) return false;
     const size_t map_value_heap_root = 1024;
-    const size_t key_arena_root = 4096;
+    const size_t key_arena_root = 1024;
     memset(db, 0, sizeof(*db));
     db->shard_count = shard_count;
     db->shard_mask = shard_count - 1u;
     if (!db_init_overflow_arena(&db->map_arena, map_value_heap_root)) return false;
-    db->key_arena = cc_arena_heap(key_arena_root);
-    if (!db->key_arena.valid()) {
+    if (!db_init_overflow_arena(&db->key_arena, key_arena_root)) {
         db_free_arenas_only(db);
         return false;
     }
@@ -356,6 +357,12 @@ static CCSlicePacked !>(CCError) db_clone_key_packed(RedisDb* db, char[:] key) {
     return cc_ok(rr.value());
 }
 
+/* Heap-form keys return via key_arena overflow free; inline/empty are no-ops. */
+static void db_release_key_packed(RedisDb* db, CCSlicePacked* k) {
+    if (!db || !k) return;
+    cc_slice_packed_release(&db->key_arena, k);
+}
+
 static int64_t db_expires_get(RedisDb* db, CCSlicePacked kh) {
     int64_t* p;
     RedisDbShard* sh;
@@ -379,7 +386,8 @@ static bool db_key_expired(RedisDb* db, char[:] key, DbCmdClock* clock) {
 }
 
 /* Set absolute deadline; when==0 clears TTL.  New TTL keys clone into key_arena
- * (side-table key bytes; not double-counted in key_alloc mem stats). */
+ * when the side table does not already share the entries key word (side-table
+ * key bytes are not double-counted in key_alloc mem stats). */
 static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
     @errhandler(CCError e) { return cc_err(e); }
     CCSlicePackedView view;
@@ -389,7 +397,17 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db expires without map"));
     }
     if (when == 0) {
+        CCSlicePacked* xk = sh->expires.find_key_ptr(kh);
+        CCSlicePacked exp_owned = xk ? *xk : cc_slice_packed_empty();
+        uintptr_t entry_w = 0;
+        if (sh->entries) {
+            CCSlicePacked* ek = sh->entries.find_key_ptr(kh);
+            if (ek) entry_w = ek->w;
+        }
         (void)sh->expires.del(kh);
+        /* Shared insert path reused the entries word — do not double-free. */
+        if (exp_owned.w && exp_owned.w != entry_w)
+            db_release_key_packed(db, &exp_owned);
         return cc_ok();
     }
     {
@@ -401,24 +419,40 @@ static void !>(CCError) db_expires_set(RedisDb* db, char[:] key, int64_t when) {
     }
     CCSlicePacked owned = db_clone_key_packed(db, key) !>;
     if (sh->expires.insert(owned, when) != 0) {
+        db_release_key_packed(db, &owned);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
     }
     return cc_ok();
 }
 
-/* Remove one entry outright (value released, key accounted).  The key bytes
- * stay in the growable key arena until db teardown — same policy as DEL had
- * from the start (arena keys are not individually freeable). */
+/* Remove one entry: value released, key accounted, and heap key bytes returned
+ * to the key arena (overflow malloc).  Expires may share the entries key word
+ * or own a separate clone — free the clone only when distinct. */
 static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
     RedisValue* val = &cell->val;
     CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
     CCSlicePackedView view;
     CCSlicePacked kh = db_key_packed_borrow(&view, key);
     RedisDbShard* sh = db_shard_for_key(db, key);
-    if (!sh) return;
-    if (sh->expires) (void)sh->expires.del(kh);
-    if (!sh->entries || !sh->entries.del(kh)) return;
+    CCSlicePacked entry_key = cc_slice_packed_empty();
+    CCSlicePacked exp_key = cc_slice_packed_empty();
+    uintptr_t entry_w;
+    if (!sh || !sh->entries) return;
+    {
+        CCSlicePacked* ek = sh->entries.find_key_ptr(kh);
+        if (ek) entry_key = *ek;
+    }
+    if (sh->expires) {
+        CCSlicePacked* xk = sh->expires.find_key_ptr(kh);
+        if (xk) exp_key = *xk;
+        (void)sh->expires.del(kh);
+    }
+    if (!sh->entries.del(kh)) return;
+    entry_w = entry_key.w;
     db_mem_stats_note_key_release(key.len);
+    db_release_key_packed(db, &entry_key);
+    if (exp_key.w && exp_key.w != entry_w)
+        db_release_key_packed(db, &exp_key);
     db_release_value(db, &doomed);
 }
 
@@ -436,6 +470,7 @@ static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
 
 static void !>(CCError) db_insert_value(RedisDb* db, CCSlicePacked owned_key, RedisEntry entry) {
     RedisDbShard* sh;
+    size_t before;
     if (!db || !db->shards) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
@@ -443,8 +478,15 @@ static void !>(CCError) db_insert_value(RedisDb* db, CCSlicePacked owned_key, Re
     if (!sh || !sh->entries) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db insert without entry"));
     }
+    before = sh->entries.len();
     if (sh->entries.insert(owned_key, entry) != 0) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
+    }
+    if (sh->entries.len() > before) {
+        db_mem_stats_note_key_alloc((size_t)cc_slice_packed_len(&owned_key));
+    } else {
+        /* Replace path: map kept the prior key word; free the unused clone. */
+        db_release_key_packed(db, &owned_key);
     }
     return cc_ok();
 }
@@ -462,9 +504,9 @@ static void !>(CCError) db_insert_new_entry(RedisDb* db, char[:] key,
         RedisValue* pv = &entry.val;
         CCString doomed = pv->str ?> cc_string_new();
         db_release_value(db, &doomed);
+        db_release_key_packed(db, &owned_key);
         return cc_err(e);
     };
-    db_mem_stats_note_key_alloc(key.len);
     if (expires_at_ms != 0) {
         /* Reuse the same durable key word in the side table (no second clone). */
         RedisDbShard* sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
@@ -542,9 +584,9 @@ static RedisReply !>(CCError) db_set_install(RedisDb* db,
         void !>(CCError) inserted = db_insert_value(db, owned_key, entry);
         if (inserted.is_err()) {
             db_release_value(db, &owned_value);
+            db_release_key_packed(db, &owned_key);
             return cc_err(inserted.error());
         }
-        db_mem_stats_note_key_alloc(key.len);
         if (expires_at_ms != 0) {
             RedisDbShard* sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
             if (!sh || !sh->expires || sh->expires.insert(owned_key, expires_at_ms) != 0) {
@@ -845,9 +887,8 @@ static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
 }
 
 /* FLUSHDB/FLUSHALL (one logical DB, so they are the same operation): a
- * mass-DEL.  Values are released with the usual accounting, then the map is
- * cleared in one shot; key bytes follow the standing DEL policy (arena-held
- * until db teardown).  Dense at_ptr/key_ptr so release hits the live cell
+ * mass-DEL.  Values and heap keys are released with the usual accounting,
+ * then maps are cleared.  Dense at_ptr/key_ptr so release hits the live cell
  * (same discipline as get_ptr — not a by-value FOREACH alias). */
 static RedisReply db_flush(RedisDb* db) {
     size_t si;
@@ -861,11 +902,23 @@ static RedisReply db_flush(RedisDb* db) {
         for (i = 0; i < n; ++i) {
             CCSlicePacked* k = sh->entries.key_ptr(i);
             RedisEntry* cell = sh->entries.at_ptr(i);
+            CCSlicePacked entry_key;
+            CCSlicePacked exp_key = cc_slice_packed_empty();
+            uintptr_t entry_w;
             if (!k || !cell) continue;
+            entry_key = *k;
+            entry_w = entry_key.w;
+            if (sh->expires) {
+                CCSlicePacked* xk = sh->expires.find_key_ptr(entry_key);
+                if (xk) exp_key = *xk;
+            }
             db_mem_stats_note_key_release(k->len());
             RedisValue* val = &cell->val;
             CCString doomed = val->str ?> cc_string_new();  /* num arms own no bytes */
             db_release_value(db, &doomed);
+            db_release_key_packed(db, &entry_key);
+            if (exp_key.w && exp_key.w != entry_w)
+                db_release_key_packed(db, &exp_key);
         }
         sh->entries.clear();
         if (sh->expires) sh->expires.clear();

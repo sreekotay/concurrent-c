@@ -76,6 +76,30 @@ int main(void) {
         if (!cc_slice_packed_is_durable(&a)) return 20;
     }
 
+    /* Heap-overflow arena: packed heap payload can be released individually. */
+    {
+        CCArena ovf = cc_arena_heap(64);
+        CCSlicePacked hp;
+        if (!ovf.base) return 21;
+        ovf.block_max = 1;
+        if (!cc_arena_set_heap_overflow(&ovf, true)) return 22;
+        {
+            CCSlice long_s = cc_slice_from_buffer(long_buf, sizeof(long_buf));
+            CCResult_CCSlicePacked_CCError rr = long_s.to_packed(&ovf);
+            if (rr.is_err()) return 23;
+            hp = rr.value();
+        }
+        if (cc_slice_packed_is_inline(&hp)) return 24;
+        cc_slice_packed_release(&ovf, &hp);
+        if (!cc_slice_packed_is_empty(&hp)) return 25;
+        {
+            CCSlicePacked inline_p = a; /* copy; release is inline no-op */
+            cc_slice_packed_release(&ovf, &inline_p);
+            if (!cc_slice_packed_is_empty(&inline_p)) return 26;
+        }
+        ovf.destroy();
+    }
+
     printf("slice_packed_smoke: ok\n");
     return 0;
 }

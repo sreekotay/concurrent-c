@@ -2,9 +2,10 @@
  * CCSlicePacked — pointer-sized held slice: inline small bytes, arena
  * length-prefixed payload, or a short-lived borrow of foreign bytes.
  *
- * Dense hold twin of CCSliceHdr ({ptr,len} fat handle).  Durable forms
- * (inline / SDS heap) do not grow or free; heap bytes live until the arena
- * is reset.  Borrowed views are probe-only — caller must not insert them
+ * Dense hold twin of CCSliceHdr ({ptr,len} fat handle).  Inline forms need
+ * no free.  Heap form is `[u32 len][bytes]` from `arena`; release with
+ * `cc_slice_packed_release` when the arena uses heap-overflow (real malloc)
+ * so bytes can return.  Borrowed views are probe-only — do not insert them
  * into maps.  CCString remains the growable owner.
  *
  * Tags (little-endian hosts):
@@ -239,6 +240,24 @@ static inline CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CC
 
 static inline CCResult_CCSlicePacked_CCError CCSlice_to_packed(CCSlice *src, CCArena *arena) {
     return cc_slice_to_packed(src, arena);
+}
+
+/* Release heap-form payload into `arena` (no-op for inline / empty / view).
+ * Heap block starts at `data - sizeof(u32)`; requires an arena that can
+ * release individual allocs (heap-overflow or last-live slab reclaim). */
+static inline void cc_slice_packed_release(CCArena *arena, CCSlicePacked *r) {
+    char *data;
+    char *block;
+    if (!r) return;
+    if (!arena || cc_slice_packed_is_empty(r) || cc_slice_packed_is_inline(r) ||
+        cc_slice_packed_is_view(r)) {
+        r->w = 0;
+        return;
+    }
+    data = (char *)(void *)r->w;
+    block = data - (ptrdiff_t)sizeof(uint32_t);
+    (void)cc_arena_release(arena, block);
+    r->w = 0;
 }
 
 static inline size_t cc_map_hash_slice_packed(CCSlicePacked r) {
