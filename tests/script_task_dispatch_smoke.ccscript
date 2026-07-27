@@ -27,4 +27,12 @@ static int zebra(int argc, char **argv) {
     return 0;
 }
 
+/* Extra param → not a task (arity must be exactly argc/argv). */
+static int helper_not_a_task(int argc, char **argv, const char *extra) {
+    (void)argc;
+    (void)argv;
+    (void)extra;
+    return 0;
+}
+
 printf("default\n");

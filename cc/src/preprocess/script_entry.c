@@ -584,9 +584,30 @@ static void cc__append(char* out, size_t* o, size_t need_cap,
     *o += n;
 }
 
+/* Top-level arity of a parameter list span (0 if empty/whitespace-only). */
+static int cc__param_list_arity(const char* s, size_t a, size_t b) {
+    int depth = 0, commas = 0, any = 0;
+    size_t i = a;
+    while (i < b) {
+        char c = s[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth) depth--;
+        } else if (c == ',' && depth == 0) {
+            commas++;
+        }
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') any = 1;
+        i++;
+    }
+    if (!any) return 0;
+    return commas + 1;
+}
+
+/* True for exactly `(int …, char **…)` — two parameters, argc/argv-shaped. */
 static int cc__param_list_is_argc_argv(const char* s, size_t a, size_t b) {
     int saw_int = 0, saw_char = 0, stars = 0;
     size_t i = a;
+    if (cc__param_list_arity(s, a, b) != 2) return 0;
     while (i < b) {
         if (cc__starts_with_kw(s, b, i, "int")) {
             saw_int = 1;

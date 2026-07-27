@@ -2,9 +2,9 @@
 /*
  * Make-facing task runner for compiler perf checks.
  *
- *   ./tools/perf.ccscript @                 — list tasks
- *   ./tools/perf.ccscript @perf_regress …   — primary .ccscript check
- *   ./tools/perf.ccscript @perf_oracle …    — bash oracle twin
+ *   ./tools/perf.ccscript @                 - list tasks
+ *   ./tools/perf.ccscript @perf_regress ... - primary .ccscript check
+ *   ./tools/perf.ccscript @perf_oracle ...  - bash oracle twin
  *
  * Extra argv after the task name is forwarded to the underlying tool
  * (e.g. --update, --current PATH).
