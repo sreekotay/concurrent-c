@@ -2186,6 +2186,26 @@ static const char* cc__recv_chain_start(const char* line_start, const char* recv
             break;
         }
         while (q > line_start && isspace((unsigned char)q[-1])) q--;
+        /* Left operand of `.`/`->` is a postfix expr.  Consume trailing
+         * subscripts (`shards[i]`, `a[i][j]`), then at most one `(...)`
+         * (call or paren primary), then the base ident when present.
+         * Do not keep chewing `(...)` groups — that would swallow C casts
+         * like `(int64_t)(p)->field.method()`.  Stopping at `[` would
+         * truncate `db->shards[i].field.method()` to `[i].field.method()`
+         * and mis-emit it as a closure capture. */
+        while (q > line_start && q[-1] == ']') {
+            int depth = 1;
+            const char* pp = q - 1;
+            while (pp > line_start && depth > 0) {
+                pp--;
+                if (*pp == ']') depth++;
+                else if (*pp == '[') depth--;
+            }
+            if (depth != 0) return NULL;
+            seg_start = pp;
+            q = pp;
+            while (q > line_start && isspace((unsigned char)q[-1])) q--;
+        }
         if (q > line_start && q[-1] == ')') {
             int depth = 1;
             const char* pp = q - 1;
@@ -2194,30 +2214,19 @@ static const char* cc__recv_chain_start(const char* line_start, const char* recv
                 if (*pp == ')') depth++;
                 else if (*pp == '(') depth--;
             }
-            if (depth == 0) {
-                seg_start = pp;
-                continue;
-            }
-            break;
+            if (depth != 0) return NULL;
+            seg_start = pp;
+            q = pp;
+            while (q > line_start && isspace((unsigned char)q[-1])) q--;
         }
-        if (q > line_start && q[-1] == ']') {
-            int depth = 1;
-            const char* pp = q - 1;
-            while (pp > line_start && depth > 0) {
-                pp--;
-                if (*pp == ']') depth++;
-                else if (*pp == '[') depth--;
-            }
-            if (depth == 0) {
-                seg_start = pp;
-                continue;
-            }
-            break;
+        if (q > line_start && cc_is_ident_char(q[-1])) {
+            seg_start = q;
+            while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
+            if (!cc_is_ident_start(*seg_start)) return NULL;
+            continue;
         }
-        if (q <= line_start || !cc_is_ident_char(q[-1])) return seg_start;
-        seg_start = q;
-        while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
-        if (!cc_is_ident_start(*seg_start)) return NULL;
+        /* Parenthesized primary with no leading ident, e.g. `(e).m`. */
+        return seg_start;
     }
     return seg_start;
 }

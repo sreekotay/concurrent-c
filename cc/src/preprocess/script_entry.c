@@ -576,12 +576,80 @@ static int cc__split_body(const char* body, size_t n,
     return 0;
 }
 
-static void cc__append(char* out, size_t* o, size_t need_cap,
-                       const char* p, size_t n) {
-    (void)need_cap;
-    if (n == 0) return;
-    memcpy(out + *o, p, n);
-    *o += n;
+/* Growable rewrite sink — never trusts a precomputed byte budget. */
+typedef struct CC__OutBuf {
+    char* data;
+    size_t len;
+    size_t cap;
+} CC__OutBuf;
+
+static void cc__ob_init(CC__OutBuf* ob) {
+    ob->data = NULL;
+    ob->len = 0;
+    ob->cap = 0;
+}
+
+static void cc__ob_free(CC__OutBuf* ob) {
+    free(ob->data);
+    ob->data = NULL;
+    ob->len = 0;
+    ob->cap = 0;
+}
+
+static int cc__ob_ensure(CC__OutBuf* ob, size_t add) {
+    size_t need;
+    size_t ncap;
+    char* nd;
+    if (!ob) return -1;
+    if (add > SIZE_MAX - ob->len) return -1;
+    need = ob->len + add;
+    if (need <= ob->cap) return 0;
+    ncap = ob->cap ? ob->cap : 1024;
+    while (ncap < need) {
+        if (ncap > SIZE_MAX / 2u) {
+            ncap = need;
+            break;
+        }
+        ncap *= 2u;
+    }
+    if (ncap < need) ncap = need;
+    nd = (char*)realloc(ob->data, ncap);
+    if (!nd) return -1;
+    ob->data = nd;
+    ob->cap = ncap;
+    return 0;
+}
+
+static int cc__append(CC__OutBuf* ob, const char* p, size_t n) {
+    if (n == 0) return 0;
+    if (!ob || !p) return -1;
+    if (cc__ob_ensure(ob, n) != 0) return -1;
+    memcpy(ob->data + ob->len, p, n);
+    ob->len += n;
+    return 0;
+}
+
+static int cc__append_ch(CC__OutBuf* ob, char c) {
+    return cc__append(ob, &c, 1);
+}
+
+/* NUL-terminate in place; leaves ownership with ob until take/free. */
+static int cc__ob_terminate(CC__OutBuf* ob) {
+    if (cc__ob_ensure(ob, 1) != 0) return -1;
+    ob->data[ob->len] = '\0';
+    return 0;
+}
+
+/* Steal buffer (NUL-terminated). Sets *out_len to byte length excluding NUL. */
+static char* cc__ob_take(CC__OutBuf* ob, size_t* out_len) {
+    char* p;
+    if (cc__ob_terminate(ob) != 0) return NULL;
+    p = ob->data;
+    if (out_len) *out_len = ob->len;
+    ob->data = NULL;
+    ob->len = 0;
+    ob->cap = 0;
+    return p;
 }
 
 /* 1-based line of src[off] in the original buffer (honors shebang lines). */
@@ -601,8 +669,7 @@ static int cc__src_line_at(const char* src, size_t off) {
  * raw_hash_line=0 → masked CC_LN block comment (MAIN chunks inside synthetic
  * main; pass_create skips block comments for declared types / @destroy).
  */
-static int cc__append_prov_marker(char* out, size_t* o, size_t need,
-                                  int raw_hash_line, int line,
+static int cc__append_prov_marker(CC__OutBuf* ob, int raw_hash_line, int line,
                                   const char* path) {
     char buf[1200];
     int m;
@@ -613,9 +680,7 @@ static int cc__append_prov_marker(char* out, size_t* o, size_t need,
         m = snprintf(buf, sizeof(buf), "/*CC_LN %d %s*/\n", line, path);
     }
     if (m < 0 || (size_t)m >= sizeof(buf)) return -1;
-    if (*o + (size_t)m >= need) return -1;
-    cc__append(out, o, need, buf, (size_t)m);
-    return 0;
+    return cc__append(ob, buf, (size_t)m);
 }
 
 /* Top-level arity of a parameter list span (0 if empty/whitespace-only). */
@@ -1029,8 +1094,7 @@ static size_t cc__task_name_width(const CC__ScriptTask* tasks, size_t ntasks) {
  * Append one listing line.
  * to_stderr=0 → printf(...); to_stderr=1 → fprintf(stderr, ...).
  */
-static int cc__append_task_list_line(char* out, size_t* o, size_t need,
-                                     int to_stderr, size_t width,
+static int cc__append_task_list_line(CC__OutBuf* ob, int to_stderr, size_t width,
                                      const CC__ScriptTask* task) {
     char esc[512];
     char line[768];
@@ -1047,13 +1111,12 @@ static int cc__append_task_list_line(char* out, size_t* o, size_t need,
                      "            %s\"%s\\n\");\n", call, task->name);
     }
     if (m < 0 || (size_t)m >= sizeof(line)) return -1;
-    cc__append(out, o, need, line, (size_t)m);
-    return 0;
+    return cc__append(ob, line, (size_t)m);
 }
 
-/* Append @task dispatch; returns 0 on success, -1 if out buffer too small. */
-static int cc__append_task_dispatch(char* out, size_t* o, size_t need,
-                                    const CC__ScriptTask* tasks, size_t ntasks) {
+/* Append @task dispatch; returns 0 on success, -1 on OOM / encode failure. */
+static int cc__append_task_dispatch(CC__OutBuf* ob, const CC__ScriptTask* tasks,
+                                    size_t ntasks) {
     size_t ti;
     size_t width = cc__task_name_width(tasks, ntasks);
     static const char head[] =
@@ -1077,12 +1140,12 @@ static int cc__append_task_dispatch(char* out, size_t* o, size_t need,
         "    }\n"
         "\n";
 
-    cc__append(out, o, need, head, sizeof(head) - 1);
+    if (cc__append(ob, head, sizeof(head) - 1) != 0) return -1;
     for (ti = 0; ti < ntasks; ti++) {
-        if (cc__append_task_list_line(out, o, need, 0, width, &tasks[ti]) != 0)
+        if (cc__append_task_list_line(ob, 0, width, &tasks[ti]) != 0)
             return -1;
     }
-    cc__append(out, o, need, after_list, sizeof(after_list) - 1);
+    if (cc__append(ob, after_list, sizeof(after_list) - 1) != 0) return -1;
     for (ti = 0; ti < ntasks; ti++) {
         char line[256];
         int m;
@@ -1098,15 +1161,14 @@ static int cc__append_task_dispatch(char* out, size_t* o, size_t need,
                          tasks[ti].name, tasks[ti].name);
         }
         if (m < 0 || (size_t)m >= sizeof(line)) return -1;
-        cc__append(out, o, need, line, (size_t)m);
+        if (cc__append(ob, line, (size_t)m) != 0) return -1;
     }
-    cc__append(out, o, need, unknown_head, sizeof(unknown_head) - 1);
+    if (cc__append(ob, unknown_head, sizeof(unknown_head) - 1) != 0) return -1;
     for (ti = 0; ti < ntasks; ti++) {
-        if (cc__append_task_list_line(out, o, need, 1, width, &tasks[ti]) != 0)
+        if (cc__append_task_list_line(ob, 1, width, &tasks[ti]) != 0)
             return -1;
     }
-    cc__append(out, o, need, unknown_tail, sizeof(unknown_tail) - 1);
-    return 0;
+    return cc__append(ob, unknown_tail, sizeof(unknown_tail) - 1);
 }
 
 char* cc_script_rewrite_source(const char* path,
@@ -1148,27 +1210,22 @@ char* cc_script_rewrite_source(const char* path,
 
     CC__Chunk* chunks = NULL;
     size_t nchunks = 0;
-    size_t tu_bytes = 0, main_bytes = 0;
-    size_t need, o;
-    char* out;
     size_t ci;
     int has_main_chunk = 0;
     CC__ScriptTask* tasks = NULL;
     size_t ntasks = 0;
-    size_t dispatch_budget;
+    CC__OutBuf ob;
+    char* out;
 
     if (cc__split_body(body, body_len, &chunks, &nchunks) != 0)
         return NULL;
 
     for (ci = 0; ci < nchunks; ci++) {
-        size_t clen = chunks[ci].b - chunks[ci].a;
-        if (chunks[ci].kind == CC__CHUNK_TU)
-            tu_bytes += clen;
-        else {
-            main_bytes += clen;
+        if (chunks[ci].kind != CC__CHUNK_TU)
             has_main_chunk = 1;
-        }
     }
+
+    cc__ob_init(&ob);
 
     if (has_main) {
         if (has_main_chunk) {
@@ -1176,43 +1233,44 @@ char* cc_script_rewrite_source(const char* path,
                     "%s: .shcc with explicit main cannot also have "
                     "top-level statements\n",
                     path ? path : "<shcc>");
-            need = pre_len + (sizeof(main_stmt_err) - 1) + body_len + 1;
-            out = (char*)malloc(need);
-            if (!out) { free(chunks); return NULL; }
-            o = 0;
-            cc__append(out, &o, need, prelude, pre_len);
-            cc__append(out, &o, need, main_stmt_err, sizeof(main_stmt_err) - 1);
-            cc__append(out, &o, need, body, body_len);
-            out[o] = '\0';
-            if (out_len) *out_len = o;
+            if (cc__append(&ob, prelude, pre_len) != 0 ||
+                cc__append(&ob, main_stmt_err, sizeof(main_stmt_err) - 1) != 0 ||
+                cc__append(&ob, body, body_len) != 0) {
+                cc__ob_free(&ob);
+                free(chunks);
+                return NULL;
+            }
+            out = cc__ob_take(&ob, out_len);
             free(chunks);
             return out;
         }
         /* Explicit main, TU-only extras: prelude + body with file-scope #line. */
         {
-            size_t path_len = path ? strlen(path) : 0;
-            size_t mark_budget = 64 + path_len;
             int body_line = cc__src_line_at(src, body_off);
-            need = pre_len + body_len + mark_budget + 1;
-            out = (char*)malloc(need);
-            if (!out) { free(chunks); return NULL; }
-            o = 0;
-            cc__append(out, &o, need, prelude, pre_len);
-            if (path && body_len > 0 &&
-                cc__append_prov_marker(out, &o, need, 1, body_line, path) != 0) {
-                free(out);
+            if (cc__append(&ob, prelude, pre_len) != 0) {
+                cc__ob_free(&ob);
                 free(chunks);
                 return NULL;
             }
-            cc__append(out, &o, need, body, body_len);
-            out[o] = '\0';
-            if (out_len) *out_len = o;
+            if (path && body_len > 0 &&
+                cc__append_prov_marker(&ob, 1, body_line, path) != 0) {
+                cc__ob_free(&ob);
+                free(chunks);
+                return NULL;
+            }
+            if (cc__append(&ob, body, body_len) != 0) {
+                cc__ob_free(&ob);
+                free(chunks);
+                return NULL;
+            }
+            out = cc__ob_take(&ob, out_len);
             free(chunks);
             return out;
         }
     }
 
     if (cc__collect_script_tasks(path, body, chunks, nchunks, &tasks, &ntasks) != 0) {
+        cc__ob_free(&ob);
         free(chunks);
         return NULL;
     }
@@ -1220,67 +1278,52 @@ char* cc_script_rewrite_source(const char* path,
     /* No explicit main: TU chunks (raw #line), then synthetic main with
      * masked CC_LN before each MAIN chunk (raw mid-function #line breaks
      * @create/@destroy type extraction in pass_create). */
-    {
-        size_t path_len = path ? strlen(path) : 0;
-        size_t mark_budget = nchunks * (80 + path_len) + 128;
-        dispatch_budget = 768 + ntasks * 320;
-        need = pre_len + tu_bytes + open_len + eh_len + dispatch_budget
-             + main_bytes + close_len + mark_budget + 64;
-        out = (char*)malloc(need);
-        if (!out) { free(chunks); free(tasks); return NULL; }
-        o = 0;
-        cc__append(out, &o, need, prelude, pre_len);
+    if (cc__append(&ob, prelude, pre_len) != 0) goto fail_rewrite;
 
-        for (ci = 0; ci < nchunks; ci++) {
-            int line;
-            if (chunks[ci].kind != CC__CHUNK_TU) continue;
-            if (chunks[ci].b <= chunks[ci].a) continue;
-            line = cc__src_line_at(src, body_off + chunks[ci].a);
-            if (path &&
-                cc__append_prov_marker(out, &o, need, 1, line, path) != 0) {
-                free(out);
-                free(chunks);
-                free(tasks);
-                return NULL;
-            }
-            cc__append(out, &o, need, body + chunks[ci].a,
-                       chunks[ci].b - chunks[ci].a);
-            if (o > 0 && out[o - 1] != '\n')
-                out[o++] = '\n';
-        }
-
-        cc__append(out, &o, need, main_open, open_len);
-        cc__append(out, &o, need, default_eh, eh_len);
-        if (cc__append_task_dispatch(out, &o, need, tasks, ntasks) != 0) {
-            free(out);
-            free(chunks);
-            free(tasks);
-            return NULL;
-        }
-
-        for (ci = 0; ci < nchunks; ci++) {
-            int line;
-            if (chunks[ci].kind != CC__CHUNK_MAIN) continue;
-            if (chunks[ci].b <= chunks[ci].a) continue;
-            line = cc__src_line_at(src, body_off + chunks[ci].a);
-            if (path &&
-                cc__append_prov_marker(out, &o, need, 0, line, path) != 0) {
-                free(out);
-                free(chunks);
-                free(tasks);
-                return NULL;
-            }
-            cc__append(out, &o, need, body + chunks[ci].a,
-                       chunks[ci].b - chunks[ci].a);
-            if (o > 0 && out[o - 1] != '\n')
-                out[o++] = '\n';
-        }
-
-        cc__append(out, &o, need, main_close, close_len);
-        out[o] = '\0';
-        if (out_len) *out_len = o;
-        free(chunks);
-        free(tasks);
-        return out;
+    for (ci = 0; ci < nchunks; ci++) {
+        int line;
+        if (chunks[ci].kind != CC__CHUNK_TU) continue;
+        if (chunks[ci].b <= chunks[ci].a) continue;
+        line = cc__src_line_at(src, body_off + chunks[ci].a);
+        if (path && cc__append_prov_marker(&ob, 1, line, path) != 0)
+            goto fail_rewrite;
+        if (cc__append(&ob, body + chunks[ci].a,
+                       chunks[ci].b - chunks[ci].a) != 0)
+            goto fail_rewrite;
+        if (ob.len > 0 && ob.data[ob.len - 1] != '\n' &&
+            cc__append_ch(&ob, '\n') != 0)
+            goto fail_rewrite;
     }
+
+    if (cc__append(&ob, main_open, open_len) != 0 ||
+        cc__append(&ob, default_eh, eh_len) != 0 ||
+        cc__append_task_dispatch(&ob, tasks, ntasks) != 0)
+        goto fail_rewrite;
+
+    for (ci = 0; ci < nchunks; ci++) {
+        int line;
+        if (chunks[ci].kind != CC__CHUNK_MAIN) continue;
+        if (chunks[ci].b <= chunks[ci].a) continue;
+        line = cc__src_line_at(src, body_off + chunks[ci].a);
+        if (path && cc__append_prov_marker(&ob, 0, line, path) != 0)
+            goto fail_rewrite;
+        if (cc__append(&ob, body + chunks[ci].a,
+                       chunks[ci].b - chunks[ci].a) != 0)
+            goto fail_rewrite;
+        if (ob.len > 0 && ob.data[ob.len - 1] != '\n' &&
+            cc__append_ch(&ob, '\n') != 0)
+            goto fail_rewrite;
+    }
+
+    if (cc__append(&ob, main_close, close_len) != 0) goto fail_rewrite;
+    out = cc__ob_take(&ob, out_len);
+    free(chunks);
+    free(tasks);
+    return out;
+
+fail_rewrite:
+    cc__ob_free(&ob);
+    free(chunks);
+    free(tasks);
+    return NULL;
 }

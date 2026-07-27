@@ -20,9 +20,10 @@
 #ifndef REDIS_DB_CCH
 #define REDIS_DB_CCH
 
-/* Three DB arenas: map (table blob), key (cloned key bytes), value (CCString
- * backing).  Each uses a tiny root + heap overflow so packed keys / values
- * can be released individually on DEL/FLUSH. */
+/* Arenas: shared map/value (table blob + CCString backing); per-shard key
+ * arenas so concurrent shard inserts never share an allocator.  Each uses a
+ * tiny root + heap overflow so packed keys / values can be released on
+ * DEL/FLUSH. */
 
 /* Probe key: stack borrow of request bytes (not durable — do not insert). */
 static inline CCSlicePacked db_key_packed_borrow(CCSlicePackedView* view, char[:] key) {
@@ -47,17 +48,17 @@ typedef ArrayMap::[CCSlicePacked, RedisEntry] RedisDbMap;
 /* key → absolute expire ms; absent / missing ⇒ no TTL. */
 typedef ArrayMap::[CCSlicePacked, int64_t] RedisExpiresMap;
 
-/* One hash shard: entries + expires share the same key→shard mapping. */
+/* One hash shard: entries + expires + key bytes for that shard. */
 typedef struct RedisDbShard {
     RedisDbMap entries;
     RedisExpiresMap expires;
+    CCArena key_arena;
 } RedisDbShard;
 
 enum { REDIS_DB_MAX_SHARDS = 64 };
 
 typedef struct RedisDb {
     CCArena map_arena;
-    CCArena key_arena;
     CCArena value_arena;
     size_t shard_count; /* power of two, 1..REDIS_DB_MAX_SHARDS */
     size_t shard_mask;  /* shard_count - 1 */
@@ -141,10 +142,18 @@ static bool db_init_overflow_arena(CCArena* a, size_t root_bytes) {
     return true;
 }
 
+static void db_destroy_shard_key_arenas(RedisDb* db) {
+    size_t i;
+    if (!db || !db->shards) return;
+    for (i = 0; i < db->shard_count; ++i) {
+        db->shards[i].key_arena.destroy();
+    }
+}
+
 static void db_free_arenas_only(RedisDb* db) {
     if (!db) return;
+    db_destroy_shard_key_arenas(db);
     db->map_arena.destroy();
-    db->key_arena.destroy();
     db->value_arena.destroy();
 }
 
@@ -162,10 +171,6 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     db->shard_count = shard_count;
     db->shard_mask = shard_count - 1u;
     if (!db_init_overflow_arena(&db->map_arena, map_value_heap_root)) return false;
-    if (!db_init_overflow_arena(&db->key_arena, key_arena_root)) {
-        db_free_arenas_only(db);
-        return false;
-    }
     if (!db_init_overflow_arena(&db->value_arena, map_value_heap_root)) {
         db_free_arenas_only(db);
         return false;
@@ -181,6 +186,8 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     per_shard = bucket_count / shard_count;
     if (per_shard < 8u) per_shard = 8u;
     for (i = 0; i < shard_count; ++i) {
+        if (!db_init_overflow_arena(&db->shards[i].key_arena, key_arena_root))
+            goto fail;
         db->shards[i].entries =
             array_map_new_count::[CCSlicePacked, RedisEntry](&db->map_arena, per_shard);
         if (!db->shards[i].entries) goto fail;
@@ -201,8 +208,10 @@ fail:
             sh->entries = NULL;
         }
     }
+    db_destroy_shard_key_arenas(db);
     db->shards = NULL;
-    db_free_arenas_only(db);
+    db->map_arena.destroy();
+    db->value_arena.destroy();
     return false;
 }
 
@@ -351,16 +360,27 @@ static int64_t db_cmd_clock_now(DbCmdClock* clock) {
 
 static CCSlicePacked !>(CCError) db_clone_key_packed(RedisDb* db, char[:] key) {
     @errhandler(CCError e) { return cc_err(e); }
+    RedisDbShard* sh;
     if (!db) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without db"));
-    CCSlicePacked !>(CCError) rr = key.to_packed(&db->key_arena);
+    sh = db_shard_for_key(db, key);
+    if (!sh) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db key clone without shard"));
+    CCSlicePacked !>(CCError) rr = key.to_packed(&sh->key_arena);
     if (rr.is_err()) return cc_err(rr.error());
     return cc_ok(rr.value());
 }
 
-/* Heap-form keys return via key_arena overflow free; inline/empty are no-ops. */
+/* Heap-form keys return via the owning shard's key arena; inline/empty no-op. */
 static void db_release_key_packed(RedisDb* db, CCSlicePacked* k) {
+    RedisDbShard* sh;
     if (!db || !k) return;
-    cc_slice_packed_release(&db->key_arena, k);
+    if (cc_slice_packed_is_empty(k) || cc_slice_packed_is_inline(k) ||
+        cc_slice_packed_is_view(k)) {
+        k->w = 0;
+        return;
+    }
+    sh = db_shard_at(db, db_shard_index_for_packed(db, *k));
+    if (!sh) return;
+    cc_slice_packed_release(&sh->key_arena, k);
 }
 
 static int64_t db_expires_get(RedisDb* db, CCSlicePacked kh) {
@@ -1082,7 +1102,10 @@ static void db_free_all(RedisDb* db) {
                 sh->entries = NULL;
             }
         }
+        /* Key arenas destroyed in db_free_arenas_only while shards[] is live. */
+        db_free_arenas_only(db);
         db->shards = NULL;
+        return;
     }
     db_free_arenas_only(db);
 }

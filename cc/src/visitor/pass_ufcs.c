@@ -118,6 +118,26 @@ static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start
             break;
         }
         while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        /* Left operand of `.`/`->` is a postfix expr.  Consume trailing
+         * subscripts (`shards[i]`, `a[i][j]`), then at most one `(...)`
+         * (call or paren primary), then the base ident when present.
+         * Do not keep chewing `(...)` groups — that would swallow C casts
+         * like `(int64_t)(p)->field.method()`.  Stopping at `[` would
+         * truncate `db->shards[i].field.method()` to `[i].field.method()`
+         * and mis-emit it as a closure capture. */
+        while (q > range_start && s[q - 1] == ']') {
+            int depth = 1;
+            size_t pp = q - 1;
+            while (pp > range_start && depth > 0) {
+                pp--;
+                if (s[pp] == ']') depth++;
+                else if (s[pp] == '[') depth--;
+            }
+            if (depth != 0) return sep_pos;
+            seg_start = pp;
+            q = pp;
+            while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        }
         if (q > range_start && s[q - 1] == ')') {
             int depth = 1;
             size_t pp = q - 1;
@@ -126,30 +146,19 @@ static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start
                 if (s[pp] == ')') depth++;
                 else if (s[pp] == '(') depth--;
             }
-            if (depth == 0) {
-                seg_start = pp;
-                continue;
-            }
-            break;
+            if (depth != 0) return sep_pos;
+            seg_start = pp;
+            q = pp;
+            while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
         }
-        if (q > range_start && s[q - 1] == ']') {
-            int depth = 1;
-            size_t pp = q - 1;
-            while (pp > range_start && depth > 0) {
-                pp--;
-                if (s[pp] == ']') depth++;
-                else if (s[pp] == '[') depth--;
-            }
-            if (depth == 0) {
-                seg_start = pp;
-                continue;
-            }
-            break;
+        if (q > range_start && cc__is_ident_char_char(s[q - 1])) {
+            seg_start = q;
+            while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
+            if (!cc__is_ident_start_char(s[seg_start])) return sep_pos;
+            continue;
         }
-        if (q <= range_start || !cc__is_ident_char_char(s[q - 1])) break;
-        seg_start = q;
-        while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
-        if (!cc__is_ident_start_char(s[seg_start])) return sep_pos;
+        /* Parenthesized primary with no leading ident, e.g. `(e).m`. */
+        break;
     }
 
     return seg_start;

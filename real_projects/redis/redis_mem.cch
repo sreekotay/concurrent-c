@@ -114,10 +114,19 @@ static int redis_mem_process_footprint_B(uint64_t* out_bytes, const char** out_s
     return 1;
 }
 
+static size_t redis_mem_key_arenas_gross_B(const RedisDb* db) {
+    size_t sum = 0;
+    size_t i;
+    if (!db || !db->shards) return 0;
+    for (i = 0; i < db->shard_count; ++i)
+        sum += cc_arena_committed_gross_bytes(&db->shards[i].key_arena);
+    return sum;
+}
+
 static size_t redis_mem_arenas_gross_B(const RedisDb* db) {
     if (!db) return 0;
     return cc_arena_committed_gross_bytes(&db->map_arena) +
-           cc_arena_committed_gross_bytes(&db->key_arena) +
+           redis_mem_key_arenas_gross_B(db) +
            cc_arena_committed_gross_bytes(&db->value_arena);
 }
 
@@ -208,8 +217,8 @@ static void redis_mem_report_impl(const RedisDb* db, const char* tag) {
                 cap,
                 map_alloc);
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] model: map/key/value arenas fixed root+overflow; "
-                "large allocs use heap-overflow malloc and can be released per key/value\n",
+                "redis_idiomatic: mem[%s] model: map/value shared + per-shard key arenas; "
+                "fixed root+overflow; keys/values releasable individually\n",
                 tag ? tag : "?");
         if (have_mach_footprint) {
             size_t map_live = map_alloc;
@@ -294,24 +303,32 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
             map_live,
             key_live + value_live + map_live);
     if (db) {
+        size_t si;
+        size_t k_slab = 0, k_ovf = 0, k_ext = 0, k_gross = 0;
         /* Arena roots (B): must match db_init() map/key/value heap-overflow roots. */
         fprintf(stderr,
-                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) key=%u(heap_overflow) value=%u(heap_overflow)\n",
+                "redis_idiomatic: mem[%s] arena_initial_root_B map=%u(heap_overflow) "
+                "key=%u(heap_overflow×%zu shards) value=%u(heap_overflow)\n",
                 tag ? tag : "db",
                 1024u,
                 1024u,
+                db->shard_count,
                 1024u);
         redis_db_fprint_arena_slab_chain_detail(tag, "map", &db->map_arena);
-        redis_db_fprint_arena_slab_chain_detail(tag, "key", &db->key_arena);
+        for (si = 0; db->shards && si < db->shard_count; ++si) {
+            char pool[32];
+            snprintf(pool, sizeof(pool), "key%zu", si);
+            redis_db_fprint_arena_slab_chain_detail(tag, pool, &db->shards[si].key_arena);
+            k_slab += cc_arena_slab_chain_bytes(&db->shards[si].key_arena);
+            k_ovf += cc_arena_overflow_raw_bytes(&db->shards[si].key_arena);
+            k_ext += cc_arena_extent_struct_bytes(&db->shards[si].key_arena);
+            k_gross += cc_arena_committed_gross_bytes(&db->shards[si].key_arena);
+        }
         redis_db_fprint_arena_slab_chain_detail(tag, "value", &db->value_arena);
         size_t m_slab = cc_arena_slab_chain_bytes(&db->map_arena);
         size_t m_ovf = cc_arena_overflow_raw_bytes(&db->map_arena);
         size_t m_ext = cc_arena_extent_struct_bytes(&db->map_arena);
         size_t m_gross = cc_arena_committed_gross_bytes(&db->map_arena);
-        size_t k_slab = cc_arena_slab_chain_bytes(&db->key_arena);
-        size_t k_ovf = cc_arena_overflow_raw_bytes(&db->key_arena);
-        size_t k_ext = cc_arena_extent_struct_bytes(&db->key_arena);
-        size_t k_gross = cc_arena_committed_gross_bytes(&db->key_arena);
         size_t v_slab = cc_arena_slab_chain_bytes(&db->value_arena);
         size_t v_ovf = cc_arena_overflow_raw_bytes(&db->value_arena);
         size_t v_ext = cc_arena_extent_struct_bytes(&db->value_arena);
@@ -319,7 +336,7 @@ static void db_dump_mem_stats(RedisDb* db, const char* tag) {
         fprintf(stderr,
                 "redis_idiomatic: mem[%s] arena_committed_B "
                 "map slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
-                "key slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
+                "key(sum) slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
                 "value slabs=%zu ovf=%zu ext_meta=%zu gross=%zu | "
                 "db_arenas_gross_sum=%zu\n",
                 tag ? tag : "db",

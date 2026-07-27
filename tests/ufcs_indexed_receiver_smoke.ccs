@@ -1,0 +1,45 @@
+// Smoke: UFCS method call whose receiver includes an array index.
+//
+// Regression: the UFCS span/receiver left-scan used to stop at `[` after
+// consuming a subscript, truncating `p->arr[i].field.method()` to
+// `[i].field.method()` and emitting garbage that the parser then rejected
+// as old-style closure-capture syntax.
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    CCArena key_arena;
+} Shard;
+
+typedef struct {
+    Shard* shards;
+    size_t shard_count;
+} Db;
+
+int main(void) {
+    Shard shards[2] = {0};
+    Db db = { shards, 2 };
+    size_t i;
+
+    for (i = 0; i < db.shard_count; ++i) {
+        db.shards[i].key_arena = cc_arena_heap(kilobytes(1));
+        assert(db.shards[i].key_arena.base);
+    }
+
+    Db* p = &db;
+    for (i = 0; i < p->shard_count; ++i) {
+        /* Indexed receiver through pointer — the redis failure mode. */
+        p->shards[i].key_arena.destroy();
+    }
+
+    for (i = 0; i < db.shard_count; ++i) {
+        db.shards[i].key_arena = cc_arena_heap(kilobytes(1));
+        assert(db.shards[i].key_arena.base);
+        /* Indexed receiver through value. */
+        db.shards[i].key_arena.destroy();
+    }
+
+    printf("ufcs_indexed_receiver_smoke: OK\n");
+    return 0;
+}

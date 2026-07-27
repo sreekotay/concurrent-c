@@ -842,6 +842,103 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
     return out_type;
 }
 
+/* After `expr[i]`, peel one array/pointer level from a registry type spelling.
+ * `T*` / `T[n]` / `T[]` become `T`.  When normalization already decayed a
+ * pointer field (`Shard*` → `Shard`), peeling is a no-op and still succeeds. */
+static int cc__peel_indexed_type(char* type_buf) {
+    size_t len;
+    if (!type_buf) return 0;
+    len = strlen(type_buf);
+    while (len > 0 && (type_buf[len - 1] == ' ' || type_buf[len - 1] == '\t')) len--;
+    if (len > 0 && type_buf[len - 1] == '*') {
+        len--;
+        while (len > 0 && (type_buf[len - 1] == ' ' || type_buf[len - 1] == '\t')) len--;
+        type_buf[len] = '\0';
+        return 1;
+    }
+    if (len > 0 && type_buf[len - 1] == ']') {
+        size_t i = len - 1;
+        int depth = 1;
+        while (i > 0 && depth > 0) {
+            i--;
+            if (type_buf[i] == ']') depth++;
+            else if (type_buf[i] == '[') depth--;
+        }
+        if (depth != 0) return 0;
+        while (i > 0 && (type_buf[i - 1] == ' ' || type_buf[i - 1] == '\t')) i--;
+        type_buf[i] = '\0';
+        return 1;
+    }
+    return 1;
+}
+
+/* Walk `.` / `->` / `[index]` suffixes, updating resolved_type in place.
+ * Returns 0 on malformed / unresolved field access. */
+static int cc__walk_receiver_postfix(CCTypeRegistry* reg,
+                                     const char** io_p,
+                                     char* resolved_type,
+                                     size_t resolved_cap) {
+    const char* p;
+    if (!reg || !io_p || !resolved_type) return 0;
+    p = *io_p;
+    while (*p) {
+        char field_name[128];
+        char base_type[256];
+        const char* type_name;
+        size_t fn = 0;
+        int is_arrow = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '[') {
+            /* Keep the subscript as part of the receiver; index into arrays
+             * / pointers so `arr[i].field` / `p->arr[i].field` resolve. */
+            int depth = 1;
+            p++;
+            while (*p && depth > 0) {
+                if (*p == '"' || *p == '\'') {
+                    char q = *p++;
+                    while (*p) {
+                        if (*p == '\\' && p[1]) { p += 2; continue; }
+                        if (*p == q) { p++; break; }
+                        p++;
+                    }
+                    continue;
+                }
+                if (*p == '[') depth++;
+                else if (*p == ']') depth--;
+                p++;
+            }
+            if (depth != 0) return 0;
+            if (!cc__peel_indexed_type(resolved_type)) return 0;
+            continue;
+        }
+        if (*p == '.') {
+            p++;
+        } else if (*p == '-' && p[1] == '>') {
+            is_arrow = 1;
+            p += 2;
+        } else {
+            break;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        if (!(isalnum((unsigned char)*p) || *p == '_') ||
+            !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
+            return 0;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
+            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
+            fn++;
+            p++;
+        }
+        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
+        cc__copy_type_base(base_type, sizeof(base_type), resolved_type);
+        if (is_arrow && base_type[0] == '\0') return 0;
+        type_name = cc_type_registry_lookup_field(reg, base_type, field_name);
+        if (!type_name) return 0;
+        cc__normalize_registry_type_name(reg, type_name, resolved_type, resolved_cap);
+    }
+    *io_p = p;
+    return 1;
+}
+
 const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
                                                    const char* recv_expr,
                                                    int* out_recv_is_ptr) {
@@ -881,35 +978,7 @@ const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
     type_name = cc_type_registry_lookup_var(reg, root);
     if (!type_name) return NULL;
     cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
-    while (*p) {
-        char field_name[128];
-        char base_type[256];
-        size_t fn = 0;
-        int is_arrow = 0;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '.') {
-            p++;
-        } else if (*p == '-' && p[1] == '>') {
-            is_arrow = 1;
-            p += 2;
-        } else {
-            break;
-        }
-        while (*p == ' ' || *p == '\t') p++;
-        if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
-            return NULL;
-        while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
-            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
-            fn++;
-            p++;
-        }
-        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
-        cc__copy_type_base(base_type, sizeof(base_type), resolved_type);
-        if (is_arrow && base_type[0] == '\0') return NULL;
-        type_name = cc_type_registry_lookup_field(reg, base_type, field_name);
-        if (!type_name) return NULL;
-        cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
-    }
+    if (!cc__walk_receiver_postfix(reg, &p, resolved_type, sizeof(resolved_type))) return NULL;
     if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
     return resolved_type;
 }
@@ -961,35 +1030,7 @@ const char* cc_type_registry_resolve_receiver_expr_at(CCTypeRegistry* reg,
     if (!type_name) type_name = cc_type_registry_lookup_var(reg, root);
     if (!type_name) return NULL;
     cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
-    while (*p) {
-        char field_name[128];
-        char base_type[256];
-        size_t fn = 0;
-        int is_arrow = 0;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '.') {
-            p++;
-        } else if (*p == '-' && p[1] == '>') {
-            is_arrow = 1;
-            p += 2;
-        } else {
-            break;
-        }
-        while (*p == ' ' || *p == '\t') p++;
-        if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
-            return NULL;
-        while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
-            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
-            fn++;
-            p++;
-        }
-        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
-        cc__copy_type_base(base_type, sizeof(base_type), resolved_type);
-        if (is_arrow && base_type[0] == '\0') return NULL;
-        type_name = cc_type_registry_lookup_field(reg, base_type, field_name);
-        if (!type_name) return NULL;
-        cc__normalize_registry_type_name(reg, type_name, resolved_type, sizeof(resolved_type));
-    }
+    if (!cc__walk_receiver_postfix(reg, &p, resolved_type, sizeof(resolved_type))) return NULL;
     if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
     return resolved_type;
 }
