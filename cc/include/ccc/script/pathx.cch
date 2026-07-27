@@ -1,0 +1,104 @@
+/*
+ * Script path helpers: repo root discovery and C-string path join.
+ */
+#ifndef CC_SCRIPT_PATHX_H
+#define CC_SCRIPT_PATHX_H
+
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/std/dir.cch>
+#include <ccc/std/io.cch>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+static inline int cc__script_is_repo_root(const char *dir) {
+    char marker[PATH_MAX];
+    if (!dir || !dir[0]) return 0;
+    snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", dir);
+    if (cc_path_exists(marker)) return 1;
+    snprintf(marker, sizeof(marker), "%s/perf/compiler_baseline.txt", dir);
+    if (cc_path_exists(marker)) return 1;
+    snprintf(marker, sizeof(marker), "%s/.git", dir);
+    return cc_path_exists(marker) ? 1 : 0;
+}
+
+static inline CCSlice cc__script_dup_cstr(CCArena *arena, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    CCSlice out = cc_arena_alloc_slice_bytes(arena, n + 1);
+    if (!out.ptr) return cc_slice_empty();
+    if (n) memcpy(out.ptr, s, n);
+    ((char *)out.ptr)[n] = '\0';
+    out.len = n;
+    return out;
+}
+
+/*
+ * Resolve the Concurrent-C repo root (walk cwd, then dirname(argv0)).
+ * Arena is last. Returned slice is NUL-terminated.
+ */
+static inline CCResult_CCSlice_CCError cc_script_repo_root(const char *argv0,
+                                                          CCArena *arena) {
+    char start[PATH_MAX];
+    char cur[PATH_MAX];
+    if (!arena) {
+        return cc_err_CCResult_CCSlice_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_script_repo_root: no arena"));
+    }
+    start[0] = '\0';
+    if (getcwd(start, sizeof(start)) == NULL) start[0] = '\0';
+    if ((!start[0] || !cc__script_is_repo_root(start)) && argv0 && argv0[0]) {
+        char tmp[PATH_MAX];
+        if (realpath(argv0, tmp)) {
+            char *slash = strrchr(tmp, '/');
+            if (slash) {
+                *slash = '\0';
+                strncpy(start, tmp, sizeof(start) - 1);
+                start[sizeof(start) - 1] = '\0';
+            }
+        }
+    }
+    if (!start[0]) {
+        return cc_err_CCResult_CCSlice_CCError(
+            CC_ERROR(CC_ERR_NOT_FOUND, "cc_script_repo_root: no start path"));
+    }
+    strncpy(cur, start, sizeof(cur) - 1);
+    cur[sizeof(cur) - 1] = '\0';
+    for (;;) {
+        if (cc__script_is_repo_root(cur)) {
+            CCSlice out = cc__script_dup_cstr(arena, cur);
+            if (!out.ptr) {
+                return cc_err_CCResult_CCSlice_CCError(
+                    CC_ERROR(CC_ERR_OUT_OF_MEMORY, "cc_script_repo_root: alloc"));
+            }
+            return cc_ok_CCResult_CCSlice_CCError(out);
+        }
+        char *slash = strrchr(cur, '/');
+        if (!slash || slash == cur) break;
+        *slash = '\0';
+    }
+    return cc_err_CCResult_CCSlice_CCError(
+        CC_ERROR(CC_ERR_NOT_FOUND, "cc_script_repo_root: not found"));
+}
+
+/* Join path segments; arena last. Result is NUL-terminated. */
+static inline CCSlice cc_script_path_join(const char *a, const char *b, CCArena *arena) {
+    CCSlice sa = a ? cc_slice_from_cstr(a) : cc_slice_empty();
+    CCSlice sb = b ? cc_slice_from_cstr(b) : cc_slice_empty();
+    return cc_path_join(arena, sa, sb);
+}
+
+static inline bool cc_script_path_exists(CCSlice path) {
+    if (!path.ptr || path.len == 0) return false;
+    return cc_path_exists((const char *)path.ptr);
+}
+
+#endif /* CC_SCRIPT_PATHX_H */

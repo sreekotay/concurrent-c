@@ -1,0 +1,39 @@
+/*
+ * Thin process wrappers for .ccscript orchestration.
+ */
+#ifndef CC_SCRIPT_SH_H
+#define CC_SCRIPT_SH_H
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_io_error.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/std/exec.cch>
+
+/*
+ * Run program with one argument; fail if exit status != 0.
+ * Arena is last (command builder storage).
+ */
+static inline CCResult_int_CCError cc_sh_run(const char *program,
+                                            const char *arg,
+                                            CCArena *arena) {
+    CCCommand cmd;
+    CCResult_int_CCIoError st;
+    if (!program || !arena) {
+        return cc_err_CCResult_int_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_sh_run: bad args"));
+    }
+    cmd = cc_command(arena, program);
+    if (arg) (void)cc_command_arg(&cmd, arg);
+    st = cc_command_status(&cmd);
+    if (cc_is_err(st)) {
+        return cc_err_CCResult_int_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(st))));
+    }
+    if (cc_value(st) != 0) {
+        return cc_err_CCResult_int_CCError(
+            CC_ERROR(CC_ERR_IO, "cc_sh_run: non-zero exit"));
+    }
+    return cc_ok_CCResult_int_CCError(cc_value(st));
+}
+
+#endif /* CC_SCRIPT_SH_H */

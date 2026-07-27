@@ -1,0 +1,78 @@
+/*
+ * Temp file with Result create + @destroy cleanup for .ccscript.
+ *
+ *   CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+ */
+#ifndef CC_SCRIPT_TEMP_H
+#define CC_SCRIPT_TEMP_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_type.cch>
+
+typedef struct CCTempFile {
+    CCSlice path;
+    int fd;
+    int owns;
+} CCTempFile;
+
+#ifndef CCResult_CCTempFile_CCError_DEFINED
+#define CCResult_CCTempFile_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCTempFile_CCError, CCTempFile, CCError)
+#endif
+
+static inline CCResult_CCTempFile_CCError cc_temp_file(CCArena *arena) {
+    char tmpl[] = "/tmp/cc_script.XXXXXX";
+    int fd;
+    size_t n;
+    CCSlice path;
+    CCTempFile tmp;
+    if (!arena) {
+        return cc_err_CCResult_CCTempFile_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_temp_file: no arena"));
+    }
+    fd = mkstemp(tmpl);
+    if (fd < 0) {
+        return cc_err_CCResult_CCTempFile_CCError(
+            CC_ERROR(CC_ERR_IO, "cc_temp_file: mkstemp failed"));
+    }
+    n = strlen(tmpl);
+    path = cc_arena_alloc_slice_bytes(arena, n + 1);
+    if (!path.ptr) {
+        close(fd);
+        unlink(tmpl);
+        return cc_err_CCResult_CCTempFile_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "cc_temp_file: alloc"));
+    }
+    memcpy(path.ptr, tmpl, n + 1);
+    path.len = n;
+    tmp.path = path;
+    tmp.fd = fd;
+    tmp.owns = 1;
+    return cc_ok_CCResult_CCTempFile_CCError(tmp);
+}
+
+static inline void cc_temp_file_destroy(CCTempFile *tmp) {
+    if (!tmp || !tmp->owns) return;
+    if (tmp->fd >= 0) close(tmp->fd);
+    if (tmp->path.ptr && tmp->path.len)
+        unlink((const char *)tmp->path.ptr);
+    tmp->fd = -1;
+    tmp->owns = 0;
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCTempFile", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_temp_file_destroy"),
+    });
+}
+#endif
+
+#endif /* CC_SCRIPT_TEMP_H */

@@ -501,7 +501,12 @@ static int cc__classify_item(const char* s, size_t n, size_t item,
 
         if (c == ';' && paren == 0 && brace == 0 && brack == 0) {
             *out_end = i + 1;
-            if (is_type_kw && !saw_eq)
+            /* Type defs and file-scope static/extern decls stay at TU so
+             * helpers can share counters / globals; non-static runtime
+             * decls still hoist into synthetic main. */
+            if ((is_type_kw && !saw_eq) ||
+                cc__starts_with_kw(s, n, item, "static") ||
+                cc__starts_with_kw(s, n, item, "extern"))
                 *out_kind = CC__CHUNK_TU;
             else
                 *out_kind = CC__CHUNK_MAIN;
