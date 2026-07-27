@@ -188,14 +188,23 @@ static long long now_ms_monotonic(void) {
 // Runs command via `sh -c <full>` with optional timeout. Returns:
 // - exit code of the command (0..255)
 // - 124 on timeout (like GNU timeout)
+// Optional in_path redirects stdin (`< in_path`) when non-NULL.
 static int run_cmd_redirect_timeout(const char* cmd,
+                                    const char* in_path,
                                     const char* out_path,
                                     const char* err_path,
                                     int verbose,
                                     int timeout_sec) {
     if (!cmd) return -1;
     char full[4096];
-    if (out_path && err_path) {
+    if (in_path && in_path[0] && out_path && err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s < %s > %s 2> %s'",
+                 cmd, in_path, out_path, err_path);
+    } else if (in_path && in_path[0] && out_path) {
+        snprintf(full, sizeof(full), "sh -c '%s < %s > %s'", cmd, in_path, out_path);
+    } else if (in_path && in_path[0] && err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s < %s 2> %s'", cmd, in_path, err_path);
+    } else if (out_path && err_path) {
         snprintf(full, sizeof(full), "sh -c '%s > %s 2> %s'", cmd, out_path, err_path);
     } else if (out_path) {
         snprintf(full, sizeof(full), "sh -c '%s > %s'", cmd, out_path);
@@ -562,12 +571,14 @@ static int run_one_test(const char* stem,
      * for `tests/macro/foo.ccs`).  Derived from input_path. */
     char test_dir[512];
     test_dir_from_path(input_path, test_dir, sizeof(test_dir));
-    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512], args_path[512];
+    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512], args_path[512], stdin_path[512];
     snprintf(exp_stdout_path, sizeof(exp_stdout_path), "%s/%s.stdout", test_dir, stem);
     snprintf(exp_stderr_path, sizeof(exp_stderr_path), "%s/%s.stderr", test_dir, stem);
     snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "%s/%s.compile_err", test_dir, stem);
     snprintf(ldflags_path, sizeof(ldflags_path), "%s/%s.ldflags", test_dir, stem);
     snprintf(args_path, sizeof(args_path), "%s/%s.args", test_dir, stem);
+    snprintf(stdin_path, sizeof(stdin_path), "%s/%s.stdin", test_dir, stem);
+    const char* run_stdin = file_exists(stdin_path) ? stdin_path : NULL;
 
     unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
     size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, ldflags_len = 0;
@@ -614,7 +625,7 @@ static int run_one_test(const char* stem,
     EnvSidecar envsc = {0};
     env_sidecar_apply(test_dir, stem, &envsc);
 
-    int build_rc = run_cmd_redirect_timeout(build_cmd, NULL, build_err_txt, verbose, build_timeout_sec);
+    int build_rc = run_cmd_redirect_timeout(build_cmd, NULL, NULL, build_err_txt, verbose, build_timeout_sec);
 
     /* Restore process env now — the build subprocess has completed and
      * already observed the sidecar values.  Running the compiled binary
@@ -688,7 +699,8 @@ static int run_one_test(const char* stem,
             snprintf(run_cmd, sizeof(run_cmd), "%s", bin_out);
         }
 
-        int run_rc = run_cmd_redirect_timeout(run_cmd, out_txt, err_txt, verbose, test_run_timeout_sec);
+        int run_rc = run_cmd_redirect_timeout(run_cmd, run_stdin, out_txt, err_txt, verbose,
+                                              test_run_timeout_sec);
         if (run_rc != 0) {
             if (run_rc == 124) {
                 fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, test_run_timeout_sec);
@@ -836,11 +848,11 @@ int main(int argc, char** argv) {
     (void)ensure_dir_p("bin");
     if (clean && !list_only) {
         // Best-effort: wipe per-test artifacts + incremental cache (NOT --all which would delete the compiler).
-        (void)run_cmd_redirect_timeout("./cc/bin/ccc clean", NULL, NULL, verbose, 0);
+        (void)run_cmd_redirect_timeout("./cc/bin/ccc clean", NULL, NULL, NULL, verbose, 0);
     }
 
     /* Collect all .c / .ccs / .shcc files under tests/ recursively.
-     * Sibling config files (`tests/<stem>.env`, `.stdout`, `.args`,
+     * Sibling config files (`tests/<stem>.env`, `.stdout`, `.stdin`, `.args`,
      * `.compile_err`, etc.) are still keyed by bare stem in the top-level
      * tests/ dir for back-compat; subdir tests must therefore have stems
      * unique across the whole tree. */

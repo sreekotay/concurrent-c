@@ -5,6 +5,7 @@
  * Usage:  ./minify.shcc < twitter.json > twitter_min.json
  *         (or: ccc minify.shcc < ...)
  * Side-by-side with: examples/serdes/json/tools/minify.py
+ * Suite: tests/script_minify_smoke.shcc (symlink) + .stdin/.stdout
  */
 
 /* prelude auto-included; default @errhandler */

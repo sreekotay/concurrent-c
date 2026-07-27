@@ -1,0 +1,7 @@
+{
+  "a" : 1,
+  "b" : "keep space",
+  "c" : "quote\"ok",
+  "d" : [ 1 , 2 ],
+  "e" : "line\nstill"
+}
