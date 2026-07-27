@@ -122,10 +122,10 @@ int main(void) {
         store.put(key.as_slice(), request_id * 10) !>;
     }
 
-    int* user1 = store.get(cc_slice_from_cstr("user:1"));
+    int* user1 = store.get(char_to_slice("user:1"));
     if (!user1 || *user1 != 10) return 2;
 
-    if (!store.delete(cc_slice_from_cstr("user:1"))) return 3;
+    if (!store.delete(char_to_slice("user:1"))) return 3;
 
     StoreMap* entries = store.entries;
     printf("entries=%zu logical_key_bytes=%zu inserted=%zu deleted=%zu\n",

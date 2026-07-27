@@ -54,9 +54,9 @@ void cc_ufcs_set_source_context(const char* source_text, size_t source_offset);
  * default UFCS hook: `CCFoo.bar()` -> `cc_foo_bar(...)`, and bare CamelCase
  * user types like `RedisConn.retain()` -> `redis_conn_retain(...)`.
  *
- * This is a text-only mirror of cc_ufcs_generic_cc_prefix_lower_c for parser
- * survival paths that cannot invoke comptime hooks yet. Authoritative UFCS
- * lowering still goes through the registered hook machinery. */
+ * Text-only mirror of cc_ufcs_generic_cc_prefix_lower_c (cv peel, east-const,
+ * multi-word spaces → `_`). Authoritative UFCS still goes through the
+ * registered comptime hook; keep this in sync when that helper changes. */
 static inline int cc_ufcs_compose_default_callee(char* out,
                                                  size_t out_sz,
                                                  const char* type_name,
@@ -66,6 +66,9 @@ static inline int cc_ufcs_compose_default_callee(char* out,
     size_t wi = 0;
     size_t body_start = 0;
     int has_cc_prefix = 0;
+    int has_const = 0;
+    int has_volatile = 0;
+    int has_restrict = 0;
     if (!out || out_sz == 0 || !type_name || !method_name || !method_name[0]) return 0;
     out[0] = '\0';
     while (*t == ' ' || *t == '\t') t++;
@@ -74,8 +77,57 @@ static inline int cc_ufcs_compose_default_callee(char* out,
     tlen = strlen(t);
     while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
     if (tlen == 0) return 0;
+
+    for (;;) {
+        while (tlen > 0 && (t[0] == ' ' || t[0] == '\t')) { t++; tlen--; }
+        if (tlen >= 6 && memcmp(t, "const", 5) == 0 && (t[5] == ' ' || t[5] == '\t')) {
+            has_const = 1; t += 5; tlen -= 5; continue;
+        }
+        if (tlen >= 9 && memcmp(t, "volatile", 8) == 0 && (t[8] == ' ' || t[8] == '\t')) {
+            has_volatile = 1; t += 8; tlen -= 8; continue;
+        }
+        if (tlen >= 9 && memcmp(t, "restrict", 8) == 0 && (t[8] == ' ' || t[8] == '\t')) {
+            has_restrict = 1; t += 8; tlen -= 8; continue;
+        }
+        break;
+    }
+    while (tlen > 0 && (t[0] == ' ' || t[0] == '\t')) { t++; tlen--; }
+    if (tlen == 0) return 0;
+
+    for (;;) {
+        while (tlen > 0 && (t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+        if (tlen >= 6 && (t[tlen - 6] == ' ' || t[tlen - 6] == '\t') &&
+            memcmp(t + tlen - 5, "const", 5) == 0) {
+            has_const = 1; tlen -= 6; continue;
+        }
+        if (tlen >= 9 && (t[tlen - 9] == ' ' || t[tlen - 9] == '\t') &&
+            memcmp(t + tlen - 8, "volatile", 8) == 0) {
+            has_volatile = 1; tlen -= 9; continue;
+        }
+        if (tlen >= 9 && (t[tlen - 9] == ' ' || t[tlen - 9] == '\t') &&
+            memcmp(t + tlen - 8, "restrict", 8) == 0) {
+            has_restrict = 1; tlen -= 9; continue;
+        }
+        break;
+    }
+    while (tlen > 0 && (t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0) return 0;
+
     has_cc_prefix = (tlen > 2 && t[0] == 'C' && t[1] == 'C' && t[2] >= 'A' && t[2] <= 'Z');
     if (!((t[0] >= 'A' && t[0] <= 'Z') || (t[0] >= 'a' && t[0] <= 'z') || t[0] == '_')) return 0;
+
+    if (has_const) {
+        if (wi + 6 >= out_sz) return 0;
+        memcpy(out + wi, "const_", 6); wi += 6;
+    }
+    if (has_volatile) {
+        if (wi + 9 >= out_sz) return 0;
+        memcpy(out + wi, "volatile_", 9); wi += 9;
+    }
+    if (has_restrict) {
+        if (wi + 9 >= out_sz) return 0;
+        memcpy(out + wi, "restrict_", 9); wi += 9;
+    }
     if (has_cc_prefix) {
         if (wi + 3 >= out_sz) return 0;
         out[wi++] = 'c';
@@ -85,14 +137,23 @@ static inline int cc_ufcs_compose_default_callee(char* out,
     }
     for (size_t ri = body_start; ri < tlen; ++ri) {
         char c = t[ri];
-        int is_upper = (c >= 'A' && c <= 'Z');
-        if (is_upper && ri > body_start) {
+        int is_upper;
+        if (c == ' ' || c == '\t') {
+            if (wi > 0 && out[wi - 1] != '_') {
+                if (wi + 1 >= out_sz) return 0;
+                out[wi++] = '_';
+            }
+            continue;
+        }
+        is_upper = (c >= 'A' && c <= 'Z');
+        if (is_upper && ri > body_start && wi > 0 && out[wi - 1] != '_') {
             if (wi + 1 >= out_sz) return 0;
             out[wi++] = '_';
         }
         if (wi + 1 >= out_sz) return 0;
         out[wi++] = is_upper ? (char)(c + ('a' - 'A')) : c;
     }
+    if (wi > 0 && out[wi - 1] == '_') wi--;
     if (wi + 1 + strlen(method_name) + 1 > out_sz) return 0;
     out[wi++] = '_';
     strcpy(out + wi, method_name);

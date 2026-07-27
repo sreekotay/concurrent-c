@@ -442,6 +442,9 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     size_t total;
     size_t body_start;
     int has_cc_prefix;
+    int has_const = 0;
+    int has_volatile = 0;
+    int has_restrict = 0;
     char *buf;
     CCSlice out;
     (void)mode;
@@ -457,6 +460,58 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     /* Strip trailing pointer stars and whitespace so both `CCFoo` and
        `CCFoo*` resolve to the same callee. */
     while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0) return cc_slice_empty();
+    /* Peel leading cv-qualifiers into snake prefixes (`const char*` →
+       `const_char_<method>`, not a broken `const char_<method>`). Order
+       of appearance is preserved: `const volatile T*` → `const_volatile_…`. */
+    for (;;) {
+        while (tlen > 0 && (t[0] == ' ' || t[0] == '\t')) { t++; tlen--; }
+        if (tlen >= 6 && memcmp(t, "const", 5) == 0 &&
+            (t[5] == ' ' || t[5] == '\t')) {
+            has_const = 1;
+            t += 5; tlen -= 5;
+            continue;
+        }
+        if (tlen >= 9 && memcmp(t, "volatile", 8) == 0 &&
+            (t[8] == ' ' || t[8] == '\t')) {
+            has_volatile = 1;
+            t += 8; tlen -= 8;
+            continue;
+        }
+        if (tlen >= 9 && memcmp(t, "restrict", 8) == 0 &&
+            (t[8] == ' ' || t[8] == '\t')) {
+            has_restrict = 1;
+            t += 8; tlen -= 8;
+            continue;
+        }
+        break;
+    }
+    while (tlen > 0 && (t[0] == ' ' || t[0] == '\t')) { t++; tlen--; }
+    if (tlen == 0) return cc_slice_empty();
+    /* East-const / trailing cv: `char const*` → same prefixes as west-const. */
+    for (;;) {
+        while (tlen > 0 && (t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+        if (tlen >= 6 && (t[tlen - 6] == ' ' || t[tlen - 6] == '\t') &&
+            memcmp(t + tlen - 5, "const", 5) == 0) {
+            has_const = 1;
+            tlen -= 6;
+            continue;
+        }
+        if (tlen >= 9 && (t[tlen - 9] == ' ' || t[tlen - 9] == '\t') &&
+            memcmp(t + tlen - 8, "volatile", 8) == 0) {
+            has_volatile = 1;
+            tlen -= 9;
+            continue;
+        }
+        if (tlen >= 9 && (t[tlen - 9] == ' ' || t[tlen - 9] == '\t') &&
+            memcmp(t + tlen - 8, "restrict", 8) == 0) {
+            has_restrict = 1;
+            tlen -= 9;
+            continue;
+        }
+        break;
+    }
+    while (tlen > 0 && (t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
     if (tlen == 0) return cc_slice_empty();
     /* The bare-CC-prefix case (Shape A) prepends `cc_` and strips the
        leading `CC`; any other CamelCase type (Shape B) emits a direct
@@ -502,13 +557,26 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
         static const char pass_tag[] = "__cc_ufcs_pass__";
         return cc_slice_from_static((void*)pass_tag, sizeof(pass_tag) - 1);
     }
-    /* Worst case: every char is uppercase and gains a `_`, so plan for
-       2x + optional `cc_` prefix + `_` separator + method. */
-    max_total = 3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
+    /* Worst case: cv prefixes + every char uppercase with `_` + optional
+       `cc_` + `_` separator + method. */
+    max_total = 6 /* const_ */ + 9 /* volatile_ */ + 9 /* restrict_ */ +
+                3 /* "cc_" */ + tlen * 2 + 1 /* "_" */ + method.len;
     out = cc_arena_alloc_slice_bytes(arena, max_total);
     buf = (char *)out.ptr;
     if (!buf) return cc_slice_empty();
     wi = 0;
+    if (has_const) {
+        memcpy(buf + wi, "const_", 6);
+        wi += 6;
+    }
+    if (has_volatile) {
+        memcpy(buf + wi, "volatile_", 9);
+        wi += 9;
+    }
+    if (has_restrict) {
+        memcpy(buf + wi, "restrict_", 9);
+        wi += 9;
+    }
     if (has_cc_prefix) {
         buf[wi++] = 'c'; buf[wi++] = 'c'; buf[wi++] = '_';
         body_start = 2;  /* skip the `CC` we just replaced with `cc_` */
@@ -517,16 +585,24 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
     }
     /* Smart snake_case: the first char of the body is emitted as lower
        with no leading `_`; each subsequent uppercase letter gets a
-       preceding `_`.  Non-ASCII / already-lowercase / digits / `_` pass
-       through unchanged.  Works for both Shape A (`CCArena` -> `arena`
-       body, joined with the `cc_` prefix above) and Shape B
-       (`RedisConn` -> `redis_conn`). */
+       preceding `_`.  Whitespace inside multi-word types becomes `_`
+       (`unsigned char*` → `unsigned_char_<method>`). Digits / `_` pass
+       through. Works for Shape A (`CCArena` → `cc_arena_…`) and Shape B
+       (`RedisConn` → `redis_conn_…`). */
     for (ri = body_start; ri < tlen; ++ri) {
         char c = t[ri];
-        int is_upper = (c >= 'A' && c <= 'Z');
-        if (is_upper && ri > body_start) buf[wi++] = '_';
+        int is_upper;
+        if (c == ' ' || c == '\t') {
+            if (wi > 0 && buf[wi - 1] != '_') buf[wi++] = '_';
+            continue;
+        }
+        is_upper = (c >= 'A' && c <= 'Z');
+        if (is_upper && ri > body_start && wi > 0 && buf[wi - 1] != '_')
+            buf[wi++] = '_';
         buf[wi++] = is_upper ? (char)(c + ('a' - 'A')) : c;
     }
+    /* Trim a trailing `_` left by a trailing space before method join. */
+    if (wi > 0 && buf[wi - 1] == '_') wi--;
     buf[wi++] = '_';
     if (method.len > 0 && method.ptr) {
         memcpy(buf + wi, method.ptr, method.len);

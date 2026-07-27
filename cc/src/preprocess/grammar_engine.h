@@ -28,6 +28,13 @@ char* cc_grammar_builtin_emit(const char* engine,
                               const char* src, size_t src_len,
                               char* err, size_t err_sz);
 
+/* @grammar(cli) emitter (grammar_cli.c). */
+char* cc_grammar_cli_emit(const char* name,
+                          const char* body, size_t body_len,
+                          const char* file, int line,
+                          const char* src, size_t src_len,
+                          char* err, size_t err_sz);
+
 /* Cross-block state (rules bodies that @grammar(schema) blocks `use`, schema
  * type names) is scoped to one input file; the seam resets it per rewrite. */
 void cc__grammar_registry_reset(void);

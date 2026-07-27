@@ -17,7 +17,7 @@
 #include <ccc/cc_type.cch>
 
 typedef struct CCTempFile {
-    CCSlice path;
+    CCSlice path;  /* NUL-terminated temp path */
     int fd;
     int owns;
 } CCTempFile;

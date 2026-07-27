@@ -11,7 +11,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
     if (!arena.valid()) return 1;
 
-    CCSlice src = cc_slice_from_cstr("hello");
+    CCSlice src = char_to_slice("hello");
     CCResult_CCSlice_CCError cloned_res = cc_slice_clone_into(&src, &arena);
     if (cloned_res.is_err()) return 2;
     CCSlice cloned = CCResult_CCSlice_CCError_value(cloned_res);

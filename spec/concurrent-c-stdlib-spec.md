@@ -104,13 +104,30 @@ CCSlice cc_slice_from_buffer(void *ptr, size_t len);
 CCSlice cc_slice_from_static(void *ptr, size_t len);
 CCSlice cc_slice_hdr_slice(CCSliceHdr *sh);
 CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id, size_t available_len);
-CCSlice cc_slice_from_cstr(const char *cstr);
+CCSlice char_to_slice(const char *cstr);
+CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
+CCSlice unsigned_char_to_slice(const unsigned char *cstr);
+CCSlice signed_char_to_slice(const signed char *cstr);
+CCSlice const_unsigned_char_to_slice(const unsigned char *cstr);
+CCSlice const_signed_char_to_slice(const signed char *cstr);
+CCSlice cc_slice_from_cstr(const char *cstr);  /* alias of char_to_slice */
 CCSliceUnique cc_adopt(void *ptr, size_t nbytes, CCSliceDeleter deleter);
 void cc_slice_destroy(CCSlice *s);
 ```
 
 `cc_slice_from_buffer` and `cc_slice_hdr_slice` produce untracked slices.
-`cc_slice_from_static` and `cc_slice_from_cstr` produce canonical static slices.
+`char_to_slice` / `const_char_to_slice` (and the signedness variants) and
+`cc_slice_from_static` produce canonical static slices. `cc_slice_from_cstr`
+is an alias of `char_to_slice`. In Concurrent-C, `p->to_slice()` is UFCS:
+`char*` → `char_to_slice`, `const char*` → `const_char_to_slice` (generic
+cv-qualifier peel in the UFCS lowerer; signedness variants likewise).
+At a call site, a string literal whose parameter is by-value `CCSlice`,
+`char[:0]`, `CCSliceShared`, or `CCSliceUnique` is rewritten to
+`const_char_to_slice(lit)` (phase-3). Pointer parameters and non-literal
+`char[N]` / `char*` variables are not coerced — use `p->to_slice()` /
+`char_to_slice(p)`. Host-included C headers may spell the same ABI as
+`CCSlice`; Concurrent-C path and CLI string surfaces are `char[:0]`
+(NUL-terminated borrow).
 `cc_adopt` registers the supplied deleter and produces a unique,
 non-transferable slice. `cc_slice_destroy` invokes that deleter at most once
 for a still-registered unique slice and then clears the slice.
@@ -390,7 +407,7 @@ typedef struct {
 The file API is:
 
 ```c
-int cc_file_open(CCFile *file, const char *path, const char *mode);
+int cc_file_open(CCFile *file, char[:0] path, const char *mode);
 void cc_file_close(CCFile *file);
 CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena);
 CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena *arena, size_t n);
@@ -407,8 +424,10 @@ CCResult_size_t_CCIoError cc_file_tell(CCFile *file);
 CCResult_size_t_CCIoError cc_file_size(CCFile *file);
 ```
 
-`cc_file_open` returns zero on success and `-1` on failure. The failure's
-`errno` remains available separately.
+`path` is a NUL-terminated borrow (`char[:0]` / `CCSlice` ABI). String
+literals coerce at the call site; `mode` remains `const char *` and is not
+coerced. `cc_file_open` returns zero on success and `-1` on failure. The
+failure's `errno` remains available separately.
 `cc_file_close` ignores close errors. Value-returning reads return an empty
 slice at EOF. The `_into` read forms return `ok(true)` when they write an
 output value and `ok(false)` at EOF. `cc_file_read_line` includes the newline
@@ -467,7 +486,7 @@ completes with the actual `cc_file_open` result, including `-1` on open
 failure; this code is not an errno value.
 
 ```c
-int cc_file_open_async(CCExec *ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle *handle);
+int cc_file_open_async(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle);
 int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
 int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
 int cc_file_read_async(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
@@ -481,15 +500,16 @@ Path helpers are part of `<ccc/std/io.cch>`:
 
 ```c
 char cc_path_sep(void);
-bool cc_path_is_abs(CCSlice path);
-CCSlice cc_path_join(CCArena *arena, CCSlice a, CCSlice b);
-CCSlice cc_path_dirname(CCArena *arena, CCSlice path);
-CCSlice cc_path_basename(CCArena *arena, CCSlice path);
+bool cc_path_is_abs(char[:0] path);
+char[:0] cc_path_join(CCArena *arena, char[:0] a, char[:0] b);
+char[:0] cc_path_dirname(CCArena *arena, char[:0] path);
+char[:0] cc_path_basename(CCArena *arena, char[:0] path);
 ```
 
-The returned `join`, `dirname`, and `basename` slices are NUL-terminated and
-arena-backed. These helpers implement POSIX path syntax only:
-`cc_path_sep()` is `/`, and `cc_path_is_abs` recognizes only a leading `/`.
+Path arguments are NUL-terminated borrows (`char[:0]`). The returned `join`,
+`dirname`, and `basename` slices are NUL-terminated and arena-backed. These
+helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
+`cc_path_is_abs` recognizes only a leading `/`.
 
 ## Collections
 
@@ -707,45 +727,46 @@ typedef enum {
 } CCDirEntryType;
 
 typedef struct {
-    CCSlice name;
+    char[:0] name;
     CCDirEntryType type;
 } CCDirEntry;
 
 typedef struct CCDirIter CCDirIter;
 
 typedef struct {
-    CCSlice *paths;
+    char[:0] *paths;
     size_t count;
     size_t capacity;
 } CCGlobResult;
 ```
 
+
 The API is:
 
 ```c
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena *arena, const char *path);
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena *arena, char[:0] path);
 CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter *iter, CCArena *arena);
 void cc_dir_close(CCDirIter *iter);
 
-bool cc_path_exists(const char *path);
-bool cc_path_is_dir(const char *path);
-bool cc_path_is_file(const char *path);
-CCResult_bool_CCIoError cc_dir_create(const char *path);
-CCResult_bool_CCIoError cc_dir_create_all(const char *path);
-CCResult_bool_CCIoError cc_dir_remove(const char *path);
-CCResult_bool_CCIoError cc_file_remove(const char *path);
-CCSlice cc_dir_cwd(CCArena *arena);
-CCResult_bool_CCIoError cc_dir_chdir(const char *path);
+bool cc_path_exists(char[:0] path);
+bool cc_path_is_dir(char[:0] path);
+bool cc_path_is_file(char[:0] path);
+CCResult_bool_CCIoError cc_dir_create(char[:0] path);
+CCResult_bool_CCIoError cc_dir_create_all(char[:0] path);
+CCResult_bool_CCIoError cc_dir_remove(char[:0] path);
+CCResult_bool_CCIoError cc_file_remove(char[:0] path);
+char[:0] cc_dir_cwd(CCArena *arena);
+CCResult_bool_CCIoError cc_dir_chdir(char[:0] path);
 
-CCGlobResult cc_glob(CCArena *arena, const char *pattern);
-bool cc_glob_match(const char *pattern, const char *name);
+CCGlobResult cc_glob(CCArena *arena, char[:0] pattern);
+bool cc_glob_match(char[:0] pattern, char[:0] name);
 ```
 
-After the final entry, `cc_dir_next` returns
-`Err((CCIoError){ .kind = CC_IO_OTHER, .os_code = 0 })`. Entry names and glob
-paths are allocated in the supplied arena. `cc_dir_create` does not create
-parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and recursive
-`**`; `cc_glob_match` matches a single name with `*` and `?`.
+Path arguments are NUL-terminated borrows (`char[:0]`). After the final entry,
+`cc_dir_next` returns `Err((CCIoError){ .kind = CC_IO_OTHER, .os_code = 0 })`.
+Entry names and glob paths are arena-backed `char[:0]`. `cc_dir_create` does
+not create parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and
+recursive `**`; `cc_glob_match` matches a single name with `*` and `?`.
 
 The accessor functions are:
 
@@ -868,14 +889,14 @@ allocation fails.
 `<ccc/std/exec.cch>` defines the arena-backed `CCCommand` builder:
 
 ```c
-CCCommand cc_command_new(CCArena *arena, const char *program);
-CCCommand cc_command(CCArena *arena, const char *program);
+CCCommand cc_command_new(CCArena *arena, char[:0] program);
+CCCommand cc_command(CCArena *arena, char[:0] program);
 size_t cc_command_argc(const CCCommand *command);
 const char *cc_command_get(const CCCommand *command, size_t index);
 const char *cc_command_program(const CCCommand *command);
 
 CCCommand *cc_command_arg(CCCommand *command, const char *arg);
-CCCommand *cc_command_arg_slice(CCCommand *command, CCSlice arg);
+CCCommand *cc_command_arg_slice(CCCommand *command, char[:0] arg);
 CCCommand *cc_command_arg_i64(CCCommand *command, int64_t value);
 CCCommand *cc_command_arg_i32(CCCommand *command, int value);
 CCCommand *cc_command_arg_if(CCCommand *command, bool condition, const char *arg);
@@ -888,7 +909,7 @@ CCCommand *cc_command_stdout_capture(CCCommand *command);
 CCCommand *cc_command_stderr_capture(CCCommand *command);
 CCCommand *cc_command_stderr_to_stdout(CCCommand *command);
 CCCommand *cc_command_inherit_stdio(CCCommand *command);
-CCCommand *cc_command_cwd(CCCommand *command, const char *cwd);
+CCCommand *cc_command_cwd(CCCommand *command, char[:0] cwd);
 CCCommand *cc_command_env(CCCommand *command, const char **env);
 
 const char **cc_command_argv(CCCommand *command);
@@ -900,6 +921,9 @@ CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *comma
 CCResult_int_CCIoError cc_command_status(CCCommand *command);
 ```
 
+`program`, `cwd`, and `arg_slice` take NUL-terminated path/token borrows
+(`char[:0]`). String literals coerce at those by-value slice parameters;
+`cc_command_arg` / `cc_command_stdin` keep `const char *` faces.
 `CCCommand` UFCS maps method names to `cc_command_*` and passes the receiver by
 address. `cc_command_status` disables stdout and stderr capture, waits for the
 process, and returns `Ok(status.exit_code)` for any completed process.
@@ -967,31 +991,30 @@ completion. `cc_block_any` reports the first successful completion and returns
 
 ## Command-line parsing
 
-`<ccc/std/cli.cch>` defines declarative argument specifications with
-`CCArgSpec`, parsed entries with `CCParsedArg`, the `CCParsedArgs` collection,
-and the `CCCliParse` result. The public operations are:
+Declare options with `@grammar(cli)` (see `spec/cc_serdes.md`). The compiler
+emits a typed options struct plus `Name_parse_args` / `Name_prepare` /
+`Name_print_usage`. Call sites use the stable macros `cc_parse_args`,
+`cc_prepare_args`, and `cc_print_usage`. The same faces and
+`<ccc/std/cli.cch>` runtime apply to `.ccs` and `.shcc`:
 
 ```c
-const char *cc_cli_prog(int argc, char **argv);
-CCSlice cc_cli_prog_slice(int argc, char **argv);
-CCParsedArgs cc_parsed_args(CCArena *arena);
-CCCliParse cc_cli_parse_args(int argc, char **argv, const CCArgSpec *specs, size_t spec_count, CCArena *arena);
-void cc_print_usage(FILE *out, CCSlice prog, const CCArgSpec *specs, size_t spec_count);
-void cc_cli_parse_print(const CCCliParse *parse, FILE *out);
+@grammar(cli) Opts {~~~~
+    help: flag -h, --help desc "Show help"
+    jobs: opt i64 -j, --jobs attach as N default 4 desc "Worker count"
+    file: rest string desc "Inputs"
+~~~~}
 
-size_t cc_parsed_args_len(const CCParsedArgs *args);
-const CCParsedArg *cc_parsed_args_get(const CCParsedArgs *args, size_t index);
-bool cc_parsed_args_has(const CCParsedArgs *args, const char *key);
-size_t cc_parsed_args_count(const CCParsedArgs *args, const char *key);
-const CCSlice *cc_parsed_args_value_at(const CCParsedArgs *args, const char *key, size_t index);
-const CCSlice *cc_parsed_args_last_value(const CCParsedArgs *args, const char *key);
-bool cc_parsed_args_find_value_at(const CCParsedArgs *args, const char *key, size_t index, CCSlice *out);
-bool cc_parsed_args_find_last_value(const CCParsedArgs *args, const char *key, CCSlice *out);
+Opts opts = {0};
+bool go = cc_prepare_args(Opts, argc, argv, &arena, &opts, stderr) !>;
+if (!go) return 0; /* help flag named `help` → Ok(false); usage printed */
 ```
 
-`CCParsedArgs` UFCS maps `len`, `get`, `has`, `count`, `value_at`,
-`last_value`, `find_value_at`, and `find_last_value` to `cc_parsed_args_*`.
-`CCCliParse.print(out)` maps to `cc_cli_parse_print`.
+`opt string` / `rest string` fields are `char[:0]` (NUL-terminated borrows of
+argv or of a `default "..."` literal). Defaults apply before the argv overlay;
+`_present` stays false until the user sets the option. `cc_prepare_args` is a
+`bool !>(CCError)` face: `Ok(true)` proceed, `Ok(false)` help (usage printed
+for a `flag` named `help`), `Err` bad argv (usage printed). `cc_parse_args`
+fills only (defaults, then argv). `cc_print_usage` prints the generated usage.
 
 ## Networking
 

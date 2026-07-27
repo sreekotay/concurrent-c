@@ -154,7 +154,8 @@ static int backend_write(void* ctx, CCFile *file, CCSlice data, size_t* out_writ
     return 0;
 }
 
-static int backend_open(void* ctx, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_open(void* ctx, CCFile *file, CCSlice path_sl, const char *mode, CCAsyncHandle* h, const CCDeadline* d) {
+    const char *path = path_sl.ptr ? (const char *)path_sl.ptr : NULL;
     (void)ctx; (void)d;
     if (!file || !path || !mode || !h) return EINVAL;
     FILE* f = fopen(path, mode);

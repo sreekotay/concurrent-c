@@ -48,11 +48,16 @@ struct CCDirIter {
  * For EOF on directory iteration, use CC_IO_OTHER with os_code=0. */
 #define CC_DIR_EOF_ERROR ((CCIoError){.kind = CC_IO_OTHER, .os_code = 0})
 
+static const char *cc__dir_path_cstr(CCSlice path) {
+    return path.ptr ? (const char *)path.ptr : NULL;
+}
+
 /* ============================================================================
  * Directory Iteration
  * ============================================================================ */
 
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, const char* path) {
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!arena || !path) {
         return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -197,7 +202,8 @@ void cc_dir_close(CCDirIter* iter) {
  * Directory Operations
  * ============================================================================ */
 
-bool cc_path_exists(const char* path) {
+bool cc_path_exists(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) return false;
 #ifdef _WIN32
     DWORD attr = GetFileAttributesA(path);
@@ -208,7 +214,8 @@ bool cc_path_exists(const char* path) {
 #endif
 }
 
-bool cc_path_is_dir(const char* path) {
+bool cc_path_is_dir(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) return false;
 #ifdef _WIN32
     DWORD attr = GetFileAttributesA(path);
@@ -220,7 +227,8 @@ bool cc_path_is_dir(const char* path) {
 #endif
 }
 
-bool cc_path_is_file(const char* path) {
+bool cc_path_is_file(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) return false;
 #ifdef _WIN32
     DWORD attr = GetFileAttributesA(path);
@@ -232,7 +240,8 @@ bool cc_path_is_file(const char* path) {
 #endif
 }
 
-CCResult_bool_CCIoError cc_dir_create(const char* path) {
+CCResult_bool_CCIoError cc_dir_create(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -251,7 +260,8 @@ CCResult_bool_CCIoError cc_dir_create(const char* path) {
 #endif
 }
 
-CCResult_bool_CCIoError cc_dir_create_all(const char* path) {
+CCResult_bool_CCIoError cc_dir_create_all(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -270,7 +280,7 @@ CCResult_bool_CCIoError cc_dir_create_all(const char* path) {
             char saved = buf[i];
             buf[i] = '\0';
 
-            if (!cc_path_exists(buf)) {
+            if (!cc_path_exists(char_to_slice(buf))) {
 #ifdef _WIN32
                 if (!CreateDirectoryA(buf, NULL)) {
                     DWORD err = GetLastError();
@@ -297,7 +307,8 @@ CCResult_bool_CCIoError cc_dir_create_all(const char* path) {
     return cc_ok_CCResult_bool_CCIoError(true);
 }
 
-CCResult_bool_CCIoError cc_dir_remove(const char* path) {
+CCResult_bool_CCIoError cc_dir_remove(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -316,7 +327,8 @@ CCResult_bool_CCIoError cc_dir_remove(const char* path) {
 #endif
 }
 
-CCResult_bool_CCIoError cc_file_remove(const char* path) {
+CCResult_bool_CCIoError cc_file_remove(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -358,7 +370,8 @@ CCSlice cc_dir_cwd(CCArena* arena) {
     return result;
 }
 
-CCResult_bool_CCIoError cc_dir_chdir(const char* path) {
+CCResult_bool_CCIoError cc_dir_chdir(CCSlice path_sl) {
+    const char* path = cc__dir_path_cstr(path_sl);
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -381,7 +394,10 @@ CCResult_bool_CCIoError cc_dir_chdir(const char* path) {
  * Glob Pattern Matching
  * ============================================================================ */
 
-bool cc_glob_match(const char* pattern, const char* name) {
+bool cc_glob_match(CCSlice pattern_sl, CCSlice name_sl) {
+    const char* pattern = cc__dir_path_cstr(pattern_sl);
+    const char* name = cc__dir_path_cstr(name_sl);
+    if (!pattern || !name) return false;
     if (!pattern || !name) return false;
 
 #ifdef _WIN32
@@ -447,7 +463,7 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
 
 static void glob_dir(CCArena* arena, CCGlobResult* result,
                      const char* dir, const char* pattern, int recursive) {
-    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, dir);
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
     if (cc_is_err(iter_res)) return;
 
     CCDirIter* iter = cc_unwrap(iter_res);
@@ -475,7 +491,7 @@ static void glob_dir(CCArena* arena, CCGlobResult* result,
                 glob_recurse(arena, result, full_path, pattern, recursive);
             }
         } else {
-            if (cc_glob_match(pattern, name)) {
+            if (cc_glob_match(char_to_slice(pattern), char_to_slice(name))) {
                 glob_add(result, arena, full_path, path_len);
             }
         }
@@ -489,7 +505,7 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
     glob_dir(arena, result, dir, pattern, recursive);
 
     /* Recurse into subdirectories */
-    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, dir);
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
     if (cc_is_err(iter_res)) return;
 
     CCDirIter* iter = cc_unwrap(iter_res);
@@ -517,8 +533,9 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
     cc_dir_close(iter);
 }
 
-CCGlobResult cc_glob(CCArena* arena, const char* pattern) {
+CCGlobResult cc_glob(CCArena* arena, CCSlice pattern_sl) {
     CCGlobResult result = {0};
+    const char* pattern = cc__dir_path_cstr(pattern_sl);
     if (!arena || !pattern) return result;
 
     /* Check for ** (recursive) */

@@ -1,0 +1,31 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    const char *path = "/tmp/cstr_to_slice_ufcs";
+    char *mut = (char *)"hello";
+    char const *east = "east-const";
+    unsigned char *ubytes = (unsigned char *)"ubytes";
+
+    char[:0] a = path->to_slice();          /* → const_char_to_slice */
+    char[:0] b = mut->to_slice();           /* → char_to_slice */
+    char[:0] c = char_to_slice("literal");
+    char[:0] d = const_char_to_slice(path);
+    char[:0] e = east->to_slice();          /* east-const → const_char_to_slice */
+    char[:0] f = ubytes->to_slice();        /* → unsigned_char_to_slice */
+
+    assert(a.len == strlen(path));
+    assert(CCSlice_eq_cstr(&a, path));
+    assert(CCSlice_eq_cstr(&b, "hello"));
+    assert(CCSlice_eq_cstr(&c, "literal"));
+    assert(CCSlice_eq_cstr(&d, path));
+    assert(CCSlice_eq_cstr(&e, "east-const"));
+    assert(CCSlice_eq_cstr(&f, "ubytes"));
+    assert(char_to_slice(NULL).len == 0);
+    assert(const_char_to_slice(NULL).len == 0);
+
+    printf("cstr_to_slice_ufcs_smoke: PASS\n");
+    return 0;
+}

@@ -137,10 +137,36 @@ static inline CCSlice cc_slice_from_parts(void *ptr,
     return s;
 }
 
-static inline CCSlice cc_slice_from_cstr(const char *cstr) {
+/* NUL-terminated C string → borrowed char[:0] / CCSlice view.
+ * UFCS: `p->to_slice()` lowers to `char_to_slice` / `const_char_to_slice`
+ * via the generic cv-qualifier peel in cc_arena.cch. */
+static inline CCSlice char_to_slice(const char *cstr) {
     if (!cstr) return cc_slice_empty();
     size_t len = strlen(cstr);
     return cc_slice_from_static((void *)cstr, len);
+}
+
+static inline CCSlice const_char_to_slice(const char *cstr) {
+    return char_to_slice(cstr);
+}
+
+/* Multi-word / signedness variants from UFCS type mangling
+ * (`unsigned char*` → `unsigned_char_to_slice`). */
+static inline CCSlice unsigned_char_to_slice(const unsigned char *cstr) {
+    return char_to_slice((const char *)cstr);
+}
+static inline CCSlice signed_char_to_slice(const signed char *cstr) {
+    return char_to_slice((const char *)cstr);
+}
+static inline CCSlice const_unsigned_char_to_slice(const unsigned char *cstr) {
+    return unsigned_char_to_slice(cstr);
+}
+static inline CCSlice const_signed_char_to_slice(const signed char *cstr) {
+    return signed_char_to_slice(cstr);
+}
+
+static inline CCSlice cc_slice_from_cstr(const char *cstr) {
+    return char_to_slice(cstr);
 }
 
 static inline bool CCSlice_is_empty(CCSlice* s) {

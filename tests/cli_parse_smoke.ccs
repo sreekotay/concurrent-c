@@ -1,148 +1,198 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/std/cli.cch>
+#include <stdlib.h>
+#include <unistd.h>
 
-static const CCArgSpec CLI_SPECS[] = {
-    { .long_ = "help", .short_ = 'h', .kind = CC_ARG_FLAG, .desc = "show help" },
-    { .long_ = "verbose", .short_ = 'v', .kind = CC_ARG_FLAG, .desc = "verbose mode" },
-    { .long_ = "processes", .short_ = 'p', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "N", .allow_short_attached = true, .desc = "worker count" },
-    { .long_ = "blocksize", .short_ = 'b', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "KB", .allow_short_attached = true, .desc = "block size" },
-    { .long_ = "suffix", .short_ = 'S', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "SUFFIX", .desc = "suffix" },
-    { .long_ = "comment", .short_ = 'C', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "TEXT", .desc = "comment" },
-    { .long_ = "fast", .kind = CC_ARG_ALIAS, .maps_to = cc_strs("level", "1"), .desc = "fast mode" },
-    { .long_ = "level", .short_ = '1', .short_aliases = cc_strs("0", "2", "3", "4", "5", "6", "7", "8", "9", "11"), .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "LEVEL", .desc = "compression level" },
-    { .long_ = "file", .kind = CC_ARG_POSITIONAL, .positional_many = true, .desc = "input files" },
-};
-
-static bool parse_i64_value(CCSlice value, int64_t* out) {
-    CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(value, 10);
-    if (cc_is_err(parsed)) return false;
-    if (out) *out = cc_unwrap(parsed);
-    return true;
-}
+@grammar(cli) SmokeOpts {~~~~
+    help: flag -h, --help desc "show help"
+    verbose: count -v, --verbose desc "verbose mode"
+    processes: opt i64 -p, --processes attach as N default 2 desc "worker count"
+    blocksize: opt i64 -b, --blocksize attach as KB desc "block size"
+    suffix: opt string -S, --suffix as SUFFIX default ".gz" desc "suffix"
+    comment: opt string -C, --comment as TEXT desc "comment"
+    level: opt i64 --level, -0..-9, -11 alias --fast=1, --best=9 as LEVEL default 6 desc "compression level"
+    file: rest string desc "input files"
+~~~~}
 
 static int test_attached_and_equals_forms(void) {
-    char* argv[] = { "prog", "-p4", "--suffix=.zz", "input.ccs" };
+    char *argv[] = { "prog", "-p4", "--suffix=.zz", "input.ccs" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
-    CCCliParse cli = cc_cli_parse_args(4, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
-    int64_t workers = 0;
-    CCSlice suffix = cc_slice_empty();
-    CCSlice input = cc_slice_empty();
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 4, argv, &arena, &opts)) return 1;
+    if (!opts.processes_present || opts.processes != 4) return 2;
+    {
+        char[:0] suf = opts.suffix;
+        char[:0] path = opts.file[0];
+        if (!opts.suffix_present || !CCSlice_eq_cstr(&suf, ".zz")) return 3;
+        if (opts.file_len != 1) return 4;
+        if (!CCSlice_eq_cstr(&path, "input.ccs")) return 5;
+    }
+    return 0;
+}
 
-    if (!cli.ok) {
-        return 1;
+static int test_defaults(void) {
+    char *argv[] = { "prog" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 1, argv, &arena, &opts)) return 50;
+    if (opts.processes_present || opts.processes != 2) return 51;
+    {
+        char[:0] suf = opts.suffix;
+        if (opts.suffix_present || !CCSlice_eq_cstr(&suf, ".gz")) return 52;
     }
-    if (!cli.args.find_last_value("processes", &suffix)
-        || !parse_i64_value(suffix, &workers)) {
-        return 2;
-    }
-    if (workers != 4) {
-        return 3;
-    }
-    if (!cli.args.find_last_value("suffix", &suffix)
-        || !CCSlice_eq_cstr(&suffix, ".zz")) {
-        return 4;
-    }
-    if (cli.args.count("file") != 1) {
-        return 5;
-    }
-    if (!cli.args.find_value_at("file", 0, &input)
-        || !CCSlice_eq_cstr(&input, "input.ccs")) {
-        return 6;
-    }
+    if (opts.level_present || opts.level != 6) return 53;
     return 0;
 }
 
 static int test_next_arg_and_double_dash(void) {
-    char* argv[] = { "prog", "--processes", "7", "--", "-literal" };
+    char *argv[] = { "prog", "--processes", "7", "--", "-literal" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
-    CCCliParse cli = cc_cli_parse_args(5, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
-    int64_t workers = 0;
-    CCSlice value = cc_slice_empty();
-    if (!cli.ok) {
-        return 7;
-    }
-    if (!cli.args.find_last_value("processes", &value)
-        || !parse_i64_value(value, &workers)) {
-        return 8;
-    }
-    if (workers != 7) {
-        return 9;
-    }
-    if (cli.args.count("file") != 1) {
-        return 10;
-    }
-    if (!cli.args.find_value_at("file", 0, &value)
-        || !CCSlice_eq_cstr(&value, "-literal")) {
-        return 11;
-    }
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 5, argv, &arena, &opts)) return 7;
+    if (!opts.processes_present || opts.processes != 7) return 8;
+    if (opts.file_len != 1) return 9;
+    if (!CCSlice_eq_cstr(&opts.file[0], "-literal")) return 10;
     return 0;
 }
 
 static int test_aliases_and_clusters(void) {
-    char* argv[] = { "prog", "-vh", "--fast", "-11" };
+    char *argv[] = { "prog", "-vh", "--fast", "-11" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
-    CCCliParse cli = cc_cli_parse_args(4, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
-    CCSlice value = cc_slice_empty();
-    if (!cli.ok) {
-        return 12;
-    }
-    if (!cli.args.has("help") || !cli.args.has("verbose")) {
-        return 13;
-    }
-    if (cli.args.count("level") != 2) {
-        return 14;
-    }
-    if (!cli.args.find_value_at("level", 0, &value)
-        || !CCSlice_eq_cstr(&value, "1")) {
-        return 15;
-    }
-    if (!cli.args.find_value_at("level", 1, &value)
-        || !CCSlice_eq_cstr(&value, "11")) {
-        return 16;
-    }
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 4, argv, &arena, &opts)) return 12;
+    if (!opts.help || opts.verbose != 1) return 13;
+    if (!opts.level_present || opts.level != 11) return 14;
+    return 0;
+}
+
+static int test_fast_sets_level(void) {
+    char *argv[] = { "prog", "--fast" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 2, argv, &arena, &opts)) return 15;
+    if (!opts.level_present || opts.level != 1) return 16;
+    return 0;
+}
+
+static int test_digit_range_and_best(void) {
+    char *argv7[] = { "prog", "-7" };
+    char *argv_best[] = { "prog", "--best" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 2, argv7, &arena, &opts)) return 60;
+    if (!opts.level_present || opts.level != 7) return 61;
+    opts = (SmokeOpts){0};
+    if (!cc_parse_args(SmokeOpts, 2, argv_best, &arena, &opts)) return 62;
+    if (!opts.level_present || opts.level != 9) return 63;
+    return 0;
+}
+
+static int test_overlay_helpers(void) {
+    char *argv[] = { "prog", "--level", "3", "--suffix", ".zz" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    SmokeOpts opts = {0};
+    int64_t level = 6;
+    char *sufx = ".gz";
+    if (!cc_parse_args(SmokeOpts, 5, argv, &arena, &opts)) return 70;
+    cc_cli_overlay_i64(&level, &opts, level);
+    cc_cli_overlay_cstr(&sufx, &opts, suffix);
+    if (level != 3) return 71;
+    if (!sufx || strcmp(sufx, ".zz") != 0) return 72;
     return 0;
 }
 
 static int test_missing_and_space_only_values(void) {
-    char* argv_bad_suffix[] = { "prog", "-S.zz" };
-    char* argv_bad_comment[] = { "prog", "-Cnote" };
-    char* argv_missing[] = { "prog", "--suffix", "--help" };
+    char *argv_bad_suffix[] = { "prog", "-S.zz" };
+    char *argv_bad_comment[] = { "prog", "-Cnote" };
+    char *argv_missing[] = { "prog", "--suffix", "--help" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
-    if (cc_cli_parse_args(2, argv_bad_suffix, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
-        return 17;
-    }
-    if (cc_cli_parse_args(2, argv_bad_comment, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
-        return 18;
-    }
-    if (cc_cli_parse_args(3, argv_missing, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
-        return 19;
-    }
+    SmokeOpts opts = {0};
+    if (cc_parse_args(SmokeOpts, 2, argv_bad_suffix, &arena, &opts)) return 17;
+    opts = (SmokeOpts){0};
+    if (cc_parse_args(SmokeOpts, 2, argv_bad_comment, &arena, &opts)) return 18;
+    opts = (SmokeOpts){0};
+    if (cc_parse_args(SmokeOpts, 3, argv_missing, &arena, &opts)) return 19;
     return 0;
 }
 
 static int test_help_parse(void) {
-    char* argv[] = { "prog", "--help" };
+    char *argv[] = { "prog", "--help" };
     CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
-    CCCliParse cli = cc_cli_parse_args(2, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
-    if (!cli.ok) {
-        return 20;
-    }
-    if (!cli.args.has("help")) {
-        return 21;
-    }
+    SmokeOpts opts = {0};
+    if (!cc_parse_args(SmokeOpts, 2, argv, &arena, &opts)) return 20;
+    if (!opts.help) return 21;
+    return 0;
+}
+
+static int test_prepare_result(void) {
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    SmokeOpts opts = {0};
+    char *argv_ok[] = { "prog", "-p4" };
+    char *argv_help[] = { "prog", "--help" };
+    char *argv_bad[] = { "prog", "--nosuch" };
+    CCResult_bool_CCError r;
+
+    r = cc_prepare_args(SmokeOpts, 2, argv_ok, &arena, &opts, stderr);
+    if (cc_is_err(r) || !cc_value(r)) return 40;
+    if (!opts.processes_present || opts.processes != 4) return 41;
+
+    opts = (SmokeOpts){0};
+    r = cc_prepare_args(SmokeOpts, 2, argv_help, &arena, &opts, stderr);
+    if (cc_is_err(r) || cc_value(r)) return 42; /* Ok(false) */
+
+    opts = (SmokeOpts){0};
+    r = cc_prepare_args(SmokeOpts, 2, argv_bad, &arena, &opts, stderr);
+    if (!cc_is_err(r)) return 43;
+    return 0;
+}
+
+static int test_usage_text(void) {
+    char path[] = "/tmp/cli_usage_XXXXXX";
+    int fd = mkstemp(path);
+    FILE *f;
+    char buf[2048];
+    size_t n;
+    if (fd < 0) return 30;
+    f = fdopen(fd, "w+");
+    if (!f) { close(fd); unlink(path); return 31; }
+    cc_print_usage(SmokeOpts, f, "/usr/bin/mytool");
+    rewind(f);
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    unlink(path);
+    if (!strstr(buf, "Usage: mytool")) return 32;
+    if (!strstr(buf, "-p, --processes")) return 33;
+    if (!strstr(buf, "--fast")) return 34;
+    if (!strstr(buf, "--level")) return 35;
+    if (strstr(buf, "-0, --level")) return 36;
+    if (!strstr(buf, "[default: 2]")) return 37;
+    if (!strstr(buf, "[default: .gz]")) return 38;
     return 0;
 }
 
 int main(void) {
     int rc = test_attached_and_equals_forms();
     if (rc != 0) return rc;
+    rc = test_defaults();
+    if (rc != 0) return rc;
     rc = test_next_arg_and_double_dash();
     if (rc != 0) return rc;
     rc = test_aliases_and_clusters();
     if (rc != 0) return rc;
+    rc = test_fast_sets_level();
+    if (rc != 0) return rc;
+    rc = test_digit_range_and_best();
+    if (rc != 0) return rc;
+    rc = test_overlay_helpers();
+    if (rc != 0) return rc;
     rc = test_missing_and_space_only_values();
     if (rc != 0) return rc;
     rc = test_help_parse();
+    if (rc != 0) return rc;
+    rc = test_usage_text();
+    if (rc != 0) return rc;
+    rc = test_prepare_result();
     if (rc != 0) return rc;
     return 0;
 }

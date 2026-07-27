@@ -585,7 +585,7 @@ static inline CCString cc__string_from_float64_impl(CCArena *arena, double v) {
 }
 
 static inline CCString cc__string_from_bool_impl(CCArena *arena, bool v) {
-    return cc_string_from_slice(arena, cc_slice_from_cstr(v ? "true" : "false"));
+    return cc_string_from_slice(arena, char_to_slice(v ? "true" : "false"));
 }
 
 static inline CCString cc__string_from_char_impl(CCArena *arena, char v) {
@@ -620,7 +620,7 @@ static inline CCString double_to_str(double v, CCArena *arena) { return cc__stri
 static inline CCString bool_to_str(bool v, CCArena *arena) { return cc__string_from_bool_impl(arena, v); }
 
 static inline CCString cc__string_value_from_cstr(const char *cstr, CCArena *arena) {
-    return cc_string_from_slice(arena, cc_slice_from_cstr(cstr));
+    return cc_string_from_slice(arena, char_to_slice(cstr));
 }
 
 static inline CCString cc__string_value_from_slice(CCSlice s, CCArena *arena) {
@@ -639,7 +639,7 @@ static inline CCString cc__string_value_from_string_ptr(const CCString *s, CCAre
 
 static inline CCSlice cc__string_slot_from_cstr(const char *cstr, CCArena *arena) {
     (void)arena;
-    return cc_slice_from_cstr(cstr);
+    return char_to_slice(cstr);
 }
 
 static inline CCSlice cc__string_slot_from_slice(CCSlice s, CCArena *arena) {
@@ -790,7 +790,7 @@ static inline CCString* cc__string_slot_push_from_bool(CCString *str, bool v, CC
 
 static inline CCSlice cc__concat_from_cstr(const char *cstr, CCArena *arena) {
     (void)arena;
-    return cc_slice_from_cstr(cstr);
+    return char_to_slice(cstr);
 }
 
 static inline CCSlice cc__concat_from_slice(CCSlice s, CCArena *arena) {

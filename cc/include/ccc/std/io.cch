@@ -59,9 +59,9 @@ CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 #endif
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
-int cc_file_open(CCFile *file, const char *path, const char *mode);
-int cc_file_open_async(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h);
-int cc_file_open_async_deadline(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* deadline);
+int cc_file_open(CCFile *file, CCSlice path, const char *mode);
+int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h);
+int cc_file_open_async_deadline(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h, const CCDeadline* deadline);
 
 // Close file (ignores errors).
 void cc_file_close(CCFile *file);

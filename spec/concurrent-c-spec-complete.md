@@ -5015,6 +5015,30 @@ str msg = format(&arena, "Hello {}! Score: {}", name, score);
 
 **Type:** `T[:]` — Mutable view into contiguous data
 
+`char[:0]` is the sentinel (NUL-terminated) refinement; its ABI is `CCSlice`.
+Path, file, directory, command, CLI string, and script path faces use
+`char[:0]` for NUL-terminated borrows. Host-included C headers may spell the
+same parameter as `CCSlice`.
+
+#### 9.2.0 C strings and call-site literals
+
+```c
+CCSlice char_to_slice(const char *cstr);
+CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
+/* signedness variants: unsigned_char_to_slice, signed_char_to_slice, … */
+CCSlice cc_slice_from_cstr(const char *cstr);  /* alias of char_to_slice */
+
+p->to_slice();   /* UFCS: char* → char_to_slice, const char* → const_char_to_slice */
+```
+
+**Rule (call-site slice literal coerce):** A string literal argument whose
+corresponding parameter is by-value `CCSlice`, `char[:0]`, `CCSliceShared`, or
+`CCSliceUnique` is rewritten to `const_char_to_slice(lit)` in phase-3. TCC
+parser-mode accepts the bare literal. Pointer parameters (`const char *`,
+`char *`, including file `mode`) and non-literal `char[N]` / `char*` variables
+are not coerced — wrap variables with `p->to_slice()` / `char_to_slice(p)`.
+This is not general `char[N]` UFCS.
+
 #### 9.2.1 Core Methods
 
 ```c
@@ -5225,9 +5249,9 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 | Header | Role |
 | ------ | ---- |
 | `<ccc/script/stdio.cch>` | `CCStdio` — arena-bound stdin/stdout/stderr helpers |
-| `<ccc/script/cli.cch>` | `cc_cli_flag`, `cc_cli_flag_value`, `cc_cli_positional` |
-| `<ccc/script/pathx.cch>` | Repo-root discovery and C-string path join |
-| `<ccc/script/file.cch>` | Read / write / copy / print by path |
+| `<ccc/std/cli.cch>` | `@grammar(cli)` runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`) |
+| `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
+| `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
 | `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_task_exe`, `cc_script_task_shcc` |
 | `<ccc/script/temp.cch>` | `CCTempFile` with Result create and `@destroy` cleanup |
 
@@ -5259,31 +5283,31 @@ io.println(s.as_slice()) !>;
 #### 9.5.5 Path, file, process, and temp helpers
 
 ```c
-bool update = cc_cli_flag(argc, argv, "--update");
-const char* current = cc_cli_flag_value(argc, argv, "--current"); /* --current PATH or --current=PATH */
-const char* pos0 = cc_cli_positional(argc, argv, 0);
+/* @grammar(cli) Opts { … } + cc_prepare_args(Opts, argc, argv, &a, &opts, stderr) */
 
-CCSlice root = cc_script_repo_root(argv[0], &a) !>;
-CCSlice baseline = cc_script_path_join((const char*)root.ptr,
-                                      "perf/compiler_baseline.txt", &a);
+char[:0] root = cc_script_repo_root(argv[0]->to_slice(), &a) !>;
+char[:0] baseline = cc_script_path_join(root, "perf/compiler_baseline.txt", &a);
 if (!cc_script_path_exists(baseline)) { /* … */ }
 
 CCSlice bytes = cc_file_read_path(path, &a) !>;
-cc_file_copy(src_slice, dst_slice, &a) !>;
-cc_script_print_file(path_slice, &a) !>;
+cc_file_copy(src, dst, &a) !>;
+cc_script_print_file(path, &a) !>;
 
 CCTempFile tmp = cc_temp_file(&a) !> @destroy;
-cc_sh_run(program_path, arg_path, &a) !>;
+cc_sh_run(program, arg, &a) !>;  /* program/arg are char[:0]; literals coerce */
 
 /* @task bodies: forward remaining argv to a repo-relative tool */
 return cc_script_task_exe(argc, argv, "scripts/format.sh");
 return cc_script_task_shcc(argc, argv, "tools/cc_perf_check.shcc");
 ```
 
-`cc_script_repo_root` walks from the current working directory (and, failing
-that, from `dirname(argv0)`) looking for a Concurrent-C repo marker
-(`cc/src/cc_main.c`, `perf/compiler_baseline.txt`, or `.git`). Returned path
-slices from path helpers are NUL-terminated for C interop.
+Path helpers take NUL-terminated borrows (`char[:0]` / `CCSlice` ABI). String
+literals coerce at by-value slice parameters; `char*` / `argv[i]` variables
+use `p->to_slice()` / `char_to_slice(p)`. `cc_script_repo_root` walks from the
+current working directory (and, failing that, from `dirname(argv0)`) looking
+for a Concurrent-C repo marker (`cc/src/cc_main.c`,
+`perf/compiler_baseline.txt`, or `.git`). Returned path slices are
+NUL-terminated for C interop.
 
 `cc_sh_run` builds a `CCCommand`, runs it to completion, and fails with
 `CCError` when the process exits non-zero.
@@ -5304,8 +5328,9 @@ orchestration:
   file or stdin bytes.
 - **Format:** `@string(\`…${expr}…\`)` into a `CCString` / slice, then
   `CCStdio` or file write.
-- **Glue:** path join, temp files, `cc_sh_run`, CLI flags — thin wrappers over
-  `<ccc/std/>` process, dir, and I/O APIs.
+- **Glue:** path join, temp files, `cc_sh_run`, `@grammar(cli)` /
+  `cc_prepare_args` — thin wrappers over `<ccc/std/>` process, dir, and I/O
+  APIs.
 
 Example (stdin transform):
 
@@ -5503,13 +5528,18 @@ s[..]            // equivalent to s
 
 **String literals:**
 
-String literals have type `char[:]` with static provenance:
+A string literal may initialize a slice view and has static provenance:
 
 ```c
 char[:] s = "hello";  // static slice, always valid
 ```
 
 **Rule:** String literal slices are sendable and have `owner = NULL` (static provenance).
+
+**Rule (call-site slice coerce):** At a call site, a string literal whose
+parameter is by-value `CCSlice` / `char[:0]` / `CCSliceShared` /
+`CCSliceUnique` is auto-wrapped with `const_char_to_slice` (§9.2.0). Variables
+still need `p->to_slice()` / `char_to_slice(p)`.
 
 **Closures:**
 

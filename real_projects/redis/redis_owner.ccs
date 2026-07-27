@@ -354,14 +354,14 @@ static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
 static RedisReply reply_simple(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_SIMPLE_STRING;
-    r.data = cc_slice_from_cstr(s);
+    r.data = char_to_slice(s);
     return r;
 }
 
 static RedisReply reply_error(const char* s) {
     RedisReply r;
     r.kind = REDIS_REPLY_ERROR;
-    r.data = cc_slice_from_cstr(s);
+    r.data = char_to_slice(s);
     return r;
 }
 
@@ -479,12 +479,12 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
     RespGReply items[2];
     size_t n = 0;
     if (slice_eq_ignore_case(key, "save")) {
-        items[0] = wire_bulk(cc_slice_from_cstr("save"));
-        items[1] = wire_bulk(cc_slice_from_cstr(""));
+        items[0] = wire_bulk(char_to_slice("save"));
+        items[1] = wire_bulk(char_to_slice(""));
         n = 2;
     } else if (slice_eq_ignore_case(key, "appendonly")) {
-        items[0] = wire_bulk(cc_slice_from_cstr("appendonly"));
-        items[1] = wire_bulk(cc_slice_from_cstr("no"));
+        items[0] = wire_bulk(char_to_slice("appendonly"));
+        items[1] = wire_bulk(char_to_slice("no"));
         n = 2;
     }
     RespGReply arr = {
@@ -832,7 +832,7 @@ static bool redis_conn_write_wire_reply(RedisConn* conn, const RespGReply* wire)
         if (hw == 0) return false;
         conn->out_len = hw; /* buffer is empty after the flush above */
         return conn->write_bytes(wire->bulk.data) &&
-               conn->write_bytes(cc_slice_from_cstr("\r\n"));
+               conn->write_bytes(char_to_slice("\r\n"));
     }
     return false;
 }

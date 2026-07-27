@@ -8,7 +8,7 @@ int main(void) {
     size_t msg_len = strlen(msg);
 
     CCFile f;
-    if (cc_file_open(&f, path, "w+") != 0) return 1;
+    if (cc_file_open(&f, char_to_slice(path), "w+") != 0) return 1;
 
     CCSlice data = cc_slice_from_buffer((void*)msg, msg_len);
     CCResult_size_t_CCIoError w = cc_file_write(&f, data);

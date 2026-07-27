@@ -1,5 +1,6 @@
 /*
- * Script path helpers: repo root discovery and C-string path join.
+ * Script path helpers: repo root discovery and path join.
+ * Path arguments are NUL-terminated borrows (char[:0] / CCSlice ABI).
  */
 #ifndef CC_SCRIPT_PATHX_H
 #define CC_SCRIPT_PATHX_H
@@ -20,15 +21,15 @@
 #define PATH_MAX 4096
 #endif
 
-static inline int cc__script_is_repo_root(const char *dir) {
+static inline int cc__script_is_repo_root(CCSlice dir) {
     char marker[PATH_MAX];
-    if (!dir || !dir[0]) return 0;
-    snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", dir);
-    if (cc_path_exists(marker)) return 1;
-    snprintf(marker, sizeof(marker), "%s/perf/compiler_baseline.txt", dir);
-    if (cc_path_exists(marker)) return 1;
-    snprintf(marker, sizeof(marker), "%s/.git", dir);
-    return cc_path_exists(marker) ? 1 : 0;
+    if (!dir.ptr || dir.len == 0) return 0;
+    snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", (const char *)dir.ptr);
+    if (cc_path_exists(char_to_slice(marker))) return 1;
+    snprintf(marker, sizeof(marker), "%s/perf/compiler_baseline.txt", (const char *)dir.ptr);
+    if (cc_path_exists(char_to_slice(marker))) return 1;
+    snprintf(marker, sizeof(marker), "%s/.git", (const char *)dir.ptr);
+    return cc_path_exists(char_to_slice(marker)) ? 1 : 0;
 }
 
 static inline CCSlice cc__script_dup_cstr(CCArena *arena, const char *s) {
@@ -43,9 +44,9 @@ static inline CCSlice cc__script_dup_cstr(CCArena *arena, const char *s) {
 
 /*
  * Resolve the Concurrent-C repo root (walk cwd, then dirname(argv0)).
- * Arena is last. Returned slice is NUL-terminated.
+ * Arena is last. Returned path is NUL-terminated CCSlice.
  */
-static inline CCResult_CCSlice_CCError cc_script_repo_root(const char *argv0,
+static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
                                                           CCArena *arena) {
     char start[PATH_MAX];
     char cur[PATH_MAX];
@@ -55,9 +56,10 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(const char *argv0,
     }
     start[0] = '\0';
     if (getcwd(start, sizeof(start)) == NULL) start[0] = '\0';
-    if ((!start[0] || !cc__script_is_repo_root(start)) && argv0 && argv0[0]) {
+    if ((!start[0] || !cc__script_is_repo_root(char_to_slice(start)))
+        && argv0.ptr && argv0.len) {
         char tmp[PATH_MAX];
-        if (realpath(argv0, tmp)) {
+        if (realpath((const char *)argv0.ptr, tmp)) {
             char *slash = strrchr(tmp, '/');
             if (slash) {
                 *slash = '\0';
@@ -73,7 +75,7 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(const char *argv0,
     strncpy(cur, start, sizeof(cur) - 1);
     cur[sizeof(cur) - 1] = '\0';
     for (;;) {
-        if (cc__script_is_repo_root(cur)) {
+        if (cc__script_is_repo_root(char_to_slice(cur))) {
             CCSlice out = cc__script_dup_cstr(arena, cur);
             if (!out.ptr) {
                 return cc_err_CCResult_CCSlice_CCError(
@@ -89,16 +91,14 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(const char *argv0,
         CC_ERROR(CC_ERR_NOT_FOUND, "cc_script_repo_root: not found"));
 }
 
-/* Join path segments; arena last. Result is NUL-terminated. */
-static inline CCSlice cc_script_path_join(const char *a, const char *b, CCArena *arena) {
-    CCSlice sa = a ? cc_slice_from_cstr(a) : cc_slice_empty();
-    CCSlice sb = b ? cc_slice_from_cstr(b) : cc_slice_empty();
-    return cc_path_join(arena, sa, sb);
+/* Join path segments; arena last. Result is NUL-terminated CCSlice. */
+static inline CCSlice cc_script_path_join(CCSlice a, CCSlice b, CCArena *arena) {
+    return cc_path_join(arena, a, b);
 }
 
 static inline bool cc_script_path_exists(CCSlice path) {
     if (!path.ptr || path.len == 0) return false;
-    return cc_path_exists((const char *)path.ptr);
+    return cc_path_exists(path);
 }
 
 #endif /* CC_SCRIPT_PATHX_H */

@@ -92,6 +92,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/comptime_prepare.c \
 	src/preprocess/grammar_seam.c \
 	src/preprocess/grammar_rules.c \
+	src/preprocess/grammar_cli.c \
 	src/preprocess/cpp_expand.c \
 	src/preprocess/type_registry.c \
 	src/preprocess/type_graph.c \
@@ -115,7 +116,8 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 # Stage-1 bootstrap variant: grammar engines stubbed (see BOOTSTRAP SHAPE)
-LOWER_HEADERS1_SRCS := $(subst src/preprocess/grammar_rules.c,src/preprocess/grammar_stub.c,$(LOWER_HEADERS_SRCS))
+# Stage-1: stub grammar_rules (no engines) and drop grammar_cli.o (defined there).
+LOWER_HEADERS1_SRCS := $(filter-out src/preprocess/grammar_cli.c,$(subst src/preprocess/grammar_rules.c,src/preprocess/grammar_stub.c,$(LOWER_HEADERS_SRCS)))
 LOWER_HEADERS1_OBJS := $(LOWER_HEADERS1_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS1_BINARY := $(OUT_BINDIR)/lower_headers_stage1
 LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)

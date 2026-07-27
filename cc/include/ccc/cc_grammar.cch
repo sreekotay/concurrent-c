@@ -117,5 +117,10 @@ typedef struct {
 #define cc_field(T, ...)   T##_field(__VA_ARGS__)
 #define cc_dom(T, ...)     T##_dom(__VA_ARGS__)
 #define cc_try_read(T, ...) T##_try_read(__VA_ARGS__)
+/* @grammar(cli): fill typed options from argc/argv; print generated usage;
+ * prepare = parse + usage with bool !>(CCError) (Ok true/false / Err). */
+#define cc_parse_args(T, ...)    T##_parse_args(__VA_ARGS__)
+#define cc_print_usage(T, ...)   T##_print_usage(__VA_ARGS__)
+#define cc_prepare_args(T, ...)  T##_prepare(__VA_ARGS__)
 
 #endif /* CCC_CC_GRAMMAR_CCH */

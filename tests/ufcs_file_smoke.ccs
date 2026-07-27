@@ -15,7 +15,7 @@ int main(void) {
     CCArena arena;
     CCSlice out;
 
-    if (f.open(path, "w+") != 0) return 1;
+    if (f.open(path->to_slice(), "w+") != 0) return 1;
 
     written = f.write(data);
     if (cc_is_err(written)) {
@@ -33,7 +33,7 @@ int main(void) {
     }
     cc_file_close(&f);
 
-    if (reader.open(path, "rb") != 0) {
+    if (reader.open(path->to_slice(), "rb") != 0) {
         return 5;
     }
 

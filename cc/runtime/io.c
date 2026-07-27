@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-int cc_file_open(CCFile *file, const char *path, const char *mode) {
+int cc_file_open(CCFile *file, CCSlice path_sl, const char *mode) {
+    const char *path = path_sl.ptr ? (const char *)path_sl.ptr : NULL;
     if (!file) return -1;
     file->handle = NULL;
     if (!path || !mode) return -1;
@@ -93,7 +94,7 @@ static int cc__async_complete(CCAsyncHandle* h, int err) {
     return cc_chan_send(h->done, &err, sizeof(int));
 }
 
-int cc_file_open_async(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h) {
+int cc_file_open_async(CCExec* ex, CCFile *file, CCSlice path, const char *mode, CCAsyncHandle* h) {
     (void)ex;
     int err = cc_file_open(file, path, mode);
     return cc__async_complete(h, err);

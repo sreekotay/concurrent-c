@@ -12,8 +12,8 @@ int main(void) {
     SlicePtrMap *ptrs = SlicePtrMap_init(&arena);
     if (!ints || !ptrs) return 2;
 
-    CCSlice alpha = cc_slice_from_cstr("alpha");
-    CCSlice beta = cc_slice_from_cstr("beta");
+    CCSlice alpha = char_to_slice("alpha");
+    CCSlice beta = char_to_slice("beta");
 
     if (SliceIntMap_insert(ints, alpha, 11) != 0) return 3;
     if (SliceIntMap_insert(ints, beta, 22) != 0) return 4;

@@ -30,7 +30,7 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     return 0;
 }
 
-CCCommand cc_command_new(CCArena *arena, const char *program) {
+CCCommand cc_command_new(CCArena *arena, CCSlice program) {
     CCCommand cmd = {0};
     cmd.arena = arena;
     cmd.storage = cc_string_new();
@@ -41,7 +41,7 @@ CCCommand cc_command_new(CCArena *arena, const char *program) {
         return empty;
     }
 
-    if (program && !cc_command_arg(&cmd, program)) {
+    if (program.ptr && program.len && !cc_command_arg_slice(&cmd, program)) {
         CCCommand empty = {0};
         return empty;
     }
@@ -131,9 +131,9 @@ CCCommand *cc_command_inherit_stdio(CCCommand *cmd) {
     return cmd;
 }
 
-CCCommand *cc_command_cwd(CCCommand *cmd, const char *cwd) {
+CCCommand *cc_command_cwd(CCCommand *cmd, CCSlice cwd) {
     if (!cmd) return NULL;
-    cmd->cwd_path = cwd;
+    cmd->cwd_path = cwd.ptr ? (const char *)cwd.ptr : NULL;
     return cmd;
 }
 

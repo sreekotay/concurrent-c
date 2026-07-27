@@ -6,7 +6,7 @@
 static RedisReply reply_simple_local(const char* s) {
     RedisReply r = {0};
     r.kind = REDIS_REPLY_SIMPLE_STRING;
-    r.data = cc_slice_from_cstr(s);
+    r.data = char_to_slice(s);
     return r;
 }
 
@@ -29,7 +29,7 @@ static int64_t !>(CCError) incr_local(char[:] key, int64_t value) {
 }
 
 int main(void) {
-    int64_t !>(CCError) out = incr_local(cc_slice_from_cstr("k"), 5);
+    int64_t !>(CCError) out = incr_local(char_to_slice("k"), 5);
     assert(out.is_ok());
     assert(out.value() == 5);
     return 0;

@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <ccc/std/prelude.cch>
 #include <ccc/script/stdio.cch>
-#include <ccc/script/cli.cch>
+#include <ccc/std/cli.cch>
 #include <ccc/script/pathx.cch>
 #include <ccc/script/file.cch>
 #include <ccc/script/sh.cch>

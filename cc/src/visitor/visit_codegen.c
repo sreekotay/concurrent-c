@@ -30,6 +30,7 @@ static double cc__now_ms(void) {
 #include "preprocess/grammar_engine.h"
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
+#include "visitor/pass_slice_literal_coerce.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
@@ -1027,30 +1028,36 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
     return out;
 }
 
-/* M2: collect UFCS + closure_calls + autoblock + await_normalize in one apply. */
-/* Phase-3 batching is split into two stages because UFCS is a *producer* of
- * new call sites that the other Phase-3 passes need to see:
+/* M2: collect UFCS + slice-literal coerce + closure_calls + autoblock +
+ * await_normalize across staged applies. */
+/* Phase-3 batching is split because UFCS is a *producer* of new call sites
+ * that later Phase-3 passes need to see:
  *
  *   - Stage 1 (UFCS_ONLY): collects UFCS edits only.  After applying, the
  *     caller reparses so downstream passes see the lowered `method(obj)`
  *     call form in the AST.
  *
+ *   - Stage 1.5 (SLICE_LIT_COERCE): wraps string literals at CCSlice /
+ *     char[:0] parameters.  Own stage so arg-span edits do not overlap
+ *     autoblock's whole-call replacements in the same EditBuffer.
+ *
  *   - Stage 2 (POST_UFCS): batches closure_calls + autoblock +
  *     await_normalize.  These passes target disjoint constructs (closure
  *     calls / blocking calls / await expressions) and are AST-driven
- *     against the post-UFCS reparse, so they compose into a single edit
+ *     against the post-coerce reparse, so they compose into a single edit
  *     buffer apply and a single reparse.
  *
- * The single-stage variant (all four collectors into one buffer) collided
+ * The single-stage variant (all collectors into one buffer) collided
  * for ~1% of programs because await's replacement of `await EXPR` covers
  * the same byte range as UFCS's replacement of `EXPR` when `EXPR` is a
  * UFCS call inside the await — a genuine semantic dependency that
- * sequential mode resolved via an interleaved reparse.  Two-stage
- * preserves the UFCS-first ordering while collapsing 4 → 2 reparses.
+ * sequential mode resolved via an interleaved reparse.  Staged
+ * UFCS-first ordering preserves that while collapsing reparses.
  */
 typedef enum CCPhase3Stage {
     CC_PHASE3_STAGE_UFCS_ONLY = 0,
-    CC_PHASE3_STAGE_POST_UFCS = 1,
+    CC_PHASE3_STAGE_SLICE_LIT_COERCE = 1,
+    CC_PHASE3_STAGE_POST_UFCS = 2,
 } CCPhase3Stage;
 
 static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
@@ -1068,6 +1075,8 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
     int rc = 0;
     if (stage == CC_PHASE3_STAGE_UFCS_ONLY) {
         if (cc__collect_ufcs_edits(root, ctx, &eb) < 0) rc = -1;
+    } else if (stage == CC_PHASE3_STAGE_SLICE_LIT_COERCE) {
+        if (cc__collect_slice_literal_coerce_edits(root, ctx, &eb) < 0) rc = -1;
     } else {
         if (cc__collect_closure_calls_edits(root, ctx, &eb) < 0 ||
             cc__collect_autoblocking_edits(root, ctx, &eb) < 0 ||
@@ -1151,7 +1160,9 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
             }
             cc_diag_maybe_dump_lowered(stage == CC_PHASE3_STAGE_UFCS_ONLY
                                            ? "phase3-stage1-ufcs"
-                                           : "phase3-stage2-post-ufcs",
+                                           : stage == CC_PHASE3_STAGE_SLICE_LIT_COERCE
+                                                 ? "phase3-stage1_5-slice-lit-coerce"
+                                                 : "phase3-stage2-post-ufcs",
                                        rewritten, new_len);
         }
     }
@@ -4068,6 +4079,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock") ||
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@nonblocking") ||
+         /* Slice-literal coerce (stage 1.5) must run even without UFCS when
+          * common CCSlice-taking stdlib faces appear with bare string lits. */
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_path_exists") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_file_open") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_dir_open") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_glob") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_command") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_path_join") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_script_path_join") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_file_read_path") ||
+         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_sh_run") ||
          /* Dump-dir selftests (scripts/test_reparse_sanitize.sh) assert on
           * reparse_prepared_* output; keep one entry reparse when requested. */
          getenv("CC_DEBUG_REPARSE_DUMP_DIR") != NULL);
@@ -4097,9 +4119,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          * Stage 1 (UFCS): collects only `cc__collect_ufcs_edits` into the
          * edit buffer and applies them.  UFCS lowers `obj.method(...)` →
          * `method(obj, ...)`, *producing* new conventional call sites.
-         * Stage 2's collectors are AST-driven against CALL nodes whose
+         * Later collectors are AST-driven against CALL nodes whose
          * `is_ufcs` flag has been cleared by lowering, so they need to see
          * the post-UFCS AST — hence the mandatory reparse barrier here.
+         *
+         * Stage 1.5 (slice literal coerce): wraps string literals at
+         * CCSlice / char[:0] parameters.  Separate from Stage 2 so
+         * arg-span edits never overlap autoblock whole-call replacements.
          *
          * Stage 2 (post-UFCS): collects closure_calls + autoblock +
          * await_normalize into a single edit buffer and applies them in
@@ -4108,9 +4134,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          * await expressions) and emit non-overlapping per-span edits, so
          * one collect+apply+reparse cycle covers all three.
          *
-         * Net reparses in Phase 3: 2 (one per stage when each produces
-         * changes; fewer when a stage emits no edits).  The legacy
-         * sequential pipeline did 4 (one per pass).  See PIPELINE.md.
+         * Net reparses in Phase 3: up to 3 (one per stage when each
+         * produces changes; fewer when a stage emits no edits).  See
+         * PIPELINE.md.
          */
         if (src_ufcs &&
             (cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
@@ -4136,6 +4162,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
             phase3_owned_root = cc__reparse_source_to_ast_ctx(ctx, src_ufcs, src_ufcs_len,
                                                               "phase3 stage 1 (UFCS) reparse");
+            if (!phase3_owned_root) {
+                goto fail;
+            }
+            phase3_root = phase3_owned_root;
+        }
+        phase3_changed = 0;
+        if (cc__apply_batched_phase3_passes(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                            src_all, &phase3_changed,
+                                            CC_PHASE3_STAGE_SLICE_LIT_COERCE) < 0) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            goto fail;
+        }
+        if (phase3_changed) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            phase3_owned_root = cc__reparse_source_to_ast_ctx(
+                ctx, src_ufcs, src_ufcs_len, "phase3 stage 1.5 (slice lit coerce) reparse");
             if (!phase3_owned_root) {
                 goto fail;
             }

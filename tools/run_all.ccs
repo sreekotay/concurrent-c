@@ -134,7 +134,7 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
     if (!full_path) return;
 
     CCFile f;
-    if (cc_file_open(&f, full_path, "w") != 0) return;
+    if (cc_file_open(&f, full_path->to_slice(), "w") != 0) return;
     CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
     (void)cc_file_write(&f, slice);
     cc_file_close(&f);
@@ -205,7 +205,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     printf("\n=== %s ===\n", label);
     ensure_log_dir(arena);
 
-    CCGlobResult files = cc_glob(arena, pattern);
+    CCGlobResult files = cc_glob(arena, pattern->to_slice());
     size_t n = cc_glob_result_len(&files);
     if (n == 0) {
         printf("  (no files matching %s)\n", pattern);
@@ -275,39 +275,34 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     }
 }
 
+@grammar(cli) RunAllOpts {~~~~
+    help: flag -h, --help desc "Show this help"
+    examples: flag --examples desc "Run all example programs"
+    stress: flag --stress desc "Run all stress tests"
+    perf: flag --perf desc "Run all performance benchmarks"
+    all: flag --all desc "Run everything"
+    trace: flag --trace desc "Hard-flushed trace log at tmp/run_all_logs/run_trace.log"
+    stream: flag --stream desc "Stream per-test stdout/stderr to the terminal"
+~~~~}
+
 int main(int argc, char** argv) {
     CCArena arena = cc_arena_heap(megabytes(16)) @destroy;
 
-    static const CCArgSpec RUN_ALL_ARGS[] = {
-        { .long_ = "help", .short_ = 'h', .kind = CC_ARG_FLAG, .desc = "Show this help" },
-        { .long_ = "examples", .kind = CC_ARG_FLAG, .desc = "Run all example programs" },
-        { .long_ = "stress", .kind = CC_ARG_FLAG, .desc = "Run all stress tests" },
-        { .long_ = "perf", .kind = CC_ARG_FLAG, .desc = "Run all performance benchmarks" },
-        { .long_ = "all", .kind = CC_ARG_FLAG, .desc = "Run everything" },
-        { .long_ = "trace", .kind = CC_ARG_FLAG,
-          .desc = "Hard-flushed trace log (fsynced per test) at tmp/run_all_logs/run_trace.log; "
-                  "lets you see the exact test that was running if the machine panics" },
-        { .long_ = "stream", .kind = CC_ARG_FLAG,
-          .desc = "Stream per-test stdout/stderr to the terminal (inherit_stdio) for every "
-                  "category, not just perf" },
-    };
-
-    CCCliParse cli = cc_cli_parse_args(argc, argv, RUN_ALL_ARGS, cc_arg_spec_count(RUN_ALL_ARGS), &arena);
-    if (!cli.ok) {
-        cli.print(stderr);
-        return cli.exit_code;
-    }
-    if (cli.args.has("help")) {
-        cli.print(stdout);
-        return 0;
+    RunAllOpts opts = {0};
+    {
+        bool go = cc_prepare_args(RunAllOpts, argc, argv, &arena, &opts, stderr) !>(e) {
+            (void)e;
+            return 2;
+        };
+        if (!go) return 0; /* --help */
     }
 
-    bool do_examples = cli.args.has("examples");
-    bool do_stress = cli.args.has("stress");
-    bool do_perf = cli.args.has("perf");
-    bool do_all = cli.args.has("all");
-    bool do_trace = cli.args.has("trace");
-    bool do_stream = cli.args.has("stream");
+    bool do_examples = opts.examples;
+    bool do_stress = opts.stress;
+    bool do_perf = opts.perf;
+    bool do_all = opts.all;
+    bool do_trace = opts.trace;
+    bool do_stream = opts.stream;
     if (do_all) {
         do_examples = true;
         do_stress = true;
@@ -315,7 +310,7 @@ int main(int argc, char** argv) {
     }
     if (!do_examples && !do_stress && !do_perf) {
         fprintf(stderr, "Select at least one category.\n");
-        cli.print(stderr);
+        cc_print_usage(RunAllOpts, stderr, argv[0]);
         return 1;
     }
 

@@ -91,7 +91,7 @@ static bool open_output_checked(CCFile* file, const char* path) {
         mark_pipeline_error();
         return false;
     }
-    if (file->open(path, "wb") != 0) {
+    if (file->open(path->to_slice(), "wb") != 0) {
         fprintf(stderr, "Failed to open output: %s\n", path);
         mark_pipeline_error();
         return false;
@@ -420,7 +420,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     
     CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
-    if (in_file.open(real_in, "rb") != 0) {
+    if (in_file.open(real_in->to_slice(), "rb") != 0) {
         fprintf(stderr, "Failed to open input: %s\n", real_in);
         return 1;
     }
@@ -684,7 +684,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
  * ============================================================================ */
 
 /* Forward declarations */
-int process_path(const char* path, int num_workers, int level, int strategy);
+int process_path(char[:0] path, int num_workers, int level, int strategy);
 
 int compress_file(const char* in_path, const char* out_path, int num_workers, int level, int strategy) {
     /* num_workers used for round-robin worker affinity */
@@ -696,7 +696,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     // Open input file
     CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
-    if (in_file.open(real_in, "rb") != 0) {
+    if (in_file.open(real_in->to_slice(), "rb") != 0) {
         fprintf(stderr, "Failed to open input: %s\n", real_in);
         return 1;
     }
@@ -1222,23 +1222,24 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 }
 
 /* Process a single path (file or directory) recursively (matches pigz.c:4600-4620) */
-int process_path(const char* path, int num_workers, int level, int strategy) {
-    if (path == NULL) {
+int process_path(char[:0] path, int num_workers, int level, int strategy) {
+    if (!path.ptr || path.len == 0) {
         /* Stdin - no stat needed */
         g.mtime = 0;
         g.name = g.alias;
         return compress_file(NULL, "/dev/stdout", num_workers, level, strategy);
     }
 
+    const char* path_cstr = (const char*)path.ptr;
     struct stat st;
-    if (stat(path, &st) != 0) {
-        fprintf(stderr, "pigz_cc: %s: %s\n", path, strerror(errno));
+    if (stat(path_cstr, &st) != 0) {
+        fprintf(stderr, "pigz_cc: %s: %s\n", path_cstr, strerror(errno));
         return 1;
     }
 
     if (S_ISDIR(st.st_mode)) {
         if (!g.recursive) {
-            fprintf(stderr, "pigz_cc: %s is a directory -- ignored\n", path);
+            fprintf(stderr, "pigz_cc: %s is a directory -- ignored\n", path_cstr);
             return 0;
         }
 
@@ -1257,27 +1258,21 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
                     if (cc_is_err(entry_res)) {
                         CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
                         if (err.kind == CC_IO_OTHER && err.os_code == 0) break; // EOF
-                        fprintf(stderr, "pigz_cc: %s: error reading directory\n", path);
+                        fprintf(stderr, "pigz_cc: %s: error reading directory\n", path_cstr);
                         ret = 1;
                         break;
                     }
 
                     CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
-                    const char* name = (const char*)entry.name.ptr;
-                    
-                    // Skip . and ..
-                    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+                    char[:0] name = entry.name;
+                    if (CCSlice_eq_cstr(&name, ".") || CCSlice_eq_cstr(&name, "..")) continue;
 
-                    // Join path
-                    CCSlice path_slice = cc_slice_from_buffer((void*)path, strlen(path));
-                    CCSlice full_path_slice = cc_path_join(dir_arena, path_slice, entry.name);
-                    const char* full_path = (const char*)full_path_slice.ptr;
-
+                    char[:0] full_path = cc_path_join(dir_arena, path, name);
                     ret |= process_path(full_path, num_workers, level, strategy);
                 }
                 return ret;
             } else {
-                fprintf(stderr, "pigz_cc: %s: failed to open directory\n", path);
+                fprintf(stderr, "pigz_cc: %s: failed to open directory\n", path_cstr);
                 return 1;
             }
         }
@@ -1285,7 +1280,7 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
 
     /* It's a file - set metadata and build output name */
     g.mtime = (g.headis & 2) ? st.st_mtime : 0;
-    g.name = (g.headis & 1) ? justname((char*)path) : NULL;
+    g.name = (g.headis & 1) ? justname((char*)path_cstr) : NULL;
 
     char output_file[4096];
     if (g.to_stdout) {
@@ -1294,44 +1289,44 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
         }
     } else if (g.decode) {
         // Decompression: remove suffix
-        size_t len = strlen(path);
+        size_t len = path.len;
         size_t slen = strlen(g.sufx);
-        if (len > slen && strcmp(path + len - slen, g.sufx) == 0) {
+        if (len > slen && strcmp(path_cstr + len - slen, g.sufx) == 0) {
             if (len - slen >= sizeof(output_file)) {
-                fprintf(stderr, "pigz_cc: output path too long: %s\n", path);
+                fprintf(stderr, "pigz_cc: output path too long: %s\n", path_cstr);
                 return 1;
             }
-            memcpy(output_file, path, len - slen);
+            memcpy(output_file, path_cstr, len - slen);
             output_file[len - slen] = '\0';
         } else {
             if (!g.force) {
-                if (g.verbosity > 0) fprintf(stderr, "pigz_cc: %s does not have %s suffix -- skipped\n", path, g.sufx);
+                if (g.verbosity > 0) fprintf(stderr, "pigz_cc: %s does not have %s suffix -- skipped\n", path_cstr, g.sufx);
                 return 0;
             }
-            if (!build_suffixed_path(output_file, sizeof(output_file), path, ".out")) {
+            if (!build_suffixed_path(output_file, sizeof(output_file), path_cstr, ".out")) {
                 return 1;
             }
         }
     } else {
         // Compression: add suffix
-        size_t len = strlen(path);
+        size_t len = path.len;
         size_t slen = strlen(g.sufx);
-        if (!g.force && len > slen && strcmp(path + len - slen, g.sufx) == 0) {
-            if (g.verbosity > 0) fprintf(stderr, "pigz_cc: %s already has %s suffix -- skipped\n", path, g.sufx);
+        if (!g.force && len > slen && strcmp(path_cstr + len - slen, g.sufx) == 0) {
+            if (g.verbosity > 0) fprintf(stderr, "pigz_cc: %s already has %s suffix -- skipped\n", path_cstr, g.sufx);
             return 0;
         }
-        if (!build_suffixed_path(output_file, sizeof(output_file), path, g.sufx)) {
+        if (!build_suffixed_path(output_file, sizeof(output_file), path_cstr, g.sufx)) {
             return 1;
         }
     }
 
-    int ret = g.decode ? decompress_file(path, output_file, num_workers)
-                       : compress_file(path, output_file, num_workers, level, strategy);
+    int ret = g.decode ? decompress_file(path_cstr, output_file, num_workers)
+                       : compress_file(path_cstr, output_file, num_workers, level, strategy);
     
     if (ret == 0 && !g.to_stdout && !g.test && !g.list) {
-        copymeta(path, output_file);
+        copymeta(path_cstr, output_file);
         if (!g.keep) {
-            unlink(path);
+            unlink(path_cstr);
         }
     }
     
@@ -1342,59 +1337,87 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
  * Command Line Interface (matches pigz.c:4100-4600)
  * ============================================================================ */
 
-static bool pigz_cli_parse_i64(CCSlice value, const char* name, int64_t* out) {
-    CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(value, 10);
-    if (cc_is_err(parsed)) {
-        fprintf(stderr, "Invalid integer for %s\n", name);
-        return false;
-    }
-    if (out) *out = cc_unwrap(parsed);
-    return true;
-}
+@grammar(cli) PigzOpts {~~~~
+    stdout: flag -c, --stdout, --to-stdout desc "Write to stdout"
+    decompress: flag -d, --decompress, --uncompress desc "Decompress"
+    test: flag -t, --test desc "Test integrity"
+    list: flag -l, --list desc "List metadata"
+    keep: flag -k, --keep desc "Keep original file"
+    recursive: flag -r, --recursive desc "Recursive directory processing"
+    rsyncable: flag -R, --rsyncable desc "Rsyncable output"
+    force: flag -f, --force desc "Force overwrite"
+    quiet: flag -q, --quiet, --silent desc "Quiet mode"
+    verbose: count -v, --verbose desc "Verbose mode"
+    version: flag -V, --version desc "Show version"
+    zlib: flag -z, --zlib desc "Compress to zlib format"
+    zip: flag -K, --zip desc "Compress to zip format"
+    independent: flag -i, --independent desc "Independent blocks"
+    synchronous: flag -Y, --synchronous desc "Synchronous output"
+    huffman: flag -H, --huffman desc "Huffman-only strategy"
+    rle: flag -U, --rle desc "RLE strategy"
+    no_name: flag -n, --no-name desc "Do not store file name"
+    name: flag -N, --name desc "Store file name"
+    time: flag -M, --time desc "Store or restore modification time"
+    no_time: flag -T, --no-time desc "Do not store modification time"
+    help: flag -h, --help desc "Show this help"
+    level: opt i64 --level, -0..-9, -11 alias --fast=1, --best=9 as LEVEL default 6 desc "Compression level (0-9, 11)"
+    processes: opt i64 -p, --processes attach as N default 4 desc "Allow up to N compression workers"
+    blocksize: opt i64 -b, --blocksize attach as KB default 128 desc "Block size in KB"
+    max_memory: opt i64 --max-memory as MB default 0 desc "Max memory in MB"
+    suffix: opt string -S, --suffix as SUFFIX default ".gz" desc "Suffix instead of .gz"
+    comment: opt string -C, --comment as TEXT desc "Set comment"
+    alias_name: opt string -A, --alias as TEXT desc "Set alias"
+    file: rest string desc "Input files"
+~~~~}
 
-static const CCArgSpec PIGZ_ARGS[] = {
-    { .long_ = "stdout",      .short_ = 'c', .aliases = cc_strs("to-stdout"),                   .kind = CC_ARG_FLAG,  .desc = "Write to stdout" },
-    { .long_ = "decompress",  .short_ = 'd', .aliases = cc_strs("uncompress"),                  .kind = CC_ARG_FLAG,  .desc = "Decompress" },
-    { .long_ = "test",        .short_ = 't',                                                    .kind = CC_ARG_FLAG,  .desc = "Test integrity" },
-    { .long_ = "list",        .short_ = 'l',                                                    .kind = CC_ARG_FLAG,  .desc = "List metadata" },
-    { .long_ = "keep",        .short_ = 'k',                                                    .kind = CC_ARG_FLAG,  .desc = "Keep original file" },
-    { .long_ = "recursive",   .short_ = 'r',                                                    .kind = CC_ARG_FLAG,  .desc = "Recursive directory processing" },
-    { .long_ = "rsyncable",   .short_ = 'R',                                                    .kind = CC_ARG_FLAG,  .desc = "Rsyncable output" },
-    { .long_ = "force",       .short_ = 'f',                                                    .kind = CC_ARG_FLAG,  .desc = "Force overwrite" },
-    { .long_ = "quiet",       .short_ = 'q', .aliases = cc_strs("silent"),                      .kind = CC_ARG_FLAG,  .desc = "Quiet mode" },
-    { .long_ = "verbose",     .short_ = 'v',                                                    .kind = CC_ARG_FLAG,  .desc = "Verbose mode" },
-    { .long_ = "version",     .short_ = 'V',                                                    .kind = CC_ARG_FLAG,  .desc = "Show version" },
-    { .long_ = "zlib",        .short_ = 'z',                                                    .kind = CC_ARG_FLAG,  .desc = "Compress to zlib format" },
-    { .long_ = "zip",         .short_ = 'K',                                                    .kind = CC_ARG_FLAG,  .desc = "Compress to zip format" },
-    { .long_ = "independent", .short_ = 'i',                                                    .kind = CC_ARG_FLAG,  .desc = "Independent blocks" },
-    { .long_ = "synchronous", .short_ = 'Y',                                                    .kind = CC_ARG_FLAG,  .desc = "Synchronous output" },
-    { .long_ = "huffman",     .short_ = 'H',                                                    .kind = CC_ARG_FLAG,  .desc = "Huffman-only strategy" },
-    { .long_ = "rle",         .short_ = 'U',                                                    .kind = CC_ARG_FLAG,  .desc = "RLE strategy" },
-    { .long_ = "no-name",     .short_ = 'n',                                                    .kind = CC_ARG_FLAG,  .desc = "Do not store file name" },
-    { .long_ = "name",        .short_ = 'N',                                                    .kind = CC_ARG_FLAG,  .desc = "Store file name" },
-    { .long_ = "time",        .short_ = 'M',                                                    .kind = CC_ARG_FLAG,  .desc = "Store or restore modification time" },
-    { .long_ = "no-time",     .short_ = 'T',                                                    .kind = CC_ARG_FLAG,  .desc = "Do not store modification time" },
-    { .long_ = "help",        .short_ = 'h',                                                    .kind = CC_ARG_FLAG,  .desc = "Show this help" },
-    { .long_ = "fast",                       .maps_to = cc_strs("level", "1"),                  .kind = CC_ARG_ALIAS, .desc = "Compression level 1" },
-    { .long_ = "best",                       .maps_to = cc_strs("level", "9"),                  .kind = CC_ARG_ALIAS, .desc = "Compression level 9" },
-    { .long_ = "level",       .short_ = '1', .short_aliases = cc_strs("0", "2", "3", "4", "5", "6", "7", "8", "9", "11"), .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "LEVEL", .desc = "Compression level (0-9, 11)" },
-    { .long_ = "processes",   .short_ = 'p',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "N", .allow_short_attached = true, .desc = "Allow up to N compression workers [default: scheduler default]" },
-    { .long_ = "blocksize",   .short_ = 'b',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "KB", .allow_short_attached = true, .desc = "Block size in KB [default: 128]" },
-    { .long_ = "max-memory",                                                                  .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "MB", .desc = "Max memory in MB [default: 0]" },
-    { .long_ = "suffix",      .short_ = 'S',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "SUFFIX", .desc = "Suffix instead of .gz [default: .gz]" },
-    { .long_ = "comment",     .short_ = 'C',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "TEXT", .desc = "Set comment" },
-    { .long_ = "alias",       .short_ = 'A',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "TEXT", .desc = "Set alias" },
-    { .long_ = "file",                                                                          .kind = CC_ARG_POSITIONAL, .value_kind = CC_VALUE_STRING, .positional_many = true, .desc = "Input files" },
-};
+static void pigz_apply_opts(const PigzOpts *opts, int64_t *num_workers,
+                            bool *user_set_num_workers, int64_t *block_kb,
+                            int64_t *max_mem_mb, bool *show_version) {
+    if (opts->stdout) g.to_stdout = 1;
+    if (opts->decompress) g.decode = 1;
+    if (opts->test) { g.decode = 1; g.test = 1; }
+    if (opts->list) { g.decode = 1; g.list = 1; }
+    if (opts->keep) g.keep = 1;
+    if (opts->recursive) g.recursive = 1;
+    if (opts->rsyncable) g.rsync = 1;
+    if (opts->force) g.force = 1;
+    if (opts->quiet) g.verbosity = 0;
+    if (opts->verbose) g.verbosity += (int)opts->verbose;
+    if (opts->version) *show_version = true;
+    if (opts->zlib) { g.form = 1; g.sufx = ".zz"; }
+    if (opts->zip) { g.form = 2; g.sufx = ".zip"; }
+    if (opts->independent) g.setdict = 0;
+    if (opts->synchronous) g.sync = 1;
+    if (opts->huffman) g.strategy = Z_HUFFMAN_ONLY;
+    if (opts->rle) g.strategy = Z_RLE;
+    if (opts->time) g.headis |= 2;
+    if (opts->no_name) g.headis &= ~1;
+    if (opts->name) g.headis |= 1;
+    if (opts->no_time) g.headis &= ~2;
+    cc_cli_overlay_cstr(&g.comment, opts, comment);
+    cc_cli_overlay_cstr(&g.alias, opts, alias_name);
+    {
+        int64_t level = g.level;
+        cc_cli_overlay_i64(&level, opts, level);
+        g.level = (int)level;
+    }
+    if (opts->processes_present) {
+        *num_workers = opts->processes;
+        *user_set_num_workers = true;
+    }
+    cc_cli_overlay_i64(block_kb, opts, blocksize);
+    cc_cli_overlay_i64(max_mem_mb, opts, max_memory);
+    cc_cli_overlay_cstr(&g.sufx, opts, suffix);
+}
 
 int main(int argc, char *argv[]) {
     bool show_version = false;
     int64_t num_workers = 4;
     bool user_set_num_workers = false;
-    int64_t block_kb = BLOCK_SIZE / 1024;
+    int64_t block_kb = 128;
     int64_t max_mem_mb = 0;
     CCArena cli_arena = cc_arena_heap(kilobytes(16)) @destroy;
-    CCCliParse cli;
+    PigzOpts opts = {0};
 
     g.verbosity = 1;
     g.sufx = ".gz";
@@ -1407,59 +1430,23 @@ int main(int argc, char *argv[]) {
     /* Set up signal handling (matches pigz.c:4627) */
     signal(SIGINT, cut_short);
     signal(SIGTERM, cut_short);
-    cli = cc_cli_parse_args(argc, argv, PIGZ_ARGS, cc_arg_spec_count(PIGZ_ARGS), &cli_arena);
-    if (!cli.ok || (argc < 2 && isatty(1)) || cli.args.has("help")) {
-        cli.print(stderr);
-        return cli.exit_code;
-    }
-    for (size_t i = 0; i < cli.args.len(); i++) {
-        const CCParsedArg* arg = cli.args.get(i);
-        if (strcmp(arg->key, "stdout") == 0) g.to_stdout = 1;
-        else if (strcmp(arg->key, "decompress") == 0) g.decode = 1;
-        else if (strcmp(arg->key, "test") == 0) { g.decode = 1; g.test = 1; }
-        else if (strcmp(arg->key, "list") == 0) { g.decode = 1; g.list = 1; }
-        else if (strcmp(arg->key, "keep") == 0) g.keep = 1;
-        else if (strcmp(arg->key, "recursive") == 0) g.recursive = 1;
-        else if (strcmp(arg->key, "rsyncable") == 0) g.rsync = 1;
-        else if (strcmp(arg->key, "force") == 0) g.force = 1;
-        else if (strcmp(arg->key, "quiet") == 0) g.verbosity = 0;
-        else if (strcmp(arg->key, "verbose") == 0) g.verbosity++;
-        else if (strcmp(arg->key, "version") == 0) show_version = true;
-        else if (strcmp(arg->key, "zlib") == 0) { g.form = 1; g.sufx = ".zz"; }
-        else if (strcmp(arg->key, "zip") == 0) { g.form = 2; g.sufx = ".zip"; }
-        else if (strcmp(arg->key, "independent") == 0) g.setdict = 0;
-        else if (strcmp(arg->key, "synchronous") == 0) g.sync = 1;
-        else if (strcmp(arg->key, "huffman") == 0) g.strategy = Z_HUFFMAN_ONLY;
-        else if (strcmp(arg->key, "rle") == 0) g.strategy = Z_RLE;
-        else if (strcmp(arg->key, "time") == 0) g.headis |= 2;
-        else if (strcmp(arg->key, "no-name") == 0) g.headis &= ~1;
-        else if (strcmp(arg->key, "name") == 0) g.headis |= 1;
-        else if (strcmp(arg->key, "no-time") == 0) g.headis &= ~2;
-        else if (strcmp(arg->key, "comment") == 0) g.comment = (char*)arg->value.ptr;
-        else if (strcmp(arg->key, "alias") == 0) g.alias = (char*)arg->value.ptr;
-        else if (strcmp(arg->key, "level") == 0) {
-            int64_t parsed_level = 0;
-            if (!pigz_cli_parse_i64(arg->value, "--level", &parsed_level)) {
-                return 1;
-            }
-            g.level = (int)parsed_level;
-        } else if (strcmp(arg->key, "processes") == 0) {
-            if (!pigz_cli_parse_i64(arg->value, "--processes", &num_workers)) {
-                return 1;
-            }
-            user_set_num_workers = true;
-        } else if (strcmp(arg->key, "blocksize") == 0) {
-            if (!pigz_cli_parse_i64(arg->value, "--blocksize", &block_kb)) {
-                return 1;
-            }
-        } else if (strcmp(arg->key, "max-memory") == 0) {
-            if (!pigz_cli_parse_i64(arg->value, "--max-memory", &max_mem_mb)) {
-                return 1;
-            }
-        } else if (strcmp(arg->key, "suffix") == 0) {
-            g.sufx = (char*)arg->value.ptr;
+    {
+        bool go = cc_prepare_args(PigzOpts, argc, argv, &cli_arena, &opts, stderr) !>(e) {
+            (void)e;
+            return 2;
+        };
+        if (!go) return 0; /* --help */
+        if (argc < 2 && isatty(1)) {
+            cc_print_usage(PigzOpts, stderr, argv[0]);
+            return 0;
         }
     }
+    /* Seed locals from grammar defaults before apply overlays present fields. */
+    num_workers = opts.processes;
+    block_kb = opts.blocksize;
+    max_mem_mb = opts.max_memory;
+    pigz_apply_opts(&opts, &num_workers, &user_set_num_workers, &block_kb,
+                    &max_mem_mb, &show_version);
     if (show_version) {
         fprintf(stderr, "pigz_cc 1.0\n");
         if (g.verbosity > 1) fprintf(stderr, "zlib %s\n", zlibVersion());
@@ -1480,15 +1467,13 @@ int main(int argc, char *argv[]) {
     
     /* Process path recursively for each input file (matches pigz.c:4600-4620) */
     int ret = 0;
-    bool had_input = cli.args.count("file") > 0;
-    for (size_t i = 0; i < cli.args.count("file"); i++) {
-        CCSlice path_slice = cc_slice_empty();
-        const char* path;
-        if (!cli.args.find_value_at("file", i, &path_slice)) continue;
-        path = (const char*)path_slice.ptr;
-        if (strcmp(path, "-") == 0) {
+    bool had_input = opts.file_len > 0;
+    for (size_t i = 0; i < opts.file_len; i++) {
+        char[:0] path = opts.file[i];
+        if (!path.ptr) continue;
+        if (CCSlice_eq_cstr(&path, "-")) {
             g.to_stdout = 1;
-            ret |= process_path(NULL, worker_count, level, strategy);
+            ret |= process_path(cc_slice_empty(), worker_count, level, strategy);
         } else {
             ret |= process_path(path, worker_count, level, strategy);
         }
@@ -1496,7 +1481,7 @@ int main(int argc, char *argv[]) {
     
     if (!had_input) {
         g.to_stdout = 1;
-        ret = process_path(NULL, worker_count, level, strategy);
+        ret = process_path(cc_slice_empty(), worker_count, level, strategy);
     }
     
     /* Print statistics */

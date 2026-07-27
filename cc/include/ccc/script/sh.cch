@@ -1,5 +1,6 @@
 /*
  * Thin process wrappers for .shcc orchestration.
+ * Program/path arguments are CCSlice (NUL-terminated borrows).
  */
 #ifndef CC_SCRIPT_SH_H
 #define CC_SCRIPT_SH_H
@@ -14,19 +15,19 @@
 
 /*
  * Run program with one argument; fail if exit status != 0.
- * Arena is last (command builder storage).
+ * Empty `arg` omits the argument. Arena is last.
  */
-static inline CCResult_int_CCError cc_sh_run(const char *program,
-                                            const char *arg,
+static inline CCResult_int_CCError cc_sh_run(CCSlice program,
+                                            CCSlice arg,
                                             CCArena *arena) {
     CCCommand cmd;
     CCResult_int_CCIoError st;
-    if (!program || !arena) {
+    if (!program.ptr || !arena) {
         return cc_err_CCResult_int_CCError(
             CC_ERROR(CC_ERR_INVALID_ARG, "cc_sh_run: bad args"));
     }
     cmd = cc_command(arena, program);
-    if (arg) (void)cc_command_arg(&cmd, arg);
+    if (arg.ptr && arg.len) (void)cc_command_arg_slice(&cmd, arg);
     st = cc_command_status(&cmd);
     if (cc_is_err(st)) {
         return cc_err_CCResult_int_CCError(
@@ -74,16 +75,17 @@ static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe)
         return 1;
     }
     a = cc_arena_create(megabytes(1));
-    root_r = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a);
+    root_r = cc_script_repo_root(
+        argv && argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
         return 1;
     }
     root = cc_value(root_r);
-    exe = cc_script_path_join((const char *)root.ptr, rel_exe, &a);
-    cmd = cc_command(&a, (const char *)exe.ptr);
-    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
+    exe = cc_script_path_join(root, char_to_slice(rel_exe), &a);
+    cmd = cc_command(&a, exe);
+    (void)cc_command_cwd(&cmd, root);
     (void)cc_command_inherit_stdio(&cmd);
     cc__script_forward_args(&cmd, argc, argv);
     rc = cc__script_status_or_fail(&cmd, rel_exe);
@@ -128,7 +130,8 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
         return 1;
     }
     a = cc_arena_create(megabytes(1));
-    root_r = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a);
+    root_r = cc_script_repo_root(
+        argv && argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
@@ -141,26 +144,26 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
         cc_arena_destroy(&a);
         return 1;
     }
-    bin_rel = cc_script_path_join("bin", (const char *)stem.ptr, &a);
-    bin = cc_script_path_join((const char *)root.ptr, (const char *)bin_rel.ptr, &a);
-    ccc = cc_script_path_join((const char *)root.ptr, "cc/bin/ccc", &a);
+    bin_rel = cc_script_path_join(char_to_slice("bin"), stem, &a);
+    bin = cc_script_path_join(root, bin_rel, &a);
+    ccc = cc_script_path_join(root, char_to_slice("cc/bin/ccc"), &a);
 
-    build = cc_command(&a, (const char *)ccc.ptr);
-    (void)cc_command_cwd(&build, (const char *)root.ptr);
+    build = cc_command(&a, ccc);
+    (void)cc_command_cwd(&build, root);
     (void)cc_command_inherit_stdio(&build);
     (void)cc_command_arg(&build, "build");
     (void)cc_command_arg(&build, "--link");
     (void)cc_command_arg(&build, rel_tool);
     (void)cc_command_arg(&build, "-o");
-    (void)cc_command_arg(&build, (const char *)bin_rel.ptr);
+    (void)cc_command_arg_slice(&build, bin_rel);
     rc = cc__script_status_or_fail(&build, "ccc build");
     if (rc != 0) {
         cc_arena_destroy(&a);
         return rc;
     }
 
-    run = cc_command(&a, (const char *)bin.ptr);
-    (void)cc_command_cwd(&run, (const char *)root.ptr);
+    run = cc_command(&a, bin);
+    (void)cc_command_cwd(&run, root);
     (void)cc_command_inherit_stdio(&run);
     cc__script_forward_args(&run, argc, argv);
     rc = cc__script_status_or_fail(&run, rel_tool);

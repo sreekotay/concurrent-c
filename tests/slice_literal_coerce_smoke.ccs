@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void) {
+    /* Literal path args at CCSlice params — no explicit to_slice / wrap. */
+    assert(cc_path_exists("."));
+
+    CCFile f = {0};
+    const char *path = "/tmp/cc_slice_literal_coerce_smoke";
+    if (cc_file_open(&f, "/tmp/cc_slice_literal_coerce_smoke", "w+") != 0) {
+        fprintf(stderr, "open failed\n");
+        return 1;
+    }
+    if (cc_is_err(f.write(char_to_slice("ok\n")))) {
+        f.close();
+        return 1;
+    }
+    f.close();
+
+    assert(cc_path_exists(path->to_slice())); /* non-literal still needs wrap/UFCS */
+    unlink(path);
+
+    printf("slice_literal_coerce_smoke: PASS\n");
+    return 0;
+}

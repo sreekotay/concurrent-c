@@ -42,9 +42,9 @@ CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoErr
 CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
 #endif
 
-CCCommand cc_command_new(CCArena *arena, const char *program);
+CCCommand cc_command_new(CCArena *arena, CCSlice program);
 
-static inline CCCommand cc_command(CCArena *arena, const char *program) {
+static inline CCCommand cc_command(CCArena *arena, CCSlice program) {
     return cc_command_new(arena, program);
 }
 
@@ -62,7 +62,7 @@ CCCommand *cc_command_stdout_capture(CCCommand *cmd);
 CCCommand *cc_command_stderr_capture(CCCommand *cmd);
 CCCommand *cc_command_stderr_to_stdout(CCCommand *cmd);
 CCCommand *cc_command_inherit_stdio(CCCommand *cmd);
-CCCommand *cc_command_cwd(CCCommand *cmd, const char *cwd);
+CCCommand *cc_command_cwd(CCCommand *cmd, CCSlice cwd);
 CCCommand *cc_command_env(CCCommand *cmd, const char **env);
 
 static inline CCCommand *cc_command_arg_i32(CCCommand *cmd, int value) {

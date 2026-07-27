@@ -1,612 +1,645 @@
 /*
- * Declarative command-line parsing.
+ * Argv parsing runtime for @grammar(cli) — descriptor table → typed struct.
+ * String fields are char[:0] (NUL-terminated borrows of argv / default lits).
+ * Declare options with @grammar(cli); call cc_parse_args / cc_print_usage.
  */
 #ifndef CC_STD_CLI_H
 #define CC_STD_CLI_H
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_slice.cch>
+#include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
-#include <ccc/cc_type.cch>
-#include <ccc/cc_ufcs.cch>
 #include <ccc/std/string.cch>
-#include <ccc/std/vec.cch>
-
-typedef struct CCStrs {
-    const char* items[16];
-    size_t len;
-} CCStrs;
 
 typedef enum {
-    CC_ARG_FLAG = 1,
-    CC_ARG_VALUE,
-    CC_ARG_POSITIONAL,
-    CC_ARG_ALIAS,
-} CCArgKind;
+    CC_CLI_FLAG = 1,
+    CC_CLI_COUNT,
+    CC_CLI_OPT_I64,
+    CC_CLI_OPT_STRING,
+    CC_CLI_MANY_STRING,
+    CC_CLI_ALIAS,
+} CCCliKind;
 
-typedef enum {
-    CC_VALUE_NONE = 1,
-    CC_VALUE_STRING,
-    CC_VALUE_INT,
-} CCValueKind;
+typedef struct CCCliField {
+    const char *name;                 /* struct field / logical key */
+    CCCliKind kind;
+    const char *const *longs;         /* NULL-terminated long names (no leading --) */
+    const char *shorts;               /* single-char shorts packed, e.g. "c" or "vh" */
+    const char *const *short_aliases; /* NULL-terminated multi-char shorts ("11") */
+    bool allow_attached;              /* -p4 when true; else space-required */
+    bool require_space;               /* legacy; treat as !allow_attached */
+    const char *desc;
+    const char *value_name;           /* usage metavariable (grammar `as`) */
+    const char *default_cstr;         /* opt default lit text, or NULL */
+    bool is_help;                     /* help flag: prepare → Ok(false) */
+    /* CC_CLI_ALIAS: write into maps_to field with optional fixed value */
+    const char *maps_to;              /* target field name */
+    const char *maps_value;           /* fixed value text, or NULL */
+    /* byte offsets into the out struct (0 = unused) */
+    unsigned off;                     /* value */
+    unsigned off_present;             /* bool present (opt kinds) */
+    unsigned off_len;                 /* size_t len (many) */
+} CCCliField;
 
-typedef struct CCArgSpec {
-    const char* long_;
-    char short_;
-    CCStrs aliases;
-    CCStrs short_aliases;
-    CCArgKind kind;
-    CCValueKind value_kind;
-    const char* value_name;
-    const char* desc;
-    bool positional_many;
-    bool repeatable;
-    bool allow_short_attached;
-    CCStrs maps_to;
-} CCArgSpec;
-
-typedef enum {
-    CC_PARSED_OPTION = 1,
-    CC_PARSED_POSITIONAL,
-} CCParsedKind;
-
-typedef struct CCParsedArg {
-    CCParsedKind kind;
-    const char* key;
-    CCSlice value;
-    CCSlice spell;
-    int argv_index;
-} CCParsedArg;
-
-#ifndef CC_VEC_CCPARSEDARG_DEFINED
-#define CC_VEC_CCPARSEDARG_DEFINED 1
-CC_VEC_DECL_ARENA(CCParsedArg, CCVec_CCParsedArg)
-#endif
-
-typedef struct CCParsedArgs {
-    CCVec_CCParsedArg items;
-} CCParsedArgs;
-
-typedef struct CCCliParse {
+typedef struct CCCliFillResult {
     bool ok;
     int exit_code;
     CCSlice prog;
-    const CCArgSpec* specs;
-    size_t spec_count;
-    CCParsedArgs args;
-} CCCliParse;
+} CCCliFillResult;
 
-
-static inline CCSlice cc_parsed_args_ufcs_rewrite(CCSlice recv_type,
-                                                  CCSlice method,
-                                                  CCSlice mode,
-                                                  CCSliceArray argv,
-                                                  CCSliceArray arg_types,
-                                                  CCArena* arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    if (cc_ufcs_slice_eq_cstr(method, "len")
-        || cc_ufcs_slice_eq_cstr(method, "get")
-        || cc_ufcs_slice_eq_cstr(method, "has")
-        || cc_ufcs_slice_eq_cstr(method, "count")
-        || cc_ufcs_slice_eq_cstr(method, "value_at")
-        || cc_ufcs_slice_eq_cstr(method, "last_value")
-        || cc_ufcs_slice_eq_cstr(method, "find_value_at")
-        || cc_ufcs_slice_eq_cstr(method, "find_last_value")) {
-        return cc_slice_concat2(
-            cc_slice_from_static("cc_parsed_args_", sizeof("cc_parsed_args_") - 1),
-            method, arena);
-    }
-    return cc_slice_empty();
+/* Borrow a NUL-terminated token as a char[:0]-compatible view (ptr[len]==0). */
+static inline CCSlice cc__cli_cstr_slice(const char *text) {
+    if (!text) return cc_slice_empty();
+    return char_to_slice(text);
 }
 
-static inline CCSlice cc_cli_parse_ufcs_rewrite(CCSlice recv_type,
-                                                CCSlice method,
-                                                CCSlice mode,
-                                                CCSliceArray argv,
-                                                CCSliceArray arg_types,
-                                                CCArena* arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    if (cc_ufcs_slice_eq_cstr(method, "print")) {
-        return cc_slice_from_static("cc_cli_parse_print", sizeof("cc_cli_parse_print") - 1);
-    }
-    return cc_slice_empty();
+/* Argv tokens: same NUL sentinel, untracked lifetime (not immortal static). */
+static inline CCSlice cc__cli_argv_slice(const char *text) {
+    if (!text) return cc_slice_empty();
+    return cc_slice_from_buffer((void *)text, strlen(text));
 }
 
-@comptime {
-    (void)cc_type_register("CCParsedArgs", (CCTypeHooks){
-        .ufcs = cc_parsed_args_ufcs_rewrite,
-    });
-    (void)cc_type_register("CCCliParse", (CCTypeHooks){
-        .ufcs = cc_cli_parse_ufcs_rewrite,
-    });
-}
-
-static inline const char* cc_cli_prog(int argc, char** argv) {
+static inline const char *cc_cli_prog(int argc, char **argv) {
     if (!argv || argc <= 0 || !argv[0]) return "program";
     return argv[0];
 }
 
-static inline CCSlice cc_cli_prog_slice(int argc, char** argv) {
-    const char* prog = cc_cli_prog(argc, argv);
-    return cc_slice_from_buffer((void*)prog, strlen(prog));
+static inline CCSlice cc_cli_prog_slice(int argc, char **argv) {
+    return cc__cli_cstr_slice(cc_cli_prog(argc, argv));
 }
 
-static inline CCParsedArgs cc_parsed_args(CCArena* arena) {
-    CCParsedArgs args = {0};
-    args.items = CCVec_CCParsedArg_init(arena, 0);
-    return args;
-}
+/* Overlay grammar opts onto destination state only when the user set the field
+ * (`*_present`). Flags are the value itself — use a plain `if (opts->flag)`. */
+#define cc_cli_overlay_i64(dst, opts, field) \
+    do { \
+        if ((opts)->field##_present) *(dst) = (opts)->field; \
+    } while (0)
+
+#define cc_cli_overlay_cstr(dst, opts, field) \
+    do { \
+        if ((opts)->field##_present) *(dst) = (char *)(opts)->field.ptr; \
+    } while (0)
 
 static inline bool cc__cli_is_digit_str(CCSlice slice) {
     size_t i;
     if (slice.len == 0) return false;
     for (i = 0; i < slice.len; i++) {
-        char ch = ((const char*)slice.ptr)[i];
+        char ch = ((const char *)slice.ptr)[i];
         if (ch < '0' || ch > '9') return false;
     }
     return true;
 }
 
 static inline bool cc__cli_is_option_like(CCSlice slice) {
-    return slice.len > 0 && ((const char*)slice.ptr)[0] == '-' && !CCSlice_eq_cstr(&slice, "-");
+    return slice.len > 0 && ((const char *)slice.ptr)[0] == '-'
+        && !CCSlice_eq_cstr(&slice, "-");
 }
 
-static inline CCSlice cc__cli_cstr_slice(const char* text) {
-    if (!text) return cc_slice_empty();
-    return cc_slice_from_buffer((void*)text, strlen(text));
-}
-
-static inline bool cc__cli_strs_contains(CCStrs items, const char* want) {
+static inline bool cc__cli_longs_has(const char *const *longs, CCSlice name) {
     size_t i;
-    for (i = 0; i < items.len; i++) {
-        const char* item = items.items[i];
-        if (item && want && strcmp(item, want) == 0) return true;
+    if (!longs) return false;
+    for (i = 0; longs[i]; i++) {
+        if (CCSlice_eq_cstr(&name, longs[i])) return true;
     }
     return false;
 }
 
-static inline bool cc__cli_match_short_name(const CCArgSpec* spec, CCSlice name) {
+static inline bool cc__cli_short_aliases_has(const char *const *aliases, CCSlice name) {
     size_t i;
-    if (!spec || name.len == 0) return false;
-    if (spec->short_) {
-        char short_buf[2];
-        short_buf[0] = spec->short_;
-        short_buf[1] = '\0';
-        if (CCSlice_eq_cstr(&name, short_buf)) return true;
-    }
-    for (i = 0; i < spec->short_aliases.len; i++) {
-        const char* alias = spec->short_aliases.items[i];
-        if (alias && CCSlice_eq_cstr(&name, alias)) return true;
+    if (!aliases) return false;
+    for (i = 0; aliases[i]; i++) {
+        if (CCSlice_eq_cstr(&name, aliases[i])) return true;
     }
     return false;
 }
 
-static inline bool cc__cli_match_long_name(const CCArgSpec* spec, CCSlice name) {
+static inline bool cc__cli_shorts_has(const char *shorts, char ch) {
     size_t i;
-    if (!spec || name.len == 0) return false;
-    if (spec->long_ && CCSlice_eq_cstr(&name, spec->long_)) return true;
-    for (i = 0; i < spec->aliases.len; i++) {
-        const char* alias = spec->aliases.items[i];
-        if (alias && CCSlice_eq_cstr(&name, alias)) return true;
+    if (!shorts) return false;
+    for (i = 0; shorts[i]; i++) {
+        if (shorts[i] == ch) return true;
     }
     return false;
 }
 
-static inline bool cc__cli_match_short_char(const CCArgSpec* spec, char ch) {
+static inline const CCCliField *cc__cli_find_by_name(const CCCliField *fields,
+                                                    size_t n,
+                                                    const char *name) {
     size_t i;
-    if (!spec) return false;
-    if (spec->short_ && spec->short_ == ch) return true;
-    for (i = 0; i < spec->short_aliases.len; i++) {
-        const char* alias = spec->short_aliases.items[i];
-        if (alias && alias[0] == ch && alias[1] == '\0') return true;
-    }
-    return false;
-}
-
-static inline bool cc__cli_emit(CCParsedArgs* out,
-                                CCParsedKind kind,
-                                const char* key,
-                                CCSlice value,
-                                CCSlice spell,
-                                int argv_index) {
-    CCParsedArg arg;
-    if (!out || !key) return false;
-    arg.kind = kind;
-    arg.key = key;
-    arg.value = value;
-    arg.spell = spell;
-    arg.argv_index = argv_index;
-    return CCVec_CCParsedArg_push((CCVec_CCParsedArg*)&out->items, arg) == 0;
-}
-
-static inline const CCArgSpec* cc__cli_find_positional_spec(const CCArgSpec* specs, size_t spec_count) {
-    size_t i;
-    for (i = 0; i < spec_count; i++) {
-        if (specs[i].kind == CC_ARG_POSITIONAL) return &specs[i];
+    if (!fields || !name) return NULL;
+    for (i = 0; i < n; i++) {
+        if (fields[i].name && strcmp(fields[i].name, name) == 0
+            && fields[i].kind != CC_CLI_ALIAS)
+            return &fields[i];
     }
     return NULL;
 }
 
-static inline const CCArgSpec* cc__cli_find_numeric_short_value_spec(const CCArgSpec* specs,
-                                                                     size_t spec_count,
-                                                                     CCSlice name) {
+static inline const CCCliField *cc__cli_find_long(const CCCliField *fields,
+                                                 size_t n,
+                                                 CCSlice name) {
     size_t i;
-    if (!cc__cli_is_digit_str(name)) return NULL;
-    for (i = 0; i < spec_count; i++) {
-        const CCArgSpec* spec = &specs[i];
-        if (spec->kind != CC_ARG_VALUE) continue;
-        if (cc__cli_match_short_name(spec, name)) return spec;
+    for (i = 0; i < n; i++) {
+        if (cc__cli_longs_has(fields[i].longs, name)) return &fields[i];
     }
     return NULL;
 }
 
-static inline const CCArgSpec* cc__cli_find_long_spec(const CCArgSpec* specs,
-                                                      size_t spec_count,
-                                                      CCSlice name) {
-    size_t i;
-    for (i = 0; i < spec_count; i++) {
-        const CCArgSpec* spec = &specs[i];
-        if (spec->kind == CC_ARG_POSITIONAL) continue;
-        if (cc__cli_match_long_name(spec, name)) return spec;
-    }
-    return NULL;
-}
-
-static inline const CCArgSpec* cc__cli_find_short_spec(const CCArgSpec* specs,
-                                                       size_t spec_count,
+static inline const CCCliField *cc__cli_find_short_char(const CCCliField *fields,
+                                                       size_t n,
                                                        char ch) {
     size_t i;
-    for (i = 0; i < spec_count; i++) {
-        const CCArgSpec* spec = &specs[i];
-        if (spec->kind == CC_ARG_POSITIONAL) continue;
-        if (cc__cli_match_short_char(spec, ch)) return spec;
+    for (i = 0; i < n; i++) {
+        if (fields[i].kind == CC_CLI_MANY_STRING) continue;
+        if (cc__cli_shorts_has(fields[i].shorts, ch)) return &fields[i];
     }
     return NULL;
 }
 
-static inline bool cc__cli_take_next_value(int argc,
-                                           char** argv,
-                                           int* index,
-                                           CCSlice* value_out) {
+static inline const CCCliField *cc__cli_find_numeric_short(const CCCliField *fields,
+                                                          size_t n,
+                                                          CCSlice name) {
+    size_t i;
+    if (!cc__cli_is_digit_str(name)) return NULL;
+    for (i = 0; i < n; i++) {
+        if (fields[i].kind != CC_CLI_OPT_I64 && fields[i].kind != CC_CLI_ALIAS)
+            continue;
+        if (cc__cli_short_aliases_has(fields[i].short_aliases, name))
+            return &fields[i];
+        /* single-digit also listed in shorts */
+        if (name.len == 1 && cc__cli_shorts_has(fields[i].shorts,
+                                                ((const char *)name.ptr)[0]))
+            return &fields[i];
+    }
+    return NULL;
+}
+
+static inline const CCCliField *cc__cli_find_positional(const CCCliField *fields,
+                                                       size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (fields[i].kind == CC_CLI_MANY_STRING) return &fields[i];
+    }
+    return NULL;
+}
+
+static inline bool cc__cli_take_next_value(int argc, char **argv, int *index,
+                                          CCSlice *value_out) {
     CCSlice next;
     if (!index || !value_out) return false;
     if (*index + 1 >= argc || !argv || !argv[*index + 1]) return false;
-    next = cc_slice_from_buffer((void*)argv[*index + 1], strlen(argv[*index + 1]));
+    next = cc__cli_argv_slice(argv[*index + 1]);
     if (cc__cli_is_option_like(next)) return false;
     *index = *index + 1;
     *value_out = next;
     return true;
 }
 
-static inline bool cc__cli_emit_spec(CCParsedArgs* out,
-                                     const CCArgSpec* spec,
-                                     CCSlice value,
-                                     CCSlice spell,
-                                     int argv_index) {
-    const char* key = NULL;
-    CCSlice mapped_value = value;
-    if (!spec) return false;
-    if (spec->kind == CC_ARG_ALIAS) {
-        if (spec->maps_to.len == 0 || !spec->maps_to.items[0]) return false;
-        key = spec->maps_to.items[0];
-        if (spec->maps_to.len > 1 && spec->maps_to.items[1]) {
-            mapped_value = cc__cli_cstr_slice(spec->maps_to.items[1]);
-        }
-    } else {
-        key = spec->long_;
-    }
-    return cc__cli_emit(out, CC_PARSED_OPTION, key, mapped_value, spell, argv_index);
+static inline bool cc__cli_parse_i64(CCSlice value, int64_t *out) {
+    CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(value, 10);
+    if (cc_is_err(parsed)) return false;
+    if (out) *out = cc_unwrap(parsed);
+    return true;
 }
 
-static inline bool cc__cli_parse_long(CCParsedArgs* out,
-                                      int argc,
-                                      char** argv,
-                                      int* index,
-                                      const CCArgSpec* specs,
-                                      size_t spec_count,
-                                      CCSlice arg,
-                                      int* exit_code) {
-    const CCArgSpec* spec;
-    CCSlice name;
-    CCSlice value = cc_slice_empty();
-    size_t pos = 2;
-    while (pos < arg.len && ((const char*)arg.ptr)[pos] != '=') pos++;
-    name = CCSlice_sub(&arg, 2, pos);
-    spec = cc__cli_find_long_spec(specs, spec_count, name);
-    if (!spec) {
-        fprintf(stderr, "Unknown option: %.*s\n", (int)arg.len, (const char*)arg.ptr);
-        if (exit_code) *exit_code = 1;
-        return false;
-    }
-    if (spec->kind == CC_ARG_FLAG || spec->kind == CC_ARG_ALIAS) {
-        if (pos < arg.len) {
-            fprintf(stderr, "Option does not take a value: %.*s\n", (int)arg.len, (const char*)arg.ptr);
+static inline void cc__cli_set_present(void *base, const CCCliField *f) {
+    if (!base || !f || !f->off_present) return;
+    *(bool *)((char *)base + f->off_present) = true;
+}
+
+static inline bool cc__cli_apply_value(void *base,
+                                       const CCCliField *fields,
+                                       size_t nfields,
+                                       const CCCliField *spec,
+                                       CCSlice value,
+                                       CCArena *arena,
+                                       int *exit_code) {
+    const CCCliField *target = spec;
+    CCSlice use = value;
+    if (!base || !spec) return false;
+    if (spec->kind == CC_CLI_ALIAS) {
+        target = cc__cli_find_by_name(fields, nfields, spec->maps_to);
+        if (!target) {
+            fprintf(stderr, "Internal error: alias maps to unknown field\n");
             if (exit_code) *exit_code = 1;
             return false;
         }
-        if (!cc__cli_emit_spec(out, spec, cc_slice_empty(), arg, *index)) {
+        if (spec->maps_value)
+            use = cc__cli_cstr_slice(spec->maps_value);
+    }
+    switch (target->kind) {
+    case CC_CLI_FLAG:
+        *(bool *)((char *)base + target->off) = true;
+        return true;
+    case CC_CLI_COUNT:
+        (*(int64_t *)((char *)base + target->off))++;
+        return true;
+    case CC_CLI_OPT_I64: {
+        int64_t v = 0;
+        if (!cc__cli_parse_i64(use, &v)) {
+            fprintf(stderr, "Invalid integer for --%s\n",
+                    target->name ? target->name : "?");
+            if (exit_code) *exit_code = 1;
+            return false;
+        }
+        *(int64_t *)((char *)base + target->off) = v;
+        cc__cli_set_present(base, target);
+        return true;
+    }
+    case CC_CLI_OPT_STRING:
+        *(CCSlice *)((char *)base + target->off) = use;
+        cc__cli_set_present(base, target);
+        return true;
+    case CC_CLI_MANY_STRING: {
+        CCSlice **items = (CCSlice **)((char *)base + target->off);
+        size_t *len = (size_t *)((char *)base + target->off_len);
+        CCSlice *next;
+        size_t cap = *len + 1;
+        if (!arena) {
             fprintf(stderr, "Out of memory while parsing arguments\n");
             if (exit_code) *exit_code = 1;
             return false;
         }
+        next = (CCSlice *)cc_arena_alloc(arena, sizeof(CCSlice) * cap, _Alignof(CCSlice));
+        if (!next) {
+            fprintf(stderr, "Out of memory while parsing arguments\n");
+            if (exit_code) *exit_code = 1;
+            return false;
+        }
+        if (*items && *len)
+            memcpy(next, *items, sizeof(CCSlice) * (*len));
+        next[*len] = use;
+        *items = next;
+        (*len)++;
         return true;
+    }
+    default:
+        fprintf(stderr, "Internal error: bad CLI field kind\n");
+        if (exit_code) *exit_code = 1;
+        return false;
+    }
+}
+
+static inline bool cc__cli_parse_long(void *base,
+                                      const CCCliField *fields,
+                                      size_t nfields,
+                                      int argc,
+                                      char **argv,
+                                      int *index,
+                                      CCSlice arg,
+                                      CCArena *arena,
+                                      int *exit_code) {
+    const CCCliField *spec;
+    CCSlice name;
+    CCSlice value = cc_slice_empty();
+    size_t pos = 2;
+    while (pos < arg.len && ((const char *)arg.ptr)[pos] != '=') pos++;
+    name = CCSlice_sub(&arg, 2, pos);
+    spec = cc__cli_find_long(fields, nfields, name);
+    if (!spec) {
+        fprintf(stderr, "Unknown option: %.*s\n", (int)arg.len, (const char *)arg.ptr);
+        if (exit_code) *exit_code = 1;
+        return false;
+    }
+    if (spec->kind == CC_CLI_FLAG || spec->kind == CC_CLI_COUNT
+        || spec->kind == CC_CLI_ALIAS) {
+        if (pos < arg.len) {
+            fprintf(stderr, "Option does not take a value: %.*s\n",
+                    (int)arg.len, (const char *)arg.ptr);
+            if (exit_code) *exit_code = 1;
+            return false;
+        }
+        return cc__cli_apply_value(base, fields, nfields, spec, cc_slice_empty(),
+                                   arena, exit_code);
     }
     if (pos < arg.len) {
         value = CCSlice_sub(&arg, pos + 1, arg.len);
     } else if (!cc__cli_take_next_value(argc, argv, index, &value)) {
-        fprintf(stderr, "Missing value for %.*s\n", (int)arg.len, (const char*)arg.ptr);
+        fprintf(stderr, "Missing value for %.*s\n", (int)arg.len, (const char *)arg.ptr);
         if (exit_code) *exit_code = 1;
         return false;
     }
-    if (!cc__cli_emit_spec(out, spec, value, arg, *index)) {
-        fprintf(stderr, "Out of memory while parsing arguments\n");
-        if (exit_code) *exit_code = 1;
-        return false;
-    }
-    return true;
+    return cc__cli_apply_value(base, fields, nfields, spec, value, arena, exit_code);
 }
 
-static inline bool cc__cli_parse_short(CCParsedArgs* out,
+static inline bool cc__cli_parse_short(void *base,
+                                       const CCCliField *fields,
+                                       size_t nfields,
                                        int argc,
-                                       char** argv,
-                                       int* index,
-                                       const CCArgSpec* specs,
-                                       size_t spec_count,
+                                       char **argv,
+                                       int *index,
                                        CCSlice arg,
-                                       int* exit_code) {
+                                       CCArena *arena,
+                                       int *exit_code) {
     CCSlice tail = CCSlice_sub(&arg, 1, arg.len);
-    const CCArgSpec* numeric_spec = cc__cli_find_numeric_short_value_spec(specs, spec_count, tail);
+    const CCCliField *numeric = cc__cli_find_numeric_short(fields, nfields, tail);
     size_t pos = 1;
-    if (numeric_spec) {
-        if (!cc__cli_emit(out,
-                          CC_PARSED_OPTION,
-                          numeric_spec->long_,
-                          tail,
-                          arg,
-                          *index)) {
-            fprintf(stderr, "Out of memory while parsing arguments\n");
-            if (exit_code) *exit_code = 1;
-            return false;
-        }
-        return true;
+    if (numeric) {
+        return cc__cli_apply_value(base, fields, nfields, numeric, tail, arena,
+                                   exit_code);
     }
     while (pos < arg.len) {
-        const CCArgSpec* spec = cc__cli_find_short_spec(specs, spec_count, ((const char*)arg.ptr)[pos]);
+        const CCCliField *spec =
+            cc__cli_find_short_char(fields, nfields, ((const char *)arg.ptr)[pos]);
         if (!spec) {
-            fprintf(stderr, "Unknown option: -%c\n", ((const char*)arg.ptr)[pos]);
+            fprintf(stderr, "Unknown option: -%c\n", ((const char *)arg.ptr)[pos]);
             if (exit_code) *exit_code = 1;
             return false;
         }
-        if (spec->kind == CC_ARG_FLAG || spec->kind == CC_ARG_ALIAS) {
-            if (!cc__cli_emit_spec(out, spec, cc_slice_empty(), arg, *index)) {
-                fprintf(stderr, "Out of memory while parsing arguments\n");
-                if (exit_code) *exit_code = 1;
+        if (spec->kind == CC_CLI_FLAG || spec->kind == CC_CLI_COUNT
+            || spec->kind == CC_CLI_ALIAS) {
+            if (!cc__cli_apply_value(base, fields, nfields, spec, cc_slice_empty(),
+                                     arena, exit_code))
                 return false;
-            }
             pos++;
             continue;
         }
         if (pos + 1 < arg.len) {
-            if (!spec->allow_short_attached) {
-                fprintf(stderr, "Invalid usage: -%c must be followed by space\n", ((const char*)arg.ptr)[pos]);
+            if (spec->require_space || !spec->allow_attached) {
+                fprintf(stderr, "Invalid usage: -%c must be followed by space\n",
+                        ((const char *)arg.ptr)[pos]);
                 if (exit_code) *exit_code = 1;
                 return false;
             }
-            if (!cc__cli_emit_spec(out, spec, CCSlice_sub(&arg, pos + 1, arg.len), arg, *index)) {
-                fprintf(stderr, "Out of memory while parsing arguments\n");
-                if (exit_code) *exit_code = 1;
-                return false;
-            }
-            return true;
+            return cc__cli_apply_value(base, fields, nfields, spec,
+                                       CCSlice_sub(&arg, pos + 1, arg.len),
+                                       arena, exit_code);
         }
         {
             CCSlice value = cc_slice_empty();
             if (!cc__cli_take_next_value(argc, argv, index, &value)) {
-                fprintf(stderr, "Missing value for -%c\n", ((const char*)arg.ptr)[pos]);
+                fprintf(stderr, "Missing value for -%c\n",
+                        ((const char *)arg.ptr)[pos]);
                 if (exit_code) *exit_code = 1;
                 return false;
             }
-            if (!cc__cli_emit_spec(out, spec, value, arg, *index)) {
-                fprintf(stderr, "Out of memory while parsing arguments\n");
-                if (exit_code) *exit_code = 1;
-                return false;
-            }
+            return cc__cli_apply_value(base, fields, nfields, spec, value, arena,
+                                       exit_code);
         }
-        return true;
     }
     return true;
 }
 
-static inline CCCliParse cc_cli_parse_args(int argc,
-                                           char** argv,
-                                           const CCArgSpec* specs,
-                                           size_t spec_count,
-                                           CCArena* arena) {
-    CCCliParse parse;
-    bool stop_options = false;
+/*
+ * Fill `out` (layout described by `fields`) from argc/argv.
+ * Does not clear `out` — caller zeros / sets defaults first.
+ */
+static inline CCCliFillResult cc_cli_fill(const CCCliField *fields,
+                                          size_t nfields,
+                                          int argc,
+                                          char **argv,
+                                          CCArena *arena,
+                                          void *out) {
+    CCCliFillResult r;
+    bool stop = false;
     int index;
-    const CCArgSpec* positional = cc__cli_find_positional_spec(specs, spec_count);
-    parse.ok = true;
-    parse.exit_code = 0;
-    parse.prog = cc_cli_prog_slice(argc, argv);
-    parse.specs = specs;
-    parse.spec_count = spec_count;
-    parse.args = cc_parsed_args(arena);
-    if (!specs) return parse;
+    const CCCliField *positional = cc__cli_find_positional(fields, nfields);
+    r.ok = true;
+    r.exit_code = 0;
+    r.prog = cc_cli_prog_slice(argc, argv);
+    if (!fields || !out) {
+        r.ok = false;
+        r.exit_code = 1;
+        return r;
+    }
     for (index = 1; index < argc; index++) {
         CCSlice arg;
         if (!argv || !argv[index]) continue;
-        arg = cc_slice_from_buffer((void*)argv[index], strlen(argv[index]));
-        if (!stop_options && CCSlice_eq_cstr(&arg, "--")) {
-            stop_options = true;
+        arg = cc__cli_argv_slice(argv[index]);
+        if (!stop && CCSlice_eq_cstr(&arg, "--")) {
+            stop = true;
             continue;
         }
-        if (!stop_options && arg.len > 1 && ((const char*)arg.ptr)[0] == '-' && ((const char*)arg.ptr)[1] == '-') {
-            if (!cc__cli_parse_long(&parse.args, argc, argv, &index, specs, spec_count, arg, &parse.exit_code)) {
-                parse.ok = false;
-                return parse;
+        if (!stop && arg.len > 1 && ((const char *)arg.ptr)[0] == '-'
+            && ((const char *)arg.ptr)[1] == '-') {
+            if (!cc__cli_parse_long(out, fields, nfields, argc, argv, &index, arg,
+                                    arena, &r.exit_code)) {
+                r.ok = false;
+                return r;
             }
             continue;
         }
-        if (!stop_options && arg.len > 1 && ((const char*)arg.ptr)[0] == '-' && !CCSlice_eq_cstr(&arg, "-")) {
-            if (!cc__cli_parse_short(&parse.args, argc, argv, &index, specs, spec_count, arg, &parse.exit_code)) {
-                parse.ok = false;
-                return parse;
+        if (!stop && arg.len > 1 && ((const char *)arg.ptr)[0] == '-'
+            && !CCSlice_eq_cstr(&arg, "-")) {
+            if (!cc__cli_parse_short(out, fields, nfields, argc, argv, &index, arg,
+                                     arena, &r.exit_code)) {
+                r.ok = false;
+                return r;
             }
             continue;
         }
         if (!positional) {
-            fprintf(stderr, "Unexpected argument: %.*s\n", (int)arg.len, (const char*)arg.ptr);
-            parse.ok = false;
-            parse.exit_code = 1;
-            return parse;
+            fprintf(stderr, "Unexpected argument: %.*s\n",
+                    (int)arg.len, (const char *)arg.ptr);
+            r.ok = false;
+            r.exit_code = 1;
+            return r;
         }
-        if (!cc__cli_emit(&parse.args, CC_PARSED_POSITIONAL, positional->long_, arg, arg, index)) {
-            fprintf(stderr, "Out of memory while parsing arguments\n");
-            parse.ok = false;
-            parse.exit_code = 1;
-            return parse;
+        if (!cc__cli_apply_value(out, fields, nfields, positional, arg, arena,
+                                 &r.exit_code)) {
+            r.ok = false;
+            return r;
         }
     }
-    return parse;
+    return r;
 }
 
-static inline void cc_print_usage(FILE* out,
-                                  CCSlice prog,
-                                  const CCArgSpec* specs,
-                                  size_t spec_count) {
+/* Apply grammar `default` lits. Does not set *_present (absent vs explicit). */
+static inline void cc_cli_apply_defaults(const CCCliField *fields,
+                                         size_t nfields,
+                                         void *out) {
     size_t i;
+    if (!fields || !out) return;
+    for (i = 0; i < nfields; i++) {
+        const CCCliField *f = &fields[i];
+        if (!f->default_cstr || !f->default_cstr[0]) continue;
+        if (f->kind == CC_CLI_OPT_I64) {
+            int64_t v = 0;
+            CCSlice s = cc__cli_cstr_slice(f->default_cstr);
+            if (cc__cli_parse_i64(s, &v))
+                *(int64_t *)((char *)out + f->off) = v;
+        } else if (f->kind == CC_CLI_OPT_STRING) {
+            *(CCSlice *)((char *)out + f->off) = cc__cli_cstr_slice(f->default_cstr);
+        }
+    }
+}
+
+/* Basename of argv0 for Usage: lines (borrows into `argv0`). */
+static inline CCSlice cc_cli_prog_basename(const char *argv0) {
+    const char *p;
+    if (!argv0 || !argv0[0]) return cc__cli_cstr_slice("program");
+    p = strrchr(argv0, '/');
+    return cc__cli_cstr_slice(p ? p + 1 : argv0);
+}
+
+/* Prefer a letter short for help; digit-only shorts (gzip -9) stay accepted
+ * but are not the headline spelling. */
+static inline char cc__cli_display_short(const CCCliField *f) {
+    size_t i;
+    if (!f || !f->shorts) return 0;
+    for (i = 0; f->shorts[i]; i++) {
+        char c = f->shorts[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return c;
+    }
+    return 0;
+}
+
+static inline const char *cc__cli_display_long(const CCCliField *f) {
+    if (!f) return "";
+    if (f->longs && f->longs[0]) return f->longs[0];
+    return f->name ? f->name : "";
+}
+
+static inline void cc__cli_print_option_line(FILE *out,
+                                             char short0,
+                                             const char *long0,
+                                             const char *value_name,
+                                             const char *desc,
+                                             const char *default_cstr) {
+    char long_buf[64];
+    if (!out) return;
+    if (value_name && value_name[0])
+        snprintf(long_buf, sizeof(long_buf), "%s %s", long0 ? long0 : "",
+                 value_name);
+    else
+        snprintf(long_buf, sizeof(long_buf), "%s", long0 ? long0 : "");
+    if (short0)
+        fprintf(out, "  -%c, --%-22s  %s", short0, long_buf,
+                desc ? desc : "");
+    else
+        fprintf(out, "      --%-22s  %s", long_buf, desc ? desc : "");
+    if (default_cstr && default_cstr[0])
+        fprintf(out, " [default: %s]", default_cstr);
+    fprintf(out, "\n");
+}
+
+static inline void cc__cli_print_alias_line(FILE *out,
+                                            const CCCliField *alias,
+                                            const CCCliField *target) {
+    const char *long0;
+    const char *tlong;
+    char desc_buf[256];
+    if (!out || !alias) return;
+    long0 = cc__cli_display_long(alias);
+    tlong = target ? cc__cli_display_long(target)
+                   : (alias->maps_to ? alias->maps_to : "?");
+    if (alias->desc && alias->desc[0]) {
+        snprintf(desc_buf, sizeof(desc_buf), "%s", alias->desc);
+    } else if (alias->maps_value && alias->maps_value[0]) {
+        snprintf(desc_buf, sizeof(desc_buf), "Same as --%s %s", tlong,
+                 alias->maps_value);
+    } else {
+        snprintf(desc_buf, sizeof(desc_buf), "Same as --%s", tlong);
+    }
+    cc__cli_print_option_line(out, cc__cli_display_short(alias), long0, NULL,
+                              desc_buf, NULL);
+}
+
+static inline void cc_cli_print_fields(FILE *out,
+                                       CCSlice prog,
+                                       const CCCliField *fields,
+                                       size_t nfields) {
+    size_t i, j;
     bool have_options = false;
-    if (!out || !specs) return;
-    fprintf(out, "Usage: %.*s", (int)prog.len, (const char*)prog.ptr);
-    for (i = 0; i < spec_count; i++) {
-        if (specs[i].kind == CC_ARG_POSITIONAL) continue;
-        have_options = true;
-        break;
+    if (!out || !fields) return;
+    if (!prog.ptr || prog.len == 0) prog = cc__cli_cstr_slice("program");
+    fprintf(out, "Usage: %.*s", (int)prog.len, (const char *)prog.ptr);
+    for (i = 0; i < nfields; i++) {
+        if (fields[i].kind != CC_CLI_MANY_STRING && fields[i].kind != CC_CLI_ALIAS) {
+            have_options = true;
+            break;
+        }
     }
     if (have_options) fprintf(out, " [options]");
-    for (i = 0; i < spec_count; i++) {
-        const CCArgSpec* spec = &specs[i];
-        if (spec->kind != CC_ARG_POSITIONAL || !spec->long_) continue;
-        fprintf(out, " [%s", spec->long_);
-        if (spec->positional_many) fprintf(out, "...");
-        fprintf(out, "]");
+    for (i = 0; i < nfields; i++) {
+        if (fields[i].kind != CC_CLI_MANY_STRING || !fields[i].name) continue;
+        fprintf(out, " [%s...]", fields[i].name);
     }
-    fprintf(out, "\nOptions:\n");
-    for (i = 0; i < spec_count; i++) {
-        const CCArgSpec* spec = &specs[i];
-        if (spec->kind == CC_ARG_POSITIONAL || !spec->long_) continue;
-        if (spec->short_) {
-            fprintf(out, "  -%c, --%-20s  %s", spec->short_, spec->long_, spec->desc ? spec->desc : "");
-        } else {
-            fprintf(out, "      --%-20s  %s", spec->long_, spec->desc ? spec->desc : "");
+    fprintf(out, "\n");
+    if (!have_options) return;
+    fprintf(out, "Options:\n");
+    for (i = 0; i < nfields; i++) {
+        const CCCliField *f = &fields[i];
+        const char *vname = NULL;
+        if (f->kind == CC_CLI_MANY_STRING || f->kind == CC_CLI_ALIAS) continue;
+        if ((f->kind == CC_CLI_OPT_I64 || f->kind == CC_CLI_OPT_STRING)
+            && f->value_name)
+            vname = f->value_name;
+        cc__cli_print_option_line(out, cc__cli_display_short(f),
+                                  cc__cli_display_long(f), vname, f->desc,
+                                  f->default_cstr);
+        /* Aliases that target this field, in declaration order. */
+        for (j = 0; j < nfields; j++) {
+            if (fields[j].kind != CC_CLI_ALIAS) continue;
+            if (!fields[j].maps_to || !f->name) continue;
+            if (strcmp(fields[j].maps_to, f->name) != 0) continue;
+            cc__cli_print_alias_line(out, &fields[j], f);
         }
-        if (spec->kind == CC_ARG_VALUE && spec->value_name) {
-            fprintf(out, " (%s)", spec->value_name);
-        }
-        fprintf(out, "\n");
+    }
+    /* Orphan aliases (bad maps_to) still show up. */
+    for (i = 0; i < nfields; i++) {
+        const CCCliField *a = &fields[i];
+        const CCCliField *t;
+        if (a->kind != CC_CLI_ALIAS) continue;
+        t = cc__cli_find_by_name(fields, nfields, a->maps_to);
+        if (t) continue;
+        cc__cli_print_alias_line(out, a, NULL);
     }
 }
 
-static inline void cc_cli_parse_print_impl(const CCCliParse* parse,
-                                           FILE* out) {
-    CCSlice prog = cc__cli_cstr_slice("program");
-    const CCArgSpec* specs = NULL;
-    size_t spec_count = 0;
-    if (parse && parse->prog.ptr && parse->prog.len > 0) prog = parse->prog;
-    if (parse) {
-        specs = parse->specs;
-        spec_count = parse->spec_count;
-    }
-    cc_print_usage(out, prog, specs, spec_count);
-}
-
-static inline size_t cc_parsed_args_len(const CCParsedArgs* args) {
-    return args ? args->items.len : 0;
-}
-
-static inline const CCParsedArg* cc_parsed_args_get(const CCParsedArgs* args, size_t idx) {
-    if (!args || idx >= args->items.len) return NULL;
-    return &((const CCParsedArg*)args->items.data)[idx];
-}
-
-static inline bool cc_parsed_args_has(const CCParsedArgs* args, const char* key) {
+static inline bool cc__cli_help_requested(const CCCliField *fields,
+                                          size_t nfields,
+                                          const void *out) {
     size_t i;
-    for (i = 0; i < cc_parsed_args_len(args); i++) {
-        const CCParsedArg* arg = cc_parsed_args_get(args, i);
-        if (arg && arg->key && key && strcmp(arg->key, key) == 0) return true;
+    if (!fields || !out) return false;
+    for (i = 0; i < nfields; i++) {
+        if (!fields[i].is_help || fields[i].kind != CC_CLI_FLAG) continue;
+        if (*(const bool *)((const char *)out + fields[i].off)) return true;
     }
     return false;
 }
 
-static inline size_t cc_parsed_args_count(const CCParsedArgs* args, const char* key) {
-    size_t i;
-    size_t count = 0;
-    for (i = 0; i < cc_parsed_args_len(args); i++) {
-        const CCParsedArg* arg = cc_parsed_args_get(args, i);
-        if (arg && arg->key && key && strcmp(arg->key, key) == 0) count++;
+/*
+ * Parse argv into `out`, print usage on help or error.
+ * Result face (same three-way as cc_try_read / net recv):
+ *   Ok(true)  — proceed with opts
+ *   Ok(false) — help requested; usage already printed; caller returns 0
+ *   Err       — bad argv; usage already printed; caller returns non-zero
+ */
+static inline CCResult_bool_CCError
+cc_cli_prepare_fields(const CCCliField *fields,
+                      size_t nfields,
+                      int argc,
+                      char **argv,
+                      CCArena *arena,
+                      void *out,
+                      FILE *usage_out) {
+    CCCliFillResult r;
+    FILE *u = usage_out ? usage_out : stderr;
+    if (!fields || !out) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "cc_cli_prepare: bad args"));
     }
-    return count;
-}
-
-/* Return a pointer to the nth matching value, or NULL if absent.
- * The pointer is stable for the lifetime of the parsed-args table
- * (the CLI parser is single-shot: parse once, then consume). */
-static inline const CCSlice* cc_parsed_args_value_at(const CCParsedArgs* args, const char* key, size_t idx) {
-    size_t i;
-    size_t seen = 0;
-    for (i = 0; i < cc_parsed_args_len(args); i++) {
-        const CCParsedArg* arg = cc_parsed_args_get(args, i);
-        if (!arg || !arg->key || !key || strcmp(arg->key, key) != 0) continue;
-        if (seen == idx) return &arg->value;
-        seen++;
+    cc_cli_apply_defaults(fields, nfields, out);
+    r = cc_cli_fill(fields, nfields, argc, argv, arena, out);
+    if (!r.ok) {
+        cc_cli_print_fields(u, cc_cli_prog_basename(argv ? argv[0] : NULL),
+                            fields, nfields);
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "invalid command line"));
     }
-    return NULL;
-}
-
-static inline const CCSlice* cc_parsed_args_last_value(const CCParsedArgs* args, const char* key) {
-    size_t i = cc_parsed_args_len(args);
-    while (i > 0) {
-        const CCParsedArg* arg = cc_parsed_args_get(args, i - 1);
-        if (arg && arg->key && key && strcmp(arg->key, key) == 0) {
-            return &arg->value;
-        }
-        i--;
+    if (cc__cli_help_requested(fields, nfields, out)) {
+        cc_cli_print_fields(u, cc_cli_prog_basename(argv ? argv[0] : NULL),
+                            fields, nfields);
+        return cc_ok_CCResult_bool_CCError(false);
     }
-    return NULL;
+    return cc_ok_CCResult_bool_CCError(true);
 }
-
-static inline bool cc_parsed_args_find_value_at(const CCParsedArgs* args,
-                                                const char* key,
-                                                size_t idx,
-                                                CCSlice* out) {
-    const CCSlice* value = cc_parsed_args_value_at(args, key, idx);
-    if (!value) return false;
-    if (out) *out = *value;
-    return true;
-}
-
-static inline bool cc_parsed_args_find_last_value(const CCParsedArgs* args,
-                                                  const char* key,
-                                                  CCSlice* out) {
-    const CCSlice* value = cc_parsed_args_last_value(args, key);
-    if (!value) return false;
-    if (out) *out = *value;
-    return true;
-}
-
-#define cc_no_strs() ((CCStrs){0})
-#define cc_strs(...) ((CCStrs){ .items = { __VA_ARGS__ }, .len = sizeof((const char*[]){ __VA_ARGS__ }) / sizeof(const char*) })
-#define cc_arg_spec_count(specs) (sizeof(specs) / sizeof((specs)[0]))
-#define cc_cli_parse_print(parse, out) cc_cli_parse_print_impl((parse), (out))
 
 #endif /* CC_STD_CLI_H */

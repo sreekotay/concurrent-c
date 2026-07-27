@@ -1,6 +1,7 @@
 /*
  * Directory and filesystem operations for Concurrent-C stdlib.
  * Cross-platform: POSIX (macOS, Linux, BSD) and Windows.
+ * Path parameters are CCSlice ABI for NUL-terminated borrows (char[:0] in CC).
  */
 #ifndef CC_STD_DIR_H
 #define CC_STD_DIR_H
@@ -21,7 +22,7 @@ typedef enum {
 
 /* Directory entry */
 typedef struct {
-    CCSlice name;           /* Entry name (not full path), allocated in arena */
+    CCSlice name;          /* Entry name (NUL-terminated), arena-backed */
     CCDirEntryType type;    /* Type of entry */
 } CCDirEntry;
 
@@ -59,7 +60,7 @@ CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
  * Returns iterator that must be closed with cc_dir_close().
  * Path can be relative or absolute.
  */
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, const char* path);
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path);
 
 /*
  * Read next directory entry.
@@ -80,52 +81,52 @@ void cc_dir_close(CCDirIter* iter);
 /*
  * Check if path exists.
  */
-bool cc_path_exists(const char* path);
+bool cc_path_exists(CCSlice path);
 
 /*
  * Check if path is a directory.
  */
-bool cc_path_is_dir(const char* path);
+bool cc_path_is_dir(CCSlice path);
 
 /*
  * Check if path is a regular file.
  */
-bool cc_path_is_file(const char* path);
+bool cc_path_is_file(CCSlice path);
 
 /*
  * Create directory. Does not create parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_create(const char* path);
+CCResult_bool_CCIoError cc_dir_create(CCSlice path);
 
 /*
  * Create directory and all parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_create_all(const char* path);
+CCResult_bool_CCIoError cc_dir_create_all(CCSlice path);
 
 /*
  * Remove empty directory.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_remove(const char* path);
+CCResult_bool_CCIoError cc_dir_remove(CCSlice path);
 
 /*
  * Remove file.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_file_remove(const char* path);
+CCResult_bool_CCIoError cc_file_remove(CCSlice path);
 
 /*
  * Get current working directory.
- * Allocates result in arena.
+ * Allocates a NUL-terminated CCSlice in arena.
  */
 CCSlice cc_dir_cwd(CCArena* arena);
 
 /*
  * Change current working directory.
  */
-CCResult_bool_CCIoError cc_dir_chdir(const char* path);
+CCResult_bool_CCIoError cc_dir_chdir(CCSlice path);
 
 /* ============================================================================
  * Glob Pattern Matching
@@ -135,7 +136,7 @@ CCResult_bool_CCIoError cc_dir_chdir(const char* path);
  * Glob result: array of matching paths.
  */
 typedef struct {
-    CCSlice* paths;     /* Array of path slices, allocated in arena */
+    CCSlice* paths;    /* Array of NUL-terminated paths, arena-backed */
     size_t count;       /* Number of matches */
     size_t capacity;    /* Capacity of paths array */
 } CCGlobResult;
@@ -153,12 +154,12 @@ static inline const char* cc_glob_result_get(const CCGlobResult* r, size_t i) {
 /* Find files matching glob pattern.
    Supports: * (any chars), ? (single char), ** (recursive)
    Returns matches allocated in arena. */
-CCGlobResult cc_glob(CCArena* arena, const char* pattern);
+CCGlobResult cc_glob(CCArena* arena, CCSlice pattern);
 
 /*
  * Check if filename matches glob pattern (no directory traversal).
  * Supports: * (any chars), ? (single char)
  */
-bool cc_glob_match(const char* pattern, const char* name);
+bool cc_glob_match(CCSlice pattern, CCSlice name);
 
 #endif /* CC_STD_DIR_H */

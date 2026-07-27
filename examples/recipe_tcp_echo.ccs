@@ -90,17 +90,17 @@ static void run_test_client(void) {
     cc_socket_close(&sock);
 }
 
+@grammar(cli) TcpEchoOpts {~~~~
+    test: flag --test desc "Self-test: spawn a client, do one round-trip, exit."
+~~~~}
+
 static bool parse_test_flag(int argc, char** argv) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    TcpEchoOpts opts = {0};
     if (!a.base) return false;
-    static const CCArgSpec ARGS[] = {
-        { .long_ = "test", .kind = CC_ARG_FLAG,
-          .desc = "Self-test: spawn a client, do one round-trip, exit." },
-    };
-    CCCliParse cli = cc_cli_parse_args(argc, argv, ARGS,
-                                       cc_arg_spec_count(ARGS), &a);
-    if (!cli.ok) { cli.print(stderr); return false; }
-    return cli.args.has("test");
+    /* Pure parse — no usage ritual; unknown flags are just "not test mode". */
+    if (!cc_parse_args(TcpEchoOpts, argc, argv, &a, &opts)) return false;
+    return opts.test;
 }
 
 int main(int argc, char** argv) {

@@ -18,12 +18,19 @@
     name: ident #'=' val: value "\n"
 ~~~~}
 
+@grammar(cli) PerfCheckOpts {~~~~
+    help: flag -h, --help desc "Show this help"
+    update: flag --update desc "Write current metrics into the baseline"
+    current: opt string --current as PATH desc "Existing metrics file (skip capture)"
+    metrics: rest string desc "Metrics file (same as --current)"
+~~~~}
+
 typedef Map::[char[:], double] Metrics;
 
 static int regressions = 0;
 static int warnings = 0;
 
-static Metrics !>(CCError) load_metrics(const char* path, CCArena* a) {
+static Metrics !>(CCError) load_metrics(char[:0] path, CCArena* a) {
     @errhandler(CCError e) { return cc_err(e); }
     CCSlice bytes = cc_file_read_path(path, a) !>;
     Metrics m = map_new::[char[:], double](a);
@@ -159,14 +166,22 @@ static void check_wall(CCStdio* io, CCArena* a, Metrics base, Metrics cur) {
 CCArena a = @create(megabytes(4)) @destroy;
 CCStdio io = @create(&a) @destroy;
 
-bool update = cc_cli_flag(argc, argv, "--update");
+PerfCheckOpts opts = {0};
+{
+    bool go = cc_prepare_args(PerfCheckOpts, argc, argv, &a, &opts, stderr) !>;
+    if (!go) return 0; /* --help (if present) */
+}
+bool update = opts.update;
 /* --current PATH skips ~60s capture; else first positional metrics file. */
-const char* current_arg = cc_cli_flag_value(argc, argv, "--current");
-if (!current_arg) current_arg = cc_cli_positional(argc, argv, 0);
+char[:0] current_path_arg = cc_slice_empty();
+if (opts.current_present)
+    current_path_arg = opts.current;
+else if (opts.metrics_len > 0)
+    current_path_arg = opts.metrics[0];
 
-CCSlice root = cc_script_repo_root(argv[0], &a) !>;
-CCSlice baseline = cc_script_path_join((const char*)root.ptr,
-                                       "perf/compiler_baseline.txt", &a);
+char[:0] root = cc_script_repo_root(
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
+char[:0] baseline = cc_script_path_join(root, @slice("perf/compiler_baseline.txt"), &a);
 
 if (!cc_script_path_exists(baseline)) {
     CCString s = @string(`perf check: no baseline at ${baseline}`, &a);
@@ -178,17 +193,16 @@ if (!cc_script_path_exists(baseline)) {
 
 /* Always allocate a temp path; --current overrides it for compare-only runs. */
 CCTempFile tmp = cc_temp_file(&a) !> @destroy;
-CCSlice current_path = tmp.path;
-if (current_arg) {
-    current_path = cc_slice_from_cstr(current_arg);
+char[:0] current_path = tmp.path;
+if (current_path_arg.ptr) {
+    current_path = current_path_arg;
 } else {
     {
         CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, &a);
         io.println(s.as_slice()) !>;
     }
-    CCSlice capture = cc_script_path_join((const char*)root.ptr,
-                                          "scripts/capture_baseline.sh", &a);
-    cc_sh_run((const char*)capture.ptr, (const char*)current_path.ptr, &a) !>;
+    char[:0] capture = cc_script_path_join(root, @slice("scripts/capture_baseline.sh"), &a);
+    cc_sh_run(capture, current_path, &a) !>;
 }
 
 if (update) {
@@ -201,8 +215,8 @@ if (update) {
     return 0;
 }
 
-Metrics base = load_metrics((const char*)baseline.ptr, &a) !>;
-Metrics cur = load_metrics((const char*)current_path.ptr, &a) !>;
+Metrics base = load_metrics(baseline, &a) !>;
+Metrics cur = load_metrics(current_path, &a) !>;
 
 io.println(@slice("")) !>;
 {

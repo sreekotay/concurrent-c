@@ -13,7 +13,8 @@ engine. The host lexer does not tokenize the body. The compiler owns this
 capture-and-route seam; each engine owns its grammar syntax, validation,
 generated types, and generated operations.
 
-The built-in SERDES engines are `rules` and `schema`:
+The built-in engines are `rules`, `schema`, and `cli` (argv → typed struct;
+not a byte-wire dialect):
 
 ```c
 @grammar(rules) Json {~~~~
@@ -27,6 +28,12 @@ The built-in SERDES engines are `rules` and `schema`:
     ]
     '$' len: int number "\r\n"
     data: bytes len "\r\n"
+~~~~}
+
+@grammar(cli) Opts {~~~~
+    help: flag -h, --help desc "Show help"
+    jobs: opt i64 -j, --jobs attach as N default 4 desc "Workers"
+    file: rest string desc "Inputs"
 ~~~~}
 ```
 
@@ -256,13 +263,72 @@ compose with the language's ordinary result handling at call sites.
 projection. It builds `CCShapeVal` objects and arrays using the caller's
 `CCShapeReg`; map-shaped data may use per-instance dictionaries.
 
+## `@grammar(cli)`
+
+`@grammar(cli)` declares argv options and emits a typed C struct plus
+`Name_parse_args` / `Name_prepare` / `Name_print_usage`. Call sites use
+`cc_parse_args` / `cc_prepare_args` / `cc_print_usage` from
+`<ccc/std/cli.cch>` (same faces for `.ccs` and `.shcc`).
+
+Field kinds:
+
+- `flag` / `count` — bool or `int64_t` increment
+- `opt i64` — `int64_t` + `name_present`
+- `opt string` — `char[:0]` + `name_present` (NUL-terminated borrow of argv
+  or of a `default "..."` literal)
+- `rest string` — `char[:0] *name` + `name_len`
+- `alias SPELL... -> field[=value]` — fixed or passthrough map onto another field
+  (top-level row; optional when using the inline `alias` attr below)
+
+Trailing attrs (order-free):
+
+- `desc "..."` — usage text
+- `as NAME` — usage metavariable (`--jobs N`)
+- `attach` — allow glued shorts (`-p4`); omit ⇒ space-required
+- `default LIT` — applied before argv overlay; `_present` stays false until
+  the user sets the option. `LIT` is an integer for `opt i64`, or `"..."` for
+  `opt string`. Shown in usage as `[default: …]`.
+- `alias SPELL=VALUE[, SPELL=VALUE...]` — on `opt` only; synthesizes the same
+  alias rows as top-level `alias: … -> field=VALUE` (e.g.
+  `alias --fast=1, --best=9` on a `level` opt)
+
+Accepted spellings of the same attrs: `attached` for `attach`, `value_name`
+for `as`, `space` for space-required (inverse of `attach`), and
+`many positional string` for `rest string`.
+
+Spellings are unquoted (`-h`, `--help`, `-11`, `-0..-9`). Long `--name=value`
+is accepted. `--` ends options. A digit range `-LO..-HI` expands to each
+inclusive short (`-0..-9` → `-0`…`-9`); multi-digit shorts such as `-11` stay
+listed separately. Digit shorts bind when listed (or expanded) on an
+`opt i64` field.
+
+`cc_cli_overlay_i64` / `cc_cli_overlay_cstr` copy an opt into a destination
+only when `*_present` is true (user-set), so apply sites need not write the
+`if (opts->field_present)` ladder by hand.
+
+```c
+Opts opts = {0};
+bool go = cc_prepare_args(Opts, argc, argv, &arena, &opts, stderr) !>;
+if (!go) return 0; /* help flag named `help` → Ok(false); usage printed */
+```
+
+`cc_prepare_args` is a `bool !>(CCError)` face: `Ok(true)` proceed,
+`Ok(false)` help (usage printed), `Err` bad argv (usage printed).
+`cc_parse_args` is the pure fill (applies defaults, then overlays argv).
+A `flag` field named `help` is the help marker. `cc_print_usage` prints the
+generated usage text.
+
+Usage is generated from the same field table: basename of `argv[0]`,
+letter shorts preferred over digit-only shorts, `as` metavariables,
+`[default: …]`, and `alias` rows listed under their target.
+
 ## Lowering
 
-Both engines emit specialized ordinary C. Generated entry points have
+Engines emit specialized ordinary C. Generated entry points have
 deterministic `Name_operation` names. The stable macro surface is `cc_match`,
 `cc_parse`, `cc_collect`, `cc_dom`, `cc_read`, `cc_try_read`, `cc_reader`,
-`cc_next`, `cc_at_end`, `cc_write`, `cc_measure`, `cc_format`, `cc_get`, and
-`cc_field`.
+`cc_next`, `cc_at_end`, `cc_write`, `cc_measure`, `cc_format`, `cc_get`,
+`cc_field`, `cc_parse_args`, `cc_prepare_args`, and `cc_print_usage`.
 
 The rules engine computes nullability and FIRST sets, dispatches disjoint
 alternatives by lookahead, fuses eligible character-set loops into SWAR scans,
