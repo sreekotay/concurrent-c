@@ -32,9 +32,11 @@ program then starts with its standard input at end-of-file. Programs that
 both arrive on stdin and read data from stdin are not expressible; use a
 file.
 
-Arguments after the program are script arguments. The process `argv[0]` is
-the synthetic unit name `-e` or `-E` (script args begin at `argv[1]` /
-`args[0]`).
+One-liner mode flags (`-n`, `-p`, `--save`, `--save-to`, `--doc`) may appear
+anywhere among `ccc` flags relative to `-e`/`-E` (before or after `PROGRAM`);
+remaining non-flag arguments after `PROGRAM` are script arguments (use `--` to
+pass a literal `-n`/`-p`). The process `argv[0]` is the synthetic unit name
+`-e` or `-E` (script args begin at `argv[1]` / `args[0]`).
 
 ### 1.1 Predeclared names
 

@@ -4370,7 +4370,7 @@ int main(int argc, char **argv) {
         const char* save_doc = NULL;
         CCScriptOnelinerOpts ol_opts;
 
-        /* Collect one-liner flags anywhere before -e/-E PROGRAM. */
+        /* Collect one-liner mode flags anywhere (before or after PROGRAM). */
         for (int i = 1; i < argc; ++i) {
             const char* a = argv[i];
             if (strcmp(a, "--") == 0) break;
