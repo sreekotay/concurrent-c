@@ -15,6 +15,8 @@ int cc_path_is_ccscript(const char* path);
  *     `int main` (default @errhandler injected inside that main)
  *   - TU-scope: # directives, @grammar / @comptime, typedef, struct/enum/
  *     union type defs, function definitions and prototypes
+ *   - discover `int name(int, char**)` TU tasks; synthetic main dispatches
+ *     `@name` (strip that arg) or naked `@` (list tasks); else statement body
  *   - explicit main + top-level statements → #error (and stderr diag)
  *
  * Returns malloc'd rewritten text and sets *out_len.

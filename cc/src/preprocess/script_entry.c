@@ -584,6 +584,386 @@ static void cc__append(char* out, size_t* o, size_t need_cap,
     *o += n;
 }
 
+static int cc__param_list_is_argc_argv(const char* s, size_t a, size_t b) {
+    int saw_int = 0, saw_char = 0, stars = 0;
+    size_t i = a;
+    while (i < b) {
+        if (cc__starts_with_kw(s, b, i, "int")) {
+            saw_int = 1;
+            i += 3;
+            continue;
+        }
+        if (cc__starts_with_kw(s, b, i, "char")) {
+            saw_char = 1;
+            i += 4;
+            continue;
+        }
+        if (s[i] == '*') {
+            stars++;
+            i++;
+            continue;
+        }
+        if (cc_is_ident_start(s[i])) {
+            while (i < b && cc_is_ident_char(s[i])) i++;
+            continue;
+        }
+        i++;
+    }
+    return saw_int && saw_char && stars >= 2;
+}
+
+/*
+ * If [a,b) is a definition `int name(int …, char **…) { … }` (optional
+ * static/etc.), copy name into name_out and return 1. Prototypes and
+ * `main` are rejected.
+ */
+static int cc__extract_script_task(const char* s, size_t a, size_t b,
+                                   char* name_out, size_t name_cap) {
+    size_t i, ns, nl, rpar = 0, j;
+    if (!s || a >= b || !name_out || name_cap < 2) return 0;
+    i = cc_skip_ws_and_comments(s, b, a);
+    i = cc__skip_storage(s, b, i);
+    i = cc_skip_ws_and_comments(s, b, i);
+    if (!cc__starts_with_kw(s, b, i, "int")) return 0;
+    i += 3;
+    i = cc_skip_ws_and_comments(s, b, i);
+    if (i < b && s[i] == '*') return 0;
+    if (i >= b || !cc_is_ident_start(s[i])) return 0;
+    ns = i;
+    while (i < b && cc_is_ident_char(s[i])) i++;
+    nl = i - ns;
+    if (nl == 0 || nl + 1 > name_cap) return 0;
+    if (nl == 4 && memcmp(s + ns, "main", 4) == 0) return 0;
+    i = cc_skip_ws_and_comments(s, b, i);
+    if (i >= b || s[i] != '(') return 0;
+    if (!cc_find_matching_paren(s, b, i, &rpar)) return 0;
+    if (!cc__param_list_is_argc_argv(s, i + 1, rpar)) return 0;
+    j = cc__skip_throws_clause(s, b, rpar + 1);
+    j = cc_skip_ws_and_comments(s, b, j);
+    if (j >= b || s[j] != '{') return 0;
+    memcpy(name_out, s + ns, nl);
+    name_out[nl] = '\0';
+    return 1;
+}
+
+typedef struct {
+    char name[128];
+    char summary[256];
+} CC__ScriptTask;
+
+static int cc__task_name_cmp(const void* a, const void* b) {
+    return strcmp(((const CC__ScriptTask*)a)->name,
+                  ((const CC__ScriptTask*)b)->name);
+}
+
+/* Last CCDoc block (slash-star-star ... star-slash) in [a, decl) with only
+ * whitespace between the closer and decl. */
+static int cc__find_ccdoc_before(const char* s, size_t a, size_t decl,
+                                 size_t* out_a, size_t* out_b) {
+    size_t i = a;
+    size_t last_a = 0, last_b = 0;
+    int found = 0;
+    if (!s || a >= decl) return 0;
+    while (i + 3 < decl) {
+        size_t j, end, k;
+        if (!(s[i] == '/' && s[i + 1] == '*' && s[i + 2] == '*')) {
+            i++;
+            continue;
+        }
+        /* Skip empty slash-star-star-slash markers. */
+        if (i + 3 < decl && s[i + 3] == '/') {
+            i += 4;
+            continue;
+        }
+        j = i + 3;
+        while (j + 1 < decl && !(s[j] == '*' && s[j + 1] == '/')) j++;
+        if (j + 1 >= decl) break;
+        end = j + 2;
+        k = end;
+        while (k < decl &&
+               (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r'))
+            k++;
+        if (k == decl) {
+            last_a = i;
+            last_b = end;
+            found = 1;
+        }
+        i = end;
+    }
+    if (!found) return 0;
+    *out_a = last_a;
+    *out_b = last_b;
+    return 1;
+}
+
+static void cc__trim_inplace(char* s) {
+    size_t n, i, j;
+    if (!s) return;
+    n = strlen(s);
+    i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+        i++;
+    j = n;
+    while (j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' ||
+                     s[j - 1] == '\n' || s[j - 1] == '\r'))
+        j--;
+    if (i > 0 || j < n) {
+        size_t len = j - i;
+        memmove(s, s + i, len);
+        s[len] = '\0';
+    }
+}
+
+/* Fill summary_out from a CCDoc block [a,b). Prefers @task text; else the
+ * first free-text line before any @tag. */
+static void cc__ccdoc_one_line_summary(const char* s, size_t a, size_t b,
+                                       char* summary_out, size_t summary_cap) {
+    char buf[1024];
+    size_t o = 0;
+    size_t i, line_a;
+    char task_sum[256];
+    char free_sum[256];
+    int saw_tag = 0;
+
+    if (!summary_out || summary_cap == 0) return;
+    summary_out[0] = '\0';
+    task_sum[0] = '\0';
+    free_sum[0] = '\0';
+    if (!s || a + 5 > b) return;
+
+    /* Strip opening slash-star-star and closing star-slash. */
+    i = a + 3;
+    if (b >= 2) b -= 2;
+    /* Optional '*' gutter on the opening line. */
+    while (i < b && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i < b && s[i] == '*' && !(i + 1 < b && s[i + 1] == '/')) {
+        i++;
+        if (i < b && s[i] == ' ') i++;
+    }
+    while (i < b) {
+        char c = s[i];
+        if (c == '\r') { i++; continue; }
+        if (c == '\n') {
+            if (o + 1 < sizeof(buf)) buf[o++] = '\n';
+            i++;
+            while (i < b && (s[i] == ' ' || s[i] == '\t')) i++;
+            if (i < b && s[i] == '*') {
+                i++;
+                if (i < b && s[i] == '/') break;
+                if (i < b && s[i] == ' ') i++;
+            }
+            continue;
+        }
+        if (o + 1 < sizeof(buf)) buf[o++] = c;
+        i++;
+    }
+    buf[o] = '\0';
+
+    line_a = 0;
+    while (line_a <= o) {
+        size_t line_b = line_a;
+        char line[256];
+        size_t llen;
+        char* p;
+        while (line_b < o && buf[line_b] != '\n') line_b++;
+        llen = line_b - line_a;
+        if (llen >= sizeof(line)) llen = sizeof(line) - 1;
+        memcpy(line, buf + line_a, llen);
+        line[llen] = '\0';
+        p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') {
+            if (!saw_tag && free_sum[0]) break;
+        } else if (*p == '@') {
+            saw_tag = 1;
+            if (strncmp(p, "@task", 5) == 0 &&
+                (p[5] == '\0' || p[5] == ' ' || p[5] == '\t')) {
+                p += 5;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p && !task_sum[0]) {
+                    strncpy(task_sum, p, sizeof(task_sum) - 1);
+                    task_sum[sizeof(task_sum) - 1] = '\0';
+                    cc__trim_inplace(task_sum);
+                }
+            }
+        } else if (!saw_tag && !free_sum[0]) {
+            strncpy(free_sum, p, sizeof(free_sum) - 1);
+            free_sum[sizeof(free_sum) - 1] = '\0';
+            cc__trim_inplace(free_sum);
+        }
+        if (line_b >= o) break;
+        line_a = line_b + 1;
+    }
+
+    if (task_sum[0])
+        strncpy(summary_out, task_sum, summary_cap - 1);
+    else
+        strncpy(summary_out, free_sum, summary_cap - 1);
+    summary_out[summary_cap - 1] = '\0';
+}
+
+static void cc__task_fill_summary(const char* body, size_t chunk_a, size_t chunk_b,
+                                  char* summary_out, size_t summary_cap) {
+    size_t decl, da, db;
+    summary_out[0] = '\0';
+    decl = cc_skip_ws_and_comments(body, chunk_b, chunk_a);
+    if (cc__find_ccdoc_before(body, chunk_a, decl, &da, &db))
+        cc__ccdoc_one_line_summary(body, da, db, summary_out, summary_cap);
+}
+
+/* Escape src into a C string literal body (no surrounding quotes). */
+static int cc__escape_c_string(const char* src, char* dst, size_t dst_cap) {
+    size_t o = 0;
+    size_t i;
+    if (!dst || dst_cap == 0) return -1;
+    if (!src) src = "";
+    for (i = 0; src[i]; i++) {
+        char c = src[i];
+        if (c == '\\' || c == '"') {
+            if (o + 2 >= dst_cap) return -1;
+            dst[o++] = '\\';
+            dst[o++] = c;
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            if (o + 2 >= dst_cap) return -1;
+            dst[o++] = '\\';
+            dst[o++] = (c == '\n') ? 'n' : (c == '\r') ? 'r' : 't';
+        } else if ((unsigned char)c < 0x20) {
+            continue;
+        } else {
+            if (o + 1 >= dst_cap) return -1;
+            dst[o++] = c;
+        }
+    }
+    dst[o] = '\0';
+    return 0;
+}
+
+static int cc__collect_script_tasks(const char* body, const CC__Chunk* chunks,
+                                    size_t nchunks,
+                                    CC__ScriptTask** out_tasks,
+                                    size_t* out_n) {
+    CC__ScriptTask* tasks = NULL;
+    size_t n = 0, cap = 0;
+    size_t ci;
+    for (ci = 0; ci < nchunks; ci++) {
+        char name[128];
+        size_t ti;
+        if (chunks[ci].kind != CC__CHUNK_TU) continue;
+        if (!cc__extract_script_task(body, chunks[ci].a, chunks[ci].b,
+                                     name, sizeof(name)))
+            continue;
+        for (ti = 0; ti < n; ti++) {
+            if (strcmp(tasks[ti].name, name) == 0) break;
+        }
+        if (ti < n) continue;
+        if (n + 1 > cap) {
+            size_t ncap = cap ? cap * 2 : 8;
+            CC__ScriptTask* nt =
+                (CC__ScriptTask*)realloc(tasks, ncap * sizeof(CC__ScriptTask));
+            if (!nt) { free(tasks); return -1; }
+            tasks = nt;
+            cap = ncap;
+        }
+        memset(&tasks[n], 0, sizeof(tasks[n]));
+        memcpy(tasks[n].name, name, sizeof(tasks[n].name));
+        cc__task_fill_summary(body, chunks[ci].a, chunks[ci].b,
+                              tasks[n].summary, sizeof(tasks[n].summary));
+        n++;
+    }
+    if (n > 1)
+        qsort(tasks, n, sizeof(CC__ScriptTask), cc__task_name_cmp);
+    *out_tasks = tasks;
+    *out_n = n;
+    return 0;
+}
+
+static size_t cc__task_name_width(const CC__ScriptTask* tasks, size_t ntasks) {
+    size_t w = 0, ti;
+    for (ti = 0; ti < ntasks; ti++) {
+        size_t n = strlen(tasks[ti].name);
+        if (n > w) w = n;
+    }
+    if (w < 8) w = 8;
+    if (w > 40) w = 40;
+    return w;
+}
+
+/*
+ * Append one listing line.
+ * to_stderr=0 → printf(...); to_stderr=1 → fprintf(stderr, ...).
+ */
+static int cc__append_task_list_line(char* out, size_t* o, size_t need,
+                                     int to_stderr, size_t width,
+                                     const CC__ScriptTask* task) {
+    char esc[512];
+    char line[768];
+    int m;
+    const char* call = to_stderr ? "fprintf(stderr, " : "printf(";
+    if (task->summary[0]) {
+        if (cc__escape_c_string(task->summary, esc, sizeof(esc)) != 0)
+            return -1;
+        m = snprintf(line, sizeof(line),
+                     "            %s\"%%-%zus  %%s\\n\", \"%s\", \"%s\");\n",
+                     call, width, task->name, esc);
+    } else {
+        m = snprintf(line, sizeof(line),
+                     "            %s\"%s\\n\");\n", call, task->name);
+    }
+    if (m < 0 || (size_t)m >= sizeof(line)) return -1;
+    cc__append(out, o, need, line, (size_t)m);
+    return 0;
+}
+
+/* Append @task dispatch; returns 0 on success, -1 if out buffer too small. */
+static int cc__append_task_dispatch(char* out, size_t* o, size_t need,
+                                    const CC__ScriptTask* tasks, size_t ntasks) {
+    size_t ti;
+    size_t width = cc__task_name_width(tasks, ntasks);
+    static const char head[] =
+        "    if (argc >= 2 && argv[1] && argv[1][0] == '@') {\n"
+        "        const char *__cc_task = argv[1] + 1;\n"
+        "        if (__cc_task[0] == '\\0') {\n";
+    static const char after_list[] =
+        "            return 0;\n"
+        "        }\n"
+        "        {\n"
+        "            int __i;\n"
+        "            for (__i = 1; __i < argc - 1; __i++) argv[__i] = argv[__i + 1];\n"
+        "            argc -= 1;\n"
+        "            argv[argc] = NULL;\n"
+        "        }\n";
+    static const char unknown_head[] =
+        "        fprintf(stderr, \"ccscript: unknown task @%s\\n\", __cc_task);\n"
+        "        fprintf(stderr, \"tasks:\\n\");\n";
+    static const char unknown_tail[] =
+        "        return 2;\n"
+        "    }\n"
+        "\n";
+
+    cc__append(out, o, need, head, sizeof(head) - 1);
+    for (ti = 0; ti < ntasks; ti++) {
+        if (cc__append_task_list_line(out, o, need, 0, width, &tasks[ti]) != 0)
+            return -1;
+    }
+    cc__append(out, o, need, after_list, sizeof(after_list) - 1);
+    for (ti = 0; ti < ntasks; ti++) {
+        char line[256];
+        int m = snprintf(line, sizeof(line),
+                         "        if (strcmp(__cc_task, \"%s\") == 0) "
+                         "return %s(argc, argv);\n",
+                         tasks[ti].name, tasks[ti].name);
+        if (m < 0 || (size_t)m >= sizeof(line)) return -1;
+        cc__append(out, o, need, line, (size_t)m);
+    }
+    cc__append(out, o, need, unknown_head, sizeof(unknown_head) - 1);
+    for (ti = 0; ti < ntasks; ti++) {
+        if (cc__append_task_list_line(out, o, need, 1, width, &tasks[ti]) != 0)
+            return -1;
+    }
+    cc__append(out, o, need, unknown_tail, sizeof(unknown_tail) - 1);
+    return 0;
+}
+
 char* cc_script_rewrite_source(const char* path,
                                const char* src,
                                size_t len,
@@ -609,9 +989,7 @@ char* cc_script_rewrite_source(const char* path,
         "    }\n"
         "\n";
     static const char main_open[] =
-        "int main(int argc, char **argv) {\n"
-        "    (void)argc;\n"
-        "    (void)argv;\n";
+        "int main(int argc, char **argv) {\n";
     static const char main_close[] =
         "\n    return 0;\n"
         "}\n";
@@ -630,6 +1008,9 @@ char* cc_script_rewrite_source(const char* path,
     char* out;
     size_t ci;
     int has_main_chunk = 0;
+    CC__ScriptTask* tasks = NULL;
+    size_t ntasks = 0;
+    size_t dispatch_budget;
 
     if (cc__split_body(body, body_len, &chunks, &nchunks) != 0)
         return NULL;
@@ -662,7 +1043,7 @@ char* cc_script_rewrite_source(const char* path,
             free(chunks);
             return out;
         }
-        /* Explicit main, TU-only extras: prelude only. */
+        /* Explicit main, TU-only extras: prelude only (no @task dispatch). */
         need = pre_len + body_len + 1;
         out = (char*)malloc(need);
         if (!out) { free(chunks); return NULL; }
@@ -674,13 +1055,19 @@ char* cc_script_rewrite_source(const char* path,
         return out;
     }
 
-    /* No explicit main: TU chunks, then synthetic main { eh + stmts }.
+    if (cc__collect_script_tasks(body, chunks, nchunks, &tasks, &ntasks) != 0) {
+        free(chunks);
+        return NULL;
+    }
+
+    /* No explicit main: TU chunks, then synthetic main { eh + @task + stmts }.
      * Do not inject #line here — mid-function #line breaks @create/@destroy
      * and other CC sigil parsing in the current pipeline. */
-    need = pre_len + tu_bytes + open_len + eh_len + main_bytes + close_len
-         + nchunks + 64;
+    dispatch_budget = 768 + ntasks * 320;
+    need = pre_len + tu_bytes + open_len + eh_len + dispatch_budget
+         + main_bytes + close_len + nchunks + 64;
     out = (char*)malloc(need);
-    if (!out) { free(chunks); return NULL; }
+    if (!out) { free(chunks); free(tasks); return NULL; }
     o = 0;
     cc__append(out, &o, need, prelude, pre_len);
 
@@ -695,6 +1082,12 @@ char* cc_script_rewrite_source(const char* path,
 
     cc__append(out, &o, need, main_open, open_len);
     cc__append(out, &o, need, default_eh, eh_len);
+    if (cc__append_task_dispatch(out, &o, need, tasks, ntasks) != 0) {
+        free(out);
+        free(chunks);
+        free(tasks);
+        return NULL;
+    }
 
     for (ci = 0; ci < nchunks; ci++) {
         if (chunks[ci].kind != CC__CHUNK_MAIN) continue;
@@ -709,5 +1102,6 @@ char* cc_script_rewrite_source(const char* path,
     out[o] = '\0';
     if (out_len) *out_len = o;
     free(chunks);
+    free(tasks);
     return out;
 }

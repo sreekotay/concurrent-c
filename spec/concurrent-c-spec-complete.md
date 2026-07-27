@@ -683,6 +683,53 @@ class of keyword-in-comment / keyword-in-string false-positive bugs.
 
 ---
 
+### 2.4 Documentation comments (CCDoc)
+
+**CCDoc** is Concurrent-C’s documentation comment form. It is JSDoc-shaped:
+a `/** … */` block whose tags use `@name` inside the comment. CCDoc tags do
+not compete with language `@` keywords; they appear only inside documentation
+comments.
+
+**Attachment.** A CCDoc block that immediately precedes a declaration —
+separated only by whitespace and ordinary (`//` / `/* … */`) comments —
+documents that declaration. The block binds to the next declarator (function,
+type, variable, or similar).
+
+**Summary.** Free text before the first `@tag` is the summary. Compact UIs use
+the one-line summary: the first non-empty line of that free text, or the first
+paragraph up to a blank line when a multi-line summary is preferred.
+
+**Tags.** The following tag names are the reserved CCDoc vocabulary. Tooling
+may ignore unknown tags. Tag text runs to the end of the line unless a later
+revision defines multi-line tag bodies.
+
+| Tag | Meaning |
+| --- | ------- |
+| `@param <name> <text>` | Documents a parameter. |
+| `@returns` / `@return <text>` | Documents the success / return value. |
+| `@throws` / `@errors <text>` | Documents failure / Result error domain. |
+| `@deprecated [<text>]` | Marks the declaration deprecated. |
+| `@example <text>` | Short usage example. |
+| `@see <ref>` | Cross-reference (name, path, or URI). |
+| `@task <text>` | One-line summary override for `.ccscript` `@` task listing (§9.5.2a). When present, compact task UIs prefer this text over the leading summary. |
+
+```c
+/**
+ * Read metrics from path into an arena-backed map.
+ *
+ * @param path  NUL-terminated filesystem path
+ * @param a     arena for keys and map storage
+ * @returns     populated Metrics map
+ * @errors      CC_ERR_IO, CC_ERR_PARSE
+ */
+static Metrics !>(CCError) load_metrics(const char* path, CCArena* a);
+```
+
+CCDoc does not affect program semantics or lowering. Emission of HTML indexes,
+hover cards, or markdown is a tooling concern that consumes the same blocks.
+
+---
+
 ## 3. Core Types
 
 This section defines the fundamental value-level building blocks:
@@ -5074,6 +5121,43 @@ Recommended shebang:
 ```
 
 `.ccs` inputs are unchanged: they do not auto-run from a bare positional path.
+
+#### 9.5.2a `@task` entry dispatch
+
+When the driver injects synthetic `main` (no explicit top-level `main`), it
+discovers TU-scope task functions and dispatches on the first program argument
+when that argument begins with `@`:
+
+| Invocation | Behavior |
+| ---------- | -------- |
+| `tool.ccscript` | Run the synthetic-main statement body (default script). |
+| `tool.ccscript @` | Print discovered tasks (sorted) to stdout; exit 0. Each line is the task name, and when a CCDoc one-line summary is available (§2.4), a summary column. |
+| `tool.ccscript @name args…` | Strip `@name` from `argv`, then `return name(argc', argv')`. |
+| `tool.ccscript @unknown …` | Print an error and the task list (with summaries when present) to stderr; exit 2. |
+
+A **task** is a translation-unit function definition of the form
+
+```c
+static int name(int argc, char **argv) { … }
+```
+
+(`static` / `extern` / `inline` optional). The parameter list must include an
+`int` parameter and a `char` pointer parameter with at least two `*` tokens
+(typically `char **argv`). Prototypes without a body, non-`int` returns, and
+`main` are not tasks. Explicit `main` disables `@task` dispatch for that unit;
+multi-entry scripts omit explicit `main`.
+
+When `@name` selects a task, the statement body is not executed. Task names are
+ordinary C identifiers; the `@` sigil is CLI-only and is not part of the
+function name.
+
+A CCDoc block immediately before a task supplies its listing summary: `@task`
+tag text when present, otherwise the leading one-line summary (§2.4).
+
+```text
+./tools/perf.ccscript @perf_regress --update
+./tools/perf.ccscript @
+```
 
 #### 9.5.3 Prelude and headers
 

@@ -1,0 +1,30 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Smoke: @task dispatch + CCDoc summaries on `@` listing.
+ *   bare            → statement body prints "default"
+ *   @greet world    → greet sees argv[1] == "world"
+ *   @                → lists greet/zebra with CCDoc one-liners
+ */
+
+/**
+ * Print a greeting (argv[1] or hi).
+ */
+static int greet(int argc, char **argv) {
+    if (argc >= 2 && argv[1])
+        printf("%s\n", argv[1]);
+    else
+        printf("hi\n");
+    return 0;
+}
+
+/**
+ * @task Trailing alphabet demo task
+ */
+static int zebra(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    printf("z\n");
+    return 0;
+}
+
+printf("default\n");

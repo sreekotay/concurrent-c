@@ -1,0 +1,7 @@
+# bare → statement body
+# (blank line = no argv)
+
+# @ → CCDoc task listing
+@
+# @greet → task argv rewrite
+@greet world

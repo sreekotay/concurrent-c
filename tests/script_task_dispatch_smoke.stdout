@@ -1,0 +1,6 @@
+default
+---
+greet     Print a greeting (argv[1] or hi).
+zebra     Trailing alphabet demo task
+---
+world
