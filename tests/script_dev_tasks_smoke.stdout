@@ -1,0 +1,4 @@
+check_submodules  Ensure git submodules are reachable / present.
+fmt               clang-format -i under cc/ (no-op if clang-format missing).
+lint              clang-format --dry-run --Werror under cc/.
+lint_scanners     Scanner-hygiene ratchet (hand-rolled comment/string machines).

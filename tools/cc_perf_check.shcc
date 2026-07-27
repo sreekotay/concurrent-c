@@ -160,20 +160,9 @@ CCArena a = @create(megabytes(4)) @destroy;
 CCStdio io = @create(&a) @destroy;
 
 bool update = cc_cli_flag(argc, argv, "--update");
-const char* current_arg = NULL;
-/* First positional: optional pre-captured metrics file (skip ~60s capture). */
-for (int ai = 1; ai < argc; ai++) {
-    if (!argv[ai]) continue;
-    if (strcmp(argv[ai], "--update") == 0) continue;
-    if (strcmp(argv[ai], "--current") == 0) {
-        if (ai + 1 < argc) current_arg = argv[ai + 1];
-        break;
-    }
-    if (argv[ai][0] != '-') {
-        current_arg = argv[ai];
-        break;
-    }
-}
+/* --current PATH skips ~60s capture; else first positional metrics file. */
+const char* current_arg = cc_cli_flag_value(argc, argv, "--current");
+if (!current_arg) current_arg = cc_cli_positional(argc, argv, 0);
 
 CCSlice root = cc_script_repo_root(argv[0], &a) !>;
 CCSlice baseline = cc_script_path_join((const char*)root.ptr,

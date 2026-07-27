@@ -11,75 +11,25 @@
  * (e.g. --update, --current PATH, or an alternate baseline out path).
  */
 
-static int cc__run_status(CCCommand *cmd, const char *label) {
-    CCResult_int_CCIoError st = cc_command_status(cmd);
-    if (cc_is_err(st)) {
-        fprintf(stderr, "perf: failed to run %s: %s\n",
-                label, cc_io_error_str(cc_error(st)));
-        return 1;
-    }
-    return cc_value(st);
-}
-
-/* Run a repo-relative executable (shell script, etc.), forwarding argv[1..]. */
-static int cc__forward_exe(int argc, char **argv, const char *rel_exe) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "perf: %s\n", e.message);
-        return 1;
-    }
-    CCArena a = @create(megabytes(1)) @destroy;
-    CCSlice root = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a) !>;
-    CCSlice exe = cc_script_path_join((const char *)root.ptr, rel_exe, &a);
-
-    CCCommand cmd = cc_command(&a, (const char *)exe.ptr);
-    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
-    (void)cc_command_inherit_stdio(&cmd);
-    for (int i = 1; i < argc; i++) {
-        if (argv[i]) (void)cc_command_arg(&cmd, argv[i]);
-    }
-    return cc__run_status(&cmd, rel_exe);
-}
-
-/* Run a repo-relative .shcc via ccc (auto-run), forwarding argv[1..]. */
-static int cc__forward_shcc(int argc, char **argv, const char *rel_tool) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "perf: %s\n", e.message);
-        return 1;
-    }
-    CCArena a = @create(megabytes(1)) @destroy;
-    CCSlice root = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a) !>;
-    CCSlice ccc = cc_script_path_join((const char *)root.ptr, "cc/bin/ccc", &a);
-    CCSlice tool = cc_script_path_join((const char *)root.ptr, rel_tool, &a);
-
-    CCCommand cmd = cc_command(&a, (const char *)ccc.ptr);
-    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
-    (void)cc_command_inherit_stdio(&cmd);
-    (void)cc_command_arg(&cmd, (const char *)tool.ptr);
-    for (int i = 1; i < argc; i++) {
-        if (argv[i]) (void)cc_command_arg(&cmd, argv[i]);
-    }
-    return cc__run_status(&cmd, rel_tool);
-}
-
 /**
- * Capture compiler perf baseline into perf/compiler_baseline.txt.
+ * @task Capture compiler perf baseline into perf/compiler_baseline.txt.
  */
 static int perf_baseline(int argc, char **argv) {
-    return cc__forward_exe(argc, argv, "scripts/capture_baseline.sh");
+    return cc_script_task_exe(argc, argv, "scripts/capture_baseline.sh");
 }
 
 /**
- * Primary compiler perf regression check (.shcc).
+ * @task Primary compiler perf regression check (.shcc).
  */
 static int perf_regress(int argc, char **argv) {
-    return cc__forward_shcc(argc, argv, "tools/cc_perf_check.shcc");
+    return cc_script_task_shcc(argc, argv, "tools/cc_perf_check.shcc");
 }
 
 /**
  * @task Bash oracle for the .shcc twin
  */
 static int perf_oracle(int argc, char **argv) {
-    return cc__forward_exe(argc, argv, "tools/cc_perf_check.sh");
+    return cc_script_task_exe(argc, argv, "tools/cc_perf_check.sh");
 }
 
 printf("perf: use @perf_baseline, @perf_regress, or @perf_oracle (or @ to list)\n");

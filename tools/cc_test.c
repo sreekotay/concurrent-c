@@ -448,7 +448,9 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
 
 /* Optional `stem.args`: one argv line per run (blank = no args; `#` comments
  * skipped).  Matching `stem.stdout` / `stem.stderr` may split sections on a
- * line that is exactly `---`.  No `.args` → single run, whole sidecar as today. */
+ * line that is exactly `---`.  No `.args` → single run, whole sidecar as today.
+ * Optional `stem.exit`: expected process exit code(s). One integer → all runs;
+ * N integers (one per line) → per-run. Missing → expect 0. */
 #define CC_TEST_MAX_RUNS 16
 #define CC_TEST_MAX_SECTIONS 16
 
@@ -456,6 +458,11 @@ typedef struct {
     char* lines[CC_TEST_MAX_RUNS];
     int n;
 } ArgRuns;
+
+typedef struct {
+    int codes[CC_TEST_MAX_RUNS];
+    int n;
+} ExitExpects;
 
 typedef struct {
     const unsigned char* ptr[CC_TEST_MAX_SECTIONS];
@@ -467,6 +474,48 @@ static void arg_runs_clear(ArgRuns* a) {
     if (!a) return;
     for (int i = 0; i < a->n; ++i) free(a->lines[i]);
     a->n = 0;
+}
+
+static int exit_expects_load(const char* path, ExitExpects* out) {
+    if (!out) return -1;
+    out->n = 0;
+    unsigned char* buf = NULL;
+    size_t len = 0;
+    if (read_entire_file_alloc(path, &buf, &len) != 0 || !buf) return 0;
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        while (i < len && buf[i] != '\n') i++;
+        size_t end = i;
+        if (i < len && buf[i] == '\n') i++;
+        while (start < end && (buf[start] == ' ' || buf[start] == '\t')) start++;
+        while (end > start && (buf[end - 1] == ' ' || buf[end - 1] == '\t' ||
+                               buf[end - 1] == '\r'))
+            end--;
+        if (start == end) continue;
+        if (buf[start] == '#') continue;
+        if (out->n >= CC_TEST_MAX_RUNS) {
+            fprintf(stderr, "cc_test: too many exit codes in %s\n", path);
+            free(buf);
+            out->n = 0;
+            return -1;
+        }
+        char tmp[64];
+        size_t n = end - start;
+        if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+        memcpy(tmp, buf + start, n);
+        tmp[n] = '\0';
+        out->codes[out->n++] = atoi(tmp);
+    }
+    free(buf);
+    return 0;
+}
+
+static int exit_expects_for_run(const ExitExpects* e, int ri) {
+    if (!e || e->n <= 0) return 0;
+    if (e->n == 1) return e->codes[0];
+    if (ri >= 0 && ri < e->n) return e->codes[ri];
+    return 0;
 }
 
 static int arg_runs_load(const char* path, ArgRuns* out) {
@@ -571,13 +620,14 @@ static int run_one_test(const char* stem,
      * for `tests/macro/foo.ccs`).  Derived from input_path. */
     char test_dir[512];
     test_dir_from_path(input_path, test_dir, sizeof(test_dir));
-    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512], args_path[512], stdin_path[512];
+    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512], args_path[512], stdin_path[512], exit_path[512];
     snprintf(exp_stdout_path, sizeof(exp_stdout_path), "%s/%s.stdout", test_dir, stem);
     snprintf(exp_stderr_path, sizeof(exp_stderr_path), "%s/%s.stderr", test_dir, stem);
     snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "%s/%s.compile_err", test_dir, stem);
     snprintf(ldflags_path, sizeof(ldflags_path), "%s/%s.ldflags", test_dir, stem);
     snprintf(args_path, sizeof(args_path), "%s/%s.args", test_dir, stem);
     snprintf(stdin_path, sizeof(stdin_path), "%s/%s.stdin", test_dir, stem);
+    snprintf(exit_path, sizeof(exit_path), "%s/%s.exit", test_dir, stem);
     const char* run_stdin = file_exists(stdin_path) ? stdin_path : NULL;
 
     unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
@@ -588,7 +638,20 @@ static int run_one_test(const char* stem,
     (void)read_entire_file_alloc(ldflags_path, &ldflags, &ldflags_len);
 
     ArgRuns runs = {0};
+    ExitExpects exits = {0};
     if (arg_runs_load(args_path, &runs) != 0) {
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        return 1;
+    }
+    if (exit_expects_load(exit_path, &exits) != 0) {
+        arg_runs_clear(&runs);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        return 1;
+    }
+    if (runs.n > 0 && exits.n > 1 && exits.n != runs.n) {
+        fprintf(stderr, "[FAIL] %s: .args has %d runs but .exit has %d codes\n",
+                stem, runs.n, exits.n);
+        arg_runs_clear(&runs);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
     }
@@ -699,13 +762,18 @@ static int run_one_test(const char* stem,
             snprintf(run_cmd, sizeof(run_cmd), "%s", bin_out);
         }
 
+        int want_exit = exit_expects_for_run(&exits, ri);
         int run_rc = run_cmd_redirect_timeout(run_cmd, run_stdin, out_txt, err_txt, verbose,
                                               test_run_timeout_sec);
-        if (run_rc != 0) {
-            if (run_rc == 124) {
-                fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, test_run_timeout_sec);
-            }
-            fprintf(stderr, "[FAIL] %s: run failed", stem);
+        if (run_rc == 124) {
+            fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, test_run_timeout_sec);
+            log_failure_files(stem, out_txt, err_txt, build_err_txt);
+            arg_runs_clear(&runs);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            return 1;
+        }
+        if (run_rc != want_exit) {
+            fprintf(stderr, "[FAIL] %s: exit %d (expected %d)", stem, run_rc, want_exit);
             if (nruns > 1) fprintf(stderr, " (case %d/%d)", ri + 1, nruns);
             fprintf(stderr, "\n");
             log_failure_files(stem, out_txt, err_txt, build_err_txt);

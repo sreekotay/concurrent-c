@@ -711,7 +711,7 @@ revision defines multi-line tag bodies.
 | `@deprecated [<text>]` | Marks the declaration deprecated. |
 | `@example <text>` | Short usage example. |
 | `@see <ref>` | Cross-reference (name, path, or URI). |
-| `@task <text>` | One-line summary override for `.shcc` `@` task listing (§9.5.2a). When present, compact task UIs prefer this text over the leading summary. |
+| `@task [<text>]` | In `.shcc` units with synthetic `main`, opts the following declaration into `@` task discovery when the signature is a valid task shape (§9.5.2a). Optional text is the listing summary (else the leading free-text summary). In `.ccs` / non-task contexts the tag is documentation only and does not affect lowering. |
 
 ```c
 /**
@@ -725,8 +725,9 @@ revision defines multi-line tag bodies.
 static Metrics !>(CCError) load_metrics(const char* path, CCArena* a);
 ```
 
-CCDoc does not affect program semantics or lowering. Emission of HTML indexes,
-hover cards, or markdown is a tooling concern that consumes the same blocks.
+Aside from `.shcc` `@task` opt-in (§9.5.2a), CCDoc does not affect program
+semantics or lowering. Emission of HTML indexes, hover cards, or markdown is a
+tooling concern that consumes the same blocks.
 
 ---
 
@@ -5146,6 +5147,11 @@ applies an entry rewrite before the ordinary Concurrent-C pipeline:
    the default for that scope.
 5. An explicit top-level `main` together with any MAIN-classified top-level
    statement is ill-formed.
+6. Stamp provenance so diagnostics refer to the original `.shcc`: raw
+   `#line` before TU-scope chunks; masked `CC_LN` markers before each
+   statement chunk inside synthetic `main` (raw mid-function `#line` is
+   unsafe for `@create` / `@destroy` parsing). Markers are unmasked to
+   `#line` before host compile.
 
 #### 9.5.2 Driver invocation
 
@@ -5159,7 +5165,8 @@ ccc [ccc-flags...] path/to/tool.shcc [script-args...]
 Args after the script path are program arguments (inserted after `--` for the
 build-run step). Explicit `ccc run path.shcc [-- args...]` remains valid.
 
-Recommended shebang:
+Recommended shebang (run from the repo root; `./cc/bin/ccc` is resolved
+relative to the process cwd, not the script path):
 
 ```text
 #!/usr/bin/env -S ./cc/bin/ccc
@@ -5176,28 +5183,33 @@ when that argument begins with `@`:
 | Invocation | Behavior |
 | ---------- | -------- |
 | `tool.shcc` | Run the synthetic-main statement body (default script). |
-| `tool.shcc @` | Print discovered tasks (sorted) to stdout; exit 0. Each line is the task name, and when a CCDoc one-line summary is available (§2.4), a summary column. |
-| `tool.shcc @name args…` | Strip `@name` from `argv`, then `return name(argc', argv')`. |
+| `tool.shcc @` | Print discovered tasks (sorted) to stdout; exit 0. Each line is `name` left-aligned in a width column, then two spaces, then the CCDoc one-line summary (§2.4) when non-empty. |
+| `tool.shcc @name args…` | Strip `@name` from `argv`, then call the task (`name(argc', argv')` or `name()`). |
 | `tool.shcc @unknown …` | Print an error and the task list (with summaries when present) to stderr; exit 2. |
 
-A **task** is a translation-unit function definition of the form
+`ccc` auto-run / `ccc run` / `ccc build run` propagate the program exit
+status (including 2). Spawn/driver failures still surface as non-zero.
+
+A **task** is a translation-unit function definition that is opted in by an
+immediately preceding CCDoc block containing `@task` (§2.4), with one of these
+shapes:
 
 ```c
+static int name(void) { … }                 /* or empty parameter list */
 static int name(int argc, char **argv) { … }
 ```
 
-(`static` / `extern` / `inline` optional). The parameter list must include an
-`int` parameter and a `char` pointer parameter with at least two `*` tokens
-(typically `char **argv`). Prototypes without a body, non-`int` returns, and
-`main` are not tasks. Explicit `main` disables `@task` dispatch for that unit;
-multi-entry scripts omit explicit `main`.
+(`static` / `extern` / `inline` optional). The argc/argv form requires an `int`
+parameter and a `char` pointer parameter with at least two `*` tokens. Prototypes
+without a body, non-`int` returns, and `main` are not tasks. A CCDoc `@task` on
+an incompatible declaration is ill-formed. Functions with a valid shape but no
+`@task` tag are not tasks. Explicit `main` disables `@task` dispatch for that
+unit; multi-entry scripts omit explicit `main`.
 
 When `@name` selects a task, the statement body is not executed. Task names are
-ordinary C identifiers; the `@` sigil is CLI-only and is not part of the
-function name.
-
-A CCDoc block immediately before a task supplies its listing summary: `@task`
-tag text when present, otherwise the leading one-line summary (§2.4).
+ordinary C identifiers; the CLI `@` sigil is not part of the function name.
+Listing summary text is the `@task` tag’s optional text when non-empty,
+otherwise the leading free-text summary.
 
 ```text
 ./tools/perf.shcc @perf_baseline
@@ -5213,10 +5225,10 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 | Header | Role |
 | ------ | ---- |
 | `<ccc/script/stdio.cch>` | `CCStdio` — arena-bound stdin/stdout/stderr helpers |
-| `<ccc/script/cli.cch>` | Flag and positional argv helpers |
+| `<ccc/script/cli.cch>` | `cc_cli_flag`, `cc_cli_flag_value`, `cc_cli_positional` |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and C-string path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by path |
-| `<ccc/script/sh.cch>` | Thin process run wrapper |
+| `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_task_exe`, `cc_script_task_shcc` |
 | `<ccc/script/temp.cch>` | `CCTempFile` with Result create and `@destroy` cleanup |
 
 Arena parameters follow the stdlib convention: **arena last** on allocating
@@ -5248,6 +5260,7 @@ io.println(s.as_slice()) !>;
 
 ```c
 bool update = cc_cli_flag(argc, argv, "--update");
+const char* current = cc_cli_flag_value(argc, argv, "--current"); /* --current PATH or --current=PATH */
 const char* pos0 = cc_cli_positional(argc, argv, 0);
 
 CCSlice root = cc_script_repo_root(argv[0], &a) !>;
@@ -5261,6 +5274,10 @@ cc_script_print_file(path_slice, &a) !>;
 
 CCTempFile tmp = cc_temp_file(&a) !> @destroy;
 cc_sh_run(program_path, arg_path, &a) !>;
+
+/* @task bodies: forward remaining argv to a repo-relative tool */
+return cc_script_task_exe(argc, argv, "scripts/format.sh");
+return cc_script_task_shcc(argc, argv, "tools/cc_perf_check.shcc");
 ```
 
 `cc_script_repo_root` walks from the current working directory (and, failing
@@ -5270,6 +5287,13 @@ slices from path helpers are NUL-terminated for C interop.
 
 `cc_sh_run` builds a `CCCommand`, runs it to completion, and fails with
 `CCError` when the process exits non-zero.
+
+`cc_script_task_exe` / `cc_script_task_shcc` resolve a path under the repo
+root, set cwd to that root, inherit stdio, forward `argv[1..]`, and return the
+process exit status (printing a short stderr diagnostic on spawn failure).
+`cc_script_task_shcc` builds the `.shcc` with `ccc build --link` into
+`bin/<stem>` (cache / mtime gated), then execs that binary — so nested
+orchestration pays for a rebuild only when needed, not a second auto-run.
 
 #### 9.5.6 Scripting model
 

@@ -73,15 +73,15 @@ uninstall:
 	@echo "Uninstalled."
 
 fmt:
-	@./scripts/format.sh
+	@./tools/dev.shcc @fmt
 
 lint:
-	@./scripts/lint.sh
+	@./tools/dev.shcc @lint
 
 # Scanner-hygiene ratchet (PASS_CLEANUP_PLAN phase 4): fails on new
 # hand-rolled comment/string state machines outside the canonical scanners.
 lint-scanners:
-	@bash scripts/lint_scanners.sh
+	@./tools/dev.shcc @lint_scanners
 
 # Offsets golden smoke (PASS_CLEANUP_PLAN phase 1): the full suite with the
 # UFCS byte-offset self-check FATAL.  Any drift between recorded offsets and
@@ -90,7 +90,7 @@ test-strict:
 	CC_STRICT_OFFSETS=1 ./tools/cc_test
 
 check-submodules:
-	@./scripts/check_submodule_reachability.sh
+	@./tools/dev.shcc @check_submodules
 
 # Build and run the UFCS hello example through our compiler.
 example: cc

@@ -1,19 +1,28 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * Smoke: @task dispatch + CCDoc summaries on `@` listing.
+ * Smoke: CCDoc @task opt-in + dispatch + listing summaries.
  *   bare            → statement body prints "default"
  *   @greet world    → greet sees argv[1] == "world"
- *   @                → lists greet/zebra with CCDoc one-liners
+ *   @ping           → zero-arg task
+ *   @                → lists greet/ping/zebra (not hidden_helper)
  */
 
 /**
- * Print a greeting (argv[1] or hi).
+ * @task Print a greeting (argv[1] or hi).
  */
 static int greet(int argc, char **argv) {
     if (argc >= 2 && argv[1])
         printf("%s\n", argv[1]);
     else
         printf("hi\n");
+    return 0;
+}
+
+/**
+ * @task No-arg demo task
+ */
+static int ping(void) {
+    printf("pong\n");
     return 0;
 }
 
@@ -27,7 +36,16 @@ static int zebra(int argc, char **argv) {
     return 0;
 }
 
-/* Extra param → not a task (arity must be exactly argc/argv). */
+/**
+ * Documented argc/argv helper — not opted into CLI dispatch.
+ */
+static int hidden_helper(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    return 0;
+}
+
+/* Extra param → invalid task shape even with @task (see *_fail smoke). */
 static int helper_not_a_task(int argc, char **argv, const char *extra) {
     (void)argc;
     (void)argv;

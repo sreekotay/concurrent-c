@@ -1,6 +1,10 @@
 default
 ---
 greet     Print a greeting (argv[1] or hi).
+ping      No-arg demo task
 zebra     Trailing alphabet demo task
 ---
 world
+---
+pong
+---

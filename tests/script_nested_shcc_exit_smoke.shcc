@@ -1,0 +1,14 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Smoke: nested cc_script_task_shcc preserves non-zero exit (unknown → 2).
+ */
+
+/**
+ * @task Forward remaining argv to the task-dispatch smoke (build+exec).
+ */
+static int nest(int argc, char **argv) {
+    return cc_script_task_shcc(argc, argv, "tests/script_task_dispatch_smoke.shcc");
+}
+
+printf("nested: use @nest @nosuch_task_xyz\n");
+return 2;

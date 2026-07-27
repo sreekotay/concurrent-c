@@ -4,9 +4,12 @@
 #ifndef CC_SCRIPT_SH_H
 #define CC_SCRIPT_SH_H
 
+#include <stdio.h>
+
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_io_error.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/script/pathx.cch>
 #include <ccc/std/exec.cch>
 
 /*
@@ -34,6 +37,135 @@ static inline CCResult_int_CCError cc_sh_run(const char *program,
             CC_ERROR(CC_ERR_IO, "cc_sh_run: non-zero exit"));
     }
     return cc_ok_CCResult_int_CCError(cc_value(st));
+}
+
+static inline void cc__script_forward_args(CCCommand *cmd, int argc, char **argv) {
+    int i;
+    if (!cmd) return;
+    for (i = 1; i < argc; i++) {
+        if (argv && argv[i]) (void)cc_command_arg(cmd, argv[i]);
+    }
+}
+
+static inline int cc__script_status_or_fail(CCCommand *cmd, const char *label) {
+    CCResult_int_CCIoError st;
+    if (!cmd || !label) return 1;
+    st = cc_command_status(cmd);
+    if (cc_is_err(st)) {
+        fprintf(stderr, "shcc: failed to run %s: %s\n",
+                label, cc_io_error_str(cc_error(st)));
+        return 1;
+    }
+    return cc_value(st);
+}
+
+/*
+ * Task-friendly: run repo-relative executable from repo root, forward argv[1..],
+ * inherit stdio. Returns process exit status (1 on spawn/resolve failure).
+ */
+static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe) {
+    CCArena a;
+    CCResult_CCSlice_CCError root_r;
+    CCSlice root, exe;
+    CCCommand cmd;
+    int rc;
+    if (!rel_exe || !rel_exe[0]) {
+        fprintf(stderr, "shcc: cc_script_task_exe: missing path\n");
+        return 1;
+    }
+    a = cc_arena_create(megabytes(1));
+    root_r = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a);
+    if (cc_is_err(root_r)) {
+        fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
+        cc_arena_destroy(&a);
+        return 1;
+    }
+    root = cc_value(root_r);
+    exe = cc_script_path_join((const char *)root.ptr, rel_exe, &a);
+    cmd = cc_command(&a, (const char *)exe.ptr);
+    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
+    (void)cc_command_inherit_stdio(&cmd);
+    cc__script_forward_args(&cmd, argc, argv);
+    rc = cc__script_status_or_fail(&cmd, rel_exe);
+    cc_arena_destroy(&a);
+    return rc;
+}
+
+/* Basename of rel_tool without a trailing ".shcc" (NUL-terminated slice). */
+static inline CCSlice cc__script_shcc_stem(const char *rel_tool, CCArena *arena) {
+    const char *base;
+    size_t n;
+    if (!rel_tool || !arena) return cc_slice_empty();
+    base = strrchr(rel_tool, '/');
+    base = base ? base + 1 : rel_tool;
+    n = strlen(base);
+    if (n >= 5 && memcmp(base + n - 5, ".shcc", 5) == 0) n -= 5;
+    {
+        CCSlice out = cc_arena_alloc_slice_bytes(arena, n + 1);
+        if (!out.ptr) return cc_slice_empty();
+        if (n) memcpy(out.ptr, base, n);
+        ((char *)out.ptr)[n] = '\0';
+        out.len = n;
+        return out;
+    }
+}
+
+/*
+ * Task-friendly: ensure a repo-relative .shcc is linked to bin/<stem>, then
+ * exec that binary with argv[1..] forwarded (cwd = repo root, inherit stdio).
+ * Rebuilds via `ccc build --link` when the cache/mtime requires it — avoids a
+ * second full auto-run pipeline for nested .shcc orchestration.
+ * Returns process exit status (1 on resolve/build/spawn failure).
+ */
+static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_tool) {
+    CCArena a;
+    CCResult_CCSlice_CCError root_r;
+    CCSlice root, ccc, stem, bin, bin_rel;
+    CCCommand build, run;
+    int rc;
+    if (!rel_tool || !rel_tool[0]) {
+        fprintf(stderr, "shcc: cc_script_task_shcc: missing path\n");
+        return 1;
+    }
+    a = cc_arena_create(megabytes(1));
+    root_r = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a);
+    if (cc_is_err(root_r)) {
+        fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
+        cc_arena_destroy(&a);
+        return 1;
+    }
+    root = cc_value(root_r);
+    stem = cc__script_shcc_stem(rel_tool, &a);
+    if (!stem.ptr || stem.len == 0) {
+        fprintf(stderr, "shcc: cc_script_task_shcc: bad stem for %s\n", rel_tool);
+        cc_arena_destroy(&a);
+        return 1;
+    }
+    bin_rel = cc_script_path_join("bin", (const char *)stem.ptr, &a);
+    bin = cc_script_path_join((const char *)root.ptr, (const char *)bin_rel.ptr, &a);
+    ccc = cc_script_path_join((const char *)root.ptr, "cc/bin/ccc", &a);
+
+    build = cc_command(&a, (const char *)ccc.ptr);
+    (void)cc_command_cwd(&build, (const char *)root.ptr);
+    (void)cc_command_inherit_stdio(&build);
+    (void)cc_command_arg(&build, "build");
+    (void)cc_command_arg(&build, "--link");
+    (void)cc_command_arg(&build, rel_tool);
+    (void)cc_command_arg(&build, "-o");
+    (void)cc_command_arg(&build, (const char *)bin_rel.ptr);
+    rc = cc__script_status_or_fail(&build, "ccc build");
+    if (rc != 0) {
+        cc_arena_destroy(&a);
+        return rc;
+    }
+
+    run = cc_command(&a, (const char *)bin.ptr);
+    (void)cc_command_cwd(&run, (const char *)root.ptr);
+    (void)cc_command_inherit_stdio(&run);
+    cc__script_forward_args(&run, argc, argv);
+    rc = cc__script_status_or_fail(&run, rel_tool);
+    cc_arena_destroy(&a);
+    return rc;
 }
 
 #endif /* CC_SCRIPT_SH_H */

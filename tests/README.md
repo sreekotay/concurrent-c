@@ -2,23 +2,36 @@
 
 The repo provides a minimal test runner: `./tools/cc_test`.
 
-It discovers `tests/*.c` and `tests/*.ccs` and runs each as either:
-- **run test**: compile → link → run, expecting exit code 0
+It discovers `tests/**/*.{c,ccs,shcc}` recursively and runs each as either:
+- **run test**: compile → link → run
 - **compile-fail test**: compile is expected to fail
 
 #### Sidecar files (all optional)
 
-For a test `tests/foo.ccs`:
+For a test `tests/foo.ccs` (or `.c` / `.shcc`):
 
 - `tests/foo.stdout`
   - Each non-empty, non-`#` line is a **required substring** in the program’s stdout.
+  - Multi-run: sections split on a line that is exactly `---` (see `.args`).
 
 - `tests/foo.stderr`
   - Each non-empty, non-`#` line is a **required substring** in the program’s stderr.
+  - Same `---` sectioning as `.stdout`.
 
 - `tests/foo.compile_err`
   - Marks the test as **compile-fail**.
   - Each non-empty, non-`#` line is a **required substring** in the host C compiler error output (used for sourcemap checks).
+
+- `tests/foo.args`
+  - One argv line per run (`#` comments skipped; blank line = no args).
+  - Builds once, then runs the binary once per line.
+
+- `tests/foo.exit`
+  - Expected process exit code(s). One integer for all runs, or one per `.args` line.
+  - Missing → expect `0`.
+
+- `tests/foo.stdin`
+  - If present, redirected into the run (`< foo.stdin`).
 
 - `tests/foo.ldflags`
   - Extra host linker flags (example: `-lpthread`).
@@ -26,10 +39,13 @@ For a test `tests/foo.ccs`:
 - `tests/foo.requires_async`
   - If present, the test is **skipped unless** `CC_ENABLE_ASYNC=1` is set in the environment.
 
+`.shcc` scripts use the same sidecars. Symlinks under `tests/` may point at
+real tools (e.g. `script_minify_smoke.shcc` → `examples/.../minify.shcc`).
+
 #### Flags
 
 - `./tools/cc_test --list`: list selected tests
 - `./tools/cc_test --filter SUBSTR`: only run tests whose name/path contains `SUBSTR`
 - `./tools/cc_test --verbose`: print commands
-
-
+- `./tools/cc_test --jobs N`: parallel runs
+- `./tools/cc_test --no-cache` / `--use-cache`: control `ccc build` cache

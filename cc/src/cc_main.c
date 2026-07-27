@@ -4088,9 +4088,11 @@ int main(int argc, char **argv) {
                 new_argv[n++] = argv[i];
             }
             new_argv[n] = NULL;
-            int ret = run_build_mode(n, (char**)new_argv) == 0 ? 0 : 1;
+            /* Preserve program exit status (e.g. .shcc @task unknown → 2).
+             * Map internal negatives to 1 for shell-friendly codes. */
+            int ret = run_build_mode(n, (char**)new_argv);
             free(new_argv);
-            return ret;
+            return ret < 0 ? 1 : ret;
         }
         if (script_idx > 0) {
             /* room: + "build" + "run" + optional "--" */
@@ -4110,9 +4112,9 @@ int main(int argc, char **argv) {
                     new_argv[n++] = argv[i];
             }
             new_argv[n] = NULL;
-            int ret = run_build_mode(n, (char**)new_argv) == 0 ? 0 : 1;
+            int ret = run_build_mode(n, (char**)new_argv);
             free(new_argv);
-            return ret;
+            return ret < 0 ? 1 : ret;
         }
     }
 

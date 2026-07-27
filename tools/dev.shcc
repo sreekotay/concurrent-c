@@ -1,0 +1,41 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Make-facing task runner for everyday repo chores.
+ *
+ *   ./tools/dev.shcc @                 - list tasks
+ *   ./tools/dev.shcc @fmt
+ *   ./tools/dev.shcc @lint
+ *   ./tools/dev.shcc @lint_scanners
+ *   ./tools/dev.shcc @check_submodules
+ */
+
+/**
+ * @task clang-format -i under cc/ (no-op if clang-format missing).
+ */
+static int fmt(int argc, char **argv) {
+    return cc_script_task_exe(argc, argv, "scripts/format.sh");
+}
+
+/**
+ * @task clang-format --dry-run --Werror under cc/.
+ */
+static int lint(int argc, char **argv) {
+    return cc_script_task_exe(argc, argv, "scripts/lint.sh");
+}
+
+/**
+ * @task Scanner-hygiene ratchet (hand-rolled comment/string machines).
+ */
+static int lint_scanners(int argc, char **argv) {
+    return cc_script_task_exe(argc, argv, "scripts/lint_scanners.sh");
+}
+
+/**
+ * @task Ensure git submodules are reachable / present.
+ */
+static int check_submodules(int argc, char **argv) {
+    return cc_script_task_exe(argc, argv, "scripts/check_submodule_reachability.sh");
+}
+
+printf("dev: use @fmt, @lint, @lint_scanners, or @check_submodules (or @ to list)\n");
+return 2;

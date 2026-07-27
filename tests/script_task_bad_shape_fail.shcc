@@ -1,0 +1,13 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Compile-fail: CCDoc @task on an incompatible parameter list.
+ */
+
+/**
+ * @task Not a valid task signature
+ */
+static int bad(int x) {
+    return x;
+}
+
+printf("unreachable\n");

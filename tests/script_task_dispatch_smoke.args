@@ -5,3 +5,7 @@
 @
 # @greet → task argv rewrite
 @greet world
+# @ping → zero-arg task
+@ping
+# unknown → exit 2 + stderr list
+@nosuch_task_xyz

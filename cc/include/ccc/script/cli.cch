@@ -16,6 +16,27 @@ static inline bool cc_cli_flag(int argc, char **argv, const char *flag) {
     return false;
 }
 
+/*
+ * Value for `--flag VALUE` or `--flag=VALUE`. Returns NULL if the flag is
+ * absent or `--flag` is missing its following argument.
+ */
+static inline const char *cc_cli_flag_value(int argc, char **argv, const char *flag) {
+    size_t flen;
+    if (!flag || !flag[0]) return NULL;
+    flen = strlen(flag);
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        if (strcmp(a, flag) == 0) {
+            if (i + 1 < argc) return argv[i + 1];
+            return NULL;
+        }
+        if (strncmp(a, flag, flen) == 0 && a[flen] == '=')
+            return a + flen + 1;
+    }
+    return NULL;
+}
+
 /* First non-flag positional arg after argv[0], or NULL. */
 static inline const char *cc_cli_positional(int argc, char **argv, int index) {
     int seen = 0;
