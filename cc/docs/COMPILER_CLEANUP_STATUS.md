@@ -96,7 +96,7 @@ The baseline is captured in [`perf/compiler_baseline.txt`](../../perf/compiler_b
 
 ```bash
 make perf-baseline   # re-capture after a deliberate change
-make perf-regress    # verify current numbers haven't regressed
+make perf-regress    # verify via tools/cc_perf_check.ccscript
 ```
 
 The check fails if any reparse count exceeds baseline or wall-clock regresses by more than +20%. See [`perf/README.md` "Compiler perf baseline"](../../perf/README.md#compiler-perf-baseline) for what each metric guards against and when to update it.

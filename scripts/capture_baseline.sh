@@ -11,7 +11,8 @@
 #   ./scripts/capture_baseline.sh                   # write perf/compiler_baseline.txt
 #   ./scripts/capture_baseline.sh /tmp/snapshot.txt # write somewhere else
 #
-# See tools/cc_perf_check.sh for the regression check that consumes this file.
+# See tools/cc_perf_check.ccscript for the regression check that consumes this
+# file (bash oracle: tools/cc_perf_check.sh).
 
 set -euo pipefail
 

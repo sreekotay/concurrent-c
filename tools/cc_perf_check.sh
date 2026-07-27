@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Compare current compiler perf metrics against the committed baseline.
+# Bash oracle for tools/cc_perf_check.ccscript (primary: make perf-regress).
+#
+# Prefer the .ccscript twin for day-to-day use:
+#   ./tools/cc_perf_check.ccscript
+#   ./tools/cc_perf_check.ccscript --update
+#   make perf-regress
+# This script stays as a side-by-side oracle (make perf-regress-oracle).
 #
 # Workflow:
 #   1. Run scripts/capture_baseline.sh into a temp file (same command the
@@ -197,7 +203,7 @@ check_wall
 echo
 if [[ $regressions -gt 0 ]]; then
   echo "perf check: FAIL — $regressions regression(s), $warnings warning(s)"
-  echo "perf check: if this is an intentional change, run ./tools/cc_perf_check.sh --update"
+  echo "perf check: if this is an intentional change, run ./tools/cc_perf_check.ccscript --update"
   exit 1
 fi
 if [[ $warnings -gt 0 ]]; then

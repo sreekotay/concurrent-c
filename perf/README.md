@@ -176,7 +176,12 @@ make perf-baseline     # capture current numbers into perf/compiler_baseline.txt
 make perf-regress      # compare current numbers vs the committed baseline
 ```
 
-Under the hood these run `scripts/capture_baseline.sh` and `tools/cc_perf_check.sh` respectively. Both target a warm smoke-suite run (`tools/cc_test --jobs 8`) and take ~60-100s.
+Under the hood these run `scripts/capture_baseline.sh` and
+`tools/cc_perf_check.ccscript` respectively. Both target a warm smoke-suite
+run (`tools/cc_test --jobs 8`) and take ~60-100s.
+
+`tools/cc_perf_check.sh` remains as a bash oracle (`make perf-regress-oracle`).
+Compare-only (skip capture): `./tools/cc_perf_check.ccscript --current PATH`.
 
 ### What each metric guards against
 
@@ -190,7 +195,7 @@ Under the hood these run `scripts/capture_baseline.sh` and `tools/cc_perf_check.
 
 ### When to update the baseline
 
-Re-run `make perf-baseline` (or `./tools/cc_perf_check.sh --update`) **after** any intentional change that legitimately changes one of these numbers — e.g., a new visitor pass, deliberately adding a reparse for a new feature, or a major LOC cleanup. The new numbers should be committed in the same PR that introduces the change so reviewers can see the perf delta.
+Re-run `make perf-baseline` (or `./tools/cc_perf_check.ccscript --update`) **after** any intentional change that legitimately changes one of these numbers — e.g., a new visitor pass, deliberately adding a reparse for a new feature, or a major LOC cleanup. The new numbers should be committed in the same PR that introduces the change so reviewers can see the perf delta.
 
 ### Historical context
 

@@ -1,14 +1,13 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * .ccscript twin of tools/cc_perf_check.sh
+ * Primary compiler perf regression check (make perf-regress).
+ * Bash oracle: tools/cc_perf_check.sh (make perf-regress-oracle).
  *
  * Usage:
  *   ./tools/cc_perf_check.ccscript
  *   ./tools/cc_perf_check.ccscript --update
  *   ./tools/cc_perf_check.ccscript --current /tmp/metrics.txt
  *       (skip capture; compare baseline against an existing metrics file)
- *
- * Side-by-side with: tools/cc_perf_check.sh
  */
 
 @grammar(schema) Metric {~~~~

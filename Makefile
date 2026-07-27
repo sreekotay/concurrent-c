@@ -9,6 +9,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
+.PHONY: perf-baseline perf-regress perf-regress-oracle
 
 all: cc
 
@@ -217,6 +218,10 @@ perf-baseline: cc tools
 	@./scripts/capture_baseline.sh
 
 perf-regress: cc tools
+	@./tools/cc_perf_check.ccscript
+
+# Bash oracle for the .ccscript twin (same metrics / tolerances).
+perf-regress-oracle: cc tools
 	@./tools/cc_perf_check.sh
 
 # Run examples, stress, and perf in one go.
