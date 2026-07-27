@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "script_oneliner.h"
 #include "util/text.h"
 
 int cc_path_is_shcc(const char* path) {
@@ -703,34 +704,96 @@ static int cc__param_list_arity(const char* s, size_t a, size_t b) {
     return commas + 1;
 }
 
-/* True for exactly `(int …, char **…)` — two parameters, argc/argv-shaped. */
-static int cc__param_list_is_argc_argv(const char* s, size_t a, size_t b) {
-    int saw_int = 0, saw_char = 0, stars = 0;
+/* Split [a,b) on the first top-level comma; returns 1 and fills ranges. */
+static int cc__param_list_split2(const char* s, size_t a, size_t b,
+                                 size_t* a0, size_t* b0, size_t* a1, size_t* b1) {
+    int depth = 0;
     size_t i = a;
-    if (cc__param_list_arity(s, a, b) != 2) return 0;
+    if (!s || !a0 || !b0 || !a1 || !b1 || a >= b) return 0;
     while (i < b) {
-        if (cc__starts_with_kw(s, b, i, "int")) {
-            saw_int = 1;
-            i += 3;
-            continue;
+        char c = s[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth) depth--;
+        } else if (c == ',' && depth == 0) {
+            *a0 = a;
+            *b0 = i;
+            *a1 = i + 1;
+            *b1 = b;
+            return 1;
         }
-        if (cc__starts_with_kw(s, b, i, "char")) {
-            saw_char = 1;
-            i += 4;
-            continue;
-        }
-        if (s[i] == '*') {
-            stars++;
+        i++;
+    }
+    return 0;
+}
+
+/* Pointer depth: each `*` and each trailing `[]` counts one. */
+static int cc__param_ptr_depth(const char* s, size_t a, size_t b) {
+    int depth = 0;
+    int paren = 0, brack = 0, brace = 0;
+    size_t i = a;
+    while (i < b) {
+        char c = s[i];
+        if (c == '(') {
+            paren++;
             i++;
             continue;
         }
+        if (c == ')') {
+            if (paren) paren--;
+            i++;
+            continue;
+        }
+        if (c == '{') {
+            brace++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            if (brace) brace--;
+            i++;
+            continue;
+        }
+        if (c == '[') {
+            if (paren == 0 && brace == 0) depth++;
+            brack++;
+            i++;
+            continue;
+        }
+        if (c == ']') {
+            if (brack) brack--;
+            i++;
+            continue;
+        }
+        if (c == '*' && paren == 0 && brack == 0 && brace == 0) depth++;
+        i++;
+    }
+    return depth;
+}
+
+static int cc__param_has_kw(const char* s, size_t a, size_t b, const char* kw) {
+    size_t i = a;
+    while (i < b) {
+        if (cc__starts_with_kw(s, b, i, kw)) return 1;
         if (cc_is_ident_start(s[i])) {
             while (i < b && cc_is_ident_char(s[i])) i++;
             continue;
         }
         i++;
     }
-    return saw_int && saw_char && stars >= 2;
+    return 0;
+}
+
+/* True for `(int …, char **…)` / `(int …, char *…[])` — per-parameter shape. */
+static int cc__param_list_is_argc_argv(const char* s, size_t a, size_t b) {
+    size_t a0, b0, a1, b1;
+    if (cc__param_list_arity(s, a, b) != 2) return 0;
+    if (!cc__param_list_split2(s, a, b, &a0, &b0, &a1, &b1)) return 0;
+    if (!cc__param_has_kw(s, a0, b0, "int")) return 0;
+    if (cc__param_ptr_depth(s, a0, b0) != 0) return 0;
+    if (!cc__param_has_kw(s, a1, b1, "char")) return 0;
+    if (cc__param_ptr_depth(s, a1, b1) < 2) return 0;
+    return 1;
 }
 
 /* True for `()` or `(void)`. */
@@ -750,6 +813,8 @@ typedef struct {
     char name[128];
     char summary[256];
     int takes_argv; /* 1 = (int,char**), 0 = void/empty */
+    size_t chunk_a; /* body offset of enclosing TU chunk */
+    size_t brace;   /* body offset of function-body '{' */
 } CC__ScriptTask;
 
 /*
@@ -759,7 +824,8 @@ typedef struct {
  */
 static int cc__extract_script_task_shape(const char* s, size_t a, size_t b,
                                          char* name_out, size_t name_cap,
-                                         int* out_takes_argv) {
+                                         int* out_takes_argv,
+                                         size_t* out_brace) {
     size_t i, ns, nl, rpar = 0, j;
     int takes_argv = 0;
     if (!s || a >= b || !name_out || name_cap < 2) return 0;
@@ -792,6 +858,7 @@ static int cc__extract_script_task_shape(const char* s, size_t a, size_t b,
     memcpy(name_out, s + ns, nl);
     name_out[nl] = '\0';
     if (out_takes_argv) *out_takes_argv = takes_argv;
+    if (out_brace) *out_brace = j;
     return 1;
 }
 
@@ -1036,7 +1103,7 @@ static int cc__collect_script_tasks(const char* path,
     size_t ci;
     for (ci = 0; ci < nchunks; ci++) {
         char name[128];
-        size_t ti, decl, da, db;
+        size_t ti, decl, da, db, brace = 0;
         int takes_argv = 0;
         if (chunks[ci].kind != CC__CHUNK_TU) continue;
         decl = cc_skip_ws_and_comments(body, chunks[ci].b, chunks[ci].a);
@@ -1045,7 +1112,8 @@ static int cc__collect_script_tasks(const char* path,
         if (!cc__ccdoc_has_task_tag(body, da, db))
             continue;
         if (!cc__extract_script_task_shape(body, chunks[ci].a, chunks[ci].b,
-                                           name, sizeof(name), &takes_argv)) {
+                                           name, sizeof(name), &takes_argv,
+                                           &brace)) {
             fprintf(stderr,
                     "%s: error: CCDoc @task requires "
                     "`int name(void)` or `int name(int, char **)` "
@@ -1069,6 +1137,8 @@ static int cc__collect_script_tasks(const char* path,
         memset(&tasks[n], 0, sizeof(tasks[n]));
         memcpy(tasks[n].name, name, sizeof(tasks[n].name));
         tasks[n].takes_argv = takes_argv;
+        tasks[n].chunk_a = chunks[ci].a;
+        tasks[n].brace = brace;
         cc__ccdoc_one_line_summary(body, da, db,
                                    tasks[n].summary, sizeof(tasks[n].summary));
         n++;
@@ -1283,14 +1353,47 @@ char* cc_script_rewrite_source(const char* path,
 
     for (ci = 0; ci < nchunks; ci++) {
         int line;
+        const CC__ScriptTask* task = NULL;
+        size_t ti;
         if (chunks[ci].kind != CC__CHUNK_TU) continue;
         if (chunks[ci].b <= chunks[ci].a) continue;
         line = cc__src_line_at(src, body_off + chunks[ci].a);
         if (path && cc__append_prov_marker(&ob, 1, line, path) != 0)
             goto fail_rewrite;
-        if (cc__append(&ob, body + chunks[ci].a,
-                       chunks[ci].b - chunks[ci].a) != 0)
+        for (ti = 0; ti < ntasks; ti++) {
+            if (tasks[ti].chunk_a == chunks[ci].a) {
+                task = &tasks[ti];
+                break;
+            }
+        }
+        if (task && task->brace >= chunks[ci].a &&
+            task->brace < chunks[ci].b) {
+            size_t brace = task->brace;
+            size_t body_a = brace + 1;
+            size_t body_n = chunks[ci].b > body_a ? chunks[ci].b - body_a : 0;
+            /* Same default @errhandler as synthetic main — tasks are
+             * separate functions and do not see main's handler.
+             * Leading newline: the prefix ends at `{` (not the following
+             * `\n`), so without it `@errhandler` sticks to `{` on one line
+             * and later statements fail to parse. */
+            static const char task_eh[] =
+                "\n    @errhandler(CCError e) {\n"
+                "        fprintf(stderr, \"%s\\n\", e.message);\n"
+                "        return 1;\n"
+                "    }\n"
+                "\n";
+            if (cc__append(&ob, body + chunks[ci].a,
+                           brace + 1 - chunks[ci].a) != 0)
+                goto fail_rewrite;
+            if (cc__append(&ob, task_eh, sizeof(task_eh) - 1) != 0)
+                goto fail_rewrite;
+            if (body_n &&
+                cc__append(&ob, body + body_a, body_n) != 0)
+                goto fail_rewrite;
+        } else if (cc__append(&ob, body + chunks[ci].a,
+                              chunks[ci].b - chunks[ci].a) != 0) {
             goto fail_rewrite;
+        }
         if (ob.len > 0 && ob.data[ob.len - 1] != '\n' &&
             cc__append_ch(&ob, '\n') != 0)
             goto fail_rewrite;
@@ -1300,6 +1403,44 @@ char* cc_script_rewrite_source(const char* path,
         cc__append(&ob, default_eh, eh_len) != 0 ||
         cc__append_task_dispatch(&ob, tasks, ntasks) != 0)
         goto fail_rewrite;
+
+    /* Token-gated a/io/in/args for the synthetic-main wrap only — not
+     * @task bodies (those declare explicitly when needed). */
+    {
+        size_t main_len = 0;
+        char* main_buf = NULL;
+        char* pre = NULL;
+        size_t pre_n = 0;
+        for (ci = 0; ci < nchunks; ci++) {
+            if (chunks[ci].kind != CC__CHUNK_MAIN) continue;
+            if (chunks[ci].b > chunks[ci].a)
+                main_len += chunks[ci].b - chunks[ci].a + 1;
+        }
+        if (main_len > 0) {
+            size_t o = 0;
+            main_buf = (char*)malloc(main_len + 1);
+            if (!main_buf) goto fail_rewrite;
+            for (ci = 0; ci < nchunks; ci++) {
+                size_t n;
+                if (chunks[ci].kind != CC__CHUNK_MAIN) continue;
+                if (chunks[ci].b <= chunks[ci].a) continue;
+                n = chunks[ci].b - chunks[ci].a;
+                memcpy(main_buf + o, body + chunks[ci].a, n);
+                o += n;
+                main_buf[o++] = '\n';
+            }
+            main_buf[o] = '\0';
+            pre = cc_script_oneliner_predecls_for(main_buf, o, 1, "    ",
+                                                  &pre_n);
+            free(main_buf);
+            if (!pre) goto fail_rewrite;
+            if (pre_n && cc__append(&ob, pre, pre_n) != 0) {
+                free(pre);
+                goto fail_rewrite;
+            }
+            free(pre);
+        }
+    }
 
     for (ci = 0; ci < nchunks; ci++) {
         int line;

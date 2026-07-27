@@ -40,10 +40,12 @@ pass a literal `-n`/`-p`). The process `argv[0]` is the synthetic unit name
 
 ### 1.1 Predeclared names
 
-In a `-e` / `-E` program the following names are predeclared. Each
-declaration is emitted only when its identifier appears as a token in the
-**lowered** program text (comments and string/character literals are
-ignored). These identifiers are reserved: the program must not declare them.
+In a `-e` / `-E` program — and in a `.shcc` unit’s synthetic `main` wrap for
+top-level statements — the following names are predeclared. Each declaration
+is emitted only when its identifier appears as a code token in that body
+(comments and string/character literals are ignored) and the body does not
+already declare the name. `@task` bodies are not predeclared; they declare
+`a` / `io` / … explicitly when needed.
 
 | Name | Type | Declaration |
 | ---- | ---- | ----------- |

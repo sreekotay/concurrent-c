@@ -143,6 +143,47 @@ int main(void) {
         failed |= expect_substr(out, "already exists", "duplicate save");
     }
 
+    /* 7b) keyword --save name rejected */
+    snprintf(cmd, sizeof(cmd),
+             "./cc/bin/ccc --save-to '%s' --save int -e 'printf(\"x\\n\");'",
+             toolbox);
+    if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec == 0) {
+        fprintf(stderr, "FAIL keyword save should fail (exit %d):\n%s\n", ec, out);
+        failed = 1;
+    } else {
+        failed |= expect_substr(out, "non-keyword", "keyword save");
+    }
+
+    /* 7c) template prose must not trigger predecl `in` (no stdin drain) */
+    snprintf(cmd, sizeof(cmd),
+             "./cc/bin/ccc -e 'io.println(@string(`built in a jiffy`)) !>;'");
+    if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+        fprintf(stderr, "FAIL template prose predecl (exit %d):\n%s\n", ec, out);
+        failed = 1;
+    } else {
+        failed |= expect_substr(out, "built in a jiffy", "template prose");
+    }
+
+    /* 7d) apostrophe in template must not wedge --save duplicate detection */
+    snprintf(cmd, sizeof(cmd),
+             "./cc/bin/ccc --save-to '%s' --save dont -e "
+             "'io.println(@string(`don'\\''t`)) !>;'",
+             toolbox);
+    if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+        fprintf(stderr, "FAIL save dont (exit %d):\n%s\n", ec, out);
+        failed = 1;
+    }
+    snprintf(cmd, sizeof(cmd),
+             "./cc/bin/ccc --save-to '%s' --save dont -e 'printf(\"x\\n\");'",
+             toolbox);
+    if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec == 0) {
+        fprintf(stderr, "FAIL duplicate after apostrophe template (exit %d):\n%s\n",
+                ec, out);
+        failed = 1;
+    } else {
+        failed |= expect_substr(out, "already exists", "duplicate after template");
+    }
+
     /* 8) -E expr print */
     snprintf(cmd, sizeof(cmd), "./cc/bin/ccc -E '1 + 2'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {

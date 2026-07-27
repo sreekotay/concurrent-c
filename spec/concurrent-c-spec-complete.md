@@ -5167,13 +5167,19 @@ applies an entry rewrite before the ordinary Concurrent-C pipeline:
      declarations.
    - **Synthetic `main`:** statements and non-static runtime-init declarations
      (including `@create` / `@destroy` locals).
-4. Inject a default `@errhandler(CCError)` **inside** synthetic `main` that
-   prints `e.message` to stderr and returns `1`, so statement-level `!>` works
-   without a local handler. A user `@errhandler` in the script body overrides
-   the default for that scope.
-5. An explicit top-level `main` together with any MAIN-classified top-level
+4. Inject a default `@errhandler(CCError)` **inside** synthetic `main` and
+   each `@task` body that prints `e.message` to stderr and returns `1`, so
+   statement-level `!>` works without a local handler. A user `@errhandler`
+   in that scope overrides the default.
+5. Token-gated script predecls `a` / `io` / `in` / `args` (same bindings as
+   one-liner mode) are injected into the synthetic `main` wrap when the
+   identifier appears as a code token in the top-level statement body and
+   that body does not already declare the name. `in` implies `io`; `io`
+   implies `a`. `@task` bodies are not predeclared. One-liner `-n`/`-p`
+   locals `line` / `nr` are not ambient file predecls.
+6. An explicit top-level `main` together with any MAIN-classified top-level
    statement is ill-formed.
-6. Stamp provenance so diagnostics refer to the original `.shcc`: raw
+7. Stamp provenance so diagnostics refer to the original `.shcc`: raw
    `#line` before TU-scope chunks; masked `CC_LN` markers before each
    statement chunk inside synthetic `main` (raw mid-function `#line` is
    unsafe for `@create` / `@destroy` parsing). Markers are unmasked to
@@ -5223,14 +5229,16 @@ shapes:
 ```c
 static int name(void) { … }                 /* or empty parameter list */
 static int name(int argc, char **argv) { … }
+static int name(int argc, char *argv[]) { … }
 ```
 
 (`static` / `extern` / `inline` optional). The argc/argv form requires an `int`
-parameter and a `char` pointer parameter with at least two `*` tokens. Prototypes
-without a body, non-`int` returns, and `main` are not tasks. A CCDoc `@task` on
-an incompatible declaration is ill-formed. Functions with a valid shape but no
-`@task` tag are not tasks. Explicit `main` disables `@task` dispatch for that
-unit; multi-entry scripts omit explicit `main`.
+parameter with no pointer indirection, and a `char` pointer parameter whose
+pointer depth is at least two (`*` and a trailing `[]` each count one level).
+Prototypes without a body, non-`int` returns, and `main` are not tasks. A CCDoc
+`@task` on an incompatible declaration is ill-formed. Functions with a valid
+shape but no `@task` tag are not tasks. Explicit `main` disables `@task`
+dispatch for that unit; multi-entry scripts omit explicit `main`.
 
 When `@name` selects a task, the statement body is not executed. Task names are
 ordinary C identifiers; the CLI `@` sigil is not part of the function name.
@@ -5318,8 +5326,9 @@ NUL-terminated for C interop.
 root, set cwd to that root, inherit stdio, forward `argv[1..]`, and return the
 process exit status (printing a short stderr diagnostic on spawn failure).
 `cc_script_task_shcc` builds the `.shcc` with `ccc build --link` into
-`bin/<stem>` (cache / mtime gated), then execs that binary — so nested
-orchestration pays for a rebuild only when needed, not a second auto-run.
+`bin/<repo-relative-path>` with `/` mapped to `__` and `.shcc` stripped
+(cache / mtime gated), then execs that binary — so nested orchestration
+pays for a rebuild only when needed, not a second auto-run.
 
 #### 9.5.6 Scripting model
 
@@ -5530,17 +5539,11 @@ s[..]            // equivalent to s
 
 **String literals:**
 
-A string literal may initialize a slice view and has static provenance:
-
-```c
-char[:] s = "hello";  // static slice, always valid
-```
-
-**Rule:** String literal slices are sendable and have `owner = NULL` (static provenance).
-
-**Rule (call-site slice coerce):** At a call site, a string literal whose
-parameter is by-value `CCSlice` / `char[:0]` / `CCSliceShared` /
-`CCSliceUnique` is auto-wrapped with `const_char_to_slice` (§9.2.0). Variables
+String literals used as slice values have static provenance (`owner = NULL`) and
+are sendable. Call-site coerce (§9.2.0) wraps a bare literal at a by-value
+`CCSlice` / `char[:0]` / `CCSliceShared` / `CCSliceUnique` parameter. Initializer
+position (`char[:] s = "hello"`) is not auto-wrapped; write
+`char[:] s = const_char_to_slice("hello")` (or an equivalent helper). Variables
 still need `p->to_slice()` / `char_to_slice(p)`.
 
 **Closures:**

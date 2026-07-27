@@ -1,0 +1,16 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Smoke: @task accepts the textbook char *argv[] spelling.
+ */
+
+/**
+ * @task Echo argv[1] or hi
+ */
+static int greet(int argc, char *argv[]) {
+    const char *msg = (argc >= 2 && argv[1]) ? argv[1] : "hi";
+    printf("%s\n", msg);
+    return 0;
+}
+
+printf("script_task_argv_bracket_smoke: use @greet\n");
+return 2;

@@ -88,6 +88,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
 	src/preprocess/script_entry.c \
+	src/preprocess/script_oneliner.c \
 	src/preprocess/template_scan.c \
 	src/preprocess/comptime_prepare.c \
 	src/preprocess/grammar_seam.c \

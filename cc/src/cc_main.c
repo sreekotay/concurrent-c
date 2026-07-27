@@ -4142,9 +4142,20 @@ static char* cc__materialize_e_unit(const char* program, size_t program_len,
     }
     snprintf(path, sizeof(path), "%s/%016llx.shcc", dir, (unsigned long long)h);
     if (!file_exists(path)) {
-        if (cc__write_file_bytes(path, unit, unit_len) != 0) {
+        char tmp[PATH_MAX];
+        snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+        if (cc__write_file_bytes(tmp, unit, unit_len) != 0) {
+            unlink(tmp);
             free(unit);
             return NULL;
+        }
+        if (rename(tmp, path) != 0) {
+            unlink(tmp);
+            /* Lost a create race: winner's complete file is fine. */
+            if (!file_exists(path)) {
+                free(unit);
+                return NULL;
+            }
         }
     }
     free(unit);
@@ -4165,7 +4176,7 @@ static int cc__toolbox_save(const char* toolbox_path, const char* name,
     FILE* f;
 
     if (!cc_script_oneliner_is_ident(name)) {
-        fprintf(stderr, "ccc: --save name must be a C identifier\n");
+        fprintf(stderr, "ccc: --save name must be a non-keyword C identifier\n");
         return 1;
     }
     if (file_exists(toolbox_path)) {

@@ -1,0 +1,15 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Compile-fail: @task must not accept int*,char* (false argc/argv shape).
+ */
+
+/**
+ * @task Not argc/argv
+ */
+static int bad(int *count, char *name) {
+    (void)count;
+    (void)name;
+    return 0;
+}
+
+printf("unreachable\n");

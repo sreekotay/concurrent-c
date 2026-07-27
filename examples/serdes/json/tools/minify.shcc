@@ -8,13 +8,7 @@
  * Suite: tests/script_minify_smoke.shcc (symlink) + .stdin/.stdout
  */
 
-/* prelude auto-included; default @errhandler */
-
-/* Initial capacity only — arena grows on overflow by default. */
-CCArena a = @create(megabytes(1)) @destroy;
-CCStdio io = @create(&a) @destroy;
-
-char[:] in = io.read_all() !>;
+/* prelude + synthetic-main predecls (a/io/in); default @errhandler */
 
 CCVec::[char] out = cc_vec_new::[char](&a);
 bool instr = false;

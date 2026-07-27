@@ -93,32 +93,33 @@ static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe)
     return rc;
 }
 
-/* Basename of rel_tool without a trailing ".shcc" (NUL-terminated slice). */
+/* Repo-relative path with '/' → '__' and ".shcc" stripped (avoids bin/
+ * basename collisions across directories). NUL-terminated slice. */
 static inline CCSlice cc__script_shcc_stem(const char *rel_tool, CCArena *arena) {
-    const char *base;
-    size_t n;
+    size_t n, i, o, cap;
+    CCSlice out;
     if (!rel_tool || !arena) return cc_slice_empty();
-    base = strrchr(rel_tool, '/');
-    base = base ? base + 1 : rel_tool;
-    n = strlen(base);
-    if (n >= 5 && memcmp(base + n - 5, ".shcc", 5) == 0) n -= 5;
-    {
-        CCSlice out = cc_arena_alloc_slice_bytes(arena, n + 1);
-        if (!out.ptr) return cc_slice_empty();
-        if (n) memcpy(out.ptr, base, n);
-        ((char *)out.ptr)[n] = '\0';
-        out.len = n;
-        return out;
+    while (rel_tool[0] == '.' && rel_tool[1] == '/') rel_tool += 2;
+    n = strlen(rel_tool);
+    if (n >= 5 && memcmp(rel_tool + n - 5, ".shcc", 5) == 0) n -= 5;
+    cap = n + 1;
+    for (i = 0; i < n; i++)
+        if (rel_tool[i] == '/') cap++; /* each '/' becomes "__" */
+    out = cc_arena_alloc_slice_bytes(arena, cap);
+    if (!out.ptr) return cc_slice_empty();
+    o = 0;
+    for (i = 0; i < n; i++) {
+        if (rel_tool[i] == '/') {
+            ((char *)out.ptr)[o++] = '_';
+            ((char *)out.ptr)[o++] = '_';
+        } else {
+            ((char *)out.ptr)[o++] = rel_tool[i];
+        }
     }
+    ((char *)out.ptr)[o] = '\0';
+    out.len = o;
+    return out;
 }
-
-/*
- * Task-friendly: ensure a repo-relative .shcc is linked to bin/<stem>, then
- * exec that binary with argv[1..] forwarded (cwd = repo root, inherit stdio).
- * Rebuilds via `ccc build --link` when the cache/mtime requires it — avoids a
- * second full auto-run pipeline for nested .shcc orchestration.
- * Returns process exit status (1 on resolve/build/spawn failure).
- */
 static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_tool) {
     CCArena a;
     CCResult_CCSlice_CCError root_r;

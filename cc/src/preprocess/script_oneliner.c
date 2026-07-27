@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "template_scan.h"
 #include "util/text.h"
 
 static void cc__ol_apply_implications(CCScriptOnelinerPredecls* p) {
@@ -17,27 +18,37 @@ static void cc__ol_apply_implications(CCScriptOnelinerPredecls* p) {
     if (p->want_io) p->want_a = 1;
 }
 
-void cc_script_oneliner_scan_predecls(const char* src, size_t len,
-                                      CCScriptOnelinerPredecls* out) {
-    int in_str = 0, in_chr = 0, in_line = 0, in_block = 0;
-    if (out) memset(out, 0, sizeof(*out));
-    if (!src || !out) return;
+typedef struct {
+    void (*on_ident)(const char* src, size_t len, size_t i, void* ctx);
+    void (*on_punct)(char c, void* ctx);
+    void* ctx;
+    int recurse_holes; /* 1: predecls (${in} counts); 0: task_exists skip tpl */
+} CCOlCodeWalk;
 
-    for (size_t i = 0; i < len; i++) {
+/* Walk [a,b) as Concurrent-C code: skip C strings/chars/comments; on backtick
+ * templates, treat literal/verbatim text as inert. When recurse_holes, walk
+ * ${…} hole bodies as code (canonical lexer via template_scan). */
+static void cc__ol_walk_code(const char* src, size_t a, size_t b,
+                             const CCOlCodeWalk* walk) {
+    int in_str = 0, in_chr = 0, in_line = 0, in_block = 0;
+    size_t i;
+    if (!src || a >= b || !walk) return;
+
+    for (i = a; i < b; i++) {
         char c = src[i];
         if (in_line) {
             if (c == '\n') in_line = 0;
             continue;
         }
         if (in_block) {
-            if (c == '*' && i + 1 < len && src[i + 1] == '/') {
+            if (c == '*' && i + 1 < b && src[i + 1] == '/') {
                 in_block = 0;
                 i++;
             }
             continue;
         }
         if (in_str) {
-            if (c == '\\' && i + 1 < len) {
+            if (c == '\\' && i + 1 < b) {
                 i++;
                 continue;
             }
@@ -45,19 +56,19 @@ void cc_script_oneliner_scan_predecls(const char* src, size_t len,
             continue;
         }
         if (in_chr) {
-            if (c == '\\' && i + 1 < len) {
+            if (c == '\\' && i + 1 < b) {
                 i++;
                 continue;
             }
             if (c == '\'') in_chr = 0;
             continue;
         }
-        if (c == '/' && i + 1 < len && src[i + 1] == '/') {
+        if (c == '/' && i + 1 < b && src[i + 1] == '/') {
             in_line = 1;
             i++;
             continue;
         }
-        if (c == '/' && i + 1 < len && src[i + 1] == '*') {
+        if (c == '/' && i + 1 < b && src[i + 1] == '*') {
             in_block = 1;
             i++;
             continue;
@@ -70,39 +81,237 @@ void cc_script_oneliner_scan_predecls(const char* src, size_t len,
             in_chr = 1;
             continue;
         }
-        if (!cc_is_ident_start(c)) continue;
-        if (cc_match_ident_kw(src, len, i, "args")) {
-            out->want_args = 1;
-            i += 3;
+        if (c == '`') {
+            size_t tick_end = 0;
+            if (cc_tpl_scan_literal(src, b, i, &tick_end) != 0) return;
+            if (tick_end > b) tick_end = b;
+            if (walk->recurse_holes) {
+                size_t pos = i + 1;
+                while (pos < tick_end) {
+                    CCTemplatePiece piece;
+                    int r = cc_template_next_piece(src, b, i + 1, tick_end, &pos,
+                                                   &piece);
+                    if (r < 0) return;
+                    if (r == 0) break;
+                    if (piece.kind == CC_TPL_PIECE_SLOT ||
+                        piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
+                        cc__ol_walk_code(src, piece.expr_off,
+                                         piece.expr_off + piece.expr_len, walk);
+                    }
+                }
+            }
+            i = tick_end;
             continue;
         }
-        if (cc_match_ident_kw(src, len, i, "line")) {
-            out->want_line = 1;
-            i += 3;
-            continue;
+        if (walk->on_punct &&
+            (c == '{' || c == '}' || c == '(' || c == ')' || c == '[' ||
+             c == ']')) {
+            walk->on_punct(c, walk->ctx);
         }
-        if (cc_match_ident_kw(src, len, i, "nr")) {
-            out->want_nr = 1;
-            i += 1;
-            continue;
-        }
-        if (cc_match_ident_kw(src, len, i, "io")) {
-            out->want_io = 1;
-            i += 1;
-            continue;
-        }
-        if (cc_match_ident_kw(src, len, i, "in")) {
-            out->want_in = 1;
-            i += 1;
-            continue;
-        }
-        if (cc_match_ident_kw(src, len, i, "a")) {
-            out->want_a = 1;
-            continue;
-        }
-        while (i + 1 < len && cc_is_ident_char(src[i + 1])) i++;
+        if (!walk->on_ident || !cc_is_ident_start(c)) continue;
+        walk->on_ident(src, b, i, walk->ctx);
+        while (i + 1 < b && cc_is_ident_char(src[i + 1])) i++;
     }
+}
+
+static void cc__ol_predecl_on_ident(const char* src, size_t len, size_t i,
+                                    void* ctx) {
+    CCScriptOnelinerPredecls* out = (CCScriptOnelinerPredecls*)ctx;
+    (void)len;
+    if (cc_match_ident_kw(src, len, i, "args")) {
+        out->want_args = 1;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "line")) {
+        out->want_line = 1;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "nr")) {
+        out->want_nr = 1;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "io")) {
+        out->want_io = 1;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "in")) {
+        out->want_in = 1;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "a")) {
+        out->want_a = 1;
+    }
+}
+
+void cc_script_oneliner_scan_predecls(const char* src, size_t len,
+                                      CCScriptOnelinerPredecls* out) {
+    CCOlCodeWalk walk;
+    if (out) memset(out, 0, sizeof(*out));
+    if (!src || !out) return;
+    walk.on_ident = cc__ol_predecl_on_ident;
+    walk.on_punct = NULL;
+    walk.ctx = out;
+    walk.recurse_holes = 1;
+    cc__ol_walk_code(src, 0, len, &walk);
     cc__ol_apply_implications(out);
+}
+
+static size_t cc__ol_predecl_bytes(const CCScriptOnelinerPredecls* p);
+
+typedef struct {
+    int saw_CCArena;
+    int saw_CCStdio;
+    int decl_a;
+    int decl_io;
+    int decl_in;
+    int decl_args;
+} CCOlDeclScan;
+
+static void cc__ol_decl_on_ident(const char* src, size_t len, size_t i,
+                                 void* ctx) {
+    CCOlDeclScan* d = (CCOlDeclScan*)ctx;
+    (void)len;
+    if (cc_match_ident_kw(src, len, i, "CCArena")) {
+        d->saw_CCArena = 1;
+        d->saw_CCStdio = 0;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "CCStdio")) {
+        d->saw_CCStdio = 1;
+        d->saw_CCArena = 0;
+        return;
+    }
+    if (d->saw_CCArena && cc_match_ident_kw(src, len, i, "a")) {
+        d->decl_a = 1;
+        d->saw_CCArena = 0;
+        return;
+    }
+    if (d->saw_CCStdio && cc_match_ident_kw(src, len, i, "io")) {
+        d->decl_io = 1;
+        d->saw_CCStdio = 0;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "in")) {
+        /* Heuristic: `char[:] in` / `char *[:] in` — treat any `in` decl
+         * keyword use after `]` in a short window as a declaration. Cheap
+         * check: previous non-space char is ']'. */
+        size_t j = i;
+        while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' ||
+                         src[j - 1] == '\n' || src[j - 1] == '\r'))
+            j--;
+        if (j > 0 && src[j - 1] == ']') d->decl_in = 1;
+        d->saw_CCArena = 0;
+        d->saw_CCStdio = 0;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "args")) {
+        size_t j = i;
+        while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' ||
+                         src[j - 1] == '\n' || src[j - 1] == '\r'))
+            j--;
+        if (j > 0 && src[j - 1] == ']') d->decl_args = 1;
+        d->saw_CCArena = 0;
+        d->saw_CCStdio = 0;
+        return;
+    }
+    d->saw_CCArena = 0;
+    d->saw_CCStdio = 0;
+}
+
+void cc_script_oneliner_suppress_existing_decls(const char* src, size_t len,
+                                                CCScriptOnelinerPredecls* p) {
+    CCOlDeclScan d;
+    CCOlCodeWalk walk;
+    if (!p || !src) return;
+    memset(&d, 0, sizeof(d));
+    walk.on_ident = cc__ol_decl_on_ident;
+    walk.on_punct = NULL;
+    walk.ctx = &d;
+    cc__ol_walk_code(src, 0, len, &walk);
+    if (d.decl_a) p->want_a = 0;
+    if (d.decl_io) p->want_io = 0;
+    if (d.decl_in) p->want_in = 0;
+    if (d.decl_args) p->want_args = 0;
+    /* If io remains wanted but a was an explicit decl, keep want_a cleared. */
+}
+
+char* cc_script_oneliner_predecls_for(const char* src, size_t len,
+                                      int allow_args, const char* indent,
+                                      size_t* out_len) {
+    CCScriptOnelinerPredecls p;
+    size_t ind_len = (indent && indent[0]) ? strlen(indent) : 0;
+    size_t lines = 0;
+    size_t need;
+    size_t o = 0;
+    char* out;
+    if (!src) {
+        src = "";
+        len = 0;
+    }
+    cc_script_oneliner_scan_predecls(src, len, &p);
+    /* line/nr are -n/-p loop locals only — never ambient in file .shcc. */
+    p.want_line = 0;
+    p.want_nr = 0;
+    if (!allow_args) p.want_args = 0;
+    cc_script_oneliner_suppress_existing_decls(src, len, &p);
+    if (p.want_a) lines++;
+    if (p.want_io) lines++;
+    if (p.want_in) lines++;
+    if (p.want_args) lines++;
+    if (lines == 0) {
+        out = (char*)malloc(1);
+        if (!out) return NULL;
+        out[0] = '\0';
+        if (out_len) *out_len = 0;
+        return out;
+    }
+    need = cc__ol_predecl_bytes(&p) + lines * ind_len + 1;
+    out = (char*)malloc(need);
+    if (!out) return NULL;
+    if (p.want_a) {
+        static const char s[] = "CCArena a = @create(megabytes(1)) @destroy;\n";
+        if (ind_len) {
+            memcpy(out + o, indent, ind_len);
+            o += ind_len;
+        }
+        memcpy(out + o, s, sizeof(s) - 1);
+        o += sizeof(s) - 1;
+    }
+    if (p.want_io) {
+        static const char s[] = "CCStdio io = @create(&a) @destroy;\n";
+        if (ind_len) {
+            memcpy(out + o, indent, ind_len);
+            o += ind_len;
+        }
+        memcpy(out + o, s, sizeof(s) - 1);
+        o += sizeof(s) - 1;
+    }
+    if (p.want_in) {
+        static const char s[] = "char[:] in = io.read_all() !>;\n";
+        if (ind_len) {
+            memcpy(out + o, indent, ind_len);
+            o += ind_len;
+        }
+        memcpy(out + o, s, sizeof(s) - 1);
+        o += sizeof(s) - 1;
+    }
+    if (p.want_args) {
+        static const char s[] =
+            "char *[:] args = { .ptr = (char *)(argv + 1), "
+            ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n";
+        if (ind_len) {
+            memcpy(out + o, indent, ind_len);
+            o += ind_len;
+        }
+        memcpy(out + o, s, sizeof(s) - 1);
+        o += sizeof(s) - 1;
+    }
+    if (o + 1 < need) {
+        out[o++] = '\n';
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = o;
+    return out;
 }
 
 static size_t cc__ol_trim_expr(const char* src, size_t len, size_t* out_a,
@@ -373,103 +582,76 @@ char* cc_script_oneliner_first_line(const char* src, size_t len) {
 }
 
 int cc_script_oneliner_is_ident(const char* name) {
+    /* Keywords that make `static int NAME(...)` uncompilable or reserved. */
+    static const char* const kws[] = {
+        "auto",    "break",  "case",   "char",   "const",   "continue",
+        "default", "do",     "double", "else",   "enum",    "extern",
+        "float",   "for",    "goto",   "if",     "inline",  "int",
+        "long",    "main",   "register", "restrict", "return", "short",
+        "signed",  "sizeof", "static", "struct", "switch",  "typedef",
+        "union",   "unsigned", "void", "volatile", "while",  "_Bool",
+        "_Complex", "_Imaginary", NULL
+    };
     size_t i;
     if (!name || !name[0]) return 0;
     if (!cc_is_ident_start(name[0])) return 0;
     for (i = 1; name[i]; i++) {
         if (!cc_is_ident_char(name[i])) return 0;
     }
+    for (i = 0; kws[i]; i++) {
+        if (strcmp(name, kws[i]) == 0) return 0;
+    }
     return 1;
+}
+
+typedef struct {
+    const char* name;
+    size_t nlen;
+    int brace;
+    int paren;
+    int brack;
+    int found;
+} CCOlTaskExistsCtx;
+
+static void cc__ol_exists_on_punct(char c, void* ctx) {
+    CCOlTaskExistsCtx* e = (CCOlTaskExistsCtx*)ctx;
+    if (c == '{') e->brace++;
+    else if (c == '}') {
+        if (e->brace) e->brace--;
+    } else if (c == '(') e->paren++;
+    else if (c == ')') {
+        if (e->paren) e->paren--;
+    } else if (c == '[') e->brack++;
+    else if (c == ']') {
+        if (e->brack) e->brack--;
+    }
+}
+
+static void cc__ol_exists_on_ident(const char* src, size_t len, size_t i,
+                                   void* ctx) {
+    CCOlTaskExistsCtx* e = (CCOlTaskExistsCtx*)ctx;
+    size_t j;
+    if (e->found) return;
+    if (e->brace != 0 || e->paren != 0 || e->brack != 0) return;
+    if (!cc_match_ident_kw(src, len, i, e->name)) return;
+    j = cc_skip_ws_and_comments(src, len, i + e->nlen);
+    if (j < len && src[j] == '(') e->found = 1;
 }
 
 int cc_script_oneliner_task_exists(const char* toolbox, size_t len,
                                    const char* name) {
-    size_t nlen;
-    int in_str = 0, in_chr = 0, in_line = 0, in_block = 0;
-    int brace = 0, paren = 0, brack = 0;
+    CCOlTaskExistsCtx e;
+    CCOlCodeWalk walk;
     if (!toolbox || !name || !name[0]) return 0;
-    nlen = strlen(name);
-    for (size_t i = 0; i < len; i++) {
-        char c = toolbox[i];
-        if (in_line) {
-            if (c == '\n') in_line = 0;
-            continue;
-        }
-        if (in_block) {
-            if (c == '*' && i + 1 < len && toolbox[i + 1] == '/') {
-                in_block = 0;
-                i++;
-            }
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < len) {
-                i++;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < len) {
-                i++;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            continue;
-        }
-        if (c == '/' && i + 1 < len && toolbox[i + 1] == '/') {
-            in_line = 1;
-            i++;
-            continue;
-        }
-        if (c == '/' && i + 1 < len && toolbox[i + 1] == '*') {
-            in_block = 1;
-            i++;
-            continue;
-        }
-        if (c == '"') {
-            in_str = 1;
-            continue;
-        }
-        if (c == '\'') {
-            in_chr = 1;
-            continue;
-        }
-        if (c == '{') {
-            brace++;
-            continue;
-        }
-        if (c == '}') {
-            if (brace) brace--;
-            continue;
-        }
-        if (c == '(') {
-            paren++;
-            continue;
-        }
-        if (c == ')') {
-            if (paren) paren--;
-            continue;
-        }
-        if (c == '[') {
-            brack++;
-            continue;
-        }
-        if (c == ']') {
-            if (brack) brack--;
-            continue;
-        }
-        if (brace != 0 || paren != 0 || brack != 0) continue;
-        if (!cc_match_ident_kw(toolbox, len, i, name)) continue;
-        {
-            size_t j = i + nlen;
-            j = cc_skip_ws_and_comments(toolbox, len, j);
-            if (j < len && toolbox[j] == '(') return 1;
-        }
-        i += nlen - 1;
-    }
-    return 0;
+    memset(&e, 0, sizeof(e));
+    e.name = name;
+    e.nlen = strlen(name);
+    walk.on_ident = cc__ol_exists_on_ident;
+    walk.on_punct = cc__ol_exists_on_punct;
+    walk.ctx = &e;
+    walk.recurse_holes = 0; /* skip whole templates; names are never inside */
+    cc__ol_walk_code(toolbox, 0, len, &walk);
+    return e.found;
 }
 
 static size_t cc__ol_indent_body(char* out, size_t o, size_t cap,
