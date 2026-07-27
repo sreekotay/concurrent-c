@@ -75,7 +75,10 @@ static int cc__slc_type_is_slice_value(const char* ty) {
         break;
     }
     /* CCSlice and semantic markers (CCSliceShared / CCSliceUnique) are
-     * ABI-identical by-value slice params. Reject pointer forms. */
+     * ABI-identical by-value slice params. Reject pointer forms.
+     * Accept surface `char[:]` / `char[:0]` and `struct CCSlice` spellings
+     * from type_to_str. */
+    if (strncmp(p, "struct ", 7) == 0) p += 7;
     if (strncmp(p, "CCSliceShared", 13) == 0) {
         p += 13;
     } else if (strncmp(p, "CCSliceUnique", 13) == 0) {
@@ -84,6 +87,8 @@ static int cc__slc_type_is_slice_value(const char* ty) {
         p += 7;
     } else if (strncmp(p, "char[:0]", 8) == 0) {
         p += 8;
+    } else if (strncmp(p, "char[:]", 7) == 0) {
+        p += 7;
     } else {
         return 0;
     }
@@ -125,7 +130,7 @@ static int cc__slc_known_slice_arg(const char* callee, int arg_index) {
     if (strcmp(callee, "cc_file_open_async") == 0) return arg_index == 2;
     if (strcmp(callee, "cc_file_open_async_deadline") == 0) return arg_index == 2;
     if (strcmp(callee, "cc_dir_open") == 0) return arg_index == 1;
-    if (strcmp(callee, "cc_glob") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_glob") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_command") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_command_new") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_path_join") == 0) return arg_index == 1 || arg_index == 2;
@@ -149,6 +154,98 @@ static int cc__slc_skip_callee(const char* callee) {
     return 0;
 }
 
+/* True when `name(` at `name_s` is a function declarator (definition or
+ * prototype), not a call. Looks left: a preceding type/storage token means
+ * declarator; `return`/`sizeof`/… and expression punctuation mean call.
+ * Also: `) {` after the param list is always a definition. */
+static int cc__slc_name_is_declarator(const char* s, size_t len, size_t name_s,
+                                      size_t callee_n) {
+    size_t after, lparen, rparen, k, i, ns, nl;
+    if (!s || name_s >= len) return 0;
+    after = cc_skip_ws_and_comments(s, len, name_s + callee_n);
+    if (after >= len || s[after] != '(') return 0;
+    lparen = after;
+    if (!cc_find_matching_paren(s, len, lparen, &rparen)) return 0;
+    k = cc_skip_ws_and_comments(s, len, rparen + 1);
+    if (k < len && s[k] == '{') return 1;
+
+    i = name_s;
+    while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\n' ||
+                     s[i - 1] == '\r'))
+        i--;
+    if (i == 0) return 0;
+    if (s[i - 1] == '*') return 1;
+    if (!cc_is_ident_char(s[i - 1])) return 0; /* `=` `,` `(` `{` `;` `}` → call */
+    nl = 0;
+    while (i > 0 && cc_is_ident_char(s[i - 1])) {
+        i--;
+        nl++;
+    }
+    ns = i;
+    /* Statement keywords before a call, not a return type. */
+    if (nl == 6 && memcmp(s + ns, "return", 6) == 0) return 0;
+    if (nl == 6 && memcmp(s + ns, "sizeof", 6) == 0) return 0;
+    if (nl == 5 && memcmp(s + ns, "throw", 5) == 0) return 0;
+    if (nl == 4 && memcmp(s + ns, "else", 4) == 0) return 0;
+    if (nl == 2 && memcmp(s + ns, "if", 2) == 0) return 0;
+    if (nl == 3 && memcmp(s + ns, "for", 3) == 0) return 0;
+    if (nl == 5 && memcmp(s + ns, "while", 5) == 0) return 0;
+    if (nl == 6 && memcmp(s + ns, "switch", 6) == 0) return 0;
+    if (nl == 4 && memcmp(s + ns, "case", 4) == 0) return 0;
+    if (nl == 2 && memcmp(s + ns, "do", 2) == 0) return 0;
+    return 1; /* e.g. `void takes(` / `static int foo(` / `CCSlice bar(` */
+}
+
+/* Fill param_is_slice[0..out_paramc) from FUNC/PARAM or DECL_ITEM; returns 1 if
+ * any param info was found. */
+/* Strip a trailing C declarator name / array brackets from a param spelling
+ * so `CCSlice s` / `char[:0] buf` / `char *argv[]` reduce to the type. */
+static void cc__slc_strip_param_name(char* ty) {
+    size_t n, i, j;
+    if (!ty) return;
+    n = strlen(ty);
+    while (n > 0 && (ty[n - 1] == ' ' || ty[n - 1] == '\t')) ty[--n] = '\0';
+    /* Drop trailing [] dimensions (possibly empty). */
+    while (n > 0 && ty[n - 1] == ']') {
+        i = n;
+        while (i > 0 && ty[i - 1] != '[') i--;
+        if (i == 0) break;
+        n = i - 1;
+        ty[n] = '\0';
+        while (n > 0 && (ty[n - 1] == ' ' || ty[n - 1] == '\t')) ty[--n] = '\0';
+    }
+    /* If the last token is an identifier and something type-like precedes it,
+     * drop the identifier (parameter name). Keep bare type idents like
+     * `CCSlice`. */
+    if (n == 0) return;
+    i = n;
+    while (i > 0 && (isalnum((unsigned char)ty[i - 1]) || ty[i - 1] == '_')) i--;
+    if (i == 0 || i == n) return; /* whole string is one ident, or no ident */
+    j = i;
+    while (j > 0 && (ty[j - 1] == ' ' || ty[j - 1] == '\t')) j--;
+    if (j == 0) return;
+    /* Preceding must look like a type end: ident, *, ], or > (templates). */
+    {
+        char prev = ty[j - 1];
+        if (!(isalnum((unsigned char)prev) || prev == '_' || prev == '*' ||
+              prev == ']' || prev == '>'))
+            return;
+    }
+    ty[j] = '\0';
+}
+
+static int cc__slc_param_spelling_is_slice(const char* spelling) {
+    char tmp[256];
+    size_t n;
+    if (!spelling) return 0;
+    n = strlen(spelling);
+    if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+    memcpy(tmp, spelling, n);
+    tmp[n] = '\0';
+    cc__slc_strip_param_name(tmp);
+    return cc__slc_type_is_slice_value(tmp);
+}
+
 /* Fill param_is_slice[0..out_paramc) from FUNC/PARAM or DECL_ITEM; returns 1 if
  * any param info was found. */
 static int cc__slc_lookup_param_slices(const CCASTRoot* root,
@@ -159,6 +256,7 @@ static int cc__slc_lookup_param_slices(const CCASTRoot* root,
                                        int* out_paramc) {
     int paramc = 0;
     int k;
+    int dbg = getenv("CC_DEBUG_SLICE_LIT_COERCE") != NULL;
     if (!root || !n || !callee || !param_is_slice || !out_paramc || cap <= 0) return 0;
     *out_paramc = 0;
     for (k = 0; k < root->node_count; k++) {
@@ -167,10 +265,18 @@ static int cc__slc_lookup_param_slices(const CCASTRoot* root,
         if (!n[k].aux_s1 || strcmp(n[k].aux_s1, callee) != 0) continue;
         for (p = 0; p < root->node_count && paramc < cap; p++) {
             if (n[p].parent != k || n[p].kind != CC_AST_NODE_PARAM) continue;
-            param_is_slice[paramc++] = cc__slc_type_is_slice_value(n[p].aux_s2);
+            if (dbg) {
+                fprintf(stderr, "slice_lit_coerce: FUNC %s param%d ty='%s'\n",
+                        callee, paramc, n[p].aux_s2 ? n[p].aux_s2 : "(null)");
+            }
+            param_is_slice[paramc++] = cc__slc_param_spelling_is_slice(n[p].aux_s2);
         }
-        *out_paramc = paramc;
-        return paramc > 0;
+        if (paramc > 0) {
+            *out_paramc = paramc;
+            return 1;
+        }
+        /* FUNC with no PARAM children — fall through to DECL_ITEM. */
+        break;
     }
     /* DECL_ITEM signature text fallback. */
     for (k = 0; k < root->node_count; k++) {
@@ -203,7 +309,11 @@ static int cc__slc_lookup_param_slices(const CCASTRoot* root,
             if (al >= sizeof(tmp)) al = sizeof(tmp) - 1;
             memcpy(tmp, sig + starts[ai], al);
             tmp[al] = '\0';
-            param_is_slice[ai] = cc__slc_type_is_slice_value(tmp);
+            if (dbg) {
+                fprintf(stderr, "slice_lit_coerce: DECL %s param%d ty='%s'\n",
+                        callee, ai, tmp);
+            }
+            param_is_slice[ai] = cc__slc_param_spelling_is_slice(tmp);
         }
         *out_paramc = argc < cap ? argc : cap;
         return 1;
@@ -256,7 +366,8 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
         call_e = cc_pass_node_exact_end_off(root, n[i].off_end, in_len);
         name_s = (size_t)-1;
         if (call_s != (size_t)-1 && call_e != (size_t)-1 && call_e > call_s) {
-            if (call_s + callee_n <= in_len && memcmp(in_src + call_s, callee, callee_n) == 0) {
+            if (call_s + callee_n <= in_len && memcmp(in_src + call_s, callee, callee_n) == 0 &&
+                !cc__slc_name_is_declarator(in_src, in_len, call_s, callee_n)) {
                 name_s = call_s;
             } else {
                 size_t j;
@@ -267,21 +378,19 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
                     if (j + callee_n < in_len &&
                         (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_'))
                         continue;
+                    if (cc__slc_name_is_declarator(in_src, in_len, j, callee_n)) continue;
                     name_s = j;
                     break;
                 }
             }
         }
         /* #line makes physical line_start unreliable; scan the whole buffer
-         * for this callee occurrence when exact offs miss (same occurrence
-         * ranking as closure_calls: first match on the recorded user line
-         * via a full-buffer search of top-level calls). */
+         * for this callee occurrence when exact offs miss. Skip declarators
+         * so same-TU definitions are not mistaken for their call sites. */
         if (name_s == (size_t)-1) {
             size_t j;
             int occ = 0;
             int want_occ = 1;
-            /* Count prior same-callee CALL nodes in this TU at earlier or
-             * equal (line,col) so we pick the matching occurrence. */
             for (int k = 0; k < i; k++) {
                 if (n[k].kind != CC_AST_NODE_CALL) continue;
                 if ((n[k].aux2 & 4) != 0) continue;
@@ -301,6 +410,7 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
                     continue;
                 after = cc_skip_ws_and_comments(in_src, in_len, j + callee_n);
                 if (after >= in_len || in_src[after] != '(') continue;
+                if (cc__slc_name_is_declarator(in_src, in_len, j, callee_n)) continue;
                 occ++;
                 if (occ == want_occ) {
                     name_s = j;

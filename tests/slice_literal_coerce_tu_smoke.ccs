@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+static void takes_slice(CCSlice s) {
+    assert(s.ptr);
+    assert(s.len == 5);
+    assert(memcmp(s.ptr, "hello", 5) == 0);
+}
+
+static int takes_char_slice(char[:0] s) {
+    assert(s.len == 3);
+    assert(memcmp(s.ptr, "hey", 3) == 0);
+    return 0;
+}
+
+int main(void) {
+    takes_slice("hello");
+    (void)takes_char_slice("hey");
+    printf("slice_literal_coerce_tu_smoke: PASS\n");
+    return 0;
+}

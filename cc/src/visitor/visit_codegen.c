@@ -1578,6 +1578,44 @@ static int cc__has_member_call_candidate(const char* s, size_t n) {
     return 0;
 }
 
+/* Conservative: phase-3 slice-literal coerce when the buffer may pass a string
+ * literal to a by-value slice parameter (stdlib or same-TU). False positives
+ * only keep a reparse; false negatives drop user-TU wraps. */
+static int cc__may_need_slice_lit_coerce(const char* s, size_t n) {
+    size_t i;
+    int saw_lit = 0;
+    if (!s || n == 0) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] == '"') {
+            saw_lit = 1;
+            break;
+        }
+    }
+    if (!saw_lit) return 0;
+    if (cc_contains_token_top_level(s, n, "CCSlice") ||
+        cc_contains_token_top_level(s, n, "CCSliceShared") ||
+        cc_contains_token_top_level(s, n, "CCSliceUnique"))
+        return 1;
+    for (i = 0; i + 6 < n; i++) {
+        if (memcmp(s + i, "char[:", 6) == 0) return 1;
+    }
+    /* Stdlib faces that take CCSlice even when the spelling is only in headers. */
+    if (cc_contains_token_top_level(s, n, "cc_path_exists") ||
+        cc_contains_token_top_level(s, n, "cc_path_is_dir") ||
+        cc_contains_token_top_level(s, n, "cc_path_is_file") ||
+        cc_contains_token_top_level(s, n, "cc_file_open") ||
+        cc_contains_token_top_level(s, n, "cc_dir_open") ||
+        cc_contains_token_top_level(s, n, "cc_glob") ||
+        cc_contains_token_top_level(s, n, "cc_command") ||
+        cc_contains_token_top_level(s, n, "cc_path_join") ||
+        cc_contains_token_top_level(s, n, "cc_script_path_join") ||
+        cc_contains_token_top_level(s, n, "cc_file_read_path") ||
+        cc_contains_token_top_level(s, n, "cc_file_write_path") ||
+        cc_contains_token_top_level(s, n, "cc_sh_run"))
+        return 1;
+    return 0;
+}
+
 static CCASTRoot* cc__reparse_source_to_ast_ex(const char* src, size_t src_len,
                                                const char* input_path, CCSymbolTable* symbols,
                                                const char* stage) {
@@ -4079,17 +4117,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@blocking") ||
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@noblock") ||
          cc_contains_token_top_level(src_ufcs, src_ufcs_len, "@nonblocking") ||
-         /* Slice-literal coerce (stage 1.5) must run even without UFCS when
-          * common CCSlice-taking stdlib faces appear with bare string lits. */
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_path_exists") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_file_open") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_dir_open") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_glob") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_command") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_path_join") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_script_path_join") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_file_read_path") ||
-         cc_contains_token_top_level(src_ufcs, src_ufcs_len, "cc_sh_run") ||
+         /* Slice-literal coerce (stage 1.5): stdlib and same-TU CCSlice /
+          * char[:] callees with bare string literals. */
+         cc__may_need_slice_lit_coerce(src_ufcs, src_ufcs_len) ||
          /* Dump-dir selftests (scripts/test_reparse_sanitize.sh) assert on
           * reparse_prepared_* output; keep one entry reparse when requested. */
          getenv("CC_DEBUG_REPARSE_DUMP_DIR") != NULL);
