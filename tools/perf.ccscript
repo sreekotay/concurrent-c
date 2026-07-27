@@ -1,0 +1,77 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Make-facing task runner for compiler perf checks.
+ *
+ *   ./tools/perf.ccscript @                 — list tasks
+ *   ./tools/perf.ccscript @perf_regress …   — primary .ccscript check
+ *   ./tools/perf.ccscript @perf_oracle …    — bash oracle twin
+ *
+ * Extra argv after the task name is forwarded to the underlying tool
+ * (e.g. --update, --current PATH).
+ */
+
+static int cc__forward_tool(int argc, char **argv, const char *rel_tool) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "perf: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = @create(megabytes(1)) @destroy;
+    CCSlice root = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a) !>;
+    CCSlice ccc = cc_script_path_join((const char *)root.ptr, "cc/bin/ccc", &a);
+    CCSlice tool = cc_script_path_join((const char *)root.ptr, rel_tool, &a);
+
+    CCCommand cmd = cc_command(&a, (const char *)ccc.ptr);
+    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
+    (void)cc_command_inherit_stdio(&cmd);
+    (void)cc_command_arg(&cmd, (const char *)tool.ptr);
+    for (int i = 1; i < argc; i++) {
+        if (argv[i]) (void)cc_command_arg(&cmd, argv[i]);
+    }
+
+    CCResult_int_CCIoError st = cc_command_status(&cmd);
+    if (cc_is_err(st)) {
+        fprintf(stderr, "perf: failed to run %s: %s\n",
+                rel_tool, cc_io_error_str(cc_error(st)));
+        return 1;
+    }
+    return cc_value(st);
+}
+
+/**
+ * Primary compiler perf regression check (.ccscript).
+ */
+static int perf_regress(int argc, char **argv) {
+    return cc__forward_tool(argc, argv, "tools/cc_perf_check.ccscript");
+}
+
+/**
+ * @task Bash oracle for the .ccscript twin
+ */
+static int perf_oracle(int argc, char **argv) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "perf: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = @create(megabytes(1)) @destroy;
+    CCSlice root = cc_script_repo_root(argv && argv[0] ? argv[0] : NULL, &a) !>;
+    CCSlice sh = cc_script_path_join((const char *)root.ptr,
+                                     "tools/cc_perf_check.sh", &a);
+
+    CCCommand cmd = cc_command(&a, (const char *)sh.ptr);
+    (void)cc_command_cwd(&cmd, (const char *)root.ptr);
+    (void)cc_command_inherit_stdio(&cmd);
+    for (int i = 1; i < argc; i++) {
+        if (argv[i]) (void)cc_command_arg(&cmd, argv[i]);
+    }
+
+    CCResult_int_CCIoError st = cc_command_status(&cmd);
+    if (cc_is_err(st)) {
+        fprintf(stderr, "perf: failed to run tools/cc_perf_check.sh: %s\n",
+                cc_io_error_str(cc_error(st)));
+        return 1;
+    }
+    return cc_value(st);
+}
+
+printf("perf: use @perf_regress or @perf_oracle (or @ to list)\n");
+return 2;
