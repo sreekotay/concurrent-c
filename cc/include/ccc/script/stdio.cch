@@ -19,6 +19,7 @@
 #include <ccc/cc_io_error.cch>
 #include <ccc/std/io.cch>
 #include <ccc/std/slice.cch>
+#include <ccc/std/string.cch>
 
 typedef struct CCStdio {
     CCArena *arena;
@@ -114,6 +115,53 @@ static inline CCResult_size_t_CCError cc_stdio_eprintln(CCStdio *io, CCSlice dat
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
     }
     return cc_ok_CCResult_size_t_CCError(n + 1);
+}
+
+/*
+ * Read the next stdin line into the bound arena. Trailing `\n` / `\r\n` are
+ * stripped. Ok(true) stores the line in *out (valid until the arena is
+ * destroyed or the next successful read_line that reallocates — treat as
+ * current-iteration only). Ok(false) is EOF. Err is IO / OOM.
+ */
+static inline CCResult_bool_CCError cc_stdio_read_line(CCStdio *io, CCSlice *out) {
+    if (!io || !io->arena || !out) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "CCStdio.read_line: bad args"));
+    }
+    CCString line = cc_string_new();
+    int got = 0;
+    for (;;) {
+        int c = fgetc(stdin);
+        if (c == EOF) {
+            if (ferror(stdin)) {
+                return cc_err_CCResult_bool_CCError(
+                    CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+            }
+            break;
+        }
+        got = 1;
+        if (c == '\n') break;
+        if (c == '\r') {
+            int c2 = fgetc(stdin);
+            if (c2 != '\n' && c2 != EOF) ungetc(c2, stdin);
+            break;
+        }
+        if (!cc_string_push_char(&line, (char)c, io->arena)) {
+            return cc_err_CCResult_bool_CCError(
+                CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStdio.read_line: alloc"));
+        }
+    }
+    if (!got) {
+        *out = cc_slice_empty();
+        return cc_ok_CCResult_bool_CCError(false);
+    }
+    /* Persist out of CCString SSO — as_slice may point at the stack buffer. */
+    *out = cc_string_persist_slice(io->arena, &line);
+    if (line.len > 0 && (!out->ptr || out->len != line.len)) {
+        return cc_err_CCResult_bool_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCStdio.read_line: persist"));
+    }
+    return cc_ok_CCResult_bool_CCError(true);
 }
 
 #ifdef CC_COMPTIME_SCAN

@@ -17,6 +17,7 @@
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/script_oneliner.h"
 #include "comptime/const_eval.h"
 
 // Forward decls for helpers used by multiple modes.
@@ -24,6 +25,7 @@ static int file_exists(const char* path);
 static int ensure_out_dir(void);
 static int cc__selftest_const_eval(int argc, char** argv);
 static void cc__stem_from_path(const char* path, char* out, size_t cap);
+static int run_build_mode(int argc, char** argv);
 
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
@@ -32,6 +34,8 @@ static void cc__stem_from_path(const char* path, char* out, size_t cap);
 // input in cc__compile_with_env), so no signatures need widening.
 static int g_emit_c_inspect = 0;
 static const char* g_emit_c_inspect_path = NULL;
+/* When set, `build run` uses this as the child argv[0] (exec path unchanged). */
+static const char* g_run_argv0 = NULL;
 
 // Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
@@ -502,6 +506,11 @@ static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  %s [options] <input.ccs|.shcc> [output]\n", prog);
     fprintf(stderr, "  %s <input.shcc> [args...]                  (auto-run; shebang-friendly)\n", prog);
+    fprintf(stderr, "  %s -e PROGRAM [script-args...]             (unnamed .shcc one-liner)\n", prog);
+    fprintf(stderr, "  %s -E EXPR [script-args...]                (print @string(`${EXPR}`))\n", prog);
+    fprintf(stderr, "  %s -e - [script-args...]                   (program text from stdin)\n", prog);
+    fprintf(stderr, "  %s @name [args...]                         (run toolbox @task)\n", prog);
+    fprintf(stderr, "  %s @                                       (list toolbox tasks)\n", prog);
     fprintf(stderr, "  %s run <input.ccs|.shcc> [-- <args...>]      (shorthand for build run)\n", prog);
     fprintf(stderr, "  %s build [options] <input.ccs|.shcc> <output>\n", prog);
     fprintf(stderr, "  %s build run [options] <input.ccs|.shcc> [-o out/<stem>] [-- <args...>]\n", prog);
@@ -538,6 +547,14 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
+    fprintf(stderr, "One-liners:\n");
+    fprintf(stderr, "  -e PROGRAM          Compile/run PROGRAM as an unnamed .shcc unit\n");
+    fprintf(stderr, "  -E EXPR             Like -e, wrapped as io.println(@string(`${EXPR}`)) !>;\n");
+    fprintf(stderr, "  -n                  With -e/-E: loop over stdin lines (binds line, nr)\n");
+    fprintf(stderr, "  -p                  -n plus io.println(line) !>; after the body\n");
+    fprintf(stderr, "  --save NAME         With -e/-E: append desugared @task NAME to the toolbox\n");
+    fprintf(stderr, "  --save-to PATH      Toolbox path override (default: ./tools/toolbox.shcc or ~/.ccc/toolbox.shcc)\n");
+    fprintf(stderr, "  --doc TEXT          Summary text for --save (else first program line)\n");
 }
 
 
@@ -3912,7 +3929,7 @@ static int run_build_mode(int argc, char** argv) {
         // (Zig-style: `zig build --help` shows options; we keep it minimal for now.)
         char* exec_argv[64];
         int idx = 0;
-        exec_argv[idx++] = (char*)bin_path;
+        exec_argv[idx++] = (char*)(g_run_argv0 ? g_run_argv0 : bin_path);
         for (int j = 0; j < run_argc && idx < (int)(sizeof(exec_argv) / sizeof(exec_argv[0]) - 1); ++j) {
             exec_argv[idx++] = run_argv[j];
         }
@@ -3983,11 +4000,286 @@ static int cc__flag_takes_value(const char* a) {
         "-o", "-D", "--build-file", "--out-stem", "--out-dir", "--bin-dir",
         "--cc-bin", "--cc-flags", "--ld-flags", "--target", "--sysroot",
         "--obj-out", "--graph-out", "--timeout", "--format",
+        "-e", "-E", "--save", "--save-to", "--doc",
     };
     for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
         if (strcmp(a, v[i]) == 0) return 1;
     }
     return 0;
+}
+
+static char* cc__read_all_stdin(size_t* out_len) {
+    size_t cap = 4096, n = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t got;
+        if (n + 1 >= cap) {
+            size_t ncap = cap * 2;
+            char* nb = (char*)realloc(buf, ncap);
+            if (!nb) {
+                free(buf);
+                return NULL;
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        got = fread(buf + n, 1, cap - n - 1, stdin);
+        n += got;
+        if (got == 0) break;
+    }
+    buf[n] = '\0';
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+static char* cc__read_all_file(const char* path, size_t* out_len) {
+    FILE* f;
+    long sz;
+    char* buf;
+    size_t n;
+    if (!path) return NULL;
+    f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    sz = ftell(f);
+    if (sz < 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = '\0';
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+static int cc__write_file_bytes(const char* path, const char* data, size_t len) {
+    FILE* f;
+    if (!path || !data) return -1;
+    f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len && fwrite(data, 1, len, f) != len) {
+        fclose(f);
+        return -1;
+    }
+    if (fclose(f) != 0) return -1;
+    return 0;
+}
+
+/* Cwd-based repo root for toolbox resolution (markers match script pathx). */
+static int cc__cwd_repo_root(char* out, size_t cap) {
+    char cwd[PATH_MAX];
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!getcwd(cwd, sizeof(cwd))) return -1;
+    return cc__search_up_for_dev_repo_root(cwd, out, cap);
+}
+
+static int cc__resolve_toolbox_path(const char* save_to, char* out, size_t cap) {
+    char root[PATH_MAX];
+    const char* home;
+    if (!out || cap == 0) return -1;
+    if (save_to && save_to[0]) {
+        strncpy(out, save_to, cap - 1);
+        out[cap - 1] = '\0';
+        return 0;
+    }
+    if (cc__cwd_repo_root(root, sizeof(root)) == 0 && root[0]) {
+        snprintf(out, cap, "%s/tools/toolbox.shcc", root);
+        return 0;
+    }
+    home = getenv("HOME");
+    if (!home || !home[0]) {
+        fprintf(stderr, "ccc: cannot resolve toolbox path (no repo cwd, no $HOME)\n");
+        return -1;
+    }
+    snprintf(out, cap, "%s/.ccc/toolbox.shcc", home);
+    return 0;
+}
+
+static int cc__ensure_parent_dir(const char* path) {
+    char dir[PATH_MAX];
+    if (!path || !path[0]) return -1;
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    cc__dirname_inplace(dir);
+    if (!dir[0]) return 0;
+    return cc__mkdir_p(dir);
+}
+
+/*
+ * Materialize an -e/-E unit as content-keyed out/.cc-build/e/<hash>.shcc and
+ * return a malloc'd path. `program` is the raw text; opts apply -E/-n/-p.
+ */
+static char* cc__materialize_e_unit(const char* program, size_t program_len,
+                                    const CCScriptOnelinerOpts* opts) {
+    char* unit = NULL;
+    size_t unit_len = 0;
+    uint64_t h;
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char* out_path;
+
+    unit = cc_script_oneliner_lower(program, program_len, opts, &unit_len);
+    if (!unit) return NULL;
+
+    h = 1469598103934665603ULL;
+    h = cc__fnv1a64_update(h, unit, unit_len);
+    snprintf(dir, sizeof(dir), "%s/e", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) {
+        free(unit);
+        return NULL;
+    }
+    snprintf(path, sizeof(path), "%s/%016llx.shcc", dir, (unsigned long long)h);
+    if (!file_exists(path)) {
+        if (cc__write_file_bytes(path, unit, unit_len) != 0) {
+            free(unit);
+            return NULL;
+        }
+    }
+    free(unit);
+    out_path = (char*)malloc(strlen(path) + 1);
+    if (!out_path) return NULL;
+    memcpy(out_path, path, strlen(path) + 1);
+    return out_path;
+}
+
+static int cc__toolbox_save(const char* toolbox_path, const char* name,
+                            const char* doc, const char* program,
+                            size_t program_len,
+                            const CCScriptOnelinerOpts* opts) {
+    char* existing = NULL;
+    size_t existing_len = 0;
+    char* task = NULL;
+    size_t task_len = 0;
+    FILE* f;
+
+    if (!cc_script_oneliner_is_ident(name)) {
+        fprintf(stderr, "ccc: --save name must be a C identifier\n");
+        return 1;
+    }
+    if (file_exists(toolbox_path)) {
+        existing = cc__read_all_file(toolbox_path, &existing_len);
+        if (!existing) {
+            fprintf(stderr, "ccc: failed to read toolbox %s\n", toolbox_path);
+            return 1;
+        }
+        if (cc_script_oneliner_task_exists(existing, existing_len, name)) {
+            fprintf(stderr, "ccc: toolbox task '%s' already exists in %s\n",
+                    name, toolbox_path);
+            free(existing);
+            return 1;
+        }
+    }
+    task = cc_script_oneliner_format_task(name, doc, program, program_len, opts,
+                                          &task_len);
+    if (!task) {
+        free(existing);
+        fprintf(stderr, "ccc: failed to format toolbox task\n");
+        return 1;
+    }
+    if (cc__ensure_parent_dir(toolbox_path) != 0) {
+        free(existing);
+        free(task);
+        fprintf(stderr, "ccc: failed to create toolbox directory\n");
+        return 1;
+    }
+    if (!existing) {
+        static const char hdr[] =
+            "#!/usr/bin/env -S ./cc/bin/ccc\n"
+            "/* ccc toolbox — saved -e @tasks */\n\n";
+        f = fopen(toolbox_path, "wb");
+        if (!f) {
+            free(task);
+            fprintf(stderr, "ccc: failed to create toolbox %s\n", toolbox_path);
+            return 1;
+        }
+        if (fwrite(hdr, 1, sizeof(hdr) - 1, f) != sizeof(hdr) - 1 ||
+            fwrite(task, 1, task_len, f) != task_len) {
+            fclose(f);
+            free(task);
+            fprintf(stderr, "ccc: failed to write toolbox %s\n", toolbox_path);
+            return 1;
+        }
+        fclose(f);
+    } else {
+        f = fopen(toolbox_path, "ab");
+        if (!f) {
+            free(existing);
+            free(task);
+            fprintf(stderr, "ccc: failed to append toolbox %s\n", toolbox_path);
+            return 1;
+        }
+        if (existing_len > 0 && existing[existing_len - 1] != '\n')
+            fputc('\n', f);
+        fputc('\n', f);
+        if (fwrite(task, 1, task_len, f) != task_len) {
+            fclose(f);
+            free(existing);
+            free(task);
+            fprintf(stderr, "ccc: failed to append toolbox %s\n", toolbox_path);
+            return 1;
+        }
+        fclose(f);
+    }
+    free(existing);
+    free(task);
+    return 0;
+}
+
+/* Rewrite argv to `ccc build [flags…] run <unit> -- [script-args…]` and exec mode. */
+static int cc__run_shcc_unit(int argc, char** argv, int unit_idx,
+                             const char* unit_path, int script_args_from) {
+    const char** new_argv;
+    int n = 0;
+    int ret;
+    int room = argc + 6;
+    new_argv = (const char**)malloc((size_t)room * sizeof(char*));
+    if (!new_argv) {
+        fprintf(stderr, "cc: out of memory\n");
+        return 1;
+    }
+    new_argv[n++] = argv[0];
+    new_argv[n++] = "build";
+    for (int i = 1; i < argc; i++) {
+        if (i == unit_idx) continue;
+        if (script_args_from >= 0 && i >= script_args_from) continue;
+        /* Drop -e PROGRAM and one-liner-only flags from the build argv. */
+        if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "-E") == 0) {
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "-p") == 0)
+            continue;
+        if (strcmp(argv[i], "--save") == 0 || strcmp(argv[i], "--save-to") == 0 ||
+            strcmp(argv[i], "--doc") == 0) {
+            i++;
+            continue;
+        }
+        new_argv[n++] = argv[i];
+    }
+    new_argv[n++] = "run";
+    new_argv[n++] = unit_path;
+    if (script_args_from >= 0 && script_args_from < argc) {
+        if (strcmp(argv[script_args_from], "--") != 0)
+            new_argv[n++] = "--";
+        for (int i = script_args_from; i < argc; i++)
+            new_argv[n++] = argv[i];
+    }
+    new_argv[n] = NULL;
+    ret = run_build_mode(n, (char**)new_argv);
+    free(new_argv);
+    return ret < 0 ? 1 : ret;
 }
 
 int main(int argc, char **argv) {
@@ -4060,20 +4352,177 @@ int main(int argc, char **argv) {
      * (inserted after `--`), so
      *   #!/usr/bin/env -S ./cc/bin/ccc
      *   ./tools/foo.shcc --flag
-     * becomes `ccc build run ./tools/foo.shcc -- --flag`. */
+     * becomes `ccc build run ./tools/foo.shcc -- --flag`.
+     *
+     * One-liners: `-e` / `-E` materialize a content-keyed .shcc unit
+     * (token-gated predecls, optional -n/-p) and take the same run path.
+     * `ccc @name` with no unit path dispatches against the toolbox. */
     {
         int sub_idx = 0;
         int script_idx = 0;
+        int e_idx = -1;
+        int e_is_expr = 0; /* -E */
+        int flag_n = 0;
+        int flag_p = 0;
+        int toolbox_idx = -1;
+        const char* save_name = NULL;
+        const char* save_to = NULL;
+        const char* save_doc = NULL;
+        CCScriptOnelinerOpts ol_opts;
+
+        /* Collect one-liner flags anywhere before -e/-E PROGRAM. */
         for (int i = 1; i < argc; ++i) {
             const char* a = argv[i];
             if (strcmp(a, "--") == 0) break;
+            if (strcmp(a, "-e") == 0 || strcmp(a, "-E") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "ccc: %s requires PROGRAM or -\n", a);
+                    return 1;
+                }
+                if (e_idx >= 0) {
+                    fprintf(stderr, "ccc: -e and -E are mutually exclusive\n");
+                    return 1;
+                }
+                e_idx = i;
+                e_is_expr = (strcmp(a, "-E") == 0);
+                i++; /* skip PROGRAM */
+                continue;
+            }
+            if (strcmp(a, "-n") == 0) { flag_n = 1; continue; }
+            if (strcmp(a, "-p") == 0) { flag_p = 1; continue; }
+            if (strcmp(a, "--save") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "ccc: --save requires NAME\n");
+                    return 1;
+                }
+                save_name = argv[++i];
+                continue;
+            }
+            if (strcmp(a, "--save-to") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "ccc: --save-to requires PATH\n");
+                    return 1;
+                }
+                save_to = argv[++i];
+                continue;
+            }
+            if (strcmp(a, "--doc") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "ccc: --doc requires TEXT\n");
+                    return 1;
+                }
+                save_doc = argv[++i];
+                continue;
+            }
             if (a[0] == '-') {
                 if (cc__flag_takes_value(a)) i++;
                 continue;
             }
-            if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
-            else if (cc__ends_with(a, ".shcc")) script_idx = i;
+            /* First positional after flags (and after -e PROGRAM if any). */
+            if (e_idx < 0) {
+                if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
+                else if (cc__ends_with(a, ".shcc")) script_idx = i;
+                else if (a[0] == '@') toolbox_idx = i;
+                break;
+            }
+            /* Script args follow -e PROGRAM; stop positional classify. */
             break;
+        }
+        if ((flag_n || flag_p) && e_idx < 0) {
+            fprintf(stderr, "ccc: -n/-p require -e or -E\n");
+            return 1;
+        }
+        if (flag_p && e_is_expr) {
+            fprintf(stderr, "ccc: -p cannot be combined with -E\n");
+            return 1;
+        }
+        if (flag_p) flag_n = 1;
+
+        if (e_idx >= 0) {
+            const char* prog_arg = argv[e_idx + 1];
+            char* program = NULL;
+            size_t program_len = 0;
+            char* unit_path = NULL;
+            int script_from = e_idx + 2;
+            int ret;
+
+            /* Skip trailing one-liner flags that may follow PROGRAM. */
+            while (script_from < argc) {
+                const char* sa = argv[script_from];
+                if (strcmp(sa, "-n") == 0 || strcmp(sa, "-p") == 0) {
+                    script_from++;
+                    continue;
+                }
+                if (strcmp(sa, "--save") == 0 || strcmp(sa, "--save-to") == 0 ||
+                    strcmp(sa, "--doc") == 0) {
+                    script_from += (script_from + 1 < argc) ? 2 : 1;
+                    continue;
+                }
+                break;
+            }
+
+            memset(&ol_opts, 0, sizeof(ol_opts));
+            ol_opts.expr_print = e_is_expr;
+            ol_opts.line_loop = flag_n;
+            ol_opts.line_print = flag_p;
+
+            if (strcmp(prog_arg, "-") == 0) {
+                program = cc__read_all_stdin(&program_len);
+                if (!program) {
+                    fprintf(stderr, "ccc: failed to read program from stdin\n");
+                    return 1;
+                }
+            } else {
+                program_len = strlen(prog_arg);
+                program = (char*)malloc(program_len + 1);
+                if (!program) {
+                    fprintf(stderr, "cc: out of memory\n");
+                    return 1;
+                }
+                memcpy(program, prog_arg, program_len + 1);
+            }
+
+            if (save_name) {
+                char toolbox[PATH_MAX];
+                if (cc__resolve_toolbox_path(save_to, toolbox, sizeof(toolbox)) != 0) {
+                    free(program);
+                    return 1;
+                }
+                ret = cc__toolbox_save(toolbox, save_name, save_doc, program,
+                                       program_len, &ol_opts);
+                if (ret != 0) {
+                    free(program);
+                    return ret;
+                }
+                fprintf(stderr, "ccc: saved @%s to %s\n", save_name, toolbox);
+            }
+
+            unit_path = cc__materialize_e_unit(program, program_len, &ol_opts);
+            free(program);
+            if (!unit_path) {
+                fprintf(stderr, "ccc: failed to materialize -e unit\n");
+                return 1;
+            }
+            /* Synthetic unit name visible to the program as argv[0]. */
+            g_run_argv0 = e_is_expr ? "-E" : "-e";
+            ret = cc__run_shcc_unit(argc, argv, -1, unit_path, script_from);
+            free(unit_path);
+            return ret;
+        }
+        if (save_name) {
+            fprintf(stderr, "ccc: --save requires -e or -E PROGRAM\n");
+            return 1;
+        }
+        if (toolbox_idx > 0) {
+            char toolbox[PATH_MAX];
+            if (cc__resolve_toolbox_path(save_to, toolbox, sizeof(toolbox)) != 0)
+                return 1;
+            if (!file_exists(toolbox)) {
+                fprintf(stderr, "ccc: toolbox not found: %s\n", toolbox);
+                return 1;
+            }
+            return cc__run_shcc_unit(argc, argv, toolbox_idx, toolbox,
+                                     toolbox_idx);
         }
         if (sub_idx > 0) {
             /* Normalize to `ccc build [flags...] [run] ...`: run_build_mode
