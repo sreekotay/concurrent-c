@@ -1,0 +1,3 @@
+perf_baseline  Capture compiler perf baseline into perf/compiler_baseline.txt.
+perf_oracle    Bash oracle for the .shcc twin
+perf_regress   Primary compiler perf regression check (.shcc).

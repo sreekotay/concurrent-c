@@ -215,7 +215,7 @@ perf-check: cc
 # Compiler perf baseline / regression guard. See perf/README.md
 # "Compiler perf baseline" section for what each captured metric means.
 perf-baseline: cc tools
-	@./scripts/capture_baseline.sh
+	@./tools/perf.shcc @perf_baseline
 
 perf-regress: cc tools
 	@./tools/perf.shcc @perf_regress

@@ -5200,6 +5200,7 @@ A CCDoc block immediately before a task supplies its listing summary: `@task`
 tag text when present, otherwise the leading one-line summary (§2.4).
 
 ```text
+./tools/perf.shcc @perf_baseline
 ./tools/perf.shcc @perf_regress --update
 ./tools/perf.shcc @
 ```

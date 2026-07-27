@@ -8,11 +8,13 @@
 #   - Wall-clock for the warm smoke suite (jobs=8 by default)
 #
 # Use:
+#   make perf-baseline                              # via tools/perf.shcc @perf_baseline
+#   ./tools/perf.shcc @perf_baseline                # same
 #   ./scripts/capture_baseline.sh                   # write perf/compiler_baseline.txt
 #   ./scripts/capture_baseline.sh /tmp/snapshot.txt # write somewhere else
 #
 # See tools/cc_perf_check.shcc for the regression check that consumes this
-# file (bash oracle: tools/cc_perf_check.sh).
+# file (bash oracle: tools/cc_perf_check.sh; Make: @perf_oracle).
 
 set -euo pipefail
 
