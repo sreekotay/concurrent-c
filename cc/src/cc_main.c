@@ -501,6 +501,7 @@ static void cc_init_paths(const char* argv0) {
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  %s [options] <input.ccs|.ccscript> [output]\n", prog);
+    fprintf(stderr, "  %s <input.ccscript> [args...]                  (auto-run; shebang-friendly)\n", prog);
     fprintf(stderr, "  %s run <input.ccs|.ccscript> [-- <args...>]      (shorthand for build run)\n", prog);
     fprintf(stderr, "  %s build [options] <input.ccs|.ccscript> <output>\n", prog);
     fprintf(stderr, "  %s build run [options] <input.ccs|.ccscript> [-o out/<stem>] [-- <args...>]\n", prog);
@@ -4052,9 +4053,17 @@ int main(int argc, char **argv) {
      * form with an input literally named "run", which then died on a
      * nonsense "multiple build.cc files" error (the absolutized fake input
      * made the root build.cc match itself twice).  Flags and their values
-     * are skipped; the scan stops at the first real positional or "--". */
+     * are skipped; the scan stops at the first real positional or "--".
+     *
+     * Shebang / direct invoke: a first positional ending in `.ccscript`
+     * implies `run`.  Args after the script path are program args
+     * (inserted after `--`), so
+     *   #!/usr/bin/env -S ./cc/bin/ccc
+     *   ./tools/foo.ccscript --flag
+     * becomes `ccc build run ./tools/foo.ccscript -- --flag`. */
     {
         int sub_idx = 0;
+        int script_idx = 0;
         for (int i = 1; i < argc; ++i) {
             const char* a = argv[i];
             if (strcmp(a, "--") == 0) break;
@@ -4063,6 +4072,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
+            else if (cc__ends_with(a, ".ccscript")) script_idx = i;
             break;
         }
         if (sub_idx > 0) {
@@ -4076,6 +4086,28 @@ int main(int argc, char **argv) {
             for (int i = 1; i < argc; i++) {
                 if (i == sub_idx && strcmp(argv[i], "build") == 0) continue; /* inserted above */
                 new_argv[n++] = argv[i];
+            }
+            new_argv[n] = NULL;
+            int ret = run_build_mode(n, (char**)new_argv) == 0 ? 0 : 1;
+            free(new_argv);
+            return ret;
+        }
+        if (script_idx > 0) {
+            /* room: + "build" + "run" + optional "--" */
+            const char** new_argv = (const char**)malloc((size_t)(argc + 4) * sizeof(char*));
+            if (!new_argv) { fprintf(stderr, "cc: out of memory\n"); return 1; }
+            int n = 0;
+            new_argv[n++] = argv[0];
+            new_argv[n++] = "build";
+            for (int i = 1; i < script_idx; i++)
+                new_argv[n++] = argv[i];
+            new_argv[n++] = "run";
+            new_argv[n++] = argv[script_idx];
+            if (script_idx + 1 < argc) {
+                if (strcmp(argv[script_idx + 1], "--") != 0)
+                    new_argv[n++] = "--";
+                for (int i = script_idx + 1; i < argc; i++)
+                    new_argv[n++] = argv[i];
             }
             new_argv[n] = NULL;
             int ret = run_build_mode(n, (char**)new_argv) == 0 ? 0 : 1;

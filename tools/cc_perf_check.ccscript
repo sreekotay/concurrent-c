@@ -1,11 +1,11 @@
-#!/usr/bin/env -S ./cc/bin/ccc run
+#!/usr/bin/env -S ./cc/bin/ccc
 /*
  * .ccscript twin of tools/cc_perf_check.sh
  *
  * Usage:
- *   ./cc/bin/ccc run tools/cc_perf_check.ccscript
- *   ./cc/bin/ccc run tools/cc_perf_check.ccscript -- --update
- *   ./cc/bin/ccc run tools/cc_perf_check.ccscript -- --current /tmp/metrics.txt
+ *   ./tools/cc_perf_check.ccscript
+ *   ./tools/cc_perf_check.ccscript --update
+ *   ./tools/cc_perf_check.ccscript --current /tmp/metrics.txt
  *       (skip capture; compare baseline against an existing metrics file)
  *
  * Side-by-side with: tools/cc_perf_check.sh

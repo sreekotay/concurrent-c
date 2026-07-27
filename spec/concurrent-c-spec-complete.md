@@ -14,6 +14,7 @@ This specification defines:
 - Surface syntax and compile-time rules
 - Observable runtime contract
 - Lowering to C
+- Script entry (`.ccscript`) and the script library partner to the stdlib (§9.5)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -5021,6 +5022,166 @@ Primitive numeric types get UFCS methods for common operations:
 
 ---
 
+### 9.5 Script Library (`.ccscript` / `ccc/script/`)
+
+The **script library** (`cc_scriptlib`) is the scripting partner to the standard
+library. It targets short Concurrent-C programs that orchestrate tools: read
+bytes, parse with `@grammar` / SERDES, format with `@string`, spawn processes,
+and print reports. Domain codecs (JSON, RESP, …) stay in application or
+example headers; scriptlib supplies only the pipes.
+
+Headers live under `<ccc/script/>`. The full stdlib surface used underneath is
+defined in `concurrent-c-stdlib-spec.md` and §9.
+
+#### 9.5.1 Language and file extension
+
+A `.ccscript` translation unit is the same language as `.ccs`. The driver
+applies an entry rewrite before the ordinary Concurrent-C pipeline:
+
+1. Strip a leading `#!` shebang line when present.
+2. Force-include `<ccc/script/prelude.cch>` at translation-unit scope.
+3. When the unit has no top-level `main`, partition the body and inject a
+   synthetic `int main(int argc, char **argv)`:
+   - **TU scope:** `#` preprocessor lines, `@grammar` / `@comptime` blocks,
+     `typedef` and `struct` / `enum` / `union` type definitions, function
+     definitions and prototypes, and file-scope `static` / `extern`
+     declarations.
+   - **Synthetic `main`:** statements and non-static runtime-init declarations
+     (including `@create` / `@destroy` locals).
+4. Inject a default `@errhandler(CCError)` **inside** synthetic `main` that
+   prints `e.message` to stderr and returns `1`, so statement-level `!>` works
+   without a local handler. A user `@errhandler` in the script body overrides
+   the default for that scope.
+5. An explicit top-level `main` together with any MAIN-classified top-level
+   statement is ill-formed.
+
+#### 9.5.2 Driver invocation
+
+`ccc` treats a first positional argument ending in `.ccscript` as an implicit
+`run` (shebang-friendly):
+
+```text
+ccc [ccc-flags...] path/to/tool.ccscript [script-args...]
+```
+
+Args after the script path are program arguments (inserted after `--` for the
+build-run step). Explicit `ccc run path.ccscript [-- args...]` remains valid.
+
+Recommended shebang:
+
+```text
+#!/usr/bin/env -S ./cc/bin/ccc
+```
+
+`.ccs` inputs are unchanged: they do not auto-run from a bare positional path.
+
+#### 9.5.3 Prelude and headers
+
+`<ccc/script/prelude.cch>` includes `<ccc/std/prelude.cch>` and the script
+headers below. Scripts do not `#include` the prelude; the driver injects it.
+
+| Header | Role |
+| ------ | ---- |
+| `<ccc/script/stdio.cch>` | `CCStdio` — arena-bound stdin/stdout/stderr helpers |
+| `<ccc/script/cli.cch>` | Flag and positional argv helpers |
+| `<ccc/script/pathx.cch>` | Repo-root discovery and C-string path join |
+| `<ccc/script/file.cch>` | Read / write / copy / print by path |
+| `<ccc/script/sh.cch>` | Thin process run wrapper |
+| `<ccc/script/temp.cch>` | `CCTempFile` with Result create and `@destroy` cleanup |
+
+Arena parameters follow the stdlib convention: **arena last** on allocating
+APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
+`CCResult_*_CCError` form) unless noted.
+
+#### 9.5.4 `CCStdio`
+
+```c
+CCArena a = @create(megabytes(1)) @destroy;
+CCStdio io = @create(&a) @destroy;
+
+char[:] in = io.read_all() !>;
+io.write_all(out.as_slice()) !>;
+io.println(msg.as_slice()) !>;
+io.eprintln(err.as_slice()) !>;
+```
+
+`CCStdio` binds an arena for growing reads. `println` / `eprintln` write a
+slice then a trailing newline. Template formatting uses language `@string`,
+not a scriptlib wrapper:
+
+```c
+CCString s = @string(`perf check: OK with ${warnings} warning(s)`, &a);
+io.println(s.as_slice()) !>;
+```
+
+#### 9.5.5 Path, file, process, and temp helpers
+
+```c
+bool update = cc_cli_flag(argc, argv, "--update");
+const char* pos0 = cc_cli_positional(argc, argv, 0);
+
+CCSlice root = cc_script_repo_root(argv[0], &a) !>;
+CCSlice baseline = cc_script_path_join((const char*)root.ptr,
+                                      "perf/compiler_baseline.txt", &a);
+if (!cc_script_path_exists(baseline)) { /* … */ }
+
+CCSlice bytes = cc_file_read_path(path, &a) !>;
+cc_file_copy(src_slice, dst_slice, &a) !>;
+cc_script_print_file(path_slice, &a) !>;
+
+CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+cc_sh_run(program_path, arg_path, &a) !>;
+```
+
+`cc_script_repo_root` walks from the current working directory (and, failing
+that, from `dirname(argv0)`) looking for a Concurrent-C repo marker
+(`cc/src/cc_main.c`, `perf/compiler_baseline.txt`, or `.git`). Returned path
+slices from path helpers are NUL-terminated for C interop.
+
+`cc_sh_run` builds a `CCCommand`, runs it to completion, and fails with
+`CCError` when the process exits non-zero.
+
+#### 9.5.6 Scripting model
+
+Prefer Concurrent-C structure for script *content*, and scriptlib for
+orchestration:
+
+- **Parse:** `@grammar(schema|rules)` (and SERDES where appropriate) over
+  file or stdin bytes.
+- **Format:** `@string(\`…${expr}…\`)` into a `CCString` / slice, then
+  `CCStdio` or file write.
+- **Glue:** path join, temp files, `cc_sh_run`, CLI flags — thin wrappers over
+  `<ccc/std/>` process, dir, and I/O APIs.
+
+Example (stdin transform):
+
+```c
+#!/usr/bin/env -S ./cc/bin/ccc
+
+CCArena a = @create(megabytes(1)) @destroy;
+CCStdio io = @create(&a) @destroy;
+char[:] in = io.read_all() !>;
+/* … transform into out … */
+io.write_all(out.as_slice()) !>;
+```
+
+Example (parse → map → report) uses the same prelude, a top-level `@grammar`
+and helpers at TU scope, and statement body in synthetic `main` — see
+`tools/cc_perf_check.ccscript` and `examples/serdes/json/tools/minify.ccscript`.
+
+#### 9.5.7 Out of scope for scriptlib
+
+Scriptlib does not define:
+
+- JSON, RESP, or other domain codecs
+- A second string-formatting language beyond `@string` / `cc_format`
+- Implicit global arenas or ambient process state beyond the driver rewrite
+  above
+
+Those remain stdlib, language, or application concerns.
+
+---
+
 ## 10. FFI and Unsafe Operations
 
 Because CC is a C preprocessor, **native C interop is first-class**. The entire C standard library and existing C code is immediately accessible. This section defines escape hatches for when CC's safety checks must be bypassed:
@@ -7074,5 +7235,6 @@ These rules prevent ABI surprises and ensure the implementation can generate bor
 ## Summary
 
 The main body defines source syntax, static semantics, and observable behavior.
-Appendix J defines the shipped C lowering contract. Focused specifications
-define scheduler and channel runtime state machines.
+§9.5 defines `.ccscript` entry rewriting and the `ccc/script/` orchestration
+surface. Appendix J defines the shipped C lowering contract. Focused
+specifications define scheduler and channel runtime state machines.

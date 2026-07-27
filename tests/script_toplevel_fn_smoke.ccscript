@@ -1,4 +1,4 @@
-#!/usr/bin/env -S ./cc/bin/ccc run
+#!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Smoke: top-level function stays at TU scope; statements land in
  * synthetic main. Exit 0 iff add(2,3) == 5.

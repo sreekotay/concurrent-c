@@ -1,8 +1,9 @@
-#!/usr/bin/env -S ./cc/bin/ccc run
+#!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Twin of minify.py: strip structural JSON whitespace, preserve string bytes.
  *
- * Usage:  ccc run minify.ccscript < twitter.json > twitter_min.json
+ * Usage:  ./minify.ccscript < twitter.json > twitter_min.json
+ *         (or: ccc minify.ccscript < ...)
  * Side-by-side with: examples/serdes/json/tools/minify.py
  */
 
