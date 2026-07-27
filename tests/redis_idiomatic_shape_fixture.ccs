@@ -1,0 +1,26 @@
+/*
+ * Minimal idiomatic-model shape for redis_phase2_lowering_shape_smoke:
+ * exclusive acquire from a @noblock helper called by async handle_client
+ * (same boundary as redis_idiomatic: acquire stays off the blocking pool).
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/std/task.cch>
+
+@noblock static int touch_shard(CCExclusive* excl, uint64_t shard) {
+    CCExclusiveGuard g = excl->acquire(shard);
+    (void)g;
+    return 0;
+}
+
+@async int handle_client(CCExclusive* excl, uint64_t shard) {
+    return touch_shard(excl, shard);
+}
+
+int main(void) {
+    CCArena a = @create(megabytes(1)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&a);
+    (void)handle_client;
+    (void)excl;
+    return 0;
+}

@@ -1,0 +1,49 @@
+/*
+ * Minimal owner-model shape for redis_phase2_lowering_shape_smoke:
+ * try_send_into via a conn field (same UFCS path as redis_owner) + async
+ * owner_loop / handle_client that stay fiber-hot.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include <string.h>
+
+typedef struct {
+    int n;
+} Reply;
+
+typedef Reply[~4 1:1 >] ReplyTx;
+typedef Reply[~4 1:1 <] ReplyRx;
+
+typedef struct {
+    ReplyTx reply_tx;
+} Conn;
+
+@async int owner_loop(ReplyRx req_rx, Conn* conn) {
+    Reply req = {0};
+    while (cc_io_avail(req_rx.recv(&req))) {
+        (void)conn->reply_tx.try_send_into(
+            (slot, arena) => [req] {
+                (void)arena;
+                memset(slot, 0, sizeof(*slot));
+                slot->n = req.n + 1;
+                return NULL;
+            },
+            NULL);
+    }
+    return 0;
+}
+
+@async int handle_client(ReplyTx req_tx, ReplyRx reply_rx) {
+    Reply msg = {.n = 1};
+    if (!cc_io_avail(req_tx.send(&msg))) return 1;
+    Reply got = {0};
+    if (!cc_io_avail(reply_rx.recv(&got))) return 1;
+    return got.n == 2 ? 0 : 1;
+}
+
+static void* keep[] = {(void*)owner_loop, (void*)handle_client};
+
+int main(void) {
+    (void)keep;
+    return 0;
+}

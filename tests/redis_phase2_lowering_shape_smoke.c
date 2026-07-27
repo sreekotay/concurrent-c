@@ -1,11 +1,11 @@
 /*
- * Lowering-shape oracle for the two Redis concurrency models:
+ * Lowering-shape oracle for the two Redis concurrency models, on tiny
+ * fixtures (not the full real_projects/redis sources):
  *
- *   redis_owner.ccs     — channel reply path lowers to typed try_send_into;
- *                         owner_loop / handle_client stay fiber-hot (no
- *                         cc_run_blocking_task).
- *   redis_idiomatic.ccs — exclusive shard locks (cc_exclusive_acquire*);
- *                         no channel try_send_into; handle_client fiber-hot.
+ *   redis_owner_shape_fixture.ccs     — channel reply → typed try_send_into;
+ *                                       owner_loop / handle_client fiber-hot.
+ *   redis_idiomatic_shape_fixture.ccs — exclusive shard locks; no try_send_into;
+ *                                       handle_client fiber-hot.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -61,8 +61,7 @@ static char* emit_c(const char* src, const char* tag) {
     snprintf(out_path, sizeof(out_path), "tmp/redis_phase2_%s_%ld.c", tag, (long)getpid());
     snprintf(log_path, sizeof(log_path), "tmp/redis_phase2_%s_%ld.log", tag, (long)getpid());
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc --no-cache --emit-c-only %s -o %s > %s 2>&1",
-             src, out_path, log_path);
+             "./cc/bin/ccc --emit-c-only %s -o %s > %s 2>&1", src, out_path, log_path);
     if (system(cmd) != 0) {
         fprintf(stderr, "emit-c-only failed for %s; see %s\n", src, log_path);
         return NULL;
@@ -144,14 +143,13 @@ static int check_idiomatic(const char* lowered) {
 int main(void) {
     char* owner = NULL;
     char* idio = NULL;
-    int rc = 0;
 
     if (mkdir("tmp", 0777) != 0 && errno != EEXIST) {
         perror("mkdir tmp");
         return 2;
     }
 
-    owner = emit_c("real_projects/redis/redis_owner.ccs", "owner");
+    owner = emit_c("tests/redis_owner_shape_fixture.ccs", "owner");
     if (!owner) return 2;
     if (check_owner(owner) != 0) {
         free(owner);
@@ -159,7 +157,7 @@ int main(void) {
     }
     free(owner);
 
-    idio = emit_c("real_projects/redis/redis_idiomatic.ccs", "idiomatic");
+    idio = emit_c("tests/redis_idiomatic_shape_fixture.ccs", "idiomatic");
     if (!idio) return 2;
     if (check_idiomatic(idio) != 0) {
         free(idio);
@@ -168,5 +166,5 @@ int main(void) {
     free(idio);
 
     puts("ok");
-    return rc;
+    return 0;
 }

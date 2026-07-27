@@ -4,8 +4,9 @@
  * the current TU buffer, so `#include`'d helpers like `cc_stdio_read_all`
  * fell back to `__typeof__(call)` / `__cc_uw_value` and TCC reparse died.
  *
- * Covers both the direct callee and UFCS-lowered form.  Stdin may be empty
- * under `cc_test` (no `.stdin` sidecar); the pin is that unwrap typed-lowers.
+ * Covers both the direct callee and UFCS-lowered form.  Empty `.stdin` (and
+ * cc_test's /dev/null default) keeps `read_all` from hanging on an inherited
+ * pipe; the pin is that unwrap typed-lowers.
  */
 #include <ccc/script/prelude.cch>
 #include <stdio.h>

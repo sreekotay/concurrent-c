@@ -443,8 +443,6 @@ static void env_sidecar_restore(EnvSidecar* e) {
 static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (!stem) return default_timeout_sec;
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
-    /* Emits both Redis variants; ~7s each under -O0 toolchains. */
-    if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
     return default_timeout_sec;
 }
 
@@ -630,7 +628,10 @@ static int run_one_test(const char* stem,
     snprintf(args_path, sizeof(args_path), "%s/%s.args", test_dir, stem);
     snprintf(stdin_path, sizeof(stdin_path), "%s/%s.stdin", test_dir, stem);
     snprintf(exit_path, sizeof(exit_path), "%s/%s.exit", test_dir, stem);
-    const char* run_stdin = file_exists(stdin_path) ? stdin_path : NULL;
+    /* Default /dev/null so tests that call read_all()/scanf cannot hang when
+     * the harness inherits an open pipe/TTY (parallel make, CI). Explicit
+     * `stem.stdin` still wins. */
+    const char* run_stdin = file_exists(stdin_path) ? stdin_path : "/dev/null";
 
     unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
     size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, ldflags_len = 0;
