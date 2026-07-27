@@ -220,6 +220,16 @@ typedef struct {
 } CCSliceArray;
 #endif
 
+/* UFCS: arr.len(), arr.get(i) → element char[:0] / CCSlice (empty if OOB). */
+static inline size_t cc_slice_array_len(const CCSliceArray *a) {
+    return a ? a->len : 0;
+}
+
+static inline CCSlice cc_slice_array_get(const CCSliceArray *a, size_t i) {
+    if (!a || !a->items || i >= a->len) return cc_slice_empty();
+    return a->items[i];
+}
+
 /* ---- Slice query helpers ---- */
 
 static inline bool cc_slice_is_ascii(CCSlice s) {

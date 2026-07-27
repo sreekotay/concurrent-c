@@ -132,29 +132,11 @@ CCResult_bool_CCIoError cc_dir_chdir(CCSlice path);
  * Glob Pattern Matching
  * ============================================================================ */
 
-/*
- * Glob result: array of matching paths.
- */
-typedef struct {
-    CCSlice* paths;    /* Array of NUL-terminated paths, arena-backed */
-    size_t count;       /* Number of matches */
-    size_t capacity;    /* Capacity of paths array */
-} CCGlobResult;
-
-/* UFCS accessors for CCGlobResult: r.len(), r.get(i) */
-static inline size_t cc_glob_result_len(const CCGlobResult* r) {
-    return r ? r->count : 0;
-}
-
-static inline const char* cc_glob_result_get(const CCGlobResult* r, size_t i) {
-    if (!r || i >= r->count) return NULL;
-    return (const char*)r->paths[i].ptr;
-}
-
 /* Find files matching glob pattern.
-   Supports: * (any chars), ? (single char), ** (recursive)
-   Returns matches allocated in arena. */
-CCGlobResult cc_glob(CCArena* arena, CCSlice pattern);
+ * Supports: * (any chars), ? (single char), ** (recursive).
+ * Returns arena-backed CCSliceArray of NUL-terminated path borrows
+ * (char[:0] / CCSlice). Empty array on bad args or no matches. */
+CCSliceArray cc_glob(CCSlice pattern, CCArena* arena);
 
 /*
  * Check if filename matches glob pattern (no directory traversal).

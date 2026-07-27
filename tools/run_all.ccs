@@ -7,21 +7,14 @@
  *   ccc run tools/run_all.ccs -- --perf       # run all perf benchmarks
  *   ccc run tools/run_all.ccs -- --all        # run everything
  *
+ * Make targets `stress-check` / `perf-check` thin-wrap --stress / --perf.
+ * Compile-only `examples-check` stays a small Make recipe (not this tool).
+ *
  * Pick one (or more) categories — --stress is what usually panics:
  *   ccc run tools/run_all.ccs -- --trace --stream --stress
- * Or everything:
- *   ccc run tools/run_all.ccs -- --trace --stream --all
  *
  * Add --trace to write a per-test-boundary log that is fflush+fsynced after
- * every START/END marker. If the machine kernel-panics mid-test, reading
- * tmp/run_all_logs/run_trace.log after reboot shows exactly which test was
- * running at the time of the crash (the last line will be a dangling START
- * with no matching END).
- *
- * Add --stream to inherit stdout/stderr from every category's children so
- * test output hits the terminal immediately instead of being buffered and
- * reprinted on failure. Useful in combination with --trace when hunting a
- * crash; without --stream, only the per-test progress line flushes live.
+ * every START/END marker. Add --stream to inherit child stdout/stderr.
  */
 
 #include <ccc/std/prelude.cch>
@@ -205,15 +198,15 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     printf("\n=== %s ===\n", label);
     ensure_log_dir(arena);
 
-    CCGlobResult files = cc_glob(arena, pattern->to_slice());
-    size_t n = cc_glob_result_len(&files);
+    CCSliceArray files = cc_glob(pattern->to_slice(), arena);
+    size_t n = files.len();
     if (n == 0) {
         printf("  (no files matching %s)\n", pattern);
         return;
     }
 
     for (size_t i = 0; i < n; i++) {
-        const char* path = cc_glob_result_get(&files, i);
+        const char* path = (const char*)files.get(i).ptr;
         const RunPolicy* pol = policy_for(path);
         int expected_exit = pol ? pol->expected_exit : 0;
         int timeout_for_file = (pol && pol->timeout_sec > 0) ? pol->timeout_sec : timeout_sec;

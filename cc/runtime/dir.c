@@ -434,17 +434,22 @@ bool cc_glob_match(CCSlice pattern_sl, CCSlice name_sl) {
 #endif
 }
 
-/* Helper: add path to glob result */
-static void glob_add(CCGlobResult* result, CCArena* arena, const char* path, size_t len) {
-    if (result->count >= result->capacity) {
-        size_t new_cap = result->capacity ? result->capacity * 2 : 16;
+/* Growable builder for cc_glob → CCSliceArray (capacity is private). */
+typedef struct {
+    CCSliceArray arr;
+    size_t capacity;
+} CCGlobBuilder;
+
+static void glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t len) {
+    if (b->arr.len >= b->capacity) {
+        size_t new_cap = b->capacity ? b->capacity * 2 : 16;
         CCSlice* new_paths = cc_arena_alloc(arena, new_cap * sizeof(CCSlice), _Alignof(CCSlice));
         if (!new_paths) return;
-        if (result->paths && result->count > 0) {
-            memcpy(new_paths, result->paths, result->count * sizeof(CCSlice));
+        if (b->arr.items && b->arr.len > 0) {
+            memcpy(new_paths, b->arr.items, b->arr.len * sizeof(CCSlice));
         }
-        result->paths = new_paths;
-        result->capacity = new_cap;
+        b->arr.items = new_paths;
+        b->capacity = new_cap;
     }
 
     char* copy = cc_arena_alloc(arena, len + 1, 1);
@@ -452,16 +457,15 @@ static void glob_add(CCGlobResult* result, CCArena* arena, const char* path, siz
     memcpy(copy, path, len);
     copy[len] = '\0';
 
-    result->paths[result->count].ptr = copy;
-    result->paths[result->count].len = len;
-    result->count++;
+    b->arr.items[b->arr.len] = char_to_slice(copy);
+    b->arr.len++;
 }
 
 /* Helper: recursive glob */
-static void glob_recurse(CCArena* arena, CCGlobResult* result,
+static void glob_recurse(CCArena* arena, CCGlobBuilder* b,
                          const char* dir, const char* pattern, int recursive);
 
-static void glob_dir(CCArena* arena, CCGlobResult* result,
+static void glob_dir(CCArena* arena, CCGlobBuilder* b,
                      const char* dir, const char* pattern, int recursive) {
     CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
     if (cc_is_err(iter_res)) return;
@@ -488,11 +492,11 @@ static void glob_dir(CCArena* arena, CCGlobResult* result,
 
         if (entry.type == CC_DIRENT_DIR) {
             if (recursive) {
-                glob_recurse(arena, result, full_path, pattern, recursive);
+                glob_recurse(arena, b, full_path, pattern, recursive);
             }
         } else {
             if (cc_glob_match(char_to_slice(pattern), char_to_slice(name))) {
-                glob_add(result, arena, full_path, path_len);
+                glob_add(b, arena, full_path, path_len);
             }
         }
     }
@@ -500,9 +504,9 @@ static void glob_dir(CCArena* arena, CCGlobResult* result,
     cc_dir_close(iter);
 }
 
-static void glob_recurse(CCArena* arena, CCGlobResult* result,
+static void glob_recurse(CCArena* arena, CCGlobBuilder* b,
                          const char* dir, const char* pattern, int recursive) {
-    glob_dir(arena, result, dir, pattern, recursive);
+    glob_dir(arena, b, dir, pattern, recursive);
 
     /* Recurse into subdirectories */
     CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
@@ -527,16 +531,16 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
         memcpy(subdir + dir_len + 1, entry.name.ptr, name_len);
         subdir[path_len] = '\0';
 
-        glob_recurse(arena, result, subdir, pattern, recursive);
+        glob_recurse(arena, b, subdir, pattern, recursive);
     }
 
     cc_dir_close(iter);
 }
 
-CCGlobResult cc_glob(CCArena* arena, CCSlice pattern_sl) {
-    CCGlobResult result = {0};
+CCSliceArray cc_glob(CCSlice pattern_sl, CCArena* arena) {
+    CCGlobBuilder b = {{0}, 0};
     const char* pattern = cc__dir_path_cstr(pattern_sl);
-    if (!arena || !pattern) return result;
+    if (!arena || !pattern) return b.arr;
 
     /* Check for ** (recursive) */
     int recursive = (strstr(pattern, "**") != NULL);
@@ -552,7 +556,7 @@ CCGlobResult cc_glob(CCArena* arena, CCSlice pattern_sl) {
 
     if (last_sep) {
         size_t dir_len = (size_t)(last_sep - pattern);
-        if (dir_len >= sizeof(dir)) return result;
+        if (dir_len >= sizeof(dir)) return b.arr;
         memcpy(dir, pattern, dir_len);
         dir[dir_len] = '\0';
         file_pattern = last_sep + 1;
@@ -570,10 +574,10 @@ CCGlobResult cc_glob(CCArena* arena, CCSlice pattern_sl) {
     }
 
     if (recursive) {
-        glob_recurse(arena, &result, dir, file_pattern, 1);
+        glob_recurse(arena, &b, dir, file_pattern, 1);
     } else {
-        glob_dir(arena, &result, dir, file_pattern, 0);
+        glob_dir(arena, &b, dir, file_pattern, 0);
     }
 
-    return result;
+    return b.arr;
 }

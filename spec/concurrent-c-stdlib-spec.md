@@ -733,17 +733,6 @@ typedef struct {
 
 typedef struct CCDirIter CCDirIter;
 
-typedef struct {
-    char[:0] *paths;
-    size_t count;
-    size_t capacity;
-} CCGlobResult;
-```
-
-
-The API is:
-
-```c
 CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena *arena, char[:0] path);
 CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter *iter, CCArena *arena);
 void cc_dir_close(CCDirIter *iter);
@@ -758,7 +747,7 @@ CCResult_bool_CCIoError cc_file_remove(char[:0] path);
 char[:0] cc_dir_cwd(CCArena *arena);
 CCResult_bool_CCIoError cc_dir_chdir(char[:0] path);
 
-CCGlobResult cc_glob(CCArena *arena, char[:0] pattern);
+CCSliceArray cc_glob(char[:0] pattern, CCArena *arena);
 bool cc_glob_match(char[:0] pattern, char[:0] name);
 ```
 
@@ -767,6 +756,8 @@ Path arguments are NUL-terminated borrows (`char[:0]`). After the final entry,
 Entry names and glob paths are arena-backed `char[:0]`. `cc_dir_create` does
 not create parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and
 recursive `**`; `cc_glob_match` matches a single name with `*` and `?`.
+`cc_glob` returns a `CCSliceArray` of NUL-terminated path borrows (same
+aggregate used by slice split helpers).
 
 The accessor functions are:
 
@@ -775,11 +766,11 @@ const char *cc_dir_entry_name_str(const CCDirEntry *entry);
 bool cc_dir_entry_is_dir(const CCDirEntry *entry);
 bool cc_dir_entry_is_file(const CCDirEntry *entry);
 bool cc_dir_entry_is_symlink(const CCDirEntry *entry);
-size_t cc_glob_result_len(const CCGlobResult *result);
-const char *cc_glob_result_get(const CCGlobResult *result, size_t index);
+size_t cc_slice_array_len(const CCSliceArray *arr);
+char[:0] cc_slice_array_get(const CCSliceArray *arr, size_t index);
 ```
 
-UFCS on `CCDirEntry` and `CCGlobResult` maps these accessors to their
+UFCS on `CCDirEntry` and `CCSliceArray` maps these accessors to their
 corresponding C functions.
 
 ## Processes and commands
