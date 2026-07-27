@@ -1,0 +1,12 @@
+#!/usr/bin/env -S ./cc/bin/ccc run
+/*
+ * Smoke: top-level function stays at TU scope; statements land in
+ * synthetic main. Exit 0 iff add(2,3) == 5.
+ */
+
+static int add(int x, int y) { return x + y; }
+
+CCArena a = @create(kilobytes(4)) @destroy;
+int v = add(2, 3);
+if (v != 5) return 1;
+return 0;
