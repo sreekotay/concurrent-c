@@ -1,0 +1,58 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Make-facing check tasks (small, one job each).
+ *
+ *   ./tools/make.shcc @                 - list tasks
+ *   ./tools/make.shcc @examples_check
+ *
+ * Make:  make examples-check
+ */
+
+/**
+ * @task Compile-check top-level examples (--emit-c-only).
+ */
+static int examples_check() {
+    CCArena a = @create(megabytes(1)) @destroy;
+    CCStdio io = @create(&a) @destroy;
+    int failed = 0;
+
+    io.println(@slice("=== Checking examples compile ===")) !>;
+    CCSliceArray files = cc_glob(@slice("examples/*.ccs"), &a);
+    for (size_t i = 0; i < files.len(); i++) {
+        char[:0] path = files.get(i);
+
+        CCCommand cmd = cc_command(&a, @slice("./ccc"));
+        cmd.arg("--emit-c-only");
+        cmd.arg_slice(path);
+        cmd.arg("-o");
+        cmd.arg("/dev/null");
+        CCResult_int_CCIoError st = cmd.status();
+        if (cc_is_err(st)) {
+            CCIoError e = cc_error(st);
+            CCString msg = @string(
+                `  spawn failed: ${cc_io_error_str(e)} (os=${e.os_code})`, &a);
+            io.eprintln(msg.as_slice()) !>;
+            return 1;
+        }
+        int rc = cc_value(st);
+        if (rc == 0) {
+            CCString line = @string(`  ${path}  OK`, &a);
+            io.println(line.as_slice()) !>;
+        } else {
+            CCString line = @string(`  ${path}  FAIL`, &a);
+            io.println(line.as_slice()) !>;
+            failed++;
+        }
+    }
+
+    if (failed > 0) {
+        CCString line = @string(`${failed} example(s) failed`, &a);
+        io.println(line.as_slice()) !>;
+        return 1;
+    }
+    io.println(@slice("All examples OK")) !>;
+    return 0;
+}
+
+io.println(@slice("make: use @examples_check (or @ to list)")) !>;
+return 2;

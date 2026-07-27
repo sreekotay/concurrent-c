@@ -111,106 +111,23 @@ test: cc tools out-of-tree-smoke
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
 # tree.  Regression guard for `cc_path_find_repo_root` -> header include
 # path resolution.  Without this, `!>` on pointer-returning runtime funcs
-# (e.g. `cc_nursery_create`) silently falls back to Result-style lowering
+# (e.g. `cc_nursery_create`) silently fall back to Result-style lowering
 # because the function isn't registered as pointer-returning.
 out-of-tree-smoke: cc
-	@tmpdir=$$(mktemp -d); \
-	trap 'rm -rf "$$tmpdir"' EXIT; \
-	cp tests/unwrap_destroy_closure_smoke.ccs "$$tmpdir/out_of_tree.ccs"; \
-	expected=$$(cat tests/unwrap_destroy_closure_smoke.stdout); \
-	actual=$$($(CC_DIR)/bin/ccc run "$$tmpdir/out_of_tree.ccs" 2>&1); \
-	status=$$?; \
-	if [ "$$status" -ne 0 ]; then \
-		echo "FAIL out-of-tree-smoke: ccc run exited $$status"; \
-		echo "----- output -----"; echo "$$actual"; \
-		exit 1; \
-	fi; \
-	if [ "$$actual" != "$$expected" ]; then \
-		echo "FAIL out-of-tree-smoke: stdout mismatch"; \
-		echo "--- expected ---"; echo "$$expected"; \
-		echo "--- actual -----"; echo "$$actual"; \
-		exit 1; \
-	fi; \
-	echo "OK out-of-tree-smoke"
+	@./tools/out_of_tree_smoke.shcc
 
-# Verify all examples compile (CI smoke test for example rot).
+# Verify all examples compile (tools/make.shcc @examples_check).
 examples-check: cc
-	@echo "=== Checking examples compile ==="
-	@failed=0; \
-	for f in examples/*.ccs; do \
-		printf "  %-40s" "$$f"; \
-		if $(CC_DIR)/bin/ccc --emit-c-only "$$f" -o /dev/null 2>/dev/null; then \
-			echo "OK"; \
-		else \
-			echo "FAIL"; \
-			failed=$$((failed + 1)); \
-		fi; \
-	done; \
-	for d in examples/*/; do \
-		if [ -f "$$d/build.cc" ]; then \
-			printf "  %-40s" "$$d"; \
-			if $(CC_DIR)/bin/ccc build --build-file "$$d/build.cc" --dry-run 2>/dev/null; then \
-				echo "OK"; \
-			else \
-				echo "FAIL"; \
-				failed=$$((failed + 1)); \
-			fi; \
-		fi; \
-	done; \
-	if [ $$failed -gt 0 ]; then \
-		echo "$$failed example(s) failed"; \
-		exit 1; \
-	fi; \
-	echo "All examples OK"
+	@./tools/make.shcc @examples_check
 
-# Verify all stress tests compile and run.
+# Thin wrappers over tools/run_all.ccs (suite run policy lives there).
 stress-check: cc
-	@echo "=== Running stress tests ==="
-	@failed=0; \
-	for f in stress/*.ccs; do \
-		printf "  %-40s" "$$f"; \
-		if [ "$$f" = "stress/deadlock_detect_demo.ccs" ] || [ "$$f" = "stress/complex_deadlock.ccs" ]; then \
-			$(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; \
-			rc=$$?; \
-			if [ $$rc -eq 124 ] || [ $$rc -eq 1 ]; then \
-				echo "OK"; \
-			else \
-				echo "FAIL"; \
-				failed=$$((failed + 1)); \
-			fi; \
-		else \
-			if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
-				echo "OK"; \
-			else \
-				echo "FAIL"; \
-				failed=$$((failed + 1)); \
-			fi; \
-		fi; \
-	done; \
-	if [ $$failed -gt 0 ]; then \
-		echo "$$failed stress test(s) failed"; \
-		exit 1; \
-	fi; \
-	echo "All stress tests OK"
+	@$(CC_DIR)/bin/ccc run tools/run_all.ccs -- --stress
 
-# Verify all perf tests compile and run.
 perf-check: cc
-	@echo "=== Running perf tests ==="
-	@failed=0; \
-	for f in perf/*.ccs; do \
-		printf "  %-40s" "$$f"; \
-		if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
-			echo "OK"; \
-		else \
-			echo "FAIL"; \
-			failed=$$((failed + 1)); \
-		fi; \
-	done; \
-	if [ $$failed -gt 0 ]; then \
-		echo "$$failed perf test(s) failed"; \
-		exit 1; \
-	fi; \
-	echo "All perf tests OK"
+	@$(CC_DIR)/bin/ccc run tools/run_all.ccs -- --perf
+
+full-check: examples-check stress-check perf-check
 
 # Compiler perf baseline / regression guard. See perf/README.md
 # "Compiler perf baseline" section for what each captured metric means.
@@ -223,9 +140,6 @@ perf-regress: cc tools
 # Bash oracle for the .shcc twin (same metrics / tolerances).
 perf-regress-oracle: cc tools
 	@./tools/perf.shcc @perf_oracle
-
-# Run examples, stress, and perf in one go.
-full-check: examples-check stress-check perf-check
 
 # ---- Dependencies -----------------------------------------------------------
 #

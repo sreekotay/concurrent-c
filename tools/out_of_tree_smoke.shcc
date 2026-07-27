@@ -1,0 +1,78 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Regression: compile/run a .ccs that lives outside the repo tree.
+ * Guards cc_path_find_repo_root → header include resolution (without this,
+ * `!>` on pointer-returning runtime funcs can silently fall back to
+ * Result-style lowering).
+ *
+ *   ./tools/out_of_tree_smoke.shcc
+ *   make out-of-tree-smoke
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+char tmpl[] = "/tmp/cc_oot.XXXXXX";
+char* dir = mkdtemp(tmpl);
+if (!dir) {
+    fprintf(stderr, "FAIL out-of-tree-smoke: mkdtemp\n");
+    return 1;
+}
+
+CCArena a = @create(megabytes(2)) @destroy;
+CCStdio io = @create(&a) @destroy;
+
+char dst_path[512];
+snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
+
+cc_file_copy(@slice("tests/unwrap_destroy_closure_smoke.ccs"),
+             char_to_slice(dst_path), &a) !>;
+
+char[:] expected =
+    cc_file_read_path(@slice("tests/unwrap_destroy_closure_smoke.stdout"), &a) !>;
+
+CCCommand cmd = cc_command(&a, @slice("./cc/bin/ccc"));
+cmd.arg("run");
+cmd.arg(dst_path);
+cmd.stderr_to_stdout(); /* match prior Make recipe: 2>&1 */
+
+/* cmd.output is CCIoError-typed; default .shcc @errhandler is CCError. */
+CCResult_CCProcessOutput_CCIoError res = cmd.output(&a);
+if (cc_is_err(res)) {
+    CCIoError err = cc_unwrap_err_as(res, CCIoError);
+    fprintf(stderr, "FAIL out-of-tree-smoke: spawn error: %s (os=%d)\n",
+            cc_io_error_str(err), err.os_code);
+    unlink(dst_path);
+    rmdir(dir);
+    return 1;
+}
+CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
+
+int rc = out.exit_code();
+CCSlice actual = out.stdout_data;
+
+unlink(dst_path);
+rmdir(dir);
+
+if (rc != 0) {
+    fprintf(stderr, "FAIL out-of-tree-smoke: ccc run exited %d\n", rc);
+    if (actual.ptr && actual.len)
+        fwrite(actual.ptr, 1, actual.len, stderr);
+    return 1;
+}
+
+if (actual.len != expected.len ||
+    (actual.len && memcmp(actual.ptr, expected.ptr, actual.len) != 0)) {
+    fprintf(stderr, "FAIL out-of-tree-smoke: stdout mismatch\n");
+    fprintf(stderr, "--- expected ---\n");
+    if (expected.ptr && expected.len)
+        fwrite(expected.ptr, 1, expected.len, stderr);
+    fprintf(stderr, "--- actual ---\n");
+    if (actual.ptr && actual.len)
+        fwrite(actual.ptr, 1, actual.len, stderr);
+    return 1;
+}
+
+io.println(@slice("OK out-of-tree-smoke")) !>;
+return 0;
