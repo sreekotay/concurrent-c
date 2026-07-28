@@ -493,6 +493,17 @@ static int cc__hc_is_tcc(const char* cc_bin) {
     return 0;
 }
 
+/* Host compiler for comptime hook dylibs.  `$CC=tcc` selects how user
+ * program objects are built; hook TUs are clang-preprocessed and retain
+ * Darwin `availability(...,introduced=10.13.4)` version tuples that host
+ * TCC rejects as "invalid number".  Keep those compiles on system `cc`. */
+static const char* cc__hook_host_cc(void) {
+    const char* cc_bin = getenv("CC");
+    if (!cc_bin || !cc_bin[0]) return "cc";
+    if (cc__hc_is_tcc(cc_bin)) return "cc";
+    return cc_bin;
+}
+
 /* Same resolution as cc_main / const_eval: uninstalled vendored TCC needs -B. */
 static const char* cc__hc_tcc_lib_dir(const char* cc_bin, const char* repo_root,
                                       char* buf, size_t cap) {
@@ -539,8 +550,7 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
                                   const char* input_dir,
                                   const char* dylib_path,
                                   const char* source_path) {
-    const char* cc_bin = getenv("CC");
-    if (!cc_bin || !cc_bin[0]) cc_bin = "cc";
+    const char* cc_bin = cc__hook_host_cc();
     char tmp[2048];
     char tcc_dir[1024];
     if (cc__argv_push(argv, cc_bin) != 0) return -1;
@@ -728,8 +738,7 @@ static uint64_t cc__toolchain_fingerprint(void) {
     static int      computed = 0;
     if (computed) return cached;
     computed = 1;
-    const char* cc_bin = getenv("CC");
-    if (!cc_bin || !cc_bin[0]) cc_bin = "/usr/bin/cc";
+    const char* cc_bin = cc__hook_host_cc();
     struct stat st;
     if (stat(cc_bin, &st) == 0) {
         cached = cc__hash64_fnv(&st.st_mtime, sizeof(st.st_mtime), 0);
