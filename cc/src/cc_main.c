@@ -52,6 +52,10 @@ static char g_cc_runtime_c[PATH_MAX];
 static char g_out_root[PATH_MAX];
 static char g_bin_root[PATH_MAX];
 static char g_cache_root[PATH_MAX];
+/* Host-native .o/.d/runtime + compile/link metas: <cache>/host/<fp>/.
+ * Lowered headers stay at <repo>/out/include (shared, host-agnostic). */
+static char g_host_fp[17];
+static char g_host_obj_root[PATH_MAX];
 
 static void cc__dirname_inplace(char* path) {
     if (!path) return;
@@ -370,8 +374,28 @@ static void cc__cache_key_paths(char* out_meta, size_t meta_cap,
                                 char* out_link, size_t link_cap,
                                 const char* stem) {
     if (!stem) stem = "unknown";
+    /* Emit .meta is host-agnostic (shared .c). Link meta is host-native. */
     if (out_meta && meta_cap) snprintf(out_meta, meta_cap, "%s/%s.meta", g_cache_root, stem);
-    if (out_link && link_cap) snprintf(out_link, link_cap, "%s/%s.link", g_cache_root, stem);
+    if (out_link && link_cap) {
+        const char* root = g_host_obj_root[0] ? g_host_obj_root : g_cache_root;
+        snprintf(out_link, link_cap, "%s/%s.link", root, stem);
+    }
+}
+
+static const char* pick_cc_bin(const char* override);
+
+/* Isolate host-native compile/link products under <cache>/host/<fp>/. */
+static void cc_refresh_host_obj_root(const char* cc_bin_override) {
+    const char* cc = pick_cc_bin(cc_bin_override);
+    const char* cache = g_cache_root[0] ? g_cache_root : "out/.cc-build";
+    if (cc_host_cc_fingerprint(cc, g_host_fp, sizeof(g_host_fp)) != 0) {
+        snprintf(g_host_fp, sizeof(g_host_fp), "unresolved");
+        snprintf(g_host_obj_root, sizeof(g_host_obj_root), "%s/host/%s", cache, g_host_fp);
+        return;
+    }
+    if (cc_host_cc_obj_root(cc, cache, g_host_obj_root, sizeof(g_host_obj_root)) != 0) {
+        snprintf(g_host_obj_root, sizeof(g_host_obj_root), "%s/host/%s", cache, g_host_fp);
+    }
 }
 
 static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
@@ -401,6 +425,7 @@ static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
     }
 
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
+    cc_refresh_host_obj_root(NULL);
 }
 
 // Check if a path layout is valid (runtime source exists).
@@ -790,6 +815,7 @@ static int ensure_out_dir(void) {
     if (cc__mkdir_p(g_out_root) != 0) return -1;
     if (cc__mkdir_p(g_bin_root) != 0) return -1;
     if (cc__mkdir_p(g_cache_root) != 0) return -1;
+    if (g_host_obj_root[0] && cc__mkdir_p(g_host_obj_root) != 0) return -1;
     return 0;
 }
 
@@ -823,7 +849,8 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
     if (!in_path) return -1;
     char stem[128];
     cc__stem_from_path(in_path, stem, sizeof(stem));
-    return derive_path_from_stem(stem, g_out_root, ".o", out_buf, out_buf_size);
+    return derive_path_from_stem(stem, g_host_obj_root[0] ? g_host_obj_root : g_out_root, ".o",
+                                 out_buf, out_buf_size);
 }
 
 static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf_size) {
@@ -1357,13 +1384,13 @@ static int cc__derive_c_path_from_stem(const char* stem, char* out, size_t cap) 
 
 static int cc__derive_o_path_from_stem(const char* stem, char* out, size_t cap) {
     if (!stem || !stem[0] || !out || cap == 0) return -1;
-    snprintf(out, cap, "%s/%s.o", g_out_root, stem);
+    snprintf(out, cap, "%s/%s.o", g_host_obj_root[0] ? g_host_obj_root : g_out_root, stem);
     return 0;
 }
 
 static int cc__derive_d_path_from_stem(const char* stem, char* out, size_t cap) {
     if (!stem || !stem[0] || !out || cap == 0) return -1;
-    snprintf(out, cap, "%s/%s.d", g_out_root, stem);
+    snprintf(out, cap, "%s/%s.d", g_host_obj_root[0] ? g_host_obj_root : g_out_root, stem);
     return 0;
 }
 
@@ -1864,13 +1891,14 @@ static int cc__build_target_objs_rec(int idx,
     char o_dir[PATH_MAX];
     // Include a per-build-dir prefix so multiple unrelated projects can safely share the same --out-dir.
     // Layout:
-    //   <out>/c/<build_id>/<target>/<unit>.c
-    //   <out>/obj/<build_id>/<target>/<unit>.o/.d
+    //   <out>/c/<build_id>/<target>/<unit>.c          (host-agnostic emit)
+    //   <cache>/host/<fp>/obj/<build_id>/<target>/...  (host-native objects)
     uint64_t build_id_u64 = cc__hash_build_dir_u64(build_dir);
     char build_id_hex[32];
     cc__format_u64_hex(build_id_hex, sizeof(build_id_hex), build_id_u64);
     snprintf(c_dir, sizeof(c_dir), "%s/c/%s/%s", g_out_root, build_id_hex, t->name);
-    snprintf(o_dir, sizeof(o_dir), "%s/obj/%s/%s", g_out_root, build_id_hex, t->name);
+    snprintf(o_dir, sizeof(o_dir), "%s/obj/%s/%s",
+             g_host_obj_root[0] ? g_host_obj_root : g_out_root, build_id_hex, t->name);
     if (cc__mkdir_p(c_dir) != 0 || cc__mkdir_p(o_dir) != 0) return -1;
 
     // Emit + compile each source.
@@ -1917,7 +1945,8 @@ static int cc__build_target_objs_rec(int idx,
         char meta_path[PATH_MAX];
         char obj_meta_path[PATH_MAX];
         snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, cache_stem);
-        snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, cache_stem);
+        snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj",
+                 g_host_obj_root[0] ? g_host_obj_root : g_cache_root, cache_stem);
 
         uint64_t emit_key = 0;
         if (!is_raw_c) {
@@ -1930,6 +1959,7 @@ static int cc__build_target_objs_rec(int idx,
                 h = cc__fnv1a64_str(h, src_abs);
                 h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
                 h = cc__fnv1a64_i64(h, in_sig.size);
+                h = cc__fold_file_content(h, src_abs);
                 h = cc__fnv1a64_i64(h, build_sig_for_key ? build_sig_for_key->mtime_sec : 0);
                 h = cc__fnv1a64_i64(h, build_sig_for_key ? build_sig_for_key->size : 0);
                 h = cc__fnv1a64_i64(h, cc_sig_for_key ? cc_sig_for_key->mtime_sec : 0);
@@ -1987,6 +2017,7 @@ static int cc__build_target_objs_rec(int idx,
                 h = cc__fnv1a64_str(h, t_cc_flags);
                 h = cc__fnv1a64_str(h, getenv("CFLAGS"));
                 h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                h = cc__fnv1a64_str(h, g_host_fp);
                 obj_key = h;
                 uint64_t prev = 0;
                 if (file_exists(o_out) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key && !cc__deps_require_rebuild(d_out, o_out)) {
@@ -2111,26 +2142,26 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     char meta_path[PATH_MAX];
     cc__cache_key_paths(meta_path, sizeof(meta_path), NULL, 0, stem);
     if (!is_raw_c && cache_ok) {
-        CCFileSig in_sig, build_sig, cc_sig, ccc_sig;
+        CCFileSig in_sig, build_sig, ccc_sig;
         (void)cc__stat_sig(opt->in_path, &in_sig);
         char build_buf[512];
         int multiple = 0;
         const char* build_path = opt->build_override ? opt->build_override : choose_build_path(opt->in_path, build_buf, sizeof(build_buf), &multiple);
         if (multiple) build_path = NULL;
         if (build_path && cc__stat_sig(build_path, &build_sig) != 0) { build_sig.mtime_sec = 0; build_sig.size = 0; }
-        if (cc__stat_sig(opt->cc_bin_override ? opt->cc_bin_override : "cc", &cc_sig) != 0) { cc_sig.mtime_sec = 0; cc_sig.size = 0; }
-        // Also include the ccc binary itself so cache invalidates when lowering logic changes
+        /* Emit is host-agnostic: key on ccc (lowering), not the host C compiler. */
         if (cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : g_ccc_path, &ccc_sig) != 0) { ccc_sig.mtime_sec = 0; ccc_sig.size = 0; }
 
         uint64_t h = 1469598103934665603ULL;
         h = cc__fnv1a64_str(h, opt->in_path);
         h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, in_sig.size);
+        /* Content fold: mtime is second-granular; same-second same-size edits
+         * must still invalidate emit + diagnostic sidecar replay. */
+        h = cc__fold_file_content(h, opt->in_path);
         h = cc__fnv1a64_str(h, build_path ? build_path : "");
         h = cc__fnv1a64_i64(h, build_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, build_sig.size);
-        h = cc__fnv1a64_i64(h, cc_sig.mtime_sec);
-        h = cc__fnv1a64_i64(h, cc_sig.size);
         h = cc__fnv1a64_i64(h, ccc_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, ccc_sig.size);
         h = cc__fnv1a64_str(h, opt->target_flag);
@@ -2194,7 +2225,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s", opt->sysroot_flag);
     }
     char obj_meta_path[PATH_MAX];
-    snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
+    snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj",
+             g_host_obj_root[0] ? g_host_obj_root : g_cache_root, stem);
     uint64_t obj_key = 0;
     char dep_path[PATH_MAX];
     cc__derive_d_path_from_stem(stem, dep_path, sizeof(dep_path));
@@ -2217,6 +2249,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, opt->cc_flags);
         h = cc__fnv1a64_str(h, getenv("CFLAGS"));
         h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+        h = cc__fnv1a64_str(h, g_host_fp);
         obj_key = h;
         uint64_t prev = 0;
         if (file_exists(opt->obj_out_path) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key &&
@@ -2305,6 +2338,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, link_extra);
         h = cc__fnv1a64_str(h, target_part);
         h = cc__fnv1a64_str(h, sysroot_part);
+        h = cc__fnv1a64_str(h, g_host_fp);
         link_key = h;
         uint64_t prev = 0;
         if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
@@ -2627,14 +2661,15 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         return -1;
     }
 
-    // Build a runtime object under out/obj/runtime.o
+    // Host-native runtime objects under <cache>/host/<fp>/.
     char runtime_obj[PATH_MAX];
     char runtime_core_obj[PATH_MAX];
     char runtime_xjb_obj[PATH_MAX];
     char runtime_xjb_src[PATH_MAX];
-    snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
-    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime.core.o", g_out_root);
-    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime.xjb.o", g_out_root);
+    const char* rt_root = g_host_obj_root[0] ? g_host_obj_root : g_out_root;
+    snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", rt_root);
+    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime.core.o", rt_root);
+    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime.xjb.o", rt_root);
     snprintf(runtime_xjb_src, sizeof(runtime_xjb_src), "%s/runtime/float_format_xjb.cpp", g_cc_dir);
     const char* ccflags_env = getenv("CFLAGS");
     const char* cxxflags_env = getenv("CXXFLAGS");
@@ -3018,6 +3053,7 @@ static int run_build_mode(int argc, char** argv) {
 
     // Apply output directory override before creating/deriving any outputs.
     cc_set_out_dir(out_dir, bin_dir);
+    cc_refresh_host_obj_root(cc_bin);
 
     // Determine build.cc path (if any) for help/targets.
     const char* build_path_for_help = NULL;
@@ -3635,7 +3671,8 @@ static int run_build_mode(int argc, char** argv) {
                 char out_stem[128];
                 cc__stem_from_path(user_out, out_stem, sizeof(out_stem));
                 char link_meta_path[PATH_MAX];
-                snprintf(link_meta_path, sizeof(link_meta_path), "%s/%s.link", g_cache_root, out_stem);
+                snprintf(link_meta_path, sizeof(link_meta_path), "%s/%s.link",
+                         g_host_obj_root[0] ? g_host_obj_root : g_cache_root, out_stem);
                 CCFileSig rt_sig;
                 rt_sig.mtime_sec = 0;
                 rt_sig.size = 0;
@@ -3645,6 +3682,7 @@ static int run_build_mode(int argc, char** argv) {
                 h = cc__fnv1a64_str(h, chosen_sysroot_part);
                 h = cc__fnv1a64_str(h, base_opt.ld_flags ? base_opt.ld_flags : "");
                 h = cc__fnv1a64_str(h, getenv("LDFLAGS"));
+                h = cc__fnv1a64_str(h, g_host_fp);
                 h = cc__fnv1a64_i64(h, (long long)rt_sig.mtime_sec);
                 h = cc__fnv1a64_i64(h, (long long)rt_sig.size);
                 for (size_t i = 0; i < obj_count; ++i) {
@@ -3849,6 +3887,7 @@ static int run_build_mode(int argc, char** argv) {
                 h = cc__fnv1a64_str(h, inputs[i]);
                 h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
                 h = cc__fnv1a64_i64(h, in_sig.size);
+                h = cc__fold_file_content(h, inputs[i]);
                 h = cc__fnv1a64_str(h, build_path_for_key ? build_path_for_key : "");
                 h = cc__fnv1a64_i64(h, build_sig_for_key.mtime_sec);
                 h = cc__fnv1a64_i64(h, build_sig_for_key.size);
@@ -3867,6 +3906,7 @@ static int run_build_mode(int argc, char** argv) {
                     h = cc__fnv1a64_str(h, bindings[bi].name);
                     h = cc__fnv1a64_i64(h, bindings[bi].value);
                 }
+                h = cc__fold_cc_depends(h, inputs[i]);
                 emit_key = h;
 
                 uint64_t prev = 0;
@@ -3888,7 +3928,8 @@ static int run_build_mode(int argc, char** argv) {
             }
             if (mode != CC_MODE_EMIT_C) {
                 char obj_meta_path[PATH_MAX];
-                snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
+                snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj",
+                         g_host_obj_root[0] ? g_host_obj_root : g_cache_root, stem);
                 if (cache_ok) {
                     uint64_t h = 1469598103934665603ULL;
                     if (is_raw_c) {
@@ -3906,6 +3947,7 @@ static int run_build_mode(int argc, char** argv) {
                     h = cc__fnv1a64_str(h, cc_flags);
                     h = cc__fnv1a64_str(h, getenv("CFLAGS"));
                     h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                    h = cc__fnv1a64_str(h, g_host_fp);
                     uint64_t obj_key = h;
                     obj_keys[i] = obj_key;
                     uint64_t prev = 0;
@@ -3942,7 +3984,8 @@ static int run_build_mode(int argc, char** argv) {
             char out_stem[128];
             cc__stem_from_path(user_out, out_stem, sizeof(out_stem));
             char link_meta_path[PATH_MAX];
-            snprintf(link_meta_path, sizeof(link_meta_path), "%s/%s.link", g_cache_root, out_stem);
+            snprintf(link_meta_path, sizeof(link_meta_path), "%s/%s.link",
+                     g_host_obj_root[0] ? g_host_obj_root : g_cache_root, out_stem);
             CCFileSig rt_sig;
             rt_sig.mtime_sec = 0; rt_sig.size = 0;
             if (!no_runtime) (void)cc__stat_sig(runtime_path, &rt_sig);
@@ -3951,6 +3994,7 @@ static int run_build_mode(int argc, char** argv) {
             h = cc__fnv1a64_str(h, sysroot_part);
             h = cc__fnv1a64_str(h, ld_flags);
             h = cc__fnv1a64_str(h, getenv("LDFLAGS"));
+            h = cc__fnv1a64_str(h, g_host_fp);
             h = cc__fnv1a64_i64(h, (long long)rt_sig.mtime_sec);
             h = cc__fnv1a64_i64(h, (long long)rt_sig.size);
             for (int i = 0; i < input_count; ++i) {
@@ -4890,6 +4934,7 @@ int main(int argc, char **argv) {
     cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
     cc_set_out_dir(out_dir, bin_dir);
+    cc_refresh_host_obj_root(cc_bin);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
         return 1;

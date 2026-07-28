@@ -500,9 +500,34 @@ static inline CCString* cc_string_push_uint(CCString *str, uint64_t v, CCArena *
     return cc__string_append_u64_impl(str, v, arena);
 }
 
+/* Non-XJB float printer: aim for the same shape as dragonbox/XJB for common
+ * values (0.0, 1000.0, 1.2e+23) so host TCC (no C++ XJB link on Darwin)
+ * matches string_template / to_str expectations. */
 static inline CCString* cc__string_push_double_fallback(CCString *str, double v, CCArena *arena) {
     char buf[64];
-    int n = snprintf(buf, sizeof(buf), "%g", v);
+    int n;
+    if (!str) return NULL;
+    if (isnan(v)) {
+        n = snprintf(buf, sizeof(buf), "NaN");
+    } else if (isinf(v)) {
+        n = snprintf(buf, sizeof(buf), signbit(v) ? "-inf" : "inf");
+    } else if (v == 0.0) {
+        n = snprintf(buf, sizeof(buf), signbit(v) ? "-0.0" : "0.0");
+    } else {
+        n = snprintf(buf, sizeof(buf), "%.15g", v);
+        if (n > 0 && n < (int)sizeof(buf)) {
+            int has_dot = 0, has_exp = 0, i;
+            for (i = 0; i < n; i++) {
+                if (buf[i] == '.' || buf[i] == ',') has_dot = 1;
+                if (buf[i] == 'e' || buf[i] == 'E') has_exp = 1;
+            }
+            if (!has_dot && !has_exp && n + 2 < (int)sizeof(buf)) {
+                buf[n++] = '.';
+                buf[n++] = '0';
+                buf[n] = '\0';
+            }
+        }
+    }
     if (n < 0) return NULL;
     return cc_string_push_buffer(str, buf, (uint32_t)n, arena);
 }

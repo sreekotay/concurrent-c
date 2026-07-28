@@ -71,7 +71,8 @@ static inline uint32_t cc_array_map_slot_frag(uint32_t slot) {
 }
 
 static inline void cc_array_map_prefetch(const void *p) {
-#if defined(__GNUC__) || defined(__clang__)
+    /* TINYC defines __GNUC__ for compat but has no __builtin_prefetch. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__TINYC__)
     __builtin_prefetch(p, 0, 1);
 #else
     (void)p;

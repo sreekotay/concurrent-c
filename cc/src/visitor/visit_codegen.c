@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <limits.h>
 
 /* Env-gated reparse instrumentation (CC_PROFILE_REPARSE=1).  Counts full
  * source->AST reparses and accumulates wall time so structural pass-count
@@ -2446,6 +2447,32 @@ static int cc__line_is_line_directive(const char* s, size_t n) {
            (i + 5 == n || s[i + 5] == ' ' || s[i + 5] == '\t');
 }
 
+/* mark[i]=1 iff s[i] starts a live (non-comment/string) #line line.
+ * Comment-blind text walkers must consult this instead of scanning raw
+ * lines — a #line inside a block comment must not be renumbered/deleted
+ * (and must not swallow the comment closer on that line). */
+static unsigned char* cc__mark_live_line_directives(const char* s, size_t n) {
+    unsigned char* mark;
+    CCInertScan scan;
+    size_t i;
+    if (!s) return NULL;
+    mark = (unsigned char*)calloc(n ? n : 1, 1);
+    if (!mark) return NULL;
+    cc_inert_scan_init(&scan, NULL);
+    for (i = 0; i < n; ) {
+        if (scan.at_line_start &&
+            !scan.in_block_comment && !scan.in_line_comment &&
+            !scan.in_str && !scan.in_chr && !scan.in_pp) {
+            size_t e = i;
+            while (e < n && s[e] != '\n') e++;
+            if (cc__line_is_line_directive(s + i, e - i)) mark[i] = 1;
+        }
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+        i++;
+    }
+    return mark;
+}
+
 /* Cosmetic: when a `#line` directive is immediately followed by another
  * `#line` directive, only the last of the run affects the mapping — drop the
  * earlier ones.  Pass rewinds leave these back-to-back ping-pong pairs in the
@@ -2453,16 +2480,18 @@ static int cc__line_is_line_directive(const char* s, size_t n) {
  * buffer, immediately before the write.  Compacts in place (w <= r). */
 static void cc__coalesce_adjacent_line_directives(char* s, size_t* io_len) {
     size_t n, r = 0, w = 0;
+    unsigned char* live;
     if (!s || !io_len) return;
     n = *io_len;
+    live = cc__mark_live_line_directives(s, n);
+    if (!live) return; /* OOM: leave buffer unchanged */
     while (r < n) {
         size_t e = r;
         while (e < n && s[e] != '\n') e++;
         int drop = 0;
-        if (e < n && cc__line_is_line_directive(s + r, e - r)) {
-            size_t nr = e + 1, ne = nr;
-            while (ne < n && s[ne] != '\n') ne++;
-            if (cc__line_is_line_directive(s + nr, ne - nr)) drop = 1;
+        if (e < n && live[r]) {
+            size_t nr = e + 1;
+            if (nr < n && live[nr]) drop = 1;
         }
         if (!drop) {
             size_t m = (e < n ? e + 1 : e) - r;
@@ -2471,6 +2500,7 @@ static void cc__coalesce_adjacent_line_directives(char* s, size_t* io_len) {
         }
         r = (e < n) ? e + 1 : e;
     }
+    free(live);
     s[w] = '\0';
     *io_len = w;
 }
@@ -2505,12 +2535,18 @@ static long cc__line_directive_number(const char* s, size_t n,
  * The first advances the anchor instead of padding to it; the others rely
  * on the following directive re-anchoring.  Removes whole lines, so it
  * must run only on the final buffer (after trailing-ws strip, so blank
- * means empty).  Compacts in place: dropping k>=2 one-byte lines always
- * outweighs the <= digits(k)+1 bytes a renumbered directive can grow. */
+ * means empty).  Renumber stages the rewritten directive in a stack
+ * buffer before writing — when the new number gains a digit and no
+ * write-slack has accumulated yet, an in-place digit memcpy would clobber
+ * the space before the filename (`#line 122"file"`), which host CCs accept
+ * silently and defeat diagnostic/__LINE__ fidelity below the anchor. */
 static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
     size_t n, r = 0, w = 0;
+    unsigned char* live;
     if (!s || !io_len) return;
     n = *io_len;
+    live = cc__mark_live_line_directives(s, n);
+    if (!live) return; /* OOM: leave buffer unchanged */
     while (r < n) {
         size_t e = r;
         while (e < n && s[e] != '\n') e++;
@@ -2526,11 +2562,11 @@ static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
         }
         size_t pe = p;
         while (pe < n && s[pe] != '\n') pe++;
-        int next_is_dir = (p < n) && cc__line_is_line_directive(s + p, pe - p);
+        int next_is_dir = (p < n) && live[p];
 
         if (!line_is_blank) {
             size_t na = 0, nb = 0;
-            long ln = cc__line_directive_number(s + r, e - r, &na, &nb);
+            long ln = live[r] ? cc__line_directive_number(s + r, e - r, &na, &nb) : 0;
             if (ln > 0 && k > 0 && p < n) {
                 if (next_is_dir) {
                     /* Directive + blanks + directive: drop this one. */
@@ -2538,18 +2574,24 @@ static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
                     continue;
                 }
                 if (k >= 2) {
-                    /* Renumber past the dropped blanks. */
+                    /* Renumber past the dropped blanks — stage first. */
                     char num[24];
+                    char staged[PATH_MAX + 64];
                     int nd = snprintf(num, sizeof(num), "%ld", ln + (long)k);
-                    memmove(s + w, s + r, na);
-                    w += na;
-                    memcpy(s + w, num, (size_t)nd);
-                    w += (size_t)nd;
-                    memmove(s + w, s + r + nb, e - (r + nb));
-                    w += e - (r + nb);
-                    s[w++] = '\n';
-                    r = p;
-                    continue;
+                    size_t prefix = na;
+                    size_t tail = e - (r + nb);
+                    size_t need = prefix + (size_t)nd + tail + 1; /* + '\n' */
+                    if (nd > 0 && need <= sizeof(staged)) {
+                        memcpy(staged, s + r, prefix);
+                        memcpy(staged + prefix, num, (size_t)nd);
+                        memcpy(staged + prefix + (size_t)nd, s + r + nb, tail);
+                        staged[prefix + (size_t)nd + tail] = '\n';
+                        memmove(s + w, staged, need);
+                        w += need;
+                        r = p;
+                        continue;
+                    }
+                    /* Path too long for stack stage: skip renumber, keep line. */
                 }
             }
             /* Ordinary line: copy through. */
@@ -2568,6 +2610,7 @@ static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
         while (k-- > 0) s[w++] = '\n';
         r = p;
     }
+    free(live);
     s[w] = '\0';
     *io_len = w;
 }
@@ -5430,6 +5473,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc__collapse_typeof_dup_decls(src_ufcs, &src_ufcs_len);
         cc__compact_blank_runs_at_line_directives(src_ufcs, &src_ufcs_len);
         cc__coalesce_adjacent_line_directives(src_ufcs, &src_ufcs_len);
+        /* Host TCC rejects `constructor(N)` priority args; blank them in the
+         * emit buffer (clang accepts bare `constructor` equally). Parse-time
+         * L2 already does this for libtcc; the written .c must match. */
+        if (strstr(src_ufcs, "constructor(") || strstr(src_ufcs, "destructor(")) {
+            (void)cc_l2_blank_ctor_priority_inplace(src_ufcs, src_ufcs_len);
+        }
 
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);

@@ -36,11 +36,18 @@ For an input stem `NAME`, default single-input paths are:
 
 ```
 out/NAME.c
-out/NAME.o
-out/NAME.d
+out/.cc-build/host/<host-fp>/NAME.o
+out/.cc-build/host/<host-fp>/NAME.d
 bin/NAME
 out/.cc-build/
+out/include/   # lowered .h headers (shared; not keyed by host CC)
 ```
+
+`<host-fp>` is a fingerprint of the resolved host C compiler (`$CC` / `--cc-bin`:
+path, mtime, size, profile schema). Host-native objects, depfiles, runtime
+objects built by the driver, and compile/link cache metas live under
+`out/.cc-build/host/<host-fp>/` so switching `CC=tcc` cannot reuse clang
+Mach-O objects (or the reverse). Emitted `.c` and lowered headers stay shared.
 
 `-o PATH` selects the terminal output for the current mode. In link mode, `--obj-out PATH` independently selects the intermediate object. Generated C is retained; `--keep-c` is accepted and is therefore idempotent.
 
@@ -59,8 +66,8 @@ output root, each target uses:
 
 ```
 out/c/<build-id>/<target>/<source-stem>__<source-path-hash>.c
-out/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.o
-out/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.d
+out/.cc-build/host/<host-fp>/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.o
+out/.cc-build/host/<host-fp>/obj/<build-id>/<target>/<source-stem>__<source-path-hash>.d
 ```
 
 `<build-id>` is a stable hash of the build-file directory. The unit suffix is
@@ -95,9 +102,13 @@ The bundled runtime is linked unless `--no-runtime` is present. The driver may r
 
 ## Incremental cache
 
-Cache metadata lives under `<out-dir>/.cc-build/`. The driver independently caches C emission, object compilation, runtime compilation, and linking.
+Cache metadata lives under `<out-dir>/.cc-build/`. Emit metas (`.meta`) are
+shared there. Object and link metas (`.obj`, `.link`) live under
+`<out-dir>/.cc-build/host/<host-fp>/` with the host-native objects. The driver
+independently caches C emission, object compilation, runtime compilation, and
+linking.
 
-Cache keys include the relevant source and build-file signatures, compiler inputs, target and sysroot, command-line and environment flags, compile-time bindings, runtime signatures, and declared `#pragma cc_depends` content. Object reuse also checks dependency files.
+Cache keys include the relevant source and build-file signatures, compiler inputs, target and sysroot, command-line and environment flags, compile-time bindings, runtime signatures, and declared `#pragma cc_depends` content. Object and link keys also fold the host-compiler fingerprint. Object reuse also checks dependency files.
 
 Failed emission is not cached. A diagnostic-producing emit fails the build, and a later invocation reruns it even when prior cache metadata exists. `--no-cache` and `CC_NO_CACHE=1` force each selected phase to execute.
 

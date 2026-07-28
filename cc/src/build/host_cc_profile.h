@@ -34,4 +34,16 @@ void cc_host_cc_profile_append_flags(const CCHostCcProfile* p,
                                      char* cmd,
                                      size_t cmd_cap);
 
+/* 16 hex chars + NUL. Fingerprint = resolved path + mtime + size + schema.
+ * Host-native objects and compile/link metas live under
+ * <cache_root>/host/<fingerprint>/ so CC=tcc cannot reuse clang Mach-O .o. */
+int cc_host_cc_fingerprint(const char* cc_bin, char* hex_out, size_t hex_cap);
+
+/* Write <cache_root>/host/<fingerprint> into `out`. cache_root defaults to
+ * out/.cc-build when null/empty. */
+int cc_host_cc_obj_root(const char* cc_bin,
+                        const char* cache_root,
+                        char* out,
+                        size_t out_cap);
+
 #endif /* CC_BUILD_HOST_CC_PROFILE_H */

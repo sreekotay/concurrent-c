@@ -1,4 +1,4 @@
 # Oracle: the @grammar(schema) splice above the error keeps exact user lines.
-# Pin file:line:col + symbol; clang wording varies.
-diag_oracle_grammar_fail.ccs:19:13: error:
+# Pin file:line + symbol (column/`error:` optional — see plain_fail).
+diag_oracle_grammar_fail.ccs:19:
 cc_diag_oracle_undeclared

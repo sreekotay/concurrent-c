@@ -54,7 +54,10 @@ typedef _Atomic intptr_t cc_atomic_intptr;
 #define CC_ATOMIC_HAVE_REAL_ATOMICS 1
 
 #elif defined(__TINYC__)
-/* TCC - no real atomics, best-effort non-atomic fallback */
+/* Bare / pre-C11 TCC: non-atomic CAS. Host driver always passes -std=c11 so
+ * the real-atomics branch above is taken; compiling emitted C outside the
+ * driver without -std=c11 silently picks this and corrupts Treiber freelists. */
+#warning "TINYC without C11: non-atomic CAS fallback. Pass -std=c11 (ccc does)."
 typedef volatile int cc_atomic_int;
 typedef volatile unsigned int cc_atomic_uint;
 typedef volatile size_t cc_atomic_size;

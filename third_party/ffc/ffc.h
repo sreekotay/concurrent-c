@@ -131,6 +131,10 @@ extern "C" {
  * common.h re-uses this same definition under an #ifndef guard. */
 #if defined(_MSC_VER)
   #define ffc_inline __forceinline
+#elif defined(__TINYC__)
+  /* TCC claims __GNUC__ but `extern always_inline` becomes a local symbol
+   * (nm `t`), so non-FFC_IMPL TUs cannot link. Plain extern definitions. */
+  #define ffc_inline
 #elif defined(__GNUC__) || defined(__clang__)
   #define ffc_inline __attribute__((always_inline)) inline
 #else
@@ -319,6 +323,10 @@ ffc_result ffc_parse_json_number(const char *start, const char *end, ffc_json_nu
 #ifndef ffc_inline
 #if defined(_MSC_VER)
   #define ffc_inline __forceinline
+#elif defined(__TINYC__)
+  /* TCC claims __GNUC__ but `extern always_inline` becomes a local symbol
+   * (nm `t`), so non-FFC_IMPL TUs cannot link. Plain extern definitions. */
+  #define ffc_inline
 #elif defined(__GNUC__) || defined(__clang__)
   #define ffc_inline __attribute__((always_inline)) inline
 #else

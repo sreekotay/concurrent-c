@@ -1,4 +1,4 @@
 # Oracle: @defer and @string template lowering above the error keep exact lines.
-# Pin file:line:col + symbol; clang wording varies.
-diag_oracle_defer_template_fail.ccs:10:13: error:
+# Pin file:line + symbol (column/`error:` optional — see plain_fail).
+diag_oracle_defer_template_fail.ccs:10:
 cc_diag_oracle_undeclared

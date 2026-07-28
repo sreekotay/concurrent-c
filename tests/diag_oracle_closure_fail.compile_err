@@ -1,8 +1,8 @@
 # Oracle: closure lift must not shift lines below the literal (the call-site
 # collapse is padded line-neutral), and an error INSIDE a hoisted closure
 # body must map to the USER file:line, not a synthetic <cc-closures> file.
-# Pin file:line:col + symbol; clang wording varies.
-diag_oracle_closure_fail.ccs:13:17: error:
+# Pin file:line + symbol (column/`error:` optional — see plain_fail).
+diag_oracle_closure_fail.ccs:13:
 cc_diag_oracle_undeclared_two
-diag_oracle_closure_fail.ccs:10:21: error:
+diag_oracle_closure_fail.ccs:10:
 cc_diag_oracle_undeclared

@@ -407,3 +407,19 @@ void cc_host_cc_profile_append_flags(const CCHostCcProfile* p,
     if (!p || !cmd || !cmd_cap || !p->flags[0]) return;
     strncat(cmd, p->flags, cmd_cap - strlen(cmd) - 1);
 }
+
+int cc_host_cc_fingerprint(const char* cc_bin, char* hex_out, size_t hex_cap) {
+    return cc__hp_fingerprint(cc_bin, hex_out, hex_cap, NULL, 0);
+}
+
+int cc_host_cc_obj_root(const char* cc_bin,
+                        const char* cache_root,
+                        char* out,
+                        size_t out_cap) {
+    char hex[32];
+    if (!out || out_cap == 0) return -1;
+    if (cc__hp_fingerprint(cc_bin, hex, sizeof(hex), NULL, 0) != 0) return -1;
+    if (!cache_root || !cache_root[0]) cache_root = "out/.cc-build";
+    if (snprintf(out, out_cap, "%s/host/%s", cache_root, hex) >= (int)out_cap) return -1;
+    return 0;
+}

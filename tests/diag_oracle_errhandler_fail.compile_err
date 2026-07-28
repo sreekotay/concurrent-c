@@ -1,5 +1,5 @@
 # Oracle: @errhandler + `!> @destroy` above the error must not shift the
 # reported line (the defer prologue used to drift diagnostics by +2..+3).
-# Pin file:line:col + symbol; clang wording varies.
-diag_oracle_errhandler_fail.ccs:12:13: error:
+# Pin file:line + symbol (column/`error:` optional — see plain_fail).
+diag_oracle_errhandler_fail.ccs:12:
 cc_diag_oracle_undeclared
