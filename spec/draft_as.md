@@ -11,6 +11,7 @@ see `tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
 `tests/as_nontypedef_struct_smoke.ccs`, `tests/errhandler_as_fallback_smoke.ccs`,
 `tests/errhandler_as_face_message_smoke.ccs`,
 `tests/script_errhandler_as_default_smoke.shcc`,
+`tests/errhandler_as_ambiguous_fail.ccs`,
 `tests/errhandler_type_match_smoke.ccs`).
 
 ## 1. Surface
@@ -154,7 +155,9 @@ Io vocabulary. Display prefers a custom message when set (`cc_error_str` /
    to the `F` subobject (`e.path`) — member selection, no conversion
    function, no mapping table.
 3. Two `@as` paths from `E` reaching distinct handler types in scope:
-   ill-formed, ambiguous (the same rule as §2).
+   ill-formed, ambiguous (the same rule as §2). Lookup scans every
+   in-scope handler before selecting a face; it must not return the
+   innermost face when another distinct face is also reachable.
 4. The reverse direction never matches: an `@errhandler(E)` where `E` has
    an `@as` field of type `F` does not handle an `F`-typed unwrap.
 
@@ -168,6 +171,9 @@ default — therefore handles `CCIoError` Results via `base`, while an exact
 `@errhandler(CCIoError)` still claims them when `os_code` matters. The
 default handler prints `cc_error_str(e)` (kind label when `message` is
 null or empty), not a raw `e.message` that may be unset.
+
+Set `CC_DEBUG_ERRHANDLER_AS` to log each successful dispatch as exact,
+`@as` (with the dotted path), or ambient `CCError` (Result `E` unresolved).
 
 ## 6. Out of scope
 

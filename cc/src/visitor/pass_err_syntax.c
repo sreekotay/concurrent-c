@@ -28,32 +28,55 @@ typedef struct {
 
 static CCErrFrame* cc__err_stk_find(CCErrFrame* stk, int stk_n,
                                     const char* err_type,
-                                    char* out_as_path, size_t out_as_path_sz) {
+                                    char* out_as_path, size_t out_as_path_sz,
+                                    int* out_as_diag) {
+    CCErrHandlerStack hs;
+    const CCErrHandlerFrame* fr;
     int i;
-    CCTypeRegistry* reg;
     if (out_as_path && out_as_path_sz) out_as_path[0] = 0;
-    if (!stk || !err_type || !err_type[0]) return NULL;
+    if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_NONE;
+    if (!stk || !err_type || !err_type[0] || stk_n <= 0) return NULL;
+    cc_errhandler_stack_init(&hs);
+    for (i = 0; i < stk_n && hs.n < CC_ERRHANDLER_STK_MAX; i++) {
+        CCErrHandlerFrame* dst = &hs.frames[hs.n];
+        memset(dst, 0, sizeof(*dst));
+        dst->reg_depth = stk[i].reg_depth;
+        dst->body = stk[i].body;
+        dst->body_len = stk[i].body_len;
+        dst->at_pos = 0;
+        {
+            size_t dl = strlen(stk[i].param_decl);
+            if (dl >= sizeof(dst->param_decl)) dl = sizeof(dst->param_decl) - 1;
+            memcpy(dst->param_decl, stk[i].param_decl, dl);
+            dst->param_decl[dl] = 0;
+        }
+        {
+            size_t tl = strlen(stk[i].param_type);
+            if (tl >= sizeof(dst->param_type)) tl = sizeof(dst->param_type) - 1;
+            memcpy(dst->param_type, stk[i].param_type, tl);
+            dst->param_type[tl] = 0;
+        }
+        {
+            size_t nl = strlen(stk[i].param_name);
+            if (nl >= sizeof(dst->param_name)) nl = sizeof(dst->param_name) - 1;
+            memcpy(dst->param_name, stk[i].param_name, nl);
+            dst->param_name[nl] = 0;
+        }
+        hs.n++;
+    }
+    fr = cc_errhandler_stack_find_with_as(&hs, err_type,
+                                          out_as_path, out_as_path_sz,
+                                          out_as_diag);
+    if (!fr) return NULL;
+    /* Map shared-stack frame back to the caller's CCErrFrame by type+decl. */
     for (i = stk_n - 1; i >= 0; i--) {
-        if (cc_errhandler_types_equal(stk[i].param_type, err_type))
+        if (cc_errhandler_types_equal(stk[i].param_type, fr->param_type) &&
+            strcmp(stk[i].param_decl, fr->param_decl) == 0)
             return &stk[i];
     }
-    reg = cc_type_registry_get_global();
-    if (!reg) return NULL;
     for (i = stk_n - 1; i >= 0; i--) {
-        char path[CC_ERRHANDLER_AS_PATH_MAX];
-        int rc;
-        path[0] = 0;
-        rc = cc_type_registry_as_path_for_type(reg, err_type, stk[i].param_type,
-                                               path, sizeof(path));
-        if (rc == 0 && path[0]) {
-            if (out_as_path && out_as_path_sz) {
-                size_t pl = strlen(path);
-                if (pl >= out_as_path_sz) pl = out_as_path_sz - 1;
-                memcpy(out_as_path, path, pl);
-                out_as_path[pl] = 0;
-            }
+        if (cc_errhandler_types_equal(stk[i].param_type, fr->param_type))
             return &stk[i];
-        }
     }
     return NULL;
 }
@@ -1289,24 +1312,48 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     goto fail;
                 }
                 err_type[0] = 0;
-                if (!cc_errhandler_resolve_call_err_type(in_src, in_len, call_a, call_b,
-                                                         err_type, sizeof(err_type))) {
-                    /* Untyped / pointer unwrap → ambient CCError binder. */
-                    memcpy(err_type, "CCError", sizeof("CCError"));
-                }
-                def = cc__err_stk_find(stk, stk_n, err_type,
-                                       def_as_path, sizeof(def_as_path));
-                if (!def) {
-                    char rel[1024];
-                    char msg[256];
-                    const char* f =
-                        cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                    snprintf(msg, sizeof(msg),
-                             "no matching '@errhandler' for error type '%s'",
-                             err_type);
-                    cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, msg);
-                    free(local_body);
-                    goto fail;
+                {
+                    int as_diag = CC_ERRHANDLER_AS_NONE;
+                    int ambient = 0;
+                    if (!cc_errhandler_resolve_call_err_type(in_src, in_len, call_a, call_b,
+                                                             err_type, sizeof(err_type))) {
+                        /* Untyped / pointer unwrap → ambient CCError binder. */
+                        memcpy(err_type, "CCError", sizeof("CCError"));
+                        ambient = 1;
+                    }
+                    def = cc__err_stk_find(stk, stk_n, err_type,
+                                           def_as_path, sizeof(def_as_path),
+                                           &as_diag);
+                    if (!def) {
+                        char rel[1024];
+                        char msg[256];
+                        const char* f =
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                        if (as_diag == CC_ERRHANDLER_AS_AMBIG) {
+                            snprintf(msg, sizeof(msg),
+                                     "ambiguous '@errhandler' for error type '%s': "
+                                     "multiple @as faces match in-scope handlers",
+                                     err_type);
+                            cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "%s", msg);
+                            cc_pass_note(f, errl, 1,
+                                         "exact '@errhandler(%s)' wins; otherwise keep a single face-typed handler in scope",
+                                         err_type);
+                        } else if (as_diag == CC_ERRHANDLER_AS_CYCLE) {
+                            snprintf(msg, sizeof(msg),
+                                     "cyclic @as path while matching '@errhandler' for error type '%s'",
+                                     err_type);
+                            cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "%s", msg);
+                        } else {
+                            snprintf(msg, sizeof(msg),
+                                     "no matching '@errhandler' for error type '%s'",
+                                     err_type);
+                            cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "%s", msg);
+                        }
+                        free(local_body);
+                        goto fail;
+                    }
+                    cc_errhandler_debug_dispatch(err_type, ambient, def->param_type,
+                                                 def_as_path, as_diag);
                 }
             }
 
@@ -1411,7 +1458,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     local_type[0] = 0;
                     if (cc_errhandler_split_param_decl(local_decl, local_type,
                                                        sizeof(local_type), NULL, 0))
-                        outer_d = cc__err_stk_find(stk, stk_n, local_type, NULL, 0);
+                        outer_d = cc__err_stk_find(stk, stk_n, local_type, NULL, 0, NULL);
                     lb_exp =
                         cc__expand_delegations(local_body, local_body_len, local_param, outer_d, NULL, &dg);
                     free(local_body);

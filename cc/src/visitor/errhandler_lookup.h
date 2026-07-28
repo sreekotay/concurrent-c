@@ -19,6 +19,13 @@ extern "C" {
 #define CC_ERRHANDLER_STK_MAX 64
 #define CC_ERRHANDLER_AS_PATH_MAX 128
 
+/* out_as_diag from cc_errhandler_stack_find_with_as / find_for_call. */
+#define CC_ERRHANDLER_AS_EXACT  1  /* param_type == E */
+#define CC_ERRHANDLER_AS_FACE   0  /* unique @as path E → handler type */
+#define CC_ERRHANDLER_AS_NONE  -1
+#define CC_ERRHANDLER_AS_AMBIG -2  /* distinct faces / multi-path to one face */
+#define CC_ERRHANDLER_AS_CYCLE -3
+
 typedef struct {
     int reg_depth;
     const char* body; /* aliases source; not owned */
@@ -51,7 +58,9 @@ const CCErrHandlerFrame* cc_errhandler_stack_find(const CCErrHandlerStack* stk,
  * Exact match, else unique @as path from err_type → frame param_type.
  * On success returns the frame; writes dotted path into out_as_path
  * (empty when exact). Returns NULL if none / ambiguous / cycle.
- * out_as_diag: -1 none, -2 ambiguous, -3 cycle (optional).
+ * Scans every in-scope handler before choosing: two distinct handler
+ * types both reachable from E via @as → ambiguous (Rule 3), not the
+ * innermost face. out_as_diag: CC_ERRHANDLER_AS_* (optional).
  */
 const CCErrHandlerFrame* cc_errhandler_stack_find_with_as(
     const CCErrHandlerStack* stk,
@@ -59,6 +68,11 @@ const CCErrHandlerFrame* cc_errhandler_stack_find_with_as(
     char* out_as_path,
     size_t out_as_path_sz,
     int* out_as_diag);
+
+/* When CC_DEBUG_ERRHANDLER_AS is set, log exact / @as / ambient dispatch. */
+void cc_errhandler_debug_dispatch(const char* err_type, int ambient,
+                                  const char* handler_type,
+                                  const char* as_path, int as_diag);
 
 /*
  * Scan s[0..pos) and build the in-scope handler stack at `pos`.
@@ -82,9 +96,13 @@ int cc_errhandler_resolve_call_err_type(const char* s, size_t n,
  * Build stack at `pos`, resolve E for the call, find matching handler
  * (exact, else @as). On success fills out_* (body aliases into s) and
  * returns 1. out_as_path is empty on exact match.
- * Returns 0 if no match / unknown E / no handlers.
+ * Returns 0 if no match / ambiguous / cycle / no handlers.
  * *out_have_handlers is 1 if any in-scope handler existed (for diagnostics).
- * *out_err_type receives resolved E when known (may be empty).
+ * *out_err_type receives resolved E (or "CCError" when ambient).
+ * *out_as_diag receives CC_ERRHANDLER_AS_* (including AMBIG/CYCLE on miss).
+ * *out_ambient is 1 when Result E could not be resolved and dispatch used
+ * ambient CCError (optional).
+ * Set CC_DEBUG_ERRHANDLER_AS to log exact / @as / ambient on success.
  */
 int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
                                 size_t call_a, size_t call_b,
@@ -94,7 +112,9 @@ int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
                                 size_t* out_decl_pos,
                                 char* out_err_type, size_t out_err_type_sz,
                                 char* out_as_path, size_t out_as_path_sz,
-                                int* out_have_handlers);
+                                int* out_have_handlers,
+                                int* out_as_diag,
+                                int* out_ambient);
 
 #ifdef __cplusplus
 }

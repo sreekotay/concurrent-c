@@ -1,0 +1,44 @@
+/*
+ * Rule 3: E with @as faces to two distinct in-scope handler types is
+ * ill-formed (must not silently pick the innermost face).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int tag;
+} FaceA;
+
+typedef struct {
+    int tag;
+} FaceB;
+
+typedef struct {
+    FaceA a @as;
+    FaceB b @as;
+    int pad;
+} DualFaceErr;
+
+#ifndef CCResult_int_DualFaceErr_DEFINED
+#define CCResult_int_DualFaceErr_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int_DualFaceErr, int, DualFaceErr)
+#endif
+
+static int !> (DualFaceErr) always_dual(void) {
+    DualFaceErr e = {0};
+    return cc_err(e);
+}
+
+int main(void) {
+    @errhandler(FaceA a) {
+        (void)a;
+        return 1;
+    }
+    @errhandler(FaceB b) {
+        (void)b;
+        return 1;
+    }
+    always_dual() !>;
+    printf("unreachable\n");
+    return 0;
+}

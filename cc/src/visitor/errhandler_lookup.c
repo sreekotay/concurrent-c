@@ -1,6 +1,8 @@
 #include "errhandler_lookup.h"
 
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "preprocess/type_registry.h"
@@ -82,17 +84,29 @@ const CCErrHandlerFrame* cc_errhandler_stack_find_with_as(
     size_t out_as_path_sz,
     int* out_as_diag) {
     const CCErrHandlerFrame* exact;
+    const CCErrHandlerFrame* best = NULL;
     CCTypeRegistry* reg;
+    char best_path[CC_ERRHANDLER_AS_PATH_MAX];
     int i;
-    int best_diag = -1;
+    int match_n = 0;
+    int saw_path_ambig = 0;
+    int saw_cycle = 0;
+
     if (out_as_path && out_as_path_sz) out_as_path[0] = 0;
-    if (out_as_diag) *out_as_diag = -1;
+    if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_NONE;
+    best_path[0] = 0;
+
     exact = cc_errhandler_stack_find(stk, err_type);
-    if (exact) return exact;
+    if (exact) {
+        if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_EXACT;
+        return exact;
+    }
     if (!stk || !err_type || !err_type[0]) return NULL;
     reg = cc_type_registry_get_global();
     if (!reg) return NULL;
-    /* Innermost handler with a unique @as path from E → param_type. */
+
+    /* Scan all handlers first — Rule 3 forbids picking the innermost face
+     * when another distinct face-typed handler is also in scope. */
     for (i = stk->n - 1; i >= 0; i--) {
         char path[CC_ERRHANDLER_AS_PATH_MAX];
         int rc;
@@ -101,19 +115,70 @@ const CCErrHandlerFrame* cc_errhandler_stack_find_with_as(
                                                stk->frames[i].param_type,
                                                path, sizeof(path));
         if (rc == 0 && path[0]) {
-            if (out_as_path && out_as_path_sz) {
+            if (match_n == 0) {
                 size_t pl = strlen(path);
-                if (pl >= out_as_path_sz) pl = out_as_path_sz - 1;
-                memcpy(out_as_path, path, pl);
-                out_as_path[pl] = 0;
+                best = &stk->frames[i];
+                if (pl >= sizeof(best_path)) pl = sizeof(best_path) - 1;
+                memcpy(best_path, path, pl);
+                best_path[pl] = 0;
+                match_n = 1;
+            } else if (!cc_errhandler_types_equal(best->param_type,
+                                                  stk->frames[i].param_type)) {
+                if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_AMBIG;
+                return NULL;
             }
-            if (out_as_diag) *out_as_diag = 0;
-            return &stk->frames[i];
+        } else if (rc == -2) {
+            saw_path_ambig = 1;
+        } else if (rc == -3) {
+            saw_cycle = 1;
         }
-        if (rc == -2 || rc == -3) best_diag = rc;
     }
-    if (out_as_diag) *out_as_diag = best_diag;
+
+    if (match_n == 1 && best) {
+        if (out_as_path && out_as_path_sz) {
+            size_t pl = strlen(best_path);
+            if (pl >= out_as_path_sz) pl = out_as_path_sz - 1;
+            memcpy(out_as_path, best_path, pl);
+            out_as_path[pl] = 0;
+        }
+        if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_FACE;
+        return best;
+    }
+    if (saw_path_ambig) {
+        if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_AMBIG;
+        return NULL;
+    }
+    if (saw_cycle) {
+        if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_CYCLE;
+        return NULL;
+    }
+    if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_NONE;
     return NULL;
+}
+
+void cc_errhandler_debug_dispatch(const char* err_type, int ambient,
+                                  const char* handler_type,
+                                  const char* as_path, int as_diag) {
+    const char* env = getenv("CC_DEBUG_ERRHANDLER_AS");
+    if (!env || !env[0] || !handler_type || !handler_type[0]) return;
+    if (ambient) {
+        fprintf(stderr,
+                "errhandler: ambient CCError (unresolved Result E) → handler %s\n",
+                handler_type);
+        return;
+    }
+    if (as_diag == CC_ERRHANDLER_AS_EXACT) {
+        fprintf(stderr, "errhandler: exact E=%s → handler %s\n",
+                err_type ? err_type : "?", handler_type);
+        return;
+    }
+    if (as_diag == CC_ERRHANDLER_AS_FACE && as_path && as_path[0]) {
+        fprintf(stderr, "errhandler: @as E=%s → handler %s via .%s\n",
+                err_type ? err_type : "?", handler_type, as_path);
+        return;
+    }
+    fprintf(stderr, "errhandler: E=%s → handler %s (diag=%d)\n",
+            err_type ? err_type : "?", handler_type, as_diag);
 }
 
 static int cc__eh_push(CCErrHandlerStack* stk, int depth,
@@ -432,12 +497,18 @@ int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
                                 size_t* out_decl_pos,
                                 char* out_err_type, size_t out_err_type_sz,
                                 char* out_as_path, size_t out_as_path_sz,
-                                int* out_have_handlers) {
+                                int* out_have_handlers,
+                                int* out_as_diag,
+                                int* out_ambient) {
     CCErrHandlerStack stk;
     const CCErrHandlerFrame* fr;
     char err_type[128];
     char as_path[CC_ERRHANDLER_AS_PATH_MAX];
+    int as_diag = CC_ERRHANDLER_AS_NONE;
+    int ambient = 0;
     if (out_have_handlers) *out_have_handlers = 0;
+    if (out_as_diag) *out_as_diag = CC_ERRHANDLER_AS_NONE;
+    if (out_ambient) *out_ambient = 0;
     if (out_decl_len) *out_decl_len = 0;
     if (out_body) *out_body = NULL;
     if (out_body_len) *out_body_len = 0;
@@ -453,7 +524,9 @@ int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
         /* Pointer / untyped unwrap binders lower as ambient CCError
          * (`__cc_uw_err_at` default arm). Match that for dispatch. */
         memcpy(err_type, "CCError", sizeof("CCError"));
+        ambient = 1;
     }
+    if (out_ambient) *out_ambient = ambient;
     if (out_err_type && out_err_type_sz) {
         size_t el = strlen(err_type);
         if (el >= out_err_type_sz) el = out_err_type_sz - 1;
@@ -462,7 +535,8 @@ int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
     }
     as_path[0] = 0;
     fr = cc_errhandler_stack_find_with_as(&stk, err_type,
-                                          as_path, sizeof(as_path), NULL);
+                                          as_path, sizeof(as_path), &as_diag);
+    if (out_as_diag) *out_as_diag = as_diag;
     if (!fr) return 0;
     if (out_as_path && out_as_path_sz) {
         size_t pl = strlen(as_path);
@@ -480,5 +554,7 @@ int cc_errhandler_find_for_call(const char* s, size_t n, size_t pos,
     if (out_body) *out_body = fr->body;
     if (out_body_len) *out_body_len = fr->body_len;
     if (out_decl_pos) *out_decl_pos = fr->at_pos;
+    cc_errhandler_debug_dispatch(err_type, ambient, fr->param_type, as_path,
+                                 as_diag);
     return 1;
 }

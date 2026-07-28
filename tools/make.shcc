@@ -13,10 +13,15 @@
 static int run_all_flag(const char* flag) {
     CCArena a = @create(megabytes(1)) @destroy;
 
-    /* CCError catches cmd.status() (CCIoError) via @as face. */
+    /* Exact CCIoError keeps os_code; CCError covers other Results. */
     @errhandler(CCError e) {
         (void)cc_eprintln(@string(
-            `  failed: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a));
+            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a));
+        return 1;
+    }
+    @errhandler(CCIoError e) {
+        (void)cc_eprintln(@string(
+            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a));
         return 1;
     }
 
@@ -35,10 +40,14 @@ static int run_all_flag(const char* flag) {
 static int examples_check() {
     CCArena a = @create(megabytes(1)) @destroy;
 
-    /* One handler: println/glob are CCError; cmd.status is CCIoError @as. */
     @errhandler(CCError e) {
         (void)cc_eprintln(@string(
-            `  failed: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a));
+            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a));
+        return 1;
+    }
+    @errhandler(CCIoError e) {
+        (void)cc_eprintln(@string(
+            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a));
         return 1;
     }
 

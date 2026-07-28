@@ -1243,13 +1243,47 @@ static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
                                         size_t* out_decl_pos,
                                         char* out_err_type, size_t out_err_type_sz,
                                         char* out_as_path, size_t out_as_path_sz,
-                                        int* out_have_handlers) {
+                                        int* out_have_handlers,
+                                        int* out_as_diag,
+                                        int* out_ambient) {
     return cc_errhandler_find_for_call(s, n, pos, call_a, call_b,
                                        out_decl, out_decl_sz, out_decl_len,
                                        out_body, out_body_len, out_decl_pos,
                                        out_err_type, out_err_type_sz,
                                        out_as_path, out_as_path_sz,
-                                       out_have_handlers);
+                                       out_have_handlers,
+                                       out_as_diag, out_ambient);
+}
+
+static void cc__pu_errhandler_miss_diag(const char* f, int line,
+                                        const char* err_type, int have_handlers,
+                                        int as_diag, const char* bare_msg) {
+    char msg[256];
+    const char* et = (err_type && err_type[0]) ? err_type : "CCError";
+    if (!have_handlers) {
+        cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", bare_msg);
+        return;
+    }
+    if (as_diag == CC_ERRHANDLER_AS_AMBIG) {
+        snprintf(msg, sizeof(msg),
+                 "ambiguous '@errhandler' for error type '%s': "
+                 "multiple @as faces match in-scope handlers",
+                 et);
+        cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", msg);
+        cc_pass_note(f, line, 1,
+                     "exact '@errhandler(%s)' wins; otherwise keep a single face-typed handler in scope",
+                     et);
+        return;
+    }
+    if (as_diag == CC_ERRHANDLER_AS_CYCLE) {
+        snprintf(msg, sizeof(msg),
+                 "cyclic @as path while matching '@errhandler' for error type '%s'",
+                 et);
+        cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", msg);
+        return;
+    }
+    snprintf(msg, sizeof(msg), "no matching '@errhandler' for error type '%s'", et);
+    cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", msg);
 }
 
 /* Emit binder typed as the handler param, projecting Result E through
@@ -1727,6 +1761,8 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     char outer_err_type[128];
     char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
     int outer_have_handlers = 0;
+    int outer_as_diag = CC_ERRHANDLER_AS_NONE;
+    int outer_ambient = 0;
     outer_param[0] = 0;
     outer_err_type[0] = 0;
     outer_as_path[0] = 0;
@@ -1736,10 +1772,21 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
                                      &outer_decl_pos,
                                      outer_err_type, sizeof(outer_err_type),
                                      outer_as_path, sizeof(outer_as_path),
-                                     &outer_have_handlers)) {
+                                     &outer_have_handlers,
+                                     &outer_as_diag, &outer_ambient)) {
+        (void)outer_ambient;
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
                                   outer_param, sizeof(outer_param));
         outer_found = 1;
+    } else if (outer_as_diag == CC_ERRHANDLER_AS_AMBIG ||
+               outer_as_diag == CC_ERRHANDLER_AS_CYCLE) {
+        char rel[1024];
+        const char* ff = cc_path_rel_to_repo(
+            ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+        cc__pu_errhandler_miss_diag(ff, op_line, outer_err_type, outer_have_handlers,
+                                    outer_as_diag,
+                                    "'!>' requires an enclosing '@errhandler' in scope");
+        return -1;
     }
 
     char* processed = NULL;
@@ -1978,6 +2025,8 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     char outer_err_type[128];
     char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
     int outer_have_handlers = 0;
+    int outer_as_diag = CC_ERRHANDLER_AS_NONE;
+    int outer_ambient = 0;
     outer_param[0] = 0;
     outer_err_type[0] = 0;
     outer_as_path[0] = 0;
@@ -1987,7 +2036,8 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         &outer_body, &outer_body_len, &outer_decl_pos,
         outer_err_type, sizeof(outer_err_type),
         outer_as_path, sizeof(outer_as_path),
-        &outer_have_handlers);
+        &outer_have_handlers, &outer_as_diag, &outer_ambient);
+    (void)outer_ambient;
     if (outer_found) {
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
                                   outer_param, sizeof(outer_param));
@@ -1997,16 +2047,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
      * inline the outer handler body. */
     if (s[scan] == ';' && !has_binder) {
         if (!outer_found) {
-            char msg[256];
-            if (!outer_have_handlers) {
-                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
-                                  "'!>;' at expression position requires an enclosing '@errhandler' in scope");
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "no matching '@errhandler' for error type '%s'",
-                         outer_err_type[0] ? outer_err_type : "CCError");
-                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX, msg);
-            }
+            cc__pu_errhandler_miss_diag(
+                f, line_no, outer_err_type, outer_have_handlers, outer_as_diag,
+                "'!>;' at expression position requires an enclosing '@errhandler' in scope");
             return -1;
         }
         if (!cc__pu_body_diverges(outer_body, outer_body_len)) {
