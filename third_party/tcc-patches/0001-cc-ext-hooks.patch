@@ -1267,7 +1267,7 @@ index e7a2f1e2..98cf25db 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..c082509d 100644
+index 50802edf..61c8c0d4 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
@@ -1533,7 +1533,41 @@ index 50802edf..c082509d 100644
              tcc_warning("assignment makes integer from pointer without a cast");
          } else if (sbt == VT_STRUCT) {
              goto case_VT_STRUCT;
-@@ -3674,8 +3838,74 @@ static void verify_assign_cast(CType *dt)
+@@ -3667,6 +3831,33 @@ static void verify_assign_cast(CType *dt)
+     case VT_STRUCT:
+     case_VT_STRUCT:
+         if (!is_compatible_unqualified_types(dt, st)) {
++#ifdef CONFIG_CC_EXT
++            /* CC `@as` embedding, by-value mirror of the pointer-case
++               first-member tolerance above: accept passing a struct whose
++               (recursive) first member is the destination struct. Parser
++               mode only — the CC frontend rewrites the call site to select
++               the member before real codegen. */
++            if (tcc_state && tcc_state->cc_parser_mode
++                && (dt->t & VT_BTYPE) == VT_STRUCT
++                && (st->t & VT_BTYPE) == VT_STRUCT
++                && !IS_UNION(st->t) && st->ref) {
++                Sym *fsym = st->ref->next;
++                int fcompat = 0;
++                while (fsym != NULL && (fsym->type.t & VT_BTYPE) == VT_STRUCT) {
++                    if (is_compatible_unqualified_types(dt, &fsym->type)) {
++                        fcompat = 1;
++                        break;
++                    }
++                    if (IS_UNION(fsym->type.t) || !fsym->type.ref)
++                        break;
++                    fsym = fsym->type.ref->next;
++                }
++                if (fcompat) {
++                    vtop->type = *dt;
++                    break;
++                }
++            }
++#endif
+     error:
+             cast_error(st, dt);
+         }
+@@ -3674,8 +3865,74 @@ static void verify_assign_cast(CType *dt)
      }
  }
  
@@ -1608,7 +1642,7 @@ index 50802edf..c082509d 100644
      verify_assign_cast(dt);
      gen_cast(dt);
  }
-@@ -4496,6 +4726,24 @@ do_decl:
+@@ -4496,6 +4753,24 @@ do_decl:
          if (s->c != -1
              && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
              tcc_error("struct/union/enum already defined");
@@ -1633,7 +1667,7 @@ index 50802edf..c082509d 100644
          s->c = -2;
          /* cannot be empty */
          /* non empty enums are not allowed */
-@@ -4524,6 +4772,15 @@ do_decl:
+@@ -4524,6 +4799,15 @@ do_decl:
                  ss = sym_push(v, &t, VT_CONST, 0);
                  ss->enum_val = ll;
                  *ps = ss, ps = &ss->next;
@@ -1649,7 +1683,7 @@ index 50802edf..c082509d 100644
                  if (ll < nl)
                      nl = ll;
                  if (ll > pl)
-@@ -4537,6 +4794,7 @@ do_decl:
+@@ -4537,6 +4821,7 @@ do_decl:
                      break;
              }
              skip('}');
@@ -1657,7 +1691,7 @@ index 50802edf..c082509d 100644
  
              if (bt) {
                  t.t = bt;
-@@ -4671,6 +4929,19 @@ do_decl:
+@@ -4671,6 +4956,19 @@ do_decl:
                          ss->a = ad1.a;
                          *ps = ss;
                          ps = &ss->next;
@@ -1677,7 +1711,7 @@ index 50802edf..c082509d 100644
                      }
                      if (tok == ';' || tok == TOK_EOF)
                          break;
-@@ -4679,6 +4950,12 @@ do_decl:
+@@ -4679,6 +4977,12 @@ do_decl:
                  skip(';');
              }
              skip('}');
@@ -1690,7 +1724,7 @@ index 50802edf..c082509d 100644
  	    parse_attribute(&ad);
              if (ad.cleanup_func) {
                  tcc_warning("attribute '__cleanup__' ignored on type");
-@@ -4727,6 +5004,40 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+@@ -4727,6 +5031,40 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
  
      while(1) {
          switch(tok) {
@@ -1731,7 +1765,7 @@ index 50802edf..c082509d 100644
          case TOK_EXTENSION:
              /* currently, we really ignore extension */
              next();
-@@ -5605,6 +5916,18 @@ ST_FUNC void unary(void)
+@@ -5605,6 +5943,18 @@ ST_FUNC void unary(void)
      case TOK_CCHAR: 
  	t = VT_INT;
   push_tokc:
@@ -1750,7 +1784,7 @@ index 50802edf..c082509d 100644
  	type.t = t;
  	vsetc(&type, VT_CONST, &tokc);
          next();
-@@ -5660,6 +5983,25 @@ ST_FUNC void unary(void)
+@@ -5660,6 +6010,25 @@ ST_FUNC void unary(void)
          /* string parsing */
          t = char_type.t;
      str_init:
@@ -1776,7 +1810,7 @@ index 50802edf..c082509d 100644
          if (tcc_state->warn_write_strings & WARN_ON)
              t |= VT_CONSTANT;
          type.t = t;
-@@ -5669,10 +6011,34 @@ ST_FUNC void unary(void)
+@@ -5669,10 +6038,34 @@ ST_FUNC void unary(void)
          ad.section = rodata_section;
          decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
          break;
@@ -1811,7 +1845,7 @@ index 50802edf..c082509d 100644
          /* cast ? */
          if (parse_btype(&type, &ad, 0)) {
              type_decl(&type, &ad, &n, TYPE_ABSTRACT);
-@@ -5725,11 +6091,14 @@ ST_FUNC void unary(void)
+@@ -5725,11 +6118,14 @@ ST_FUNC void unary(void)
          }
          break;
      case '*':
@@ -1826,7 +1860,7 @@ index 50802edf..c082509d 100644
          next();
          unary();
          /* functions names must be treated as function pointers,
-@@ -5744,17 +6113,22 @@ ST_FUNC void unary(void)
+@@ -5744,17 +6140,22 @@ ST_FUNC void unary(void)
            vtop->sym->a.addrtaken = 1;
          mk_pointer(&vtop->type);
          gaddrof();
@@ -1849,7 +1883,7 @@ index 50802edf..c082509d 100644
          break;
      case '+':
          next();
-@@ -5774,13 +6148,30 @@ ST_FUNC void unary(void)
+@@ -5774,13 +6175,30 @@ ST_FUNC void unary(void)
      case TOK_ALIGNOF2:
      case TOK_ALIGNOF3:
          t = tok;
@@ -1880,7 +1914,7 @@ index 50802edf..c082509d 100644
          } else {
              type_size(&type, &align);
              s = NULL;
-@@ -5975,10 +6366,13 @@ ST_FUNC void unary(void)
+@@ -5975,10 +6393,13 @@ ST_FUNC void unary(void)
      case TOK_DEC:
          t = tok;
          next();
@@ -1894,7 +1928,7 @@ index 50802edf..c082509d 100644
          next();
          unary();
  	if (is_float(vtop->type.t)) {
-@@ -5988,6 +6382,7 @@ ST_FUNC void unary(void)
+@@ -5988,6 +6409,7 @@ ST_FUNC void unary(void)
              vswap();
              gen_op('-');
          }
@@ -1902,7 +1936,7 @@ index 50802edf..c082509d 100644
          break;
      case TOK_LAND:
          if (!gnu_ext)
-@@ -6093,13 +6488,108 @@ special_math_val:
+@@ -6093,13 +6515,108 @@ special_math_val:
  
      default:
      tok_identifier:
@@ -2012,7 +2046,7 @@ index 50802edf..c082509d 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6139,17 +6629,151 @@ special_math_val:
+@@ -6139,17 +6656,151 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -2168,7 +2202,7 @@ index 50802edf..c082509d 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,20 +6792,84 @@ special_math_val:
+@@ -6168,20 +6819,84 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -2254,7 +2288,7 @@ index 50802edf..c082509d 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6190,6 +6878,53 @@ special_math_val:
+@@ -6190,6 +6905,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -2308,7 +2342,7 @@ index 50802edf..c082509d 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6264,8 +6999,13 @@ special_math_val:
+@@ -6264,8 +7026,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -2323,7 +2357,7 @@ index 50802edf..c082509d 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6282,10 +7022,51 @@ special_math_val:
+@@ -6282,10 +7049,51 @@ special_math_val:
                  vrev(n);
              }
  
@@ -2375,7 +2409,7 @@ index 50802edf..c082509d 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6366,9 +7147,11 @@ static void expr_prod(void)
+@@ -6366,9 +7174,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -2387,7 +2421,7 @@ index 50802edf..c082509d 100644
      }
  }
  
-@@ -6378,9 +7161,11 @@ static void expr_sum(void)
+@@ -6378,9 +7188,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -2399,7 +2433,7 @@ index 50802edf..c082509d 100644
      }
  }
  
-@@ -6509,11 +7294,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7321,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -2413,7 +2447,7 @@ index 50802edf..c082509d 100644
          }
          t = tok;
      }
-@@ -6703,12 +7490,13 @@ static void expr_cond(void)
+@@ -6703,12 +7517,13 @@ static void expr_cond(void)
      }
  }
  
@@ -2428,7 +2462,7 @@ index 50802edf..c082509d 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6719,6 +7507,7 @@ static void expr_eq(void)
+@@ -6719,6 +7534,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -2436,7 +2470,7 @@ index 50802edf..c082509d 100644
      }
  }
  
-@@ -7119,7 +7908,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7935,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -2460,7 +2494,7 @@ index 50802edf..c082509d 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7947,70 @@ static void gexpr_decl(void)
+@@ -7142,14 +7974,70 @@ static void gexpr_decl(void)
      }
  }
  
@@ -2532,7 +2566,7 @@ index 50802edf..c082509d 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +8021,40 @@ again:
+@@ -7160,24 +8048,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -2573,7 +2607,7 @@ index 50802edf..c082509d 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,6 +8067,7 @@ again:
+@@ -7190,6 +8094,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -2581,7 +2615,7 @@ index 50802edf..c082509d 100644
  
      } else if (t == '{') {
          if (debug_modes)
-@@ -7211,7 +8089,24 @@ again:
+@@ -7211,7 +8116,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -2606,7 +2640,7 @@ index 50802edf..c082509d 100644
              }
          }
  
-@@ -7224,6 +8119,7 @@ again:
+@@ -7224,6 +8146,7 @@ again:
              check_func_return();
  
      } else if (t == TOK_RETURN) {
@@ -2614,7 +2648,7 @@ index 50802edf..c082509d 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +8138,7 @@ again:
+@@ -7242,6 +8165,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -2622,7 +2656,7 @@ index 50802edf..c082509d 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8166,7 @@ again:
+@@ -7269,6 +8193,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -2630,7 +2664,7 @@ index 50802edf..c082509d 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8200,7 @@ again:
+@@ -7302,6 +8227,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -2638,7 +2672,7 @@ index 50802edf..c082509d 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8387,7 @@ again:
+@@ -7488,6 +8414,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -2646,7 +2680,7 @@ index 50802edf..c082509d 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8718,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8745,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -2656,7 +2690,7 @@ index 50802edf..c082509d 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8116,6 +9019,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+@@ -8116,6 +9046,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
              && is_compatible_unqualified_types(type, &vtop->type)) {
          goto one_elem;
  
@@ -2676,7 +2710,7 @@ index 50802edf..c082509d 100644
      } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
          no_oblock = 1;
          if ((flags & DIF_FIRST) || tok == '{') {
-@@ -8672,12 +9588,23 @@ static int decl(int l)
+@@ -8672,12 +9615,23 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -2701,7 +2735,7 @@ index 50802edf..c082509d 100644
              /* skip redundant ';' if not in old parameter decl scope */
              if (tok == ';' && l != VT_CMP) {
                  next();
-@@ -8687,6 +9614,44 @@ static int decl(int l)
+@@ -8687,6 +9641,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2746,7 +2780,7 @@ index 50802edf..c082509d 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8714,8 +9679,10 @@ static int decl(int l)
+@@ -8714,8 +9706,10 @@ static int decl(int l)
                  ; /* enum decl */
              else
                  tcc_warning("useless type defines no instances");
@@ -2758,7 +2792,7 @@ index 50802edf..c082509d 100644
              next();
              continue;
          }
-@@ -8723,8 +9690,68 @@ static int decl(int l)
+@@ -8723,8 +9717,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2828,7 +2862,7 @@ index 50802edf..c082509d 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8810,6 +9837,10 @@ static int decl(int l)
+@@ -8810,6 +9864,10 @@ static int decl(int l)
                          cur_text_section->sh_flags = text_section->sh_flags;
                      gen_function(sym);
                  }
@@ -2839,7 +2873,7 @@ index 50802edf..c082509d 100644
                  break;
              } else {
                  has_init = 0;
-@@ -8832,6 +9863,31 @@ static int decl(int l)
+@@ -8832,6 +9890,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2871,7 +2905,7 @@ index 50802edf..c082509d 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9919,11 @@ static int decl(int l)
+@@ -8863,6 +9946,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2883,7 +2917,7 @@ index 50802edf..c082509d 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8902,15 +9963,26 @@ static int decl(int l)
+@@ -8902,15 +9990,26 @@ static int decl(int l)
                      }
                  }
                  if (tok != ',') {
