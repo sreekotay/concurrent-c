@@ -108,24 +108,35 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t
 // - Ok(false) = EOF (no more lines)
 // - Err(e) = actual error
 // Usage: while (cc_io_avail(cc_file_read_line(file, arena, &line))) { process(line); }
+//
+// Line bytes are allocated in `arena` (that is why the arena is passed).
+// Staging uses a stack buffer + fgets (block I/O, stops at newline) then a
+// single push into the arena — never fgetc-per-byte, never getline/malloc.
 static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCArena *arena, CCSlice *out) {
+    CCString line;
+    char buf[8192];
     if (!file || !file->handle || !arena || !out) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new();
-    int c;
-    while ((c = fgetc(file->handle)) != EOF) {
-        if (!cc_string_push_char(&line, (char)c, arena)) {
+    line = cc_string_new();
+    for (;;) {
+        size_t n;
+        if (!fgets(buf, (int)sizeof(buf), file->handle)) {
+            if (ferror(file->handle)) {
+                return CCRes_err(bool, CCIoError, cc_io_from_errno(errno));
+            }
+            if (line.len == 0) {
+                *out = cc_slice_empty();
+                return CCRes_ok(bool, CCIoError, false);
+            }
+            break;
+        }
+        n = strlen(buf);
+        if (!cc_string_push_slice(&line, cc_slice_from_buffer(buf, n), arena)) {
             return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
-        if (c == '\n') break;
+        if (n > 0 && buf[n - 1] == '\n') break;
     }
-    if (line.len == 0) {
-        // EOF with no data
-        *out = cc_slice_empty();
-        return CCRes_ok(bool, CCIoError, false);
-    }
-    // Got line - return Ok(true)
     *out = cc_string_as_slice(&line);
     return CCRes_ok(bool, CCIoError, true);
 }
@@ -400,34 +411,39 @@ static inline CCRes(CCSlice, CCIoError) cc_buf_reader_next(CCBufReader *r, size_
 }
 
 // Read one line from buffered reader. Returns Ok(slice) (empty slice = EOF) or Err(e).
+// Appends buffer spans via memchr + push_slice (not per-byte push_char).
 static inline CCRes(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *r, CCArena *arena) {
+    CCString line;
     if (!r || !r->file || !r->file->handle || !arena) {
         return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new();
-    while (1) {
+    line = cc_string_new();
+    for (;;) {
+        char *start;
+        size_t avail;
+        char *nl;
+        size_t take;
         if (r->pos >= r->len) {
             CCRes(CCSlice, CCIoError) fill = cc_buf_reader_next(r, r->cap);
             if (cc_is_err(fill)) return fill;
-            CCSlice filled = cc_value(fill);
-            if (filled.len == 0) {
-                if (line.len == 0) {
-                    // No data accumulated, true EOF
+            if (cc_value(fill).len == 0) {
+                if (line.len == 0)
                     return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
-                }
-                // Have accumulated data, return it
                 break;
             }
         }
         if (r->pos >= r->len) break;
-        char c = r->buf[r->pos++];
-        if (!cc_string_push_char(&line, c, arena)) {
+        start = r->buf + r->pos;
+        avail = r->len - r->pos;
+        nl = (char *)memchr(start, '\n', avail);
+        take = nl ? (size_t)(nl - start) + 1 : avail;
+        if (!cc_string_push_slice(&line, cc_slice_from_buffer(start, take), arena)) {
             return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
-        if (c == '\n') break;
+        r->pos += take;
+        if (nl) break;
     }
-    CCSlice slice = cc_string_as_slice(&line);
-    return CCRes_ok(CCSlice, CCIoError, slice);
+    return CCRes_ok(CCSlice, CCIoError, cc_string_as_slice(&line));
 }
 
 static inline int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena *arena, size_t cap) {
