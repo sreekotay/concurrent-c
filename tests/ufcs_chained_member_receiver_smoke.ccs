@@ -20,6 +20,7 @@ static bool queue(Conn* c, int* p) {
 }
 
 int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
     int*[~4 1:1 >] tx;
     int*[~4 1:1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;

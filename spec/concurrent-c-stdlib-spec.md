@@ -747,7 +747,7 @@ CCResult_bool_CCIoError cc_file_remove(char[:0] path);
 char[:0] cc_dir_cwd(CCArena *arena);
 CCResult_bool_CCIoError cc_dir_chdir(char[:0] path);
 
-CCSliceArray cc_glob(char[:0] pattern, CCArena *arena);
+CCSliceArray!>(CCIoError) cc_glob(char[:0] pattern, CCArena *arena);
 bool cc_glob_match(char[:0] pattern, char[:0] name);
 ```
 
@@ -756,9 +756,11 @@ Path arguments are NUL-terminated borrows (`char[:0]`). After the final entry,
 Entry names and glob paths are arena-backed `char[:0]`. `cc_dir_create` does
 not create parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and
 recursive `**`; `cc_glob_match` matches a single name with `*` and `?`.
-`cc_glob` takes the pattern first and the arena last; it returns a
-`CCSliceArray` of NUL-terminated path borrows (same aggregate used by slice
-split helpers). UFCS: `files.len()`, `files.get(i)` → `char[:0]`.
+`cc_glob` takes the pattern first and the arena last; it returns
+`CCSliceArray!>(CCIoError)` of NUL-terminated path borrows (same aggregate
+used by slice split helpers). Success with no matches is an empty array;
+I/O and allocation failures are errors (not empty). UFCS:
+`files.len()`, `files.get(i)` → `char[:0]`.
 
 The accessor functions are:
 

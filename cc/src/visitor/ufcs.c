@@ -2046,7 +2046,8 @@ static int cc__parse_ufcs_chain(const char* in,
             *seg_count = 0;
             return 0;
         }
-        const char* args_end = p;
+        const char* args_end = p; /* points at closing ')' */
+        if (*p == ')') p++; /* advance so chain / end checks see trailing text */
 
         if (*seg_count >= 8) {
             cc__free_ufcs_segments(segs, *seg_count);
@@ -2086,7 +2087,8 @@ static int cc__parse_ufcs_chain(const char* in,
 }
 
 static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
-    char recv[256];
+    /* Statement-expr receivers (`@string(...).println()`) routinely exceed 256. */
+    char recv[4096];
     struct CCUFCSSegment segs[8] = {0};
     int seg_count = 0;
     if (!cc__parse_ufcs_chain(in, recv, sizeof(recv), segs, &seg_count)) return 1;
@@ -2172,9 +2174,34 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
 }
 
 static const char* cc__recv_chain_start(const char* line_start, const char* recv_end) {
-    const char* seg_start = recv_end + 1;
-    while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
-    if (seg_start > recv_end || !cc_is_ident_start(*seg_start)) return NULL;
+    const char* seg_start;
+    /* recv_end points at the last char of the receiver (inclusive). */
+    if (!line_start || !recv_end || recv_end < line_start) return NULL;
+    if (*recv_end == ')') {
+        int depth = 1;
+        const char* pp = recv_end;
+        while (pp > line_start && depth > 0) {
+            pp--;
+            if (*pp == ')') depth++;
+            else if (*pp == '(') depth--;
+        }
+        if (depth != 0) return NULL;
+        seg_start = pp;
+        {
+            const char* q = pp;
+            while (q > line_start && isspace((unsigned char)q[-1])) q--;
+            if (q > line_start && cc_is_ident_char(q[-1])) {
+                seg_start = q;
+                while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1)))
+                    seg_start--;
+                if (!cc_is_ident_start(*seg_start)) return NULL;
+            }
+        }
+    } else {
+        seg_start = recv_end + 1;
+        while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
+        if (seg_start > recv_end || !cc_is_ident_start(*seg_start)) return NULL;
+    }
     for (;;) {
         const char* q = seg_start;
         while (q > line_start && isspace((unsigned char)q[-1])) q--;
@@ -2276,7 +2303,8 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         // Identify receiver
         const char* r_end = sep - 1;
         while (r_end >= p && isspace((unsigned char)*r_end)) r_end--;
-        if (r_end < p || !cc_is_ident_char(*r_end)) {
+        /* Allow CallExpr / paren-primary receivers ending in ')' (and ident). */
+        if (r_end < p || !(cc_is_ident_char(*r_end) || *r_end == ')')) {
             size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
@@ -2360,16 +2388,17 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         memcpy(o, p, prefix_len); o += prefix_len; cap -= prefix_len;
 
         // Build receiver/method strings
-        char recv[256] = {0};
         char method[64] = {0};
-        if (recv_len >= sizeof(recv) || method_len >= sizeof(method)) {
-            // Too long; fall back to copying original segment.
+        char* recv = NULL;
+        if (method_len >= sizeof(method) || recv_len == 0) {
             size_t seg_len = (size_t)(args_end - p + 1);
             if (seg_len >= cap) seg_len = cap - 1;
             memcpy(o, p, seg_len); o += seg_len; cap -= seg_len;
             p = args_end + 1;
             continue;
         }
+        recv = (char*)malloc(recv_len + 1);
+        if (!recv) return -1;
         memcpy(recv, r_start, recv_len); recv[recv_len] = '\0';
         memcpy(method, m_start, method_len); method[method_len] = '\0';
 
@@ -2377,7 +2406,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         size_t arg_len = (size_t)(args_end - args_start);
         char* inner = (char*)malloc(arg_len + 1);
         char* rewritten_args = NULL;
-        if (!inner) return -1;
+        if (!inner) { free(recv); return -1; }
         memcpy(inner, args_start, arg_len);
         inner[arg_len] = '\0';
         rewritten_args = cc__rewrite_nested_ufcs_args(inner);
@@ -2391,6 +2420,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
 
         // Emit desugared call
         int n = emit_desugared_call(o, cap, recv, method, recv_is_ptr, rewritten_args, has_args);
+        free(recv);
         if (n == CC_UFCS_EMIT_UNRESOLVED) {
             free(rewritten_args);
             free(inner);
@@ -2401,7 +2431,11 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             free(inner);
             return CC_UFCS_REWRITE_NO_MATCH;
         }
-        if (n < 0 || (size_t)n >= cap) return -1;
+        if (n < 0 || (size_t)n >= cap) {
+            free(rewritten_args);
+            free(inner);
+            return -1;
+        }
         o += n; cap -= (size_t)n;
         /* If we emitted a full call for std_out/std_err.write overload, we don't
            append args/closing paren. Detect that by checking for a trailing ')'. */

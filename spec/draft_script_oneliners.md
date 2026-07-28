@@ -18,14 +18,22 @@ it. Program text is content-keyed under `out/.cc-build/e/<hash>.shcc`.
 mode and no alternate string delimiters; `@string` and C literals keep their
 usual forms.
 
-`-E EXPR` is `-e` with a trivial print wrap:
+`-E EXPR` is `-e` with a trivial print wrap. Trailing whitespace/`';` on
+`EXPR` are stripped. When `EXPR` already contains a backtick template or
+begins with `@string`, the wrap is:
 
 ```c
-io.println(@string(`${EXPR}`)) !>;
+cc_println(EXPR) !>;
 ```
 
-(trailing whitespace/`';` on `EXPR` are stripped). `-e` and `-E` are
-mutually exclusive. Arena-less `@string` bounds apply to interpolations.
+Otherwise:
+
+```c
+cc_println(@string(`${EXPR}`)) !>;
+```
+
+(so `-E '1+2'` still stringifies, while `-E '@string(`hi`, &a)'` does not
+nest templates). `-e` and `-E` are mutually exclusive.
 
 `-e -` reads the program text from standard input to end-of-file; the
 program then starts with its standard input at end-of-file. Programs that
@@ -75,11 +83,11 @@ binder form (§3.1).
 `-n` wraps the (possibly `-E`-wrapped) body in a loop over standard-input
 lines via `CCStdio.read_line`. Each iteration binds `line` (without its
 trailing newline) and increments `nr`. `line`'s storage is for the current
-iteration only. `-p` is `-n` with `io.println(line) !>;` appended to the
-loop body, so `continue` skips the print and `break` ends the loop.
+iteration only. `-p` is `-n` with `line.println() !>;` appended to the loop body, so
+`continue` skips the print and `break` ends the loop.
 
 ```text
-... | ccc -n -e 'if (nr == 1) io.println(line) !>;'
+... | ccc -n -e 'if (nr == 1) line.println() !>;'
 ... | ccc -p -e '/* transform line */'
 ... | ccc -n -E 'nr'
 ```

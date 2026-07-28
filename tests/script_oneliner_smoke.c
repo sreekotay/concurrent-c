@@ -193,6 +193,44 @@ int main(void) {
         failed |= expect_substr(out, "3", "-E 1+2");
     }
 
+    /* 8b) -E with nested @string template (no backtick nesting in wrap) */
+    snprintf(cmd, sizeof(cmd),
+             "./cc/bin/ccc -E '@string(`hi-tpl`, &a)'");
+    if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+        fprintf(stderr, "FAIL -E @string (exit %d):\n%s\n", ec, out);
+        failed = 1;
+    } else {
+        failed |= expect_substr(out, "hi-tpl", "-E @string");
+    }
+
+    /* 8c) --doc must escape comment delimiters so CCDoc cannot be closed early.
+     * Use a fresh toolbox: shared file after @dont (`don't` in a template body)
+     * currently breaks later @task discovery — out of scope for this check. */
+    {
+        char toolbox_doc[256];
+        snprintf(toolbox_doc, sizeof(toolbox_doc), "%s/doc_escape.shcc", tmpdir);
+        snprintf(cmd, sizeof(cmd),
+                 "./cc/bin/ccc --save-to '%s' --save safe_doc "
+                 "--doc 'end */ int main(){return 0;} /*' "
+                 "-e 'printf(\"safe\\n\");'",
+                 toolbox_doc);
+        if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+            fprintf(stderr, "FAIL --doc escape save (exit %d):\n%s\n", ec, out);
+            failed = 1;
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                     "./cc/bin/ccc --save-to '%s' @safe_doc", toolbox_doc);
+            if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+                fprintf(stderr,
+                        "FAIL @safe_doc after hostile --doc (exit %d):\n%s\n",
+                        ec, out);
+                failed = 1;
+            } else {
+                failed |= expect_substr(out, "safe", "@safe_doc");
+            }
+        }
+    }
+
     /* 9) -n -E line numbers */
     snprintf(cmd, sizeof(cmd),
              "printf 'a\\nb\\n' | ./cc/bin/ccc -n -E 'nr'");

@@ -1,0 +1,50 @@
+/* cc_glob returns CCSliceArray!>(CCIoError): I/O failures are Err, not empty. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = @create(kilobytes(64)) @destroy;
+
+    /* Existing dir, no matches → Ok(empty). */
+    CCSliceArray!>(CCIoError) none_res =
+        cc_glob(@slice("cc/include/*.no_such_ext_zz"), &a);
+    if (cc_is_err(none_res)) {
+        printf("unexpected err for no-match glob\n");
+        return 1;
+    }
+    CCSliceArray none = cc_unwrap(none_res);
+    if (none.len() != 0) {
+        printf("expected empty no-match glob, got %zu\n", none.len());
+        return 1;
+    }
+
+    /* Missing directory → Err (not empty success). */
+    CCSliceArray!>(CCIoError) miss_res =
+        cc_glob(@slice("this/dir/does/not/exist_zz/*.ccs"), &a);
+    if (!cc_is_err(miss_res)) {
+        printf("missing dir should be Err, got Ok(len=%zu)\n",
+               cc_unwrap(miss_res).len());
+        return 1;
+    }
+    CCIoError e = cc_unwrap_err(miss_res);
+    if (e.kind != CC_IO_FILE_NOT_FOUND) {
+        printf("expected FILE_NOT_FOUND, kind=%d os=%d\n", (int)e.kind,
+               (int)e.os_code);
+        return 1;
+    }
+
+    /* Positive match. */
+    CCSliceArray files = cc_glob(@slice("cc/include/ccc/*.cch"), &a) !>(err) {
+        printf("glob include failed: kind=%d os=%d\n", (int)err.kind,
+               (int)err.os_code);
+        return 1;
+    };
+    if (files.len() == 0) {
+        printf("expected matches under cc/include/ccc\n");
+        return 1;
+    }
+
+    (void)files;
+    printf("glob_result_smoke: PASS\n");
+    return 0;
+}

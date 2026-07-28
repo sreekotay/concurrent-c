@@ -49,6 +49,10 @@ typedef struct CCDirIter CCDirIter;
 /* Result types - use CC_DECL_RESULT_SPEC for canonical names with helper functions */
 CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
+#ifndef CCResult_CCSliceArray_CCIoError_DEFINED
+#define CCResult_CCSliceArray_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSliceArray_CCIoError, CCSliceArray, CCIoError)
+#endif
 /* CCResult_bool_CCIoError is declared in cc_io_error.cch (unified I/O result type) */
 
 /* ============================================================================
@@ -134,9 +138,10 @@ CCResult_bool_CCIoError cc_dir_chdir(CCSlice path);
 
 /* Find files matching glob pattern.
  * Supports: * (any chars), ? (single char), ** (recursive).
- * Returns arena-backed CCSliceArray of NUL-terminated path borrows
- * (char[:0] / CCSlice). Empty array on bad args or no matches. */
-CCSliceArray cc_glob(CCSlice pattern, CCArena* arena);
+ * On success: arena-backed CCSliceArray of NUL-terminated path borrows
+ * (char[:0] / CCSlice); empty array means no matches.
+ * On failure: CCIoError (bad args, I/O, or OOM) — not an empty array. */
+CCResult_CCSliceArray_CCIoError cc_glob(CCSlice pattern, CCArena* arena);
 
 /*
  * Check if filename matches glob pattern (no directory traversal).

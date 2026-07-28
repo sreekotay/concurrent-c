@@ -198,7 +198,12 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     printf("\n=== %s ===\n", label);
     ensure_log_dir(arena);
 
-    CCSliceArray files = cc_glob(pattern->to_slice(), arena);
+    CCSliceArray files = cc_glob(pattern->to_slice(), arena) !>(e) {
+        printf("  glob failed for %s: %s (os=%d)\n", pattern,
+               cc_io_error_str(e), (int)e.os_code);
+        stats->failed++;
+        return;
+    };
     size_t n = files.len();
     if (n == 0) {
         printf("  (no files matching %s)\n", pattern);

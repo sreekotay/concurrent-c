@@ -16,14 +16,14 @@ static int examples_check() {
 
     @errhandler(CCIoError e) {
         (void)cc_eprintln(@string(
-            `  spawn failed: ${cc_io_error_str(e)} (os=${e.os_code})`, &a));
+            `  failed: ${cc_io_error_str(e)} (os=${e.os_code})`, &a));
         return 1;
     }
 
     int failed = 0;
 
     cc_println("=== Checking examples compile ===") !>;
-    CCSliceArray files = cc_glob(@slice("examples/*.ccs"), &a);
+    CCSliceArray files = cc_glob(@slice("examples/*.ccs"), &a) !>;
     for (size_t i = 0; i < files.len(); i++) {
         char[:0] path = files.get(i);
 
@@ -38,7 +38,7 @@ static int examples_check() {
         if (rc != 0) failed++;
     }
 
-    if (failed > 0) {
+    if (failed > 0 || files.len() == 0) {
         cc_println(@string(`${failed} example(s) failed`, &a)) !>;
         return 1;
     }

@@ -103,9 +103,32 @@ static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start
     while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
     if (r_end == range_start) return sep_pos;
 
-    seg_start = r_end;
-    while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
-    if (seg_start == r_end || !cc__is_ident_start_char(s[seg_start])) return sep_pos;
+    /* Initial segment may be CallExpr / paren primary: `foo(args).m` or `(e).m`.
+     * Without this, `make_bool(true).is_err()` fails the ident-only gate below
+     * and the span collapses (rewrite no-ops; host C sees `.is_err`). */
+    if (r_end > range_start && s[r_end - 1] == ')') {
+        int depth = 1;
+        size_t pp = r_end - 1;
+        while (pp > range_start && depth > 0) {
+            pp--;
+            if (s[pp] == ')') depth++;
+            else if (s[pp] == '(') depth--;
+        }
+        if (depth != 0) return sep_pos;
+        seg_start = pp;
+        q = pp;
+        while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        if (q > range_start && cc__is_ident_char_char(s[q - 1])) {
+            seg_start = q;
+            while (seg_start > range_start &&
+                   cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
+            if (!cc__is_ident_start_char(s[seg_start])) return sep_pos;
+        }
+    } else {
+        seg_start = r_end;
+        while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
+        if (seg_start == r_end || !cc__is_ident_start_char(s[seg_start])) return sep_pos;
+    }
 
     for (;;) {
         q = seg_start;

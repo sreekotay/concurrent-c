@@ -4140,10 +4140,13 @@ static char* cc__materialize_e_unit(const char* program, size_t program_len,
         free(unit);
         return NULL;
     }
-    snprintf(path, sizeof(path), "%s/%016llx.shcc", dir, (unsigned long long)h);
+    /* Per-process path avoids parallel cc_test races on a shared
+     * content-keyed file under out/.cc-build/e/. */
+    snprintf(path, sizeof(path), "%s/%016llx.%d.shcc", dir,
+             (unsigned long long)h, (int)getpid());
     if (!file_exists(path)) {
         char tmp[PATH_MAX];
-        snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
         if (cc__write_file_bytes(tmp, unit, unit_len) != 0) {
             unlink(tmp);
             free(unit);
@@ -4151,7 +4154,6 @@ static char* cc__materialize_e_unit(const char* program, size_t program_len,
         }
         if (rename(tmp, path) != 0) {
             unlink(tmp);
-            /* Lost a create race: winner's complete file is fine. */
             if (!file_exists(path)) {
                 free(unit);
                 return NULL;

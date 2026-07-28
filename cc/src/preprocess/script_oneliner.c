@@ -330,24 +330,52 @@ static size_t cc__ol_trim_expr(const char* src, size_t len, size_t* out_a,
     return b - a;
 }
 
+static int cc__ol_span_has_char(const char* src, size_t a, size_t b, char ch) {
+    size_t i;
+    for (i = a; i < b; i++) {
+        if (src[i] == ch) return 1;
+    }
+    return 0;
+}
+
 static char* cc__ol_wrap_expr_print(const char* src, size_t len, size_t* out_len) {
     size_t a, b, elen, need, o;
     char* out;
+    int direct;
+    /* If EXPR already contains a template (backtick) or @string, print it
+     * directly — nesting inside @string(`${…}`) breaks the scanner.
+     * Otherwise stringify via @string(`${EXPR}`) so -E '1+2' still works. */
     elen = cc__ol_trim_expr(src, len, &a, &b);
-    /* io.println(@string(`${EXPR}`)) !>;\n */
-    need = sizeof("io.println(@string(`${") - 1 + elen +
-           sizeof("}`)) !>;\n") - 1 + 1;
+    direct = cc__ol_span_has_char(src, a, a + elen, '`') ||
+             (elen >= 7 && memcmp(src + a, "@string", 7) == 0);
+    if (direct) {
+        need = sizeof("cc_println(") - 1 + elen + sizeof(") !>;\n") - 1 + 1;
+    } else {
+        need = sizeof("cc_println(@string(`${") - 1 + elen +
+               sizeof("}`)) !>;\n") - 1 + 1;
+    }
     out = (char*)malloc(need);
     if (!out) return NULL;
     o = 0;
-    memcpy(out + o, "io.println(@string(`${", 22);
-    o += 22;
-    if (elen) {
-        memcpy(out + o, src + a, elen);
-        o += elen;
+    if (direct) {
+        memcpy(out + o, "cc_println(", sizeof("cc_println(") - 1);
+        o += sizeof("cc_println(") - 1;
+        if (elen) {
+            memcpy(out + o, src + a, elen);
+            o += elen;
+        }
+        memcpy(out + o, ") !>;\n", sizeof(") !>;\n") - 1);
+        o += sizeof(") !>;\n") - 1;
+    } else {
+        memcpy(out + o, "cc_println(@string(`${", sizeof("cc_println(@string(`${") - 1);
+        o += sizeof("cc_println(@string(`${") - 1;
+        if (elen) {
+            memcpy(out + o, src + a, elen);
+            o += elen;
+        }
+        memcpy(out + o, "}`)) !>;\n", sizeof("}`)) !>;\n") - 1);
+        o += sizeof("}`)) !>;\n") - 1;
     }
-    memcpy(out + o, "}`)) !>;\n", sizeof("}`)) !>;\n") - 1);
-    o += sizeof("}`)) !>;\n") - 1;
     out[o] = '\0';
     if (out_len) *out_len = o;
     return out;
@@ -362,7 +390,7 @@ static char* cc__ol_wrap_line_loop(const char* body, size_t body_len, int line_p
         "    bool __cc_more = io.read_line(&line) !>;\n"
         "    if (!__cc_more) break;\n"
         "    nr += 1;\n";
-    static const char print[] = "    io.println(line) !>;\n";
+    static const char print[] = "    line.println() !>;\n";
     static const char tail[] = "}\n";
     size_t need, o, i;
     char* out;
@@ -654,24 +682,79 @@ int cc_script_oneliner_task_exists(const char* toolbox, size_t len,
     return e.found;
 }
 
+/* Escape summary text for embedding in a CCDoc block (no comment delimiters). */
+static char* cc__ol_escape_doc_summary(const char* summary, size_t* out_len) {
+    size_t i, o, need;
+    char* out;
+    if (!summary) summary = "";
+    need = 1;
+    for (i = 0; summary[i]; i++) {
+        if (summary[i] == '*' && summary[i + 1] == '/') need += 2; /* * / */
+        else if (summary[i] == '/' && summary[i + 1] == '*') need += 2; /* / * */
+        else if (summary[i] == '\n' || summary[i] == '\r') need += 1; /* space */
+        else need += 1;
+    }
+    out = (char*)malloc(need);
+    if (!out) return NULL;
+    o = 0;
+    for (i = 0; summary[i]; i++) {
+        if (summary[i] == '*' && summary[i + 1] == '/') {
+            out[o++] = '*';
+            out[o++] = ' ';
+            out[o++] = '/';
+            i++;
+        } else if (summary[i] == '/' && summary[i + 1] == '*') {
+            out[o++] = '/';
+            out[o++] = ' ';
+            out[o++] = '*';
+            i++;
+        } else if (summary[i] == '\n' || summary[i] == '\r') {
+            if (summary[i] == '\r' && summary[i + 1] == '\n') i++;
+            out[o++] = ' ';
+        } else {
+            out[o++] = summary[i];
+        }
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = o;
+    return out;
+}
+
+static size_t cc__ol_indent_body_len(const char* body, size_t body_len) {
+    size_t i = 0, o = 0;
+    int at_line = 1;
+    while (i < body_len) {
+        if (at_line) {
+            o += 4;
+            at_line = 0;
+        }
+        o++;
+        if (body[i] == '\n') at_line = 1;
+        i++;
+    }
+    if (body_len > 0 && body[body_len - 1] != '\n') o++;
+    return o;
+}
+
 static size_t cc__ol_indent_body(char* out, size_t o, size_t cap,
                                  const char* body, size_t body_len) {
     size_t i = 0;
     int at_line = 1;
     while (i < body_len) {
         if (at_line) {
-            if (o + 4 < cap) memcpy(out + o, "    ", 4);
+            if (o + 4 > cap) return (size_t)-1;
+            memcpy(out + o, "    ", 4);
             o += 4;
             at_line = 0;
         }
-        if (o + 1 < cap) out[o] = body[i];
-        o++;
+        if (o + 1 > cap) return (size_t)-1;
+        out[o++] = body[i];
         if (body[i] == '\n') at_line = 1;
         i++;
     }
     if (body_len > 0 && body[body_len - 1] != '\n') {
-        if (o + 1 < cap) out[o] = '\n';
-        o++;
+        if (o + 1 > cap) return (size_t)-1;
+        out[o++] = '\n';
     }
     return o;
 }
@@ -683,10 +766,13 @@ char* cc_script_oneliner_format_task(const char* name, const char* doc,
     char* injected = NULL;
     size_t inj_len = 0;
     char* auto_doc = NULL;
+    char* safe_doc = NULL;
+    size_t safe_doc_len = 0;
     const char* summary;
-    size_t need, o;
+    size_t need, o, indented_need;
     char* out;
     int hdr_n;
+    static const char tail[] = "    return 0;\n}\n";
 
     if (!name) return NULL;
     if (!program) {
@@ -702,12 +788,20 @@ char* cc_script_oneliner_format_task(const char* name, const char* doc,
         auto_doc = cc_script_oneliner_first_line(program, program_len);
         summary = auto_doc ? auto_doc : "";
     }
+    safe_doc = cc__ol_escape_doc_summary(summary, &safe_doc_len);
+    if (!safe_doc) {
+        free(injected);
+        free(auto_doc);
+        return NULL;
+    }
 
-    need = 128 + strlen(name) + strlen(summary) + inj_len * 2 + 64;
+    indented_need = cc__ol_indent_body_len(injected, inj_len);
+    need = 64 + strlen(name) + safe_doc_len + indented_need + sizeof(tail) + 8;
     out = (char*)malloc(need);
     if (!out) {
         free(injected);
         free(auto_doc);
+        free(safe_doc);
         return NULL;
     }
     o = 0;
@@ -716,29 +810,31 @@ char* cc_script_oneliner_format_task(const char* name, const char* doc,
                      " * @task %s\n"
                      " */\n"
                      "static int %s(int argc, char **argv) {\n",
-                     summary[0] ? summary : name, name);
+                     safe_doc[0] ? safe_doc : name, name);
     if (hdr_n < 0 || (size_t)hdr_n >= need) {
         free(out);
         free(injected);
         free(auto_doc);
+        free(safe_doc);
         return NULL;
     }
     o = (size_t)hdr_n;
-    o = cc__ol_indent_body(out, o, need, injected, inj_len);
+    o = cc__ol_indent_body(out, o, need - sizeof(tail), injected, inj_len);
+    if (o == (size_t)-1) {
+        free(out);
+        free(injected);
+        free(auto_doc);
+        free(safe_doc);
+        return NULL;
+    }
     {
-        static const char tail[] = "    return 0;\n}\n";
         size_t n = sizeof(tail) - 1;
         if (o + n + 1 > need) {
-            size_t nneed = o + n + 1;
-            char* grown = (char*)realloc(out, nneed);
-            if (!grown) {
-                free(out);
-                free(injected);
-                free(auto_doc);
-                return NULL;
-            }
-            out = grown;
-            need = nneed;
+            free(out);
+            free(injected);
+            free(auto_doc);
+            free(safe_doc);
+            return NULL;
         }
         memcpy(out + o, tail, n);
         o += n;
@@ -747,5 +843,6 @@ char* cc_script_oneliner_format_task(const char* name, const char* doc,
     if (out_len) *out_len = o;
     free(injected);
     free(auto_doc);
+    free(safe_doc);
     return out;
 }

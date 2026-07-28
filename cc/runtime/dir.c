@@ -440,11 +440,20 @@ typedef struct {
     size_t capacity;
 } CCGlobBuilder;
 
-static void glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t len) {
+static int cc__dir_is_eof(CCIoError e) {
+    return e.kind == CC_IO_OTHER && e.os_code == 0;
+}
+
+/* 0 on success; -1 and *err set on failure. */
+static int glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t len,
+                    CCIoError* err) {
     if (b->arr.len >= b->capacity) {
         size_t new_cap = b->capacity ? b->capacity * 2 : 16;
         CCSlice* new_paths = cc_arena_alloc(arena, new_cap * sizeof(CCSlice), _Alignof(CCSlice));
-        if (!new_paths) return;
+        if (!new_paths) {
+            *err = cc_io_from_errno(ENOMEM);
+            return -1;
+        }
         if (b->arr.items && b->arr.len > 0) {
             memcpy(new_paths, b->arr.items, b->arr.len * sizeof(CCSlice));
         }
@@ -453,27 +462,41 @@ static void glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t 
     }
 
     char* copy = cc_arena_alloc(arena, len + 1, 1);
-    if (!copy) return;
+    if (!copy) {
+        *err = cc_io_from_errno(ENOMEM);
+        return -1;
+    }
     memcpy(copy, path, len);
     copy[len] = '\0';
 
     b->arr.items[b->arr.len] = char_to_slice(copy);
     b->arr.len++;
+    return 0;
 }
 
-/* Helper: recursive glob */
-static void glob_recurse(CCArena* arena, CCGlobBuilder* b,
-                         const char* dir, const char* pattern, int recursive);
+static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
+                        const char* dir, const char* pattern, int recursive,
+                        CCIoError* err);
 
-static void glob_dir(CCArena* arena, CCGlobBuilder* b,
-                     const char* dir, const char* pattern, int recursive) {
+static int glob_dir(CCArena* arena, CCGlobBuilder* b,
+                    const char* dir, const char* pattern, int recursive,
+                    CCIoError* err) {
     CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
-    if (cc_is_err(iter_res)) return;
+    if (cc_is_err(iter_res)) {
+        *err = cc_unwrap_err(iter_res);
+        return -1;
+    }
 
     CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
         CCResult_CCDirEntry_CCIoError entry_res = cc_dir_next(iter, arena);
-        if (cc_is_err(entry_res)) break;
+        if (cc_is_err(entry_res)) {
+            CCIoError e = cc_unwrap_err(entry_res);
+            if (cc__dir_is_eof(e)) break;
+            *err = e;
+            cc_dir_close(iter);
+            return -1;
+        }
 
         CCDirEntry entry = cc_unwrap(entry_res);
         const char* name = (const char*)entry.name.ptr;
@@ -483,7 +506,11 @@ static void glob_dir(CCArena* arena, CCGlobBuilder* b,
         size_t name_len = entry.name.len;
         size_t path_len = dir_len + 1 + name_len;
         char* full_path = cc_arena_alloc(arena, path_len + 1, 1);
-        if (!full_path) continue;
+        if (!full_path) {
+            *err = cc_io_from_errno(ENOMEM);
+            cc_dir_close(iter);
+            return -1;
+        }
 
         memcpy(full_path, dir, dir_len);
         full_path[dir_len] = PATH_SEP;
@@ -492,30 +519,47 @@ static void glob_dir(CCArena* arena, CCGlobBuilder* b,
 
         if (entry.type == CC_DIRENT_DIR) {
             if (recursive) {
-                glob_recurse(arena, b, full_path, pattern, recursive);
+                if (glob_recurse(arena, b, full_path, pattern, recursive, err) != 0) {
+                    cc_dir_close(iter);
+                    return -1;
+                }
             }
         } else {
             if (cc_glob_match(char_to_slice(pattern), char_to_slice(name))) {
-                glob_add(b, arena, full_path, path_len);
+                if (glob_add(b, arena, full_path, path_len, err) != 0) {
+                    cc_dir_close(iter);
+                    return -1;
+                }
             }
         }
     }
 
     cc_dir_close(iter);
+    return 0;
 }
 
-static void glob_recurse(CCArena* arena, CCGlobBuilder* b,
-                         const char* dir, const char* pattern, int recursive) {
-    glob_dir(arena, b, dir, pattern, recursive);
+static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
+                        const char* dir, const char* pattern, int recursive,
+                        CCIoError* err) {
+    if (glob_dir(arena, b, dir, pattern, recursive, err) != 0) return -1;
 
     /* Recurse into subdirectories */
     CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
-    if (cc_is_err(iter_res)) return;
+    if (cc_is_err(iter_res)) {
+        *err = cc_unwrap_err(iter_res);
+        return -1;
+    }
 
     CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
         CCResult_CCDirEntry_CCIoError entry_res = cc_dir_next(iter, arena);
-        if (cc_is_err(entry_res)) break;
+        if (cc_is_err(entry_res)) {
+            CCIoError e = cc_unwrap_err(entry_res);
+            if (cc__dir_is_eof(e)) break;
+            *err = e;
+            cc_dir_close(iter);
+            return -1;
+        }
 
         CCDirEntry entry = cc_unwrap(entry_res);
         if (entry.type != CC_DIRENT_DIR) continue;
@@ -524,23 +568,34 @@ static void glob_recurse(CCArena* arena, CCGlobBuilder* b,
         size_t name_len = entry.name.len;
         size_t path_len = dir_len + 1 + name_len;
         char* subdir = cc_arena_alloc(arena, path_len + 1, 1);
-        if (!subdir) continue;
+        if (!subdir) {
+            *err = cc_io_from_errno(ENOMEM);
+            cc_dir_close(iter);
+            return -1;
+        }
 
         memcpy(subdir, dir, dir_len);
         subdir[dir_len] = PATH_SEP;
         memcpy(subdir + dir_len + 1, entry.name.ptr, name_len);
         subdir[path_len] = '\0';
 
-        glob_recurse(arena, b, subdir, pattern, recursive);
+        if (glob_recurse(arena, b, subdir, pattern, recursive, err) != 0) {
+            cc_dir_close(iter);
+            return -1;
+        }
     }
 
     cc_dir_close(iter);
+    return 0;
 }
 
-CCSliceArray cc_glob(CCSlice pattern_sl, CCArena* arena) {
+CCResult_CCSliceArray_CCIoError cc_glob(CCSlice pattern_sl, CCArena* arena) {
     CCGlobBuilder b = {{0}, 0};
+    CCIoError err;
     const char* pattern = cc__dir_path_cstr(pattern_sl);
-    if (!arena || !pattern) return b.arr;
+    if (!arena || !pattern) {
+        return cc_err_CCResult_CCSliceArray_CCIoError(cc_io_from_errno(EINVAL));
+    }
 
     /* Check for ** (recursive) */
     int recursive = (strstr(pattern, "**") != NULL);
@@ -556,7 +611,9 @@ CCSliceArray cc_glob(CCSlice pattern_sl, CCArena* arena) {
 
     if (last_sep) {
         size_t dir_len = (size_t)(last_sep - pattern);
-        if (dir_len >= sizeof(dir)) return b.arr;
+        if (dir_len >= sizeof(dir)) {
+            return cc_err_CCResult_CCSliceArray_CCIoError(cc_io_from_errno(ENAMETOOLONG));
+        }
         memcpy(dir, pattern, dir_len);
         dir[dir_len] = '\0';
         file_pattern = last_sep + 1;
@@ -574,10 +631,14 @@ CCSliceArray cc_glob(CCSlice pattern_sl, CCArena* arena) {
     }
 
     if (recursive) {
-        glob_recurse(arena, &b, dir, file_pattern, 1);
+        if (glob_recurse(arena, &b, dir, file_pattern, 1, &err) != 0) {
+            return cc_err_CCResult_CCSliceArray_CCIoError(err);
+        }
     } else {
-        glob_dir(arena, &b, dir, file_pattern, 0);
+        if (glob_dir(arena, &b, dir, file_pattern, 0, &err) != 0) {
+            return cc_err_CCResult_CCSliceArray_CCIoError(err);
+        }
     }
 
-    return b.arr;
+    return cc_ok_CCResult_CCSliceArray_CCIoError(b.arr);
 }

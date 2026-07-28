@@ -22,6 +22,7 @@ out/
 third_party/jackson-allan-cc/cc_for_ccc.h
 
 tools/cc_test
+tools/toolbox.shcc
 
 # Claude Code agent worktrees / session-local state
 .claude/
