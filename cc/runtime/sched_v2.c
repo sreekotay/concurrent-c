@@ -70,7 +70,9 @@ static inline void v2_slock_lock(v2_slock* l) {
             return;
         }
         if (spins < 64) {
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__TINYC__)
+            cc_cpu_yield_port();
+#elif defined(__x86_64__) || defined(__i386__)
             __asm__ volatile("pause" ::: "memory");
 #elif defined(__aarch64__) || defined(__arm__)
             __asm__ volatile("yield" ::: "memory");
@@ -896,6 +898,12 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
 }
 
 /* Per-thread state */
+#if defined(__TINYC__)
+#define tls_v2_thread_id (cc_rt_tls_get()->v2_thread_id)
+#define tls_v2_my_generation (cc_rt_tls_get()->v2_my_generation)
+#define tls_v2_current_fiber (*(fiber_v2**)&(cc_rt_tls_get()->v2_current_fiber))
+#define tls_v2_dispatch_seq (cc_rt_tls_get()->v2_dispatch_seq)
+#else
 static __thread int tls_v2_thread_id = -1;
 static __thread uint64_t tls_v2_my_generation = 0;
 static __thread fiber_v2* tls_v2_current_fiber = NULL;
@@ -904,6 +912,7 @@ static __thread fiber_v2* tls_v2_current_fiber = NULL;
  * still running after one tick" without any wall-clock read on the hot
  * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
 static __thread uint64_t tls_v2_dispatch_seq = 0;
+#endif
 bool cc_nursery_is_cancelled(const CCNursery* n);
 void cc_nursery_notify_child_done(CCNursery* n);
 
@@ -1206,7 +1215,9 @@ static void sched_v2_wake(int worker_hint) {
                  * runs in the outer thread_v2_main loop on return. */
                 int spin = g_v2_spin_before_park;
                 while (spin-- > 0) {
-#if defined(__aarch64__) || defined(__arm__)
+#if defined(__TINYC__)
+                    cc_cpu_yield_port();
+#elif defined(__aarch64__) || defined(__arm__)
                     __asm__ volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(__i386__)
                     __asm__ volatile("pause" ::: "memory");
@@ -1567,14 +1578,15 @@ void sched_v2_signal(fiber_v2* f) {
  * any remaining divergence between tls_v2_current_fiber and the
  * user_data-derived fiber so we can keep an eye on it.
  */
-static int g_sched_v2_yield_mismatches = 0;
+static _Atomic int g_sched_v2_yield_mismatches = 0;
 static void sched_v2_yield_report_mismatch(const char* where,
                                             fiber_v2* tls_f,
                                             mco_coro* co,
                                             fiber_v2* real_f) {
     const char* e = getenv("CC_DEBUG_YIELD");
     if (!e || !*e || *e == '0') return;
-    int n = __sync_fetch_and_add(&g_sched_v2_yield_mismatches, 1);
+    int n = atomic_fetch_add_explicit(&g_sched_v2_yield_mismatches, 1,
+                                      memory_order_relaxed);
     if (n >= 16) return;
     fprintf(stderr,
         "[sched-v2-stale] %s: tls_fiber=%p (coro=%p) mco_running=%p "
@@ -3047,7 +3059,9 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
             V2_STAT_INC(g_v2_join_spin_hit);
             return sched_v2_finish_join(f, out_result);
         }
-        #if defined(__aarch64__) || defined(__arm64__)
+        #if defined(__TINYC__)
+        cc_cpu_yield_port();
+        #elif defined(__aarch64__) || defined(__arm64__)
         __asm__ volatile("yield");
         #elif defined(__x86_64__)
         __asm__ volatile("pause");

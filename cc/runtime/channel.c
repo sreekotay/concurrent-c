@@ -91,7 +91,11 @@
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
 CCNursery* cc__runtime_current_nursery(void);
 /* Thread-local current deadline scope (set by with_deadline lowering). */
+#if defined(__TINYC__)
+#define cc__tls_current_deadline (*(CCDeadline**)&(cc_rt_tls_get()->current_deadline))
+#else
 __thread CCDeadline* cc__tls_current_deadline = NULL;
+#endif
 
 static inline CCDeadline* cc__runtime_current_deadline(void) {
     CCDeadline* v2 = (CCDeadline*)sched_v2_current_deadline_scope();
@@ -124,7 +128,9 @@ typedef struct __attribute__((aligned(64))) {
 
 
 static inline void cc__chan_cpu_pause(void) {
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(__TINYC__)
+    cc_cpu_pause_port();
+#elif defined(__aarch64__) || defined(__arm64__)
     __asm__ volatile("isb");
 #elif defined(__x86_64__) || defined(_M_X64)
     __asm__ volatile("pause");
@@ -160,7 +166,12 @@ typedef struct {
     size_t count;
 } wake_batch;
 
+#if defined(__TINYC__)
+/* Layout matches cc_rt_tls_wake_batch (void* fibers[32], uint32_t attribs[32], size_t). */
+#define tls_wake_batch (*(wake_batch*)&(cc_rt_tls_get()->wake_batch))
+#else
 static __thread wake_batch tls_wake_batch = {{NULL}, {0}, 0};
+#endif
 
 /* Forward declaration */
 static inline void wake_batch_flush(void);
@@ -790,7 +801,9 @@ static inline int cc__chan_lock_spin_count(void) {
 }
 
 static inline void cc__chan_spin_hint(void) {
-#if defined(__aarch64__) || defined(__arm__)
+#if defined(__TINYC__)
+    cc_cpu_yield_port();
+#elif defined(__aarch64__) || defined(__arm__)
     __asm__ volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(__i386__)
     __asm__ volatile("pause" ::: "memory");

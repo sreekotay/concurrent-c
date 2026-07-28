@@ -513,7 +513,8 @@ ffc_internal ffc_inline size_t ffc_get_value_size(ffc_value_kind vk) {
 #define FFC_SSE2 1
 #endif
 
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(__TINYC__)
+/* Host TCC has no arm_neon.h (clang intrinsic header); use scalar ffc path. */
 #define FFC_NEON 1
 #endif
 

@@ -136,6 +136,65 @@ static int cc__is_tcc(const char* cc_bin) {
     return 0;
 }
 
+/* Resolve the vendored TCC install dir (holds include/ + libtcc1.a). Uninstalled
+ * builds have CONFIG_TCCDIR=/usr/local/lib/tcc, so host `CC=…/tcc` needs `-B`
+ * pointing here or system headers like stdbool.h are missing. */
+static const char* cc__tcc_lib_dir(const char* cc_bin, char* buf, size_t cap) {
+    const char* cands[8];
+    size_t nc = 0;
+    char from_bin[PATH_MAX];
+    const char* env = getenv("CC_TCC_LIB_PATH");
+    if (env && env[0]) cands[nc++] = env;
+#ifdef CC_TCC_LIB_DIR
+    cands[nc++] = CC_TCC_LIB_DIR;
+#endif
+    if (cc_bin && cc_bin[0] && cc__is_tcc(cc_bin)) {
+        /* dirname(cc_bin) when the binary lives next to include/ / libtcc1.a */
+        size_t n = strlen(cc_bin);
+        if (n + 1 < sizeof(from_bin)) {
+            memcpy(from_bin, cc_bin, n + 1);
+            char* slash = strrchr(from_bin, '/');
+            if (slash && slash != from_bin) {
+                *slash = '\0';
+                cands[nc++] = from_bin;
+            }
+        }
+    }
+    cands[nc++] = "third_party/tcc";
+    cands[nc++] = "../third_party/tcc";
+    if (g_repo_root[0]) {
+        static char abs_cand[PATH_MAX];
+        if (snprintf(abs_cand, sizeof(abs_cand), "%s/third_party/tcc", g_repo_root) < (int)sizeof(abs_cand))
+            cands[nc++] = abs_cand;
+    }
+    for (size_t i = 0; i < nc; i++) {
+        char probe[PATH_MAX];
+        if (!cands[i] || !cands[i][0]) continue;
+        if (snprintf(probe, sizeof(probe), "%s/include/stdbool.h", cands[i]) >= (int)sizeof(probe))
+            continue;
+        if (access(probe, R_OK) == 0) {
+            if (snprintf(buf, cap, "%s", cands[i]) < (int)cap) return buf;
+        }
+    }
+    return NULL;
+}
+
+/* Flags required when the *host* compiler is the vendored TCC binary. */
+static void cc__append_tcc_host_flags(char* cmd, size_t cmd_cap, const char* cc_bin) {
+    char dir[PATH_MAX];
+    const char* libdir;
+    if (!cmd || !cmd_cap || !cc__is_tcc(cc_bin)) return;
+    /* Default language mode is pre-C11; max_align_t in tcc's stddef.h is gated
+     * on __STDC_VERSION__ >= 201112L. */
+    strncat(cmd, " -std=c11", cmd_cap - strlen(cmd) - 1);
+    libdir = cc__tcc_lib_dir(cc_bin, dir, sizeof(dir));
+    if (libdir) {
+        char flag[PATH_MAX + 4];
+        snprintf(flag, sizeof(flag), " -B%s", libdir);
+        strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
+    }
+}
+
 static void cc__append_flag(char* buf, size_t cap, const char* prefix, const char* val) {
     if (!buf || cap == 0 || !val || !val[0]) return;
     if (prefix && prefix[0]) {
@@ -2239,6 +2298,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                      ldflags_env ? ldflags_env : "",
                      final_ld_flags ? final_ld_flags : "",
                      opt->bin_out_path);
+            if (link_is_tcc) cc__append_tcc_host_flags(link_cmd, sizeof(link_cmd), cc_bin);
             if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
 
 #if defined(__APPLE__)
@@ -2271,6 +2331,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  ldflags_env ? ldflags_env : "",
                  final_ld_flags ? final_ld_flags : "",
                  opt->bin_out_path);
+        if (link_is_tcc) cc__append_tcc_host_flags(link_cmd, sizeof(link_cmd), cc_bin);
         if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
 
 #if defined(__APPLE__)
@@ -2412,6 +2473,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
+        cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     } else {
         snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s -I%s",
                  cc_bin,
@@ -2520,8 +2582,10 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         return 0;
     }
     
-    // ABORT if prebuilt exists but is stale - force explicit rebuild
-    if (file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
+    // ABORT if prebuilt exists but is stale - force explicit rebuild.
+    // Skip for TCC: host TCC never reuses the clang/gcc prebuilt (object format
+    // mismatch) and always rebuilds out/<dir>/runtime.o from sources.
+    if (!is_tcc && file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
         fprintf(stderr, "\n");
         fprintf(stderr, "================================================================================\n");
         fprintf(stderr, "STALE RUNTIME DETECTED\n");
@@ -2561,6 +2625,12 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
              g_repo_root,
              g_cc_runtime_c,
              is_tcc ? runtime_obj : runtime_core_obj);
+    if (is_tcc) {
+        /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
+         * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
+        strncat(cmd, " -DCC_NO_LIBLFDS", sizeof(cmd) - strlen(cmd) - 1);
+        cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
+    }
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
@@ -2622,6 +2692,7 @@ static int cc__link_many(const CCBuildOptions* opt,
              sysroot_part ? sysroot_part : "",
              ldflags_env ? ldflags_env : "",
              opt->ld_flags ? opt->ld_flags : "");
+    if (is_tcc) cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     // TCC doesn't support -Wl,-dead_strip or -Wl,--gc-sections
     if (!is_tcc) {
 #if defined(__APPLE__)

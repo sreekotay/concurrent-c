@@ -28,7 +28,9 @@
  * ============================================================================ */
 
 static inline uint64_t nursery_rdtsc(void) {
-    #if defined(__x86_64__) || defined(_M_X64)
+    #if defined(__TINYC__)
+    return cc_cpu_counter_port();
+    #elif defined(__x86_64__) || defined(_M_X64)
     unsigned int lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
@@ -137,7 +139,11 @@ typedef struct {
 
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
+#if defined(__TINYC__)
+#define cc__tls_current_nursery (*(CCNursery**)&(cc_rt_tls_get()->current_nursery))
+#else
 __thread CCNursery* cc__tls_current_nursery = NULL;
+#endif
 
 CCNursery* cc__runtime_current_nursery(void) {
     CCNursery* v2 = sched_v2_current_nursery();

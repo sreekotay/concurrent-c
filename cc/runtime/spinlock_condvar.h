@@ -54,7 +54,10 @@
  * ============================================================================ */
 
 static inline void scv_cpu_pause(void) {
-    #if defined(__aarch64__) || defined(__arm64__)
+    #if defined(__TINYC__)
+    #include <stdatomic.h>
+    atomic_signal_fence(memory_order_seq_cst);
+    #elif defined(__aarch64__) || defined(__arm64__)
     __asm__ volatile("isb");
     #elif defined(__x86_64__) || defined(_M_X64)
     __asm__ volatile("pause");

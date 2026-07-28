@@ -562,7 +562,29 @@ static MCO_FORCE_INLINE size_t _mco_align_forward(size_t addr, size_t align) {
 }
 
 /* Variable holding the current running coroutine per thread. */
+#if defined(__TINYC__)
+/* Host TCC has no __thread; use a pthread cell (lvalue via *slot). */
+#include <pthread.h>
+#include <stdlib.h>
+static pthread_key_t _mco_current_co_key;
+static pthread_once_t _mco_current_co_once = PTHREAD_ONCE_INIT;
+static void _mco_current_co_key_init(void) {
+  (void)pthread_key_create(&_mco_current_co_key, free);
+}
+static mco_coro** _mco_current_co_slot(void) {
+  mco_coro** p;
+  (void)pthread_once(&_mco_current_co_once, _mco_current_co_key_init);
+  p = (mco_coro**)pthread_getspecific(_mco_current_co_key);
+  if (!p) {
+    p = (mco_coro**)calloc(1, sizeof(*p));
+    if (p) (void)pthread_setspecific(_mco_current_co_key, p);
+  }
+  return p;
+}
+#define mco_current_co (*_mco_current_co_slot())
+#else
 static MCO_THREAD_LOCAL mco_coro* mco_current_co = NULL;
+#endif
 
 static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
   /* Set the old coroutine to normal state and update it. */
@@ -1258,9 +1280,32 @@ static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base,
 
 #elif defined(MCO_USE_UCONTEXT)
 
+/* Darwin hides makecontext/swapcontext unless _XOPEN_SOURCE is set. Define it
+ * here (late is fine — only this header needs the deprecated API). Under host
+ * TCC we must not set _XOPEN_SOURCE for the whole TU: it breaks Apple SDK
+ * headers in TCC's preprocessor. */
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include <ucontext.h>
 
+#if defined(__TINYC__) && defined(__APPLE__)
+/* TCC's parsed ucontext_t is undersized vs libSystem (e.g. 608 vs 880 on
+ * arm64) because it misses part of the mcontext register file. Overflowing
+ * a TCC-sized buffer in swapcontext corrupts the neighbor context and
+ * crashes with a NULL sp. Keep the field view for makecontext setup, but
+ * allocate ABI-sized storage. */
+typedef struct _mco_ctxbuf {
+  union {
+    ucontext_t uc;
+    unsigned char abi_pad[1024];
+  } u;
+} _mco_ctxbuf;
+#define _MCO_UC(buf) (&(buf)->u.uc)
+#else
 typedef ucontext_t _mco_ctxbuf;
+#define _MCO_UC(buf) (buf)
+#endif
 
 #if defined(_LP64) || defined(__LP64__)
 static void _mco_wrap_main(unsigned int lo, unsigned int hi) {
@@ -1275,26 +1320,27 @@ static void _mco_wrap_main(unsigned int lo) {
 #endif
 
 static MCO_FORCE_INLINE void _mco_switch(_mco_ctxbuf* from, _mco_ctxbuf* to) {
-  int res = swapcontext(from, to);
+  int res = swapcontext(_MCO_UC(from), _MCO_UC(to));
   _MCO_UNUSED(res);
   MCO_ASSERT(res == 0);
 }
 
 static mco_result _mco_makectx(mco_coro* co, _mco_ctxbuf* ctx, void* stack_base, size_t stack_size) {
+  ucontext_t* uc = _MCO_UC(ctx);
   /* Initialize ucontext. */
-  if(getcontext(ctx) != 0) {
+  if(getcontext(uc) != 0) {
     MCO_LOG("failed to get ucontext");
     return MCO_MAKE_CONTEXT_ERROR;
   }
-  ctx->uc_link = NULL;  /* We never exit from _mco_wrap_main. */
-  ctx->uc_stack.ss_sp = stack_base;
-  ctx->uc_stack.ss_size = stack_size;
+  uc->uc_link = NULL;  /* We never exit from _mco_wrap_main. */
+  uc->uc_stack.ss_sp = stack_base;
+  uc->uc_stack.ss_size = stack_size;
   unsigned int lo = (unsigned int)((size_t)co);
 #if defined(_LP64) || defined(__LP64__)
   unsigned int hi = (unsigned int)(((size_t)co)>>32);
-  makecontext(ctx, (void (*)(void))_mco_wrap_main, 2, lo, hi);
+  makecontext(uc, (void (*)(void))_mco_wrap_main, 2, lo, hi);
 #else
-  makecontext(ctx, (void (*)(void))_mco_wrap_main, 1, lo);
+  makecontext(uc, (void (*)(void))_mco_wrap_main, 1, lo);
 #endif
   return MCO_SUCCESS;
 }

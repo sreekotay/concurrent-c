@@ -15,8 +15,22 @@
 * This reserves large virtual address space (2MB) but only commits
 * physical memory on demand (~4KB pages as stack grows).
 * Trade-off: mco_create/destroy are slower (mmap/munmap syscalls),
-* but coroutine pooling (99% reuse) amortizes this cost. */
+* but coroutine pooling (99% reuse) amortizes this cost.
+* Host TCC on Darwin uses ucontext (no ARM asm); mmap stacks have been
+* observed to hand swapcontext a NULL sp — use the calloc allocator. */
+#if !defined(__TINYC__)
 #define MCO_USE_VMEM_ALLOCATOR
+#endif
+
+#if defined(__TINYC__)
+/* Prevent minicoro from picking __thread via fake __GNUC__; the IMPL uses a
+ * pthread cell for mco_current_co under __TINYC__. Prefer ucontext: TCC
+ * aarch64 cannot assemble the MCO_USE_ASM backend. */
+#define MCO_THREAD_LOCAL
+#ifndef MCO_USE_UCONTEXT
+#define MCO_USE_UCONTEXT
+#endif
+#endif
 
 #define MINICORO_IMPL
 #include "minicoro.h"
@@ -83,7 +97,9 @@ int cc__chan_debug_is_open(void* ch_obj);
 * ============================================================================ */
 
 static inline void cpu_pause(void) {
-    #if defined(__aarch64__) || defined(__arm64__)
+    #if defined(__TINYC__)
+    cc_cpu_pause_port();
+    #elif defined(__aarch64__) || defined(__arm64__)
     __asm__ volatile("isb");
     #elif defined(__x86_64__) || defined(_M_X64)
     __asm__ volatile("pause");
@@ -97,7 +113,9 @@ static inline void cpu_pause(void) {
 * ============================================================================ */
 
 static inline uint64_t rdtsc(void) {
-    #if defined(__x86_64__) || defined(_M_X64)
+    #if defined(__TINYC__)
+    return cc_cpu_counter_port();
+    #elif defined(__x86_64__) || defined(_M_X64)
     unsigned int lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
@@ -660,8 +678,13 @@ static _Atomic uintptr_t g_next_fiber_id = 1;       /* Counter for unique fiber 
  *   the caller is a plain pthread (not a V2 fiber).  They are the only
  *   place the scope for a raw thread lives, so they MUST stay even though
  *   the "mirror into fiber_task" branches that shadowed them are dead. */
+#if defined(__TINYC__)
+#define tls_deadlock_suppress_depth (cc_rt_tls_get()->deadlock_suppress_depth)
+#define tls_external_wait_depth (cc_rt_tls_get()->external_wait_depth)
+#else
 static __thread unsigned tls_deadlock_suppress_depth = 0;
 static __thread unsigned tls_external_wait_depth = 0;
+#endif
 
 
 /* Return the current scheduler base-worker ID, or -1 if the calling thread

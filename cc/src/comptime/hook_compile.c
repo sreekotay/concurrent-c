@@ -482,6 +482,57 @@ static void cc__argv_free(CCArgvBuilder* a) {
     a->len = a->cap = 0;
 }
 
+static int cc__hc_is_tcc(const char* cc_bin) {
+    size_t n;
+    if (!cc_bin || !cc_bin[0]) return 0;
+    n = strlen(cc_bin);
+    if (n >= 3 && strcmp(cc_bin + n - 3, "tcc") == 0) return 1;
+    if (n >= 7 && strcmp(cc_bin + n - 7, "tcc.exe") == 0) return 1;
+    if (strstr(cc_bin, "/tcc") || strstr(cc_bin, "\\tcc")) return 1;
+    return 0;
+}
+
+/* Same resolution as cc_main / const_eval: uninstalled vendored TCC needs -B. */
+static const char* cc__hc_tcc_lib_dir(const char* cc_bin, const char* repo_root,
+                                      char* buf, size_t cap) {
+    const char* cands[8];
+    size_t nc = 0;
+    char from_bin[1024];
+    const char* env = getenv("CC_TCC_LIB_PATH");
+    if (env && env[0]) cands[nc++] = env;
+#ifdef CC_TCC_LIB_DIR
+    cands[nc++] = CC_TCC_LIB_DIR;
+#endif
+    if (cc_bin && cc__hc_is_tcc(cc_bin)) {
+        size_t n = strlen(cc_bin);
+        if (n + 1 < sizeof(from_bin)) {
+            memcpy(from_bin, cc_bin, n + 1);
+            char* slash = strrchr(from_bin, '/');
+            if (slash && slash != from_bin) {
+                *slash = '\0';
+                cands[nc++] = from_bin;
+            }
+        }
+    }
+    if (repo_root && repo_root[0]) {
+        static char abs_cand[1024];
+        if (snprintf(abs_cand, sizeof(abs_cand), "%s/third_party/tcc", repo_root) < (int)sizeof(abs_cand))
+            cands[nc++] = abs_cand;
+    }
+    cands[nc++] = "third_party/tcc";
+    cands[nc++] = "../third_party/tcc";
+    for (size_t i = 0; i < nc; i++) {
+        char probe[1100];
+        if (!cands[i] || !cands[i][0]) continue;
+        if (snprintf(probe, sizeof(probe), "%s/include/stdbool.h", cands[i]) >= (int)sizeof(probe))
+            continue;
+        if (access(probe, R_OK) == 0) {
+            if (snprintf(buf, cap, "%s", cands[i]) < (int)cap) return buf;
+        }
+    }
+    return NULL;
+}
+
 static int cc__build_compile_argv(CCArgvBuilder* argv,
                                   const char* repo_root,
                                   const char* input_dir,
@@ -490,6 +541,7 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
     const char* cc_bin = getenv("CC");
     if (!cc_bin || !cc_bin[0]) cc_bin = "cc";
     char tmp[2048];
+    char tcc_dir[1024];
     if (cc__argv_push(argv, cc_bin) != 0) return -1;
 #ifdef __APPLE__
     if (cc__argv_push(argv, "-dynamiclib") != 0) return -1;
@@ -502,6 +554,14 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
     /* Comptime helpers are throwaway code: -O0 cuts host compile cost ~3-5x
        and we never benchmark the resulting dylib. */
     if (cc__argv_push(argv, "-O0") != 0) return -1;
+    if (cc__hc_is_tcc(cc_bin)) {
+        /* Pre-C11 default omits max_align_t; uninstalled builds need -B. */
+        if (cc__argv_push(argv, "-std=c11") != 0) return -1;
+        if (cc__hc_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir))) {
+            snprintf(tmp, sizeof(tmp), "-B%s", tcc_dir);
+            if (cc__argv_push(argv, tmp) != 0) return -1;
+        }
+    }
     if (repo_root && repo_root[0]) {
         snprintf(tmp, sizeof(tmp), "-I%s/cc/include", repo_root);
         if (cc__argv_push(argv, tmp) != 0) return -1;

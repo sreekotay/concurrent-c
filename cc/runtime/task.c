@@ -457,7 +457,11 @@ static void* cc__fiber_closure0_wrapper(void* arg) {
 }
 
 static intptr_t cc__task_take_v2_result(fiber_v2* fiber, void* result) {
+#if defined(__TINYC__)
+#define tls_v2_result (cc_rt_tls_get()->task_v2_result)
+#else
     static __thread char tls_v2_result[48] __attribute__((aligned(8)));
+#endif
     if (!fiber || !result) return 0;
 
     char* buf = sched_v2_fiber_result_buf(fiber);

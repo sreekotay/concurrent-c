@@ -2572,97 +2572,12 @@ static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
     *io_len = w;
 }
 
-static int cc__tdup_ident_char(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
-}
-
-/* Offset of the ')' matching the '(' at `lp` (string/comment-aware), or 0. */
-static size_t cc__tdup_match_paren(const char* s, size_t n, size_t lp) {
-    CCInertScan sc;
-    int depth = 0;
-    cc_inert_scan_init(&sc, NULL);
-    for (size_t i = lp; i < n; ) {
-        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
-        if (s[i] == '(') depth++;
-        else if (s[i] == ')') { depth--; if (depth == 0) return i; }
-        i++;
-    }
-    return 0;
-}
-
-/* Cosmetic: collapse the pass-emitted doubled spelling
- *
- *   __typeof__(EXPR) name = (EXPR);      (also `= EXPR;`)
- *   =>  __auto_type name = (EXPR);
- *
- * when the two EXPR copies are byte-identical and the declaration sits on
- * one physical line (line counts stay exact for `#line`).  The passes and
- * the internal parser need the `__typeof__` spelling (tcc has no
- * `__auto_type`; async frame-lift pattern-matches on it), so this runs only
- * on the final buffer the host compiler sees.  Only compiler-introduced
- * shapes are touched: the declared name starts with `__cc_`, or EXPR is an
- * unwrap-binder expression.  Compacts in place (w <= r). */
+/* Formerly collapsed `__typeof__(EXPR) name = (EXPR)` → `__auto_type name = (EXPR)`
+ * on the host buffer. Disabled: vendored TCC rejects `__auto_type`, and emit-c /
+ * host-compile can be separate steps. Keep the `__typeof__` spelling. */
 static void cc__collapse_typeof_dup_decls(char* s, size_t* io_len) {
-    size_t n, w = 0;
-    CCInertScan sc;
-    if (!s || !io_len) return;
-    n = *io_len;
-    cc_inert_scan_init(&sc, NULL);
-    for (size_t i = 0; i < n; ) {
-        size_t before = i;
-        if (cc_inert_scan_step(&sc, s, n, &i)) {
-            if (w != before) memmove(s + w, s + before, i - before);
-            w += i - before;
-            continue;
-        }
-        if (s[i] == '_' && i + 10 <= n && memcmp(s + i, "__typeof__", 10) == 0 &&
-            (i == 0 || !cc__tdup_ident_char(s[i - 1])) &&
-            (i + 10 == n || !cc__tdup_ident_char(s[i + 10]))) {
-            size_t lp = i + 10;
-            while (lp < n && (s[lp] == ' ' || s[lp] == '\t')) lp++;
-            size_t rp = (lp < n && s[lp] == '(') ? cc__tdup_match_paren(s, n, lp) : 0;
-            if (rp > lp) {
-                const char* ex = s + lp + 1;
-                size_t el = rp - lp - 1;
-                size_t j = rp + 1;
-                while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
-                size_t ns = j;
-                if (j < n && cc__tdup_ident_char(s[j]) && !(s[j] >= '0' && s[j] <= '9')) {
-                    while (j < n && cc__tdup_ident_char(s[j])) j++;
-                    size_t ne = j;
-                    while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
-                    if (j < n && s[j] == '=') {
-                        j++;
-                        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
-                        size_t k = 0;
-                        if (s[j] == '(' && j + 1 + el < n &&
-                            memcmp(s + j + 1, ex, el) == 0 && s[j + 1 + el] == ')') {
-                            k = j + 2 + el;
-                        } else if (j + el <= n && memcmp(s + j, ex, el) == 0) {
-                            k = j + el;
-                        }
-                        if (k) {
-                            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
-                            int gate =
-                                (ne - ns > 5 && memcmp(s + ns, "__cc_", 5) == 0) ||
-                                (el >= 15 && memcmp(ex, "__cc_uw_err_at(", 15) == 0) ||
-                                (el >= 9 && memcmp(ex, "cc_error(", 9) == 0);
-                            if (gate && k < n && s[k] == ';' &&
-                                memchr(s + i, '\n', k - i) == NULL) {
-                                memcpy(s + w, "__auto_type", 11);
-                                w += 11;
-                                i = rp + 1;
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        s[w++] = s[i++];
-    }
-    *io_len = w;
+    (void)s;
+    (void)io_len;
 }
 
 static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,

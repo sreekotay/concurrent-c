@@ -129,7 +129,9 @@ static void cc__excl_entry_free(CCExclusive* excl, CCExclusiveEntry* e) {
 }
 
 static inline void cc__cpu_pause(void) {
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__TINYC__)
+    cc_cpu_pause_port();
+#elif defined(__x86_64__) || defined(__i386__)
     __asm__ __volatile__("pause");
 #elif defined(__aarch64__)
     __asm__ __volatile__("yield");
@@ -188,10 +190,16 @@ typedef struct {
     uint64_t pos;
 } cc__excl_evt_ring_t;
 static _Atomic(cc__excl_evt_ring_t*) g_cc_excl_evt_rings[CC_EXCL_EVT_MAX_THREADS];
+#if defined(__TINYC__)
+#define tls_cc_excl_ring (*(cc__excl_evt_ring_t**)&(cc_rt_tls_get()->excl_ring))
+#else
 static __thread cc__excl_evt_ring_t* tls_cc_excl_ring;
+#endif
 
 static inline uint64_t cc__excl_now(void) {
-#if defined(__aarch64__)
+#if defined(__TINYC__)
+    return cc_cpu_counter_port();
+#elif defined(__aarch64__)
     uint64_t v;
     __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
     return v;

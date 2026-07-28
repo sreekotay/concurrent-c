@@ -1909,12 +1909,17 @@ int cc__collect_autoblocking_edits(const CCASTRoot* root,
                 while (arg_e > arg_s && (call_txt[arg_e - 1] == ' ' || call_txt[arg_e - 1] == '\t')) arg_e--;
                 if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "%s%s __cc_ab_l%d_arg%d = ", I, reps[ri].param_types[ai], reps[ri].line_start, ai);
+                    cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ";\n");
                 } else {
-                    /* Use __auto_type for C11 type inference */
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s__auto_type __cc_ab_l%d_arg%d = ", I, reps[ri].line_start, ai);
+                    /* __typeof__ — portable to host TCC (no __auto_type). */
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s__typeof__(", I);
+                    cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, ") __cc_ab_l%d_arg%d = ",
+                                   reps[ri].line_start, ai);
+                    cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ";\n");
                 }
-                cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
-                cc__append_str(&repl, &repl_len, &repl_cap, ";\n");
             }
 
             /* Emit the task-returning call in place of the original call. */

@@ -10,6 +10,15 @@
  *   CC_ENABLE_TLS   - Enable TLS support (requires BearSSL)
  */
 
+#if defined(__TINYC__)
+/* ucontext fiber backend (TCC aarch64 has no inline asm for minicoro ASM).
+ * Do not set _XOPEN_SOURCE here — it breaks Apple SDK headers under TCC;
+ * minicoro defines it locally just before #include <ucontext.h>. */
+#define MCO_USE_UCONTEXT
+#include "cc_pthread_tls.h"
+#include "cc_cpu_port.h"
+#endif
+
 #include "channel.c"
 #include "sched_v2.c"
 #include "fiber_sched.c"

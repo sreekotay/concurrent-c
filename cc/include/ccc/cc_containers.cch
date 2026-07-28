@@ -5352,10 +5352,10 @@ static const ccj_str_hdr_ty ccj_str_placeholder_char8 = { 0, 0, (void *)u8"" };
 #else
 static const ccj_str_hdr_ty ccj_str_placeholder_char8 = { 0, 0, (void *)"" };
 #endif
-#if defined( CC_COMPTIME )
-/* TCC (comptime backend) lacks char16_t/char32_t string literals; comptime never
- * instantiates wide-char string containers, so an empty narrow placeholder is
- * functionally identical (size/cap 0, contents never read). */
+#if defined( CC_COMPTIME ) || defined( __TINYC__ )
+/* TCC lacks u""/U"" string literals (both as comptime backend and as host CC).
+ * Wide-char string containers are not used on these paths; an empty narrow
+ * placeholder is functionally identical (size/cap 0, contents never read). */
 static const ccj_str_hdr_ty ccj_str_placeholder_char16 = { 0, 0, (void *)"" };
 static const ccj_str_hdr_ty ccj_str_placeholder_char32 = { 0, 0, (void *)"" };
 #else
