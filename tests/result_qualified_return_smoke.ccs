@@ -13,7 +13,7 @@ static inline int !>(CCIoError) parse_value(int x) {
 }
 
 static int io_kind(CCIoError err) {
-    return err.kind;
+    return err.base.kind;
 }
 
 int main(void) {

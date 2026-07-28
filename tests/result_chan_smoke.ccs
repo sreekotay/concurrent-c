@@ -41,7 +41,7 @@ int main(void) {
     CCResult_int_CCError r2 = {0};
     CCResult_bool_CCIoError res2 = chan_recv(results_rx, &r2);
     assert(cc_io_avail(res2) && !r2.ok && "second result should be error");
-    assert(r2.u.error.base.kind == CC_ERR_PARSE);
+    assert(r2.u.error.kind == CC_ERR_PARSE);
     
     cc_chan_free(g_ch);
     

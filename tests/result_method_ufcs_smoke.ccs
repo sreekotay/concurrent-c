@@ -10,7 +10,7 @@ static size_t !>(CCIoError) make_err(void) {
 }
 
 static int io_kind(CCIoError err) {
-    return err.kind;
+    return err.base.kind;
 }
 
 int main(void) {
