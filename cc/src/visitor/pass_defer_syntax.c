@@ -142,6 +142,35 @@ static void cc__append_missing_indent_to(char** out, size_t* out_len, size_t* ou
     }
 }
 
+/* True when the return type is a plain arithmetic spelling for which the
+ * cleanup epilogue's fallback can read `return 0;` instead of the generic
+ * `return (__typeof__(__cc_retval_N)){0};` compound literal. */
+static int cc__ret_type_plain_zero_ok(const char* t) {
+    static const char* words[] = {
+        "signed", "unsigned", "short", "long", "int", "char",
+        "bool", "_Bool", "float", "double",
+        "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    };
+    int seen = 0;
+    if (!t) return 0;
+    while (*t) {
+        while (*t == ' ' || *t == '\t') t++;
+        if (!*t) break;
+        const char* w = t;
+        while (*t && *t != ' ' && *t != '\t') t++;
+        size_t wl = (size_t)(t - w);
+        int ok = 0;
+        for (size_t k = 0; k < sizeof(words) / sizeof(words[0]); k++) {
+            if (strlen(words[k]) == wl && memcmp(words[k], w, wl) == 0) { ok = 1; break; }
+        }
+        if (!ok) return 0;
+        seen = 1;
+    }
+    return seen;
+}
+
 /* Emit return-through-cleanup without depending on `__cc_ret*` macros.
  * Parser-mode stubs define `__cc_ret` as `((void)(value))`; if those ever
  * leak into final codegen (or a local is named `__cc_ret`), a macro call
@@ -1479,9 +1508,12 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                    "if (__cc_ret_set_%d) return __cc_retval_%d;\n",
                                    fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
                     cc__append_missing_indent_to(&out, &outl, &outc, fn_body_indent);
-                    cc_sb_append_fmt(&out, &outl, &outc,
-                                   "return (__typeof__(__cc_retval_%d)){0};\n",
-                                   fn_scope.cleanup_label_id);
+                    if (cc__ret_type_plain_zero_ok(fn_scope.return_type))
+                        cc__append_str(&out, &outl, &outc, "return 0;\n");
+                    else
+                        cc_sb_append_fmt(&out, &outl, &outc,
+                                       "return (__typeof__(__cc_retval_%d)){0};\n",
+                                       fn_scope.cleanup_label_id);
                 }
                 /* Masked ledger resync: the epilogue added lines with no
                  * #line accounting, so everything below the function's `}`

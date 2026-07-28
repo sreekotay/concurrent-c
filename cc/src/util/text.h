@@ -841,16 +841,17 @@ static inline int cc_contains_token_top_level(const char* src, size_t len, const
  * `"` / `\` are escaped, control bytes become `?`, and snippets longer
  * than 160 visible chars are truncated with `...`.  Emits the opening
  * and closing `"` itself. */
-static inline void cc_sb_append_c_string_literal(char** buf, size_t* len, size_t* cap,
-                                                  const char* src, size_t a, size_t b) {
+static inline void cc_sb_append_c_string_literal_max(char** buf, size_t* len, size_t* cap,
+                                                      const char* src, size_t a, size_t b,
+                                                      size_t vis_max) {
     if (!buf || !len || !cap) return;
     cc_sb_append(buf, len, cap, "\"", 1);
     if (src && b > a) {
         char tmp[256];
         size_t w = 0;
         int prev_space = 0;
-        const size_t vis_max = 160;
         int truncated = 0;
+        if (vis_max == 0 || vis_max > 160) vis_max = 160;
         for (size_t i = a; i < b && w + 3 < sizeof(tmp); i++) {
             unsigned char c = (unsigned char)src[i];
             if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
@@ -877,6 +878,11 @@ static inline void cc_sb_append_c_string_literal(char** buf, size_t* len, size_t
     cc_sb_append(buf, len, cap, "\"", 1);
 }
 
+static inline void cc_sb_append_c_string_literal(char** buf, size_t* len, size_t* cap,
+                                                  const char* src, size_t a, size_t b) {
+    cc_sb_append_c_string_literal_max(buf, len, cap, src, a, b, 160);
+}
+
 /* Append a `__cc_err_null_at("<sanitized-expr>", "<file>", "<line>")`
  * call expression to the string builder.  The three literal arguments
  * are spelled as C string literals so the runtime macro in
@@ -889,7 +895,9 @@ static inline void cc_sb_append_err_null_at(char** buf, size_t* len, size_t* cap
                                              const char* file, int line) {
     if (!buf || !len || !cap) return;
     cc_sb_append(buf, len, cap, "__cc_err_null_at(", (size_t)sizeof("__cc_err_null_at(") - 1);
-    cc_sb_append_c_string_literal(buf, len, cap, src, a, b);
+    /* The expression string only situates the failure in the message —
+     * file:line carry the precise diagnostic — so keep it short. */
+    cc_sb_append_c_string_literal_max(buf, len, cap, src, a, b, 64);
     cc_sb_append(buf, len, cap, ", ", 2);
     /* File path goes in as a plain C string literal — the runtime doesn't
      * need it sanitized the same way the expression does, but we reuse
@@ -923,7 +931,9 @@ static inline void cc_sb_append_uw_err_at(char** buf, size_t* len, size_t* cap,
     cc_sb_append(buf, len, cap, "__cc_uw_err_at(", (size_t)sizeof("__cc_uw_err_at(") - 1);
     cc_sb_append(buf, len, cap, tmpv, strlen(tmpv));
     cc_sb_append(buf, len, cap, ", ", 2);
-    cc_sb_append_c_string_literal(buf, len, cap, src, a, b);
+    /* Short expression string: it is unused for Result temps and only
+     * situates the pointer-arm message — file:line are the diagnostic. */
+    cc_sb_append_c_string_literal_max(buf, len, cap, src, a, b, 64);
     cc_sb_append(buf, len, cap, ", ", 2);
     {
         const char* f = file ? file : "<input>";

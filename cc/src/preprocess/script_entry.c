@@ -1407,9 +1407,11 @@ char* cc_script_rewrite_source(const char* path,
             goto fail_rewrite;
     }
 
+    /* @task dispatch only when the script defines tasks; a zero-task
+     * script gets no `argv[1][0] == '@'` preamble (all args flow through). */
     if (cc__append(&ob, main_open, open_len) != 0 ||
         cc__append(&ob, default_eh, eh_len) != 0 ||
-        cc__append_task_dispatch(&ob, tasks, ntasks) != 0)
+        (ntasks > 0 && cc__append_task_dispatch(&ob, tasks, ntasks) != 0))
         goto fail_rewrite;
 
     /* Token-gated a/io/in/args for the synthetic-main wrap only — not

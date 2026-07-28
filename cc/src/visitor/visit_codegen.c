@@ -2438,6 +2438,136 @@ static void cc__strip_trailing_ws_in_place(char* s, size_t* io_len) {
     *io_len = w;
 }
 
+/* True when [s, s+n) is a `#line` preprocessor directive (leading blanks ok). */
+static int cc__line_is_line_directive(const char* s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    return i + 5 <= n && memcmp(s + i, "#line", 5) == 0 &&
+           (i + 5 == n || s[i + 5] == ' ' || s[i + 5] == '\t');
+}
+
+/* Cosmetic: when a `#line` directive is immediately followed by another
+ * `#line` directive, only the last of the run affects the mapping — drop the
+ * earlier ones.  Pass rewinds leave these back-to-back ping-pong pairs in the
+ * lowered body.  Removes whole lines, so it must run only on the final
+ * buffer, immediately before the write.  Compacts in place (w <= r). */
+static void cc__coalesce_adjacent_line_directives(char* s, size_t* io_len) {
+    size_t n, r = 0, w = 0;
+    if (!s || !io_len) return;
+    n = *io_len;
+    while (r < n) {
+        size_t e = r;
+        while (e < n && s[e] != '\n') e++;
+        int drop = 0;
+        if (e < n && cc__line_is_line_directive(s + r, e - r)) {
+            size_t nr = e + 1, ne = nr;
+            while (ne < n && s[ne] != '\n') ne++;
+            if (cc__line_is_line_directive(s + nr, ne - nr)) drop = 1;
+        }
+        if (!drop) {
+            size_t m = (e < n ? e + 1 : e) - r;
+            if (w != r) memmove(s + w, s + r, m);
+            w += m;
+        }
+        r = (e < n) ? e + 1 : e;
+    }
+    s[w] = '\0';
+    *io_len = w;
+}
+
+static int cc__tdup_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Offset of the ')' matching the '(' at `lp` (string/comment-aware), or 0. */
+static size_t cc__tdup_match_paren(const char* s, size_t n, size_t lp) {
+    CCInertScan sc;
+    int depth = 0;
+    cc_inert_scan_init(&sc, NULL);
+    for (size_t i = lp; i < n; ) {
+        if (cc_inert_scan_step(&sc, s, n, &i)) continue;
+        if (s[i] == '(') depth++;
+        else if (s[i] == ')') { depth--; if (depth == 0) return i; }
+        i++;
+    }
+    return 0;
+}
+
+/* Cosmetic: collapse the pass-emitted doubled spelling
+ *
+ *   __typeof__(EXPR) name = (EXPR);      (also `= EXPR;`)
+ *   =>  __auto_type name = (EXPR);
+ *
+ * when the two EXPR copies are byte-identical and the declaration sits on
+ * one physical line (line counts stay exact for `#line`).  The passes and
+ * the internal parser need the `__typeof__` spelling (tcc has no
+ * `__auto_type`; async frame-lift pattern-matches on it), so this runs only
+ * on the final buffer the host compiler sees.  Only compiler-introduced
+ * shapes are touched: the declared name starts with `__cc_`, or EXPR is an
+ * unwrap-binder expression.  Compacts in place (w <= r). */
+static void cc__collapse_typeof_dup_decls(char* s, size_t* io_len) {
+    size_t n, w = 0;
+    CCInertScan sc;
+    if (!s || !io_len) return;
+    n = *io_len;
+    cc_inert_scan_init(&sc, NULL);
+    for (size_t i = 0; i < n; ) {
+        size_t before = i;
+        if (cc_inert_scan_step(&sc, s, n, &i)) {
+            if (w != before) memmove(s + w, s + before, i - before);
+            w += i - before;
+            continue;
+        }
+        if (s[i] == '_' && i + 10 <= n && memcmp(s + i, "__typeof__", 10) == 0 &&
+            (i == 0 || !cc__tdup_ident_char(s[i - 1])) &&
+            (i + 10 == n || !cc__tdup_ident_char(s[i + 10]))) {
+            size_t lp = i + 10;
+            while (lp < n && (s[lp] == ' ' || s[lp] == '\t')) lp++;
+            size_t rp = (lp < n && s[lp] == '(') ? cc__tdup_match_paren(s, n, lp) : 0;
+            if (rp > lp) {
+                const char* ex = s + lp + 1;
+                size_t el = rp - lp - 1;
+                size_t j = rp + 1;
+                while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+                size_t ns = j;
+                if (j < n && cc__tdup_ident_char(s[j]) && !(s[j] >= '0' && s[j] <= '9')) {
+                    while (j < n && cc__tdup_ident_char(s[j])) j++;
+                    size_t ne = j;
+                    while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+                    if (j < n && s[j] == '=') {
+                        j++;
+                        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+                        size_t k = 0;
+                        if (s[j] == '(' && j + 1 + el < n &&
+                            memcmp(s + j + 1, ex, el) == 0 && s[j + 1 + el] == ')') {
+                            k = j + 2 + el;
+                        } else if (j + el <= n && memcmp(s + j, ex, el) == 0) {
+                            k = j + el;
+                        }
+                        if (k) {
+                            while (k < n && (s[k] == ' ' || s[k] == '\t')) k++;
+                            int gate =
+                                (ne - ns > 5 && memcmp(s + ns, "__cc_", 5) == 0) ||
+                                (el >= 15 && memcmp(ex, "__cc_uw_err_at(", 15) == 0) ||
+                                (el >= 9 && memcmp(ex, "cc_error(", 9) == 0);
+                            if (gate && k < n && s[k] == ';' &&
+                                memchr(s + i, '\n', k - i) == NULL) {
+                                memcpy(s + w, "__auto_type", 11);
+                                w += 11;
+                                i = rp + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        s[w++] = s[i++];
+    }
+    *io_len = w;
+}
+
 static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                                                      const char* type_name,
                                                      const char* src,
@@ -5040,61 +5170,71 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
 
-                /* Unified unwrap primitives for real compile mode: one arm per
-                 * concrete Result type plus a default arm for raw pointers.
-                 * These mirror the parser-mode definitions in cc_result.cch so
+                /* Unified unwrap primitives for real compile mode.  The
+                 * only per-TU information is the roster of concrete Result
+                 * types, so emit it once as an X-macro list (split into
+                 * value-ok and void-ok, whose `value` arms differ) and
+                 * derive the three `__cc_uw_*` `_Generic` dispatchers from
+                 * it; the `default:` arm covers raw-pointer LHSs.  These
+                 * mirror the parser-mode definitions in cc_result.cch so
                  * the lowering pass can emit the same call shape for both
                  * Result-struct and pointer LHSs without scanning source
-                 * text to guess the LHS type. */
+                 * text to guess the LHS type.  Every `err_at` arm
+                 * side-effects on R3's unwrap chain (comma operator)
+                 * before extracting the error — same shape as the baseline
+                 * macro in cc_result.cch, so the record() call fires for
+                 * Result-struct LHSs too, not just the raw-pointer
+                 * default. */
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "/* Unified unwrap primitives (real mode, enumerated per TU). */\n");
-                /* __cc_uw_is_err */
+                    "/* Unified unwrap dispatch (real mode).  This TU's Result types as an\n"
+                    " * X-macro roster; the __cc_uw_* dispatchers derive their _Generic arms\n"
+                    " * from it (default: arm = raw-pointer LHS). */\n");
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "#undef __cc_uw_is_err\n#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n");
+                    "#undef __CC_UW_RESULT_TYPES\n"
+                    "#define __CC_UW_RESULT_TYPES(X, ...)");
                 for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
-                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
-                    if (!spec) continue;
-                    char line[256];
-                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
-                                                   CC_RESULT_ARM_IS_ERR, 0, 0);
-                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
-                }
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n");
-                /* __cc_uw_value */
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "#undef __cc_uw_value\n#define __cc_uw_value(__x__) _Generic((__x__), \\\n");
-                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
-                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
-                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
-                    if (!spec) continue;
-                    char line[256];
-                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
-                                                   CC_RESULT_ARM_VALUE,
-                                                   strcmp(spec->ok_type, "void") == 0, 0);
-                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
-                }
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "    default: (__x__))\n");
-                /* __cc_uw_err_at — every arm side-effects on R3's unwrap
-                 * chain (comma-operator) before extracting the error.  See
-                 * the baseline macro in cc_result.cch for the rationale; the
-                 * enumerated arms here must use the *same* shape so the
-                 * record() call fires for Result-struct LHSs too, not just
-                 * the raw-pointer default. */
-                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
-                    "#undef __cc_uw_err_at\n#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n");
-                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
-                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
-                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
-                    if (!spec) continue;
                     char line[320];
-                    cc_emit_plan_format_result_arm(line, sizeof(line), spec->concrete_name,
-                                                   CC_RESULT_ARM_ERR, 0, /*with_diag=*/1);
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
+                    if (!spec || strcmp(spec->ok_type, "void") == 0) continue;
+                    snprintf(line, sizeof(line), " \\\n    X(%s, __VA_ARGS__)", spec->concrete_name);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "\n#undef __CC_UW_RESULT_TYPES_VOIDOK\n"
+                    "#define __CC_UW_RESULT_TYPES_VOIDOK(X, ...)");
+                for (size_t ri = 0; ri < cc__cg_result_specs.count; ri++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    char line[320];
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
+                    if (!spec || strcmp(spec->ok_type, "void") != 0) continue;
+                    snprintf(line, sizeof(line), " \\\n    X(%s, __VA_ARGS__)", spec->concrete_name);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "\n"
+                    "#undef __cc_uw_arm_is_err\n"
+                    "#define __cc_uw_arm_is_err(T, x) T: (!((T*)(void*)&(x))->ok),\n"
+                    "#undef __cc_uw_arm_value\n"
+                    "#define __cc_uw_arm_value(T, x) T: ((T*)(void*)&(x))->u.value,\n"
+                    "#undef __cc_uw_arm_value_voidok\n"
+                    "#define __cc_uw_arm_value_voidok(T, x) T: ((void)0),\n"
+                    "#undef __cc_uw_arm_err_at\n"
+                    "#define __cc_uw_arm_err_at(T, x, f, l) T: (cc_rt_diag_record_unwrap_site(f, l), ((T*)(void*)&(x))->u.error),\n"
+                    "#undef __cc_uw_is_err\n"
+                    "#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n"
+                    "    __CC_UW_RESULT_TYPES(__cc_uw_arm_is_err, __x__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_is_err, __x__) \\\n"
+                    "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n"
+                    "#undef __cc_uw_value\n"
+                    "#define __cc_uw_value(__x__) _Generic((__x__), \\\n"
+                    "    __CC_UW_RESULT_TYPES(__cc_uw_arm_value, __x__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_value_voidok, __x__) \\\n"
+                    "    default: (__x__))\n"
+                    "#undef __cc_uw_err_at\n"
+                    "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n"
+                    "    __CC_UW_RESULT_TYPES(__cc_uw_arm_err_at, __x__, __f__, __l__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_err_at, __x__, __f__, __l__) \\\n"
                     "    default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))\n");
 
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
@@ -5271,6 +5411,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             goto fail;
         }
 
+        /* Final cosmetics — host-compiler buffer only: collapse the doubled
+         * `__typeof__(EXPR) tmp = (EXPR)` spelling (line-count preserving),
+         * then drop `#line` ping-pong pairs (removes lines). */
+        cc__collapse_typeof_dup_decls(src_ufcs, &src_ufcs_len);
+        cc__coalesce_adjacent_line_directives(src_ufcs, &src_ufcs_len);
+
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 
@@ -5278,6 +5424,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             /* Re-lower once more: the merge path above may be skipped
              * (no-merge TUs) and spawn closures can carry @defer. */
             cc__relower_closure_defs(ctx, &closure_defs, &closure_defs_len);
+            cc__collapse_typeof_dup_decls(closure_defs, &closure_defs_len);
 
             /* Emit closure declarations/definitions at end-of-file so all user
                types are already in scope and exact signatures are valid. */
