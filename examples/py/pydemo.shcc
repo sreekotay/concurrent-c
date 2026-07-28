@@ -17,8 +17,7 @@ cc_println(@string(`math.pow(2,10) = ${pv}`, &a)) !>;
 
 CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
-CCPyObj lst = py.list_f64(xs) !> @destroy;
-CCPyObj mean = stats.mean(lst) !> @destroy;
+CCPyObj mean = stats.mean(xs) !> @destroy;
 double mv = mean.as_f64() !>;
 cc_println(@string(`statistics.mean = ${mv}`, &a)) !>;
 

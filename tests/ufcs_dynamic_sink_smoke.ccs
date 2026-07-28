@@ -1,6 +1,8 @@
 /* Dynamic UFCS sink (.ufcs_dynamic): unresolved methods on a registered
  * type lower to `sink(&recv, "method", N, WRAP(a), ...)`; real methods
- * (visible callees) keep conventional dispatch and win over the sink. */
+ * (visible callees) keep conventional dispatch and win over the sink.
+ * Args whose declared type is a typed slice instance (`double[:]`)
+ * lower through the registration's third macro: SLICE_WRAP(elem, arg). */
 #include <ccc/cc_runtime.cch>
 #include <assert.h>
 #include <stdarg.h>
@@ -11,12 +13,18 @@ typedef struct TestSink {
     int last_argc;
     double f_sum;
     long long i_sum;
+    size_t slice_n;
+    double slice_sum;
 } TestSink;
 
 typedef struct TSArg {
-    int kind; /* 0=i 1=f */
+    int kind; /* 0=i 1=f 2=typed slice */
     long long i;
     double f;
+    const void *p;
+    size_t n;
+    int esz;
+    int isf;
 } TSArg;
 
 static TSArg ts_arg_i(long long v) {
@@ -30,9 +38,20 @@ static TSArg ts_arg_f(double v) {
     a.f = v;
     return a;
 }
+static TSArg ts_arg_slice(CCSlice s, int esz, int isf) {
+    TSArg a = {0};
+    a.kind = 2;
+    a.p = s.ptr;
+    a.n = s.len;
+    a.esz = esz;
+    a.isf = isf;
+    return a;
+}
 
 #define TS_ARG(x) _Generic((x), double: ts_arg_f, float: ts_arg_f, \
                            default: ts_arg_i)(x)
+#define TS_ARG_SLICE(T, s) \
+    ts_arg_slice((s), (int)sizeof(T), _Generic((T)0, double: 1, float: 1, default: 0))
 
 static int test_sink_dyn(TestSink *t, const char *method, int argc, ...) {
     va_list ap;
@@ -40,10 +59,21 @@ static int test_sink_dyn(TestSink *t, const char *method, int argc, ...) {
     t->last_argc = argc;
     t->f_sum = 0;
     t->i_sum = 0;
+    t->slice_n = 0;
+    t->slice_sum = 0;
     va_start(ap, argc);
     for (i = 0; i < argc; i++) {
         TSArg a = va_arg(ap, TSArg);
         if (a.kind == 1) t->f_sum += a.f;
+        else if (a.kind == 2) {
+            size_t k;
+            t->slice_n = a.n;
+            for (k = 0; k < a.n; k++) {
+                const unsigned char *e = (const unsigned char *)a.p + k * (size_t)a.esz;
+                if (a.isf && a.esz == 8) t->slice_sum += *(const double *)e;
+                else if (!a.isf && a.esz == 4) t->slice_sum += *(const int *)e;
+            }
+        }
         else t->i_sum += a.i;
     }
     va_end(ap);
@@ -59,7 +89,8 @@ static int test_sink_real(TestSink *t) {
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("TestSink", (CCTypeHooks){
-        .ufcs_dynamic = cc_type_dynamic_call("test_sink_dyn", "TS_ARG"),
+        .ufcs_dynamic = cc_type_dynamic_call_typed("test_sink_dyn", "TS_ARG",
+                                                   "TS_ARG_SLICE"),
     });
 }
 #endif
@@ -80,6 +111,25 @@ int main(void) {
     /* Pointer receiver, zero args, unknown name returns sink's answer. */
     assert(p->bar() == -1);
     assert(w.last_argc == 0);
+
+    /* Typed slice arg: declared `double[:]`, wrapped elem-aware. */
+    {
+        double xs[:] = {1.5, 2.5};
+        assert(w.listy(xs) == -1);
+        assert(w.last_argc == 1);
+        assert(w.slice_n == 2);
+        assert(w.slice_sum == 4.0);
+    }
+
+    /* Typed slice mixes with scalar args; int elems marshal too. */
+    {
+        int ys[:] = {10, 20, 30};
+        assert(w.mixed(7, ys) == -1);
+        assert(w.last_argc == 2);
+        assert(w.i_sum == 7);
+        assert(w.slice_n == 3);
+        assert(w.slice_sum == 60.0);
+    }
 
     printf("ok\n");
     return 0;

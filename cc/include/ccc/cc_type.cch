@@ -297,6 +297,10 @@ typedef struct {
 typedef struct {
     const char* callee;
     const char* arg_wrap;
+    /* Optional wrapper macro for typed-slice args: invoked as
+     * slice_wrap(elem_type, expr) when an argument's declared type is a
+     * typed slice instance (`double[:]` -> CCSlice__double). */
+    const char* slice_wrap;
 } CCTypeDynamicHook;
 
 typedef struct {
@@ -331,6 +335,16 @@ static inline CCTypeDynamicHook cc_type_dynamic_call(const char* callee,
     CCTypeDynamicHook hook = {0};
     hook.callee = callee;
     hook.arg_wrap = arg_wrap;
+    return hook;
+}
+
+static inline CCTypeDynamicHook cc_type_dynamic_call_typed(const char* callee,
+                                                           const char* arg_wrap,
+                                                           const char* slice_wrap) {
+    CCTypeDynamicHook hook = {0};
+    hook.callee = callee;
+    hook.arg_wrap = arg_wrap;
+    hook.slice_wrap = slice_wrap;
     return hook;
 }
 

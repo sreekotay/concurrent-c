@@ -63,6 +63,64 @@ typedef struct {
 typedef CCSlice CCSliceUnique;
 typedef CCSlice CCSliceShared;
 
+/* Typed slice instances: `T[:]` with a non-char scalar element type
+ * lowers to `CCSlice__<T>` — a typed *name* over the erased CCSlice
+ * core, the same move as generic instantiation. The name carries the
+ * element type at compile time (marshaling, future element-wise
+ * methods); at runtime every instance IS CCSlice: same ABI, same
+ * fields, assignable anywhere a CCSlice goes. Erasure happens exactly
+ * where the spelling erases it. char slices stay bare CCSlice.
+ *
+ * Parser mode uses #defines: extra typedefs of the CCSlice struct
+ * would make tcc's typedef-name lookup (receiver typing, string
+ * literal tolerance at slice params) report an arbitrary member of
+ * the family for plain CCSlice values. */
+#ifdef CC_PARSER_MODE
+#define CCSlice__short CCSlice
+#define CCSlice__int CCSlice
+#define CCSlice__long CCSlice
+#define CCSlice__long_long CCSlice
+#define CCSlice__unsigned CCSlice
+#define CCSlice__unsigned_short CCSlice
+#define CCSlice__unsigned_int CCSlice
+#define CCSlice__unsigned_long CCSlice
+#define CCSlice__unsigned_long_long CCSlice
+#define CCSlice__float CCSlice
+#define CCSlice__double CCSlice
+#define CCSlice__int8_t CCSlice
+#define CCSlice__int16_t CCSlice
+#define CCSlice__int32_t CCSlice
+#define CCSlice__int64_t CCSlice
+#define CCSlice__uint8_t CCSlice
+#define CCSlice__uint16_t CCSlice
+#define CCSlice__uint32_t CCSlice
+#define CCSlice__uint64_t CCSlice
+#define CCSlice__size_t CCSlice
+#define CCSlice__bool CCSlice
+#else
+typedef CCSlice CCSlice__short;
+typedef CCSlice CCSlice__int;
+typedef CCSlice CCSlice__long;
+typedef CCSlice CCSlice__long_long;
+typedef CCSlice CCSlice__unsigned;
+typedef CCSlice CCSlice__unsigned_short;
+typedef CCSlice CCSlice__unsigned_int;
+typedef CCSlice CCSlice__unsigned_long;
+typedef CCSlice CCSlice__unsigned_long_long;
+typedef CCSlice CCSlice__float;
+typedef CCSlice CCSlice__double;
+typedef CCSlice CCSlice__int8_t;
+typedef CCSlice CCSlice__int16_t;
+typedef CCSlice CCSlice__int32_t;
+typedef CCSlice CCSlice__int64_t;
+typedef CCSlice CCSlice__uint8_t;
+typedef CCSlice CCSlice__uint16_t;
+typedef CCSlice CCSlice__uint32_t;
+typedef CCSlice CCSlice__uint64_t;
+typedef CCSlice CCSlice__size_t;
+typedef CCSlice CCSlice__bool;
+#endif
+
 /* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
  * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
 typedef struct {

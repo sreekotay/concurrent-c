@@ -400,7 +400,7 @@ int ! IoError read_int (char [ : ] data) {
 }
 ```
 
-**Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike. Two initializer forms lower specially:
+**Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike. A non-char scalar element type gives the slice a typed instance name: `double[:]` lowers to `CCSlice__double`, a typedef of `CCSlice`. The name carries the element type at compile time (dynamic-sink marshaling dispatches on it); at runtime every instance is `CCSlice` — same ABI, same fields, assignable anywhere a `CCSlice` goes. Erasure happens exactly where the spelling erases it: assigning into a `CCSlice`-typed variable, field, or parameter drops the element type, visibly. Two initializer forms lower specially:
 
 - `char s[:] = "lit";` — the slice views the static string literal; `len` excludes the terminating NUL.
 - `T xs[:] = {a, b, c};` — the elements materialize in a hidden block-scope backing array; the slice is an untracked view with `len` = element count. The view shares the enclosing block's lifetime, like the C array it replaces.

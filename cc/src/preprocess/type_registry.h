@@ -65,11 +65,29 @@ int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name);
  * unresolved methods lower through a registered sink callee. Session-global
  * (survives registry rebuilds across pipeline stages). */
 int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
-                                      const char* callee, const char* wrap);
+                                      const char* callee, const char* wrap,
+                                      const char* slice_wrap);
 int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
                                       const char** out_callee,
                                       const char** out_wrap);
+/* Typed-slice arg wrapper macro for a sink type (third arg of
+ * cc_type_dynamic_call_typed), or NULL when not registered. */
+const char* cc_type_registry_get_dynamic_sink_slice_wrap(CCTypeRegistry* reg,
+                                                         const char* type_name);
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name);
+/* Typed slice instances (`double[:]` -> `CCSlice__double`): map a
+ * single-space-normalized scalar element spelling to its instance type
+ * name, and back. Spelling->instance returns 1 on whitelist hit;
+ * instance->spelling returns NULL for non-instance type names. */
+int cc_slice_instance_for_spelling(const char* spelling, char* out, size_t out_sz);
+const char* cc_slice_elem_spelling_for_instance(const char* type_name);
+/* Raw declared type spelling of `ident` at `use_offset` (no family
+ * normalization, no alias following); typed slice instance names
+ * survive. NULL when unknown. */
+const char* cc_type_registry_scoped_decl_type(CCTypeRegistry* reg,
+                                              const char* src, size_t limit,
+                                              const char* ident,
+                                              char* out, size_t out_sz);
 /* Unique `@as` field of `outer` whose field type matches `want_type`
  * (cv/`struct ` stripped; pointer stars on want_type ignored).
  * Direct embeds only. Returns 0 and sets *out_field_name; -1 none; -2 ambiguous. */

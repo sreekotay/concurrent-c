@@ -148,6 +148,9 @@ static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
         pos = hit + strlen(recv);
     }
     if (!recv_type[0]) return 0;
+    if (getenv("CC_DEBUG_RU_UFCS"))
+        fprintf(stderr, "ru_ufcs_callee: recv='%s' type='%s' method='%s'\n",
+                recv, recv_type, method);
     if (!cc_ufcs_compose_default_callee(out, out_sz, recv_type, method)) return 0;
     return 1;
 }

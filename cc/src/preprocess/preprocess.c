@@ -3409,6 +3409,8 @@ static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
     if (decl_count == 0) return NULL;
     strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
+    if (getenv("CC_DEBUG_SCOPED_VAR"))
+        fprintf(stderr, "scoped_var: '%s' -> '%s' (n=%d)\n", var_name, out_type, decl_count);
     return out_type;
 }
 
@@ -4276,6 +4278,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 int has_sink =
                     reg && cc_type_registry_get_dynamic_sink(
                                reg, recv_type_base, &sink_callee, &sink_wrap) == 0;
+                const char* sink_slice_wrap = has_sink
+                    ? cc_type_registry_get_dynamic_sink_slice_wrap(reg, recv_type_base)
+                    : NULL;
                 int composed =
                     !cc__lookup_ufcs_field_type(fields, field_count,
                                                 recv_type_base, method_name) &&
@@ -4347,9 +4352,44 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                 if (q > s0) {
                                     if (pass == 0) argc++;
                                     else {
+                                        /* Bare-identifier arg declared as a typed
+                                         * slice instance -> typed slice wrap:
+                                         * slice_wrap(elem, arg). */
+                                        const char* elem = NULL;
+                                        size_t a = s0, b = q;
+                                        while (a < b && (src[a] == ' ' || src[a] == '\t' ||
+                                                         src[a] == '\n' || src[a] == '\r')) a++;
+                                        while (b > a && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                                                         src[b - 1] == '\n' || src[b - 1] == '\r')) b--;
+                                        if (sink_slice_wrap && b > a && b - a < 128 &&
+                                            cc_is_ident_start(src[a])) {
+                                            size_t w = a + 1;
+                                            while (w < b && cc_is_ident_char(src[w])) w++;
+                                            if (w == b) {
+                                                char aident[128];
+                                                char aty[256];
+                                                const char* rawty;
+                                                memcpy(aident, src + a, b - a);
+                                                aident[b - a] = '\0';
+                                                /* Raw decl spelling: alias-following
+                                                 * resolvers erase the instance name. */
+                                                rawty = cc_type_registry_scoped_decl_type(
+                                                    reg, src, sep_pos, aident,
+                                                    aty, sizeof(aty));
+                                                if (rawty)
+                                                    elem = cc_slice_elem_spelling_for_instance(rawty);
+                                            }
+                                        }
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, sink_wrap);
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                        if (elem) {
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, sink_slice_wrap);
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, elem);
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                                        } else {
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, sink_wrap);
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                        }
                                         cc_sb_append(&out, &out_len, &out_cap, src + s0, q - s0);
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                                     }
@@ -6201,6 +6241,35 @@ static int cc__slice_declarator_name(const char* s, size_t type_start, size_t lb
     return 1;
 }
 
+/* Instance type name for a slice element span: `double` -> CCSlice__double.
+ * Whitelisted non-char scalars only; returns 0 to use bare CCSlice. Also
+ * registers the instance->CCSlice typedef alias so UFCS receiver typing
+ * erases the instance name back to the CCSlice family. */
+static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t elem_e,
+                                       char* out, size_t out_sz) {
+    char norm[128];
+    size_t nn = 0;
+    size_t p = elem_s;
+    while (elem_e > elem_s && (src[elem_e - 1] == ' ' || src[elem_e - 1] == '\t' ||
+                               src[elem_e - 1] == '\n' || src[elem_e - 1] == '\r'))
+        elem_e--;
+    while (p < elem_e) {
+        p = cc_skip_ws_and_comments(src, elem_e, p);
+        if (p >= elem_e) break;
+        if (!cc_is_ident_start(src[p])) return 0;
+        if (nn > 0 && nn + 1 < sizeof(norm)) norm[nn++] = ' ';
+        while (p < elem_e && cc_is_ident_char(src[p])) {
+            if (nn + 1 >= sizeof(norm)) return 0;
+            norm[nn++] = src[p++];
+        }
+    }
+    norm[nn] = '\0';
+    if (nn == 0) return 0;
+    if (!cc_slice_instance_for_spelling(norm, out, out_sz)) return 0;
+    (void)cc_type_registry_add_alias(cc_type_registry_get_global(), out, "CCSlice");
+    return 1;
+}
+
 /* Lower a slice declaration initializer:
  *   `= "lit"` -> `= const_char_to_slice("lit")`      (char element type)
  *   `= {...}` -> hidden block-scope backing array + view:
@@ -6228,6 +6297,8 @@ static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_
         elem_e--;
     if (src[p] == '{') {
         size_t rb, semi, body;
+        char inst[96];
+        const char* slice_ty;
         if (!cc_find_matching_brace(src, n, p, &rb)) return 0;
         semi = cc_skip_ws_and_comments(src, n, rb + 1);
         if (semi >= n || src[semi] != ';') return 0; /* multi-declarator etc. */
@@ -6239,8 +6310,11 @@ static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_
             size_t z = cc_skip_ws_and_comments(src, rb, body + 1);
             if (z >= rb) return 0;
         }
+        slice_ty = cc__slice_instance_for_elem(src, elem_s, elem_e, inst, sizeof(inst))
+                       ? inst : "CCSlice";
         if (body >= rb) {
-            cc_sb_append_cstr(out, out_len, out_cap, "CCSlice ");
+            cc_sb_append_cstr(out, out_len, out_cap, slice_ty);
+            cc_sb_append_cstr(out, out_len, out_cap, " ");
             cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
             cc_sb_append_cstr(out, out_len, out_cap, " = cc_slice_empty()");
             return rb + 1;
@@ -6251,7 +6325,9 @@ static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_
         cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
         cc_sb_append_cstr(out, out_len, out_cap, "[] = ");
         cc_sb_append(out, out_len, out_cap, src + p, rb + 1 - p);
-        cc_sb_append_cstr(out, out_len, out_cap, "; CCSlice ");
+        cc_sb_append_cstr(out, out_len, out_cap, "; ");
+        cc_sb_append_cstr(out, out_len, out_cap, slice_ty);
+        cc_sb_append_cstr(out, out_len, out_cap, " ");
         cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
         cc_sb_append_cstr(out, out_len, out_cap, " = cc_slice_from_buffer((void*)__cc_slb_");
         cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
@@ -6375,17 +6451,25 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                     if (decl_form) {
                         /* `T name[:] ...` — C declarator position. */
                         size_t resume = 0;
+                        char inst[96];
                         if (!is_unique)
                             resume = cc__slice_emit_decl_init(&out, &out_len, &out_cap, src, n,
                                                               type_start, name_s,
                                                               name_s, name_e, k + 1);
                         if (resume) { last_emit = resume; i = resume; continue; }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap,
-                                          is_unique ? "CCSliceUnique " : "CCSlice ");
+                        if (is_unique)
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCSliceUnique ");
+                        else if (cc__slice_instance_for_elem(src, type_start, name_s,
+                                                             inst, sizeof(inst))) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, inst);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                        } else
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCSlice ");
                         cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                         last_emit = k + 1; /* skip past ']' */
                     } else {
                         size_t resume = 0;
+                        char inst[96];
                         if (!is_unique) {
                             /* `T[:] name = "lit"` / `= {...}` — initializer lowering. */
                             size_t ns = cc_skip_ws_and_comments(src, n, k + 1);
@@ -6397,7 +6481,13 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                             }
                         }
                         if (resume) { last_emit = resume; i = resume; continue; }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
+                        if (is_unique)
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCSliceUnique");
+                        else if (cc__slice_instance_for_elem(src, type_start, i,
+                                                             inst, sizeof(inst)))
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, inst);
+                        else
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCSlice");
                         last_emit = k + 1; /* skip past ']' */
                     }
                 }

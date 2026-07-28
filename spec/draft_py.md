@@ -45,8 +45,12 @@ live is safe; `fork` without `exec` is not supported.
 `CCPyObj` is opaque. `.get(name)` reads an attribute; `.call(name, args…)`
 calls a method; both return `CCPyObj !>(CCPyError)`. Arguments marshal by
 type: `int` / `int64_t` → Python `int`, `double` → `float`, `bool` →
-`bool`, `CCSlice` / `char[:0]` → `str`, `CCPyObj` → itself (same home
-required, §7). No other type marshals; there is no deep conversion.
+`bool`, `CCSlice` / `char[:0]` → `str`, a typed slice (`double[:]`,
+`int[:]`, …) → `list` of its scalar element type, `CCPyObj` → itself
+(same home required, §7). No other type marshals; there is no deep
+conversion. The typed-slice element type is compile-time knowledge: it
+rides the declaration's instance name, so a slice that has been erased
+to plain `CCSlice` marshals as `str`, not `list`.
 
 Extraction is explicit: `.as_i64() !>`, `.as_f64() !>`, `.as_bool() !>`,
 `.as_slice(&arena) !>` (`str`/`bytes` copied into the arena). Anything

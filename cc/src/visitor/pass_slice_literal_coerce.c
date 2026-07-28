@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
 
@@ -83,6 +84,11 @@ static int cc__slc_type_is_slice_value(const char* ty) {
         p += 13;
     } else if (strncmp(p, "CCSliceUnique", 13) == 0) {
         p += 13;
+    } else if (strncmp(p, "CCSlice__", 9) == 0 &&
+               cc_slice_elem_spelling_for_instance(p)) {
+        /* Typed slice instance name — tcc's typedef-name lookup may report
+         * any of the family's names for a plain CCSlice param. */
+        while (*p && *p != ' ' && *p != '*') p++;
     } else if (strncmp(p, "CCSlice", 7) == 0) {
         p += 7;
     } else if (strncmp(p, "char[:0]", 8) == 0) {

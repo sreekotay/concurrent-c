@@ -124,6 +124,14 @@ static const char* cc__ufcs_canonicalize_type_alias(const char* type_name) {
     if (strcmp(type_name, "CCVec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
         return "CCString*";
     }
+    /* Typed slice instances are typedefs of CCSlice; tcc's typedef-name
+     * lookup can report any of the family's names for a plain CCSlice
+     * receiver (they share one struct type). Family dispatch always wants
+     * the erased core. */
+    if (cc_slice_elem_spelling_for_instance(type_name)) {
+        size_t n = strlen(type_name);
+        return (n > 0 && type_name[n - 1] == '*') ? "CCSlice*" : "CCSlice";
+    }
     return type_name;
 }
 
@@ -1904,8 +1912,35 @@ static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
                                            seg[seg_len - 1] == '\t'))
                         seg_len--;
                     if (seg_len > 0) {
-                        n = snprintf(argbuf + ao, sizeof(argbuf) - ao,
-                                     ", %s(%.*s)", wrap, (int)seg_len, seg);
+                        /* Bare-identifier arg declared as a typed slice
+                         * instance -> slice_wrap(elem, arg). */
+                        const char* elem = NULL;
+                        const char* slice_wrap =
+                            cc_type_registry_get_dynamic_sink_slice_wrap(
+                                cc_type_registry_get_global(), recv_type_base);
+                        if (slice_wrap && seg_len < 128 &&
+                            (isalpha((unsigned char)seg[0]) || seg[0] == '_')) {
+                            size_t w = 1;
+                            while (w < seg_len &&
+                                   (isalnum((unsigned char)seg[w]) || seg[w] == '_'))
+                                w++;
+                            if (w == seg_len) {
+                                char aident[128];
+                                const char* vty;
+                                memcpy(aident, seg, seg_len);
+                                aident[seg_len] = '\0';
+                                vty = cc_type_registry_lookup_var(
+                                    cc_type_registry_get_global(), aident);
+                                if (vty) elem = cc_slice_elem_spelling_for_instance(vty);
+                            }
+                        }
+                        if (elem)
+                            n = snprintf(argbuf + ao, sizeof(argbuf) - ao,
+                                         ", %s(%s, %.*s)", slice_wrap, elem,
+                                         (int)seg_len, seg);
+                        else
+                            n = snprintf(argbuf + ao, sizeof(argbuf) - ao,
+                                         ", %s(%.*s)", wrap, (int)seg_len, seg);
                         if (n < 0 || (size_t)n >= sizeof(argbuf) - ao) return -1;
                         ao += (size_t)n;
                         argc++;
