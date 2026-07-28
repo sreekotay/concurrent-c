@@ -257,6 +257,37 @@ static inline size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found) {
     if (found) *found = false; return 0;
 }
 
+/* UFCS: s.has(needle) — substring presence (wraps index_of).
+ * Pointer receiver matches other CCSlice method spellings (len/fprintln). */
+static inline bool cc_slice_has(CCSlice *s, CCSlice needle) {
+    bool found = false;
+    if (!s) return false;
+    (void)cc_slice_index_of(*s, needle, &found);
+    return found;
+}
+
+/* UFCS: s.has_ci(needle) — ASCII case-insensitive substring (grep -qi). */
+static inline bool cc_slice_has_ci(CCSlice *s, CCSlice needle) {
+    size_t i, j;
+    const unsigned char *hay;
+    const unsigned char *nd;
+    if (!s || !s->ptr) return false;
+    if (needle.len == 0) return true;
+    if (needle.len > s->len || !needle.ptr) return false;
+    hay = (const unsigned char *)s->ptr;
+    nd = (const unsigned char *)needle.ptr;
+    for (i = 0; i + needle.len <= s->len; i++) {
+        for (j = 0; j < needle.len; j++) {
+            unsigned char a = hay[i + j], b = nd[j];
+            if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (j == needle.len) return true;
+    }
+    return false;
+}
+
 static inline size_t cc_slice_last_index_of(CCSlice s, CCSlice needle, bool *found) {
     if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
     const uint8_t *hay = (const uint8_t *)s.ptr;

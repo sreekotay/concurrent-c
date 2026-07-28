@@ -191,7 +191,16 @@ typedef struct CCProcessOutput {
     CCProcessStatus status; /* Exit status */
 } CCProcessOutput;
 
-/* UFCS accessors for CCProcessOutput: out.stdout_str(), out.stderr_str(), out.exit_code() */
+/* UFCS accessors: out.stdout() / out.stderr() (slices; after cmd.capture(),
+ * stderr is merged into stdout), out.exit_code(), … */
+static inline CCSlice cc_process_output_stdout(const CCProcessOutput* o) {
+    return o ? o->stdout_data : cc_slice_empty();
+}
+
+static inline CCSlice cc_process_output_stderr(const CCProcessOutput* o) {
+    return o ? o->stderr_data : cc_slice_empty();
+}
+
 static inline const char* cc_process_output_stdout_str(const CCProcessOutput* o) {
     return o ? (const char*)o->stdout_data.ptr : NULL;
 }

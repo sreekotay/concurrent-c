@@ -89,6 +89,15 @@ CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *ar
 CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
 CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
 
+/* Script/oracle default: merge stderr into stdout, then capture.
+ * Prefer this over stderr_to_stdout() + output() for inspect-the-text runs.
+ * Exit status stays on the returned CCProcessOutput (not folded into Err). */
+static inline CCResult_CCProcessOutput_CCIoError
+cc_command_capture(CCCommand *cmd, CCArena *arena) {
+    (void)cc_command_stderr_to_stdout(cmd);
+    return cc_command_output(cmd, arena);
+}
+
 /* CCCommand UFCS uses the shared generic snake_case helper:
    smart-lowering CCCommand -> cc_command_*, matching the existing C API. */
 
