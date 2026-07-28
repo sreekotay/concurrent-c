@@ -38,7 +38,7 @@ static TSArg ts_arg_f(double v) {
     a.f = v;
     return a;
 }
-static TSArg ts_arg_slice(CCSlice s, int esz, int isf) {
+static TSArg ts_arg_slice(CCSlice s, int esz, int isf) /* elem-count len */ {
     TSArg a = {0};
     a.kind = 2;
     a.p = s.ptr;
@@ -48,10 +48,12 @@ static TSArg ts_arg_slice(CCSlice s, int esz, int isf) {
     return a;
 }
 
+static TSArg ts_arg_ds(CCSlice_double s) { return ts_arg_slice(s.base, (int)sizeof(double), 1); }
+static TSArg ts_arg_is(CCSlice_int s) { return ts_arg_slice(s.base, (int)sizeof(int), 0); }
+
 #define TS_ARG(x) _Generic((x), double: ts_arg_f, float: ts_arg_f, \
+                           CCSlice_double: ts_arg_ds, CCSlice_int: ts_arg_is, \
                            default: ts_arg_i)(x)
-#define TS_ARG_SLICE(T, s) \
-    ts_arg_slice((s), (int)sizeof(T), _Generic((T)0, double: 1, float: 1, default: 0))
 
 static int test_sink_dyn(TestSink *t, const char *method, int argc, ...) {
     va_list ap;
@@ -89,8 +91,7 @@ static int test_sink_real(TestSink *t) {
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("TestSink", (CCTypeHooks){
-        .ufcs_dynamic = cc_type_dynamic_call_typed("test_sink_dyn", "TS_ARG",
-                                                   "TS_ARG_SLICE"),
+        .ufcs_dynamic = cc_type_dynamic_call("test_sink_dyn", "TS_ARG"),
     });
 }
 #endif
@@ -112,7 +113,8 @@ int main(void) {
     assert(p->bar() == -1);
     assert(w.last_argc == 0);
 
-    /* Typed slice arg: declared `double[:]`, wrapped elem-aware. */
+    /* Typed slice arg: `double[:]` is CCSlice_double; the wrap macro's
+     * _Generic dispatches on the instance type — any expression works. */
     {
         double xs[:] = {1.5, 2.5};
         assert(w.listy(xs) == -1);

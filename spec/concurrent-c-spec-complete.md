@@ -400,7 +400,11 @@ int ! IoError read_int (char [ : ] data) {
 }
 ```
 
-**Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike. A non-char scalar element type gives the slice a typed instance name: `double[:]` lowers to `CCSlice__double`, a typedef of `CCSlice`. The name carries the element type at compile time (dynamic-sink marshaling dispatches on it); at runtime every instance is `CCSlice` — same ABI, same fields, assignable anywhere a `CCSlice` goes. Erasure happens exactly where the spelling erases it: assigning into a `CCSlice`-typed variable, field, or parameter drops the element type, visibly. Two initializer forms lower specially:
+**Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike.
+
+**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, snake_prefix, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand. `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len`/`alen` scale by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type declares its own instance with one `CC_DECL_SLICE_SPEC` line after the element type's definition. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
+
+Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the `@as` retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
 - `char s[:] = "lit";` — the slice views the static string literal; `len` excludes the terminating NUL.
 - `T xs[:] = {a, b, c};` — the elements materialize in a hidden block-scope backing array; the slice is an untracked view with `len` = element count. The view shares the enclosing block's lifetime, like the C array it replaces.

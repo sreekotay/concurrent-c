@@ -333,10 +333,10 @@ static inline CCPyArg cc__py_arg_bool(int v) {
     return a;
 }
 
-/* Typed slice (`double[:]` etc.): marshals as a Python list of the
- * element type. len = element count. Emitted by the compiler as
- * CC_PY_ARG_SLICE(elem_type, arg) when the argument's declared type is
- * a typed slice instance. */
+/* Typed slices (`double[:]` -> CCSlice_double): marshal as a Python
+ * list of the element type. len = element count; the CC_PY_ARG
+ * _Generic dispatches on the instance struct, so any expression of a
+ * typed slice type marshals — not just declared locals. */
 static inline CCPyArg cc__py_arg_tslice(CCSlice s, int esz, int isf, int iss) {
     CCPyArg a = {0};
     a.kind = 6;
@@ -346,10 +346,22 @@ static inline CCPyArg cc__py_arg_tslice(CCSlice s, int esz, int isf, int iss) {
     return a;
 }
 
-#define CC_PY_ARG_SLICE(T, s)                                        \
-    cc__py_arg_tslice((s), (int)sizeof(T),                           \
-                      _Generic((T)0, float: 1, double: 1, default: 0), \
-                      (((T)-1) < ((T)1) ? 1 : 0))
+#define CC__PY_TSLICE_ARM(NAME, T)                                             \
+    static inline CCPyArg cc__py_arg_ts_##NAME(NAME s) {                       \
+        return cc__py_arg_tslice(s.base, (int)sizeof(T),                       \
+                                 _Generic((T)0, float: 1, double: 1, default: 0), \
+                                 (((T)-1) < ((T)1) ? 1 : 0));                  \
+    }
+CC__PY_TSLICE_ARM(CCSlice_short, short)
+CC__PY_TSLICE_ARM(CCSlice_int, int)
+CC__PY_TSLICE_ARM(CCSlice_long, long)
+CC__PY_TSLICE_ARM(CCSlice_long_long, long long)
+CC__PY_TSLICE_ARM(CCSlice_int16_t, int16_t)
+CC__PY_TSLICE_ARM(CCSlice_int32_t, int32_t)
+CC__PY_TSLICE_ARM(CCSlice_int64_t, int64_t)
+CC__PY_TSLICE_ARM(CCSlice_float, float)
+CC__PY_TSLICE_ARM(CCSlice_double, double)
+#undef CC__PY_TSLICE_ARM
 
 #define CC_PY_ARG(x)                                        \
     _Generic((x),                                           \
@@ -364,6 +376,15 @@ static inline CCPyArg cc__py_arg_tslice(CCSlice s, int esz, int isf, int iss) {
         char *: cc__py_arg_cstr,                            \
         const char *: cc__py_arg_cstr,                      \
         CCSlice: cc__py_arg_slice,                          \
+        CCSlice_short: cc__py_arg_ts_CCSlice_short,         \
+        CCSlice_int: cc__py_arg_ts_CCSlice_int,             \
+        CCSlice_long: cc__py_arg_ts_CCSlice_long,           \
+        CCSlice_long_long: cc__py_arg_ts_CCSlice_long_long, \
+        CCSlice_int16_t: cc__py_arg_ts_CCSlice_int16_t,     \
+        CCSlice_int32_t: cc__py_arg_ts_CCSlice_int32_t,     \
+        CCSlice_int64_t: cc__py_arg_ts_CCSlice_int64_t,     \
+        CCSlice_float: cc__py_arg_ts_CCSlice_float,         \
+        CCSlice_double: cc__py_arg_ts_CCSlice_double,       \
         CCPyObj: cc__py_arg_obj,                            \
         _Bool: cc__py_arg_bool)(x)
 
@@ -541,8 +562,7 @@ static inline CCResult_CCSlice_CCPyError cc_py_obj_as_slice(CCPyObj *obj,
     });
     (void)cc_type_register("CCPyObj", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_py_obj_release"),
-        .ufcs_dynamic = cc_type_dynamic_call_typed("cc_py_obj_callm", "CC_PY_ARG",
-                                                  "CC_PY_ARG_SLICE"),
+        .ufcs_dynamic = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
     });
 }
 #endif

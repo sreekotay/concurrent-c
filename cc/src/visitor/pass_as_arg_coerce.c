@@ -562,9 +562,19 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                 if (param_stars[ai] == 0) {
                     /* By-value param: `xs` (Outer value) → `xs.base`.
                      * `&xs` / pointer outers stay as-written — the type
-                     * error they produce is the honest one. */
+                     * error they produce is the honest one. Typed slice
+                     * instances erase SCALED: the byte world must receive
+                     * byte-measured len/alen, and the template's bytes()
+                     * knows sizeof(T). */
+                    const char* ts_snake = NULL;
                     if (has_amp || outer_is_ptr) continue;
-                    snprintf(repl, sizeof(repl), "%s.%s", ident, field_name);
+                    if (strcmp(bases[ai], "CCSlice") == 0 &&
+                        cc_slice_spec_lookup(outer_ty, &ts_snake, NULL) == 0 &&
+                        ts_snake) {
+                        snprintf(repl, sizeof(repl), "%s_bytes(&%s)", ts_snake, ident);
+                    } else {
+                        snprintf(repl, sizeof(repl), "%s.%s", ident, field_name);
+                    }
                 } else {
                     /* Value Outer must be addressed (`&w`); pointer Outer uses `p`. */
                     if (!has_amp && !outer_is_ptr) {

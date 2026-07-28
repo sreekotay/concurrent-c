@@ -680,40 +680,6 @@ static int cc__parse_helper_call_2(const char* src,
     return 1;
 }
 
-static int cc__parse_helper_call_3(const char* src,
-                                   size_t n,
-                                   size_t* io_pos,
-                                   const char* helper,
-                                   char* out_a,
-                                   size_t out_a_sz,
-                                   char* out_b,
-                                   size_t out_b_sz,
-                                   char* out_c,
-                                   size_t out_c_sz) {
-    size_t p = cc__skip_ws_reg(src, n, *io_pos);
-    size_t lpar = 0, rpar = 0;
-    if (!cc__match_kw_reg(src, n, p, helper)) return 0;
-    p += strlen(helper);
-    p = cc__skip_ws_reg(src, n, p);
-    if (p >= n || src[p] != '(') return 0;
-    lpar = p;
-    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
-    p = cc__skip_ws_reg(src, rpar, lpar + 1);
-    if (!cc__parse_string_literal_reg(src, rpar, &p, out_a, out_a_sz)) return 0;
-    p = cc__skip_ws_reg(src, rpar, p);
-    if (p >= rpar || src[p] != ',') return 0;
-    p = cc__skip_ws_reg(src, rpar, p + 1);
-    if (!cc__parse_string_literal_reg(src, rpar, &p, out_b, out_b_sz)) return 0;
-    p = cc__skip_ws_reg(src, rpar, p);
-    if (p >= rpar || src[p] != ',') return 0;
-    p = cc__skip_ws_reg(src, rpar, p + 1);
-    if (!cc__parse_string_literal_reg(src, rpar, &p, out_c, out_c_sz)) return 0;
-    p = cc__skip_ws_reg(src, rpar, p);
-    if (p != rpar) return 0;
-    *io_pos = rpar + 1;
-    return 1;
-}
-
 static int cc__parse_ident_call_1_reg(const char* src,
                                       size_t n,
                                       size_t* io_pos,
@@ -1041,17 +1007,11 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
         if (cc__match_kw_reg(src, obj_r, p, "ufcs_dynamic")) {
             char dyn_callee[256];
             char dyn_wrap[256];
-            char dyn_slice_wrap[256];
             p += strlen("ufcs_dynamic");
-            dyn_slice_wrap[0] = '\0';
             p = cc__skip_ws_reg(src, obj_r, p);
             if (p >= obj_r || src[p] != '=') return -1;
             p++;
-            if (!cc__parse_helper_call_3(src, obj_r, &p, "cc_type_dynamic_call_typed",
-                                         dyn_callee, sizeof(dyn_callee),
-                                         dyn_wrap, sizeof(dyn_wrap),
-                                         dyn_slice_wrap, sizeof(dyn_slice_wrap)) &&
-                !cc__parse_helper_call_2(src, obj_r, &p, "cc_type_dynamic_call",
+            if (!cc__parse_helper_call_2(src, obj_r, &p, "cc_type_dynamic_call",
                                          dyn_callee, sizeof(dyn_callee),
                                          dyn_wrap, sizeof(dyn_wrap))) {
                 fprintf(stderr,
@@ -1067,7 +1027,7 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
              * rewriting can emit sink calls before the comptime scan runs. */
             (void)cc_type_registry_set_dynamic_sink(cc_type_registry_get_global(),
                                                     type_name, dyn_callee,
-                                                    dyn_wrap, dyn_slice_wrap);
+                                                    dyn_wrap);
             continue;
         }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs")) {
