@@ -400,6 +400,13 @@ int ! IoError read_int (char [ : ] data) {
 }
 ```
 
+**Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike. Two initializer forms lower specially:
+
+- `char s[:] = "lit";` — the slice views the static string literal; `len` excludes the terminating NUL.
+- `T xs[:] = {a, b, c};` — the elements materialize in a hidden block-scope backing array; the slice is an untracked view with `len` = element count. The view shares the enclosing block's lifetime, like the C array it replaces.
+
+`{0}` and designated initializers (`{ .ptr = p, .len = n }`) remain ordinary C struct initialization of the slice header, not element lists.
+
 ---
 
 ## 2. Foundations

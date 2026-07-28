@@ -402,18 +402,18 @@ static inline CCResult_CCPyObj_CCPyError cc_py_obj_callm(CCPyObj *obj,
 
 /* ---- marshaling ---- */
 
-static inline CCResult_CCPyObj_CCPyError cc_py_list_f64(CCPy *py,
-                                                        const double *xs,
-                                                        size_t n) {
+/* `xs` is a slice of doubles: len = element count. */
+static inline CCResult_CCPyObj_CCPyError cc_py_list_f64(CCPy *py, CCSlice xs) {
+    const double *d = (const double *)xs.ptr;
     void *list;
     size_t i;
     if (!py || !py->ready)
         return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));
-    list = cc__py.ListNew((intptr_t)n);
+    list = cc__py.ListNew((intptr_t)xs.len);
     if (!list)
         return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));
-    for (i = 0; i < n; i++) {
-        void *f = cc__py.FloatFromDouble(xs[i]);
+    for (i = 0; i < xs.len; i++) {
+        void *f = cc__py.FloatFromDouble(d[i]);
         if (!f || cc__py.ListSetItem(list, (intptr_t)i, f) != 0) {
             cc__py.DecRef(list);
             return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));

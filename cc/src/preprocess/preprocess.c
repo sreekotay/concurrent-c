@@ -6135,10 +6135,180 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     return out;
 }
 
+static int cc__slice_tok_is(const char* s, size_t a, size_t b, const char* kw) {
+    size_t kn = strlen(kw);
+    return (b - a) == kn && memcmp(s + a, kw, kn) == 0;
+}
+
+/* Classify `[:...]` at `lb` as declarator-position (`T name[:]`) vs
+ * type-position (`T[:] name`). The span [type_start, lb) must be a pure
+ * decl prefix (identifiers and `*` only) with at least two tokens whose
+ * last token is a plain identifier — that identifier is the variable
+ * name and everything before it is the element type. Multi-word builtin
+ * types (`unsigned char[:]`) and tags (`struct Foo[:]`) stay
+ * type-position: their last token is a type keyword / tag name. */
+static int cc__slice_declarator_name(const char* s, size_t type_start, size_t lb,
+                                     size_t* out_ns, size_t* out_ne) {
+    size_t p = type_start;
+    size_t first_s = 0, first_e = 0;
+    size_t prev_s = 0, prev_e = 0;
+    size_t last_s = 0, last_e = 0;
+    int ntok = 0;
+    static const char* builtin_tail[] = {
+        "char", "short", "int", "long", "float", "double",
+        "signed", "unsigned", "bool", "void", "_Bool", NULL
+    };
+    while (p < lb) {
+        p = cc_skip_ws_and_comments(s, lb, p);
+        if (p >= lb) break;
+        if (s[p] == '*') {
+            prev_s = last_s; prev_e = last_e;
+            last_s = p; last_e = p + 1;
+            if (ntok == 0) { first_s = p; first_e = p + 1; }
+            ntok++;
+            p++;
+            continue;
+        }
+        if (cc_is_ident_start(s[p])) {
+            size_t e = p;
+            while (e < lb && cc_is_ident_char(s[e])) e++;
+            prev_s = last_s; prev_e = last_e;
+            last_s = p; last_e = e;
+            if (ntok == 0) { first_s = p; first_e = e; }
+            ntok++;
+            p = e;
+            continue;
+        }
+        return 0; /* expression or complex declarator — not our shape */
+    }
+    if (ntok < 2) return 0;
+    if (s[last_s] == '*') return 0;
+    for (int k = 0; builtin_tail[k]; k++)
+        if (cc__slice_tok_is(s, last_s, last_e, builtin_tail[k])) return 0;
+    if (prev_e > prev_s && s[prev_s] != '*' &&
+        (cc__slice_tok_is(s, prev_s, prev_e, "struct") ||
+         cc__slice_tok_is(s, prev_s, prev_e, "union") ||
+         cc__slice_tok_is(s, prev_s, prev_e, "enum")))
+        return 0;
+    /* `return x[a:b]`-style statements are not declarations. */
+    if (cc__slice_tok_is(s, first_s, first_e, "return") ||
+        cc__slice_tok_is(s, first_s, first_e, "sizeof") ||
+        cc__slice_tok_is(s, first_s, first_e, "case") ||
+        cc__slice_tok_is(s, first_s, first_e, "goto"))
+        return 0;
+    *out_ns = last_s;
+    *out_ne = last_e;
+    return 1;
+}
+
+/* Lower a slice declaration initializer:
+ *   `= "lit"` -> `= const_char_to_slice("lit")`      (char element type)
+ *   `= {...}` -> hidden block-scope backing array + view:
+ *                `T __cc_slb_N[] = {...}; CCSlice N =
+ *                 cc_slice_from_buffer(buf, element-count)`
+ *   `= {}`    -> `= cc_slice_empty()`
+ * `after` points just past the declarator (after `]` in declarator
+ * position, after the variable name in type position). On success emits
+ * the replacement from the element type onward (caller has emitted decl
+ * specs) and returns the resume offset — the terminating `;` stays in
+ * the source. Returns 0 for any other initializer shape. */
+static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_cap,
+                                       const char* src, size_t n,
+                                       size_t elem_s, size_t elem_e,
+                                       size_t name_s, size_t name_e,
+                                       size_t after) {
+    size_t eq = cc_skip_ws_and_comments(src, n, after);
+    size_t p;
+    if (eq >= n || src[eq] != '=') return 0;
+    if (eq + 1 < n && src[eq + 1] == '=') return 0;
+    p = cc_skip_ws_and_comments(src, n, eq + 1);
+    if (p >= n) return 0;
+    while (elem_e > elem_s && (src[elem_e - 1] == ' ' || src[elem_e - 1] == '\t' ||
+                               src[elem_e - 1] == '\n' || src[elem_e - 1] == '\r'))
+        elem_e--;
+    if (src[p] == '{') {
+        size_t rb, semi, body;
+        if (!cc_find_matching_brace(src, n, p, &rb)) return 0;
+        semi = cc_skip_ws_and_comments(src, n, rb + 1);
+        if (semi >= n || src[semi] != ';') return 0; /* multi-declarator etc. */
+        body = cc_skip_ws_and_comments(src, rb, p + 1);
+        /* `{ .ptr = ..., ... }` and the `{0}` zero-init idiom are struct
+         * initializers for the slice itself, not element lists. */
+        if (body < rb && src[body] == '.') return 0;
+        if (body < rb && src[body] == '0') {
+            size_t z = cc_skip_ws_and_comments(src, rb, body + 1);
+            if (z >= rb) return 0;
+        }
+        if (body >= rb) {
+            cc_sb_append_cstr(out, out_len, out_cap, "CCSlice ");
+            cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+            cc_sb_append_cstr(out, out_len, out_cap, " = cc_slice_empty()");
+            return rb + 1;
+        }
+        if (elem_e <= elem_s) return 0;
+        cc_sb_append(out, out_len, out_cap, src + elem_s, elem_e - elem_s);
+        cc_sb_append_cstr(out, out_len, out_cap, " __cc_slb_");
+        cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(out, out_len, out_cap, "[] = ");
+        cc_sb_append(out, out_len, out_cap, src + p, rb + 1 - p);
+        cc_sb_append_cstr(out, out_len, out_cap, "; CCSlice ");
+        cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(out, out_len, out_cap, " = cc_slice_from_buffer((void*)__cc_slb_");
+        cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(out, out_len, out_cap, ", sizeof(__cc_slb_");
+        cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(out, out_len, out_cap, ")/sizeof((__cc_slb_");
+        cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(out, out_len, out_cap, ")[0]))");
+        return rb + 1;
+    }
+    {
+        /* String literal (optionally u8/L/u/U prefixed); element type must
+         * be `char` (cv-qualified is fine). */
+        size_t e = p;
+        size_t q = elem_s;
+        int nchar = 0;
+        if (e + 1 < n && src[e] == 'u' && src[e + 1] == '8') e += 2;
+        else if (src[e] == 'L' || src[e] == 'u' || src[e] == 'U') e += 1;
+        if (e >= n || src[e] != '"') return 0;
+        while (q < elem_e) {
+            size_t qe;
+            q = cc_skip_ws_and_comments(src, elem_e, q);
+            if (q >= elem_e) break;
+            if (!cc_is_ident_start(src[q])) return 0;
+            qe = q;
+            while (qe < elem_e && cc_is_ident_char(src[qe])) qe++;
+            if (cc__slice_tok_is(src, q, qe, "char")) nchar++;
+            else if (!cc__slice_tok_is(src, q, qe, "const") &&
+                     !cc__slice_tok_is(src, q, qe, "volatile"))
+                return 0;
+            q = qe;
+        }
+        if (nchar != 1) return 0;
+        {
+            size_t end = cc__scan_to_top_level_delim(src, n, p, ';', ',');
+            size_t ie;
+            if (end >= n || src[end] != ';') return 0;
+            ie = end;
+            while (ie > p && (src[ie - 1] == ' ' || src[ie - 1] == '\t' ||
+                              src[ie - 1] == '\n' || src[ie - 1] == '\r'))
+                ie--;
+            cc_sb_append_cstr(out, out_len, out_cap, "CCSlice ");
+            cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
+            cc_sb_append_cstr(out, out_len, out_cap, " = const_char_to_slice(");
+            cc_sb_append(out, out_len, out_cap, src + p, ie - p);
+            cc_sb_append_cstr(out, out_len, out_cap, ")");
+            return end;
+        }
+    }
+}
+
 /* Rewrite slice types:
    - `T[:]`  -> `CCSlice`
    - `T[:!]` -> `CCSliceUnique`
-   Requires a closing ']' and a ':' after '['. */
+   Both type position (`T[:] name`) and declarator position (`T name[:]`)
+   are accepted. String-literal and braced initializers lower through
+   cc__slice_emit_decl_init. Requires a closing ']' and a ':' after '['. */
 static char* cc__rewrite_slice_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -6196,12 +6366,40 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                 if (ty_start < last_emit) { /* odd overlap */ }
                 else {
                     size_t type_start = cc__skip_leading_decl_specs(src, ty_start);
+                    size_t name_s = 0, name_e = 0;
+                    int decl_form = cc__slice_declarator_name(src, type_start, i, &name_s, &name_e);
                     /* Emit everything up to the slice element type, preserving
                        leading decl/function specifiers like `static inline`. */
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
                     cc_sb_append(&out, &out_len, &out_cap, src + ty_start, type_start - ty_start);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
-                    last_emit = k + 1; /* skip past ']' */
+                    if (decl_form) {
+                        /* `T name[:] ...` — C declarator position. */
+                        size_t resume = 0;
+                        if (!is_unique)
+                            resume = cc__slice_emit_decl_init(&out, &out_len, &out_cap, src, n,
+                                                              type_start, name_s,
+                                                              name_s, name_e, k + 1);
+                        if (resume) { last_emit = resume; i = resume; continue; }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                          is_unique ? "CCSliceUnique " : "CCSlice ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                        last_emit = k + 1; /* skip past ']' */
+                    } else {
+                        size_t resume = 0;
+                        if (!is_unique) {
+                            /* `T[:] name = "lit"` / `= {...}` — initializer lowering. */
+                            size_t ns = cc_skip_ws_and_comments(src, n, k + 1);
+                            if (ns < n && cc_is_ident_start(src[ns])) {
+                                size_t ne = ns;
+                                while (ne < n && cc_is_ident_char(src[ne])) ne++;
+                                resume = cc__slice_emit_decl_init(&out, &out_len, &out_cap, src, n,
+                                                                  type_start, i, ns, ne, ne);
+                            }
+                        }
+                        if (resume) { last_emit = resume; i = resume; continue; }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
+                        last_emit = k + 1; /* skip past ']' */
+                    }
                 }
 
                 /* advance scan to after ']' */
