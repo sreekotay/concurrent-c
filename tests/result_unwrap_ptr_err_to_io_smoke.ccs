@@ -55,7 +55,7 @@ int main(void) {
     g_captured_set = 0;
     int err = do_work(0);
     printf("err path: rc=%d captured=%d kind=%d\n",
-           err, g_captured_set, (int)g_captured.kind);
+           err, g_captured_set, (int)g_captured.base.kind);
 
     printf("ptr_err_to_io: OK\n");
     return 0;

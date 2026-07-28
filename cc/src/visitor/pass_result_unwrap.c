@@ -1232,8 +1232,8 @@ static void cc__pu_extract_param_name(const char* decl, size_t dl,
 }
 
 /* Find the in-scope `@errhandler` whose parameter type matches Result E
- * of the call at [call_a, call_b).  Brace-scoped; fail closed on miss.
- * Body aliases into `s`.  *out_have_handlers / *out_err_type aid diagnostics. */
+ * (exact, else unique `@as` path).  Brace-scoped; fail closed on miss.
+ * Body aliases into `s`.  *out_as_path empty on exact match. */
 static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
                                         size_t call_a, size_t call_b,
                                         char* out_decl, size_t out_decl_sz,
@@ -1242,12 +1242,45 @@ static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
                                         size_t* out_body_len,
                                         size_t* out_decl_pos,
                                         char* out_err_type, size_t out_err_type_sz,
+                                        char* out_as_path, size_t out_as_path_sz,
                                         int* out_have_handlers) {
     return cc_errhandler_find_for_call(s, n, pos, call_a, call_b,
                                        out_decl, out_decl_sz, out_decl_len,
                                        out_body, out_body_len, out_decl_pos,
                                        out_err_type, out_err_type_sz,
+                                       out_as_path, out_as_path_sz,
                                        out_have_handlers);
+}
+
+/* Emit binder typed as the handler param, projecting Result E through
+ * `@as` path when non-empty: `CCError b = (tmp).u.error.base;`. */
+static void cc__ru_emit_handler_err_binder(char** out, size_t* ol, size_t* oc,
+                                           const char* s, size_t n,
+                                           size_t call_a, size_t call_b,
+                                           const char* tmpv, const char* binder,
+                                           const char* handler_decl,
+                                           const char* as_path,
+                                           const char* file, int line) {
+    char param_type[128];
+    char param_name[64];
+    param_type[0] = 0;
+    param_name[0] = 0;
+    if (handler_decl && handler_decl[0] &&
+        cc_errhandler_split_param_decl(handler_decl,
+                                       param_type, sizeof(param_type),
+                                       param_name, sizeof(param_name)) &&
+        param_type[0] && as_path && as_path[0]) {
+        const char* f = file ? file : "<input>";
+        size_t fl = strlen(f);
+        cc__append_str(out, ol, oc, "cc_rt_diag_record_unwrap_site(");
+        cc_sb_append_c_string_literal(out, ol, oc, f, 0, fl);
+        cc_sb_append_fmt(out, ol, oc, ", \"%d\"); ", line);
+        cc_sb_append_fmt(out, ol, oc, "%s %s = (%s).u.error.%s; ",
+                         param_type, binder, tmpv, as_path);
+        return;
+    }
+    cc__ru_emit_uw_err_binder(out, ol, oc, s, n, call_a, call_b, tmpv, binder,
+                              file, line);
 }
 
 /* ---- Handler divergence check (Feature C) ------------------------
@@ -1487,6 +1520,8 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
                                     const char* binder,
                                     const char* outer_body, size_t outer_body_len,
                                     const char* outer_param,
+                                    const char* outer_decl,
+                                    const char* outer_as_path,
                                     int outer_found, size_t outer_decl_pos,
                                     char** out_buf, size_t* out_len) {
     (void)op_at;
@@ -1608,21 +1643,40 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
 
                 /* Inline the outer handler's body, substituting its
                  * parameter name → our binder so user references in
-                 * the handler body keep resolving. */
+                 * the handler body keep resolving.  When the handler
+                 * matched via `@as`, project the binder into the
+                 * handler param type first (by-value member select). */
                 size_t sub_len = 0;
+                char proj_name[64];
+                const char* subst_to = binder;
+                proj_name[0] = 0;
+                if (outer_as_path && outer_as_path[0] && outer_decl &&
+                    outer_decl[0]) {
+                    char pty[128], pname[64];
+                    static int g_as_proj_id = 0;
+                    if (cc_errhandler_split_param_decl(outer_decl, pty, sizeof(pty),
+                                                       pname, sizeof(pname)) &&
+                        pty[0]) {
+                        snprintf(proj_name, sizeof(proj_name),
+                                 "__cc_eh_as_%d", ++g_as_proj_id);
+                        subst_to = proj_name;
+                    }
+                }
                 char* subst = cc__pu_subst_word(outer_body, outer_body_len,
                                                 (outer_param && outer_param[0]) ? outer_param : "",
-                                                binder, &sub_len);
+                                                subst_to, &sub_len);
                 if (!subst) {
                     free(out);
                     return -1;
                 }
-                /* Splice the body verbatim, newlines and comments intact.
-                 * (An [F11]-era flattener used to crush this to ONE physical
-                 * line purely so later line-keyed passes wouldn't drift; the
-                 * modern resolvers are byte-verified (UFCS) and marker-bound
-                 * (closures), and the corpus is green without it.) */
                 cc__append_str(&out, &ol, &oc, "{ ");
+                if (proj_name[0]) {
+                    char pty[128], pname[64];
+                    cc_errhandler_split_param_decl(outer_decl, pty, sizeof(pty),
+                                                   pname, sizeof(pname));
+                    cc_sb_append_fmt(&out, &ol, &oc, "%s %s = (%s).%s; ",
+                                     pty, proj_name, binder, outer_as_path);
+                }
                 cc__append_n(&out, &ol, &oc, subst, sub_len);
                 cc__append_str(&out, &ol, &oc, " }");
                 free(subst);
@@ -1671,14 +1725,17 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
     int outer_found = 0;
     char outer_param[128];
     char outer_err_type[128];
+    char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
     int outer_have_handlers = 0;
     outer_param[0] = 0;
     outer_err_type[0] = 0;
+    outer_as_path[0] = 0;
     if (cc__pu_find_outer_errhandler(s, n, call_a, call_a, call_b,
                                      outer_decl, sizeof(outer_decl), &outer_decl_len,
                                      &outer_body, &outer_body_len,
                                      &outer_decl_pos,
                                      outer_err_type, sizeof(outer_err_type),
+                                     outer_as_path, sizeof(outer_as_path),
                                      &outer_have_handlers)) {
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
                                   outer_param, sizeof(outer_param));
@@ -1691,6 +1748,7 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
                                  body, body_len, binder,
                                  outer_body, outer_body_len,
                                  outer_param,
+                                 outer_decl, outer_as_path,
                                  outer_found, outer_decl_pos,
                                  &processed, &processed_len) < 0) {
         return -1;
@@ -1918,14 +1976,17 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     size_t outer_decl_pos = 0;
     char outer_param[128];
     char outer_err_type[128];
+    char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
     int outer_have_handlers = 0;
     outer_param[0] = 0;
     outer_err_type[0] = 0;
+    outer_as_path[0] = 0;
     int outer_found = cc__pu_find_outer_errhandler(
         s, n, call_a, call_a, call_b,
         outer_decl, sizeof(outer_decl), &outer_decl_len,
         &outer_body, &outer_body_len, &outer_decl_pos,
         outer_err_type, sizeof(outer_err_type),
+        outer_as_path, sizeof(outer_as_path),
         &outer_have_handlers);
     if (outer_found) {
         cc__pu_extract_param_name(outer_decl, outer_decl_len,
@@ -1969,9 +2030,6 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
             (outer_param[0] ? outer_param : ""),
             binder, &sub_len);
         if (!substituted) return -1;
-        /* Body splices verbatim — the [F11]-era one-line flattener is gone
-         * (line drift is absorbed by the byte-verified/marker-bound
-         * resolvers downstream). */
 
         static int g_expr_tmp_id = 0;
         int tid = ++g_expr_tmp_id;
@@ -2005,7 +2063,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         cc__append_str(&out, &ol, &oc, "); if (");
         cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
         cc__append_str(&out, &ol, &oc, ") { ");
-        cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, binder, ff, line_no);
+        cc__ru_emit_handler_err_binder(&out, &ol, &oc, s, n, call_a, call_b,
+                                       tmpv, binder, outer_decl, outer_as_path,
+                                       ff, line_no);
         cc__append_n(&out, &ol, &oc, substituted, sub_len);
         cc__append_str(&out, &ol, &oc, " } ");
         cc__ru_emit_value(&out, &ol, &oc, result_type, tmpv);
@@ -2072,6 +2132,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
                                  binder,
                                  outer_body, outer_body_len,
                                  outer_param,
+                                 outer_decl, outer_as_path,
                                  outer_found, outer_decl_pos,
                                  &processed, &processed_len) < 0) {
         return -1;
@@ -2181,8 +2242,13 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
          * actually at expression position (the `!>` operand is `return`'s
          * expression).  Use the comment-aware forward skip so any block
          * or line comments between the preceding statement boundary and
-         * `return` don't hide the keyword and drag it into the operand. */
-        if (is_stmt_pos) {
+         * `return` don't hide the keyword and drag it into the operand.
+         *
+         * Also run when the LHS walk already classified the site as
+         * expression-position (e.g. nested parens): `return foo() !>;`
+         * must still strip the keyword or resolve sees `return foo(...)`
+         * and falls back to ambient CCError. */
+        {
             size_t a = cc__skip_ws_comments_forward(s, op_at, call_start);
             if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
                 (a + 6 == op_at || !cc_is_ident_char(s[a + 6]))) {

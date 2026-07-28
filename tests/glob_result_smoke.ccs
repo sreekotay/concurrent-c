@@ -27,15 +27,15 @@ int main(void) {
         return 1;
     }
     CCIoError e = cc_unwrap_err(miss_res);
-    if (e.kind != CC_IO_FILE_NOT_FOUND) {
-        printf("expected FILE_NOT_FOUND, kind=%d os=%d\n", (int)e.kind,
+    if (e.base.kind != CC_IO_FILE_NOT_FOUND) {
+        printf("expected FILE_NOT_FOUND, kind=%d os=%d\n", (int)e.base.kind,
                (int)e.os_code);
         return 1;
     }
 
     /* Positive match. */
     CCSliceArray files = cc_glob(@slice("cc/include/ccc/*.cch"), &a) !>(err) {
-        printf("glob include failed: kind=%d os=%d\n", (int)err.kind,
+        printf("glob include failed: kind=%d os=%d\n", (int)err.base.kind,
                (int)err.os_code);
         return 1;
     };

@@ -73,18 +73,18 @@ static void check_eq(CCStdio* io, CCArena* a, Metrics base, Metrics cur, char[:]
     double* n = cur.get_ptr(name);
     if (!b || !n) {
         CCString s = @string(`  ${name}  SKIP    (missing)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         return;
     }
     if (*n == *b) {
         CCString s = @string(`  ${name}  OK      (=${*n})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else if (*n < *b) {
         CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else {
         CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         regressions++;
     }
 }
@@ -95,19 +95,19 @@ static void check_le(CCStdio* io, CCArena* a, Metrics base, Metrics cur, char[:]
     double* n = cur.get_ptr(name);
     if (!b || !n) {
         CCString s = @string(`  ${name}  SKIP    (missing)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         return;
     }
     if (*n < *b) {
         CCString s = @string(`  ${name}  IMPROVED (${*b} -> ${*n})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else if (*n == *b) {
         CCString s = @string(`  ${name}  OK      (=${*n})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else {
         double inc = *n - *b;
         CCString s = @string(`  ${name}  FAIL    (baseline=${*b} current=${*n}, increase=${inc})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         regressions++;
     }
 }
@@ -118,22 +118,22 @@ static void check_loc(CCStdio* io, CCArena* a, Metrics base, Metrics cur, char[:
     double* n = cur.get_ptr(name);
     if (!b || !n) {
         CCString s = @string(`  ${name}  SKIP    (missing)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         return;
     }
     if (*n <= *b) {
         CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b})`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         return;
     }
     double pct = (*n - *b) * 100.0 / *b;
     if (pct > 25.0) {
         CCString s = @string(`  ${name}  NOTICE  (=${*n} vs baseline ${*b}, +${pct}%)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         warnings++;
     } else {
         CCString s = @string(`  ${name}  OK      (=${*n} vs baseline ${*b}, +${pct}%)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     }
 }
 
@@ -144,19 +144,19 @@ static void check_wall(CCStdio* io, CCArena* a, Metrics base, Metrics cur) {
     double* n = cur.get_ptr(name);
     if (!b || !n) {
         CCString s = @string(`  ${name}  SKIP    (missing)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         return;
     }
     double pct = (*n - *b) * 100.0 / *b;
     if (pct <= 5.0) {
         CCString s = @string(`  ${name}  OK      (=${*n}s vs baseline ${*b}s, ${pct}%)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else if (pct <= 30.0) {
         CCString s = @string(`  ${name}  INFO    (=${*n}s vs baseline ${*b}s, ${pct}% — OS-noise band)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
     } else {
         CCString s = @string(`  ${name}  NOTICE  (=${*n}s vs baseline ${*b}s, ${pct}% — large jump)`, a);
-        io->println(s.as_slice()) !>;
+        io->println(s) !>;
         warnings++;
     }
 }
@@ -185,9 +185,9 @@ char[:0] baseline = cc_script_path_join(root, @slice("perf/compiler_baseline.txt
 
 if (!cc_script_path_exists(baseline)) {
     CCString s = @string(`perf check: no baseline at ${baseline}`, &a);
-    io.eprintln(s.as_slice()) !>;
+    io.eprintln(s) !>;
     s = @string(`perf check: run ./scripts/capture_baseline.sh first`, &a);
-    io.eprintln(s.as_slice()) !>;
+    io.eprintln(s) !>;
     return 1;
 }
 
@@ -199,7 +199,7 @@ if (current_path_arg.ptr) {
 } else {
     {
         CCString s = @string(`perf check: capturing current metrics (this takes ~60s)...`, &a);
-        io.println(s.as_slice()) !>;
+        io.println(s) !>;
     }
     char[:0] capture = cc_script_path_join(root, @slice("scripts/capture_baseline.sh"), &a);
     cc_sh_run(capture, current_path, &a) !>;
@@ -209,7 +209,7 @@ if (update) {
     cc_file_copy(current_path, baseline, &a) !>;
     {
         CCString s = @string(`perf check: baseline updated. New contents:`, &a);
-        io.println(s.as_slice()) !>;
+        io.println(s) !>;
     }
     cc_script_print_file(baseline, &a) !>;
     return 0;
@@ -221,7 +221,7 @@ Metrics cur = load_metrics(current_path, &a) !>;
 io.println(@slice("")) !>;
 {
     CCString s = @string(`perf check: comparing current vs baseline (${baseline})`, &a);
-    io.println(s.as_slice()) !>;
+    io.println(s) !>;
 }
 
 io.println(@slice("")) !>;
@@ -250,14 +250,14 @@ check_wall(&io, &a, base, cur);
 io.println(@slice("")) !>;
 if (regressions > 0) {
     CCString s = @string(`perf check: FAIL — ${regressions} regression(s), ${warnings} warning(s)`, &a);
-    io.println(s.as_slice()) !>;
+    io.println(s) !>;
     s = @string(`perf check: if intentional, re-run with --update`, &a);
-    io.println(s.as_slice()) !>;
+    io.println(s) !>;
     return 1;
 }
 if (warnings > 0) {
     CCString s = @string(`perf check: OK with ${warnings} warning(s) (no regressions)`, &a);
-    io.println(s.as_slice()) !>;
+    io.println(s) !>;
 } else {
     io.println(@slice("perf check: OK")) !>;
 }

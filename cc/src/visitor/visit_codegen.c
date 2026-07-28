@@ -1581,6 +1581,12 @@ static int cc__has_member_call_candidate(const char* s, size_t n) {
     return 0;
 }
 
+/* Conservative: phase-3 `@as` arg coerce when the emit buffer declares a local
+ * embed (comment-marker form) or names a registry outer that has `@as`. */
+static int cc__may_need_as_arg_coerce(const char* s, size_t n) {
+    return cc_type_registry_may_need_as_arg_coerce(cc_type_registry_get_global(), s, n);
+}
+
 /* Conservative: phase-3 slice-literal coerce when the buffer may pass a string
  * literal to a by-value slice parameter (stdlib or same-TU). False positives
  * only keep a reparse; false negatives drop user-TU wraps. */
@@ -4143,6 +4149,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          /* Slice-literal coerce (stage 1.5): stdlib and same-TU CCSlice /
           * char[:] callees with bare string literals. */
          cc__may_need_slice_lit_coerce(src_ufcs, src_ufcs_len) ||
+         /* `@as` arg coerce (same stage): Outer* / &Outer where T* expected. */
+         cc__may_need_as_arg_coerce(src_ufcs, src_ufcs_len) ||
          /* Dump-dir selftests (scripts/test_reparse_sanitize.sh) assert on
           * reparse_prepared_* output; keep one entry reparse when requested. */
          getenv("CC_DEBUG_REPARSE_DUMP_DIR") != NULL);

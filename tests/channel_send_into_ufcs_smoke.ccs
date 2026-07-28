@@ -62,7 +62,7 @@ int main(void) {
             },
             NULL);
     assert(cc_is_err(full));
-    assert(cc_error(full).kind == CC_IO_BUSY);
+    assert(cc_error(full).base.kind == CC_IO_BUSY);
     assert(cc_error(full).os_code == EAGAIN);
     assert(g_builder_calls == 1);
 

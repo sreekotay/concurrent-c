@@ -27,7 +27,7 @@ static int lint(int argc, char **argv) {
  * @task Scanner-hygiene ratchet (hand-rolled comment/string machines).
  */
 static int lint_scanners(int argc, char **argv) {
-    return cc_script_task_exe(argc, argv, "scripts/lint_scanners.sh");
+    return cc_script_task_shcc(argc, argv, "tools/lint_scanners.shcc");
 }
 
 /**

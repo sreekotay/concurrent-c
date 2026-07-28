@@ -16,7 +16,7 @@
 static int last_err_kind = 0;
 
 static void consume_io_err(CCIoError e) {
-    last_err_kind = (int)e.kind;
+    last_err_kind = (int)e.base.kind;
 }
 
 static bool remove_dir(const char* path) {

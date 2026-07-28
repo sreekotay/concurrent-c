@@ -44,7 +44,7 @@ CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena) {
     size_t len = (size_t)end;
     char *buf = (char *)cc_arena_alloc(arena, len + 1, sizeof(char));
     if (!buf) {
-        return cc_err_CCResult_CCSlice_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     }
 
     size_t read = fread(buf, 1, len, file->handle);

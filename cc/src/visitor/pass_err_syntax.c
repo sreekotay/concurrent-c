@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
@@ -26,12 +27,33 @@ typedef struct {
 } CCErrFrame;
 
 static CCErrFrame* cc__err_stk_find(CCErrFrame* stk, int stk_n,
-                                    const char* err_type) {
+                                    const char* err_type,
+                                    char* out_as_path, size_t out_as_path_sz) {
     int i;
+    CCTypeRegistry* reg;
+    if (out_as_path && out_as_path_sz) out_as_path[0] = 0;
     if (!stk || !err_type || !err_type[0]) return NULL;
     for (i = stk_n - 1; i >= 0; i--) {
         if (cc_errhandler_types_equal(stk[i].param_type, err_type))
             return &stk[i];
+    }
+    reg = cc_type_registry_get_global();
+    if (!reg) return NULL;
+    for (i = stk_n - 1; i >= 0; i--) {
+        char path[CC_ERRHANDLER_AS_PATH_MAX];
+        int rc;
+        path[0] = 0;
+        rc = cc_type_registry_as_path_for_type(reg, err_type, stk[i].param_type,
+                                               path, sizeof(path));
+        if (rc == 0 && path[0]) {
+            if (out_as_path && out_as_path_sz) {
+                size_t pl = strlen(path);
+                if (pl >= out_as_path_sz) pl = out_as_path_sz - 1;
+                memcpy(out_as_path, path, pl);
+                out_as_path[pl] = 0;
+            }
+            return &stk[i];
+        }
     }
     return NULL;
 }
@@ -1252,6 +1274,8 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             }
 
             CCErrFrame* def = NULL;
+            char def_as_path[CC_ERRHANDLER_AS_PATH_MAX];
+            def_as_path[0] = 0;
             if (!has_local) {
                 char err_type[128];
                 size_t call_a = (has_assign && has_colon_def) ? def_a : expr_a;
@@ -1270,7 +1294,8 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     /* Untyped / pointer unwrap → ambient CCError binder. */
                     memcpy(err_type, "CCError", sizeof("CCError"));
                 }
-                def = cc__err_stk_find(stk, stk_n, err_type);
+                def = cc__err_stk_find(stk, stk_n, err_type,
+                                       def_as_path, sizeof(def_as_path));
                 if (!def) {
                     char rel[1024];
                     char msg[256];
@@ -1386,7 +1411,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     local_type[0] = 0;
                     if (cc_errhandler_split_param_decl(local_decl, local_type,
                                                        sizeof(local_type), NULL, 0))
-                        outer_d = cc__err_stk_find(stk, stk_n, local_type);
+                        outer_d = cc__err_stk_find(stk, stk_n, local_type, NULL, 0);
                     lb_exp =
                         cc__expand_delegations(local_body, local_body_len, local_param, outer_d, NULL, &dg);
                     free(local_body);
@@ -1418,6 +1443,8 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
                                             in_src, err_span_a, err_span_b,
                                             err_file, errl);
+                    if (def_as_path[0])
+                        cc_sb_append_fmt(&out, &ol, &oc, ".%s", def_as_path);
                     cc__append_str(&out, &ol, &oc, "; ");
                     {
                         size_t def_flat_len = 0;

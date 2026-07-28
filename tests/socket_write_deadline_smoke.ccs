@@ -23,7 +23,7 @@ static void writer_task(int fd) {
     while (true) {
         CCResult_size_t_CCIoError res =
             cc_socket_write_deadline(&sock, buf, sizeof(buf), &deadline);
-        if (cc_is_err(res) && cc_error(res).kind == CC_IO_BUSY) {
+        if (cc_is_err(res) && cc_error(res).base.kind == CC_IO_BUSY) {
             cc_atomic_store(&g_timed_out, 1);
             break;
         }
@@ -32,7 +32,7 @@ static void writer_task(int fd) {
                     "socket_write_deadline_smoke: unexpected write ok=%d n=%zu kind=%d\n",
                     res.ok,
                     cc_is_err(res) ? 0 : cc_value(res),
-                    cc_is_err(res) ? (int)cc_error(res).kind : -1);
+                    cc_is_err(res) ? (int)cc_error(res).base.kind : -1);
             cc_atomic_fetch_add(&g_errors, 1);
             break;
         }

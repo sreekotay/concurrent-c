@@ -8,9 +8,11 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_arena.cch>
 
+#include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
 #include "util/text.h"
 #include "util/text_scan.h"
+#include "visitor/pass_unwrap_destroy.h"
 
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 
@@ -247,6 +249,15 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
     size_t last_emit = 0;
     int changed = 0;
     if (!src || n == 0 || !symbols) return NULL;
+    /* Create runs before canonicalize ingest — seed @as fields here (same
+     * as unwrap-destroy) so `@create…@destroy` can append the embed chain. */
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) {
+            cc_type_registry_ingest_struct_fields(reg, src, n);
+            cc_ingest_included_cch_struct_fields(reg);
+        }
+    }
     cc__create_seed_registered_var_types(symbols, src, n);
     for (size_t i = 0; i < n; ) {
         size_t lpar = 0, rpar = 0, p = 0, eq = 0, name_end = 0, stmt_s = 0;
@@ -468,55 +479,98 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
         }
         {
-            int need_defer = (ownership == CC_CREATE_OWN_DESTROY &&
-                (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee));
-            cc_sb_append_cstr(&out, &out_len, &out_cap, need_defer ? "); " : ");\n");
-        }
-        if (ownership == CC_CREATE_OWN_DESTROY &&
-            (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee)) {
+            CCTypeRegistry* reg = cc_type_registry_get_global();
+            char type_key[256];
+            size_t tk = 0;
+            int decl_is_ptr = 0;
+            int has_as = 0;
             int has_pre_destroy = (registered_pre_destroy_callee != NULL);
             int has_custom_body = (destroy_body_s && destroy_body_e > destroy_body_s);
             int has_destroy_callee = (registered_destroy_callee != NULL);
-            if (!has_pre_destroy && !has_custom_body && has_destroy_callee) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                if (strchr(declared_type, '*')) {
-                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                } else {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
-                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+            int need_defer;
+            /* Normalize `T *` / `struct T` → registry key for @as lookup. */
+            {
+                size_t a = 0, b = strlen(declared_type);
+                while (a < b && isspace((unsigned char)declared_type[a])) a++;
+                while (b > a && isspace((unsigned char)declared_type[b - 1])) b--;
+                if (a + 7 <= b && memcmp(declared_type + a, "struct ", 7) == 0) a += 7;
+                while (a < b && isspace((unsigned char)declared_type[a])) a++;
+                while (b > a && declared_type[b - 1] == '*') {
+                    decl_is_ptr = 1;
+                    b--;
+                    while (b > a && isspace((unsigned char)declared_type[b - 1])) b--;
                 }
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
-            } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
-                if (registered_pre_destroy_callee) {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                    if (strchr(declared_type, '*')) {
-                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                    } else {
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
-                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                    }
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
-                }
-                if (destroy_body_s && destroy_body_e > destroy_body_s) {
-                    cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-                }
-                if (registered_destroy_callee) {
+                while (a < b && tk + 1 < sizeof(type_key)) type_key[tk++] = declared_type[a++];
+                type_key[tk] = '\0';
+            }
+            if (reg && type_key[0] &&
+                (cc_type_registry_has_as_field(reg, type_key) ||
+                 cc_type_registry_has_as_field_transitive(reg, type_key)))
+                has_as = 1;
+            need_defer = (ownership == CC_CREATE_OWN_DESTROY &&
+                          (has_pre_destroy || has_custom_body || has_destroy_callee || has_as));
+            cc_sb_append_cstr(&out, &out_len, &out_cap, need_defer ? "); " : ");\n");
+            if (need_defer) {
+                if (!has_pre_destroy && !has_custom_body && has_destroy_callee && !has_as) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                    if (strchr(declared_type, '*')) {
+                    if (decl_is_ptr) {
                         cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                     } else {
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
                         cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                     }
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
+                } else {
+                    int as_rc;
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
+                    if (registered_pre_destroy_callee) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                        if (decl_is_ptr) {
+                            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    }
+                    if (destroy_body_s && destroy_body_e > destroy_body_s) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s,
+                                     destroy_body_e - destroy_body_s + 1);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                    }
+                    if (registered_destroy_callee) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                        if (decl_is_ptr) {
+                            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    }
+                    as_rc = cc_as_destroy_chain_append(&out, &out_len, &out_cap, symbols,
+                                                       type_key, src + name_s, name_e - name_s,
+                                                       decl_is_ptr);
+                    if (as_rc == -3) {
+                        int line = 1, col = 1;
+                        cc__create_offset_to_line_col(src, i, &line, &col);
+                        fprintf(stderr,
+                                "%s:%d:%d: error: @create: cyclic @as embed graph involving "
+                                "type `%s`\n",
+                                input_path ? input_path : "<input>", line, col, type_key);
+                        free(out);
+                        return (char*)-1;
+                    }
+                    if (as_rc < 0) {
+                        free(out);
+                        return (char*)-1;
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "};\n");
                 }
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "};\n");
             }
         }
         last_emit = semi + 1;

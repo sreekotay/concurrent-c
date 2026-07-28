@@ -26,6 +26,15 @@ CCStdio io = @create(&a) @destroy;
 char dst_path[512];
 snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
 
+/* File ops + cmd.output (CCIoError) share one CCError handler via @as. */
+@errhandler(CCError e) {
+    fprintf(stderr, "FAIL out-of-tree-smoke: %s (kind=%d)\n",
+            cc_io_error_str(cc_io_error(e)), (int)e.kind);
+    unlink(dst_path);
+    rmdir(dir);
+    return 1;
+}
+
 cc_file_copy(@slice("tests/unwrap_destroy_closure_smoke.ccs"),
              char_to_slice(dst_path), &a) !>;
 
@@ -37,17 +46,7 @@ cmd.arg("run");
 cmd.arg(dst_path);
 cmd.stderr_to_stdout(); /* match prior Make recipe: 2>&1 */
 
-/* cmd.output is CCIoError-typed; default .shcc @errhandler is CCError. */
-CCResult_CCProcessOutput_CCIoError res = cmd.output(&a);
-if (cc_is_err(res)) {
-    CCIoError err = cc_unwrap_err_as(res, CCIoError);
-    fprintf(stderr, "FAIL out-of-tree-smoke: spawn error: %s (os=%d)\n",
-            cc_io_error_str(err), err.os_code);
-    unlink(dst_path);
-    rmdir(dir);
-    return 1;
-}
-CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
+CCProcessOutput out = cmd.output(&a) !>;
 
 int rc = out.exit_code();
 CCSlice actual = out.stdout_data;

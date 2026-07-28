@@ -393,6 +393,7 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
  * `name.field.nested` (value root) or `name->field.nested` (pointer root).
  * Returns 0 ok, -1 OOM/error, -3 @as cycle. */
 static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc,
+                                              CCSymbolTable* symbols,
                                               const char* type_key,
                                               const char* root_name, size_t root_len,
                                               int root_is_ptr,
@@ -432,12 +433,12 @@ static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc
             snprintf(next_suffix, sizeof(next_suffix), "%s.%s", path_suffix, field_name);
         else
             snprintf(next_suffix, sizeof(next_suffix), "%s", field_name);
-        if (g_ud_symbols) {
-            (void)cc_symbols_lookup_type_pre_destroy_call(g_ud_symbols, fkey, &pre);
-            (void)cc_symbols_lookup_type_destroy_call(g_ud_symbols, fkey, &post);
+        if (symbols) {
+            (void)cc_symbols_lookup_type_pre_destroy_call(symbols, fkey, &pre);
+            (void)cc_symbols_lookup_type_destroy_call(symbols, fkey, &post);
             if ((!pre && !post) && f_had_ptr == 0) {
-                (void)cc_symbols_lookup_type_pre_destroy_call(g_ud_symbols, field_type, &pre);
-                (void)cc_symbols_lookup_type_destroy_call(g_ud_symbols, field_type, &post);
+                (void)cc_symbols_lookup_type_pre_destroy_call(symbols, field_type, &pre);
+                (void)cc_symbols_lookup_type_destroy_call(symbols, field_type, &post);
             }
         }
         if (pre) {
@@ -458,7 +459,7 @@ static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc
             cc__append_str(out, ol, oc, next_suffix);
             cc__append_str(out, ol, oc, ");");
         }
-        sub = cc__ud_append_as_destroy_chain_rec(out, ol, oc, fkey,
+        sub = cc__ud_append_as_destroy_chain_rec(out, ol, oc, symbols, fkey,
                                                  root_name, root_len, root_is_ptr,
                                                  next_suffix, visited, visited_n + 1,
                                                  visited_cap);
@@ -472,8 +473,20 @@ static int cc__ud_append_as_destroy_chain(char** out, size_t* ol, size_t* oc,
                                           const char* name, size_t name_len,
                                           int decl_is_ptr) {
     const char* visited[32];
-    return cc__ud_append_as_destroy_chain_rec(out, ol, oc, type_key, name, name_len,
-                                              decl_is_ptr, NULL, visited, 0, 32);
+    return cc__ud_append_as_destroy_chain_rec(out, ol, oc, g_ud_symbols, type_key,
+                                              name, name_len, decl_is_ptr, NULL,
+                                              visited, 0, 32);
+}
+
+int cc_as_destroy_chain_append(char** out, size_t* ol, size_t* oc,
+                               CCSymbolTable* symbols,
+                               const char* type_key,
+                               const char* name, size_t name_len,
+                               int decl_is_ptr) {
+    const char* visited[32];
+    return cc__ud_append_as_destroy_chain_rec(out, ol, oc, symbols, type_key,
+                                              name, name_len, decl_is_ptr, NULL,
+                                              visited, 0, 32);
 }
 
 static int cc__ud_type_has_as_destroy_hooks_rec(const char* type_key,
@@ -836,8 +849,11 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
          * scope. */
         cc__append_str(&out, &ol, &oc, " @defer { ");
         if (pre_hook && have_name) {
+            /* Pre and post both take T* — value decls need `&name` (same as
+             * `.destroy()` / `@create…@destroy`). */
             cc__append_str(&out, &ol, &oc, pre_hook);
             cc__append_str(&out, &ol, &oc, "(");
+            if (post_pass_addr) cc__append_str(&out, &ol, &oc, "&");
             cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
             cc__append_str(&out, &ol, &oc, "); ");
         }

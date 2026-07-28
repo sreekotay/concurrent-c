@@ -638,10 +638,17 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
         /* Strip a leading `return` keyword from the LHS: it belongs to
          * the enclosing statement, not to the unwrap operand.  Leaving
          * it in would force structured emitters to re-parse the LHS
-         * text to get the real expression; better to do it once here. */
+         * text to get the real expression; better to do it once here.
+         *
+         * Also clear stmt_position: `return EXPR !>;` is expression-
+         * position (the operand of `return`).  If left as stmt-pos, the
+         * IR `!> → @err` rewrite produces `return CALL @err;` and the
+         * @err pass resolves a span that still begins with `return`,
+         * falling back to ambient CCError instead of the call's E. */
         if (cc_ir_lhs_starts_with_return(src, lhs_start, next_sigil)) {
             size_t j = cc_ir_trim_ws_left(src, lhs_start, next_sigil);
             lhs_start = j + 6;  /* past "return" */
+            is_stmt = 0;
         }
 
         /* Trimmed LHS range for the decl-form heuristic and payload. */

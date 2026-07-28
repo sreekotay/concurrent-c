@@ -19,6 +19,15 @@ void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols);
  * resolution in preprocess/variant_lower.c). */
 CCSymbolTable* cc_unwrap_destroy_get_symbols(void);
 
+/* Append transitive `@as` destroy hooks for `type_key` into a string buffer
+ * (`cc_sb_*` style). Used by `!> @destroy` and `@create…@destroy`.
+ * Returns 0 ok, -1 error, -3 cycle. */
+int cc_as_destroy_chain_append(char** out, size_t* ol, size_t* oc,
+                               CCSymbolTable* symbols,
+                               const char* type_key,
+                               const char* name, size_t name_len,
+                               int decl_is_ptr);
+
 /* Rewrite a trailing `@destroy { body }` suffix on a statement that
  * contains a `!>` or `?>` operator into a standalone `@defer { body };`
  * placed immediately after the original statement terminator.

@@ -20,12 +20,12 @@ static void reader_task(int fd) {
     CCDeadline deadline = cc_deadline_after_ms(50);
     CCResult_bool_CCIoError res =
         cc_socket_read_into_deadline(&sock, buf, sizeof(buf), &n, &deadline);
-    if (cc_is_err(res) && cc_error(res).kind == CC_IO_BUSY) {
+    if (cc_is_err(res) && cc_error(res).base.kind == CC_IO_BUSY) {
         cc_atomic_store(&g_timed_out, 1);
     } else {
         fprintf(stderr,
                 "socket_read_deadline_smoke: ok=%d n=%zu kind=%d\n",
-                res.ok, n, cc_is_err(res) ? (int)cc_error(res).kind : -1);
+                res.ok, n, cc_is_err(res) ? (int)cc_error(res).base.kind : -1);
         cc_atomic_fetch_add(&g_errors, 1);
     }
     cc_socket_close(&sock);

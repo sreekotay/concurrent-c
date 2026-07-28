@@ -1,26 +1,15 @@
-/* Cyclic @as graph must fail loudly. */
+/* Cyclic @as graph must fail loudly (self-embed value edge). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-typedef struct AsA AsA;
-typedef struct AsB AsB;
-
-typedef struct AsA {
-    AsB *b @as;
-    int a_tag;
-} AsA;
-
-typedef struct AsB {
-    AsA *a @as;
-    int b_tag;
-} AsB;
+typedef struct Node {
+    int tag;
+    struct Node nest @as;
+} Node;
 
 int main(void) {
-    AsA a = {0};
-    AsB b = {0};
-    a.b = &b;
-    b.a = &a;
-    a.destroy();
+    Node n = {0};
+    (void)n;
     printf("unreachable\n");
     return 0;
 }

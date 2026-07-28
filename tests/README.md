@@ -22,6 +22,10 @@ For a test `tests/foo.ccs` (or `.c` / `.shcc`):
   - Marks the test as **compile-fail**.
   - Each non-empty, non-`#` line is a **required substring** in the host C compiler error output (used for sourcemap checks).
 
+- `tests/foo.build_stderr`
+  - For **successful** builds: each non-empty, non-`#` line is a **required substring**
+    in the `ccc build` stderr (compile-time warnings / notes).
+
 - `tests/foo.args`
   - One argv line per run (`#` comments skipped; blank line = no args).
   - Builds once, then runs the binary once per line.

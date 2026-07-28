@@ -1,0 +1,33 @@
+/* Plain-C TU (no UFCS/async): @as arg coerce must still run. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int tag;
+    CCFile file @as;
+} AsPlainWrap;
+
+static CCFile *g_got;
+
+static void takes_file(CCFile *f) {
+    assert(f != NULL);
+    g_got = f;
+}
+
+int main(void) {
+    AsPlainWrap w = {0};
+    AsPlainWrap *p = &w;
+    w.tag = 3;
+
+    g_got = NULL;
+    takes_file(&w);
+    assert(g_got == &w.file);
+
+    g_got = NULL;
+    takes_file(p);
+    assert(g_got == &w.file);
+
+    printf("ok\n");
+    return 0;
+}

@@ -1,0 +1,1 @@
+explicit cast to 'CCFile *' from 'AsArgWrap' skips @as path

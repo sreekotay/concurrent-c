@@ -486,9 +486,17 @@ static int cc__classify_item(const char* s, size_t n, size_t item,
                         *out_kind = CC__CHUNK_TU;
                         return 1;
                     }
-                    /* struct S { ... } var = ...; → main */
+                    /* struct S { ... } var = ...; → keep scanning */
                     i = r;
                     brace = 0;
+                    continue;
+                }
+                if (saw_eq) {
+                    /* Brace initializer: static T x[] = { ... }; — keep
+                     * scanning to ';' so the static/extern TU rule applies.
+                     * Without this, `{...}` was misclassified as a compound
+                     * statement and the decl never landed at file scope. */
+                    i = r;
                     continue;
                 }
                 /* Compound statement at depth 0 → main */

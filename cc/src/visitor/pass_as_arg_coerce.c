@@ -277,6 +277,65 @@ static int cc__as_arg_already_member(const char* s, size_t a, size_t b,
     return i + fl == e && memcmp(s + i, field, fl) == 0;
 }
 
+/* Next code-byte index after skipping one comment/string starting at i, or i. */
+static size_t cc__as_skip_inert(const char* s, size_t n, size_t i) {
+    if (!s || i >= n) return i;
+    if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+        i += 2;
+        while (i < n && s[i] != '\n') i++;
+        return i;
+    }
+    if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+        i += 2;
+        while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+        if (i + 1 < n) i += 2;
+        return i;
+    }
+    if (s[i] == '"' || s[i] == '\'') {
+        char q = s[i++];
+        while (i < n) {
+            if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
+            if (s[i] == q) { i++; break; }
+            i++;
+        }
+        return i;
+    }
+    return i;
+}
+
+/* Find word-bounded callee( occurrences outside comments/strings. */
+static size_t cc__as_find_callee_occ(const char* in_src, size_t in_len,
+                                     size_t start, size_t end,
+                                     const char* callee, size_t callee_n,
+                                     int want_occ) {
+    size_t j = start;
+    int occ = 0;
+    if (!in_src || !callee || callee_n == 0 || want_occ <= 0) return (size_t)-1;
+    if (end > in_len) end = in_len;
+    while (j + callee_n <= end) {
+        size_t after;
+        size_t next = cc__as_skip_inert(in_src, end, j);
+        if (next != j) { j = next; continue; }
+        if (memcmp(in_src + j, callee, callee_n) != 0) { j++; continue; }
+        if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_')) {
+            j++;
+            continue;
+        }
+        if (j + callee_n < in_len &&
+            (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_')) {
+            j++;
+            continue;
+        }
+        after = cc_skip_ws_and_comments(in_src, in_len, j + callee_n);
+        if (after >= in_len || in_src[after] != '(') { j++; continue; }
+        if (cc__as_name_is_declarator(in_src, in_len, j, callee_n)) { j++; continue; }
+        occ++;
+        if (occ == want_occ) return j;
+        j += callee_n;
+    }
+    return (size_t)-1;
+}
+
 static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
                                       int call_idx, const char* in_src, size_t in_len,
                                       const CCVisitorCtx* ctx, const char* callee) {
@@ -290,23 +349,10 @@ static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
             !cc__as_name_is_declarator(in_src, in_len, call_s, callee_n)) {
             return call_s;
         }
-        {
-            size_t j;
-            for (j = call_s; j + callee_n <= call_e; j++) {
-                if (memcmp(in_src + j, callee, callee_n) != 0) continue;
-                if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_'))
-                    continue;
-                if (j + callee_n < in_len &&
-                    (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_'))
-                    continue;
-                if (cc__as_name_is_declarator(in_src, in_len, j, callee_n)) continue;
-                return j;
-            }
-        }
+        name_s = cc__as_find_callee_occ(in_src, in_len, call_s, call_e, callee, callee_n, 1);
+        if (name_s != (size_t)-1) return name_s;
     }
     {
-        size_t j;
-        int occ = 0;
         int want_occ = 1;
         int k;
         for (k = 0; k < call_idx; k++) {
@@ -319,23 +365,7 @@ static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
                  n[k].col_start <= n[call_idx].col_start))
                 want_occ++;
         }
-        for (j = 0; j + callee_n <= in_len; j++) {
-            size_t after;
-            if (memcmp(in_src + j, callee, callee_n) != 0) continue;
-            if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_'))
-                continue;
-            if (j + callee_n < in_len &&
-                (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_'))
-                continue;
-            after = cc_skip_ws_and_comments(in_src, in_len, j + callee_n);
-            if (after >= in_len || in_src[after] != '(') continue;
-            if (cc__as_name_is_declarator(in_src, in_len, j, callee_n)) continue;
-            occ++;
-            if (occ == want_occ) {
-                name_s = j;
-                break;
-            }
-        }
+        name_s = cc__as_find_callee_occ(in_src, in_len, 0, in_len, callee, callee_n, want_occ);
     }
     return name_s;
 }

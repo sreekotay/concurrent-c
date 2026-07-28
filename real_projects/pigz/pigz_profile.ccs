@@ -113,7 +113,7 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
         CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.kind, err.os_code);
+        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.base.kind, err.os_code);
         cc_atomic_store(&g_pipeline_error, 1);
         return false;
     }

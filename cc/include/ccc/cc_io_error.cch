@@ -1,6 +1,8 @@
 /*
- * Basic I/O error types and helpers.
- * Used by channels, files, network - all I/O operations.
+ * I/O error type: CCError general face (@as) + os_code payload.
+ *
+ * CCIoError is usable as CCError through `base` — same preference order as
+ * UFCS (@errhandler exact E, else unique @as path to handler E).
  */
 #ifndef CC_IO_ERROR_H
 #define CC_IO_ERROR_H
@@ -9,107 +11,91 @@
 #include <errno.h>
 #include <ccc/cc_result.cch>
 
-typedef enum {
-    CC_IO_PERMISSION_DENIED = 1,
-    CC_IO_FILE_NOT_FOUND,
-    CC_IO_INVALID_ARGUMENT,
-    CC_IO_INTERRUPTED,
-    CC_IO_OUT_OF_MEMORY,
-    CC_IO_BUSY,
-    CC_IO_CONNECTION_CLOSED,
-    CC_IO_CANCELLED,
-    CC_IO_OTHER
-} CCIoErrorKind;
+/* Former CCIoErrorKind names — aliases onto CCErrorKind. */
+#define CC_IO_PERMISSION_DENIED  CC_ERR_PERMISSION
+#define CC_IO_FILE_NOT_FOUND     CC_ERR_NOT_FOUND
+#define CC_IO_INVALID_ARGUMENT   CC_ERR_INVALID_ARG
+#define CC_IO_INTERRUPTED        CC_ERR_INTERRUPTED
+#define CC_IO_OUT_OF_MEMORY      CC_ERR_OUT_OF_MEMORY
+#define CC_IO_BUSY               CC_ERR_WOULD_BLOCK
+#define CC_IO_CONNECTION_CLOSED  CC_ERR_CLOSED
+#define CC_IO_CANCELLED          CC_ERR_CANCELLED
+#define CC_IO_OTHER              CC_ERR_IO
 
 typedef struct {
-    CCIoErrorKind kind;
-    int32_t os_code; // errno or platform-specific code; 0 when not applicable.
+    /* Comment-form @as: this .cch is included by host C (ufcs.c). */
+    CCError base /*@as*/;
+    int32_t os_code; /* errno or platform code; 0 when not applicable. */
 } CCIoError;
 
-// Create CCIoError from a kind (os_code = 0).
-static inline CCIoError __cc_io_error_from_kind(CCIoErrorKind kind) {
-    return (CCIoError){kind, 0};
+static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
+    CCIoError e;
+    e.base = CC_ERROR(kind, NULL);
+    e.os_code = (int32_t)os_code;
+    return e;
 }
 
-// Create CCIoError from kind and os error code.
-static inline CCIoError cc_io_error_os(CCIoErrorKind kind, int os_code) {
-    return (CCIoError){kind, os_code};
+static inline CCIoError __cc_io_error_from_kind(CCErrorKind kind) {
+    return cc_io_error_os(kind, 0);
 }
 
-/* Map a generic CCError (produced by `!>` on a pointer LHS, or returned
- * from a CCError-typed fallible function) onto the matching CCIoError.
- * This is the conversion that makes the idiomatic pattern
- *     @errhandler(CCError e) { cc_channel_close(tx, cc_io_error(e)); ... }
- * work cleanly: the `!>` pointer lowering synthesizes a CCError (that's
- * the one error type every handler can catch), and `cc_io_error(e)`
- * projects it into the I/O error domain so it can be threaded into
- * channel-close / result-error sites without manually unpacking
- * `.kind`.  The mapping is best-effort — errors outside the I/O vocab
- * (e.g. CC_ERR_INTERNAL) collapse to CC_IO_OTHER. */
+/* Copy a generic CCError into the @as face (os_code = 0). */
 static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
-    CCIoError r = {CC_IO_OTHER, 0};
-    switch (e.kind) {
-        case CC_ERR_CANCELLED:      r.kind = CC_IO_CANCELLED; break;
-        case CC_ERR_INVALID_ARG:    r.kind = CC_IO_INVALID_ARGUMENT; break;
-        case CC_ERR_OUT_OF_MEMORY:  r.kind = CC_IO_OUT_OF_MEMORY; break;
-        case CC_ERR_NOT_FOUND:      r.kind = CC_IO_FILE_NOT_FOUND; break;
-        case CC_ERR_PERMISSION:     r.kind = CC_IO_PERMISSION_DENIED; break;
-        case CC_ERR_WOULD_BLOCK:    r.kind = CC_IO_BUSY; break;
-        case CC_ERR_CLOSED:         r.kind = CC_IO_CONNECTION_CLOSED; break;
-        default:                    r.kind = CC_IO_OTHER; break;
-    }
+    CCIoError r;
+    r.base = e;
+    r.os_code = 0;
     return r;
 }
 
-/* `cc_io_error(x)` — overload via `_Generic` so callers can pass either
- * a `CCIoErrorKind` (direct construction) or a `CCError` (domain
- * conversion from the generic `!>` pointer-lowering error).  Keeping the
- * two shapes under one surface means user code doesn't have to switch
- * helpers based on whether the inbound error came from a typed
- * Result-returning call or a pointer-returning one. */
+/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (@as face). */
 #define cc_io_error(__x__) _Generic((__x__), \
     CCError:                __cc_io_error_from_cc_error, \
     default:                __cc_io_error_from_kind)((__x__))
 
-// Map platform errno to our IoError kind.
 static inline CCIoError cc_io_from_errno(int err) {
-    CCIoError e;
-    e.os_code = err;
+    CCErrorKind kind = CC_ERR_IO;
     switch (err) {
-        case EACCES: e.kind = CC_IO_PERMISSION_DENIED; break;
-        case ENOENT: e.kind = CC_IO_FILE_NOT_FOUND; break;
-        case EINVAL: e.kind = CC_IO_INVALID_ARGUMENT; break;
-        case EINTR:  e.kind = CC_IO_INTERRUPTED; break;
-        case ENOMEM: e.kind = CC_IO_OUT_OF_MEMORY; break;
-        case EBUSY:  e.kind = CC_IO_BUSY; break;
-        case EPIPE:  e.kind = CC_IO_CONNECTION_CLOSED; break;
-        case EAGAIN: e.kind = CC_IO_BUSY; break;
-        case ECANCELED: e.kind = CC_IO_CANCELLED; break;
-        case 0:      e.kind = CC_IO_OTHER; break;
-        default:     e.kind = CC_IO_OTHER; break;
+        case EACCES: kind = CC_ERR_PERMISSION; break;
+        case ENOENT: kind = CC_ERR_NOT_FOUND; break;
+        case EINVAL: kind = CC_ERR_INVALID_ARG; break;
+        case EINTR:  kind = CC_ERR_INTERRUPTED; break;
+        case ENOMEM: kind = CC_ERR_OUT_OF_MEMORY; break;
+        case EBUSY:  kind = CC_ERR_WOULD_BLOCK; break;
+        case EPIPE:  kind = CC_ERR_CLOSED; break;
+#if defined(EAGAIN)
+        case EAGAIN: kind = CC_ERR_WOULD_BLOCK; break;
+#endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || EWOULDBLOCK != EAGAIN)
+        case EWOULDBLOCK: kind = CC_ERR_WOULD_BLOCK; break;
+#endif
+#if defined(ECANCELED)
+        case ECANCELED: kind = CC_ERR_CANCELLED; break;
+#endif
+        case 0:      kind = CC_ERR_IO; break;
+        default:     kind = CC_ERR_IO; break;
     }
-    return e;
+    return cc_io_error_os(kind, err);
 }
 
-// Human-readable error string (static, do not free).
+/* Human-readable string (static). Prefer base.message when set. */
 static inline const char* cc_io_error_str(CCIoError e) {
-    switch (e.kind) {
-        case CC_IO_PERMISSION_DENIED: return "permission denied";
-        case CC_IO_FILE_NOT_FOUND:    return "file not found";
-        case CC_IO_INVALID_ARGUMENT:  return "invalid argument";
-        case CC_IO_INTERRUPTED:       return "interrupted";
-        case CC_IO_OUT_OF_MEMORY:     return "out of memory";
-        case CC_IO_BUSY:              return "resource busy";
-        case CC_IO_CONNECTION_CLOSED: return "connection closed";
-        case CC_IO_CANCELLED:         return "cancelled";
-        case CC_IO_OTHER:             return "I/O error";
-        default:                      return "unknown error";
+    if (e.base.message && e.base.message[0]) return e.base.message;
+    switch (e.base.kind) {
+        case CC_ERR_PERMISSION:    return "permission denied";
+        case CC_ERR_NOT_FOUND:     return "file not found";
+        case CC_ERR_INVALID_ARG:   return "invalid argument";
+        case CC_ERR_INTERRUPTED:   return "interrupted";
+        case CC_ERR_OUT_OF_MEMORY: return "out of memory";
+        case CC_ERR_WOULD_BLOCK:   return "resource busy";
+        case CC_ERR_CLOSED:        return "connection closed";
+        case CC_ERR_CANCELLED:     return "cancelled";
+        case CC_ERR_IO:            return "I/O error";
+        default:                   return "I/O error";
     }
 }
 
 /*
  * Unified I/O result type: bool !>(CCIoError)
- * Used by channels, files, network - all I/O operations.
  * - Ok(true)  = operation succeeded, got data
  * - Ok(false) = EOF / closed gracefully
  * - Err(e)    = actual error
@@ -117,5 +103,3 @@ static inline const char* cc_io_error_str(CCIoError e) {
 CC_DECL_RESULT_SPEC(CCResult_bool_CCIoError, bool, CCIoError)
 
 #endif /* CC_IO_ERROR_H */
-
-

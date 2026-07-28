@@ -62,7 +62,7 @@ static bool !>(CCIoError) rr_fill_common(RespReader* r, CCSocket* sock, bool non
             cc_socket_try_read_into(sock, r->data + r->end, max_bytes, &n);
         if (cc_is_err(res)) {
             CCIoError e = cc_error(res);
-            if (e.kind == CC_IO_BUSY) return cc_ok(false);
+            if (e.base.kind == CC_IO_BUSY) return cc_ok(false);
             return cc_err(e);
         }
         if (!cc_value(res)) return cc_ok(false);  /* FIN */

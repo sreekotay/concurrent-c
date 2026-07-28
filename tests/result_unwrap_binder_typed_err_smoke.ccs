@@ -26,7 +26,7 @@ static bool !>(CCIoError) rr_check(int x) {
 
 /* Consumer that requires the *declared* error type, not the generic one. */
 static void report(const CCIoError e) {
-    printf("report: kind=%d os_code=%d\n", (int)e.kind, (int)e.os_code);
+    printf("report: kind=%d os_code=%d\n", (int)e.base.kind, (int)e.os_code);
 }
 
 /* Expression-position `?>(e)` — the binder must be typed so `report(e)`

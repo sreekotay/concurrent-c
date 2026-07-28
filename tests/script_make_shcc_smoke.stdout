@@ -1,3 +1,5 @@
-make: use @examples_check (or @ to list)
+make: use @examples_check, @stress_check, @perf_check (or @ to list)
 ---
 examples_check  Compile-check top-level examples (--emit-c-only).
+perf_check      Run perf suite (timeouts/policies in tools/run_all.ccs).
+stress_check    Run stress suite (timeouts/policies in tools/run_all.ccs).

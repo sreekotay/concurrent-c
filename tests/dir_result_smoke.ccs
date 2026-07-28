@@ -22,7 +22,7 @@ int main(void) {
             if (cc_is_err(entry_res)) {
                 // CCIoError is a struct, need _as variant
                 CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
-                if (err.kind == CC_IO_OTHER && err.os_code == 0) {
+                if (err.base.kind == CC_IO_OTHER && err.os_code == 0) {
                     // EOF
                     break;
                 }

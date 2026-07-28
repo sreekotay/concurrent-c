@@ -33,8 +33,8 @@ int main(void) {
         printf("FAIL: res2 should be error\n");
         return 1;
     }
-    if (res2.u.error.kind != CC_IO_FILE_NOT_FOUND) {
-        printf("FAIL: res2.u.error.kind should be CC_IO_FILE_NOT_FOUND\n");
+    if (res2.u.error.base.kind != CC_IO_FILE_NOT_FOUND) {
+        printf("FAIL: res2.u.error.base.kind should be CC_IO_FILE_NOT_FOUND\n");
         return 1;
     }
     

@@ -2055,6 +2055,8 @@ static int emit_desugared_call(char* out,
         int has_as = (reg && ctx.recv_type_base[0] &&
                       cc_type_registry_has_as_field(reg, ctx.recv_type_base));
         int outer_real = 0;
+        /* Cheap @as gate before fn_name_is_real (O(TU) + header re-reads). */
+        if (dispatch_n >= 0 && !has_as) return dispatch_n;
         if (dispatch_n >= 0) {
             char callee[256];
             size_t ci = 0;
@@ -2065,7 +2067,7 @@ static int emit_desugared_call(char* out,
             }
             callee[ci] = '\0';
             if (ci > 0 && cc__ufcs_fn_name_is_real(callee)) outer_real = 1;
-            if (outer_real || !has_as) return dispatch_n;
+            if (outer_real) return dispatch_n;
         }
         if (has_as) {
             size_t nas;

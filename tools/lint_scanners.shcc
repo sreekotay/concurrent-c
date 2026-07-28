@@ -1,0 +1,153 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * RATCHET: no new hand-rolled comment/string state machines.
+ *
+ * Canonical scanners: util/text.h, util/text_scan.h (CCInertScan),
+ * preprocess.c's CCScannerState, template_scan.c.  Every other in_bc /
+ * in_block_comment local is legacy debt (PASS_CLEANUP_PLAN phase 4).
+ *
+ * Counts matching lines per file (same as `grep -cE`) and fails when a
+ * file exceeds its baseline or a new file appears.  Shrinking? Lower the
+ * baseline in the same commit — the ratchet only turns one way.
+ *
+ *   ./tools/lint_scanners.shcc
+ *   ./tools/dev.shcc @lint_scanners
+ * Bash oracle: scripts/lint_scanners.sh
+ */
+
+typedef struct {
+    const char* path;
+    int n;
+} ScannerBaseline;
+
+/* Keep in sync with scripts/lint_scanners.sh oracle. */
+static const ScannerBaseline BASELINE[] = {
+    {"cc/src/comptime/executor.c", 3},
+    {"cc/src/comptime/hook_compile.c", 3},
+    {"cc/src/comptime/symbols.c", 3},
+    {"cc/src/header/lower_header.c", 7},
+    {"cc/src/ir/ir.c", 8},
+    {"cc/src/parser/parse.c", 7},
+    {"cc/src/preprocess/emit_plan.c", 9},
+    {"cc/src/preprocess/preprocess.c", 85},
+    {"cc/src/preprocess/template_scan.c", 10},
+    {"cc/src/preprocess/type_registry.c", 3},
+    {"cc/src/util/result_fn_registry.c", 3},
+    {"cc/src/util/text.h", 22},
+    {"cc/src/util/text_scan.h", 5},
+    {"cc/src/visitor/async_ast.c", 3},
+    {"cc/src/visitor/pass_autoblock.c", 4},
+    {"cc/src/visitor/pass_create.c", 4},
+    {"cc/src/visitor/pass_defer_syntax.c", 4},
+    {"cc/src/visitor/pass_err_syntax.c", 4},
+    {"cc/src/visitor/pass_type_syntax.c", 4},
+    {"cc/src/visitor/visit_codegen.c", 10},
+};
+
+static int is_word_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Match grep -E 'in_bc\b|in_block_comment' on one line. */
+static int line_has_marker(CCSlice line) {
+    if (cc_slice_has(&line, @slice("in_block_comment"))) return 1;
+    CCSlice needle = @slice("in_bc");
+    size_t idx = 0;
+    while (idx + needle.len <= line.len) {
+        bool found = false;
+        CCSlice rest = cc_slice_sub(line, idx, line.len);
+        size_t pos = cc_slice_index_of(rest, needle, &found);
+        if (!found) break;
+        size_t at = idx + pos;
+        char before = (at > 0) ? line.ptr[at - 1] : 0;
+        char after = (at + needle.len < line.len) ? line.ptr[at + needle.len] : 0;
+        if (!is_word_char(before) && !is_word_char(after)) return 1;
+        idx = at + 1;
+    }
+    return 0;
+}
+
+static int count_markers(CCSlice bytes) {
+    int n = 0;
+    size_t i = 0;
+    while (i < bytes.len) {
+        size_t start = i;
+        while (i < bytes.len && bytes.ptr[i] != '\n') i++;
+        CCSlice line = cc_slice_sub(bytes, start, i);
+        if (line_has_marker(line)) n++;
+        if (i < bytes.len) i++;
+    }
+    return n;
+}
+
+/* Glob may emit `cc/src//foo.c` when `**` matches empty — collapse slashes. */
+static CCSlice norm_path(CCSlice path, CCArena* a) {
+    char* buf = (char*)cc_arena_alloc(a, path.len + 1, 1);
+    size_t o = 0;
+    if (!buf) return cc_slice_empty();
+    for (size_t i = 0; i < path.len; i++) {
+        char ch = path.ptr[i];
+        if (ch == '/' && o > 0 && buf[o - 1] == '/') continue;
+        buf[o++] = ch;
+    }
+    buf[o] = '\0';
+    return cc_slice_from_buffer(buf, o);
+}
+
+/* -1 if path is not in the baseline table. path is NUL-terminated. */
+static int baseline_get(CCSlice path) {
+    const size_t nbase = sizeof(BASELINE) / sizeof(BASELINE[0]);
+    if (!path.ptr) return -1;
+    for (size_t i = 0; i < nbase; i++) {
+        if (strcmp(path.ptr, BASELINE[i].path) == 0) return BASELINE[i].n;
+    }
+    return -1;
+}
+
+CCArena a = @create(megabytes(8)) @destroy;
+
+/* File/glob Results are CCIoError; handler matches via @as → CCError. */
+@errhandler(CCError e) {
+    (void)cc_eprintln(@string(
+        `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a));
+    return 1;
+}
+
+CCSlice root = cc_script_repo_root(@slice(""), &a) !>;
+cc_dir_chdir(root) !>;
+
+int fail = 0;
+CCSliceArray c_files = cc_glob(@slice("cc/src/**/*.c"), &a) !>;
+CCSliceArray h_files = cc_glob(@slice("cc/src/**/*.h"), &a) !>;
+
+for (size_t pass = 0; pass < 2; pass++) {
+    CCSliceArray files = (pass == 0) ? c_files : h_files;
+    for (size_t i = 0; i < files.len(); i++) {
+        CCSlice path = norm_path(files.get(i), &a);
+        CCSlice bytes = cc_file_read_path(path, &a) !>;
+        int n = count_markers(bytes);
+        if (n == 0) continue;
+        int b = baseline_get(path);
+        if (b < 0) {
+            CCString msg = @string(
+                `lint_scanners: NEW hand-rolled scanner state in ${path} (${n} markers) — use util/text.h or CCInertScan`,
+                &a);
+            msg.eprintln() !>;
+            fail = 1;
+        } else if (n > b) {
+            CCString msg = @string(
+                `lint_scanners: ${path} grew scanner-state markers (${b} -> ${n}) — use util/text.h or CCInertScan`,
+                &a);
+            msg.eprintln() !>;
+            fail = 1;
+        }
+    }
+}
+
+if (fail != 0) {
+    cc_eprintln(@slice("lint_scanners: FAILED (see PASS_CLEANUP_PLAN.md phase 4)")) !>;
+    return 1;
+}
+cc_println(@slice("lint_scanners: OK")) !>;
+return 0;

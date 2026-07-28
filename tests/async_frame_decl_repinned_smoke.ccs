@@ -17,7 +17,7 @@
 static bool !>(CCIoError) maybe_io(int x) {
     if (x < 0) {
         CCIoError e = {0};
-        e.kind = CC_IO_OTHER;
+        e.base = CC_ERROR(CC_IO_OTHER, NULL);
         return cc_err(e);
     }
     return cc_ok(true);

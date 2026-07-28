@@ -1,10 +1,15 @@
 # `@as` fields
 
 Status: draft — implemented for UFCS-miss retry (including transitive `@as`
-walk), destroy chaining, and arg-position autocast (see
-`tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
-`tests/as_arg_coerce_smoke.ccs`, `tests/as_ufcs_miss_fail.ccs`,
-`tests/as_transitive_smoke.ccs`, `tests/as_cycle_fail.ccs`).
+walk), destroy chaining, arg-position autocast, and `@errhandler` fallback
+(exact Result `E`, else unique `@as` path to the handler parameter type;
+see `tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
+`tests/as_arg_coerce_smoke.ccs`, `tests/as_arg_coerce_plain_smoke.ccs`,
+`tests/as_ufcs_miss_fail.ccs`, `tests/as_transitive_smoke.ccs`,
+`tests/as_cycle_fail.ccs`, `tests/as_ptr_as_fail.ccs`,
+`tests/as_anon_fail.ccs`, `tests/as_pre_hook_value_smoke.ccs`,
+`tests/as_nontypedef_struct_smoke.ccs`, `tests/errhandler_as_fallback_smoke.ccs`,
+`tests/errhandler_type_match_smoke.ccs`).
 
 ## 1. Surface
 
@@ -21,6 +26,8 @@ typedef struct CCTempFile {
 
 - The name is required; an anonymous `@as` field is ill-formed. The lowered
   C member is exactly the source name — no synthetic names.
+- The field must be a value embed (`Type name @as;`). A pointer field
+  (`Type *name @as;`) is ill-formed at the struct declaration.
 - Layout is ordinary field layout: `sizeof(Type)` at the declaration site
   with `Type`'s alignment. No field flattening.
 - At most one `@as` path to any given type from a struct (direct or
@@ -63,7 +70,16 @@ keeps C's meaning (no adjustment); a cast from `Outer*` to a `T*` whose
 `@as` path is not at offset zero is diagnosed with the member spelling to
 use instead.
 
-By-value conversion of `Outer` to `T` is not performed.
+By-value conversion of `Outer` to `T` is not performed at ordinary call
+sites. `@errhandler` dispatch is the exception: when no handler parameter
+type equals the unwrap's Result error type `E`, the innermost in-scope
+handler whose parameter type `H` is reachable from `E` by a unique `@as`
+path is selected (same preference order as UFCS: exact, then `@as`). The
+error binder is then that path's member, by value — e.g. `CCError e =
+(tmp).u.error.base` when `E` is `CCIoError` and `H` is `CCError`. An
+exact `CCIoError` handler still wins over a `CCError` handler when both
+are in scope. Ambiguous or cyclic `@as` paths leave the site without a
+match (ill-formed when a handler is required).
 
 ## 3. Destroy chain
 
@@ -117,13 +133,18 @@ A callee registered as a destroy hook tolerates a second call on the same
 object. `cc_file_close` nulls `handle` and no-ops on a null handle; every
 registered hook follows the same shape (guard field, null after release).
 
-## 4. First consumer
+## 4. Consumers
 
 `CCTempFile` embeds `CCFile file @as` (`fdopen` of the `mkstemp` fd);
 `cc_temp_file_unlink` is the registered delta hook (unlink path, clear
 `owns`); `cc_temp_file_destroy` is the hand-written full chain; `CCFile`
 registers `cc_file_close` as its destroy hook. The factory remains
 `cc_temp_file`.
+
+`CCIoError` embeds `CCError base @as` plus `os_code`. I/O Results use
+`CCIoError` as `E`; a sole `@errhandler(CCError …)` matches via the
+`base` face. Kind tags share `CCErrorKind` (`CC_IO_*` names alias the
+corresponding `CC_ERR_*` values).
 
 ## 5. Out of scope
 
@@ -133,6 +154,7 @@ registers `cc_file_close` as its destroy hook. The factory remains
   form may use the same layout facts
 - `@as` on non-struct types
 - Construction chaining (`@create` through `@as` fields)
-- By-value conversion of the outer type to an `@as` type
+- General by-value conversion of the outer type to an `@as` type outside
+  `@errhandler` binder projection
 - Anonymous `@as` fields; a `@super` spelling
 - Synthesized full-chain destroy symbols

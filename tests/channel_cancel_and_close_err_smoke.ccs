@@ -91,12 +91,12 @@ static int test_close_with_error(void) {
     pthread_join(th, NULL);
 
     int ok = !obs.result.ok
-          && obs.result.u.error.kind == CC_IO_PERMISSION_DENIED
+          && obs.result.u.error.base.kind == CC_IO_PERMISSION_DENIED
           && obs.result.u.error.os_code == 13;
     cc_chan_free(ch);
     if (!ok) {
         fprintf(stderr, "close(e): expected Err(PERMISSION_DENIED,13), got ok=%d kind=%d os=%d\n",
-                (int)obs.result.ok, (int)obs.result.u.error.kind, (int)obs.result.u.error.os_code);
+                (int)obs.result.ok, (int)obs.result.u.error.base.kind, (int)obs.result.u.error.os_code);
         return 1;
     }
     return 0;
@@ -116,11 +116,11 @@ static int test_cancel_tx(void) {
     cc_channel_cancel(tx);
     pthread_join(th, NULL);
 
-    int ok = !obs.result.ok && obs.result.u.error.kind == CC_IO_CANCELLED;
+    int ok = !obs.result.ok && obs.result.u.error.base.kind == CC_IO_CANCELLED;
     cc_chan_free(ch);
     if (!ok) {
         fprintf(stderr, "tx.cancel: expected Err(CANCELLED), got ok=%d kind=%d\n",
-                (int)obs.result.ok, (int)obs.result.u.error.kind);
+                (int)obs.result.ok, (int)obs.result.u.error.base.kind);
         return 1;
     }
     return 0;
@@ -149,11 +149,11 @@ static int test_cancel_rx_unblocks_sender(void) {
     cc_channel_cancel(rx);
     pthread_join(th, NULL);
 
-    int ok = !obs.result.ok && obs.result.u.error.kind == CC_IO_CANCELLED;
+    int ok = !obs.result.ok && obs.result.u.error.base.kind == CC_IO_CANCELLED;
     cc_chan_free(ch);
     if (!ok) {
         fprintf(stderr, "rx.cancel->send: expected Err(CANCELLED), got ok=%d kind=%d\n",
-                (int)obs.result.ok, (int)obs.result.u.error.kind);
+                (int)obs.result.ok, (int)obs.result.u.error.base.kind);
         return 1;
     }
     return 0;
@@ -178,12 +178,12 @@ static int test_rx_close_with_error_unblocks_sender(void) {
     pthread_join(th, NULL);
 
     int ok = !obs.result.ok
-          && obs.result.u.error.kind == CC_IO_OUT_OF_MEMORY
+          && obs.result.u.error.base.kind == CC_IO_OUT_OF_MEMORY
           && obs.result.u.error.os_code == 12;
     cc_chan_free(ch);
     if (!ok) {
         fprintf(stderr, "rx.close(e)->send: expected Err(OOM,12), got ok=%d kind=%d os=%d\n",
-                (int)obs.result.ok, (int)obs.result.u.error.kind, (int)obs.result.u.error.os_code);
+                (int)obs.result.ok, (int)obs.result.u.error.base.kind, (int)obs.result.u.error.os_code);
         return 1;
     }
     return 0;

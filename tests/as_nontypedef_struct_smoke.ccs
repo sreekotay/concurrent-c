@@ -1,0 +1,30 @@
+/* Non-typedef struct with a named @as embed must participate in UFCS retry. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/temp.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+struct AsNtWrap {
+    int tag;
+    CCFile file @as;
+};
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "err: %s\n", e.message ? e.message : "?");
+        return 1;
+    }
+
+    CCArena a = @create(kilobytes(64)) @destroy;
+    struct AsNtWrap w = {0};
+    w.tag = 2;
+    assert(w.open(cc_slice_from_cstr("tmp/as_nontypedef_struct_smoke.txt"), "w") == 0);
+    assert(w.file.handle != NULL);
+    w.close();
+    assert(w.file.handle == NULL);
+    remove("tmp/as_nontypedef_struct_smoke.txt");
+    printf("ok\n");
+    return 0;
+}

@@ -79,7 +79,7 @@ static inline CCResult_CCSlice_CCError cc_stdio_read_all(CCStdio *io) {
     return cc_ok_CCResult_CCSlice_CCError(slice);
 }
 
-static inline CCResult_size_t_CCError cc_stdio_write_all(CCStdio *io, CCSlice data) {
+static inline CCResult_size_t_CCError cc__stdio_write_all_slice(CCStdio *io, CCSlice data) {
     (void)io;
     CCResult_size_t_CCIoError r = cc_std_out_write(data);
     if (cc_is_err(r)) {
@@ -89,7 +89,12 @@ static inline CCResult_size_t_CCError cc_stdio_write_all(CCStdio *io, CCSlice da
     return cc_ok_CCResult_size_t_CCError(cc_value(r));
 }
 
-static inline CCResult_size_t_CCError cc_stdio_println(CCStdio *io, CCSlice data) {
+static inline CCResult_size_t_CCError cc__stdio_write_all_string(CCStdio *io, CCString data) {
+    CCSlice view = cc_string_as_slice(&data);
+    return cc__stdio_write_all_slice(io, view);
+}
+
+static inline CCResult_size_t_CCError cc__stdio_println_slice(CCStdio *io, CCSlice data) {
     (void)io;
     CCResult_size_t_CCIoError r = cc_std_out_write(data);
     if (cc_is_err(r)) {
@@ -104,7 +109,12 @@ static inline CCResult_size_t_CCError cc_stdio_println(CCStdio *io, CCSlice data
     return cc_ok_CCResult_size_t_CCError(n + 1);
 }
 
-static inline CCResult_size_t_CCError cc_stdio_eprintln(CCStdio *io, CCSlice data) {
+static inline CCResult_size_t_CCError cc__stdio_println_string(CCStdio *io, CCString data) {
+    CCSlice view = cc_string_as_slice(&data);
+    return cc__stdio_println_slice(io, view);
+}
+
+static inline CCResult_size_t_CCError cc__stdio_eprintln_slice(CCStdio *io, CCSlice data) {
     (void)io;
     CCResult_size_t_CCIoError r = cc_std_err_write(data);
     if (cc_is_err(r)) {
@@ -118,6 +128,28 @@ static inline CCResult_size_t_CCError cc_stdio_eprintln(CCStdio *io, CCSlice dat
     }
     return cc_ok_CCResult_size_t_CCError(n + 1);
 }
+
+static inline CCResult_size_t_CCError cc__stdio_eprintln_string(CCStdio *io, CCString data) {
+    CCSlice view = cc_string_as_slice(&data);
+    return cc__stdio_eprintln_slice(io, view);
+}
+
+/* UFCS lowers `io.println(x)` → `cc_stdio_println(&io, x)`. Accept both
+ * CCSlice and CCString so call sites need not write `.as_slice()`. */
+#define cc_stdio_write_all(io, data) _Generic((data), \
+    CCString: cc__stdio_write_all_string, \
+    default: cc__stdio_write_all_slice \
+)(io, data)
+
+#define cc_stdio_println(io, data) _Generic((data), \
+    CCString: cc__stdio_println_string, \
+    default: cc__stdio_println_slice \
+)(io, data)
+
+#define cc_stdio_eprintln(io, data) _Generic((data), \
+    CCString: cc__stdio_eprintln_string, \
+    default: cc__stdio_eprintln_slice \
+)(io, data)
 
 /*
  * Read the next stdin line into the bound arena. Trailing `\n` / `\r\n` are

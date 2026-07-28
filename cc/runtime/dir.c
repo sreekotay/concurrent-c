@@ -46,7 +46,7 @@ struct CCDirIter {
 
 /* Use cc_io_from_errno() from cc_io_error.cch for error conversion.
  * For EOF on directory iteration, use CC_IO_OTHER with os_code=0. */
-#define CC_DIR_EOF_ERROR ((CCIoError){.kind = CC_IO_OTHER, .os_code = 0})
+#define CC_DIR_EOF_ERROR ((CCIoError){.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = 0})
 
 static const char *cc__dir_path_cstr(CCSlice path) {
     return path.ptr ? (const char *)path.ptr : NULL;
@@ -86,7 +86,7 @@ CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path_sl) {
     iter->handle = FindFirstFileA(pattern, &iter->find_data);
     if (iter->handle == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-        CCIoError e = {.kind = CC_IO_FILE_NOT_FOUND, .os_code = (int)err};
+        CCIoError e = {.base = CC_ERROR(CC_IO_FILE_NOT_FOUND, NULL), .os_code = (int)err};
         return cc_err_CCResult_CCDirIterptr_CCIoError(e);
     }
     iter->first = 1;
@@ -114,7 +114,7 @@ CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
             if (err == ERROR_NO_MORE_FILES) {
                 return cc_err_CCResult_CCDirEntry_CCIoError(CC_DIR_EOF_ERROR);
             }
-            CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+            CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
             return cc_err_CCResult_CCDirEntry_CCIoError(e);
         }
     }
@@ -250,7 +250,7 @@ CCResult_bool_CCIoError cc_dir_create(CCSlice path_sl) {
         return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
-    CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+    CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
     return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (mkdir(path, 0755) == 0) {
@@ -286,7 +286,7 @@ CCResult_bool_CCIoError cc_dir_create_all(CCSlice path_sl) {
                     DWORD err = GetLastError();
                     if (err != ERROR_ALREADY_EXISTS) {
                         free(buf);
-                        CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+                        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
                         return cc_err_CCResult_bool_CCIoError(e);
                     }
                 }
@@ -317,7 +317,7 @@ CCResult_bool_CCIoError cc_dir_remove(CCSlice path_sl) {
         return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
-    CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+    CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
     return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (rmdir(path) == 0) {
@@ -337,7 +337,7 @@ CCResult_bool_CCIoError cc_file_remove(CCSlice path_sl) {
         return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
-    CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+    CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
     return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (unlink(path) == 0) {
@@ -380,7 +380,7 @@ CCResult_bool_CCIoError cc_dir_chdir(CCSlice path_sl) {
         return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
-    CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
+    CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)err};
     return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (chdir(path) == 0) {
@@ -441,7 +441,7 @@ typedef struct {
 } CCGlobBuilder;
 
 static int cc__dir_is_eof(CCIoError e) {
-    return e.kind == CC_IO_OTHER && e.os_code == 0;
+    return e.base.kind == CC_IO_OTHER && e.os_code == 0;
 }
 
 /* 0 on success; -1 and *err set on failure. */

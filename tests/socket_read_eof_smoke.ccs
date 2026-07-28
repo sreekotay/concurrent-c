@@ -93,7 +93,7 @@ int main(void) {
         size_t nbytes = 0;
 
         CCResult_bool_CCIoError busy = cc_socket_try_read_into(&sock, buf, sizeof(buf), &nbytes);
-        if (!(cc_is_err(busy) && cc_error(busy).kind == CC_IO_BUSY)) {
+        if (!(cc_is_err(busy) && cc_error(busy).base.kind == CC_IO_BUSY)) {
             fail("expected Err(BUSY) on empty nonblocking read");
         }
 

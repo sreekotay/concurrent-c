@@ -8725,6 +8725,65 @@ static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len)
     return 0;
 }
 
+static void cc__register_included_cch_tree(const char* source_path);
+
+/* Register stdlib `.cch` trees for `#include <….[ch]|cch>` so `@as` metadata
+ * is available when the TU already uses lowered `.h` includes (no `.cch→.h`
+ * rewrite side-effect). */
+static void cc__register_cch_trees_from_angle_includes(const char* src, size_t n) {
+    char repo_root[PATH_MAX];
+    size_t i = 0;
+    if (!src || n == 0) return;
+    repo_root[0] = '\0';
+    if (!cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root)) || !repo_root[0])
+        return;
+    while (i < n) {
+        size_t line_end = i, p, close, path_s, path_e, rel_len;
+        char rel[PATH_MAX], abs_src[PATH_MAX];
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < line_end && src[p] == '#') {
+            p++;
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(src + p, "include", 7) == 0 &&
+                (p + 7 == line_end || !cc_is_ident_char(src[p + 7]))) {
+                p += 7;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < line_end && src[p] == '<') {
+                    close = p + 1;
+                    while (close < line_end && src[close] != '>') close++;
+                    if (close < line_end) {
+                        path_s = p + 1;
+                        path_e = close;
+                        rel_len = path_e - path_s;
+                        if (rel_len >= 4 && rel_len < sizeof(rel)) {
+                            int is_cch = memcmp(src + path_e - 4, ".cch", 4) == 0;
+                            int is_h = !is_cch && memcmp(src + path_e - 2, ".h", 2) == 0;
+                            if (is_cch || is_h) {
+                                memcpy(rel, src + path_s, rel_len);
+                                rel[rel_len] = '\0';
+                                if (is_h) {
+                                    /* foo.h → foo.cch */
+                                    if (rel_len + 2 >= sizeof(rel)) goto next_line;
+                                    memcpy(rel + rel_len - 2, ".cch", 4);
+                                    rel[rel_len + 2] = '\0';
+                                }
+                                snprintf(abs_src, sizeof(abs_src),
+                                         "%s/cc/include/%s", repo_root, rel);
+                                if (access(abs_src, R_OK) == 0)
+                                    cc__register_included_cch_tree(abs_src);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    next_line:
+        i = line_end < n ? line_end + 1 : line_end;
+    }
+}
+
 void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg) {
     size_t h;
     if (!reg) return;
@@ -13003,7 +13062,12 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
      * buffer and are otherwise invisible to TU-local field scans. */
     {
         CCTypeRegistry* reg = cc_type_registry_get_global();
-        if (reg) cc_ingest_included_cch_struct_fields(reg);
+        if (reg) {
+            /* TUs that `#include <….h>` never hit the `.cch→.h` rewrite's
+             * registration side-effect; map those includes back to `.cch`. */
+            cc__register_cch_trees_from_angle_includes(chain->src, chain->len);
+            cc_ingest_included_cch_struct_fields(reg);
+        }
     }
     /* UFCS must lower `recv.method(...)` before `!>` / `?>` expand the
      * call into `__typeof__(call)` / `__cc_uw_*` form.  Expanding first

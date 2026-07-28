@@ -1,0 +1,69 @@
+/* Value-type pre+post destroy hooks + @as: bang, .destroy(), and @create
+ * must all pass &outer and close the embed. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int tag;
+    CCFile file @as;
+} Holder;
+
+static int g_pre;
+static int g_post;
+
+static void holder_pre(Holder *h) {
+    assert(h != NULL);
+    g_pre++;
+}
+static void holder_post(Holder *h) {
+    assert(h != NULL);
+    g_post++;
+}
+static Holder holder_make(void) {
+    Holder h = {0};
+    h.tag = 1;
+    return h;
+}
+
+@comptime {
+    (void)cc_type_register("Holder", (CCTypeHooks){
+        .create = cc_type_create_call("holder_make"),
+        .destroy = cc_type_destroy_hooks("holder_pre", "holder_post"),
+    });
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "err: %s\n", e.message ? e.message : "?");
+        return 1;
+    }
+
+    g_pre = g_post = 0;
+    {
+        Holder a = holder_make() !> @destroy;
+        assert(a.tag == 1);
+    }
+    assert(g_pre == 1);
+    assert(g_post == 1);
+
+    g_pre = g_post = 0;
+    {
+        Holder b = holder_make();
+        b.destroy();
+    }
+    assert(g_pre == 1);
+    assert(g_post == 1);
+
+    g_pre = g_post = 0;
+    {
+        Holder c = @create() @destroy;
+        assert(c.tag == 1);
+    }
+    assert(g_pre == 1);
+    assert(g_post == 1);
+
+    printf("ok\n");
+    return 0;
+}

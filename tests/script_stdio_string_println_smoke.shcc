@@ -1,0 +1,12 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Smoke: CCStdio.println/eprintln accept CCString without .as_slice().
+ */
+
+CCArena a = @create(kilobytes(64)) @destroy;
+CCStdio io = @create(&a) @destroy;
+CCString s = @string(`stdio-string-ok`, &a);
+io.println(s) !>;
+io.eprintln(s) !>;
+io.println(@slice("slice-ok")) !>;
+return 0;

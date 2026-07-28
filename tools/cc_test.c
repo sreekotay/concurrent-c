@@ -622,10 +622,11 @@ static int run_one_test(const char* stem,
      * for `tests/macro/foo.ccs`).  Derived from input_path. */
     char test_dir[512];
     test_dir_from_path(input_path, test_dir, sizeof(test_dir));
-    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512], args_path[512], stdin_path[512], exit_path[512];
+    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], exp_build_stderr_path[512], ldflags_path[512], args_path[512], stdin_path[512], exit_path[512];
     snprintf(exp_stdout_path, sizeof(exp_stdout_path), "%s/%s.stdout", test_dir, stem);
     snprintf(exp_stderr_path, sizeof(exp_stderr_path), "%s/%s.stderr", test_dir, stem);
     snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "%s/%s.compile_err", test_dir, stem);
+    snprintf(exp_build_stderr_path, sizeof(exp_build_stderr_path), "%s/%s.build_stderr", test_dir, stem);
     snprintf(ldflags_path, sizeof(ldflags_path), "%s/%s.ldflags", test_dir, stem);
     snprintf(args_path, sizeof(args_path), "%s/%s.args", test_dir, stem);
     snprintf(stdin_path, sizeof(stdin_path), "%s/%s.stdin", test_dir, stem);
@@ -635,29 +636,30 @@ static int run_one_test(const char* stem,
      * `stem.stdin` still wins. */
     const char* run_stdin = file_exists(stdin_path) ? stdin_path : "/dev/null";
 
-    unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
-    size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, ldflags_len = 0;
+    unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *exp_build_stderr = NULL, *ldflags = NULL;
+    size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, exp_build_stderr_len = 0, ldflags_len = 0;
     (void)read_entire_file_alloc(exp_stdout_path, &exp_stdout, &exp_stdout_len);
     (void)read_entire_file_alloc(exp_stderr_path, &exp_stderr, &exp_stderr_len);
     (void)read_entire_file_alloc(exp_compile_err_path, &exp_compile_err, &exp_compile_err_len);
+    (void)read_entire_file_alloc(exp_build_stderr_path, &exp_build_stderr, &exp_build_stderr_len);
     (void)read_entire_file_alloc(ldflags_path, &ldflags, &ldflags_len);
 
     ArgRuns runs = {0};
     ExitExpects exits = {0};
     if (arg_runs_load(args_path, &runs) != 0) {
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
     }
     if (exit_expects_load(exit_path, &exits) != 0) {
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
     }
     if (runs.n > 0 && exits.n > 1 && exits.n != runs.n) {
         fprintf(stderr, "[FAIL] %s: .args has %d runs but .exit has %d codes\n",
                 stem, runs.n, exits.n);
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
     }
 
@@ -704,14 +706,14 @@ static int run_one_test(const char* stem,
         if (build_rc == 0) {
             fprintf(stderr, "[FAIL] %s: expected build to fail\n", stem);
             arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
             return 1;
         }
         if (build_rc == 124) {
             fprintf(stderr, "[TIMEOUT] %s: build timed out after %ds\n", stem, build_timeout_sec);
             log_failure_files(stem, out_txt, err_txt, build_err_txt);
             arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
             return 1;
         }
         unsigned char* err_buf = NULL;
@@ -720,7 +722,7 @@ static int run_one_test(const char* stem,
         int bad = expect_contains_lines("compile_err", err_buf, err_len, exp_compile_err, exp_compile_err_len);
         free(err_buf);
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         if (bad) return 1;
         fprintf(stderr, "[OK] %s\n", stem);
         return 0;
@@ -733,8 +735,24 @@ static int run_one_test(const char* stem,
         fprintf(stderr, "[FAIL] %s: build failed\n", stem);
         log_failure_files(stem, out_txt, err_txt, build_err_txt);
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
+    }
+
+    /* Optional pin for compile-time diagnostics on successful builds (warnings). */
+    if (exp_build_stderr && exp_build_stderr_len) {
+        unsigned char* build_err_buf = NULL;
+        size_t build_err_len = 0;
+        (void)read_entire_file_alloc(build_err_txt, &build_err_buf, &build_err_len);
+        if (expect_contains_lines("build_stderr", build_err_buf, build_err_len,
+                                  exp_build_stderr, exp_build_stderr_len) != 0) {
+            log_failure_files(stem, out_txt, err_txt, build_err_txt);
+            free(build_err_buf);
+            arg_runs_clear(&runs);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
+            return 1;
+        }
+        free(build_err_buf);
     }
 
     int nruns = runs.n > 0 ? runs.n : 1;
@@ -745,14 +763,14 @@ static int run_one_test(const char* stem,
         fprintf(stderr, "[FAIL] %s: .args has %d runs but .stdout has %d --- sections\n",
                 stem, nruns, out_secs.n);
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
     }
     if (runs.n > 0 && err_secs.n > 1 && err_secs.n != nruns) {
         fprintf(stderr, "[FAIL] %s: .args has %d runs but .stderr has %d --- sections\n",
                 stem, nruns, err_secs.n);
         arg_runs_clear(&runs);
-        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
         return 1;
     }
 
@@ -774,7 +792,7 @@ static int run_one_test(const char* stem,
             fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, test_run_timeout_sec);
             log_failure_files(stem, out_txt, err_txt, build_err_txt);
             arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
             return 1;
         }
         if (run_rc != want_exit) {
@@ -783,7 +801,7 @@ static int run_one_test(const char* stem,
             fprintf(stderr, "\n");
             log_failure_files(stem, out_txt, err_txt, build_err_txt);
             arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
             return 1;
         }
 
@@ -826,13 +844,13 @@ static int run_one_test(const char* stem,
         if (bad) {
             log_failure_files(stem, out_txt, err_txt, build_err_txt);
             arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
             return 1;
         }
     }
 
     arg_runs_clear(&runs);
-    free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+    free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
     fprintf(stderr, "[OK] %s\n", stem);
     return 0;
 }

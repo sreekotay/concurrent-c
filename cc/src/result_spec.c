@@ -11,7 +11,7 @@ static const struct {
     const char* cc_name;
 } cc__type_aliases[] = {
     { "IoError", "CCIoError" },
-    { "IoErrorKind", "CCIoErrorKind" },
+    { "IoErrorKind", "CCErrorKind" },
     { "Error", "CCError" },
     { "ErrorKind", "CCErrorKind" },
     { "NetError", "CCNetError" },

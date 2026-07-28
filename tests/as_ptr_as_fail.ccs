@@ -1,0 +1,15 @@
+/* Pointer @as fields are ill-formed (value embeds only). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile *fp @as;
+    int tag;
+} AsPtrWrap;
+
+int main(void) {
+    AsPtrWrap w = {0};
+    (void)w;
+    printf("unreachable\n");
+    return 0;
+}

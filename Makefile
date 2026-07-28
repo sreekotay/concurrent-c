@@ -120,12 +120,12 @@ out-of-tree-smoke: cc
 examples-check: cc
 	@./tools/make.shcc @examples_check
 
-# Thin wrappers over tools/run_all.ccs (suite run policy lives there).
+# Suite runners via tools/make.shcc (policy still lives in run_all.ccs).
 stress-check: cc
-	@$(CC_DIR)/bin/ccc run tools/run_all.ccs -- --stress
+	@./tools/make.shcc @stress_check
 
 perf-check: cc
-	@$(CC_DIR)/bin/ccc run tools/run_all.ccs -- --perf
+	@./tools/make.shcc @perf_check
 
 full-check: examples-check stress-check perf-check
 

@@ -1,0 +1,26 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Smoke: return cmd.status() !>; matches @errhandler(CCIoError) for UFCS
+ * receivers (previously defaulted to CCError and rejected the Io handler).
+ * Also exercises cmd.inherit_stdio() value UFCS (returns CCCommand*).
+ */
+
+static int run_ccc_version(void) {
+    CCArena a = @create(megabytes(1)) @destroy;
+    @errhandler(CCIoError e) {
+        (void)e;
+        return 1;
+    }
+    CCCommand cmd = cc_command(&a, @slice("./cc/bin/ccc"));
+    cmd.arg("--version");
+    /* Value-receiver UFCS for inherit_stdio (mutates a probe, not the run). */
+    CCCommand probe = cmd;
+    (void)probe.inherit_stdio();
+    /* Capture so suite stdout stays quiet. */
+    cmd.stdout_capture();
+    cmd.stderr_capture();
+    return cmd.status() !>;
+}
+
+int rc = run_ccc_version();
+return rc == 0 ? 0 : 1;

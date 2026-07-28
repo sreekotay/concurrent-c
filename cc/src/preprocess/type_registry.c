@@ -574,6 +574,31 @@ typedef struct {
     char path[256];
 } CCAsReach;
 
+/* True when a field type spelling is a pointer (has `*`). `@as` requires a
+ * value embed; pointer stars are not stripped here (unlike path matching). */
+static int cc__as_field_type_is_pointer(const char* field_type) {
+    size_t i = 0;
+    size_t n;
+    if (!field_type || !field_type[0]) return 0;
+    n = strlen(field_type);
+    while (i < n) {
+        if (field_type[i] == '/' && i + 1 < n && field_type[i + 1] == '/') {
+            i += 2;
+            while (i < n && field_type[i] != '\n') i++;
+            continue;
+        }
+        if (field_type[i] == '/' && i + 1 < n && field_type[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(field_type[i] == '*' && field_type[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (field_type[i] == '*') return 1;
+        i++;
+    }
+    return 0;
+}
+
 static int cc__line_for_typedef_name(const char* src, size_t n, const char* name) {
     size_t i;
     size_t nlen;
@@ -652,6 +677,8 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
         if (cc_type_registry_as_field_at(reg, type_key, ai, &field_name, &field_type) != 0)
             continue;
         if (!field_name || !field_type) continue;
+        /* Pointer `@as` is diagnosed separately; do not walk it as an edge. */
+        if (cc__as_field_type_is_pointer(field_type)) continue;
         cc__strip_type_spelling(field_type, fkey, sizeof(fkey));
         if (!fkey[0]) continue;
         fn_len = strlen(field_name);
@@ -684,6 +711,11 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
         }
         if (k == *seen_n) {
             if (*seen_n >= seen_cap) {
+                fprintf(stderr,
+                        "%s:%d:1: error: type: @as embed graph on '%s' exceeds "
+                        "validation capacity (%zu types); simplify the embed DAG\n",
+                        file ? file : "<input>", line > 0 ? line : 1, root, seen_cap);
+                (*err_count)++;
                 path_len = saved_len;
                 path[path_len] = '\0';
                 return -1;
@@ -715,6 +747,8 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
     return 0;
 }
 
+static int cc__as_diagnose_anon_fields(const char* file, const char* src, size_t n);
+
 int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
                                         const char* file,
                                         const char* src,
@@ -725,10 +759,34 @@ int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
     size_t i;
     int err_count = 0;
     if (!reg) return 0;
+    err_count += cc__as_diagnose_anon_fields(file, src, n);
+    /* Pointer `@as` is ill-formed (value-embed layout / `&recv.field`). */
+    for (i = 0; i < reg->field_count; i++) {
+        int line;
+        if (!reg->fields[i].is_as || !reg->fields[i].struct_name) continue;
+        if (!cc__as_field_type_is_pointer(reg->fields[i].field_type)) continue;
+        line = cc__line_for_typedef_name(src, n, reg->fields[i].struct_name);
+        fprintf(stderr,
+                "%s:%d:1: error: type: @as field '%s' on '%s' must be a value "
+                "embed, not a pointer (got '%s')\n",
+                file ? file : "<input>", line > 0 ? line : 1,
+                reg->fields[i].field_name ? reg->fields[i].field_name : "?",
+                reg->fields[i].struct_name,
+                reg->fields[i].field_type ? reg->fields[i].field_type : "?");
+        fprintf(stderr,
+                "%s:%d:1: note: declare 'T %s @as;' (by value); pointer @as is "
+                "not supported\n",
+                file ? file : "<input>", line > 0 ? line : 1,
+                reg->fields[i].field_name ? reg->fields[i].field_name : "field");
+        err_count++;
+    }
     for (i = 0; i < reg->field_count; i++) {
         size_t r;
         int have = 0;
         if (!reg->fields[i].is_as || !reg->fields[i].struct_name) continue;
+        /* Pointer embeds already diagnosed; omit them from the DAG walk so
+         * a pointer cycle does not also report "cyclic @as". */
+        if (cc__as_field_type_is_pointer(reg->fields[i].field_type)) continue;
         for (r = 0; r < root_count; r++) {
             if (strcmp(roots[r], reg->fields[i].struct_name) == 0) {
                 have = 1;
@@ -756,12 +814,40 @@ int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
         char path[256];
         int line = cc__line_for_typedef_name(src, n, roots[i]);
         path[0] = '\0';
-        (void)cc__as_validate_walk(reg, roots[i], roots[i], path, 0, sizeof(path),
-                                   stack, 0, 32, seen, &seen_n, 64, file, line,
-                                   &err_count);
+        {
+            int walk_rc = cc__as_validate_walk(reg, roots[i], roots[i], path, 0,
+                                               sizeof(path), stack, 0, 32, seen,
+                                               &seen_n, 64, file, line, &err_count);
+            /* Capacity / OOM aborts already increment err_count when diagnosed;
+             * treat any negative walk result as failure. */
+            if (walk_rc < 0 && err_count == 0) err_count++;
+        }
     }
     free(roots);
     return err_count > 0 ? -1 : 0;
+}
+
+int cc_type_registry_may_need_as_arg_coerce(CCTypeRegistry* reg,
+                                            const char* src,
+                                            size_t n) {
+    size_t i;
+    if (!src || n == 0) return 0;
+    /* Emit-ready buffer keeps the comment-marker form after preprocess. */
+    for (i = 0; i + 7 <= n; i++) {
+        if (memcmp(src + i, "/*@as*/", 7) == 0) return 1;
+    }
+    if (cc_contains_token_top_level(src, n, "@as")) return 1;
+    if (!reg) return 0;
+    /* Header-registered embeds (e.g. CCTempFile): fire when an outer type
+     * that has `@as` appears in the TU text. */
+    for (i = 0; i < reg->field_count; i++) {
+        const char* sn;
+        if (!reg->fields[i].is_as) continue;
+        sn = reg->fields[i].struct_name;
+        if (!sn || !sn[0]) continue;
+        if (cc_contains_token_top_level(src, n, sn)) return 1;
+    }
+    return 0;
 }
 
 int cc_type_registry_field_is_first(CCTypeRegistry* reg,
@@ -780,34 +866,172 @@ int cc_type_registry_field_is_first(CCTypeRegistry* reg,
     return 0;
 }
 
-void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
-                                           const char* src,
-                                           size_t n) {
+static int cc__as_stmt_has_marker(const char* src, size_t a, size_t b) {
+    size_t i = a;
+    if (!src || a >= b) return 0;
+    while (i < b) {
+        if (src[i] == '/' && i + 1 < b && src[i + 1] == '/') {
+            i += 2;
+            while (i < b && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < b && src[i + 1] == '*') {
+            if (i + 7 <= b && memcmp(src + i, "/*@as*/", 7) == 0) return 1;
+            i += 2;
+            while (i + 1 < b && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < b) i += 2;
+            continue;
+        }
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < b) {
+                if (src[i] == '\\' && i + 1 < b) { i += 2; continue; }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (src[i] == '@' && i + 3 <= b && src[i + 1] == 'a' && src[i + 2] == 's' &&
+            (i + 3 == b || !cc_is_ident_char(src[i + 3])))
+            return 1;
+        i++;
+    }
+    return 0;
+}
+
+static void cc__ingest_struct_body_fields(CCTypeRegistry* reg,
+                                          const char* src,
+                                          size_t body_l,
+                                          size_t body_r,
+                                          const char* struct_name) {
+    const char* stmt;
+    const char* body_end;
+    if (!reg || !src || !struct_name || !struct_name[0] || body_l >= body_r) return;
+    stmt = src + body_l + 1;
+    body_end = src + body_r;
+    while (stmt < body_end) {
+        size_t stmt_off = (size_t)(stmt - src);
+        size_t end_off = (size_t)(body_end - src);
+        size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+        char field_name[128];
+        char field_type[256];
+        int field_is_as = 0;
+        if (semi_off >= end_off) break;
+        cc_parse_decl_name_and_type_ex(src + stmt_off, src + semi_off,
+                                       field_name, sizeof(field_name),
+                                       field_type, sizeof(field_type),
+                                       &field_is_as);
+        if (field_name[0] && field_type[0]) {
+            (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
+                                                field_type, field_is_as);
+        }
+        stmt = src + semi_off + 1;
+    }
+}
+
+static int cc__as_diagnose_anon_in_body(const char* file,
+                                        const char* src,
+                                        size_t body_l,
+                                        size_t body_r,
+                                        const char* struct_name,
+                                        int line) {
+    const char* stmt;
+    const char* body_end;
+    int errs = 0;
+    if (!src || !struct_name || body_l >= body_r) return 0;
+    stmt = src + body_l + 1;
+    body_end = src + body_r;
+    while (stmt < body_end) {
+        size_t stmt_off = (size_t)(stmt - src);
+        size_t end_off = (size_t)(body_end - src);
+        size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+        char field_name[128];
+        char field_type[256];
+        int field_is_as = 0;
+        if (semi_off >= end_off) break;
+        if (!cc__as_stmt_has_marker(src, stmt_off, semi_off)) {
+            stmt = src + semi_off + 1;
+            continue;
+        }
+        cc_parse_decl_name_and_type_ex(src + stmt_off, src + semi_off,
+                                       field_name, sizeof(field_name),
+                                       field_type, sizeof(field_type),
+                                       &field_is_as);
+        /* Named form yields both name and type; anything else with an @as
+         * marker is anonymous / ill-formed. */
+        if (!(field_name[0] && field_type[0] && field_is_as)) {
+            fprintf(stderr,
+                    "%s:%d:1: error: type: anonymous @as field on '%s' is "
+                    "ill-formed; declare 'Type name @as;'\n",
+                    file ? file : "<input>", line > 0 ? line : 1, struct_name);
+            errs++;
+        }
+        stmt = src + semi_off + 1;
+    }
+    return errs;
+}
+
+static int cc__as_diagnose_anon_fields(const char* file,
+                                       const char* src,
+                                       size_t n) {
     size_t i = 0;
-    if (!reg || !src || n == 0) return;
+    int errs = 0;
+    if (!src || n == 0) return 0;
     while (i < n) {
-        size_t td;
-        size_t body_l;
-        size_t body_r = 0;
-        size_t name_pos;
+        size_t body_l = 0, body_r = 0;
         char struct_name[128];
         size_t sn = 0;
-        if (i + 7 > n || memcmp(src + i, "typedef", 7) != 0 ||
-            (i > 0 && cc_is_ident_char(src[i - 1])) ||
-            (i + 7 < n && cc_is_ident_char(src[i + 7]))) {
+        int line = 1;
+        int is_typedef = 0;
+        size_t struct_kw;
+        /* Skip comments/strings so prose like `struct Tag { T @as; }` in a
+         * file comment cannot be mistaken for a real declaration. */
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            i += 2;
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) { i += 2; continue; }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 7 <= n && memcmp(src + i, "typedef", 7) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 7 >= n || !cc_is_ident_char(src[i + 7]))) {
+            is_typedef = 1;
+            struct_kw = cc_skip_ws_and_comments(src, n, i + 7);
+        } else if (i + 6 <= n && memcmp(src + i, "struct", 6) == 0 &&
+                   (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                   (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            struct_kw = i;
+        } else {
             i++;
             continue;
         }
-        td = cc_skip_ws_and_comments(src, n, i + 7);
-        if (td + 6 > n || memcmp(src + td, "struct", 6) != 0 ||
-            (td + 6 < n && cc_is_ident_char(src[td + 6]))) {
+        if (struct_kw + 6 > n || memcmp(src + struct_kw, "struct", 6) != 0 ||
+            (struct_kw + 6 < n && cc_is_ident_char(src[struct_kw + 6]))) {
             i++;
             continue;
         }
-        body_l = cc_skip_ws_and_comments(src, n, td + 6);
+        body_l = cc_skip_ws_and_comments(src, n, struct_kw + 6);
         if (body_l < n && cc_is_ident_start(src[body_l])) {
             size_t tag_end = body_l;
-            while (tag_end < n && cc_is_ident_char(src[tag_end])) tag_end++;
+            while (tag_end < n && cc_is_ident_char(src[tag_end]) &&
+                   sn + 1 < sizeof(struct_name)) {
+                struct_name[sn++] = src[tag_end++];
+            }
+            struct_name[sn] = '\0';
             body_l = cc_skip_ws_and_comments(src, n, tag_end);
         }
         if (body_l >= n || src[body_l] != '{' ||
@@ -815,38 +1039,106 @@ void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
             i++;
             continue;
         }
-        name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
-        if (name_pos >= n || !cc_is_ident_start(src[name_pos])) {
-            i = body_r + 1;
-            continue;
-        }
-        while (name_pos < n && cc_is_ident_char(src[name_pos]) &&
-               sn + 1 < sizeof(struct_name)) {
-            struct_name[sn++] = src[name_pos++];
-        }
-        struct_name[sn] = '\0';
-        if (struct_name[0]) {
-            const char* stmt = src + body_l + 1;
-            const char* body_end = src + body_r;
-            while (stmt < body_end) {
-                size_t stmt_off = (size_t)(stmt - src);
-                size_t end_off = (size_t)(body_end - src);
-                size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
-                char field_name[128];
-                char field_type[256];
-                int field_is_as = 0;
-                if (semi_off >= end_off) break;
-                cc_parse_decl_name_and_type_ex(src + stmt_off, src + semi_off,
-                                               field_name, sizeof(field_name),
-                                               field_type, sizeof(field_type),
-                                               &field_is_as);
-                if (field_name[0] && field_type[0]) {
-                    (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
-                                                        field_type, field_is_as);
+        if (is_typedef) {
+            size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
+            sn = 0;
+            if (name_pos < n && cc_is_ident_start(src[name_pos])) {
+                while (name_pos < n && cc_is_ident_char(src[name_pos]) &&
+                       sn + 1 < sizeof(struct_name)) {
+                    struct_name[sn++] = src[name_pos++];
                 }
-                stmt = src + semi_off + 1;
+                struct_name[sn] = '\0';
             }
         }
+        if (struct_name[0]) {
+            line = cc__line_for_typedef_name(src, n, struct_name);
+            errs += cc__as_diagnose_anon_in_body(file, src, body_l, body_r,
+                                                 struct_name, line);
+        }
+        i = body_r + 1;
+    }
+    return errs;
+}
+
+void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
+                                           const char* src,
+                                           size_t n) {
+    size_t i = 0;
+    if (!reg || !src || n == 0) return;
+    while (i < n) {
+        size_t body_l = 0, body_r = 0;
+        char struct_name[128];
+        size_t sn = 0;
+        int is_typedef = 0;
+        size_t struct_kw;
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            i += 2;
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) { i += 2; continue; }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 7 <= n && memcmp(src + i, "typedef", 7) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 7 >= n || !cc_is_ident_char(src[i + 7]))) {
+            is_typedef = 1;
+            struct_kw = cc_skip_ws_and_comments(src, n, i + 7);
+        } else if (i + 6 <= n && memcmp(src + i, "struct", 6) == 0 &&
+                   (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                   (i + 6 >= n || !cc_is_ident_char(src[i + 6]))) {
+            struct_kw = i;
+        } else {
+            i++;
+            continue;
+        }
+        if (struct_kw + 6 > n || memcmp(src + struct_kw, "struct", 6) != 0 ||
+            (struct_kw + 6 < n && cc_is_ident_char(src[struct_kw + 6]))) {
+            i++;
+            continue;
+        }
+        body_l = cc_skip_ws_and_comments(src, n, struct_kw + 6);
+        /* Tagged form: struct Tag { ... } — keep the tag as the registry key. */
+        if (body_l < n && cc_is_ident_start(src[body_l])) {
+            size_t tag_end = body_l;
+            while (tag_end < n && cc_is_ident_char(src[tag_end]) &&
+                   sn + 1 < sizeof(struct_name)) {
+                struct_name[sn++] = src[tag_end++];
+            }
+            struct_name[sn] = '\0';
+            body_l = cc_skip_ws_and_comments(src, n, tag_end);
+        }
+        if (body_l >= n || src[body_l] != '{' ||
+            !cc_find_matching_brace(src, n, body_l, &body_r)) {
+            i++;
+            continue;
+        }
+        if (is_typedef) {
+            size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
+            /* Prefer the typedef alias name when present. */
+            if (name_pos < n && cc_is_ident_start(src[name_pos])) {
+                sn = 0;
+                while (name_pos < n && cc_is_ident_char(src[name_pos]) &&
+                       sn + 1 < sizeof(struct_name)) {
+                    struct_name[sn++] = src[name_pos++];
+                }
+                struct_name[sn] = '\0';
+            }
+        }
+        if (struct_name[0])
+            cc__ingest_struct_body_fields(reg, src, body_l, body_r, struct_name);
         i = body_r + 1;
     }
 }

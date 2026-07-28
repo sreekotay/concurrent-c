@@ -78,13 +78,19 @@ int cc_type_registry_as_path_for_type(CCTypeRegistry* reg,
 int cc_type_registry_has_as_field_transitive(CCTypeRegistry* reg,
                                              const char* outer_type);
 /* Decl-time check: from each type with `@as` fields, every reachable embed
- * type must appear via exactly one path; cycles are ill-formed. Prints
- * `file:line:col: error: type: …` diagnostics (line best-effort from src).
- * Returns 0 if clean, -1 if any diagnostic was emitted. */
+ * type must appear via exactly one path; cycles are ill-formed. Pointer
+ * `@as` fields are ill-formed. Prints `file:line:col: error: type: …`
+ * diagnostics (line best-effort from src). Returns 0 if clean, -1 if any
+ * diagnostic was emitted. */
 int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
                                         const char* file,
                                         const char* src,
                                         size_t n);
+/* Nonzero when `src` may need `@as` arg-position coerce: local comment-marker
+ * `@as`, live `@as`, or a registered `@as` outer type name appears in `src`. */
+int cc_type_registry_may_need_as_arg_coerce(CCTypeRegistry* reg,
+                                            const char* src,
+                                            size_t n);
 /* Nonzero when `field_name` is the first registered field of `struct_name`
  * (declaration-order proxy for offset-zero). */
 int cc_type_registry_field_is_first(CCTypeRegistry* reg,
