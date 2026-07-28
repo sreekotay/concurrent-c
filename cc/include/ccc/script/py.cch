@@ -15,6 +15,7 @@
 #define CC_SCRIPT_PY_H
 
 #include <dlfcn.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -75,9 +76,14 @@ typedef struct CC__PySyms {
     double (*FloatAsDouble)(void *);
     long long (*LongAsLongLong)(void *);
     void *(*FloatFromDouble)(double);
+    void *(*LongFromLongLong)(long long);
     void *(*UnicodeFromStringAndSize)(const char *, intptr_t);
     void *(*ListNew)(intptr_t);
     int (*ListSetItem)(void *, intptr_t, void *);
+    void *(*TupleNew)(intptr_t);
+    int (*TupleSetItem)(void *, intptr_t, void *);
+    void *(*CallObject)(void *, void *);
+    void *(*BoolFromLong)(long);
     void *(*ErrOccurred)(void);
     void (*ErrFetch)(void **, void **, void **);
     void (*ErrClear)(void);
@@ -129,9 +135,14 @@ static int cc__py_load(void) {
     CC__PY_SYM(FloatAsDouble, "PyFloat_AsDouble")
     CC__PY_SYM(LongAsLongLong, "PyLong_AsLongLong")
     CC__PY_SYM(FloatFromDouble, "PyFloat_FromDouble")
+    CC__PY_SYM(LongFromLongLong, "PyLong_FromLongLong")
     CC__PY_SYM(UnicodeFromStringAndSize, "PyUnicode_FromStringAndSize")
     CC__PY_SYM(ListNew, "PyList_New")
     CC__PY_SYM(ListSetItem, "PyList_SetItem")
+    CC__PY_SYM(TupleNew, "PyTuple_New")
+    CC__PY_SYM(TupleSetItem, "PyTuple_SetItem")
+    CC__PY_SYM(CallObject, "PyObject_CallObject")
+    CC__PY_SYM(BoolFromLong, "PyBool_FromLong")
     CC__PY_SYM(ErrOccurred, "PyErr_Occurred")
     CC__PY_SYM(ErrFetch, "PyErr_Fetch")
     CC__PY_SYM(ErrClear, "PyErr_Clear")
@@ -269,6 +280,126 @@ static inline CCResult_CCPyObj_CCPyError cc_py_obj_call_o(CCPyObj *obj,
     return cc__py_obj_or_err(cc__py.CallMethod(obj->o, m, "O", arg->o), m);
 }
 
+/* ---- dynamic sink: obj.anything(args) ---- */
+
+/* Tagged argument for the dynamic UFCS sink. CC_PY_ARG lifts each call
+ * argument by static type; cc_py_obj_callm re-materializes it as a
+ * Python value. */
+typedef struct CCPyArg {
+    int kind; /* 0=i64 1=f64 2=cstr 3=slice 4=obj 5=bool */
+    long long i;
+    double f;
+    const void *p;
+    size_t n;
+} CCPyArg;
+
+static inline CCPyArg cc__py_arg_i(long long v) {
+    CCPyArg a = {0};
+    a.i = v;
+    return a;
+}
+static inline CCPyArg cc__py_arg_f(double v) {
+    CCPyArg a = {0};
+    a.kind = 1;
+    a.f = v;
+    return a;
+}
+static inline CCPyArg cc__py_arg_cstr(const char *s) {
+    CCPyArg a = {0};
+    a.kind = 2;
+    a.p = s;
+    a.n = s ? strlen(s) : 0;
+    return a;
+}
+static inline CCPyArg cc__py_arg_slice(CCSlice s) {
+    CCPyArg a = {0};
+    a.kind = 3;
+    a.p = s.ptr;
+    a.n = s.len;
+    return a;
+}
+static inline CCPyArg cc__py_arg_obj(CCPyObj o) {
+    CCPyArg a = {0};
+    a.kind = 4;
+    a.p = o.o;
+    return a;
+}
+static inline CCPyArg cc__py_arg_bool(int v) {
+    CCPyArg a = {0};
+    a.kind = 5;
+    a.i = v ? 1 : 0;
+    return a;
+}
+
+#define CC_PY_ARG(x)                                        \
+    _Generic((x),                                           \
+        double: cc__py_arg_f,                               \
+        float: cc__py_arg_f,                                \
+        int: cc__py_arg_i,                                  \
+        long: cc__py_arg_i,                                 \
+        long long: cc__py_arg_i,                            \
+        unsigned int: cc__py_arg_i,                         \
+        unsigned long: cc__py_arg_i,                        \
+        unsigned long long: cc__py_arg_i,                   \
+        char *: cc__py_arg_cstr,                            \
+        const char *: cc__py_arg_cstr,                      \
+        CCSlice: cc__py_arg_slice,                          \
+        CCPyObj: cc__py_arg_obj,                            \
+        _Bool: cc__py_arg_bool)(x)
+
+/* `obj.method(args…)` sink: builds an argument tuple and calls the
+ * attribute. Registered as CCPyObj's `.ufcs_dynamic`, so unresolved
+ * methods on a CCPyObj lower here with the method name as a string. */
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_callm(CCPyObj *obj,
+                                                         const char *method,
+                                                         int argc, ...) {
+    void *attr = NULL;
+    void *tuple = NULL;
+    void *r = NULL;
+    va_list ap;
+    int i;
+    if (!obj || !obj->o || argc < 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    attr = cc__py.GetAttrString(obj->o, method);
+    if (!attr) return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    tuple = cc__py.TupleNew((intptr_t)argc);
+    if (!tuple) {
+        cc__py.DecRef(attr);
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    }
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) {
+        CCPyArg a = va_arg(ap, CCPyArg);
+        void *v = NULL;
+        switch (a.kind) {
+        case 0: v = cc__py.LongFromLongLong(a.i); break;
+        case 1: v = cc__py.FloatFromDouble(a.f); break;
+        case 2:
+        case 3:
+            v = cc__py.UnicodeFromStringAndSize((const char *)a.p,
+                                                (intptr_t)a.n);
+            break;
+        case 4:
+            v = (void *)a.p;
+            if (v) cc__py.IncRef(v); /* tuple will steal one */
+            break;
+        case 5: v = cc__py.BoolFromLong((long)a.i); break;
+        default: break;
+        }
+        if (!v || cc__py.TupleSetItem(tuple, (intptr_t)i, v) != 0) {
+            va_end(ap);
+            cc__py.DecRef(tuple);
+            cc__py.DecRef(attr);
+            return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+        }
+    }
+    va_end(ap);
+    r = cc__py.CallObject(attr, tuple);
+    cc__py.DecRef(tuple);
+    cc__py.DecRef(attr);
+    return cc__py_obj_or_err(r, method);
+}
+
 /* ---- marshaling ---- */
 
 static inline CCResult_CCPyObj_CCPyError cc_py_list_f64(CCPy *py,
@@ -350,6 +481,7 @@ static inline CCResult_CCSlice_CCPyError cc_py_obj_as_slice(CCPyObj *obj,
     });
     (void)cc_type_register("CCPyObj", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_py_obj_release"),
+        .ufcs_dynamic = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
     });
 }
 #endif

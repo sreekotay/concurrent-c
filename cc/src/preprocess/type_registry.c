@@ -70,12 +70,18 @@ struct CCTypeRegistry {
     CCTypeInstEntry* channels;
     size_t chan_count;
     size_t chan_capacity;
+
+    /* Types with a registered dynamic UFCS sink (.ufcs_dynamic) */
+    char** dyn_types;
+    size_t dyn_count;
+    size_t dyn_capacity;
 };
 
 /* Thread-local global registry */
 static _Thread_local CCTypeRegistry* g_type_registry = NULL;
 
 static void cc__normalize_local_decl_type(char* out, size_t out_sz, const char* type_name);
+static void cc__strip_type_spelling(const char* in, char* out, size_t out_sz);
 
 CCTypeRegistry* cc_type_registry_get_global(void) {
     return g_type_registry;
@@ -154,7 +160,72 @@ void cc_type_registry_free(CCTypeRegistry* reg) {
     free(reg->maps);
     free_inst_entries(reg->channels, reg->chan_count);
     free(reg->channels);
+    for (size_t i = 0; i < reg->dyn_count; ++i) free(reg->dyn_types[i]);
+    free(reg->dyn_types);
     free(reg);
+}
+
+/* Session-global (thread-local) sink-type list: registrations are parsed
+ * from header text, but later pipeline stages rebuild fresh registry
+ * instances from spliced buffers whose @comptime blocks are already
+ * consumed — the fact "type T has a dynamic sink" must survive those
+ * rebuilds. */
+typedef struct {
+    char* type_name;
+    char* callee;
+    char* wrap;
+} CCDynSinkEntry;
+static _Thread_local CCDynSinkEntry* g_dyn_sinks = NULL;
+static _Thread_local size_t g_dyn_count = 0;
+static _Thread_local size_t g_dyn_capacity = 0;
+
+int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
+                                      const char* callee, const char* wrap) {
+    char stripped[256];
+    (void)reg;
+    if (!type_name || !type_name[0] || !callee || !wrap) return -1;
+    cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
+    if (!stripped[0]) return -1;
+    for (size_t i = 0; i < g_dyn_count; ++i) {
+        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) return 0;
+    }
+    if (g_dyn_count == g_dyn_capacity) {
+        size_t ncap = g_dyn_capacity ? g_dyn_capacity * 2 : 8;
+        CCDynSinkEntry* nt = (CCDynSinkEntry*)realloc(
+            g_dyn_sinks, ncap * sizeof(CCDynSinkEntry));
+        if (!nt) return -1;
+        g_dyn_sinks = nt;
+        g_dyn_capacity = ncap;
+    }
+    g_dyn_sinks[g_dyn_count].type_name = strdup(stripped);
+    g_dyn_sinks[g_dyn_count].callee = strdup(callee);
+    g_dyn_sinks[g_dyn_count].wrap = strdup(wrap);
+    if (!g_dyn_sinks[g_dyn_count].type_name || !g_dyn_sinks[g_dyn_count].callee ||
+        !g_dyn_sinks[g_dyn_count].wrap)
+        return -1;
+    g_dyn_count++;
+    return 0;
+}
+
+int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
+                                      const char** out_callee,
+                                      const char** out_wrap) {
+    char stripped[256];
+    (void)reg;
+    if (!type_name || !type_name[0]) return -1;
+    cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
+    for (size_t i = 0; i < g_dyn_count; ++i) {
+        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) {
+            if (out_callee) *out_callee = g_dyn_sinks[i].callee;
+            if (out_wrap) *out_wrap = g_dyn_sinks[i].wrap;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name) {
+    return cc_type_registry_get_dynamic_sink(reg, type_name, NULL, NULL) == 0;
 }
 
 void cc_type_registry_clear(CCTypeRegistry* reg) {
@@ -1060,11 +1131,103 @@ static int cc__as_diagnose_anon_fields(const char* file,
     return errs;
 }
 
+/* Early text scan for `.ufcs_dynamic` registrations so the pre-splice
+ * text-UFCS pass can defer sink receivers before the comptime scan runs.
+ * A false positive (registration text inside a comment) only defers that
+ * type's lowering to the AST pass — fail-closed. */
+static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
+                                                const char* src, size_t n) {
+    size_t i = 0;
+    static const char kw[] = "cc_type_register";
+    static const char field[] = ".ufcs_dynamic";
+    if (!reg || !src) return;
+    while (i + sizeof(kw) - 1 < n) {
+        const char* hit = (const char*)memmem(src + i, n - i, kw, sizeof(kw) - 1);
+        size_t p, name_a, name_b, depth;
+        char type_name[128];
+        if (!hit) return;
+        p = (size_t)(hit - src) + sizeof(kw) - 1;
+        i = p;
+        while (p < n && isspace((unsigned char)src[p])) p++;
+        if (p >= n || src[p] != '(') continue;
+        p++;
+        while (p < n && isspace((unsigned char)src[p])) p++;
+        if (p >= n || src[p] != '"') continue;
+        p++;
+        name_a = p;
+        while (p < n && src[p] != '"') p++;
+        if (p >= n) return;
+        name_b = p;
+        if (name_b <= name_a || name_b - name_a >= sizeof(type_name)) continue;
+        memcpy(type_name, src + name_a, name_b - name_a);
+        type_name[name_b - name_a] = '\0';
+        /* Scan the registration's argument list for the field name. */
+        depth = 1;
+        p++;
+        {
+            size_t body_a = p;
+            while (p < n && depth > 0) {
+                char c = src[p];
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                else if (c == '"') {
+                    p++;
+                    while (p < n && src[p] != '"') {
+                        if (src[p] == '\\' && p + 1 < n) p++;
+                        p++;
+                    }
+                }
+                p++;
+            }
+            {
+                const char* fhit = (const char*)memmem(src + body_a, p - body_a,
+                                                       field, sizeof(field) - 1);
+                if (fhit) {
+                    /* Extract cc_type_dynamic_call("callee", "wrap"). */
+                    static const char call[] = "cc_type_dynamic_call";
+                    const char* chit = (const char*)memmem(
+                        fhit, (size_t)(src + p - fhit), call, sizeof(call) - 1);
+                    char callee[256];
+                    char wrapm[256];
+                    callee[0] = wrapm[0] = '\0';
+                    if (chit) {
+                        size_t q = (size_t)(chit - src) + sizeof(call) - 1;
+                        int which = 0;
+                        while (q < p && which < 2) {
+                            if (src[q] == '"') {
+                                size_t sa = ++q;
+                                while (q < p && src[q] != '"') q++;
+                                if (q >= p) break;
+                                {
+                                    size_t len = q - sa;
+                                    char* dst = which == 0 ? callee : wrapm;
+                                    if (len < 256) {
+                                        memcpy(dst, src + sa, len);
+                                        dst[len] = '\0';
+                                    }
+                                }
+                                which++;
+                            }
+                            q++;
+                        }
+                    }
+                    if (callee[0] && wrapm[0]) {
+                        (void)cc_type_registry_set_dynamic_sink(reg, type_name,
+                                                                callee, wrapm);
+                    }
+                }
+            }
+        }
+        i = p;
+    }
+}
+
 void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
                                            const char* src,
                                            size_t n) {
     size_t i = 0;
     if (!reg || !src || n == 0) return;
+    cc__scan_dynamic_sink_registrations(reg, src, n);
     while (i < n) {
         size_t body_l = 0, body_r = 0;
         char struct_name[128];

@@ -1,0 +1,86 @@
+/* Dynamic UFCS sink (.ufcs_dynamic): unresolved methods on a registered
+ * type lower to `sink(&recv, "method", N, WRAP(a), ...)`; real methods
+ * (visible callees) keep conventional dispatch and win over the sink. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct TestSink {
+    int last_argc;
+    double f_sum;
+    long long i_sum;
+} TestSink;
+
+typedef struct TSArg {
+    int kind; /* 0=i 1=f */
+    long long i;
+    double f;
+} TSArg;
+
+static TSArg ts_arg_i(long long v) {
+    TSArg a = {0};
+    a.i = v;
+    return a;
+}
+static TSArg ts_arg_f(double v) {
+    TSArg a = {0};
+    a.kind = 1;
+    a.f = v;
+    return a;
+}
+
+#define TS_ARG(x) _Generic((x), double: ts_arg_f, float: ts_arg_f, \
+                           default: ts_arg_i)(x)
+
+static int test_sink_dyn(TestSink *t, const char *method, int argc, ...) {
+    va_list ap;
+    int i;
+    t->last_argc = argc;
+    t->f_sum = 0;
+    t->i_sum = 0;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) {
+        TSArg a = va_arg(ap, TSArg);
+        if (a.kind == 1) t->f_sum += a.f;
+        else t->i_sum += a.i;
+    }
+    va_end(ap);
+    if (strcmp(method, "foo") == 0) return 42;
+    return -1;
+}
+
+static int test_sink_real(TestSink *t) {
+    (void)t;
+    return 7;
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("TestSink", (CCTypeHooks){
+        .ufcs_dynamic = cc_type_dynamic_call("test_sink_dyn", "TS_ARG"),
+    });
+}
+#endif
+
+int main(void) {
+    TestSink w = {0};
+    TestSink *p = &w;
+
+    /* Real method wins over the sink. */
+    assert(w.real() == 7);
+
+    /* Value receiver through the sink: name string + lifted args. */
+    assert(w.foo(3, 2.5) == 42);
+    assert(w.last_argc == 2);
+    assert(w.i_sum == 3);
+    assert(w.f_sum == 2.5);
+
+    /* Pointer receiver, zero args, unknown name returns sink's answer. */
+    assert(p->bar() == -1);
+    assert(w.last_argc == 0);
+
+    printf("ok\n");
+    return 0;
+}

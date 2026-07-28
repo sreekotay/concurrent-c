@@ -4270,14 +4270,106 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 i++;
                 continue;
             }
-            if (!cc__lookup_ufcs_field_type(fields, field_count, recv_type_base, method_name) &&
-                cc_ufcs_compose_default_callee(wildcard_callee, sizeof(wildcard_callee),
-                                               recv_type_base, method_name) &&
-                (is_cc_std || cc__ufcs_fn_name_in_text(src, n, wildcard_callee))) {
-                wildcard_like = 1;
-            } else {
-                i++;
-                continue;
+            {
+                const char* sink_callee = NULL;
+                const char* sink_wrap = NULL;
+                int has_sink =
+                    reg && cc_type_registry_get_dynamic_sink(
+                               reg, recv_type_base, &sink_callee, &sink_wrap) == 0;
+                int composed =
+                    !cc__lookup_ufcs_field_type(fields, field_count,
+                                                recv_type_base, method_name) &&
+                    cc_ufcs_compose_default_callee(wildcard_callee,
+                                                   sizeof(wildcard_callee),
+                                                   recv_type_base, method_name);
+                int real = composed &&
+                           (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
+                            cc_included_cch_contains_fn(wildcard_callee));
+                /* Sink-typed receiver, method with no real callee: lower to
+                 * `sink(&recv, "method", N, wrap(a1), ...)` here so `!>`
+                 * binders type against the sink's Result. Real methods keep
+                 * the conventional path. */
+                if (has_sink && composed && !real &&
+                    (recv_is_ptr || cc__ufcs_recv_expr_is_addressable(recv_expr))) {
+                    size_t args_start = paren_pos + 1;
+                    size_t args_end = paren_end;
+                    while (args_start < args_end &&
+                           (src[args_start] == ' ' || src[args_start] == '\t' ||
+                            src[args_start] == '\n' || src[args_start] == '\r'))
+                        args_start++;
+                    while (args_end > args_start &&
+                           (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' ||
+                            src[args_end - 1] == '\n' || src[args_end - 1] == '\r'))
+                        args_end--;
+                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                                 recv_start - last_emit);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, sink_callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                      recv_is_ptr ? "((" : "(&(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "), \"");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\"");
+                    {
+                        /* Count then emit top-level comma-separated args,
+                         * each lifted by the wrapper macro. */
+                        int argc = 0;
+                        int pass;
+                        for (pass = 0; pass < 2; pass++) {
+                            size_t s0 = args_start;
+                            size_t q = args_start;
+                            int depth = 0, in_s = 0, in_c = 0;
+                            if (pass == 1) {
+                                char nbuf[16];
+                                snprintf(nbuf, sizeof(nbuf), ", %d", argc);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, nbuf);
+                            }
+                            for (; q <= args_end; q++) {
+                                int at_end = (q == args_end);
+                                char c = at_end ? '\0' : src[q];
+                                if (!at_end && in_s) {
+                                    if (c == '\\' && q + 1 < args_end) q++;
+                                    else if (c == '"') in_s = 0;
+                                    continue;
+                                }
+                                if (!at_end && in_c) {
+                                    if (c == '\\' && q + 1 < args_end) q++;
+                                    else if (c == '\'') in_c = 0;
+                                    continue;
+                                }
+                                if (!at_end) {
+                                    if (c == '"') { in_s = 1; continue; }
+                                    if (c == '\'') { in_c = 1; continue; }
+                                    if (c == '(' || c == '[' || c == '{') { depth++; continue; }
+                                    if (c == ')' || c == ']' || c == '}') { depth--; continue; }
+                                    if (!(c == ',' && depth == 0)) continue;
+                                }
+                                if (q > s0) {
+                                    if (pass == 0) argc++;
+                                    else {
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, sink_wrap);
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                        cc_sb_append(&out, &out_len, &out_cap, src + s0, q - s0);
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                                    }
+                                }
+                                s0 = q + 1;
+                            }
+                        }
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                    last_emit = paren_end + 1;
+                    i = paren_end + 1;
+                    continue;
+                }
+                if (composed &&
+                    (is_cc_std || cc__ufcs_fn_name_in_text(src, n, wildcard_callee))) {
+                    wildcard_like = 1;
+                } else {
+                    i++;
+                    continue;
+                }
             }
         }
         if ((chan_tx || chan_rx) && cc__ufcs_preceded_by_await(src, recv_start)) {
