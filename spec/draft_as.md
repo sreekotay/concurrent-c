@@ -71,15 +71,7 @@ keeps C's meaning (no adjustment); a cast from `Outer*` to a `T*` whose
 use instead.
 
 By-value conversion of `Outer` to `T` is not performed at ordinary call
-sites. `@errhandler` dispatch is the exception: when no handler parameter
-type equals the unwrap's Result error type `E`, the innermost in-scope
-handler whose parameter type `H` is reachable from `E` by a unique `@as`
-path is selected (same preference order as UFCS: exact, then `@as`). The
-error binder is then that path's member, by value — e.g. `CCError e =
-(tmp).u.error.base` when `E` is `CCIoError` and `H` is `CCError`. An
-exact `CCIoError` handler still wins over a `CCError` handler when both
-are in scope. Ambiguous or cyclic `@as` paths leave the site without a
-match (ill-formed when a handler is required).
+sites. Handler binding (§5) is the exception.
 
 ## 3. Destroy chain
 
@@ -141,12 +133,35 @@ registered hook follows the same shape (guard field, null after release).
 registers `cc_file_close` as its destroy hook. The factory remains
 `cc_temp_file`.
 
-`CCIoError` embeds `CCError base @as` plus `os_code`. I/O Results use
-`CCIoError` as `E`; a sole `@errhandler(CCError …)` matches via the
-`base` face. Kind tags share `CCErrorKind` (`CC_IO_*` names alias the
-corresponding `CC_ERR_*` values).
+`CCIoError` embeds `CCError base @as` plus `os_code`. Kind and message live
+in `base`; `os_code` is the I/O-only payload. Kind tags share `CCErrorKind`
+(`CC_IO_*` names alias the corresponding `CC_ERR_*` values).
 
-## 5. Out of scope
+## 5. Handler dispatch through `@as`
+
+`@errhandler` resolution for an unwrap whose error type is `E`:
+
+1. The nearest in-scope `@errhandler(E)` — exact match — wins, regardless
+   of whether a face-typed handler is textually nearer.
+2. Otherwise, when `E` has a unique `@as` path to a type `F` with an
+   in-scope `@errhandler(F)`, that handler runs with its parameter bound
+   to the `F` subobject (`e.path`) — member selection, no conversion
+   function, no mapping table.
+3. Two `@as` paths from `E` reaching distinct handler types in scope:
+   ill-formed, ambiguous (the same rule as §2).
+4. The reverse direction never matches: an `@errhandler(E)` where `E` has
+   an `@as` field of type `F` does not handle an `F`-typed unwrap.
+
+Handler binding is the one place a by-value `@as` conversion occurs: the
+handler receives a copy of the face subobject and sees only the face's
+vocabulary. Code that needs the derived payload writes the exact-typed
+handler, which wins by rule 1.
+
+A sole `@errhandler(CCError)` — including the script register's injected
+default — therefore handles `CCIoError` Results via `base`, while an exact
+`@errhandler(CCIoError)` still claims them when `os_code` matters.
+
+## 6. Out of scope
 
 - Field promotion (`tmp.handle` without naming `file`)
 - Virtual dispatch

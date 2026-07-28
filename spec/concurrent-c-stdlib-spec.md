@@ -752,7 +752,8 @@ bool cc_glob_match(char[:0] pattern, char[:0] name);
 ```
 
 Path arguments are NUL-terminated borrows (`char[:0]`). After the final entry,
-`cc_dir_next` returns `Err((CCIoError){ .kind = CC_IO_OTHER, .os_code = 0 })`.
+`cc_dir_next` returns `Err(cc_io_error_os(CC_IO_OTHER, 0))` (EOF sentinel:
+`base.kind == CC_ERR_IO` and `os_code == 0`).
 Entry names and glob paths are arena-backed `char[:0]`. `cc_dir_create` does
 not create parents; `cc_dir_create_all` does. Globbing supports `*`, `?`, and
 recursive `**`; `cc_glob_match` matches a single name with `*` and `?`.
