@@ -3,6 +3,9 @@
 #
 #   ./perf/bench_line_scan_vs_bash.sh [path] [samples] [passes]
 #
+# Timed CC runs use --timed (no cold verify / warm inside the wall clock).
+# Verify + warm happen once outside measure().
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +24,24 @@ fi
 BYTES=$(wc -c < "$PATH_FILE" | tr -d ' ')
 echo "bench_line_scan_vs_bash: path=$PATH_FILE bytes=$BYTES samples=$SAMPLES passes=$PASSES"
 
+# BSD /usr/bin/time -l  (macOS)  or  GNU time -v  (/usr/bin/time on Linux, gtime on macOS)
+TIME_BIN=""
+TIME_STYLE=""
+if command -v gtime >/dev/null 2>&1 && gtime --version >/dev/null 2>&1; then
+  TIME_BIN=$(command -v gtime)
+  TIME_STYLE=gnu
+elif [[ -x /usr/bin/time ]] && /usr/bin/time --version >/dev/null 2>&1; then
+  TIME_BIN=/usr/bin/time
+  TIME_STYLE=gnu
+elif [[ -x /usr/bin/time ]] && /usr/bin/time -l true >/dev/null 2>&1; then
+  TIME_BIN=/usr/bin/time
+  TIME_STYLE=bsd
+else
+  echo "bench_line_scan_vs_bash: need BSD /usr/bin/time -l or GNU time -v (install gnu-time / use Linux)" >&2
+  exit 1
+fi
+echo "bench_line_scan_vs_bash: timer=$TIME_BIN ($TIME_STYLE)"
+
 echo "[build] $BIN"
 "$CCC" build --link "$ROOT/perf/bench_line_scan.ccs" -o "$BIN" >/dev/null
 
@@ -31,10 +52,20 @@ trap cleanup EXIT
 
 parse_time_rss() {
   local real rss ms
-  if grep -q 'maximum resident set size' "$TIME_ERR"; then
+  if [[ "$TIME_STYLE" == bsd ]]; then
+    if ! grep -q 'maximum resident set size' "$TIME_ERR"; then
+      echo "bench_line_scan_vs_bash: BSD time -l output missing RSS" >&2
+      cat "$TIME_ERR" >&2
+      return 1
+    fi
     real=$(awk '/ real / {print $1; exit}' "$TIME_ERR")
     rss=$(awk '/maximum resident set size/ {print $1; exit}' "$TIME_ERR")
-  elif grep -q 'Maximum resident set size' "$TIME_ERR"; then
+  else
+    if ! grep -q 'Maximum resident set size' "$TIME_ERR"; then
+      echo "bench_line_scan_vs_bash: GNU time -v output missing RSS" >&2
+      cat "$TIME_ERR" >&2
+      return 1
+    fi
     real=$(awk -F: '/Elapsed \(wall clock\)/ {
       gsub(/^[ \t]+/,"",$2)
       n=split($2,a,/:/)
@@ -46,9 +77,11 @@ parse_time_rss() {
     rss=$(awk -F: '/Maximum resident set size/ {
       gsub(/[^0-9]/,"",$2); print $2*1024; exit
     }' "$TIME_ERR")
-  else
-    real=$(awk '/^real/ {print $2; exit}' "$TIME_ERR")
-    rss=0
+  fi
+  if [[ -z "${real:-}" || -z "${rss:-}" ]]; then
+    echo "bench_line_scan_vs_bash: failed to parse wall/RSS" >&2
+    cat "$TIME_ERR" >&2
+    return 1
   fi
   ms=$(awk -v r="$real" 'BEGIN{printf "%.3f", (r+0)*1000}')
   echo "$ms $rss"
@@ -57,14 +90,19 @@ parse_time_rss() {
 measure() {
   local label=$1
   shift
-  set +e
-  /usr/bin/time -l "$@" >/dev/null 2>"$TIME_ERR"
-  set -e
+  if [[ "$TIME_STYLE" == bsd ]]; then
+    "$TIME_BIN" -l "$@" >/dev/null 2>"$TIME_ERR"
+  else
+    "$TIME_BIN" -v "$@" >/dev/null 2>"$TIME_ERR"
+  fi
   echo "$label $(parse_time_rss)" | tee -a "$RESULTS"
 }
 
 # Export for child bash -c bodies
 export PATH_FILE CTX EX PASSES
+
+echo "[verify]"
+"$BIN" "$PATH_FILE" 0 1 all >/dev/null
 
 echo "[warm]"
 bash -c 'for ((i=0;i<PASSES;i++)); do grep -c "$CTX" "$PATH_FILE"||true; grep -c "$EX" "$PATH_FILE"||true; wc -l <"$PATH_FILE"|tr -d " "; done >/dev/null'
@@ -81,9 +119,9 @@ bash -c 'for ((i=0;i<PASSES;i++)); do awk -v ctx="$CTX" -v ex="$EX" "
   { lines++; c+=count(\$0, ctx); e+=count(\$0, ex) }
   END { print lines+0, c+0, e+0 }
 " "$PATH_FILE"; done >/dev/null'
-"$BIN" "$PATH_FILE" 1 "$PASSES" slurp >/dev/null
-"$BIN" "$PATH_FILE" 1 "$PASSES" sync >/dev/null
-"$BIN" "$PATH_FILE" 1 "$PASSES" chan >/dev/null
+"$BIN" --timed "$PATH_FILE" 1 "$PASSES" slurp >/dev/null
+"$BIN" --timed "$PATH_FILE" 1 "$PASSES" sync >/dev/null
+"$BIN" --timed "$PATH_FILE" 1 "$PASSES" chan >/dev/null
 
 echo "[samples]"
 for ((s = 1; s <= SAMPLES; s++)); do
@@ -118,9 +156,10 @@ for ((s = 1; s <= SAMPLES; s++)); do
        " "$PATH_FILE"
      done >/dev/null'
 
-  measure cc_slurp "$BIN" "$PATH_FILE" 1 "$PASSES" slurp
-  measure cc_sync "$BIN" "$PATH_FILE" 1 "$PASSES" sync
-  measure cc_chan "$BIN" "$PATH_FILE" 1 "$PASSES" chan
+  # --timed: wall covers only PASSES scans (verify/warm already done above)
+  measure cc_slurp "$BIN" --timed "$PATH_FILE" 1 "$PASSES" slurp
+  measure cc_sync "$BIN" --timed "$PATH_FILE" 1 "$PASSES" sync
+  measure cc_chan "$BIN" --timed "$PATH_FILE" 1 "$PASSES" chan
 done
 
 echo "---"
@@ -160,4 +199,4 @@ echo "notes:"
 echo "  bash_capture = capture_baseline static (grep -c = matching lines)"
 echo "  bash_pipes   = same work through cat|grep / cat|wc"
 echo "  bash_awk     = one-pass occurrence counts (fair vs CC)"
-echo "  cc_*         = occurrence counts (perf/bench_line_scan.ccs)"
+echo "  cc_*         = occurrence counts; timed with --timed (PASSES only)"

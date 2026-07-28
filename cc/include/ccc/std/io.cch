@@ -103,6 +103,24 @@ static inline CCRes(bool, CCIoError) cc_file_read_into(CCFile *file, CCArena *ar
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
 
+/* Bytes written by fgets into a buffer that was pre-filled with
+ * CC__FGETS_FILL.  fgets always NUL-terminates after the last byte read and
+ * leaves the remainder of the buffer untouched — so the terminator is the
+ * first '\0' whose tail is still all fill.  strlen is wrong when the line
+ * contains embedded NULs (it would truncate and corrupt line boundaries). */
+enum { CC__FGETS_FILL = 0xFF };
+static inline size_t cc__fgets_payload_len(const char *buf, size_t cap) {
+    size_t n;
+    for (n = 0; n < cap; n++) {
+        size_t k;
+        if (buf[n] != '\0') continue;
+        k = n + 1;
+        while (k < cap && (unsigned char)buf[k] == (unsigned char)CC__FGETS_FILL) k++;
+        if (k == cap) return n;
+    }
+    return 0;
+}
+
 // Read one line (includes delimiter). Returns:
 // - Ok(true) = got line (stored in *out)
 // - Ok(false) = EOF (no more lines)
@@ -112,6 +130,7 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t
 // Line bytes are allocated in `arena` (that is why the arena is passed).
 // Staging uses a stack buffer + fgets (block I/O, stops at newline) then a
 // single push into the arena — never fgetc-per-byte, never getline/malloc.
+// NUL-clean: payload length uses the fill-tail trick, not strlen.
 static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCArena *arena, CCSlice *out) {
     CCString line;
     char buf[8192];
@@ -121,6 +140,7 @@ static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCAren
     line = cc_string_new();
     for (;;) {
         size_t n;
+        memset(buf, CC__FGETS_FILL, sizeof(buf));
         if (!fgets(buf, (int)sizeof(buf), file->handle)) {
             if (ferror(file->handle)) {
                 return CCRes_err(bool, CCIoError, cc_io_from_errno(errno));
@@ -131,7 +151,7 @@ static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCAren
             }
             break;
         }
-        n = strlen(buf);
+        n = cc__fgets_payload_len(buf, sizeof(buf));
         if (!cc_string_push_slice(&line, cc_slice_from_buffer(buf, n), arena)) {
             return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }

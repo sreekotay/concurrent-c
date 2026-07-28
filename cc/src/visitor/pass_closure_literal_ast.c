@@ -1497,7 +1497,10 @@ static int cc__param_is_const_ptr(const char* ty) {
 
 /* Check if a type string represents a safe wrapper that allows mutation in
    reference captures. Safe wrappers: @atomic T, Atomic<T>, cc_atomic_*,
-   Mutex<T>, CCChan*, CCChanTx, CCChanRx. */
+   Mutex<T>, CCChan*, CCChanTx, CCChanRx.
+   CCExclusive* is intentionally not listed: lock and data are split captures;
+   capture-presence must not authorize sibling mutation (see guard-scoped
+   authorization — future). Until then use a true wrapper or @unsafe. */
 static int cc__is_safe_wrapper_type(const char* ty) {
     if (!ty) return 0;
     /* Skip leading whitespace */
@@ -1515,27 +1518,6 @@ static int cc__is_safe_wrapper_type(const char* ty) {
     if (strncmp(ty, "CCChan", 6) == 0) return 1;
     /* CCChanTx, CCChanRx */
     if (strncmp(ty, "CCChanTx", 8) == 0 || strncmp(ty, "CCChanRx", 8) == 0) return 1;
-    return 0;
-}
-
-/* Registered synchronization library capture (spec §6.1): capturing an
-   exclusive domain / mutex / guard into a task closure allows sibling
-   reference-capture mutation under that library's protocol. Unlike
-   Mutex<T>/atomics, the protected data is a separate capture. */
-static int cc__is_registered_sync_capture_type(const char* ty) {
-    if (!ty) return 0;
-    while (*ty == ' ' || *ty == '\t') ty++;
-    if (strncmp(ty, "const ", 6) == 0) {
-        ty += 6;
-        while (*ty == ' ' || *ty == '\t') ty++;
-    }
-    if (strncmp(ty, "CCExclusiveMutex", 16) == 0) return 1;
-    if (strncmp(ty, "CCExclusiveGuard", 16) == 0) return 1;
-    if (strncmp(ty, "CCExclusive", 11) == 0) {
-        const char* p = ty + 11;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p == '*') return 1;
-    }
     return 0;
 }
 
@@ -3656,19 +3638,9 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             }
             /* Check for mutations to reference-captured variables, and for
              * value-captured pointer aliases of outer locals in task-escaping
-             * closures (unless @unsafe or a registered sync library is
-             * captured alongside — e.g. CCExclusiveMutex + [&total]).
-             * Sync CCClosure stores/calls may still write through `T* p = &local`. */
-            int has_sync_lib = 0;
-            if (!d->is_unsafe && d->cap_count > 0 && d->cap_types) {
-                for (int si = 0; si < d->cap_count; si++) {
-                    if (cc__is_registered_sync_capture_type(d->cap_types[si])) {
-                        has_sync_lib = 1;
-                        break;
-                    }
-                }
-            }
-            if (!d->is_unsafe && !has_sync_lib && d->body_text && d->cap_count > 0) {
+             * closures (unless @unsafe). Sync CCClosure stores/calls may still
+             * write through `T* p = &local`. */
+            if (!d->is_unsafe && d->body_text && d->cap_count > 0) {
                 int escapes = cc__closure_in_task_escape_arg(in_src, in_len, d->start_off);
                 for (int ci = 0; ci < d->cap_count; ci++) {
                     int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
@@ -3706,7 +3678,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                     nm ? nm : "?");
                             fprintf(stderr,
                                     "  = note: capturing `T* p = &x` then writing `*p` bypasses shared-ref mutation checks\n"
-                                    "  = help: capture [&x] with Atomic/CCExclusive, or @unsafe, or don't alias\n");
+                                    "  = help: capture [&x] with Atomic/Mutex, or @unsafe, or don't alias\n");
                         } else if (mk == CC_MUT_ADDR_OF_NONCONST_CALL && callee) {
                             fprintf(stderr,
                                     "%s:%d:%d: error: passing '&%s' to '%s' may mutate shared state (data race)\n",
@@ -3721,7 +3693,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                 fprintf(stderr, "  = note: callee parameter is not known to be 'const T*'\n");
                             }
                             fprintf(stderr,
-                                    "  = help: make the parameter 'const %s*' for read-only, or capture a CCExclusive / @unsafe\n",
+                                    "  = help: make the parameter 'const %s*' for read-only, or use a safe wrapper / @unsafe\n",
                                     ty ? ty : "T");
                         } else if (mk == CC_MUT_ADDR_OF_ESCAPES) {
                             fprintf(stderr,
@@ -3731,7 +3703,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                     col1,
                                     nm ? nm : "?");
                             fprintf(stderr,
-                                    "  = help: pass as 'const %s*' to a known read-only function, or capture a CCExclusive / @unsafe\n",
+                                    "  = help: pass as 'const %s*' to a known read-only function, or use a safe wrapper / @unsafe\n",
                                     ty ? ty : "T");
                         } else {
                             fprintf(stderr,
@@ -3742,8 +3714,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                     nm ? nm : "?");
                             fprintf(stderr,
                                     "  = note: concurrent mutation causes data races\n"
-                                    "  = help: use @atomic %s, capture a CCExclusiveMutex, or @unsafe [&%s]\n",
-                                    ty ? ty : "T", nm ? nm : "var");
+                                    "  = help: use @atomic %s, Mutex<%s>, or @unsafe [&%s]\n",
+                                    ty ? ty : "T", ty ? ty : "T", nm ? nm : "var");
                         }
                         /* cleanup and fail */
                         for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
