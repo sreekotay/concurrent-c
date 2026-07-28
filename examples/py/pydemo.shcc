@@ -1,0 +1,21 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py(&a) !> @destroy;
+
+CCPyObj math = py.import("math") !> @destroy;
+CCPyObj root = math.call_f("sqrt", 2.0) !> @destroy;
+double v = root.as_f64() !>;
+cc_println(@string(`sqrt(2)      = ${v}`, &a)) !>;
+
+CCPyObj stats = py.import("statistics") !> @destroy;
+double xs[5] = {1.0, 2.0, 3.0, 4.0, 42.0};
+CCPyObj lst = cc_py_list_f64(&py, xs, 5) !> @destroy;
+CCPyObj mean = stats.call_o("mean", &lst) !> @destroy;
+double mv = mean.as_f64() !>;
+cc_println(@string(`mean(...)    = ${mv}`, &a)) !>;
+
+CCPyObj sys = py.import("sys") !> @destroy;
+CCPyObj ver = sys.get("version") !> @destroy;
+CCSlice vs = ver.as_slice(&a) !>;
+cc_println(@string(`sys.version  = ${vs}`, &a)) !>;

@@ -1,0 +1,357 @@
+/*
+ * Python interop: interpreter arenas (spec/draft_py.md), light v1.
+ *
+ *   CCPy py = cc_py(&a) !> @destroy;
+ *   CCPyObj m = py.import("math") !> @destroy;
+ *   CCPyObj r = m.call_f("sqrt", 2.0) !> @destroy;
+ *   double v = r.as_f64() !>;
+ *
+ * libpython is dlopen'd at cc_py; absence is a CCPyError, not a link
+ * dependency. Stable-ABI symbols only; no '#' argument formats (their
+ * length ABI shifted across versions). Single interpreter, calling
+ * thread only; pools and moves are draft-only.
+ */
+#ifndef CC_SCRIPT_PY_H
+#define CC_SCRIPT_PY_H
+
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_type.cch>
+
+typedef struct CCPy {
+    int ready;
+    CCArena *arena; /* error-message + as_slice backing */
+} CCPy;
+
+typedef struct CCPyObj {
+    void *o; /* PyObject*, owned reference; NULL after release */
+} CCPyObj;
+
+/* Python failure with a CCError face: default @errhandler(CCError)
+ * prints the exception text; exact @errhandler(CCPyError) claims it. */
+typedef struct CCPyError {
+    CCError base @as;
+} CCPyError;
+
+#ifndef CCResult_CCPy_CCPyError_DEFINED
+#define CCResult_CCPy_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCPy_CCPyError, CCPy, CCPyError)
+#endif
+#ifndef CCResult_CCPyObj_CCPyError_DEFINED
+#define CCResult_CCPyObj_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCPyObj_CCPyError, CCPyObj, CCPyError)
+#endif
+#ifndef CCResult_double_CCPyError_DEFINED
+#define CCResult_double_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_double_CCPyError, double, CCPyError)
+#endif
+#ifndef CCResult_int64_t_CCPyError_DEFINED
+#define CCResult_int64_t_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CCPyError, int64_t, CCPyError)
+#endif
+#ifndef CCResult_CCSlice_CCPyError_DEFINED
+#define CCResult_CCSlice_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCPyError, CCSlice, CCPyError)
+#endif
+
+/* ---- dlsym table (stable ABI) ---- */
+
+typedef struct CC__PySyms {
+    void *lib;
+    int (*IsInitialized)(void);
+    void (*InitializeEx)(int);
+    int (*FinalizeEx)(void);
+    void *(*ImportModule)(const char *);
+    void *(*GetAttrString)(void *, const char *);
+    void *(*CallMethod)(void *, const char *, const char *, ...);
+    void *(*Str)(void *);
+    const char *(*AsUTF8AndSize)(void *, intptr_t *);
+    double (*FloatAsDouble)(void *);
+    long long (*LongAsLongLong)(void *);
+    void *(*FloatFromDouble)(double);
+    void *(*UnicodeFromStringAndSize)(const char *, intptr_t);
+    void *(*ListNew)(intptr_t);
+    int (*ListSetItem)(void *, intptr_t, void *);
+    void *(*ErrOccurred)(void);
+    void (*ErrFetch)(void **, void **, void **);
+    void (*ErrClear)(void);
+    void (*IncRef)(void *);
+    void (*DecRef)(void *);
+} CC__PySyms;
+
+static CC__PySyms cc__py;
+static char cc__py_errbuf[512];
+
+static int cc__py_sym(void *lib, const char *name, void *slot) {
+    void *p = dlsym(lib, name);
+    if (!p) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: missing symbol %s", name);
+        return -1;
+    }
+    memcpy(slot, &p, sizeof(p));
+    return 0;
+}
+
+static int cc__py_load(void) {
+    static const char *sonames[] = {
+        "libpython3.11.so.1.0", "libpython3.12.so.1.0",
+        "libpython3.13.so.1.0", "libpython3.10.so.1.0",
+        "libpython3.so", NULL,
+    };
+    int i;
+    if (cc__py.lib) return 0;
+    for (i = 0; sonames[i]; i++) {
+        cc__py.lib = dlopen(sonames[i], RTLD_NOW | RTLD_GLOBAL);
+        if (cc__py.lib) break;
+    }
+    if (!cc__py.lib) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: no libpython3 found (tried 3.10-3.13)");
+        return -1;
+    }
+#define CC__PY_SYM(field, name) \
+    if (cc__py_sym(cc__py.lib, name, &cc__py.field) != 0) return -1;
+    CC__PY_SYM(IsInitialized, "Py_IsInitialized")
+    CC__PY_SYM(InitializeEx, "Py_InitializeEx")
+    CC__PY_SYM(FinalizeEx, "Py_FinalizeEx")
+    CC__PY_SYM(ImportModule, "PyImport_ImportModule")
+    CC__PY_SYM(GetAttrString, "PyObject_GetAttrString")
+    CC__PY_SYM(CallMethod, "PyObject_CallMethod")
+    CC__PY_SYM(Str, "PyObject_Str")
+    CC__PY_SYM(AsUTF8AndSize, "PyUnicode_AsUTF8AndSize")
+    CC__PY_SYM(FloatAsDouble, "PyFloat_AsDouble")
+    CC__PY_SYM(LongAsLongLong, "PyLong_AsLongLong")
+    CC__PY_SYM(FloatFromDouble, "PyFloat_FromDouble")
+    CC__PY_SYM(UnicodeFromStringAndSize, "PyUnicode_FromStringAndSize")
+    CC__PY_SYM(ListNew, "PyList_New")
+    CC__PY_SYM(ListSetItem, "PyList_SetItem")
+    CC__PY_SYM(ErrOccurred, "PyErr_Occurred")
+    CC__PY_SYM(ErrFetch, "PyErr_Fetch")
+    CC__PY_SYM(ErrClear, "PyErr_Clear")
+    CC__PY_SYM(IncRef, "Py_IncRef")
+    CC__PY_SYM(DecRef, "Py_DecRef")
+#undef CC__PY_SYM
+    return 0;
+}
+
+/* Capture the pending exception (or `ctx` alone) into a CCPyError.
+ * Message lives in a static buffer: read it before the next failure. */
+static CCPyError cc__py_err(const char *ctx) {
+    CCPyError e;
+    memset(&e, 0, sizeof(e));
+    if (cc__py.lib && cc__py.ErrOccurred && cc__py.ErrOccurred()) {
+        void *t = NULL, *v = NULL, *tb = NULL;
+        cc__py.ErrFetch(&t, &v, &tb);
+        {
+            void *s = v ? cc__py.Str(v) : (t ? cc__py.Str(t) : NULL);
+            const char *msg = NULL;
+            intptr_t n = 0;
+            if (s) msg = cc__py.AsUTF8AndSize(s, &n);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf), "python: %s: %s",
+                     ctx, msg ? msg : "unknown error");
+            if (s) cc__py.DecRef(s);
+        }
+        if (t) cc__py.DecRef(t);
+        if (v) cc__py.DecRef(v);
+        if (tb) cc__py.DecRef(tb);
+        cc__py.ErrClear();
+    } else if (!cc__py_errbuf[0]) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf), "python: %s failed",
+                 ctx);
+    }
+    e.base = CC_ERROR(CC_ERR_INTERNAL, cc__py_errbuf);
+    return e;
+}
+
+/* ---- lifecycle ---- */
+
+static inline CCResult_CCPy_CCPyError cc_py(CCArena *arena) {
+    CCPy py;
+    memset(&py, 0, sizeof(py));
+    cc__py_errbuf[0] = '\0';
+    if (cc__py_load() != 0) {
+        CCPyError e;
+        memset(&e, 0, sizeof(e));
+        e.base = CC_ERROR(CC_ERR_INTERNAL, cc__py_errbuf);
+        return cc_err_CCResult_CCPy_CCPyError(e);
+    }
+    if (!cc__py.IsInitialized()) cc__py.InitializeEx(0);
+    py.ready = 1;
+    py.arena = arena;
+    return cc_ok_CCResult_CCPy_CCPyError(py);
+}
+
+/* Leaves the interpreter alive: re-initializing CPython after FinalizeEx
+ * is unreliable, and process exit reclaims it. Idempotent. */
+static inline void cc_py_close(CCPy *py) {
+    if (py) py->ready = 0;
+}
+
+static inline void cc_py_obj_release(CCPyObj *obj) {
+    if (!obj || !obj->o) return;
+    if (cc__py.lib) cc__py.DecRef(obj->o);
+    obj->o = NULL;
+}
+
+/* ---- import / attributes / calls ---- */
+
+static inline CCResult_CCPyObj_CCPyError cc__py_obj_or_err(void *o,
+                                                           const char *ctx) {
+    CCPyObj obj;
+    if (!o) return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(ctx));
+    obj.o = o;
+    return cc_ok_CCResult_CCPyObj_CCPyError(obj);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_import(CCPy *py,
+                                                      const char *module) {
+    if (!py || !py->ready)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("import"));
+    return cc__py_obj_or_err(cc__py.ImportModule(module), module);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_get(CCPyObj *obj,
+                                                       const char *name) {
+    if (!obj || !obj->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(name));
+    return cc__py_obj_or_err(cc__py.GetAttrString(obj->o, name), name);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_call0(CCPyObj *obj,
+                                                         const char *m) {
+    if (!obj || !obj->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    return cc__py_obj_or_err(cc__py.CallMethod(obj->o, m, NULL), m);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_call_f(CCPyObj *obj,
+                                                          const char *m,
+                                                          double v) {
+    if (!obj || !obj->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    return cc__py_obj_or_err(cc__py.CallMethod(obj->o, m, "d", v), m);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_call_i(CCPyObj *obj,
+                                                          const char *m,
+                                                          long long v) {
+    if (!obj || !obj->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    return cc__py_obj_or_err(cc__py.CallMethod(obj->o, m, "L", v), m);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_call_s(CCPyObj *obj,
+                                                          const char *m,
+                                                          CCSlice s) {
+    void *u;
+    void *r;
+    if (!obj || !obj->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    u = cc__py.UnicodeFromStringAndSize((const char *)s.ptr, (intptr_t)s.len);
+    if (!u) return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    r = cc__py.CallMethod(obj->o, m, "O", u);
+    cc__py.DecRef(u);
+    return cc__py_obj_or_err(r, m);
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_obj_call_o(CCPyObj *obj,
+                                                          const char *m,
+                                                          CCPyObj *arg) {
+    if (!obj || !obj->o || !arg || !arg->o)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    return cc__py_obj_or_err(cc__py.CallMethod(obj->o, m, "O", arg->o), m);
+}
+
+/* ---- marshaling ---- */
+
+static inline CCResult_CCPyObj_CCPyError cc_py_list_f64(CCPy *py,
+                                                        const double *xs,
+                                                        size_t n) {
+    void *list;
+    size_t i;
+    if (!py || !py->ready)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));
+    list = cc__py.ListNew((intptr_t)n);
+    if (!list)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));
+    for (i = 0; i < n; i++) {
+        void *f = cc__py.FloatFromDouble(xs[i]);
+        if (!f || cc__py.ListSetItem(list, (intptr_t)i, f) != 0) {
+            cc__py.DecRef(list);
+            return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("list_f64"));
+        }
+    }
+    return cc__py_obj_or_err(list, "list_f64");
+}
+
+static inline CCResult_double_CCPyError cc_py_obj_as_f64(CCPyObj *obj) {
+    double v;
+    if (!obj || !obj->o)
+        return cc_err_CCResult_double_CCPyError(cc__py_err("as_f64"));
+    v = cc__py.FloatAsDouble(obj->o);
+    if (v == -1.0 && cc__py.ErrOccurred())
+        return cc_err_CCResult_double_CCPyError(cc__py_err("as_f64"));
+    return cc_ok_CCResult_double_CCPyError(v);
+}
+
+static inline CCResult_int64_t_CCPyError cc_py_obj_as_i64(CCPyObj *obj) {
+    long long v;
+    if (!obj || !obj->o)
+        return cc_err_CCResult_int64_t_CCPyError(cc__py_err("as_i64"));
+    v = cc__py.LongAsLongLong(obj->o);
+    if (v == -1 && cc__py.ErrOccurred())
+        return cc_err_CCResult_int64_t_CCPyError(cc__py_err("as_i64"));
+    return cc_ok_CCResult_int64_t_CCPyError((int64_t)v);
+}
+
+/* str(obj) copied into the arena; NUL-terminated (char[:0] compatible). */
+static inline CCResult_CCSlice_CCPyError cc_py_obj_as_slice(CCPyObj *obj,
+                                                            CCArena *arena) {
+    void *s;
+    const char *msg;
+    intptr_t n = 0;
+    char *dst;
+    CCSlice out;
+    if (!obj || !obj->o || !arena)
+        return cc_err_CCResult_CCSlice_CCPyError(cc__py_err("as_slice"));
+    s = cc__py.Str(obj->o);
+    if (!s) return cc_err_CCResult_CCSlice_CCPyError(cc__py_err("as_slice"));
+    msg = cc__py.AsUTF8AndSize(s, &n);
+    if (!msg) {
+        cc__py.DecRef(s);
+        return cc_err_CCResult_CCSlice_CCPyError(cc__py_err("as_slice"));
+    }
+    dst = (char *)cc_arena_alloc(arena, (size_t)n + 1, 1);
+    if (!dst) {
+        cc__py.DecRef(s);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: as_slice: arena exhausted");
+        return cc_err_CCResult_CCSlice_CCPyError(cc__py_err("as_slice"));
+    }
+    memcpy(dst, msg, (size_t)n);
+    dst[n] = '\0';
+    cc__py.DecRef(s);
+    out.ptr = (uint8_t *)dst;
+    out.len = (size_t)n;
+    return cc_ok_CCResult_CCSlice_CCPyError(out);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCPy", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_py_close"),
+    });
+    (void)cc_type_register("CCPyObj", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_py_obj_release"),
+    });
+}
+#endif
+
+#endif /* CC_SCRIPT_PY_H */

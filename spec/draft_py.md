@@ -1,6 +1,8 @@
 # Python interop: interpreter arenas (`py.cch`)
 
-Status: draft — not implemented.
+Status: draft — light v1 implemented (single interpreter, dlopen + stable ABI;
+`cc/include/ccc/script/py.cch`, demo `examples/py/pydemo.shcc`). Pools and
+moves are draft-only.
 
 ## 1. Model
 
