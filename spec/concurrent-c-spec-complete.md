@@ -5177,12 +5177,13 @@ applies an entry rewrite before the ordinary Concurrent-C pipeline:
    - **Synthetic `main`:** statements and non-static runtime-init declarations
      (including `@create` / `@destroy` locals).
 4. Inject a default `@errhandler(CCError)` **inside** synthetic `main` and
-   each `@task` body that prints `e.message` to stderr and returns `1`, so
-   statement-level `!>` works without a local handler. Dispatch is
+   each `@task` body that prints `cc_error_str(e)` to stderr and returns
+   `1`, so statement-level `!>` works without a local handler. Dispatch is
    type-matched (§3.1): a user `@errhandler` for a different error type
    (for example `CCIoError`) coexists with the default; a user
    `@errhandler(CCError)` in the same scope overrides the default for
-   `CCError`.
+   `CCError`. `CCIoError` Results reach this handler via `@as` (`base`);
+   Io constructors fill the face message so the print is not blank.
 5. Token-gated script predecls `a` / `io` / `in` / `args` (same bindings as
    one-liner mode) are injected into the synthetic `main` wrap only — the
    top-level statement body — when the identifier appears as a code token
@@ -5308,7 +5309,7 @@ cc_println(@string(`n=${n}`, &a)) !>;
 Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Free sugar
 uses the `cc_*` names so a `#define println(x)` cannot steal UFCS
 `x.println()`. The injected default `@errhandler(CCError)` prints with
-`(void)cc_eprintln(e.message)`. Template formatting uses language `@string`.
+`(void)cc_eprintln(cc_error_str(e))`. Template formatting uses language `@string`.
 
 #### 9.5.5 Path, file, process, and temp helpers
 

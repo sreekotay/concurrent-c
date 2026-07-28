@@ -101,9 +101,11 @@ unit (§3.1), including type-matched `@errhandler` dispatch. No mode relaxes
 the unhandled-result diagnostic. The injected default `@errhandler(CCError)`
 (in synthetic `main` and in each `@task` body) makes bare `!>` a complete
 failure policy for `CCError` / untyped unwraps: message to stderr via
-`cc_eprintln(e.message)` (Result discarded), exit 1. A script may register
-additional handlers for other error types in the same scope; they coexist
-with the default by type match.
+`cc_eprintln(cc_error_str(e))` (Result discarded), exit 1. `CCIoError`
+Results match through the `@as` face; constructors fill that face's
+message so the print is not blank. A script may register additional
+handlers for other error types in the same scope; they coexist with the
+default by type match.
 
 ### 1.4 Flipped console print
 

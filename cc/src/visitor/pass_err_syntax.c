@@ -1439,12 +1439,25 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     free(lb_exp);
                 } else {
                     cc__append_str(&out, &ol, &oc, "{ ");
-                    cc__append_err_binder_prefix(&out, &ol, &oc, def->param_decl);
-                    cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
-                                            in_src, err_span_a, err_span_b,
-                                            err_file, errl);
-                    if (def_as_path[0])
-                        cc_sb_append_fmt(&out, &ol, &oc, ".%s", def_as_path);
+                    /* @as face: project via member select on the Result tmp.
+                     * Do not append `.<path>` to `__cc_uw_err_at(...)` — that
+                     * macro's `_Generic` default arm is already `CCError`, so
+                     * `.base` is ill-formed when the concrete Result E arm is
+                     * missing from the TU's enumerated list. */
+                    if (def_as_path[0]) {
+                        cc__append_str(&out, &ol, &oc, "cc_rt_diag_record_unwrap_site(");
+                        cc_sb_append_c_string_literal(&out, &ol, &oc, err_file, 0,
+                                                      strlen(err_file));
+                        cc_sb_append_fmt(&out, &ol, &oc, ", \"%d\"); ", errl);
+                        cc__append_err_binder_prefix(&out, &ol, &oc, def->param_decl);
+                        cc_sb_append_fmt(&out, &ol, &oc, "(%s).u.error.%s",
+                                         err_tmp, def_as_path);
+                    } else {
+                        cc__append_err_binder_prefix(&out, &ol, &oc, def->param_decl);
+                        cc_sb_append_uw_err_at(&out, &ol, &oc, err_tmp,
+                                                in_src, err_span_a, err_span_b,
+                                                err_file, errl);
+                    }
                     cc__append_str(&out, &ol, &oc, "; ");
                     {
                         size_t def_flat_len = 0;

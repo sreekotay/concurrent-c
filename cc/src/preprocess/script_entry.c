@@ -1270,7 +1270,7 @@ char* cc_script_rewrite_source(const char* path,
         "\n";
     static const char default_eh[] =
         "    @errhandler(CCError e) {\n"
-        "        (void)cc_eprintln(e.message);\n"
+        "        (void)cc_eprintln(cc_error_str(e));\n"
         "        return 1;\n"
         "    }\n"
         "\n";
@@ -1386,7 +1386,7 @@ char* cc_script_rewrite_source(const char* path,
              * and later statements fail to parse. */
             static const char task_eh[] =
                 "\n    @errhandler(CCError e) {\n"
-                "        (void)cc_eprintln(e.message);\n"
+                "        (void)cc_eprintln(cc_error_str(e));\n"
                 "        return 1;\n"
                 "    }\n"
                 "\n";

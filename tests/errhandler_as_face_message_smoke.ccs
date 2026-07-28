@@ -1,0 +1,31 @@
+/*
+ * CCIoError @as CCError: face.message is filled so a CCError-only handler
+ * can print without the Io vocabulary (cc_io_error_str).
+ */
+#include <ccc/std/io.h>
+#include <stdio.h>
+#include <string.h>
+
+static int !> (CCIoError) always_err_not_found(void) {
+    return cc_err(cc_io_from_errno(ENOENT));
+}
+
+int main(void) {
+    const char *msg = NULL;
+    CCErrorKind kind = CC_ERR_NONE;
+    @errhandler(CCError e) {
+        msg = cc_error_str(e);
+        kind = e.kind;
+    }
+    always_err_not_found() !>;
+    if (!msg || !msg[0]) {
+        fprintf(stderr, "empty face message\n");
+        return 1;
+    }
+    if (kind != CC_ERR_NOT_FOUND) {
+        fprintf(stderr, "kind=%d\n", (int)kind);
+        return 1;
+    }
+    printf("msg=%s\n", msg);
+    return 0;
+}

@@ -370,7 +370,7 @@ CCResult_CCProcessStatus_CCIoError cc_process_try_wait(CCProcess* proc) {
 
     if (result == 0) {
         /* Process still running */
-        CCIoError busy = {.base = CC_ERROR(CC_IO_BUSY, NULL), .os_code = 0};
+        CCIoError busy = cc_io_error_os(CC_IO_BUSY, 0);
         return cc_err_CCResult_CCProcessStatus_CCIoError(busy);
     }
 
@@ -473,7 +473,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
     /* Create pipes */
     if (config->pipe_stdin) {
         if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
-            CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+            CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
             return cc_err_CCResult_CCProcess_CCIoError(e);
         }
         SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
@@ -482,7 +482,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
         if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0)) {
             if (stdin_read) CloseHandle(stdin_read);
             if (stdin_write) CloseHandle(stdin_write);
-            CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+            CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
             return cc_err_CCResult_CCProcess_CCIoError(e);
         }
         SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
@@ -493,7 +493,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
             if (stdin_write) CloseHandle(stdin_write);
             if (stdout_read) CloseHandle(stdout_read);
             if (stdout_write) CloseHandle(stdout_write);
-            CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+            CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
             return cc_err_CCResult_CCProcess_CCIoError(e);
         }
         SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
@@ -551,7 +551,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
         if (stdin_write) CloseHandle(stdin_write);
         if (stdout_read) CloseHandle(stdout_read);
         if (stderr_read) CloseHandle(stderr_read);
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_CCProcess_CCIoError(e);
     }
 
@@ -597,7 +597,7 @@ CCResult_CCProcessStatus_CCIoError cc_process_try_wait(CCProcess* proc) {
 
     DWORD result = WaitForSingleObject(proc->handle, 0);
     if (result == WAIT_TIMEOUT) {
-        CCIoError busy = {.base = CC_ERROR(CC_IO_BUSY, NULL), .os_code = 0};
+        CCIoError busy = cc_io_error_os(CC_IO_BUSY, 0);
         return cc_err_CCResult_CCProcessStatus_CCIoError(busy);
     }
 
@@ -627,7 +627,7 @@ CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout_ms(CCProcess* proc, i
         return cc_err_CCResult_CCProcessStatus_CCIoError(cc_io_from_errno(ETIMEDOUT));
     }
     if (result != WAIT_OBJECT_0) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_CCProcessStatus_CCIoError(e);
     }
 
@@ -659,7 +659,7 @@ CCResult_bool_CCIoError cc_process_kill(CCProcess* proc, int sig) {
     /* On Windows, treat SIGKILL/SIGTERM as TerminateProcess */
     (void)sig;
     if (!TerminateProcess(proc->handle, 1)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_bool_CCIoError(e);
     }
 
@@ -681,7 +681,7 @@ CCResult_size_t_CCIoError cc_process_write(CCProcess* proc, CCSlice data) {
     DWORD written;
     HANDLE h = (HANDLE)_get_osfhandle(proc->stdin_fd);
     if (!WriteFile(h, data.ptr, (DWORD)data.len, &written, NULL)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_size_t_CCIoError(e);
     }
     return cc_ok_CCResult_size_t_CCIoError((size_t)written);
@@ -710,7 +710,7 @@ CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size
     DWORD n;
     HANDLE h = (HANDLE)_get_osfhandle(proc->stdout_fd);
     if (!ReadFile(h, buf, (DWORD)max_bytes, &n, NULL)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_CCSlice_CCIoError(e);
     }
 #else
@@ -741,7 +741,7 @@ CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* aren
     DWORD n;
     HANDLE h = (HANDLE)_get_osfhandle(proc->stderr_fd);
     if (!ReadFile(h, buf, (DWORD)max_bytes, &n, NULL)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_CCSlice_CCIoError(e);
     }
 #else
@@ -1046,7 +1046,7 @@ CCResult_bool_CCIoError cc_env_set(const char* name, const char* value) {
 
 #ifdef _WIN32
     if (!SetEnvironmentVariableA(name, value)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_bool_CCIoError(e);
     }
 #else
@@ -1065,7 +1065,7 @@ CCResult_bool_CCIoError cc_env_unset(const char* name) {
 
 #ifdef _WIN32
     if (!SetEnvironmentVariableA(name, NULL)) {
-        CCIoError e = {.base = CC_ERROR(CC_IO_OTHER, NULL), .os_code = (int)GetLastError()};
+        CCIoError e = cc_io_error_os(CC_IO_OTHER, (int)GetLastError());
         return cc_err_CCResult_bool_CCIoError(e);
     }
 #else

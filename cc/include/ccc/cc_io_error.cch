@@ -30,7 +30,9 @@ typedef struct {
 
 static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
     CCIoError e;
-    e.base = CC_ERROR(kind, NULL);
+    /* Face must carry a printable message: @as projection to CCError drops
+     * os_code, and the script default handler prints the face alone. */
+    e.base = CC_ERROR(kind, cc_error_kind_str(kind));
     e.os_code = (int32_t)os_code;
     return e;
 }
@@ -77,21 +79,9 @@ static inline CCIoError cc_io_from_errno(int err) {
     return cc_io_error_os(kind, err);
 }
 
-/* Human-readable string (static). Prefer base.message when set. */
+/* Human-readable string (static). Prefer base.message; else kind label. */
 static inline const char* cc_io_error_str(CCIoError e) {
-    if (e.base.message && e.base.message[0]) return e.base.message;
-    switch (e.base.kind) {
-        case CC_ERR_PERMISSION:    return "permission denied";
-        case CC_ERR_NOT_FOUND:     return "file not found";
-        case CC_ERR_INVALID_ARG:   return "invalid argument";
-        case CC_ERR_INTERRUPTED:   return "interrupted";
-        case CC_ERR_OUT_OF_MEMORY: return "out of memory";
-        case CC_ERR_WOULD_BLOCK:   return "resource busy";
-        case CC_ERR_CLOSED:        return "connection closed";
-        case CC_ERR_CANCELLED:     return "cancelled";
-        case CC_ERR_IO:            return "I/O error";
-        default:                   return "I/O error";
-    }
+    return cc_error_str(e.base);
 }
 
 /*

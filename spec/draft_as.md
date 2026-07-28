@@ -9,6 +9,8 @@ see `tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
 `tests/as_cycle_fail.ccs`, `tests/as_ptr_as_fail.ccs`,
 `tests/as_anon_fail.ccs`, `tests/as_pre_hook_value_smoke.ccs`,
 `tests/as_nontypedef_struct_smoke.ccs`, `tests/errhandler_as_fallback_smoke.ccs`,
+`tests/errhandler_as_face_message_smoke.ccs`,
+`tests/script_errhandler_as_default_smoke.shcc`,
 `tests/errhandler_type_match_smoke.ccs`).
 
 ## 1. Surface
@@ -135,7 +137,11 @@ registers `cc_file_close` as its destroy hook. The factory remains
 
 `CCIoError` embeds `CCError base @as` plus `os_code`. Kind and message live
 in `base`; `os_code` is the I/O-only payload. Kind tags share `CCErrorKind`
-(`CC_IO_*` names alias the corresponding `CC_ERR_*` values).
+(`CC_IO_*` names alias the corresponding `CC_ERR_*` values). Constructors
+(`cc_io_error_os`, `cc_io_from_errno`) fill `base.message` from the kind
+label so an `@as` projection to `CCError` remains printable without the
+Io vocabulary. Display prefers a custom message when set (`cc_error_str` /
+`cc_io_error_str`).
 
 ## 5. Handler dispatch through `@as`
 
@@ -159,7 +165,9 @@ handler, which wins by rule 1.
 
 A sole `@errhandler(CCError)` — including the script register's injected
 default — therefore handles `CCIoError` Results via `base`, while an exact
-`@errhandler(CCIoError)` still claims them when `os_code` matters.
+`@errhandler(CCIoError)` still claims them when `os_code` matters. The
+default handler prints `cc_error_str(e)` (kind label when `message` is
+null or empty), not a raw `e.message` that may be unset.
 
 ## 6. Out of scope
 
