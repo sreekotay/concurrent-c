@@ -773,12 +773,11 @@ int cc__rewrite_err_syntax(const CCVisitorCtx* ctx, const char* in_src, size_t i
     return 1;
 }
 
+/* Ledger-aware: honors `#line`/CC_LN markers in the intermediate buffer
+ * so recorded unwrap sites and diagnostics carry *user* lines, not
+ * physical lines of the lowered text. */
 static void cc__line_from_pos(const char* s, size_t pos, int* line) {
-    int ln = 1;
-    for (size_t i = 0; i < pos && s[i]; i++) {
-        if (s[i] == '\n') ln++;
-    }
-    *line = ln;
+    *line = cc_user_line_for_offset(s, pos, pos, 1, NULL, NULL);
 }
 
 static int cc__rewrite_colon_defaults(const CCVisitorCtx* ctx, const char* s, size_t n, char** out, size_t* out_len) {

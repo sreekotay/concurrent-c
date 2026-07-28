@@ -705,12 +705,11 @@ static int cc__find_rhs_end_forward(const char* s, size_t n, size_t from, size_t
     return 1;
 }
 
+/* Ledger-aware: honors `#line`/CC_LN markers in the intermediate buffer
+ * so recorded unwrap sites and diagnostics carry *user* lines, not
+ * physical lines of the lowered text. */
 static void cc__line_from_pos(const char* s, size_t pos, int* line) {
-    int ln = 1;
-    for (size_t i = 0; i < pos && s[i]; i++) {
-        if (s[i] == '\n') ln++;
-    }
-    *line = ln;
+    *line = cc_user_line_for_offset(s, pos, pos, 1, NULL, NULL);
 }
 
 static void cc__trim_range(const char* s, size_t* a, size_t* b) {
@@ -1842,9 +1841,9 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
         cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     }
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc__append_str(&out, &ol, &oc, "); if (");
+    cc__append_str(&out, &ol, &oc, ");\n    if (");
     cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
-    cc__append_str(&out, &ol, &oc, ") { ");
+    cc__append_str(&out, &ol, &oc, ") {\n        ");
     cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, mangled_binder, f, op_line);
     cc__append_n(&out, &ol, &oc, processed, processed_len);
     if (body_is_expr) {
@@ -2106,9 +2105,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
             cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
         }
         cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-        cc__append_str(&out, &ol, &oc, "); if (");
+        cc__append_str(&out, &ol, &oc, ");\n    if (");
         cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
-        cc__append_str(&out, &ol, &oc, ") { ");
+        cc__append_str(&out, &ol, &oc, ") {\n        ");
         cc__ru_emit_handler_err_binder(&out, &ol, &oc, s, n, call_a, call_b,
                                        tmpv, binder, outer_decl, outer_as_path,
                                        ff, line_no);
@@ -2218,9 +2217,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
     }
     cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
-    cc__append_str(&out, &ol, &oc, "); if (");
+    cc__append_str(&out, &ol, &oc, ");\n    if (");
     cc__ru_emit_is_err(&out, &ol, &oc, result_type, tmpv);
-    cc__append_str(&out, &ol, &oc, ") { ");
+    cc__append_str(&out, &ol, &oc, ") {\n        ");
     if (has_binder) {
         cc__ru_emit_uw_err_binder(&out, &ol, &oc, s, n, call_a, call_b, tmpv, mangled_binder, f, line_no);
     }

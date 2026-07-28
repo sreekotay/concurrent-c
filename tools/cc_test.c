@@ -676,11 +676,6 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test) */
-    /* A `.build_stderr` golden asserts on diagnostics emitted during
-     * lowering.  A warm-cache hit skips lowering, so warnings vanish
-     * (only erroring emits stay out of the cache) and the assertion
-     * fails on every second run.  Force a real build for these tests. */
-    if (exp_build_stderr && exp_build_stderr_len) use_cache = 0;
     char build_cmd[3072];
     const char* cache_flag = use_cache ? "" : "--no-cache ";
     if (ldflags_clean[0]) {

@@ -2475,6 +2475,103 @@ static void cc__coalesce_adjacent_line_directives(char* s, size_t* io_len) {
     *io_len = w;
 }
 
+/* Parse a numbered `#line N ...` line: returns N (> 0) and the [num_a,
+ * num_b) byte range of the digits, or 0 when not a numbered directive. */
+static long cc__line_directive_number(const char* s, size_t n,
+                                      size_t* num_a, size_t* num_b) {
+    size_t i = 0;
+    long v = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i + 5 > n || memcmp(s + i, "#line", 5) != 0) return 0;
+    i += 5;
+    if (i < n && s[i] != ' ' && s[i] != '\t') return 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || s[i] < '0' || s[i] > '9') return 0;
+    *num_a = i;
+    while (i < n && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+    *num_b = i;
+    return v;
+}
+
+/* Cosmetic: blank-line runs around `#line` directives.  Passes blank whole
+ * constructs (doc comments, @comptime bodies) in place to keep physical and
+ * user lines aligned, which leaves runs of empty lines in the lowered
+ * output.  Two mapping-exact rewrites clean them up:
+ *
+ *   #line N  +  k>=2 blank lines  +  code       =>  #line N+k  +  code
+ *   #line .. +  blanks            +  #line ..   =>  (second directive only)
+ *   k>=2 blank lines              +  #line ..   =>  1 blank  +  #line ..
+ *
+ * The first advances the anchor instead of padding to it; the others rely
+ * on the following directive re-anchoring.  Removes whole lines, so it
+ * must run only on the final buffer (after trailing-ws strip, so blank
+ * means empty).  Compacts in place: dropping k>=2 one-byte lines always
+ * outweighs the <= digits(k)+1 bytes a renumbered directive can grow. */
+static void cc__compact_blank_runs_at_line_directives(char* s, size_t* io_len) {
+    size_t n, r = 0, w = 0;
+    if (!s || !io_len) return;
+    n = *io_len;
+    while (r < n) {
+        size_t e = r;
+        while (e < n && s[e] != '\n') e++;
+        /* Measure the blank run starting at line `p` (possibly empty run),
+         * leaving `p` at the first non-blank line start and `k` its size. */
+        size_t k = 0, p = (e < n) ? e + 1 : n;
+        int line_is_blank = (e == r);
+        if (line_is_blank) { k = 1; p = (e < n) ? e + 1 : n; }
+        {
+            size_t q = p;
+            while (q < n && s[q] == '\n') { k++; q++; }
+            p = q;
+        }
+        size_t pe = p;
+        while (pe < n && s[pe] != '\n') pe++;
+        int next_is_dir = (p < n) && cc__line_is_line_directive(s + p, pe - p);
+
+        if (!line_is_blank) {
+            size_t na = 0, nb = 0;
+            long ln = cc__line_directive_number(s + r, e - r, &na, &nb);
+            if (ln > 0 && k > 0 && p < n) {
+                if (next_is_dir) {
+                    /* Directive + blanks + directive: drop this one. */
+                    r = p;
+                    continue;
+                }
+                if (k >= 2) {
+                    /* Renumber past the dropped blanks. */
+                    char num[24];
+                    int nd = snprintf(num, sizeof(num), "%ld", ln + (long)k);
+                    memmove(s + w, s + r, na);
+                    w += na;
+                    memcpy(s + w, num, (size_t)nd);
+                    w += (size_t)nd;
+                    memmove(s + w, s + r + nb, e - (r + nb));
+                    w += e - (r + nb);
+                    s[w++] = '\n';
+                    r = p;
+                    continue;
+                }
+            }
+            /* Ordinary line: copy through. */
+            size_t m = (e < n ? e + 1 : e) - r;
+            if (w != r) memmove(s + w, s + r, m);
+            w += m;
+            r = (e < n) ? e + 1 : e;
+            continue;
+        }
+        /* Blank run: collapse to one blank when a directive re-anchors. */
+        if (next_is_dir && k >= 2) {
+            s[w++] = '\n';
+            r = p;
+            continue;
+        }
+        while (k-- > 0) s[w++] = '\n';
+        r = p;
+    }
+    s[w] = '\0';
+    *io_len = w;
+}
+
 static int cc__tdup_ident_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
@@ -5413,8 +5510,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* Final cosmetics — host-compiler buffer only: collapse the doubled
          * `__typeof__(EXPR) tmp = (EXPR)` spelling (line-count preserving),
-         * then drop `#line` ping-pong pairs (removes lines). */
+         * compact blank runs against their `#line` anchors, then drop
+         * `#line` ping-pong pairs (removes lines). */
         cc__collapse_typeof_dup_decls(src_ufcs, &src_ufcs_len);
+        cc__compact_blank_runs_at_line_directives(src_ufcs, &src_ufcs_len);
         cc__coalesce_adjacent_line_directives(src_ufcs, &src_ufcs_len);
 
         fwrite(src_ufcs, 1, src_ufcs_len, out);

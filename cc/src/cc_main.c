@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
@@ -994,6 +995,29 @@ static void cc__apply_user_include_env(const char* cc_flags) {
     }
 }
 
+/* Warm-cache diagnostic replay (ccache-style).  Lowering-time warnings are
+ * raw fprintf(stderr) calls scattered across pass code, so the emit stage
+ * captures fd 2 around the in-process lowering call and persists the bytes
+ * as a sidecar next to the emitted C (<out>.c.diag).  A cache hit that
+ * skips lowering replays the sidecar so warm builds print the same
+ * diagnostics as cold ones. */
+static void cc__diag_sidecar_path(const char* c_out_path, char* out, size_t cap) {
+    snprintf(out, cap, "%s.diag", c_out_path);
+}
+
+static void cc__replay_diag_sidecar(const char* c_out_path) {
+    char path[PATH_MAX];
+    cc__diag_sidecar_path(c_out_path, path, sizeof(path));
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        fwrite(buf, 1, n, stderr);
+    }
+    fclose(f);
+}
+
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
     if (g_emit_c_inspect) {
@@ -1010,17 +1034,67 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
         unsetenv("CC_EMIT_C_INSPECT");
     }
     {
+        long pe0 = cc_pass_error_count();
+        int diag0 = cc_diag_error_count();
+
+        /* Redirect fd 2 to a temp file for the duration of lowering; the
+         * capture is echoed to the real stderr afterwards so cold-build
+         * output is unchanged.  On capture setup failure just lower with
+         * live stderr (no replay sidecar for this emit). */
+        char diag_path[PATH_MAX];
+        char diag_tmp[PATH_MAX];
+        cc__diag_sidecar_path(out_path, diag_path, sizeof(diag_path));
+        snprintf(diag_tmp, sizeof(diag_tmp), "%s.%d.tmp", diag_path, (int)getpid());
+        int saved_err = -1;
+        int cap_fd = open(diag_tmp, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (cap_fd >= 0) {
+            fflush(stderr);
+            saved_err = dup(2);
+            if (saved_err < 0 || dup2(cap_fd, 2) < 0) {
+                if (saved_err >= 0) { close(saved_err); saved_err = -1; }
+                close(cap_fd);
+                cap_fd = -1;
+                unlink(diag_tmp);
+            }
+        }
+
+        int rc = cc_compile_with_config(in_path, out_path, cfg);
+
+        long cap_len = 0;
+        if (saved_err >= 0) {
+            fflush(stderr);
+            dup2(saved_err, 2);
+            close(saved_err);
+            if (lseek(cap_fd, 0, SEEK_SET) == 0) {
+                char buf[4096];
+                ssize_t n;
+                while ((n = read(cap_fd, buf, sizeof(buf))) > 0) {
+                    fwrite(buf, 1, (size_t)n, stderr);
+                    cap_len += n;
+                }
+            }
+            close(cap_fd);
+        }
+
         /* A pass that prints an error but "recovers" (leaves the construct
          * unlowered) must not count as a successful emit: the .c would be
          * cached, and warm reruns would skip the diagnostic entirely and
          * fail somewhere else (or not at all).  Fail here so no meta is
          * written and every run reprints the diagnostic. */
-        long pe0 = cc_pass_error_count();
-        int diag0 = cc_diag_error_count();
-        int rc = cc_compile_with_config(in_path, out_path, cfg);
         long pe = cc_pass_error_count() - pe0;
         long de = (long)(cc_diag_error_count() - diag0);
-        if (rc == 0 && (pe > 0 || de > 0)) {
+        int diag_err = (rc == 0 && (pe > 0 || de > 0));
+
+        if (rc != 0 || diag_err || cap_len == 0) {
+            /* Failing emits are never cached, so they need no sidecar; a
+             * quiet emit drops any stale one. */
+            if (cap_fd >= 0) unlink(diag_tmp);
+            unlink(diag_path);
+        } else if (rename(diag_tmp, diag_path) != 0) {
+            unlink(diag_tmp);
+        }
+
+        if (diag_err) {
             fprintf(stderr,
                     "cc: %ld error diagnostic(s) during lowering of %s; "
                     "failing the build (emitted C not cached)\n",
@@ -1796,7 +1870,7 @@ static int cc__build_target_objs_rec(int idx,
                 emit_key = h;
                 uint64_t prev = 0;
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
-                    // reuse
+                    cc__replay_diag_sidecar(c_out);
                 } else {
                     int err = cc__compile_with_env(base_cli_opt, src_abs, c_out, cfg);
                     if (err != 0) return err;
@@ -1995,7 +2069,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         uint64_t prev = 0;
         if (file_exists(opt->c_out_path) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
             if (summary_out) { summary_out->reuse_emit_c = 1; summary_out->did_emit_c = 0; }
-            // skip emit
+            cc__replay_diag_sidecar(opt->c_out_path);
         } else {
             int err = cc__compile_with_env(opt, opt->in_path, opt->c_out_path, &cfg);
             if (err != 0) return err;
@@ -3698,6 +3772,7 @@ static int run_build_mode(int argc, char** argv) {
 
                 uint64_t prev = 0;
                 if (file_exists(c_bufs[i]) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
+                    cc__replay_diag_sidecar(c_bufs[i]);
                     emit_reused++;
                 } else {
                     int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
