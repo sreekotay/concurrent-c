@@ -1038,6 +1038,42 @@ static int cc__as_stmt_has_marker(const char* src, size_t a, size_t b) {
     return 0;
 }
 
+/* When the statement at [stmt_off, semi_off) is an anonymous
+ * `union { ... };` / `struct { ... };` member, set *out_body_l/r to its
+ * brace span and return 1. C11 flattens anonymous members into the
+ * enclosing struct, so ingestion recurses with the same struct name. */
+static int cc__stmt_is_anon_member(const char* src, size_t stmt_off, size_t semi_off,
+                                   size_t* out_body_l, size_t* out_body_r) {
+    size_t p = stmt_off;
+    size_t rb = 0;
+    while (p < semi_off && (src[p] == ' ' || src[p] == '\t' ||
+                            src[p] == '\n' || src[p] == '\r'))
+        p++;
+    if (p + 5 < semi_off && memcmp(src + p, "union", 5) == 0 &&
+        !cc_is_ident_char(src[p + 5]))
+        p += 5;
+    else if (p + 6 < semi_off && memcmp(src + p, "struct", 6) == 0 &&
+             !cc_is_ident_char(src[p + 6]))
+        p += 6;
+    else
+        return 0;
+    while (p < semi_off && (src[p] == ' ' || src[p] == '\t' ||
+                            src[p] == '\n' || src[p] == '\r'))
+        p++;
+    if (p >= semi_off || src[p] != '{') return 0;
+    if (!cc_find_matching_brace(src, semi_off, p, &rb)) return 0;
+    {
+        size_t q = rb + 1;
+        while (q < semi_off && (src[q] == ' ' || src[q] == '\t' ||
+                                src[q] == '\n' || src[q] == '\r'))
+            q++;
+        if (q != semi_off) return 0; /* named member — not anonymous */
+    }
+    if (out_body_l) *out_body_l = p;
+    if (out_body_r) *out_body_r = rb;
+    return 1;
+}
+
 static void cc__ingest_struct_body_fields(CCTypeRegistry* reg,
                                           const char* src,
                                           size_t body_l,
@@ -1052,10 +1088,16 @@ static void cc__ingest_struct_body_fields(CCTypeRegistry* reg,
         size_t stmt_off = (size_t)(stmt - src);
         size_t end_off = (size_t)(body_end - src);
         size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+        size_t anon_l = 0, anon_r = 0;
         char field_name[128];
         char field_type[256];
         int field_is_as = 0;
         if (semi_off >= end_off) break;
+        if (cc__stmt_is_anon_member(src, stmt_off, semi_off, &anon_l, &anon_r)) {
+            cc__ingest_struct_body_fields(reg, src, anon_l, anon_r, struct_name);
+            stmt = src + semi_off + 1;
+            continue;
+        }
         cc_parse_decl_name_and_type_ex(src + stmt_off, src + semi_off,
                                        field_name, sizeof(field_name),
                                        field_type, sizeof(field_type),
@@ -1084,11 +1126,20 @@ static int cc__as_diagnose_anon_in_body(const char* file,
         size_t stmt_off = (size_t)(stmt - src);
         size_t end_off = (size_t)(body_end - src);
         size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+        size_t anon_l = 0, anon_r = 0;
         char field_name[128];
         char field_type[256];
         int field_is_as = 0;
         if (semi_off >= end_off) break;
         if (!cc__as_stmt_has_marker(src, stmt_off, semi_off)) {
+            stmt = src + semi_off + 1;
+            continue;
+        }
+        if (cc__stmt_is_anon_member(src, stmt_off, semi_off, &anon_l, &anon_r)) {
+            /* Anonymous union/struct member: fields flatten into the
+             * enclosing struct; check the nested body instead. */
+            errs += cc__as_diagnose_anon_in_body(file, src, anon_l, anon_r,
+                                                 struct_name, line);
             stmt = src + semi_off + 1;
             continue;
         }

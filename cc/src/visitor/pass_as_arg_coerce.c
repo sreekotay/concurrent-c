@@ -57,12 +57,15 @@ static void cc__as_strip_param_name(char* ty) {
     ty[j] = '\0';
 }
 
-/* True when spelling is a single-level pointer to a named type (`T *`). */
-static int cc__as_param_is_named_ptr(const char* spelling, char* out_base, size_t out_sz) {
+/* Parse a named param base with 0 or 1 pointer levels (`T` / `T *`).
+ * Returns 1 and sets *out_stars; 0 for anything else. */
+static int cc__as_param_named_base(const char* spelling, char* out_base, size_t out_sz,
+                                   int* out_stars) {
     char tmp[256];
     size_t n;
     char* p;
     size_t stars = 0;
+    if (out_stars) *out_stars = 0;
     if (!spelling || !out_base || out_sz == 0) return 0;
     out_base[0] = '\0';
     n = strlen(spelling);
@@ -91,19 +94,36 @@ static int cc__as_param_is_named_ptr(const char* spelling, char* out_base, size_
     }
     while (*p == ' ' || *p == '\t') p++;
     while (*p == '*') { stars++; p++; while (*p == ' ' || *p == '\t') p++; }
-    return stars == 1 && *p == '\0' && out_base[0];
+    if (stars > 1 || *p != '\0' || !out_base[0]) return 0;
+    if (out_stars) *out_stars = (int)stars;
+    return 1;
+}
+
+/* True when spelling is a single-level pointer to a named type (`T *`). */
+static int cc__as_param_is_named_ptr(const char* spelling, char* out_base, size_t out_sz) {
+    int stars = 0;
+    return cc__as_param_named_base(spelling, out_base, out_sz, &stars) && stars == 1;
+}
+
+/* The slice marker aliases are ABI-identical typedefs of CCSlice, and the
+ * parser's typedef-name lookup may report any of them for a CCSlice param.
+ * @as field types spell the base, so match against that. */
+static void cc__as_normalize_slice_marker(char* base) {
+    if (!base) return;
+    if (strcmp(base, "CCSliceShared") == 0 || strcmp(base, "CCSliceUnique") == 0)
+        strcpy(base, "CCSlice");
 }
 
 static int cc__as_lookup_param_bases(const CCASTRoot* root,
                                      const NodeView* n,
                                      const char* callee,
                                      char bases[][128],
-                                     int* param_is_ptr,
+                                     int* param_stars,
                                      int cap,
                                      int* out_paramc) {
     int paramc = 0;
     int k;
-    if (!root || !n || !callee || !bases || !param_is_ptr || !out_paramc || cap <= 0)
+    if (!root || !n || !callee || !bases || !param_stars || !out_paramc || cap <= 0)
         return 0;
     *out_paramc = 0;
     for (k = 0; k < root->node_count; k++) {
@@ -112,8 +132,13 @@ static int cc__as_lookup_param_bases(const CCASTRoot* root,
         if (!n[k].aux_s1 || strcmp(n[k].aux_s1, callee) != 0) continue;
         for (p = 0; p < root->node_count && paramc < cap; p++) {
             if (n[p].parent != k || n[p].kind != CC_AST_NODE_PARAM) continue;
-            param_is_ptr[paramc] = cc__as_param_is_named_ptr(n[p].aux_s2, bases[paramc], 128);
-            if (!param_is_ptr[paramc]) bases[paramc][0] = '\0';
+            param_stars[paramc] = -1;
+            if (!cc__as_param_named_base(n[p].aux_s2, bases[paramc], 128,
+                                         &param_stars[paramc])) {
+                bases[paramc][0] = '\0';
+                param_stars[paramc] = -1;
+            }
+            cc__as_normalize_slice_marker(bases[paramc]);
             paramc++;
         }
         if (paramc > 0) {
@@ -152,8 +177,12 @@ static int cc__as_lookup_param_bases(const CCASTRoot* root,
             if (al >= sizeof(tmp)) al = sizeof(tmp) - 1;
             memcpy(tmp, sig + starts[ai], al);
             tmp[al] = '\0';
-            param_is_ptr[ai] = cc__as_param_is_named_ptr(tmp, bases[ai], 128);
-            if (!param_is_ptr[ai]) bases[ai][0] = '\0';
+            param_stars[ai] = -1;
+            if (!cc__as_param_named_base(tmp, bases[ai], 128, &param_stars[ai])) {
+                bases[ai][0] = '\0';
+                param_stars[ai] = -1;
+            }
+            cc__as_normalize_slice_marker(bases[ai]);
         }
         *out_paramc = argc < cap ? argc : cap;
         return 1;
@@ -395,7 +424,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
         size_t name_s, after, lparen, rparen;
         size_t starts[16], ends[16];
         char bases[16][128];
-        int param_is_ptr[16];
+        int param_stars[16];
         int argc;
         int paramc = 0;
         int have_params;
@@ -416,9 +445,13 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
         if (!cc_find_matching_paren(in_src, in_len, lparen, &rparen)) continue;
         argc = cc__as_split_args(in_src, lparen + 1, rparen, starts, ends, 16);
         if (argc <= 0) continue;
-        memset(param_is_ptr, 0, sizeof(param_is_ptr));
+        memset(param_stars, -1, sizeof(param_stars));
         memset(bases, 0, sizeof(bases));
-        have_params = cc__as_lookup_param_bases(root, n, callee, bases, param_is_ptr, 16, &paramc);
+        have_params = cc__as_lookup_param_bases(root, n, callee, bases, param_stars, 16, &paramc);
+        if (dbg)
+            fprintf(stderr, "as_arg_coerce: call %s argc=%d have=%d paramc=%d star0=%d base0=%s\n",
+                    callee, argc, have_params, paramc,
+                    paramc > 0 ? param_stars[0] : -9, paramc > 0 ? bases[0] : "-");
         if (!have_params || paramc <= 0) continue;
 
         for (ai = 0; ai < argc && ai < paramc; ai++) {
@@ -437,7 +470,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
             const char* file;
             int line, col;
 
-            if (!param_is_ptr[ai] || !bases[ai][0]) continue;
+            if (param_stars[ai] < 0 || !bases[ai][0]) continue;
             trim_a = cc_skip_ws_and_comments(in_src, e, a);
             trim_e = e;
             while (trim_e > trim_a &&
@@ -452,7 +485,8 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                                       rel, sizeof(rel));
 
             /* Explicit cast: never rewrite; warn when @as path is not offset-0. */
-            if (cc__as_arg_is_explicit_cast(in_src, trim_a, trim_e, cast_base, sizeof(cast_base),
+            if (param_stars[ai] == 1 &&
+                cc__as_arg_is_explicit_cast(in_src, trim_a, trim_e, cast_base, sizeof(cast_base),
                                             ident, sizeof(ident), &has_amp)) {
                 char path[256];
                 outer_ty = cc_type_registry_resolve_receiver_expr_at(
@@ -525,21 +559,29 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                 field_name = path; /* dotted path, e.g. mid.file */
                 if (cc__as_arg_already_member(in_src, trim_a, trim_e, field_name)) continue;
 
-                /* Value Outer must be addressed (`&w`); pointer Outer uses `p`. */
-                if (!has_amp && !outer_is_ptr) {
-                    cc_pass_error_cat(file, line, col, CC_ERR_TYPE,
-                                      "cannot coerce by-value '%s' to '%s *'; pass &%s "
-                                      "(lowers via @as to &%s.%s)",
-                                      outer_ty, bases[ai], ident, ident, field_name);
-                    return -1;
-                }
-
-                if (has_amp || !outer_is_ptr) {
-                    /* `&w` → `&w.mid.file` */
-                    snprintf(repl, sizeof(repl), "&%s.%s", ident, field_name);
+                if (param_stars[ai] == 0) {
+                    /* By-value param: `xs` (Outer value) → `xs.base`.
+                     * `&xs` / pointer outers stay as-written — the type
+                     * error they produce is the honest one. */
+                    if (has_amp || outer_is_ptr) continue;
+                    snprintf(repl, sizeof(repl), "%s.%s", ident, field_name);
                 } else {
-                    /* `p` (Outer*) → `&p->mid.file` */
-                    snprintf(repl, sizeof(repl), "&%s->%s", ident, field_name);
+                    /* Value Outer must be addressed (`&w`); pointer Outer uses `p`. */
+                    if (!has_amp && !outer_is_ptr) {
+                        cc_pass_error_cat(file, line, col, CC_ERR_TYPE,
+                                          "cannot coerce by-value '%s' to '%s *'; pass &%s "
+                                          "(lowers via @as to &%s.%s)",
+                                          outer_ty, bases[ai], ident, ident, field_name);
+                        return -1;
+                    }
+
+                    if (has_amp || !outer_is_ptr) {
+                        /* `&w` → `&w.mid.file` */
+                        snprintf(repl, sizeof(repl), "&%s.%s", ident, field_name);
+                    } else {
+                        /* `p` (Outer*) → `&p->mid.file` */
+                        snprintf(repl, sizeof(repl), "&%s->%s", ident, field_name);
+                    }
                 }
             }
 
