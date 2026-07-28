@@ -5271,7 +5271,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 
 | Header | Role |
 | ------ | ---- |
-| `<ccc/script/stdio.cch>` | `CCStdio` — arena-bound stdin/stdout/stderr helpers |
+| `<ccc/script/stdio.cch>` | `CCStdio` reads/writes; flipped `CCSlice`/`CCString` print |
 | `<ccc/std/cli.cch>` | `@grammar(cli)` runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`) |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
@@ -5282,7 +5282,7 @@ Arena parameters follow the stdlib convention: **arena last** on allocating
 APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
 `CCResult_*_CCError` form) unless noted.
 
-#### 9.5.4 `CCStdio`
+#### 9.5.4 `CCStdio` and flipped print
 
 ```c
 CCArena a = @create(megabytes(1)) @destroy;
@@ -5290,18 +5290,25 @@ CCStdio io = @create(&a) @destroy;
 
 char[:] in = io.read_all() !>;
 io.write_all(out.as_slice()) !>;
-io.println(msg.as_slice()) !>;
-io.eprintln(err.as_slice()) !>;
 ```
 
-`CCStdio` binds an arena for growing reads. `println` / `eprintln` write a
-slice then a trailing newline. Template formatting uses language `@string`,
-not a scriptlib wrapper:
+`CCStdio` binds an arena for growing reads (`read_all` / `read_line`) and
+offers `write_all` / `println` / `eprintln` that take a `CCSlice`. Preferred
+console output is **flipped** onto the data (no `io` argument):
 
 ```c
-CCString s = @string(`perf check: OK with ${warnings} warning(s)`, &a);
-io.println(s.as_slice()) !>;
+path.println() !>;                 /* CCSlice / char[:0] */
+line.eprintln() !>;                /* CCString */
+path.fprintln(STDERR_FILENO) !>;
+
+cc_println("literal") !>;          /* free sugar: cstr / slice / CCString */
+cc_println(@string(`n=${n}`, &a)) !>;
 ```
+
+Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Free sugar
+uses the `cc_*` names so a `#define println(x)` cannot steal UFCS
+`x.println()`. The injected default `@errhandler(CCError)` prints with
+`(void)cc_eprintln(e.message)`. Template formatting uses language `@string`.
 
 #### 9.5.5 Path, file, process, and temp helpers
 

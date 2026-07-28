@@ -1,9 +1,10 @@
 /*
- * Script-facing stdio bound to an arena.
+ * Script-facing stdio + flipped console print.
  *
  *   CCStdio io = @create(&a) @destroy;
  *   char[:] in = io.read_all() !>;
- *   io.write_all(out.as_slice()) !>;
+ *   msg.println() !>;                 // CCSlice / CCString receivers
+ *   cc_println(@string(`n=${n}`, &a)) !>;
  */
 #ifndef CC_SCRIPT_STDIO_H
 #define CC_SCRIPT_STDIO_H
@@ -11,6 +12,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_result.cch>
@@ -163,6 +165,192 @@ static inline CCResult_bool_CCError cc_stdio_read_line(CCStdio *io, CCSlice *out
     }
     return cc_ok_CCResult_bool_CCError(true);
 }
+
+/* ---- Flipped print: data.println(), not io.println(data) -------------------
+ *
+ * Console writes return CCResult_size_t_CCError (same as CCStdio.println) so
+ * `!>` dispatches to the default @errhandler(CCError). No CCStdio arg — stdout
+ * / stderr / fd are the sink.
+ *
+ * UFCS: `path.println()` → `cc_slice_println(&path)`.
+ * Temps: `cc_println(@string(`…`, &a))` (by-value free sugar). */
+
+static inline CCResult_size_t_CCError cc__script_io_from_ioerr(CCResult_size_t_CCIoError r) {
+    if (cc_is_err(r)) {
+        return cc_err_CCResult_size_t_CCError(
+            CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
+    }
+    return cc_ok_CCResult_size_t_CCError(cc_value(r));
+}
+
+static inline CCResult_size_t_CCError cc__script_write_fd(int fd, CCSlice data) {
+    size_t off = 0;
+    if (!data.ptr || data.len == 0) return cc_ok_CCResult_size_t_CCError(0);
+    if (fd == STDOUT_FILENO) return cc__script_io_from_ioerr(cc_std_out_write(data));
+    if (fd == STDERR_FILENO) return cc__script_io_from_ioerr(cc_std_err_write(data));
+    while (off < data.len) {
+        ssize_t n = write(fd, (const char *)data.ptr + off, data.len - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return cc_err_CCResult_size_t_CCError(
+                CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
+        }
+        if (n == 0) {
+            return cc_err_CCResult_size_t_CCError(
+                CC_ERROR(CC_ERR_IO, "short write"));
+        }
+        off += (size_t)n;
+    }
+    return cc_ok_CCResult_size_t_CCError(data.len);
+}
+
+static inline CCResult_size_t_CCError cc__script_write_fd_nl(int fd, CCSlice data) {
+    CCResult_size_t_CCError r = cc__script_write_fd(fd, data);
+    size_t n;
+    char nl = '\n';
+    CCResult_size_t_CCError r2;
+    if (cc_is_err(r)) return r;
+    n = cc_value(r);
+    r2 = cc__script_write_fd(fd, cc_slice_from_parts(&nl, 1, CC_SLICE_ID_UNTRACKED, 1));
+    if (cc_is_err(r2)) return r2;
+    return cc_ok_CCResult_size_t_CCError(n + cc_value(r2));
+}
+
+static inline CCSlice cc__script_slice_or_empty(CCSlice *s) {
+    return s ? *s : cc_slice_empty();
+}
+
+static inline CCResult_size_t_CCError cc_slice_print(CCSlice *s) {
+    return cc__script_write_fd(STDOUT_FILENO, cc__script_slice_or_empty(s));
+}
+static inline CCResult_size_t_CCError cc_slice_println(CCSlice *s) {
+    return cc__script_write_fd_nl(STDOUT_FILENO, cc__script_slice_or_empty(s));
+}
+static inline CCResult_size_t_CCError cc_slice_eprint(CCSlice *s) {
+    return cc__script_write_fd(STDERR_FILENO, cc__script_slice_or_empty(s));
+}
+static inline CCResult_size_t_CCError cc_slice_eprintln(CCSlice *s) {
+    return cc__script_write_fd_nl(STDERR_FILENO, cc__script_slice_or_empty(s));
+}
+static inline CCResult_size_t_CCError cc_slice_fprint(CCSlice *s, int fd) {
+    return cc__script_write_fd(fd, cc__script_slice_or_empty(s));
+}
+static inline CCResult_size_t_CCError cc_slice_fprintln(CCSlice *s, int fd) {
+    return cc__script_write_fd_nl(fd, cc__script_slice_or_empty(s));
+}
+
+static inline CCResult_size_t_CCError cc_string_print(CCString *s) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_print(&view);
+}
+static inline CCResult_size_t_CCError cc_string_println(CCString *s) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_println(&view);
+}
+static inline CCResult_size_t_CCError cc_string_eprint(CCString *s) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_eprint(&view);
+}
+static inline CCResult_size_t_CCError cc_string_eprintln(CCString *s) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_eprintln(&view);
+}
+static inline CCResult_size_t_CCError cc_string_fprint(CCString *s, int fd) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_fprint(&view, fd);
+}
+static inline CCResult_size_t_CCError cc_string_fprintln(CCString *s, int fd) {
+    CCSlice view = s ? cc_string_as_slice(s) : cc_slice_empty();
+    return cc_slice_fprintln(&view, fd);
+}
+
+/* Free sugar for cstr / slice / CCString values (temps: cc_println(@string(...))).
+ * Named cc_* so a `#define println(x)` cannot steal UFCS `x.println()`. */
+static inline CCResult_size_t_CCError cc__print_cstr(const char *s) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_print(&view);
+}
+static inline CCResult_size_t_CCError cc__println_cstr(const char *s) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_println(&view);
+}
+static inline CCResult_size_t_CCError cc__eprint_cstr(const char *s) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_eprint(&view);
+}
+static inline CCResult_size_t_CCError cc__eprintln_cstr(const char *s) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_eprintln(&view);
+}
+static inline CCResult_size_t_CCError cc__print_slice_val(CCSlice s) {
+    return cc_slice_print(&s);
+}
+static inline CCResult_size_t_CCError cc__println_slice_val(CCSlice s) {
+    return cc_slice_println(&s);
+}
+static inline CCResult_size_t_CCError cc__eprint_slice_val(CCSlice s) {
+    return cc_slice_eprint(&s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_slice_val(CCSlice s) {
+    return cc_slice_eprintln(&s);
+}
+static inline CCResult_size_t_CCError cc__print_string_val(CCString s) {
+    return cc_string_print(&s);
+}
+static inline CCResult_size_t_CCError cc__println_string_val(CCString s) {
+    return cc_string_println(&s);
+}
+static inline CCResult_size_t_CCError cc__eprint_string_val(CCString s) {
+    return cc_string_eprint(&s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_string_val(CCString s) {
+    return cc_string_eprintln(&s);
+}
+static inline CCResult_size_t_CCError cc__print_string_ptr(const CCString *s) {
+    return cc_string_print((CCString *)s);
+}
+static inline CCResult_size_t_CCError cc__println_string_ptr(const CCString *s) {
+    return cc_string_println((CCString *)s);
+}
+static inline CCResult_size_t_CCError cc__eprint_string_ptr(const CCString *s) {
+    return cc_string_eprint((CCString *)s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_string_ptr(const CCString *s) {
+    return cc_string_eprintln((CCString *)s);
+}
+
+#define cc_print(x) _Generic((x), \
+    CCSlice: cc__print_slice_val, \
+    char *: cc__print_cstr, \
+    const char *: cc__print_cstr, \
+    CCString: cc__print_string_val, \
+    CCString *: cc__print_string_ptr, \
+    const CCString *: cc__print_string_ptr \
+)(x)
+#define cc_println(x) _Generic((x), \
+    CCSlice: cc__println_slice_val, \
+    char *: cc__println_cstr, \
+    const char *: cc__println_cstr, \
+    CCString: cc__println_string_val, \
+    CCString *: cc__println_string_ptr, \
+    const CCString *: cc__println_string_ptr \
+)(x)
+#define cc_eprint(x) _Generic((x), \
+    CCSlice: cc__eprint_slice_val, \
+    char *: cc__eprint_cstr, \
+    const char *: cc__eprint_cstr, \
+    CCString: cc__eprint_string_val, \
+    CCString *: cc__eprint_string_ptr, \
+    const CCString *: cc__eprint_string_ptr \
+)(x)
+#define cc_eprintln(x) _Generic((x), \
+    CCSlice: cc__eprintln_slice_val, \
+    char *: cc__eprintln_cstr, \
+    const char *: cc__eprintln_cstr, \
+    CCString: cc__eprintln_string_val, \
+    CCString *: cc__eprintln_string_ptr, \
+    const CCString *: cc__eprintln_string_ptr \
+)(x)
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {

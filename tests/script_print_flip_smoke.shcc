@@ -1,0 +1,22 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Flipped print DX: slice/string.println(), free cc_println/cc_eprintln sugar.
+ * (Bare println() macros are intentionally not provided — they would steal UFCS.)
+ */
+
+CCArena a = @create(kilobytes(4)) @destroy;
+
+CCSlice hi = @slice("hello");
+hi.println() !>;
+
+CCString world = @string(`world`, &a);
+world.println() !>;
+
+cc_println("plain") !>;
+CCString tpl = @string(`tpl=${42}`, &a);
+tpl.println() !>;
+
+cc_eprintln("err-line") !>;
+hi.fprintln(STDERR_FILENO) !>;
+
+return 0;

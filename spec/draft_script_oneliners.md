@@ -92,9 +92,26 @@ loop body, so `continue` skips the print and `break` ends the loop.
 unit (§3.1), including type-matched `@errhandler` dispatch. No mode relaxes
 the unhandled-result diagnostic. The injected default `@errhandler(CCError)`
 (in synthetic `main` and in each `@task` body) makes bare `!>` a complete
-failure policy for `CCError` / untyped unwraps: message to stderr, exit 1.
-A script may register additional handlers for other error types in the same
-scope; they coexist with the default by type match.
+failure policy for `CCError` / untyped unwraps: message to stderr via
+`cc_eprintln(e.message)` (Result discarded), exit 1. A script may register
+additional handlers for other error types in the same scope; they coexist
+with the default by type match.
+
+### 1.4 Flipped console print
+
+Script prelude provides receiver print on `CCSlice` / `CCString` (no `io`):
+
+```c
+path.println() !>;
+line.eprintln() !>;
+path.fprint(STDERR_FILENO) !>;
+```
+
+and free sugar `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` for
+cstr / slice / `CCString` values (temps: `cc_println(@string(\`…\`, &a))`).
+Short names `println` / `eprintln` are not macros — a function-like
+`#define println(x)` would steal UFCS `x.println()`. Returns are
+`CCResult_size_t_CCError` (same as `CCStdio.println`).
 
 ## 2. Toolbox
 
