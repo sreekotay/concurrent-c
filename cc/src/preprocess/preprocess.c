@@ -3729,11 +3729,14 @@ static void cc__collect_generic_ufcs_types(const char* src,
                                 const char* semi = src + semi_off;
                                 char field_name[128];
                                 char field_type[256];
-                                cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
+                                int field_is_as = 0;
+                                cc_parse_decl_name_and_type_ex(stmt, semi, field_name, sizeof(field_name),
+                                                               field_type, sizeof(field_type), &field_is_as);
                                 if (field_name[0] && field_type[0]) {
                                     cc__record_ufcs_field(fields, field_count, field_cap, struct_name, field_name, field_type);
                                     if (reg) {
-                                        cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                        (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
+                                                                            field_type, field_is_as);
                                     }
                                 }
                                 stmt = semi + 1;
@@ -4259,6 +4262,14 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
              * so binders fell through to the ambient `CCError` _Generic arm. */
             int is_cc_std = (recv_type_base[0] == 'C' && recv_type_base[1] == 'C' &&
                              recv_type_base[2] >= 'A' && recv_type_base[2] <= 'Z');
+            /* Types with named `@as` embeds: leave member calls for the AST
+             * UFCS pass (as-retry / flat `.destroy()`). Inventing a CC*
+             * snake_case twin here invents missing callees like
+             * `cc_temp_file_write` and breaks the host parse. */
+            if (reg && cc_type_registry_has_as_field(reg, recv_type_base)) {
+                i++;
+                continue;
+            }
             if (!cc__lookup_ufcs_field_type(fields, field_count, recv_type_base, method_name) &&
                 cc_ufcs_compose_default_callee(wildcard_callee, sizeof(wildcard_callee),
                                                recv_type_base, method_name) &&
@@ -8714,6 +8725,50 @@ static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len)
     return 0;
 }
 
+void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg) {
+    size_t h;
+    if (!reg) return;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        cc_type_registry_ingest_struct_fields(reg, fsrc, fn);
+        free(fsrc);
+    }
+}
+
+int cc_included_cch_contains_fn(const char* name) {
+    size_t h;
+    size_t nlen;
+    if (!name || !name[0]) return 0;
+    nlen = strlen(name);
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        size_t i;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        for (i = 0; i + nlen < fn; i++) {
+            size_t q;
+            if (fsrc[i] != name[0]) continue;
+            if (memcmp(fsrc + i, name, nlen) != 0) continue;
+            if (i > 0 && cc_is_ident_char(fsrc[i - 1])) continue;
+            if (i + nlen < fn && cc_is_ident_char(fsrc[i + nlen])) continue;
+            q = i + nlen;
+            while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+            if (q < fn && fsrc[q] == '(') {
+                free(fsrc);
+                return 1;
+            }
+        }
+        free(fsrc);
+    }
+    return 0;
+}
+
 static void cc__register_included_cch_tree(const char* source_path) {
     char abs_src[PATH_MAX];
     char source_dir[PATH_MAX];
@@ -12943,6 +12998,13 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     /* Shared phase-3 bucket: parser/host-C survival and lowering after
        canonical CC has been established and phase 2 comptime effects are
        conceptually available. */
+    /* Pull `@as` field metadata from included .cch headers before text UFCS
+     * and unwrap-destroy — those headers remain `#include` in the host
+     * buffer and are otherwise invisible to TU-local field scans. */
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) cc_ingest_included_cch_struct_fields(reg);
+    }
     /* UFCS must lower `recv.method(...)` before `!>` / `?>` expand the
      * call into `__typeof__(call)` / `__cc_uw_*` form.  Expanding first
      * left UFCS callees like `ln.accept()` inside the unwrap temp, so
@@ -12951,6 +13013,18 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
      * once before unwrap (LHS of `!>`) and once after (method calls that
      * live only in handler bodies, e.g. `server->is_cancelled()`). */
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
+    {
+        /* TU typedef structs (with `@as`) are not covered by the CCFile/Arena
+         * var seed above; ingest them before decl-time @as graph checks. */
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) {
+            cc_type_registry_ingest_struct_fields(reg, chain->src, chain->len);
+            if (cc_type_registry_validate_as_graphs(reg, input_path, chain->src,
+                                                    chain->len) != 0) {
+                return -1;
+            }
+        }
+    }
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
         return -1;
     }

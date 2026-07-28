@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 typedef struct CCSymbolTable CCSymbolTable;
+typedef struct CCTypeRegistry CCTypeRegistry;
 
 /* Compile-time struct-field reflection — the single field parser shared by
  * `@comptime for (f in type_of(T).fields)` and the `cc_reflect_field_*` host
@@ -135,6 +136,14 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
 void cc_reset_included_cch_sources(void);
+
+/* Ingest `typedef struct …` fields (including `Type name @as`) from every
+ * .cch registered for this TU into `reg`.  Headers stay as `#include` in the
+ * host buffer, so destroy/UFCS must pull @as metadata from this side channel. */
+void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg);
+
+/* Nonzero if any registered included .cch contains callable `name(`. */
+int cc_included_cch_contains_fn(const char* name);
 
 /* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU

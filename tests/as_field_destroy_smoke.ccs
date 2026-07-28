@@ -1,0 +1,49 @@
+/* @as destroy chain: bodyless @destroy and .destroy() both run
+ * outer delta then CCFile close on the named embed. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/temp.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "err: %s\n", e.message ? e.message : "?");
+        return 1;
+    }
+
+    CCArena a = @create(kilobytes(64)) @destroy;
+    char path_copy[128];
+
+    {
+        CCTempFile tmp = cc_temp_file(&a) !> @destroy;
+        assert(tmp.file.handle != NULL);
+        assert(tmp.path.ptr && tmp.path.len > 0);
+        assert(tmp.path.len + 1 < sizeof(path_copy));
+        memcpy(path_copy, tmp.path.ptr, tmp.path.len + 1);
+
+        CCSlice msg = cc_slice_from_cstr("via-as\n");
+        CCRes(size_t, CCIoError) wr = tmp.write(msg);
+        assert(cc_is_ok(wr));
+        assert(cc_value(wr) == msg.len);
+        /* scope exit: unlink + cc_file_close(&tmp.file) */
+    }
+    assert(access(path_copy, F_OK) != 0);
+
+    {
+        CCTempFile tmp = cc_temp_file(&a) !>;
+        assert(tmp.file.handle != NULL);
+        assert(tmp.path.len + 1 < sizeof(path_copy));
+        memcpy(path_copy, tmp.path.ptr, tmp.path.len + 1);
+        tmp.destroy();
+        assert(tmp.file.handle == NULL);
+        assert(tmp.owns == 0);
+        assert(access(path_copy, F_OK) != 0);
+        /* Explicit full-chain C API still works after already torn down. */
+        cc_temp_file_destroy(&tmp);
+    }
+
+    printf("ok\n");
+    return 0;
+}

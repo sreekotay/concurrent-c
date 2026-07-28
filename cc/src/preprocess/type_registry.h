@@ -41,9 +41,60 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
                                const char* struct_name,
                                const char* field_name,
                                const char* field_type);
+/* Like add_field; when is_as!=0 marks the field as `Type name @as`.
+ * Rejects a second @as of the same field_type on the same struct (-2). */
+int cc_type_registry_add_field_ex(CCTypeRegistry* reg,
+                                  const char* struct_name,
+                                  const char* field_name,
+                                  const char* field_type,
+                                  int is_as);
 const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,
                                           const char* struct_name,
                                           const char* field_name);
+/* Count / index @as fields of struct_name in declaration order. */
+size_t cc_type_registry_as_field_count(CCTypeRegistry* reg, const char* struct_name);
+int cc_type_registry_as_field_at(CCTypeRegistry* reg,
+                                 const char* struct_name,
+                                 size_t idx,
+                                 const char** out_field_name,
+                                 const char** out_field_type);
+/* Nonzero if struct_name has any @as field. */
+int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name);
+/* Unique `@as` field of `outer` whose field type matches `want_type`
+ * (cv/`struct ` stripped; pointer stars on want_type ignored).
+ * Direct embeds only. Returns 0 and sets *out_field_name; -1 none; -2 ambiguous. */
+int cc_type_registry_as_field_for_type(CCTypeRegistry* reg,
+                                       const char* outer_type,
+                                       const char* want_type,
+                                       const char** out_field_name);
+/* Transitive `@as` path from `outer` to `want_type` (dotted, e.g. `mid.file`).
+ * Returns 0 unique; -1 none; -2 ambiguous; -3 cycle in the @as graph. */
+int cc_type_registry_as_path_for_type(CCTypeRegistry* reg,
+                                      const char* outer_type,
+                                      const char* want_type,
+                                      char* path_out,
+                                      size_t path_cap);
+/* Nonzero if `outer` has any @as field transitively (cycle-safe). */
+int cc_type_registry_has_as_field_transitive(CCTypeRegistry* reg,
+                                             const char* outer_type);
+/* Decl-time check: from each type with `@as` fields, every reachable embed
+ * type must appear via exactly one path; cycles are ill-formed. Prints
+ * `file:line:col: error: type: …` diagnostics (line best-effort from src).
+ * Returns 0 if clean, -1 if any diagnostic was emitted. */
+int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
+                                        const char* file,
+                                        const char* src,
+                                        size_t n);
+/* Nonzero when `field_name` is the first registered field of `struct_name`
+ * (declaration-order proxy for offset-zero). */
+int cc_type_registry_field_is_first(CCTypeRegistry* reg,
+                                    const char* struct_name,
+                                    const char* field_name);
+/* Scan `typedef struct { ... } Name;` bodies in src and register fields,
+ * including `Type name @as` / comment-marker form. Safe to call repeatedly. */
+void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
+                                           const char* src,
+                                           size_t n);
 /* If `field_name` appears on exactly one registered struct (or all hits
  * share one field type), return that field type; otherwise NULL. */
 const char* cc_type_registry_lookup_unique_field_type(CCTypeRegistry* reg,

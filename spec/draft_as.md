@@ -1,7 +1,10 @@
 # `@as` fields
 
-Status: draft — not implemented (except: `CCFile` registers `cc_file_close`
-as its destroy hook).
+Status: draft — implemented for UFCS-miss retry (including transitive `@as`
+walk), destroy chaining, and arg-position autocast (see
+`tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
+`tests/as_arg_coerce_smoke.ccs`, `tests/as_ufcs_miss_fail.ccs`,
+`tests/as_transitive_smoke.ccs`, `tests/as_cycle_fail.ccs`).
 
 ## 1. Surface
 
@@ -20,8 +23,9 @@ typedef struct CCTempFile {
   C member is exactly the source name — no synthetic names.
 - Layout is ordinary field layout: `sizeof(Type)` at the declaration site
   with `Type`'s alignment. No field flattening.
-- At most one `@as` field of any given type per struct; a second is
-  ill-formed. Distinct types may each have one `@as` field.
+- At most one `@as` path to any given type from a struct (direct or
+  transitive); a second path is ill-formed at the struct declaration.
+  Distinct types may each have one `@as` field.
 - `@as` grants no access the field name does not already have; it only
   makes the compiler take that path implicitly. Explicit `x.name` and
   `&x.name` remain ordinary member access everywhere.
@@ -41,18 +45,23 @@ tmp.write(buf)      /* lowers to */  cc_file_write(&tmp.file, buf)
 
 - Exactly one `@as` field resolving the method: that lowering is taken.
 - None: the existing unresolved-method error.
-- More than one (distinct `@as` types both provide the method): ill-formed,
+- More than one (distinct `@as` paths both provide the method): ill-formed,
   ambiguous.
 
-Retry is direct only: `@as` fields of `@as` types are not walked.
+Retry walks `@as` fields transitively: after probing `Outer`'s direct embeds,
+each embed type's `@as` fields are probed the same way. A cycle in the `@as`
+graph is ill-formed at the struct declaration. Method-name clashes across
+distinct embed types (same method, different `@as` targets) are ill-formed
+at the call.
 
 Argument-position conversion applies the same rule to type mismatches: an
 `Outer*` (or `Outer` lvalue's address) passed where `T*` is expected, when
-`Outer` has `T name @as`, lowers to `&x.name`. The lowering is member
-selection — emitted C contains no cast; the host compiler type-checks the
-selected member. An explicit C cast keeps C's meaning (no adjustment); a
-cast from `Outer*` to a `T*` whose `@as` field is not at offset zero is
-diagnosed with the member spelling to use instead.
+`Outer` has a unique `@as` path to `T`, lowers to `&x.path` (e.g.
+`&x.mid.file`). The lowering is member selection — emitted C contains no
+cast; the host compiler type-checks the selected member. An explicit C cast
+keeps C's meaning (no adjustment); a cast from `Outer*` to a `T*` whose
+`@as` path is not at offset zero is diagnosed with the member spelling to
+use instead.
 
 By-value conversion of `Outer` to `T` is not performed.
 
@@ -65,7 +74,7 @@ For `Outer x … @destroy;`, cleanup lowers to a flat call list:
 3. Outer registered destroy (if any)
 4. Each `@as` field, last declared to first: that type's registered
    pre-destroy, then destroy, on `&x.name` (skipped when the type has no
-   hooks)
+   hooks), then that type's own `@as` chain recursively (same order)
 
 ```c
 /* CCTempFile tmp = cc_temp_file(&a) !> @destroy;  lowers to */
@@ -75,14 +84,11 @@ __cc_cleanup_1:
 ```
 
 Bodyless `@destroy` on an outer type with no registered hook is well-formed
-when at least one `@as` field has hooks: the chain is the non-empty
-cleanup.
+when at least one `@as` field (transitively) has hooks: the chain is the
+non-empty cleanup.
 
-Step 4 calls the field type's registered callee only; it does not expand
-that type's own `@as` fields. Delta-only hooks and direct-only chaining are
-jointly sound only at depth 1: a type whose `@as` field itself has `@as`
-fields leaks the inner layer when every author writes delta-only hooks.
-Stacking `@as` types awaits a transitive flatten.
+Step 4 flattens transitively so delta-only hooks remain sound when `@as`
+types nest. A cycle in the `@as` graph is ill-formed.
 
 `recv.destroy()` on a type with `@as` fields expands inline to the same
 call list, including pre-destroy hooks — literal equivalence with bodyless
@@ -122,8 +128,6 @@ registers `cc_file_close` as its destroy hook. The factory remains
 ## 5. Out of scope
 
 - Field promotion (`tmp.handle` without naming `file`)
-- Transitive `@as` walk, for UFCS retry and for destroy (the depth-1
-  boundary above is the documented limit)
 - Virtual dispatch
 - Reverse conversion (`T*` → `Outer*`); a later explicit `container_of`
   form may use the same layout facts

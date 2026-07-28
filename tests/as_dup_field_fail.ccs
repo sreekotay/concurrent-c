@@ -1,0 +1,16 @@
+/* Two direct @as fields of the same type — ill-formed at the struct. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile a @as;
+    CCFile b @as;
+    int tag;
+} AsDupFile;
+
+int main(void) {
+    AsDupFile w = {0};
+    (void)w;
+    printf("unreachable\n");
+    return 0;
+}

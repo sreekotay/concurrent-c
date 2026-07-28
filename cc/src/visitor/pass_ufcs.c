@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "preprocess/preprocess.h"
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
@@ -792,7 +793,9 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                                                    nodes[i].recv_type_is_ptr, nodes[i].recv_type);
         cc_ufcs_set_source_context(NULL, 0);
 
-        if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
+        if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED ||
+            rewrite_rc == CC_UFCS_REWRITE_AS_AMBIGUOUS ||
+            rewrite_rc == CC_UFCS_REWRITE_AS_CYCLE) {
             char rel[1024];
             char file_buf[1024];
             char recv_expr[256];
@@ -817,7 +820,42 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             const char* file = cc_path_rel_to_repo(raw_file, rel, sizeof(rel));
             int col = nodes[i].col_start > 0 ? nodes[i].col_start : 1;
             cc__ufcs_extract_receiver_expr(expr, recv_expr, sizeof(recv_expr));
-            if (nodes[i].recv_type && nodes[i].recv_type[0]) {
+            if (rewrite_rc == CC_UFCS_REWRITE_AS_AMBIGUOUS) {
+                CCTypeRegistry* reg = cc_type_registry_get_global();
+                char base[256];
+                size_t bl = 0;
+                const char* rt = nodes[i].recv_type ? nodes[i].recv_type : "";
+                while (rt[bl] && rt[bl] != '*' && rt[bl] != ' ' && bl + 1 < sizeof(base)) {
+                    base[bl] = rt[bl];
+                    bl++;
+                }
+                base[bl] = '\0';
+                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
+                                  "ambiguous UFCS method '%s': multiple @as fields on '%s' provide it",
+                                  nodes[i].method ? nodes[i].method : "<unknown>",
+                                  base[0] ? base : "<unknown>");
+                if (reg && base[0]) {
+                    size_t nas = cc_type_registry_as_field_count(reg, base);
+                    size_t ai;
+                    for (ai = 0; ai < nas; ai++) {
+                        const char* fn = NULL;
+                        const char* ft = NULL;
+                        if (cc_type_registry_as_field_at(reg, base, ai, &fn, &ft) != 0)
+                            continue;
+                        cc_pass_note(file, user_line, col,
+                                     "  candidate @as field: %s %s",
+                                     ft ? ft : "?", fn ? fn : "?");
+                    }
+                }
+            } else if (rewrite_rc == CC_UFCS_REWRITE_AS_CYCLE) {
+                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
+                                  "cyclic @as embed graph while resolving UFCS method '%s' on '%s'",
+                                  nodes[i].method ? nodes[i].method : "<unknown>",
+                                  nodes[i].recv_type && nodes[i].recv_type[0]
+                                      ? nodes[i].recv_type : "<unknown>");
+                cc_pass_note(file, user_line, col,
+                             "each @as edge must form a DAG; break the cycle or drop one embed");
+            } else if (nodes[i].recv_type && nodes[i].recv_type[0]) {
                 cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
                                   "no UFCS method '%s' for receiver type '%s'",
                                   nodes[i].method ? nodes[i].method : "<unknown>",
@@ -831,8 +869,50 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                 cc_pass_note(file, user_line, col, "receiver expression: %s", recv_expr);
             }
             cc_pass_note(file, user_line, col, "offending call: %s", expr);
-            cc_pass_note(file, user_line, col,
-                         "hint: UFCS dispatch is strict; register an exact or wildcard owner, or call the lowered function explicitly");
+            /* Ambiguity / cycle already name the @as graph problem; skip the
+             * "retry also failed" field dump used for plain unresolved. */
+            if (rewrite_rc != CC_UFCS_REWRITE_AS_AMBIGUOUS &&
+                rewrite_rc != CC_UFCS_REWRITE_AS_CYCLE &&
+                nodes[i].recv_type && nodes[i].recv_type[0]) {
+                CCTypeRegistry* reg = cc_type_registry_get_global();
+                char base[256];
+                size_t bl = 0;
+                const char* rt = nodes[i].recv_type;
+                while (rt[bl] && rt[bl] != '*' && rt[bl] != ' ' && bl + 1 < sizeof(base)) {
+                    base[bl] = rt[bl];
+                    bl++;
+                }
+                base[bl] = '\0';
+                if (reg && base[0] && cc_type_registry_has_as_field(reg, base)) {
+                    size_t nas = cc_type_registry_as_field_count(reg, base);
+                    size_t ai;
+                    cc_pass_note(file, user_line, col,
+                                 "@as retry also failed on '%s' (%zu embed%s); "
+                                 "no matching method on the outer type or its @as fields",
+                                 base, nas, nas == 1 ? "" : "s");
+                    for (ai = 0; ai < nas; ai++) {
+                        const char* fn = NULL;
+                        const char* ft = NULL;
+                        if (cc_type_registry_as_field_at(reg, base, ai, &fn, &ft) != 0)
+                            continue;
+                        cc_pass_note(file, user_line, col,
+                                     "  @as field: %s %s  (try %s.%s.%s(...))",
+                                     ft ? ft : "?", fn ? fn : "?",
+                                     recv_expr[0] ? recv_expr : "<recv>",
+                                     fn ? fn : "?",
+                                     nodes[i].method ? nodes[i].method : "?");
+                    }
+                } else {
+                    cc_pass_note(file, user_line, col,
+                                 "hint: UFCS dispatch is strict; register an exact or wildcard "
+                                 "owner, or call the lowered function explicitly");
+                }
+            } else if (rewrite_rc != CC_UFCS_REWRITE_AS_AMBIGUOUS &&
+                       rewrite_rc != CC_UFCS_REWRITE_AS_CYCLE) {
+                cc_pass_note(file, user_line, col,
+                             "hint: UFCS dispatch is strict; register an exact or wildcard owner, "
+                             "or call the lowered function explicitly");
+            }
             err = -1;
         } else if (rewrite_rc != CC_UFCS_REWRITE_OK) {
             if (getenv("CC_DEBUG_UFCS_NODES"))

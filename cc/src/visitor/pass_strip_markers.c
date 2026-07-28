@@ -11,7 +11,7 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
     *out_len = 0;
 
     /* Remove only these markers: @async, @noblock/@nonblocking,
-       @blocking, @latency_sensitive.
+       @blocking, @latency_sensitive, @as (named is-a embed marker).
        This is a conservative text pass so the generated C compiles; real semantics
        will be implemented by async lowering later.
 
@@ -54,6 +54,7 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
             else if (i + 12 <= in_len && memcmp(in + i + 1, "nonblocking", 11) == 0) { kw = "nonblocking"; kw_len = 11; }
             else if (i + 9 <= in_len && memcmp(in + i + 1, "blocking", 8) == 0) { kw = "blocking"; kw_len = 8; }
             else if (i + 18 <= in_len && memcmp(in + i + 1, "latency_sensitive", 17) == 0) { kw = "latency_sensitive"; kw_len = 17; }
+            else if (i + 3 <= in_len && memcmp(in + i + 1, "as", 2) == 0) { kw = "as"; kw_len = 2; }
             if (kw) {
                 size_t j = i + 1 + kw_len;
                 /* Ensure keyword boundary */

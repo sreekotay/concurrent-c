@@ -31,6 +31,7 @@ static double cc__now_ms(void) {
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
 #include "visitor/pass_slice_literal_coerce.h"
+#include "visitor/pass_as_arg_coerce.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
@@ -1038,7 +1039,8 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
  *     call form in the AST.
  *
  *   - Stage 1.5 (SLICE_LIT_COERCE): wraps string literals at CCSlice /
- *     char[:0] parameters.  Own stage so arg-span edits do not overlap
+ *     char[:0] parameters, and `@as` arg autocast (`Outer*`→`T*` via
+ *     `&x.name`).  Own stage so arg-span edits do not overlap
  *     autoblock's whole-call replacements in the same EditBuffer.
  *
  *   - Stage 2 (POST_UFCS): batches closure_calls + autoblock +
@@ -1077,6 +1079,7 @@ static int cc__apply_batched_phase3_passes(const CCASTRoot* root,
         if (cc__collect_ufcs_edits(root, ctx, &eb) < 0) rc = -1;
     } else if (stage == CC_PHASE3_STAGE_SLICE_LIT_COERCE) {
         if (cc__collect_slice_literal_coerce_edits(root, ctx, &eb) < 0) rc = -1;
+        if (rc == 0 && cc__collect_as_arg_coerce_edits(root, ctx, &eb) < 0) rc = -1;
     } else {
         if (cc__collect_closure_calls_edits(root, ctx, &eb) < 0 ||
             cc__collect_autoblocking_edits(root, ctx, &eb) < 0 ||
@@ -3635,8 +3638,9 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                                 const char* semi = src + semi_off;
                                 char field_name[128];
                                 char field_type[256];
-                                cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name),
-                                                                     field_type, sizeof(field_type));
+                                int field_is_as = 0;
+                                cc_parse_decl_name_and_type_ex(stmt, semi, field_name, sizeof(field_name),
+                                                               field_type, sizeof(field_type), &field_is_as);
                                 if (!field_name[0]) {
                                     (void)cc__parse_decl_name_and_type_fallback_codegen(stmt, semi,
                                                                                         field_name, sizeof(field_name),
@@ -3647,9 +3651,11 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                                     if (cc_type_registry_canonicalize_type_name(reg, field_type,
                                                                                 canonical_field_type,
                                                                                 sizeof(canonical_field_type))) {
-                                        cc_type_registry_add_field(reg, struct_name, field_name, canonical_field_type);
+                                        (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
+                                                                            canonical_field_type, field_is_as);
                                     } else {
-                                        cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                        (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
+                                                                            field_type, field_is_as);
                                     }
                                 }
                                 stmt = semi + 1;

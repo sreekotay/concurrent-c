@@ -407,6 +407,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf0 = NULL;
     char* buf_fac = NULL;
     char* buf_inc = NULL;
+    char* buf_as = NULL;
     char* buf_types = NULL;
     char* buf_result_ctors = NULL;
     char* buf2 = NULL;
@@ -434,6 +435,14 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     if (buf_inc) {
         cur = buf_inc;
         cur_len = strlen(buf_inc);
+    }
+
+    /* Pass 0b2: `@as` field marker → block comment so lowered .h is valid C
+     * while destroy/UFCS ingest can still see the attribute. */
+    buf_as = cc_rewrite_as_attr_to_comment(cur, cur_len);
+    if (buf_as) {
+        cur = buf_as;
+        cur_len = strlen(buf_as);
     }
 
     /* Pass 0c: Share header-safe type-syntax lowering with preprocess.c so
@@ -512,6 +521,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf0);
     free(buf_fac);
     free(buf_inc);
+    free(buf_as);
     free(buf_types);
     free(buf_result_ctors);
     free(buf2);

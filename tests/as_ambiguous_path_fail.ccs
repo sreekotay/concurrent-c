@@ -1,0 +1,25 @@
+/* Two @as paths to CCFile from one outer type — ill-formed at the struct. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile file @as;
+    int tag;
+} AsPathMidA;
+
+typedef struct {
+    CCFile file @as;
+    int tag;
+} AsPathMidB;
+
+typedef struct {
+    AsPathMidA a @as;
+    AsPathMidB b @as;
+} AsPathDupOuter;
+
+int main(void) {
+    AsPathDupOuter o = {0};
+    (void)o;
+    printf("unreachable\n");
+    return 0;
+}

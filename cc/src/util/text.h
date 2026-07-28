@@ -985,18 +985,122 @@ static inline int cc_is_non_decl_stmt_type(const char* type_name) {
  * type macros, and rejects non-declaration statements (assignments to fields,
  * function calls, etc.).
  */
-static inline void cc_parse_decl_name_and_type(const char* stmt,
-                                               const char* stmt_end,
-                                               char* out_name,
-                                               size_t out_name_sz,
-                                               char* out_type,
-                                               size_t out_type_sz) {
+/* Rewrite field attribute `@as` to a block comment marker (`/@as/` with
+ * stars) so TCC accepts the TU while field collectors can still see it.
+ * Returns malloc'd buffer or NULL when unchanged / OOM. */
+static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
+    size_t i = 0;
+    size_t out_cap;
+    size_t w = 0;
+    char* out;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    out_cap = n + 64;
+    out = (char*)malloc(out_cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (w + 1 > out_cap) {
+                size_t nc = out_cap * 2 + 64;
+                char* nb = (char*)realloc(out, nc + 1);
+                if (!nb) { free(out); return NULL; }
+                out = nb; out_cap = nc;
+            }
+            out[w++] = q;
+            while (i < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i];
+                if (src[i] == '\\' && i + 1 < n) { out[w++] = src[i + 1]; i += 2; continue; }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            if (i + 1 < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (i + 3 <= n && src[i] == '@' && src[i + 1] == 'a' && src[i + 2] == 's' &&
+            (i + 3 == n || !cc_is_ident_char(src[i + 3]))) {
+            static const char rep[] = "/*@as*/";
+            size_t rlen = sizeof(rep) - 1;
+            if (w + rlen > out_cap) {
+                size_t nc = out_cap * 2 + 64;
+                char* nb = (char*)realloc(out, nc + 1);
+                if (!nb) { free(out); return NULL; }
+                out = nb; out_cap = nc;
+            }
+            memcpy(out + w, rep, rlen);
+            w += rlen;
+            i += 3;
+            changed = 1;
+            continue;
+        }
+        if (w + 1 > out_cap) {
+            size_t nc = out_cap * 2 + 64;
+            char* nb = (char*)realloc(out, nc + 1);
+            if (!nb) { free(out); return NULL; }
+            out = nb; out_cap = nc;
+        }
+        out[w++] = src[i++];
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
+/* Parse `Type name [@as|/@as/] [= init]` in [stmt, stmt_end).
+ * When out_is_as is non-NULL, set to 1 if a trailing `@as` follows the name. */
+static inline void cc_parse_decl_name_and_type_ex(const char* stmt,
+                                                  const char* stmt_end,
+                                                  char* out_name,
+                                                  size_t out_name_sz,
+                                                  char* out_type,
+                                                  size_t out_type_sz,
+                                                  int* out_is_as) {
     const char* p = stmt;
     const char* semi = stmt_end;
     const char* name_s = NULL;
     size_t name_n = 0;
     const char* multi_decl_type_end = NULL;
     const char* cur;
+    if (out_is_as) *out_is_as = 0;
     if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
     out_name[0] = '\0';
     out_type[0] = '\0';
@@ -1050,6 +1154,8 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
                 continue;
             }
             if (*cur == '=' || *cur == ';') break;
+            /* Trailing field attrs (`@as`) — stop; name is already captured. */
+            if (*cur == '@' && dpar == 0 && dbr == 0 && dbrc == 0) break;
             if (*cur == '(') { dpar++; cur++; continue; }
             if (*cur == ')') { if (dpar > 0) dpar--; cur++; continue; }
             if (*cur == '[') { dbr++; cur++; continue; }
@@ -1101,6 +1207,22 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
         }
         while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
                after[0] == '\n' || after[0] == '\r')) after++;
+        /* Named `@as` embed: source form `Type name @as;` is rewritten to
+         * `Type name /@as/` (block comment) before TCC parse. Accept either. */
+        if (after + 3 <= semi && after[0] == '@' && after[1] == 'a' && after[2] == 's' &&
+            (after + 3 == semi || !cc_is_ident_char(after[3]))) {
+            if (out_is_as) *out_is_as = 1;
+            after += 3;
+            while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
+                   after[0] == '\n' || after[0] == '\r')) after++;
+        } else if (after + 7 <= semi && after[0] == '/' && after[1] == '*' &&
+                   after[2] == '@' && after[3] == 'a' && after[4] == 's' &&
+                   after[5] == '*' && after[6] == '/') {
+            if (out_is_as) *out_is_as = 1;
+            after += 7;
+            while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
+                   after[0] == '\n' || after[0] == '\r')) after++;
+        }
         if (after < semi && *after != '=' && *after != ';' && *after != '[') {
             return;
         }
@@ -1128,6 +1250,16 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
         memcpy(out_name, name_s, name_n);
         out_name[name_n] = '\0';
     }
+}
+
+static inline void cc_parse_decl_name_and_type(const char* stmt,
+                                               const char* stmt_end,
+                                               char* out_name,
+                                               size_t out_name_sz,
+                                               char* out_type,
+                                               size_t out_type_sz) {
+    cc_parse_decl_name_and_type_ex(stmt, stmt_end, out_name, out_name_sz,
+                                   out_type, out_type_sz, NULL);
 }
 
 #endif /* CC_UTIL_TEXT_H */

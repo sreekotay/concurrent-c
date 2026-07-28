@@ -11,6 +11,7 @@
 #include <ccc/std/string.cch>
 
 #include "comptime/symbols.h"
+#include "preprocess/preprocess.h"
 #include "preprocess/type_graph.h"
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
@@ -38,6 +39,32 @@ static _Thread_local CCSymbolTable* g_ufcs_symbols = NULL;
    function-pointer / field access call.  Leave the source span untouched
    and let TCC type-check the plain C form. */
 #define CC_UFCS_EMIT_FIELD_WINS (-3)
+/* Two or more @as fields both resolve the method — hard error at pass_ufcs. */
+#define CC_UFCS_EMIT_AS_AMBIGUOUS (-4)
+/* @as embed graph contains a cycle — hard error at pass_ufcs. */
+#define CC_UFCS_EMIT_AS_CYCLE (-5)
+
+/* While expanding `.destroy()` on an @as type, suppress re-entry. */
+static _Thread_local int g_ufcs_as_destroy_depth = 0;
+/* Transitive @as UFCS retry: stack of type keys currently being probed. */
+static _Thread_local const char* g_ufcs_as_stack[32];
+static _Thread_local size_t g_ufcs_as_stack_n = 0;
+
+static int cc__ufcs_as_push(const char* type_key) {
+    size_t i;
+    if (!type_key || !type_key[0]) return -1;
+    for (i = 0; i < g_ufcs_as_stack_n; i++) {
+        if (g_ufcs_as_stack[i] && strcmp(g_ufcs_as_stack[i], type_key) == 0)
+            return -1;
+    }
+    if (g_ufcs_as_stack_n >= 32) return -1;
+    g_ufcs_as_stack[g_ufcs_as_stack_n++] = type_key;
+    return 0;
+}
+
+static void cc__ufcs_as_pop(void) {
+    if (g_ufcs_as_stack_n > 0) g_ufcs_as_stack_n--;
+}
 
 void cc_ufcs_set_symbols(CCSymbolTable* symbols) {
     g_ufcs_symbols = symbols;
@@ -1020,6 +1047,14 @@ static int cc__ufcs_fn_name_in_source(const char* name) {
     return 0;
 }
 
+/* True when `name(` is visible in the TU text or an included .cch.
+ * Used to reject synthetic snake_case twins invented for missing methods. */
+static int cc__ufcs_fn_name_is_real(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (cc__ufcs_fn_name_in_source(name)) return 1;
+    return cc_included_cch_contains_fn(name);
+}
+
 static int cc__emit_registered_callable(char* out,
                                         size_t cap,
                                         const char* recv,
@@ -1703,6 +1738,80 @@ static int cc__emit_closure_field_call(char* out,
                     fn_name, access, (int)a_len, args, b);
 }
 
+/* Append transitive @as destroy hooks into out[*w]. Returns 0, -1, or -3 cycle. */
+static int cc__ufcs_append_as_destroy_rec(char* out, size_t* w, size_t cap,
+                                          CCTypeRegistry* reg,
+                                          const char* type_key,
+                                          const char* recv, int recv_is_ptr,
+                                          const char* path_suffix,
+                                          const char** visited, size_t visited_n,
+                                          size_t visited_cap) {
+    size_t nas;
+    size_t k;
+    size_t vi;
+    if (!out || !w || !reg || !type_key || !recv) return -1;
+    for (vi = 0; vi < visited_n; vi++) {
+        if (visited[vi] && strcmp(visited[vi], type_key) == 0) return -3;
+    }
+    if (visited_n >= visited_cap) return -1;
+    visited[visited_n] = type_key;
+    nas = cc_type_registry_as_field_count(reg, type_key);
+    for (k = nas; k > 0; k--) {
+        const char* field_name = NULL;
+        const char* field_type = NULL;
+        const char* pre = NULL;
+        const char* post = NULL;
+        char fkey[256];
+        char next_suffix[256];
+        int n;
+        int sub;
+        if (cc_type_registry_as_field_at(reg, type_key, k - 1, &field_name, &field_type) != 0)
+            continue;
+        if (!field_name || !field_type) continue;
+        {
+            const char* p = field_type;
+            size_t fl = 0;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncmp(p, "struct ", 7) == 0) p += 7;
+            while (p[fl] && p[fl] != '*' && p[fl] != ' ') fl++;
+            if (fl >= sizeof(fkey)) fl = sizeof(fkey) - 1;
+            memcpy(fkey, p, fl);
+            fkey[fl] = '\0';
+        }
+        if (path_suffix && path_suffix[0])
+            snprintf(next_suffix, sizeof(next_suffix), "%s.%s", path_suffix, field_name);
+        else
+            snprintf(next_suffix, sizeof(next_suffix), "%s", field_name);
+        if (g_ufcs_symbols) {
+            (void)cc_symbols_lookup_type_pre_destroy_call(g_ufcs_symbols, fkey, &pre);
+            (void)cc_symbols_lookup_type_destroy_call(g_ufcs_symbols, fkey, &post);
+            if (!pre && !post) {
+                (void)cc_symbols_lookup_type_pre_destroy_call(g_ufcs_symbols, field_type, &pre);
+                (void)cc_symbols_lookup_type_destroy_call(g_ufcs_symbols, field_type, &post);
+            }
+        }
+        if (pre) {
+            n = snprintf(out + *w, cap - *w,
+                         recv_is_ptr ? "%s(&(%s->%s)); " : "%s(&(%s.%s)); ",
+                         pre, recv, next_suffix);
+            if (n < 0 || (size_t)n >= cap - *w) return -1;
+            *w += (size_t)n;
+        }
+        if (post) {
+            n = snprintf(out + *w, cap - *w,
+                         recv_is_ptr ? "%s(&(%s->%s)); " : "%s(&(%s.%s)); ",
+                         post, recv, next_suffix);
+            if (n < 0 || (size_t)n >= cap - *w) return -1;
+            *w += (size_t)n;
+        }
+        sub = cc__ufcs_append_as_destroy_rec(out, w, cap, reg, fkey, recv, recv_is_ptr,
+                                             next_suffix, visited, visited_n + 1,
+                                             visited_cap);
+        if (sub < 0) return sub;
+    }
+    return 0;
+}
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -1863,7 +1972,143 @@ static int emit_desugared_call(char* out,
         return recv_is_ptr ? snprintf(out, cap, "cc_string_cstr(%s, %s)", recv, args_rewritten)
                            : snprintf(out, cap, "cc_string_cstr(&%s, %s)", recv, args_rewritten);
     }
+    /* Types with @as fields: `.destroy()` expands inline to the same flat
+     * call list as bodyless `@destroy` (outer delta, then @as hooks reverse,
+     * transitively). */
+    if (strcmp(method, "destroy") == 0 && !has_args && g_ufcs_as_destroy_depth == 0 &&
+        ctx.recv_type_base[0]) {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg && cc_type_registry_has_as_field(reg, ctx.recv_type_base)) {
+            const char* outer_pre = NULL;
+            const char* outer_post = NULL;
+            const char* visited[32];
+            size_t w = 0;
+            int n;
+            int as_rc;
+            if (g_ufcs_symbols) {
+                (void)cc_symbols_lookup_type_pre_destroy_call(g_ufcs_symbols, ctx.recv_type_base,
+                                                              &outer_pre);
+                (void)cc_symbols_lookup_type_destroy_call(g_ufcs_symbols, ctx.recv_type_base,
+                                                          &outer_post);
+            }
+            n = snprintf(out + w, cap - w, "({ ");
+            if (n < 0 || (size_t)n >= cap - w) return -1;
+            w += (size_t)n;
+            if (outer_pre) {
+                n = snprintf(out + w, cap - w,
+                             recv_is_ptr ? "%s(%s); " : "%s(&%s); ",
+                             outer_pre, recv);
+                if (n < 0 || (size_t)n >= cap - w) return -1;
+                w += (size_t)n;
+            }
+            if (outer_post) {
+                n = snprintf(out + w, cap - w,
+                             recv_is_ptr ? "%s(%s); " : "%s(&%s); ",
+                             outer_post, recv);
+                if (n < 0 || (size_t)n >= cap - w) return -1;
+                w += (size_t)n;
+            }
+            g_ufcs_as_destroy_depth++;
+            as_rc = cc__ufcs_append_as_destroy_rec(out, &w, cap, reg, ctx.recv_type_base,
+                                                   recv, recv_is_ptr, NULL,
+                                                   visited, 0, 32);
+            g_ufcs_as_destroy_depth--;
+            if (as_rc == -3) return CC_UFCS_EMIT_AS_CYCLE;
+            if (as_rc < 0) return -1;
+            n = snprintf(out + w, cap - w, "(void)0; })");
+            if (n < 0 || (size_t)n >= cap - w) return -1;
+            return (int)(w + (size_t)n);
+        }
+    }
+
     dispatch_n = cc__emit_type_driven_dispatch(out, cap, recv, method, recv_is_ptr, args_rewritten, has_args, &ctx);
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        int has_as = (reg && ctx.recv_type_base[0] &&
+                      cc_type_registry_has_as_field(reg, ctx.recv_type_base));
+        int outer_real = 0;
+        if (dispatch_n >= 0) {
+            char callee[256];
+            size_t ci = 0;
+            while ((size_t)dispatch_n > ci && out[ci] && out[ci] != '(' &&
+                   ci + 1 < sizeof(callee)) {
+                callee[ci] = out[ci];
+                ci++;
+            }
+            callee[ci] = '\0';
+            if (ci > 0 && cc__ufcs_fn_name_is_real(callee)) outer_real = 1;
+            if (outer_real || !has_as) return dispatch_n;
+        }
+        if (has_as) {
+            size_t nas;
+            char best[1024];
+            int best_n = CC_UFCS_EMIT_UNRESOLVED;
+            int hits = 0;
+            size_t ai;
+            if (cc__ufcs_as_push(ctx.recv_type_base) != 0)
+                return CC_UFCS_EMIT_AS_CYCLE;
+            nas = cc_type_registry_as_field_count(reg, ctx.recv_type_base);
+            for (ai = 0; ai < nas; ai++) {
+                const char* field_name = NULL;
+                const char* field_type = NULL;
+                char as_recv[512];
+                char tmp[1024];
+                char callee[256];
+                size_t ci = 0;
+                const char* saved_ty;
+                int n;
+                if (cc_type_registry_as_field_at(reg, ctx.recv_type_base, ai,
+                                                 &field_name, &field_type) != 0)
+                    continue;
+                if (!field_name || !field_type) continue;
+                /* Receiver for the embed: address of the named @as field.
+                 * Parenthesize the pointer expr: `&(p)->f` parses as
+                 * `&((p)->f)` in C, and nested `&(&(o.mid)->file)` is ill-formed;
+                 * emit `&((p)->f)` so transitive hops stay valid. */
+                if (recv_is_ptr)
+                    snprintf(as_recv, sizeof(as_recv), "&((%s)->%s)", recv, field_name);
+                else
+                    snprintf(as_recv, sizeof(as_recv), "&(%s.%s)", recv, field_name);
+                saved_ty = g_ufcs_recv_type;
+                g_ufcs_recv_type = field_type;
+                n = emit_desugared_call(tmp, sizeof(tmp), as_recv, method,
+                                        /*recv_is_ptr=*/1, args_rewritten, has_args);
+                g_ufcs_recv_type = saved_ty;
+                if (n == CC_UFCS_EMIT_AS_CYCLE) {
+                    cc__ufcs_as_pop();
+                    return CC_UFCS_EMIT_AS_CYCLE;
+                }
+                if (n == CC_UFCS_EMIT_AS_AMBIGUOUS) {
+                    cc__ufcs_as_pop();
+                    return CC_UFCS_EMIT_AS_AMBIGUOUS;
+                }
+                if (n < 0 || (size_t)n >= sizeof(tmp)) continue;
+                /* Reject invented twins like `cc_file_no_such_method`. */
+                while ((size_t)n > ci && tmp[ci] && tmp[ci] != '(' &&
+                       ci + 1 < sizeof(callee)) {
+                    callee[ci] = tmp[ci];
+                    ci++;
+                }
+                callee[ci] = '\0';
+                if (ci == 0 || !cc__ufcs_fn_name_is_real(callee)) continue;
+                hits++;
+                if (hits == 1) {
+                    memcpy(best, tmp, (size_t)n + 1);
+                    best_n = n;
+                }
+            }
+            cc__ufcs_as_pop();
+            if (hits > 1) return CC_UFCS_EMIT_AS_AMBIGUOUS;
+            if (hits == 1) {
+                if ((size_t)best_n >= cap) return -1;
+                memcpy(out, best, (size_t)best_n + 1);
+                return best_n;
+            }
+            /* Outer was synthetic and @as retry found nothing real — fail loud
+             * in the UFCS pass instead of emitting a missing C symbol. */
+            return CC_UFCS_EMIT_UNRESOLVED;
+        }
+    }
     if (dispatch_n >= 0) return dispatch_n;
     if (dispatch_n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
     return CC_UFCS_EMIT_UNRESOLVED;
@@ -1879,6 +2124,8 @@ static int emit_full_call(char* out,
     char tmp[1024];
     int n = emit_desugared_call(tmp, sizeof(tmp), recv, method, recv_is_ptr, args_rewritten, has_args);
     if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
+    if (n == CC_UFCS_EMIT_AS_AMBIGUOUS) return CC_UFCS_EMIT_AS_AMBIGUOUS;
+    if (n == CC_UFCS_EMIT_AS_CYCLE) return CC_UFCS_EMIT_AS_CYCLE;
     if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_EMIT_FIELD_WINS;
     if (n < 0 || (size_t)n >= sizeof(tmp)) return -1;
     if (n > 0 && tmp[n - 1] == ')') {
@@ -2158,6 +2405,8 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
         free(rewritten_args);
         cc__free_ufcs_segments(segs, seg_count);
         if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_REWRITE_UNRESOLVED;
+        if (n == CC_UFCS_EMIT_AS_AMBIGUOUS) return CC_UFCS_REWRITE_AS_AMBIGUOUS;
+        if (n == CC_UFCS_EMIT_AS_CYCLE) return CC_UFCS_REWRITE_AS_CYCLE;
         if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_REWRITE_NO_MATCH;
         return (n < 0 || (size_t)n >= out_cap) ? CC_UFCS_REWRITE_ERROR : CC_UFCS_REWRITE_OK;
     }
@@ -2192,6 +2441,14 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
         if (cn == CC_UFCS_EMIT_UNRESOLVED) {
             cc__free_ufcs_segments(segs, seg_count);
             return CC_UFCS_REWRITE_UNRESOLVED;
+        }
+        if (cn == CC_UFCS_EMIT_AS_AMBIGUOUS) {
+            cc__free_ufcs_segments(segs, seg_count);
+            return CC_UFCS_REWRITE_AS_AMBIGUOUS;
+        }
+        if (cn == CC_UFCS_EMIT_AS_CYCLE) {
+            cc__free_ufcs_segments(segs, seg_count);
+            return CC_UFCS_REWRITE_AS_CYCLE;
         }
         if (cn == CC_UFCS_EMIT_FIELD_WINS) {
             /* In a chain, a mid-segment field-wins hit would require splicing
@@ -2477,6 +2734,16 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             free(rewritten_args);
             free(inner);
             return CC_UFCS_REWRITE_UNRESOLVED;
+        }
+        if (n == CC_UFCS_EMIT_AS_AMBIGUOUS) {
+            free(rewritten_args);
+            free(inner);
+            return CC_UFCS_REWRITE_AS_AMBIGUOUS;
+        }
+        if (n == CC_UFCS_EMIT_AS_CYCLE) {
+            free(rewritten_args);
+            free(inner);
+            return CC_UFCS_REWRITE_AS_CYCLE;
         }
         if (n == CC_UFCS_EMIT_FIELD_WINS) {
             free(rewritten_args);

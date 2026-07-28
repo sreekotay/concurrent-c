@@ -1,4 +1,5 @@
 #include "build_parse_input.h"
+#include "util/text.h"
 
 #include "../diag/diag.h"
 #include "../preprocess/cc_closure_markers.h"
@@ -158,6 +159,14 @@ int cc_build_parse_input(const char* file_buf,
         : cc_preprocess_canonicalize(buf, got, input_path, 0, 1);
     cc_unwrap_destroy_set_symbols(NULL);
     if (!canonical) { free(buf); goto fail; }
+
+    /* `@as` on struct fields is CC surface syntax; rewrite to a block-comment
+     * marker so TCC accepts the TU. Field collectors recognize the comment. */
+    {
+        size_t clen = strlen(canonical);
+        char* as_rw = cc_rewrite_as_attr_to_comment(canonical, clen);
+        if (as_rw) { free(canonical); canonical = as_rw; }
+    }
 
     /* --emit-c-inspect: on a clean lowering, dump the full merged translation
      * unit (post-comptime, post-generic-instantiation, blanked @comptime) to the

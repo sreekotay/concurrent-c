@@ -29,6 +29,7 @@ typedef struct {
     char* struct_name;
     char* field_name;
     char* field_type;
+    int is_as; /* 1 when declared `Type name @as;` */
 } CCFieldTypeEntry;
 
 /* Type instantiation storage (stores CCTypeInstantiation with owned strings) */
@@ -311,16 +312,21 @@ const char* cc_type_registry_alias_type_at(CCTypeRegistry* reg, size_t idx) {
     return reg->aliases[idx].type_name;
 }
 
-int cc_type_registry_add_field(CCTypeRegistry* reg,
-                               const char* struct_name,
-                               const char* field_name,
-                               const char* field_type) {
+int cc_type_registry_add_field_ex(CCTypeRegistry* reg,
+                                  const char* struct_name,
+                                  const char* field_name,
+                                  const char* field_type,
+                                  int is_as) {
     if (!reg || !struct_name || !field_name || !field_type) return -1;
+    /* Duplicate `@as` of the same embed type is still recorded so
+     * `cc_type_registry_validate_as_graphs` can diagnose both paths; do not
+     * silently drop the second field. */
     for (size_t i = 0; i < reg->field_count; i++) {
         if (strcmp(reg->fields[i].struct_name, struct_name) == 0 &&
             strcmp(reg->fields[i].field_name, field_name) == 0) {
             if (!cc__is_parser_placeholder_type(reg->fields[i].field_type) &&
                 cc__is_parser_placeholder_type(field_type)) {
+                if (is_as) reg->fields[i].is_as = 1;
                 return 0;
             }
             if (!cc__is_parser_placeholder_type(reg->fields[i].field_type) &&
@@ -329,6 +335,7 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
             }
             free(reg->fields[i].field_type);
             reg->fields[i].field_type = strdup(field_type);
+            if (is_as) reg->fields[i].is_as = 1;
             return reg->fields[i].field_type ? 0 : -1;
         }
     }
@@ -336,6 +343,7 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
     reg->fields[reg->field_count].struct_name = strdup(struct_name);
     reg->fields[reg->field_count].field_name = strdup(field_name);
     reg->fields[reg->field_count].field_type = strdup(field_type);
+    reg->fields[reg->field_count].is_as = is_as ? 1 : 0;
     if (!reg->fields[reg->field_count].struct_name ||
         !reg->fields[reg->field_count].field_name ||
         !reg->fields[reg->field_count].field_type) {
@@ -346,6 +354,501 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
     }
     reg->field_count++;
     return 0;
+}
+
+int cc_type_registry_add_field(CCTypeRegistry* reg,
+                               const char* struct_name,
+                               const char* field_name,
+                               const char* field_type) {
+    return cc_type_registry_add_field_ex(reg, struct_name, field_name, field_type, 0);
+}
+
+size_t cc_type_registry_as_field_count(CCTypeRegistry* reg, const char* struct_name) {
+    size_t n = 0;
+    if (!reg || !struct_name) return 0;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (reg->fields[i].is_as &&
+            strcmp(reg->fields[i].struct_name, struct_name) == 0)
+            n++;
+    }
+    return n;
+}
+
+int cc_type_registry_as_field_at(CCTypeRegistry* reg,
+                                 const char* struct_name,
+                                 size_t idx,
+                                 const char** out_field_name,
+                                 const char** out_field_type) {
+    size_t n = 0;
+    if (!reg || !struct_name) return -1;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (!reg->fields[i].is_as ||
+            strcmp(reg->fields[i].struct_name, struct_name) != 0)
+            continue;
+        if (n == idx) {
+            if (out_field_name) *out_field_name = reg->fields[i].field_name;
+            if (out_field_type) *out_field_type = reg->fields[i].field_type;
+            return 0;
+        }
+        n++;
+    }
+    return -1;
+}
+
+int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name) {
+    return cc_type_registry_as_field_count(reg, struct_name) > 0;
+}
+
+static void cc__strip_type_spelling(const char* in, char* out, size_t out_sz) {
+    size_t n = 0;
+    size_t i = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!in) return;
+    while (in[i] && n + 1 < out_sz) {
+        char c = in[i++];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (n > 0 && out[n - 1] != ' ') out[n++] = ' ';
+            continue;
+        }
+        out[n++] = c;
+    }
+    while (n > 0 && out[n - 1] == ' ') n--;
+    out[n] = '\0';
+    {
+        char* p = out;
+        for (;;) {
+            if (strncmp(p, "const ", 6) == 0) { p += 6; continue; }
+            if (strncmp(p, "volatile ", 9) == 0) { p += 9; continue; }
+            if (strncmp(p, "restrict ", 9) == 0) { p += 9; continue; }
+            if (strncmp(p, "struct ", 7) == 0) { p += 7; continue; }
+            if (strncmp(p, "union ", 6) == 0) { p += 6; continue; }
+            break;
+        }
+        if (p != out) memmove(out, p, strlen(p) + 1);
+    }
+    /* Drop trailing pointer stars for matching Outer.field_type to T* params. */
+    n = strlen(out);
+    while (n > 0) {
+        while (n > 0 && out[n - 1] == ' ') out[--n] = '\0';
+        if (n > 0 && out[n - 1] == '*') {
+            out[--n] = '\0';
+            continue;
+        }
+        break;
+    }
+}
+
+int cc_type_registry_as_field_for_type(CCTypeRegistry* reg,
+                                       const char* outer_type,
+                                       const char* want_type,
+                                       const char** out_field_name) {
+    char want[256];
+    char outer[256];
+    const char* hit_name = NULL;
+    size_t hits = 0;
+    size_t i;
+    if (out_field_name) *out_field_name = NULL;
+    if (!reg || !outer_type || !want_type) return -1;
+    cc__strip_type_spelling(want_type, want, sizeof(want));
+    cc__strip_type_spelling(outer_type, outer, sizeof(outer));
+    if (!want[0] || !outer[0]) return -1;
+    for (i = 0; i < reg->field_count; i++) {
+        char fty[256];
+        if (!reg->fields[i].is_as) continue;
+        if (strcmp(reg->fields[i].struct_name, outer) != 0) continue;
+        cc__strip_type_spelling(reg->fields[i].field_type, fty, sizeof(fty));
+        if (strcmp(fty, want) != 0) continue;
+        hits++;
+        hit_name = reg->fields[i].field_name;
+    }
+    if (hits == 0) return -1;
+    if (hits > 1) return -2;
+    if (out_field_name) *out_field_name = hit_name;
+    return 0;
+}
+
+typedef struct {
+    char path[256];
+    size_t hits;
+    int cycle;
+    char want[256];
+} CCAsPathSearch;
+
+static int cc__as_path_search(CCTypeRegistry* reg,
+                              const char* type_key,
+                              char* path,
+                              size_t path_len,
+                              size_t path_cap,
+                              const char** visited,
+                              size_t visited_n,
+                              size_t visited_cap,
+                              CCAsPathSearch* st) {
+    size_t nas;
+    size_t vi;
+    size_t ai;
+    if (!reg || !type_key || !type_key[0] || !st) return -1;
+    for (vi = 0; vi < visited_n; vi++) {
+        if (visited[vi] && strcmp(visited[vi], type_key) == 0) {
+            st->cycle = 1;
+            return -3;
+        }
+    }
+    if (visited_n >= visited_cap) return -1;
+    visited[visited_n] = type_key;
+    nas = cc_type_registry_as_field_count(reg, type_key);
+    for (ai = 0; ai < nas; ai++) {
+        const char* field_name = NULL;
+        const char* field_type = NULL;
+        char fkey[256];
+        size_t saved_len = path_len;
+        size_t fn_len;
+        int sub;
+        if (cc_type_registry_as_field_at(reg, type_key, ai, &field_name, &field_type) != 0)
+            continue;
+        if (!field_name || !field_type) continue;
+        cc__strip_type_spelling(field_type, fkey, sizeof(fkey));
+        if (!fkey[0]) continue;
+        fn_len = strlen(field_name);
+        if (path_len > 0) {
+            if (path_len + 1 + fn_len >= path_cap) continue;
+            path[path_len++] = '.';
+        } else if (fn_len >= path_cap) {
+            continue;
+        }
+        memcpy(path + path_len, field_name, fn_len);
+        path_len += fn_len;
+        path[path_len] = '\0';
+        if (strcmp(fkey, st->want) == 0) {
+            st->hits++;
+            if (st->hits == 1) {
+                size_t copy = path_len < sizeof(st->path) - 1 ? path_len : sizeof(st->path) - 1;
+                memcpy(st->path, path, copy);
+                st->path[copy] = '\0';
+            }
+        }
+        sub = cc__as_path_search(reg, fkey, path, path_len, path_cap,
+                                 visited, visited_n + 1, visited_cap, st);
+        path_len = saved_len;
+        path[path_len] = '\0';
+        if (sub == -3) return -3;
+    }
+    return 0;
+}
+
+int cc_type_registry_as_path_for_type(CCTypeRegistry* reg,
+                                      const char* outer_type,
+                                      const char* want_type,
+                                      char* path_out,
+                                      size_t path_cap) {
+    char outer[256];
+    char path[256];
+    const char* visited[32];
+    CCAsPathSearch st;
+    if (path_out && path_cap) path_out[0] = '\0';
+    if (!reg || !outer_type || !want_type || !path_out || path_cap == 0) return -1;
+    memset(&st, 0, sizeof(st));
+    cc__strip_type_spelling(want_type, st.want, sizeof(st.want));
+    cc__strip_type_spelling(outer_type, outer, sizeof(outer));
+    if (!st.want[0] || !outer[0]) return -1;
+    path[0] = '\0';
+    if (cc__as_path_search(reg, outer, path, 0, sizeof(path),
+                           visited, 0, 32, &st) == -3 || st.cycle)
+        return -3;
+    if (st.hits == 0) return -1;
+    if (st.hits > 1) return -2;
+    if (strlen(st.path) + 1 > path_cap) return -1;
+    memcpy(path_out, st.path, strlen(st.path) + 1);
+    return 0;
+}
+
+int cc_type_registry_has_as_field_transitive(CCTypeRegistry* reg,
+                                             const char* outer_type) {
+    /* Entry point for expanders: only the root needs a direct @as; nested
+     * embeds are discovered while walking. */
+    return cc_type_registry_has_as_field(reg, outer_type);
+}
+
+typedef struct {
+    char type[128];
+    char path[256];
+} CCAsReach;
+
+static int cc__line_for_typedef_name(const char* src, size_t n, const char* name) {
+    size_t i;
+    size_t nlen;
+    int line = 1;
+    int best = 1;
+    if (!src || !name || !name[0]) return 1;
+    nlen = strlen(name);
+    for (i = 0; i + nlen < n; i++) {
+        if (src[i] == '\n') {
+            line++;
+            continue;
+        }
+        /* Prefer `} Name` (typedef struct body close) or bare `Name` after
+         * whitespace following `}`. */
+        if (src[i] == '}' ) {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' ||
+                             src[j] == '\r')) {
+                if (src[j] == '\n') line++;
+                j++;
+            }
+            if (j + nlen <= n && memcmp(src + j, name, nlen) == 0 &&
+                (j + nlen == n || !cc_is_ident_char(src[j + nlen]))) {
+                best = line;
+            }
+        }
+    }
+    return best;
+}
+
+static int cc__as_validate_walk(CCTypeRegistry* reg,
+                                const char* root,
+                                const char* type_key,
+                                char* path,
+                                size_t path_len,
+                                size_t path_cap,
+                                const char** stack,
+                                size_t stack_n,
+                                size_t stack_cap,
+                                CCAsReach* seen,
+                                size_t* seen_n,
+                                size_t seen_cap,
+                                const char* file,
+                                int line,
+                                int* err_count) {
+    size_t nas;
+    size_t si;
+    size_t ai;
+    if (!reg || !root || !type_key || !type_key[0] || !err_count) return -1;
+    for (si = 0; si < stack_n; si++) {
+        if (stack[si] && strcmp(stack[si], type_key) == 0) {
+            fprintf(stderr,
+                    "%s:%d:1: error: type: cyclic @as embed graph on '%s' "
+                    "(revisits '%s')\n",
+                    file ? file : "<input>", line > 0 ? line : 1, root, type_key);
+            fprintf(stderr,
+                    "%s:%d:1: note: each @as edge must form a DAG; break the "
+                    "cycle or drop one embed\n",
+                    file ? file : "<input>", line > 0 ? line : 1);
+            (*err_count)++;
+            return -3;
+        }
+    }
+    if (stack_n >= stack_cap) return -1;
+    stack[stack_n] = type_key;
+    nas = cc_type_registry_as_field_count(reg, type_key);
+    for (ai = 0; ai < nas; ai++) {
+        const char* field_name = NULL;
+        const char* field_type = NULL;
+        char fkey[256];
+        char fkey_store[256];
+        size_t saved_len = path_len;
+        size_t fn_len;
+        size_t k;
+        int sub;
+        if (cc_type_registry_as_field_at(reg, type_key, ai, &field_name, &field_type) != 0)
+            continue;
+        if (!field_name || !field_type) continue;
+        cc__strip_type_spelling(field_type, fkey, sizeof(fkey));
+        if (!fkey[0]) continue;
+        fn_len = strlen(field_name);
+        if (path_len > 0) {
+            if (path_len + 1 + fn_len >= path_cap) continue;
+            path[path_len++] = '.';
+        } else if (fn_len >= path_cap) {
+            continue;
+        }
+        memcpy(path + path_len, field_name, fn_len);
+        path_len += fn_len;
+        path[path_len] = '\0';
+        for (k = 0; k < *seen_n; k++) {
+            if (strcmp(seen[k].type, fkey) == 0) {
+                if (strcmp(seen[k].path, path) != 0) {
+                    fprintf(stderr,
+                            "%s:%d:1: error: type: ambiguous @as embed of '%s' "
+                            "on '%s'\n",
+                            file ? file : "<input>", line > 0 ? line : 1, fkey,
+                            root);
+                    fprintf(stderr,
+                            "%s:%d:1: note: path '%s' and path '%s' both reach "
+                            "'%s'; keep a single @as path\n",
+                            file ? file : "<input>", line > 0 ? line : 1,
+                            seen[k].path, path, fkey);
+                    (*err_count)++;
+                }
+                break;
+            }
+        }
+        if (k == *seen_n) {
+            if (*seen_n >= seen_cap) {
+                path_len = saved_len;
+                path[path_len] = '\0';
+                return -1;
+            }
+            snprintf(seen[*seen_n].type, sizeof(seen[*seen_n].type), "%s", fkey);
+            snprintf(seen[*seen_n].path, sizeof(seen[*seen_n].path), "%s", path);
+            (*seen_n)++;
+        }
+        /* Recurse with a stable key string — fkey is stack-local. */
+        snprintf(fkey_store, sizeof(fkey_store), "%s", fkey);
+        /* Use seen[].type storage when possible for stack pointers. */
+        {
+            const char* next_key = fkey_store;
+            for (k = 0; k < *seen_n; k++) {
+                if (strcmp(seen[k].type, fkey) == 0) {
+                    next_key = seen[k].type;
+                    break;
+                }
+            }
+            sub = cc__as_validate_walk(reg, root, next_key, path, path_len, path_cap,
+                                       stack, stack_n + 1, stack_cap, seen, seen_n,
+                                       seen_cap, file, line, err_count);
+        }
+        path_len = saved_len;
+        path[path_len] = '\0';
+        if (sub == -3) return -3;
+        if (sub < 0) return sub;
+    }
+    return 0;
+}
+
+int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
+                                        const char* file,
+                                        const char* src,
+                                        size_t n) {
+    char** roots = NULL;
+    size_t root_count = 0;
+    size_t root_cap = 0;
+    size_t i;
+    int err_count = 0;
+    if (!reg) return 0;
+    for (i = 0; i < reg->field_count; i++) {
+        size_t r;
+        int have = 0;
+        if (!reg->fields[i].is_as || !reg->fields[i].struct_name) continue;
+        for (r = 0; r < root_count; r++) {
+            if (strcmp(roots[r], reg->fields[i].struct_name) == 0) {
+                have = 1;
+                break;
+            }
+        }
+        if (have) continue;
+        if (root_count + 1 > root_cap) {
+            size_t nc = root_cap ? root_cap * 2 : 16;
+            char** nr = (char**)realloc(roots, nc * sizeof(char*));
+            if (!nr) {
+                free(roots);
+                return -1;
+            }
+            roots = nr;
+            root_cap = nc;
+        }
+        roots[root_count] = reg->fields[i].struct_name;
+        root_count++;
+    }
+    for (i = 0; i < root_count; i++) {
+        CCAsReach seen[64];
+        size_t seen_n = 0;
+        const char* stack[32];
+        char path[256];
+        int line = cc__line_for_typedef_name(src, n, roots[i]);
+        path[0] = '\0';
+        (void)cc__as_validate_walk(reg, roots[i], roots[i], path, 0, sizeof(path),
+                                   stack, 0, 32, seen, &seen_n, 64, file, line,
+                                   &err_count);
+    }
+    free(roots);
+    return err_count > 0 ? -1 : 0;
+}
+
+int cc_type_registry_field_is_first(CCTypeRegistry* reg,
+                                    const char* struct_name,
+                                    const char* field_name) {
+    size_t i;
+    char outer[256];
+    if (!reg || !struct_name || !field_name) return 0;
+    cc__strip_type_spelling(struct_name, outer, sizeof(outer));
+    for (i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].struct_name, outer) != 0 &&
+            strcmp(reg->fields[i].struct_name, struct_name) != 0)
+            continue;
+        return strcmp(reg->fields[i].field_name, field_name) == 0;
+    }
+    return 0;
+}
+
+void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
+                                           const char* src,
+                                           size_t n) {
+    size_t i = 0;
+    if (!reg || !src || n == 0) return;
+    while (i < n) {
+        size_t td;
+        size_t body_l;
+        size_t body_r = 0;
+        size_t name_pos;
+        char struct_name[128];
+        size_t sn = 0;
+        if (i + 7 > n || memcmp(src + i, "typedef", 7) != 0 ||
+            (i > 0 && cc_is_ident_char(src[i - 1])) ||
+            (i + 7 < n && cc_is_ident_char(src[i + 7]))) {
+            i++;
+            continue;
+        }
+        td = cc_skip_ws_and_comments(src, n, i + 7);
+        if (td + 6 > n || memcmp(src + td, "struct", 6) != 0 ||
+            (td + 6 < n && cc_is_ident_char(src[td + 6]))) {
+            i++;
+            continue;
+        }
+        body_l = cc_skip_ws_and_comments(src, n, td + 6);
+        if (body_l < n && cc_is_ident_start(src[body_l])) {
+            size_t tag_end = body_l;
+            while (tag_end < n && cc_is_ident_char(src[tag_end])) tag_end++;
+            body_l = cc_skip_ws_and_comments(src, n, tag_end);
+        }
+        if (body_l >= n || src[body_l] != '{' ||
+            !cc_find_matching_brace(src, n, body_l, &body_r)) {
+            i++;
+            continue;
+        }
+        name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
+        if (name_pos >= n || !cc_is_ident_start(src[name_pos])) {
+            i = body_r + 1;
+            continue;
+        }
+        while (name_pos < n && cc_is_ident_char(src[name_pos]) &&
+               sn + 1 < sizeof(struct_name)) {
+            struct_name[sn++] = src[name_pos++];
+        }
+        struct_name[sn] = '\0';
+        if (struct_name[0]) {
+            const char* stmt = src + body_l + 1;
+            const char* body_end = src + body_r;
+            while (stmt < body_end) {
+                size_t stmt_off = (size_t)(stmt - src);
+                size_t end_off = (size_t)(body_end - src);
+                size_t semi_off = cc_find_char_top_level(src, stmt_off, end_off, ';');
+                char field_name[128];
+                char field_type[256];
+                int field_is_as = 0;
+                if (semi_off >= end_off) break;
+                cc_parse_decl_name_and_type_ex(src + stmt_off, src + semi_off,
+                                               field_name, sizeof(field_name),
+                                               field_type, sizeof(field_type),
+                                               &field_is_as);
+                if (field_name[0] && field_type[0]) {
+                    (void)cc_type_registry_add_field_ex(reg, struct_name, field_name,
+                                                        field_type, field_is_as);
+                }
+                stmt = src + semi_off + 1;
+            }
+        }
+        i = body_r + 1;
+    }
 }
 
 const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,

@@ -1,0 +1,75 @@
+/* Transitive @as: Mid embeds CCFile; Outer embeds Mid — UFCS, destroy, autocast. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    CCFile file @as;
+    int mid_tag;
+} AsMid;
+
+typedef struct {
+    AsMid mid @as;
+    int outer_tag;
+} AsOuter;
+
+static int g_mid_delta;
+static int g_outer_delta;
+
+static void cc_as_mid_delta(AsMid *m) {
+    if (!m) return;
+    g_mid_delta++;
+    m->mid_tag = 0;
+}
+
+static void cc_as_outer_delta(AsOuter *o) {
+    if (!o) return;
+    g_outer_delta++;
+    o->outer_tag = 0;
+}
+
+@comptime {
+    (void)cc_type_register("AsMid", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_as_mid_delta"),
+    });
+    (void)cc_type_register("AsOuter", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_as_outer_delta"),
+    });
+}
+
+static CCFile *g_got;
+
+static void takes_file(CCFile *f) {
+    assert(f != NULL);
+    g_got = f;
+}
+
+int main(void) {
+    AsOuter o = {0};
+    o.outer_tag = 1;
+    o.mid.mid_tag = 2;
+    assert(o.open(cc_slice_from_cstr("tmp/as_transitive_smoke.txt"), "w") == 0);
+
+    /* UFCS through two @as hops */
+    CCSlice msg = cc_slice_from_cstr("nested\n");
+    CCRes(size_t, CCIoError) wr = o.write(msg);
+    assert(cc_is_ok(wr));
+    assert(cc_value(wr) == msg.len);
+
+    /* Arg autocast through path mid.file */
+    g_got = NULL;
+    takes_file(&o);
+    assert(g_got == &o.mid.file);
+
+    g_mid_delta = 0;
+    g_outer_delta = 0;
+    o.destroy();
+    assert(g_outer_delta == 1);
+    assert(g_mid_delta == 1);
+    assert(o.mid.file.handle == NULL);
+
+    remove("tmp/as_transitive_smoke.txt");
+    printf("ok\n");
+    return 0;
+}
