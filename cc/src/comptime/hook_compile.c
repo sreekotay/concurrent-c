@@ -1,5 +1,6 @@
 #include "hook_compile.h"
 
+#include "build/host_cc_profile.h"
 #include "util/text.h"
 #include "util/text_scan.h"
 
@@ -554,12 +555,35 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
     /* Comptime helpers are throwaway code: -O0 cuts host compile cost ~3-5x
        and we never benchmark the resulting dylib. */
     if (cc__argv_push(argv, "-O0") != 0) return -1;
-    if (cc__hc_is_tcc(cc_bin)) {
-        /* Pre-C11 default omits max_align_t; uninstalled builds need -B. */
-        if (cc__argv_push(argv, "-std=c11") != 0) return -1;
-        if (cc__hc_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir))) {
-            snprintf(tmp, sizeof(tmp), "-B%s", tcc_dir);
-            if (cc__argv_push(argv, tmp) != 0) return -1;
+    {
+        CCHostCcProfile prof;
+        char cache[1100];
+        const char* cache_root = "out/.cc-build";
+        if (repo_root && repo_root[0]) {
+            snprintf(cache, sizeof(cache), "%s/out/.cc-build", repo_root);
+            cache_root = cache;
+        }
+        if (cc_host_cc_profile_ensure(cc_bin, cache_root, repo_root, &prof) == 0
+            && prof.flags[0]) {
+            /* prof.flags is a leading-space string of tokens; split and push. */
+            const char* p = prof.flags;
+            while (*p) {
+                char tok[1024];
+                size_t n = 0;
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p) break;
+                while (*p && *p != ' ' && *p != '\t' && n + 1 < sizeof(tok))
+                    tok[n++] = *p++;
+                tok[n] = '\0';
+                if (n && cc__argv_push(argv, tok) != 0) return -1;
+            }
+        } else if (cc__hc_is_tcc(cc_bin)) {
+            /* Legacy fallback if profile probe fails. */
+            if (cc__argv_push(argv, "-std=c11") != 0) return -1;
+            if (cc__hc_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir))) {
+                snprintf(tmp, sizeof(tmp), "-B%s", tcc_dir);
+                if (cc__argv_push(argv, tmp) != 0) return -1;
+            }
         }
     }
     if (repo_root && repo_root[0]) {

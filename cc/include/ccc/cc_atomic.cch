@@ -2,9 +2,9 @@
  * Portable atomic operations for Concurrent-C
  *
  * Provides a consistent interface across:
- *   - C11 stdatomic (GCC/Clang with C11)
+ *   - C11 stdatomic (GCC/Clang; vendored TCC with -std=c11)
  *   - GCC __sync builtins (older GCC/Clang)
- *   - Non-atomic fallback (TCC - best-effort, not truly thread-safe)
+ *   - Non-atomic fallback (last resort — not thread-safe)
  *
  * Usage:
  *   #include <ccc/cc_atomic.cch>
@@ -14,7 +14,9 @@
  *   int val = cc_atomic_load(&counter);
  *   cc_atomic_store(&counter, 42);
  *
- * Note: TCC fallback is NOT thread-safe. Use GCC/Clang for concurrent code.
+ * Vendored TCC: use C11 stdatomic (real CAS under -std=c11). The old
+ * `__TINYC__` non-atomic macros corrupted lock-free structures (e.g.
+ * CCArenaPool freelist) under multi-thread hammer tests.
  */
 #ifndef CC_ATOMIC_CCH
 #define CC_ATOMIC_CCH
@@ -27,7 +29,11 @@
 #define __has_include(x) 0
 #endif
 
-#if __has_include(<stdatomic.h>) && !defined(__TINYC__)
+/* TCC ships a working stdatomic.h once language mode is C11+ (driver adds
+ * -std=c11 for host TCC). Keep the version gate so a bare pre-C11 TCC
+ * build does not pick up a header it cannot honor. */
+#if __has_include(<stdatomic.h>) && \
+    (!defined(__TINYC__) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L))
 /* C11 stdatomic - full support */
 #include <stdatomic.h>
 

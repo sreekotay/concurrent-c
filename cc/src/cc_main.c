@@ -13,6 +13,7 @@
 #include <signal.h>
 
 #include "build/build.h"
+#include "build/host_cc_profile.h"
 #include <ccc/cc_build_helpers.cch>
 #include "driver.h"
 #include "diag/diag.h"
@@ -179,20 +180,44 @@ static const char* cc__tcc_lib_dir(const char* cc_bin, char* buf, size_t cap) {
     return NULL;
 }
 
-/* Flags required when the *host* compiler is the vendored TCC binary. */
-static void cc__append_tcc_host_flags(char* cmd, size_t cmd_cap, const char* cc_bin) {
-    char dir[PATH_MAX];
-    const char* libdir;
-    if (!cmd || !cmd_cap || !cc__is_tcc(cc_bin)) return;
-    /* Default language mode is pre-C11; max_align_t in tcc's stddef.h is gated
-     * on __STDC_VERSION__ >= 201112L. */
-    strncat(cmd, " -std=c11", cmd_cap - strlen(cmd) - 1);
-    libdir = cc__tcc_lib_dir(cc_bin, dir, sizeof(dir));
-    if (libdir) {
-        char flag[PATH_MAX + 4];
-        snprintf(flag, sizeof(flag), " -B%s", libdir);
-        strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
+/* Host flags from the persisted CC profile (probe-once under out/.cc-build/host/). */
+static int cc__host_profile_for(const char* cc_bin, CCHostCcProfile* out) {
+    if (!out) return -1;
+    if (cc_host_cc_profile_ensure(cc_bin, g_cache_root[0] ? g_cache_root : "out/.cc-build",
+                                  g_repo_root, out) != 0) {
+        memset(out, 0, sizeof(*out));
+        /* Fall back to name-based TCC detection so a probe failure is not fatal
+         * for clang hosts that somehow failed the probe workspace. */
+        out->is_tcc = cc__is_tcc(cc_bin);
+        out->ok = 0;
+        return -1;
     }
+    return 0;
+}
+
+static void cc__append_host_cc_flags(char* cmd, size_t cmd_cap, const char* cc_bin) {
+    CCHostCcProfile prof;
+    if (!cmd || !cmd_cap) return;
+    if (cc__host_profile_for(cc_bin, &prof) != 0) {
+        /* Legacy TCC path if profile missing. */
+        char dir[PATH_MAX];
+        const char* libdir;
+        if (!cc__is_tcc(cc_bin)) return;
+        strncat(cmd, " -std=c11", cmd_cap - strlen(cmd) - 1);
+        libdir = cc__tcc_lib_dir(cc_bin, dir, sizeof(dir));
+        if (libdir) {
+            char flag[PATH_MAX + 4];
+            snprintf(flag, sizeof(flag), " -B%s", libdir);
+            strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
+        }
+        return;
+    }
+    cc_host_cc_profile_append_flags(&prof, cmd, cmd_cap);
+}
+
+/* Back-compat name used at call sites before the profile existed. */
+static void cc__append_tcc_host_flags(char* cmd, size_t cmd_cap, const char* cc_bin) {
+    cc__append_host_cc_flags(cmd, cmd_cap, cc_bin);
 }
 
 static void cc__append_flag(char* buf, size_t cap, const char* prefix, const char* val) {
@@ -2568,7 +2593,10 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     if (opt->no_runtime) return 0;
 
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
-    int is_tcc = cc__is_tcc(cc_bin);
+    CCHostCcProfile host_prof;
+    int is_tcc;
+    (void)cc__host_profile_for(cc_bin, &host_prof);
+    is_tcc = host_prof.ok ? host_prof.is_tcc : cc__is_tcc(cc_bin);
 
     // NOTE: For release builds, don't reuse the prebuilt monolithic runtime object.
     // It may not be compiled with -ffunction-sections/-fdata-sections, which prevents
@@ -2618,19 +2646,19 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
-             is_tcc ? 0 : 1,
+             (host_prof.ok ? host_prof.no_xjb_float : is_tcc) ? 0 : 1,
              g_cc_lowered_include,
              g_cc_include,
              g_cc_dir,
              g_repo_root,
              g_cc_runtime_c,
              is_tcc ? runtime_obj : runtime_core_obj);
-    if (is_tcc) {
+    if (host_prof.ok ? host_prof.no_liblfds : is_tcc) {
         /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
          * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
         strncat(cmd, " -DCC_NO_LIBLFDS", sizeof(cmd) - strlen(cmd) - 1);
-        cc__append_tcc_host_flags(cmd, sizeof(cmd), cc_bin);
     }
+    cc__append_host_cc_flags(cmd, sizeof(cmd), cc_bin);
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);

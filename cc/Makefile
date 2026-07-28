@@ -104,6 +104,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/comptime/const_eval.c \
 	src/comptime/executor.c \
 	src/comptime/hook_compile.c \
+	src/build/host_cc_profile.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
 	src/visitor/pass_channel_syntax.c \
