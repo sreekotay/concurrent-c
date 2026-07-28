@@ -792,8 +792,10 @@ const void* cc_ufcs_grammar_type_method_native_ptr(void) {
 
 typedef struct {
     const char* recv_type_name;
+    char recv_type_buf[256];   /* owned full type; recv_type_name points here after resolve */
     char recv_type_base[256];
     char recv_family_type[256];
+    char typed_chan_buf[256];
     const char* typed_chan_type;
     int recv_is_simple;
     int recv_is_addressable;
@@ -980,7 +982,6 @@ static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* a
     }
     for (size_t i = 0; i < argv.len; ++i) {
         const char* type_name = NULL;
-        size_t len = 0;
         char* buf = NULL;
         if (reg && argv.items[i].ptr && argv.items[i].len > 0) {
             buf = (char*)cc_arena_alloc(arena, argv.items[i].len + 1, 1);
@@ -997,8 +998,20 @@ static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* a
                 }
             }
         }
-        len = type_name ? strlen(type_name) : 0;
-        items[i] = (type_name && len > 0) ? cc_slice_from_buffer((void*)type_name, len) : cc_slice_empty();
+        /* resolve_* returns a thread-local static buffer — copy each name
+         * into the arena before the next resolve clobbers it. */
+        if (type_name && type_name[0]) {
+            size_t n = strlen(type_name);
+            char* owned = (char*)cc_arena_alloc(arena, n + 1, 1);
+            if (!owned) {
+                CCSliceArray empty = {0};
+                return empty;
+            }
+            memcpy(owned, type_name, n + 1);
+            items[i] = cc_slice_from_buffer(owned, n);
+        } else {
+            items[i] = cc_slice_empty();
+        }
     }
     argv.items = items;
     return argv;
@@ -1360,14 +1373,29 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
             }
         }
     }
+    /* Snapshot into owned storage: registry resolve_* APIs return a shared
+     * thread-local buffer that later resolve calls (e.g. arg typing) clobber.
+     * family_canon_buf above is also stack-local. */
+    if (ctx->recv_type_name && ctx->recv_type_name[0]) {
+        snprintf(ctx->recv_type_buf, sizeof(ctx->recv_type_buf), "%s", ctx->recv_type_name);
+        ctx->recv_type_name = ctx->recv_type_buf;
+    } else {
+        ctx->recv_type_buf[0] = '\0';
+        ctx->recv_type_name = NULL;
+    }
     if (ctx->recv_type_name &&
         (strncmp(ctx->recv_type_name, "CCChanTx_", 9) == 0 ||
          strncmp(ctx->recv_type_name, "CCChanRx_", 9) == 0)) {
-        ctx->typed_chan_type = ctx->recv_type_name;
+        snprintf(ctx->typed_chan_buf, sizeof(ctx->typed_chan_buf), "%s", ctx->recv_type_name);
+        ctx->typed_chan_type = ctx->typed_chan_buf;
     } else if (reg_type_name &&
                (strncmp(reg_type_name, "CCChanTx_", 9) == 0 ||
                 strncmp(reg_type_name, "CCChanRx_", 9) == 0)) {
-        ctx->typed_chan_type = reg_type_name;
+        snprintf(ctx->typed_chan_buf, sizeof(ctx->typed_chan_buf), "%s", reg_type_name);
+        ctx->typed_chan_type = ctx->typed_chan_buf;
+    } else {
+        ctx->typed_chan_buf[0] = '\0';
+        ctx->typed_chan_type = NULL;
     }
     cc__ufcs_copy_type_base(ctx->recv_type_base, sizeof(ctx->recv_type_base), ctx->recv_type_name);
     if (ctx->recv_type_base[0]) {
