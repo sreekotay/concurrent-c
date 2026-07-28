@@ -445,6 +445,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
     /* Emits both Redis variants; ~7s each under -O0 toolchains. */
     if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
+    /* Many nested ccc -e/-E subprocesses; ~9s alone, flaky at default 10s. */
+    if (strcmp(stem, "script_oneliner_smoke") == 0) return 30;
     return default_timeout_sec;
 }
 
