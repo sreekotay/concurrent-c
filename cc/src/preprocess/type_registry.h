@@ -70,10 +70,6 @@ int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name
                                       const char** out_callee,
                                       const char** out_wrap);
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name);
-/* Typed slice instances (`double[:]` -> `CCSlice__double`): map a
- * single-space-normalized scalar element spelling to its instance type
- * name, and back. Spelling->instance returns 1 on whitelist hit;
- * instance->spelling returns NULL for non-instance type names. */
 /* Typed slice instances (CC_DECL_SLICE_SPEC family). The rewriter
  * registers every instance it names; lookup recovers the snake prefix
  * (cc_slice_double) and element spelling. Session-global. Returns 0 on
