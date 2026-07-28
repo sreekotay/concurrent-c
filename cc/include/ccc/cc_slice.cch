@@ -63,6 +63,64 @@ typedef struct {
 typedef CCSlice CCSliceUnique;
 typedef CCSlice CCSliceShared;
 
+/* Typed slice instances — generic over the element type, the same move
+ * as CC_DECL_RESULT_SPEC. `T[:]` with a non-char element type lowers to
+ * `CCSlice_<mangled T>`, a distinct struct embedding the erased core:
+ *
+ *   typedef struct CCSlice_double { CCSlice base @as; } CCSlice_double;
+ *
+ * The instance name carries the element type at compile time; `.base`
+ * is the visible erasure spelling; `@as` supplies method retry into the
+ * byte helpers and arg-position autocast. Element-wise methods and the
+ * scaled `bytes()` view come from this template with sizeof(T) in
+ * hand. len/alen on a typed slice count ELEMENTS; `bytes()` converts
+ * to an honestly byte-measured CCSlice. char slices stay bare CCSlice
+ * (bytes are their elements).
+ *
+ * Common scalar instances are pre-declared below; any other element
+ * type instantiates with one line after its definition:
+ *
+ *   CC_DECL_SLICE_SPEC(CCSlice_Point, cc_slice_point, Point)
+ */
+#define CC_DECL_SLICE_SPEC(NAME, SNAKE, T)                                     \
+    typedef struct NAME {                                                      \
+        CCSlice base /*@as*/;                                                  \
+    } NAME;                                                                    \
+    static inline NAME SNAKE##_from_buffer(T *p, size_t count) {               \
+        NAME s;                                                                \
+        s.base = cc_slice_from_buffer((void *)p, count);                       \
+        return s;                                                              \
+    }                                                                          \
+    static inline size_t SNAKE##_len(NAME *s) { return s ? s->base.len : 0; }  \
+    static inline T SNAKE##_at(NAME *s, size_t i) {                            \
+        return ((T *)s->base.ptr)[i];                                          \
+    }                                                                          \
+    static inline NAME SNAKE##_sub(NAME *s, size_t a, size_t b) {              \
+        NAME r;                                                                \
+        size_t n = s ? s->base.len : 0;                                        \
+        if (a > n) a = n;                                                      \
+        if (b > n) b = n;                                                      \
+        if (b < a) b = a;                                                      \
+        r.base.ptr = s ? s->base.ptr + a * sizeof(T) : 0;                      \
+        r.base.len = b - a;                                                    \
+        r.base.id = s ? ((s->base.id & ~CC_SLICE_ID_UNIQUE) |                  \
+                         (s->base.id ? CC_SLICE_ID_SUBSLICE : 0))              \
+                      : 0;                                                     \
+        r.base.alen = s ? (s->base.alen > a ? s->base.alen - a : 0) : 0;       \
+        return r;                                                              \
+    }                                                                          \
+    /* Honest byte view: len/alen scale by sizeof(T). */                       \
+    static inline CCSlice SNAKE##_bytes(NAME *s) {                             \
+        CCSlice r = {0};                                                       \
+        if (!s) return r;                                                      \
+        r = s->base;                                                           \
+        r.len *= sizeof(T);                                                    \
+        r.alen *= sizeof(T);                                                   \
+        return r;                                                              \
+    }
+
+/* Scalar instances are declared after cc_slice_from_buffer below. */
+
 /* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
  * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
 typedef struct {
@@ -128,6 +186,16 @@ static inline CCSlice cc_slice_hdr_slice(CCSliceHdr *sh) {
     if (!sh) return cc_slice_empty();
     return cc_slice_from_buffer(sh->ptr, sh->len);
 }
+
+CC_DECL_SLICE_SPEC(CCSlice_short, cc_slice_short, short)
+CC_DECL_SLICE_SPEC(CCSlice_int, cc_slice_int, int)
+CC_DECL_SLICE_SPEC(CCSlice_long, cc_slice_long, long)
+CC_DECL_SLICE_SPEC(CCSlice_long_long, cc_slice_long_long, long long)
+CC_DECL_SLICE_SPEC(CCSlice_int16_t, cc_slice_int16_t, int16_t)
+CC_DECL_SLICE_SPEC(CCSlice_int32_t, cc_slice_int32_t, int32_t)
+CC_DECL_SLICE_SPEC(CCSlice_int64_t, cc_slice_int64_t, int64_t)
+CC_DECL_SLICE_SPEC(CCSlice_float, cc_slice_float, float)
+CC_DECL_SLICE_SPEC(CCSlice_double, cc_slice_double, double)
 
 static inline CCSlice cc_slice_from_parts(void *ptr,
                                           size_t len,

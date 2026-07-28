@@ -1,5 +1,7 @@
 #include "symbols.h"
 
+#include "preprocess/type_registry.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -31,6 +33,8 @@ typedef struct {
     CCOwnedResourceFreeFn create_owner_free;
     char* pre_destroy_call;
     char* destroy_call;
+    char* ufcs_dynamic_callee;
+    char* ufcs_dynamic_wrap;
     int has_niche;
     unsigned niche_size;
     unsigned niche_align;
@@ -183,6 +187,8 @@ void cc_symbols_free(CCSymbolTable* t) {
         }
         free(t->types[i].pre_destroy_call);
         free(t->types[i].destroy_call);
+        free(t->types[i].ufcs_dynamic_callee);
+        free(t->types[i].ufcs_dynamic_wrap);
         if (t->types[i].ufcs_owner && t->types[i].ufcs_owner_free) {
             t->types[i].ufcs_owner_free(t->types[i].ufcs_owner);
         }
@@ -360,6 +366,42 @@ int cc_symbols_set_type_pre_destroy_call(CCSymbolTable* t, const char* type_name
     if (!copy) return ENOMEM;
     free(entry->pre_destroy_call);
     entry->pre_destroy_call = copy;
+    return 0;
+}
+
+int cc_symbols_set_type_ufcs_dynamic(CCSymbolTable* t, const char* type_name,
+                                     const char* callee, const char* wrap) {
+    CCTypeEntry* entry = NULL;
+    char* c = NULL;
+    char* w = NULL;
+    int err;
+    if (!t || !type_name || !callee || !wrap) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    c = strdup(callee);
+    w = strdup(wrap);
+    if (!c || !w) {
+        free(c);
+        free(w);
+        return ENOMEM;
+    }
+    free(entry->ufcs_dynamic_callee);
+    free(entry->ufcs_dynamic_wrap);
+    entry->ufcs_dynamic_callee = c;
+    entry->ufcs_dynamic_wrap = w;
+    return 0;
+}
+
+int cc_symbols_lookup_type_ufcs_dynamic(CCSymbolTable* t, const char* type_name,
+                                        const char** out_callee,
+                                        const char** out_wrap) {
+    CCTypeEntry* entry = NULL;
+    if (!t || !type_name || !out_callee || !out_wrap) return EINVAL;
+    entry = cc__find_type_entry(t, type_name);
+    if (!entry || !entry->ufcs_dynamic_callee || !entry->ufcs_dynamic_wrap)
+        return ENOENT;
+    *out_callee = entry->ufcs_dynamic_callee;
+    *out_wrap = entry->ufcs_dynamic_wrap;
     return 0;
 }
 
@@ -960,6 +1002,32 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                         input_path ? input_path : "<input>", type_name);
                 return -1;
             }
+            continue;
+        }
+        if (cc__match_kw_reg(src, obj_r, p, "ufcs_dynamic")) {
+            char dyn_callee[256];
+            char dyn_wrap[256];
+            p += strlen("ufcs_dynamic");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p++;
+            if (!cc__parse_helper_call_2(src, obj_r, &p, "cc_type_dynamic_call",
+                                         dyn_callee, sizeof(dyn_callee),
+                                         dyn_wrap, sizeof(dyn_wrap))) {
+                fprintf(stderr,
+                        "%s: error: malformed .ufcs_dynamic = "
+                        "cc_type_dynamic_call(\"callee\", \"argwrap\") for '%s'\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
+            if (cc_symbols_set_type_ufcs_dynamic(t, type_name, dyn_callee,
+                                                 dyn_wrap) != 0)
+                return -1;
+            /* Mirror into the session-global sink list so text-stage UFCS
+             * rewriting can emit sink calls before the comptime scan runs. */
+            (void)cc_type_registry_set_dynamic_sink(cc_type_registry_get_global(),
+                                                    type_name, dyn_callee,
+                                                    dyn_wrap);
             continue;
         }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs")) {

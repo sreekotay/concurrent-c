@@ -1,0 +1,92 @@
+/* Slice declaration forms and typed slice instances.
+ *
+ * `T name[:]` and `T[:] name` are equivalent. char element types stay
+ * bare CCSlice (bytes are their elements). Non-char element types
+ * instantiate the CC_DECL_SLICE_SPEC generic: `double[:]` is
+ * CCSlice_double, a distinct struct embedding `CCSlice base @as` with
+ * element-wise len/at/sub and a scaled bytes() view. Scalar instances
+ * are pre-declared in cc_slice.cch; any other element type declares
+ * its own with one CC_DECL_SLICE_SPEC line. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Open generic: user-declared instance for a non-prebaked element. */
+CC_DECL_SLICE_SPEC(CCSlice_unsigned_long, cc_slice_unsigned_long, unsigned long)
+
+static double first(double v[:]) {
+    return v.at(0);
+}
+
+static size_t erased_len(CCSlice s) {
+    return s.len;
+}
+
+int main(void) {
+    /* Declarator position + string literal: char slices stay CCSlice. */
+    char s[:] = "test";
+    assert(s.len == 4);
+    assert(memcmp(s.ptr, "test", 4) == 0);
+
+    /* Type position + string literal. */
+    char[:] t = "hello";
+    assert(t.len == 5);
+
+    /* Declarator position + braced initializer: typed instance,
+     * len counts elements, at() indexes elements. */
+    double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
+    assert(xs.base.len == 5);
+    assert(xs.len() == 5);
+    assert(xs.at(4) == 42.0);
+
+    /* Type position + braced initializer. */
+    int[:] ys = {1, 2, 3};
+    assert(ys.len() == 3);
+    assert(ys.at(2) == 3);
+
+    /* Element-wise sub stays typed. */
+    {
+        CCSlice_int mid = ys.sub(1, 3);
+        assert(mid.base.len == 2);
+        assert(mid.at(0) == 2);
+    }
+
+    /* bytes(): honestly byte-measured erased view. */
+    {
+        CCSlice bx = xs.bytes();
+        assert(bx.len == 5 * sizeof(double));
+    }
+
+    /* @as autocast into a by-value CCSlice param erases SCALED. */
+    assert(erased_len(xs) == 5 * sizeof(double));
+
+    /* User-declared instance behaves identically. */
+    unsigned long ul[:] = {7UL, 8UL};
+    assert(ul.len() == 2);
+    assert(ul.at(1) == 8UL);
+
+    /* Empty braces. */
+    char e[:] = {};
+    assert(e.len == 0);
+    double ed[:] = {};
+    assert(ed.len() == 0);
+
+    /* Declarator position without initializer; plain assignment works. */
+    char u[:];
+    u = const_char_to_slice("x");
+    assert(u.len == 1);
+
+    /* Byte helpers on char slices unchanged; on typed slices they are
+     * reachable through the @as retry (documented inheritance). */
+    CCSlice sub = s.sub(1, 3);
+    assert(sub.len == 2);
+    assert(memcmp(sub.ptr, "es", 2) == 0);
+    assert(xs.is_empty() == false);
+
+    /* Declarator-position slice parameter (typed instance param). */
+    assert(first(xs) == 1.0);
+
+    printf("ok\n");
+    return 0;
+}

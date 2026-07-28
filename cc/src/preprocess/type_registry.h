@@ -60,6 +60,23 @@ int cc_type_registry_as_field_at(CCTypeRegistry* reg,
                                  const char** out_field_type);
 /* Nonzero if struct_name has any @as field. */
 int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name);
+
+/* Dynamic UFCS sink (.ufcs_dynamic registrations): mark / query types whose
+ * unresolved methods lower through a registered sink callee. Session-global
+ * (survives registry rebuilds across pipeline stages). */
+int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
+                                      const char* callee, const char* wrap);
+int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
+                                      const char** out_callee,
+                                      const char** out_wrap);
+int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name);
+/* Typed slice instances (CC_DECL_SLICE_SPEC family). The rewriter
+ * registers every instance it names; lookup recovers the snake prefix
+ * (cc_slice_double) and element spelling. Session-global. Returns 0 on
+ * hit, -1 otherwise; trailing `*` on type_name is ignored. */
+int cc_slice_spec_register(const char* name, const char* snake, const char* elem);
+int cc_slice_spec_lookup(const char* type_name,
+                         const char** out_snake, const char** out_elem);
 /* Unique `@as` field of `outer` whose field type matches `want_type`
  * (cv/`struct ` stripped; pointer stars on want_type ignored).
  * Direct embeds only. Returns 0 and sets *out_field_name; -1 none; -2 ambiguous. */

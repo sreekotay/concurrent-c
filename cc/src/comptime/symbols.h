@@ -64,6 +64,13 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
  int cc_symbols_lookup_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
  int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
  int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
+/* Dynamic UFCS sink: unresolved methods on the type lower to
+ * `callee(&recv, "method", N, wrap(a1), ...)`. */
+ int cc_symbols_set_type_ufcs_dynamic(CCSymbolTable* t, const char* type_name,
+                                      const char* callee, const char* wrap);
+ int cc_symbols_lookup_type_ufcs_dynamic(CCSymbolTable* t, const char* type_name,
+                                         const char** out_callee,
+                                         const char** out_wrap);
 /* Niche descriptor (spec/draft_variants.md §11): the (offset, width, sentinel)
  * bit pattern a valid instance of `type_name` is guaranteed never to exhibit,
  * plus the type's footprint (size/align).  A `@variant(packed)` arm of this

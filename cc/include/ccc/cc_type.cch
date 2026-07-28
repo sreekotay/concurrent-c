@@ -289,10 +289,21 @@ typedef struct {
     unsigned long long sentinel;
 } CCTypeNicheHook;
 
+/* Dynamic UFCS sink: a method call on the type that resolves to nothing
+ * (no exact owner, no wildcard hit, no @as path) lowers to
+ * `callee(&recv, "method", N, arg_wrap(a1), arg_wrap(a2), ...)` — the
+ * method identifier becomes a string argument and each argument is
+ * lifted by the named wrapper macro. Last resort only; never wildcard. */
+typedef struct {
+    const char* callee;
+    const char* arg_wrap;
+} CCTypeDynamicHook;
+
 typedef struct {
     CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
+    CCTypeDynamicHook ufcs_dynamic;
     CCTypeNicheHook niche;
 } CCTypeHooks;
 
@@ -312,6 +323,14 @@ static inline CCTypeCreateHook cc_type_create_overloads(const char* callee1, con
 static inline CCTypeCreateHook cc_type_create_hook(CCTypeCreateHandler callable) {
     CCTypeCreateHook hook = {0};
     hook.callable = (const void*)callable;
+    return hook;
+}
+
+static inline CCTypeDynamicHook cc_type_dynamic_call(const char* callee,
+                                                     const char* arg_wrap) {
+    CCTypeDynamicHook hook = {0};
+    hook.callee = callee;
+    hook.arg_wrap = arg_wrap;
     return hook;
 }
 

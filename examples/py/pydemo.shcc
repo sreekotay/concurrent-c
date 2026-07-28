@@ -1,0 +1,27 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py(&a) !> @destroy;
+
+/* Unresolved methods on CCPyObj dispatch dynamically (.ufcs_dynamic):
+ * the method identifier becomes the Python attribute; arguments marshal
+ * by static type. Lowered form: cc_py_obj_callm(&m, "sqrt", 1, ...). */
+CCPyObj math = py.import("math") !> @destroy;
+CCPyObj root = math.sqrt(2.0) !> @destroy;
+double v = root.as_f64() !>;
+cc_println(@string(`math.sqrt(2.0) = ${v}`, &a)) !>;
+
+CCPyObj p = math.pow(2.0, 10) !> @destroy;
+double pv = p.as_f64() !>;
+cc_println(@string(`math.pow(2,10) = ${pv}`, &a)) !>;
+
+CCPyObj stats = py.import("statistics") !> @destroy;
+double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
+CCPyObj mean = stats.mean(xs) !> @destroy;
+double mv = mean.as_f64() !>;
+cc_println(@string(`statistics.mean = ${mv}`, &a)) !>;
+
+CCPyObj sys = py.import("sys") !> @destroy;
+CCPyObj ver = sys.get("version") !> @destroy;
+CCSlice vs = ver.as_slice(&a) !>;
+cc_println(@string(`sys.version    = ${vs}`, &a)) !>;

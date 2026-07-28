@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
 

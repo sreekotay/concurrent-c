@@ -118,7 +118,10 @@ static int cc__flat_cache_is_fresh(const char* cache_path, const char* deps_path
         char saved = deps_buf[le];
         deps_buf[le] = '\0';
         time_t dep_mtime;
-        if (!cc__path_mtime(deps_buf + ls, &dep_mtime) || dep_mtime > cache_mtime) fresh = 0;
+        /* `>=`, not `>`: mtimes are second-granular, so a dep written in
+         * the same second as the cache (edit racing a just-finished
+         * compile) must count as newer or the stale cache wins forever. */
+        if (!cc__path_mtime(deps_buf + ls, &dep_mtime) || dep_mtime >= cache_mtime) fresh = 0;
         deps_buf[le] = saved;
     }
     free(deps_buf);

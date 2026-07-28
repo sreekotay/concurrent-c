@@ -1840,6 +1840,88 @@ static int cc__ufcs_append_as_destroy_rec(char* out, size_t* w, size_t cap,
     return 0;
 }
 
+/* Dynamic UFCS sink (registered `.ufcs_dynamic`): last-resort lowering of
+ * an otherwise-unresolved method to
+ *   callee(&recv, "method", N, wrap(a1), wrap(a2), ...)
+ * Args split at top-level commas (string/char/paren aware). Returns the
+ * emitted length, or CC_UFCS_EMIT_UNRESOLVED when the receiver type has
+ * no sink registered (caller keeps the strict error). */
+static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
+                                 const char* method, bool recv_is_ptr,
+                                 const char* args_rewritten, bool has_args,
+                                 const char* recv_type_base) {
+    const char* callee = NULL;
+    const char* wrap = NULL;
+    size_t o = 0;
+    int n;
+    int argc = 0;
+    if (!recv_type_base || !recv_type_base[0] || !g_ufcs_symbols)
+        return CC_UFCS_EMIT_UNRESOLVED;
+    if (cc_symbols_lookup_type_ufcs_dynamic(g_ufcs_symbols, recv_type_base,
+                                            &callee, &wrap) != 0)
+        return CC_UFCS_EMIT_UNRESOLVED;
+    n = snprintf(out + o, cap - o, "%s(%s%s%s, \"%s\"",
+                 callee, recv_is_ptr ? "(" : "&(", recv, ")", method);
+    if (n < 0 || (size_t)n >= cap - o) return -1;
+    o += (size_t)n;
+    /* Reserve the argc slot by emitting args first into the tail, counting
+     * top-level commas; then splice the count. Simpler: two passes. */
+    {
+        char argbuf[1024];
+        size_t ao = 0;
+        if (has_args && args_rewritten && args_rewritten[0]) {
+            const char* p = args_rewritten;
+            const char* seg = p;
+            int depth = 0;
+            int in_str = 0, in_chr = 0;
+            for (;; p++) {
+                char c = *p;
+                int at_end = (c == '\0');
+                if (!at_end && in_str) {
+                    if (c == '\\' && p[1]) p++;
+                    else if (c == '"') in_str = 0;
+                    continue;
+                }
+                if (!at_end && in_chr) {
+                    if (c == '\\' && p[1]) p++;
+                    else if (c == '\'') in_chr = 0;
+                    continue;
+                }
+                if (!at_end) {
+                    if (c == '"') { in_str = 1; continue; }
+                    if (c == '\'') { in_chr = 1; continue; }
+                    if (c == '(' || c == '[' || c == '{') { depth++; continue; }
+                    if (c == ')' || c == ']' || c == '}') { depth--; continue; }
+                    if (!(c == ',' && depth == 0)) continue;
+                }
+                {
+                    size_t seg_len = (size_t)(p - seg);
+                    while (seg_len > 0 && (seg[0] == ' ' || seg[0] == '\t')) {
+                        seg++;
+                        seg_len--;
+                    }
+                    while (seg_len > 0 && (seg[seg_len - 1] == ' ' ||
+                                           seg[seg_len - 1] == '\t'))
+                        seg_len--;
+                    if (seg_len > 0) {
+                        n = snprintf(argbuf + ao, sizeof(argbuf) - ao,
+                                     ", %s(%.*s)", wrap, (int)seg_len, seg);
+                        if (n < 0 || (size_t)n >= sizeof(argbuf) - ao) return -1;
+                        ao += (size_t)n;
+                        argc++;
+                    }
+                }
+                if (at_end) break;
+                seg = p + 1;
+            }
+        }
+        n = snprintf(out + o, cap - o, ", %d%s)", argc, argbuf);
+        if (n < 0 || (size_t)n >= cap - o) return -1;
+        o += (size_t)n;
+    }
+    return (int)o;
+}
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -1864,6 +1946,25 @@ static int emit_desugared_call(char* out,
             if (!has_args || !args_rewritten || !args_rewritten[0])
                 return snprintf(out, cap, "%s()", fname);
             return snprintf(out, cap, "%s(%s)", fname, args_rewritten);
+        }
+    }
+    /* Typed slice instances (CC_DECL_SLICE_SPEC): the template method set
+     * is fixed, and the definitions exist only after macro expansion, so
+     * in-source name checks cannot see them. Dispatch directly by the
+     * registered snake prefix; anything outside the set falls through to
+     * normal resolution (and the @as retry into byte helpers). */
+    if (ctx.recv_type_name && ctx.recv_type_name[0]) {
+        const char* ts_snake = NULL;
+        if (cc_slice_spec_lookup(ctx.recv_type_name, &ts_snake, NULL) == 0 &&
+            ts_snake &&
+            (strcmp(method, "len") == 0 || strcmp(method, "at") == 0 ||
+             strcmp(method, "sub") == 0 || strcmp(method, "bytes") == 0 ||
+             strcmp(method, "from_buffer") == 0)) {
+            const char* amp = recv_is_ptr ? "" : "&";
+            if (!has_args || !args_rewritten || !args_rewritten[0])
+                return snprintf(out, cap, "%s_%s(%s%s)", ts_snake, method, amp, recv);
+            return snprintf(out, cap, "%s_%s(%s%s, %s)", ts_snake, method, amp, recv,
+                            args_rewritten);
         }
     }
     /* C-first dispatch: if `method` is a data member of the receiver type,
@@ -2054,9 +2155,11 @@ static int emit_desugared_call(char* out,
         CCTypeRegistry* reg = cc_type_registry_get_global();
         int has_as = (reg && ctx.recv_type_base[0] &&
                       cc_type_registry_has_as_field(reg, ctx.recv_type_base));
+        int has_dyn = (ctx.recv_type_base[0] &&
+                       cc_type_registry_has_dynamic_sink(reg, ctx.recv_type_base));
         int outer_real = 0;
         /* Cheap @as gate before fn_name_is_real (O(TU) + header re-reads). */
-        if (dispatch_n >= 0 && !has_as) return dispatch_n;
+        if (dispatch_n >= 0 && !has_as && !has_dyn) return dispatch_n;
         if (dispatch_n >= 0) {
             char callee[256];
             size_t ci = 0;
@@ -2068,6 +2171,15 @@ static int emit_desugared_call(char* out,
             callee[ci] = '\0';
             if (ci > 0 && cc__ufcs_fn_name_is_real(callee)) outer_real = 1;
             if (outer_real) return dispatch_n;
+        }
+        /* Sink-typed receiver whose dispatch produced a synthetic (unreal)
+         * callee: real methods won above; route the rest to the sink. */
+        if (has_dyn && !has_as) {
+            int sn = cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
+                                           args_rewritten, has_args,
+                                           ctx.recv_type_base);
+            if (sn >= 0) return sn;
+            if (dispatch_n >= 0) return dispatch_n;
         }
         if (has_as) {
             size_t nas;
@@ -2134,14 +2246,16 @@ static int emit_desugared_call(char* out,
                 memcpy(out, best, (size_t)best_n + 1);
                 return best_n;
             }
-            /* Outer was synthetic and @as retry found nothing real — fail loud
-             * in the UFCS pass instead of emitting a missing C symbol. */
-            return CC_UFCS_EMIT_UNRESOLVED;
+            /* Outer was synthetic and @as retry found nothing real — try the
+             * registered dynamic sink before failing loud. */
+            return cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
+                                         args_rewritten, has_args,
+                                         ctx.recv_type_base);
         }
     }
     if (dispatch_n >= 0) return dispatch_n;
-    if (dispatch_n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
-    return CC_UFCS_EMIT_UNRESOLVED;
+    return cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
+                                 args_rewritten, has_args, ctx.recv_type_base);
 }
 
 static int emit_full_call(char* out,
