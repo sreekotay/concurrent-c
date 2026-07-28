@@ -1937,6 +1937,49 @@ static char* cc__rewrite_nested_ufcs_args(const char* args_src) {
     return out;
 }
 
+/*
+ * A chain receiver must be a postfix expression. Spans reaching the chain
+ * parser via the occurrence fallback can carry leading statement text
+ * (`return c`, `x && y`); reject those so the segment-wise rewriter takes
+ * them instead of splicing the contamination into the receiver.
+ */
+static int cc__recv_is_postfix_expr(const char* recv) {
+    static const char* kws[] = {"return", "if",   "else", "while",
+                                "for",    "do",   "switch", "case",
+                                "goto",   "break", "continue", NULL};
+    size_t k = 0;
+    int depth = 0;
+    const char* p;
+    while (cc_is_ident_char(recv[k])) k++;
+    if (k > 0) {
+        for (int i = 0; kws[i]; i++) {
+            if (strlen(kws[i]) == k && memcmp(recv, kws[i], k) == 0) return 0;
+        }
+    }
+    for (p = recv; *p; p++) {
+        char c = *p;
+        if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == q) break;
+                p++;
+            }
+            if (!*p) return 0;
+            continue;
+        }
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') depth--;
+        else if (depth == 0) {
+            if ((c == '&' && p[1] == '&') || (c == '|' && p[1] == '|') ||
+                c == ';' || c == ',')
+                return 0;
+        }
+    }
+    return 1;
+}
+
 static int cc__parse_ufcs_chain(const char* in,
                                 char* recv,
                                 size_t recv_cap,
@@ -1999,6 +2042,15 @@ static int cc__parse_ufcs_chain(const char* in,
     memcpy(recv, s, recv_len);
     recv[recv_len] = '\0';
     trim_ws_in_place(recv);
+    if (!cc__recv_is_postfix_expr(recv)) return 0;
+    /* Statement-expr materialization exists for call-expression receivers
+     * (`@string(...).println()`). Lvalue receivers (idents, member chains)
+     * stay on the segment-wise path: copying them into a temp would break
+     * mutation, and relocating closure args breaks their lowering. */
+    {
+        size_t rl = strlen(recv);
+        if (rl == 0 || recv[rl - 1] != ')') return 0;
+    }
 
     const char* p = sep + (sep_is_ptr ? 2 : 1);
     for (;;) {

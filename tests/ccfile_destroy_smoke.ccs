@@ -1,0 +1,41 @@
+/* CCFile registers cc_file_close as its destroy hook: bodyless @destroy
+ * closes the file, and the hook tolerates a second call (manual close
+ * before scope exit, or double destroy). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/io.cch>
+#include <assert.h>
+#include <stdio.h>
+
+static CCFile !>(CCIoError) file_open_w(const char* path) {
+    CCFile f = {0};
+    if (cc_file_open(&f, cc_slice_from_cstr(path), "w") != 0)
+        return cc_err(cc_io_from_errno(errno ? errno : EINVAL));
+    return cc_ok(f);
+}
+
+int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "open failed: %s\n", cc_io_error_str(e));
+        return 1;
+    }
+
+    {
+        CCFile f = file_open_w("tmp/ccfile_destroy_smoke.txt") !> @destroy;
+        assert(f.handle != NULL);
+        /* scope exit: cc_file_close(&f) via registered hook */
+    }
+
+    {
+        CCFile g = file_open_w("tmp/ccfile_destroy_smoke.txt") !> @destroy;
+        assert(g.handle != NULL);
+        cc_file_close(&g);          /* manual close first */
+        assert(g.handle == NULL);
+        cc_file_close(&g);          /* idempotent: second call is a no-op */
+        assert(g.handle == NULL);
+        /* scope exit: hook runs again on nulled handle — no-op, no crash */
+    }
+
+    remove("tmp/ccfile_destroy_smoke.txt");
+    printf("ok\n");
+    return 0;
+}
