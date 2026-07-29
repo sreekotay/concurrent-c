@@ -162,6 +162,31 @@ static inline int cc_ufcs_compose_default_callee(char* out,
     return 1;
 }
 
+/* Scalar value-receiver UFCS family: `cc_<mangled type>_<method>` with the
+ * receiver passed by value (`d.halve()` -> `cc_double_halve(d)`,
+ * `(1.5).halve()` -> `cc_double_halve(1.5)`). Returns the mangled family
+ * name (`long long` -> `long_long`) for an admitted scalar base, NULL
+ * otherwise. Leading cv-qualifiers are erased (value receivers take a
+ * copy). `char` stays out — the cstr print family owns `cc_char_*` with
+ * pointer receivers; unsigned/signed spellings stay out (fail closed). */
+static inline const char* cc_ufcs_scalar_recv_family(const char* type_name) {
+    const char* t = type_name;
+    if (!t) return NULL;
+    for (;;) {
+        while (*t == ' ' || *t == '\t') t++;
+        if (strncmp(t, "const ", 6) == 0) { t += 6; continue; }
+        if (strncmp(t, "volatile ", 9) == 0) { t += 9; continue; }
+        break;
+    }
+    if (strcmp(t, "double") == 0) return "double";
+    if (strcmp(t, "float") == 0) return "float";
+    if (strcmp(t, "int") == 0) return "int";
+    if (strcmp(t, "short") == 0 || strcmp(t, "short int") == 0) return "short";
+    if (strcmp(t, "long") == 0 || strcmp(t, "long int") == 0) return "long";
+    if (strcmp(t, "long long") == 0 || strcmp(t, "long long int") == 0) return "long_long";
+    return NULL;
+}
+
 /* Resolve builtin channel UFCS lowering from receiver type + method + mode. */
 static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
                                                  const char* method,

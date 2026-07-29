@@ -1,0 +1,179 @@
+/* Destination-aware dynamic UFCS sink (.ufcs_dynamic2): at
+ * `T name = recv.method(args)` the declared destination joins
+ * resolution — the call lowers through `<sink>_<mangled T>` when that
+ * variant is declared, and through the plain sink otherwise. No sigil
+ * is involved in dispatch: plain assignment composes the same way.
+ * Adversarial shapes: cv-qualified destinations, comments between `=`
+ * and the call, statement position (no destination), compound
+ * assignment (not a destination). */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct TestSink2 {
+    int calls_plain;
+    int calls_double;
+    double f_sum;
+    long long i_sum;
+} TestSink2;
+
+typedef struct TS2Arg {
+    int kind; /* 0=i 1=f */
+    long long i;
+    double f;
+} TS2Arg;
+
+static TS2Arg ts2_arg_i(long long v) {
+    TS2Arg a = {0};
+    a.i = v;
+    return a;
+}
+static TS2Arg ts2_arg_f(double v) {
+    TS2Arg a = {0};
+    a.kind = 1;
+    a.f = v;
+    return a;
+}
+
+#define TS2_ARG(x) _Generic((x), double: ts2_arg_f, float: ts2_arg_f, \
+                            default: ts2_arg_i)(x)
+
+static void ts2_core(TestSink2 *t, int argc, va_list ap) {
+    int i;
+    t->f_sum = 0;
+    t->i_sum = 0;
+    for (i = 0; i < argc; i++) {
+        TS2Arg a = va_arg(ap, TS2Arg);
+        if (a.kind == 1) t->f_sum += a.f;
+        else t->i_sum += a.i;
+    }
+}
+
+static int ts2_call(TestSink2 *t, const char *method, int argc, ...) {
+    va_list ap;
+    va_start(ap, argc);
+    ts2_core(t, argc, ap);
+    va_end(ap);
+    t->calls_plain++;
+    if (strcmp(method, "foo") == 0) return 42;
+    return -1;
+}
+
+/* Destination-typed variant: selected whenever the declared destination
+ * is `double`. Answers with a value the plain sink can't produce so the
+ * dispatched path is observable. */
+static double ts2_call_double(TestSink2 *t, const char *method, int argc, ...) {
+    va_list ap;
+    va_start(ap, argc);
+    ts2_core(t, argc, ap);
+    va_end(ap);
+    t->calls_double++;
+    (void)method;
+    return t->f_sum + 0.25;
+}
+
+static int test_sink2_real(TestSink2 *t) {
+    (void)t;
+    return 7;
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("TestSink2", (CCTypeHooks){
+        .ufcs_dynamic2 = cc_type_dynamic_call("ts2_call", "TS2_ARG"),
+    });
+}
+#endif
+
+int main(void) {
+    TestSink2 w = {0};
+    TestSink2 *p = &w;
+
+    /* Real method wins over the sink; destination never overrides it. */
+    int r = w.real();
+    assert(r == 7);
+
+    /* Plain assignment, `double` destination: the destination-typed
+     * variant fires — no sigil anywhere in sight. */
+    double d = w.foo(2.5, 1.5);
+    assert(d == 4.25);
+    assert(w.calls_double == 1);
+    assert(w.calls_plain == 0);
+
+    /* Destination with no declared variant: plain sink. */
+    long long n = w.foo(3);
+    assert(n == 42);
+    assert(w.calls_plain == 1);
+
+    /* Statement position: no destination, plain sink. */
+    w.ping();
+    assert(w.calls_plain == 2);
+
+    /* cv-qualified destination composes the unqualified variant. */
+    const double cd = w.foo(1.0);
+    assert(cd == 1.25);
+    assert(w.calls_double == 2);
+
+    /* Comment between `=` and the call doesn't blind the harvest. */
+    double k = /* dest */ w.foo(4.0);
+    assert(k == 4.25);
+    assert(w.calls_double == 3);
+
+    /* Compound assignment is not a declaration: plain sink. */
+    long long acc = 0;
+    acc += w.foo(5);
+    assert(acc == 42);
+    assert(w.calls_plain == 3);
+
+    /* Pointer receiver with a double destination composes too. */
+    double pd = p->foo(2.0);
+    assert(pd == 2.25);
+    assert(w.calls_double == 4);
+
+    /* Reassignment: the destination is the lvalue's declared type. */
+    d = w.foo(6.0);
+    assert(d == 6.25);
+    assert(w.calls_double == 5);
+
+    /* Reassigned lvalue with no declared variant: plain sink. */
+    n = w.foo(4);
+    assert(n == 42);
+    assert(w.calls_plain == 4);
+
+    /* Subexpression: an operand has no single expected type, so the
+     * statement head is not its destination — plain sink even when the
+     * call is leftmost in the RHS. */
+    double sub = w.foo(1.0) + 100.0;
+    assert(sub == 142.0);
+    assert(w.calls_plain == 5);
+    assert(w.calls_double == 5);
+
+    /* Cast directly wrapping the call is a spelled destination: it
+     * composes and is absorbed (the variant already returns the
+     * spelled type). */
+    double c1 = (double)w.foo(5.5);
+    assert(c1 == 5.75);
+    assert(w.calls_double == 6);
+
+    /* ... including inside a larger expression — the cast is the
+     * operand's own destination. */
+    double c2 = 1.0 + (double)w.foo(2.0);
+    assert(c2 == 3.25);
+    assert(w.calls_double == 7);
+
+    /* Extra parens around the cast expression don't blind it. */
+    double c3 = ((double)w.foo(3.0));
+    assert(c3 == 3.25);
+    assert(w.calls_double == 8);
+
+    /* Cast to a type with no declared variant keeps its ordinary C
+     * meaning on the plain sink's return. */
+    long long c4 = (long long)w.foo(9);
+    assert(c4 == 42);
+    assert(w.calls_plain == 6);
+
+    printf("ok\n");
+    return 0;
+}

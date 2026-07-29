@@ -304,6 +304,15 @@ typedef struct {
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
     CCTypeDynamicHook ufcs_dynamic;
+    /* Destination-aware variant: wherever a typed destination is
+     * visible (`T name = recv.method(args)`, an assignment to a
+     * resolvable lvalue, or a cast `(T)recv.method(args)`) the
+     * destination joins resolution — the sink callee composes as
+     * <callee>_<mangled dest type> when that function is declared
+     * (compose-then-verify; plain callee otherwise). A composed cast
+     * is absorbed: it spells the destination, performs no conversion,
+     * and never consumes a Result. No sigil involved. */
+    CCTypeDynamicHook ufcs_dynamic2;
     CCTypeNicheHook niche;
 } CCTypeHooks;
 

@@ -142,12 +142,20 @@ static int cc__emit_container_cc_type_info(char** buf, size_t* len, size_t* cap,
 static void cc__format_vec_container_decl(char** buf, size_t* len, size_t* cap,
                                           const CCTypeInstantiation* inst) {
     char line[512];
+    char slice_name[256];
     const char* mangled_elem;
     if (!inst || !inst->type1 || !inst->mangled_name) return;
     mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
     if (strcmp(mangled_elem, "char") == 0) return;
-    snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n",
-             inst->type1, inst->mangled_name);
+    /* Elements with a declared slice instance get the typed `as_slice`
+     * (returns CCSlice_<elem>); others keep the erased view. */
+    if (cc_slice_spec_instance_for_elem(inst->type1, slice_name,
+                                        sizeof(slice_name)) == 0)
+        snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA_TSLICE(%s, %s, %s)\n",
+                 inst->type1, inst->mangled_name, slice_name);
+    else
+        snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n",
+                 inst->type1, inst->mangled_name);
     cc__sb_append_cstr_local(buf, len, cap, line);
     cc__emit_container_cc_type_info(buf, len, cap, inst->mangled_name);
 }

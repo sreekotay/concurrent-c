@@ -54,9 +54,39 @@ list; a slice erased to plain `CCSlice` (via `bytes()` or `.base`)
 marshals as `str`. Non-scalar instances have no marshal arm and fail
 at compile time.
 
-Extraction is explicit: `.as_i64() !>`, `.as_f64() !>`, `.as_bool() !>`,
-`.as_slice(&arena) !>` (`str`/`bytes` copied into the arena). Anything
-else stays a `CCPyObj`.
+`CCPyObj`'s dynamic sink is destination-aware (`.ufcs_dynamic2`):
+wherever a typed destination is visible — a declaration
+`T name = obj.method(args…)`, an assignment to a resolvable lvalue, or
+a cast `(T)obj.method(args…)` directly wrapping the call — the
+destination joins UFCS resolution, and the call lowers through the
+library's destination-typed variant (`cc_py_obj_callm_double`,
+`_float`, `_int`, `_int64_t`, `_long_long`) when one is declared. The
+variant runs the same call, extracts the destination type, and releases
+the intermediate object — it never reaches user space:
+
+```c
+double v = math.sqrt(2.0) !>;
+int    i = (int)math.sqrt(2.0) !>;
+```
+
+The variant returns `T !>(CCPyError)`, so the site consumes it like any
+Result; a composed cast is absorbed — it spells the destination and
+performs no conversion, and it never consumes the Result (the sigil
+does). Declaration and assignment destinations apply only when the call
+is the whole right-hand side — an operand of a larger expression has no
+single expected type in C; a cast is its own destination anywhere.
+Destinations without a declared variant lower through the plain sink
+and keep the `CCPyObj` Result.
+
+Extraction semantics are the library's: `double`/`float` accept any
+Python number (`float` narrows); integer destinations extract Python
+ints exactly and truncate Python floats toward zero (C cast and Python
+`int()` agree); a result outside the destination's range is a
+`CCPyError`, not a truncation.
+
+Explicit extraction remains for held objects and arena-backed forms:
+`.as_i64() !>`, `.as_f64() !>`, `.as_slice(&arena) !>` (`str`/`bytes`
+copied into the arena). Anything else stays a `CCPyObj`.
 
 Reference lifetime rides the destroy machinery: `CCPyObj`'s registered
 destroy hook releases the reference under its home's lock, so `@destroy`

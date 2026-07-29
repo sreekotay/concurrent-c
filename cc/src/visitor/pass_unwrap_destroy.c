@@ -777,10 +777,15 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
         int decl_is_ptr = 0;
         int has_as_hooks = 0;
         type_key[0] = '\0';
+        /* Line-ledger markers (`/@CC_LN ...@/`) and other comments can
+         * precede the first statement of a materialized unit; the type
+         * span must start at code, not at the marker. Emission anchors
+         * keep the original stmt_a. */
+        size_t ty_stmt_a = cc_skip_ws_and_comments(src, i, stmt_a);
         if (have_name) {
-            /* Type span is [stmt_a .. name_a), trimmed of trailing ws. */
+            /* Type span is [ty_stmt_a .. name_a), trimmed of trailing ws. */
             size_t type_b = name_a;
-            while (type_b > stmt_a && isspace((unsigned char)src[type_b - 1])) type_b--;
+            while (type_b > ty_stmt_a && isspace((unsigned char)src[type_b - 1])) type_b--;
             /* Prefer `@comptime cc_type_register` hooks over the hardcoded
              * builtin-owned trio.  The builtin types (CCNursery*, CCArena,
              * CCChan*) register themselves via cc_type_register too, so
@@ -788,12 +793,12 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
              * lowering uniformly.  The hardcoded list remains as a fallback
              * for call sites where no symbol table is installed (e.g.
              * out-of-tree tools invoking the pass directly). */
-            if (!cc__ud_symtab_owned_hooks(src, stmt_a, type_b,
+            if (!cc__ud_symtab_owned_hooks(src, ty_stmt_a, type_b,
                                            &pre_hook, &post_hook, &post_pass_addr)) {
-                cc__ud_builtin_owned_hooks(src, stmt_a, type_b,
+                cc__ud_builtin_owned_hooks(src, ty_stmt_a, type_b,
                                            &pre_hook, &post_hook, &post_pass_addr);
             }
-            if (cc__ud_normalize_type_name(src, stmt_a, type_b,
+            if (cc__ud_normalize_type_name(src, ty_stmt_a, type_b,
                                            type_key, sizeof(type_key),
                                            &decl_is_ptr) == 0) {
                 has_as_hooks = cc__ud_type_has_as_destroy_hooks(type_key);
@@ -807,7 +812,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             const char* f = input_path ? input_path : "<input>";
             if (have_name) {
                 /* Trim the declared type span for the diagnostic. */
-                size_t type_a = stmt_a;
+                size_t type_a = ty_stmt_a;
                 size_t type_b = name_a;
                 while (type_a < type_b && isspace((unsigned char)src[type_a])) type_a++;
                 while (type_b > type_a && isspace((unsigned char)src[type_b - 1])) type_b--;

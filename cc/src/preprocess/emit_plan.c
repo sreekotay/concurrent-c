@@ -15,6 +15,7 @@
 #include "comptime/hook_compile.h"
 #include "preprocess/emit_limits.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/type_registry.h"
 #include "preprocess/template_scan.h"
 #include "util/path.h"
 #include "util/text.h"
@@ -2140,10 +2141,18 @@ void cc_emit_plan_fprint_container_epilogue(FILE* out) {
  */
 
 static void cc__builtin_vec_decl(FILE* out, const CCTypeInstantiation* inst) {
+    char slice_name[256];
     if (!out || !inst || !inst->type1 || !inst->mangled_name) return;
     const char* mangled_elem = inst->mangled_name + 6;
     if (strcmp(mangled_elem, "char") == 0) return;
-    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+    /* Elements with a declared slice instance get the typed `as_slice`
+     * (returns CCSlice_<elem>); others keep the erased view. */
+    if (cc_slice_spec_instance_for_elem(inst->type1, slice_name,
+                                        sizeof(slice_name)) == 0)
+        fprintf(out, "CC_VEC_DECL_ARENA_TSLICE(%s, %s, %s)\n",
+                inst->type1, inst->mangled_name, slice_name);
+    else
+        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
 }
 
 /* Map key-type -> (hash, eq) selection, as data rather than control flow.

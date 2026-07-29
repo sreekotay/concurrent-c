@@ -70,6 +70,14 @@ int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name
                                       const char** out_callee,
                                       const char** out_wrap);
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name);
+/* .ufcs_dynamic2: destination-aware sink — wherever a typed destination
+ * is visible (`T name = recv.method(…)`, an assignment to a resolvable
+ * lvalue, or a cast `(T)recv.method(…)`) the callee composes as
+ * <callee>_<mangled dest> when declared. */
+int cc_type_registry_set_dynamic_sink2(CCTypeRegistry* reg, const char* type_name,
+                                       const char* callee, const char* wrap);
+int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
+                                             const char* type_name);
 /* Typed slice instances (CC_DECL_SLICE_SPEC family). The rewriter
  * registers every instance it names; lookup recovers the snake prefix
  * (cc_slice_double) and element spelling. Session-global. Returns 0 on
@@ -77,6 +85,12 @@ int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name
 int cc_slice_spec_register(const char* name, const char* snake, const char* elem);
 int cc_slice_spec_lookup(const char* type_name,
                          const char** out_snake, const char** out_elem);
+/* Slice instance for a container element type: "double" ->
+ * "CCSlice_double" when that instance is known declared (a scalar
+ * pre-instance of cc_slice.cch, or a session-registered user spec).
+ * Returns 0 and writes the instance name, -1 otherwise. */
+int cc_slice_spec_instance_for_elem(const char* elem,
+                                    char* name_out, size_t name_sz);
 /* Unique `@as` field of `outer` whose field type matches `want_type`
  * (cv/`struct ` stripped; pointer stars on want_type ignored).
  * Direct embeds only. Returns 0 and sets *out_field_name; -1 none; -2 ambiguous. */

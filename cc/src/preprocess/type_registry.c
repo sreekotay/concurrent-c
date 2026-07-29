@@ -174,6 +174,7 @@ typedef struct {
     char* type_name;
     char* callee;
     char* wrap;
+    int dest_aware; /* .ufcs_dynamic2: sink callee composes with dest type */
 } CCDynSinkEntry;
 static _Thread_local CCDynSinkEntry* g_dyn_sinks = NULL;
 static _Thread_local size_t g_dyn_count = 0;
@@ -200,6 +201,7 @@ int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name
     g_dyn_sinks[g_dyn_count].type_name = strdup(stripped);
     g_dyn_sinks[g_dyn_count].callee = strdup(callee);
     g_dyn_sinks[g_dyn_count].wrap = strdup(wrap);
+    g_dyn_sinks[g_dyn_count].dest_aware = 0;
     if (!g_dyn_sinks[g_dyn_count].type_name || !g_dyn_sinks[g_dyn_count].callee ||
         !g_dyn_sinks[g_dyn_count].wrap)
         return -1;
@@ -226,6 +228,34 @@ int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name
 
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name) {
     return cc_type_registry_get_dynamic_sink(reg, type_name, NULL, NULL) == 0;
+}
+
+int cc_type_registry_set_dynamic_sink2(CCTypeRegistry* reg, const char* type_name,
+                                       const char* callee, const char* wrap) {
+    char stripped[256];
+    int rc = cc_type_registry_set_dynamic_sink(reg, type_name, callee, wrap);
+    if (rc != 0) return rc;
+    cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
+    for (size_t i = 0; i < g_dyn_count; ++i) {
+        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) {
+            g_dyn_sinks[i].dest_aware = 1;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
+                                             const char* type_name) {
+    char stripped[256];
+    (void)reg;
+    if (!type_name || !type_name[0]) return 0;
+    cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
+    for (size_t i = 0; i < g_dyn_count; ++i) {
+        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0)
+            return g_dyn_sinks[i].dest_aware;
+    }
+    return 0;
 }
 
 /* Typed slice instances: `T[:]` with a non-char element type lowers to
@@ -280,6 +310,32 @@ int cc_slice_spec_lookup(const char* type_name,
         }
     }
     return -1;
+}
+
+int cc_slice_spec_instance_for_elem(const char* elem,
+                                    char* name_out, size_t name_sz) {
+    /* Mirrors the scalar pre-instances cc_slice.cch always declares
+     * (mangled spellings). Anything else must have been registered by
+     * the rewriter — which only happens for instances the source names,
+     * whose declarations the user supplies via CC_DECL_SLICE_SPEC. */
+    static const char* const builtins[] = {
+        "short", "int", "long", "long_long",
+        "int16_t", "int32_t", "int64_t", "float", "double", NULL,
+    };
+    char stripped[256];
+    char mangled[256];
+    int known = 0;
+    if (!elem || !elem[0] || !name_out || name_sz == 0) return -1;
+    cc__strip_type_spelling(elem, stripped, sizeof(stripped));
+    cc_result_spec_mangle_type(stripped, strlen(stripped), mangled, sizeof(mangled));
+    if (!mangled[0]) return -1;
+    if ((size_t)snprintf(name_out, name_sz, "CCSlice_%s", mangled) >= name_sz)
+        return -1;
+    for (size_t i = 0; builtins[i]; ++i) {
+        if (strcmp(mangled, builtins[i]) == 0) { known = 1; break; }
+    }
+    if (!known && cc_slice_spec_lookup(name_out, NULL, NULL) != 0) return -1;
+    return 0;
 }
 
 void cc_type_registry_clear(CCTypeRegistry* reg) {
@@ -1288,6 +1344,8 @@ static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
                 const char* fhit = (const char*)memmem(src + body_a, p - body_a,
                                                        field, sizeof(field) - 1);
                 if (fhit) {
+                    int f_dest = (fhit + sizeof(field) - 1 < src + p &&
+                                  fhit[sizeof(field) - 1] == '2');
                     /* Extract cc_type_dynamic_call("callee", "wrap"). */
                     static const char call[] = "cc_type_dynamic_call";
                     const char* chit = (const char*)memmem(
@@ -1317,8 +1375,12 @@ static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
                         }
                     }
                     if (callee[0] && wrapm[0]) {
-                        (void)cc_type_registry_set_dynamic_sink(reg, type_name,
-                                                                callee, wrapm);
+                        if (f_dest)
+                            (void)cc_type_registry_set_dynamic_sink2(reg, type_name,
+                                                                     callee, wrapm);
+                        else
+                            (void)cc_type_registry_set_dynamic_sink(reg, type_name,
+                                                                    callee, wrapm);
                     }
                 }
             }

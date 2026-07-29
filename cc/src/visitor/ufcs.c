@@ -2084,6 +2084,30 @@ static int emit_desugared_call(char* out,
             return snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
         }
     }
+    /* Scalar value receiver (`d.halve()`): `cc_<mangled type>_<method>`,
+     * receiver by value (never &d). Composes only when that function is
+     * verifiably declared and the plain `<type>_<method>` spelling is not
+     * (compose-then-verify; a declared legacy spelling keeps winning
+     * through normal dispatch). */
+    if (!recv_is_ptr && ctx.recv_type_name) {
+        const char* fam = cc_ufcs_scalar_recv_family(ctx.recv_type_name);
+        if (fam) {
+            char scalar_callee[256];
+            char legacy_callee[256];
+            int scalar_ok =
+                (size_t)snprintf(scalar_callee, sizeof(scalar_callee),
+                                 "cc_%s_%s", fam, method) < sizeof(scalar_callee);
+            int legacy_real =
+                cc_ufcs_compose_default_callee(legacy_callee, sizeof(legacy_callee),
+                                               ctx.recv_type_name, method) &&
+                cc__ufcs_fn_name_is_real(legacy_callee);
+            if (scalar_ok && !legacy_real && cc__ufcs_fn_name_is_real(scalar_callee)) {
+                if (!has_args || !args_rewritten || !args_rewritten[0])
+                    return snprintf(out, cap, "%s(%s)", scalar_callee, recv);
+                return snprintf(out, cap, "%s(%s, %s)", scalar_callee, recv, args_rewritten);
+            }
+        }
+    }
     if (ctx.recv_type_name &&
         (strcmp(ctx.recv_type_name, "CCNursery") == 0 || strcmp(ctx.recv_type_name, "CCNursery*") == 0) &&
         strcmp(method, "close_on") == 0) {

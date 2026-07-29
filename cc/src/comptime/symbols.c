@@ -1004,6 +1004,30 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             }
             continue;
         }
+        if (cc__match_kw_reg(src, obj_r, p, "ufcs_dynamic2")) {
+            char dyn_callee[256];
+            char dyn_wrap[256];
+            p += strlen("ufcs_dynamic2");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p++;
+            if (!cc__parse_helper_call_2(src, obj_r, &p, "cc_type_dynamic_call",
+                                         dyn_callee, sizeof(dyn_callee),
+                                         dyn_wrap, sizeof(dyn_wrap))) {
+                fprintf(stderr,
+                        "%s: error: malformed .ufcs_dynamic2 = "
+                        "cc_type_dynamic_call(\"callee\", \"argwrap\") for '%s'\n",
+                        input_path ? input_path : "<input>", type_name);
+                return -1;
+            }
+            if (cc_symbols_set_type_ufcs_dynamic(t, type_name, dyn_callee,
+                                                 dyn_wrap) != 0)
+                return -1;
+            (void)cc_type_registry_set_dynamic_sink2(cc_type_registry_get_global(),
+                                                     type_name, dyn_callee,
+                                                     dyn_wrap);
+            continue;
+        }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs_dynamic")) {
             char dyn_callee[256];
             char dyn_wrap[256];

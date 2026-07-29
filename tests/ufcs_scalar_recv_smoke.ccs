@@ -1,0 +1,48 @@
+/* Scalar value receivers for UFCS: `d.halve()` and parenthesized numeric
+ * literals `(1.5).halve()` lower to the `cc_<mangled type>_<method>`
+ * family with the receiver passed by VALUE (never `&`). The literal's C
+ * type is read lexically from its suffix — no suffix with `.`/exponent →
+ * double, `f` → float, bare integer → int, `LL` → long long; one leading
+ * unary minus is allowed inside the parens. The composed callee is used
+ * only when the function is verifiably declared — these are ordinary
+ * declarations written here, nothing is auto-generated. */
+#include <assert.h>
+#include <stdio.h>
+
+static double cc_double_halve(double x) { return x / 2.0; }
+static float cc_float_halve(float x) { return x / 2.0f; }
+static int cc_int_twice(int x) { return x * 2; }
+static long long cc_long_long_twice(long long x) { return x * 2; }
+static double cc_double_bump(double x) { x += 1.0; return x; }
+static double cc_double_scale(double x, double k) { return x * k; }
+
+int main(void) {
+    /* Parenthesized literal receivers, typed by suffix. */
+    assert((1.5).halve() == 0.75);
+    assert((2.5f).halve() == 1.25f);
+    assert((21).twice() == 42);
+    assert((21LL).twice() == 42);
+
+    /* Leading unary minus inside the parens. */
+    assert((-1.5).halve() == -0.75);
+
+    /* Identifier receiver of scalar declared type. */
+    double sr_ident = 3.0;
+    assert(sr_ident.halve() == 1.5);
+
+    /* Scalar-receiver call as an operand of a larger expression. */
+    double sr_expr = (1.5).halve() + 1.0;
+    assert(sr_expr == 1.75);
+
+    /* Method arguments ride along after the by-value receiver. */
+    assert((2.0).scale(3.0) == 6.0);
+
+    /* By value: the callee mutates its copy, never the caller's variable. */
+    double sr_keep = 10.0;
+    double sr_got = sr_keep.bump();
+    assert(sr_got == 11.0);
+    assert(sr_keep == 10.0);
+
+    printf("ok\n");
+    return 0;
+}

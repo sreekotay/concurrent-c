@@ -147,7 +147,12 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
  */
-#define CC_VEC_DECL_ARENA(T, Name)                                                \
+/* Everything but the slice view. `CC_VEC_DECL_ARENA` adds the erased
+ * `Name##_as_slice`; `CC_VEC_DECL_ARENA_TSLICE` adds a typed one
+ * returning the element's `CCSlice_<T>` instance (emitted by the
+ * compiler when the element has a declared slice spec; usable directly
+ * when instantiating by hand next to a `CC_DECL_SLICE_SPEC`). */
+#define CC_VEC_DECL_ARENA_CORE(T, Name)                                           \
     typedef struct {                                                              \
         T *data;                                                                  \
         size_t len;                                                               \
@@ -213,10 +218,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
         cc_vec_clear((CCVec *)v);                                                 \
     }                                                                             \
                                                                                   \
-    static inline CCSlice Name##_as_slice(const Name *v) {                        \
-        return cc_vec_as_slice((const CCVec *)v);                                 \
-    }                                                                             \
-                                                                                  \
     static inline uint64_t Name##_provenance(const Name *v) {                     \
         return cc_vec_provenance((const CCVec *)v);                               \
     }                                                                             \
@@ -228,6 +229,24 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
+
+/* Erased slice view: element-count len, provenance/cap preserved. */
+#define CC_VEC_DECL_ARENA(T, Name)                                                \
+    CC_VEC_DECL_ARENA_CORE(T, Name)                                               \
+    static inline CCSlice Name##_as_slice(const Name *v) {                        \
+        return cc_vec_as_slice((const CCVec *)v);                                 \
+    }
+
+/* Typed slice view: `as_slice` returns the element's slice instance
+ * (element-count len; erased contexts go through the instance's scaled
+ * `@as` autocast, which converts to bytes). */
+#define CC_VEC_DECL_ARENA_TSLICE(T, Name, SliceName)                              \
+    CC_VEC_DECL_ARENA_CORE(T, Name)                                               \
+    static inline SliceName Name##_as_slice(const Name *v) {                      \
+        SliceName s;                                                              \
+        s.base = cc_vec_as_slice((const CCVec *)v);                               \
+        return s;                                                                 \
+    }
 
 /* Backwards-compat alias: CC_VEC_DECL_ARENA_FULL used to take an extra OptT
    parameter for the optional return type. Optionals are retired; the third

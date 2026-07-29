@@ -3,22 +3,23 @@
 
 CCPy py = cc_py(&a) !> @destroy;
 
-/* Unresolved methods on CCPyObj dispatch dynamically (.ufcs_dynamic):
+/* Unresolved methods on CCPyObj dispatch dynamically (.ufcs_dynamic2):
  * the method identifier becomes the Python attribute; arguments marshal
- * by static type. Lowered form: cc_py_obj_callm(&m, "sqrt", 1, ...). */
+ * by static type. The declared destination joins resolution — at
+ * `double v = …` the call lowers to the library's destination-typed
+ * variant (cc_py_obj_callm_double), which extracts the scalar and
+ * releases the intermediate object, so no CCPyObj binding or @destroy
+ * appears. */
 CCPyObj math = py.import("math") !> @destroy;
-CCPyObj root = math.sqrt(2.0) !> @destroy;
-double v = root.as_f64() !>;
+double v = math.sqrt(2.0) !>;
 @string(`math.sqrt(2.0) = ${v}`, &a).println() !>;
 
-CCPyObj p = math.pow(2.0, 10) !> @destroy;
-double pv = p.as_f64() !>;
+double pv = math.pow(2.0, 10) !>;
 @string(`math.pow(2,10) = ${pv}`, &a).println() !>;
 
 CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
-CCPyObj mean = stats.mean(xs) !> @destroy;
-double mv = mean.as_f64() !>;
+double mv = stats.mean(xs) !>;
 @string(`statistics.mean = ${mv}`, &a).println() !>;
 
 CCPyObj sys = py.import("sys") !> @destroy;

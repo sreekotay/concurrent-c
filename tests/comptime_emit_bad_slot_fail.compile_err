@@ -2,8 +2,8 @@
 # use site, with the failing compiler diagnostic and a note pointing at the
 # factory definition with file:line.  This .ccs factory has no #line directive,
 # so the note falls back to the use-site input file and the buffer line where
-# `bad_slot_factory` is defined (line 8).
+# `bad_slot_factory` is defined (line 8).  The _Generic mismatch wording
+# is the host compiler's and varies (gcc/clang/tcc), so it is not pinned.
 comptime_emit_bad_slot_fail.ccs:23:5: error: type: compiled generic factory 'BadSlot' failed to compile
-does not match any association
 note: in @comptime factory 'bad_slot_factory' at
 comptime_emit_bad_slot_fail.ccs:8

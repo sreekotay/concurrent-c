@@ -1,0 +1,51 @@
+/* Typed-vec slice views: `as_slice` on a CCVec whose element has a
+ * declared slice instance returns that instance (CCVec_double →
+ * CCSlice_double, element-count len), so instance methods and the
+ * scaled `@as` erasure compose. Elements without a spec (structs)
+ * keep the erased CCSlice view. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+static size_t take_erased(CCSlice view) { return view.len; }
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 16);
+
+    CCVec::[double] v = cc_vec_new::[double](&arena);
+    v.push(1.5);
+    v.push(2.5);
+    v.push(42.0);
+
+    /* Typed view: element-count len, typed at/sub. */
+    CCSlice_double s = v.as_slice();
+    assert(s.len() == 3);
+    assert(s.at(1) == 2.5);
+    CCSlice_double mid = s.sub(0, 2);
+    assert(mid.len() == 2);
+
+    /* bytes() erases scaled: len and alen in bytes. */
+    CCSlice erased = s.bytes();
+    assert(erased.len == 3 * sizeof(double));
+
+    /* By-value @as autocast to a CCSlice param erases scaled too —
+     * the as_slice use alone names the instance (no double[:] decl
+     * appears in this file). */
+    assert(take_erased(s) == 3 * sizeof(double));
+
+    /* Struct element: no slice spec, as_slice stays erased with
+     * element-count len. */
+    {
+        CCVec::[Pt] pv = cc_vec_new::[Pt](&arena);
+        Pt p = {1, 2};
+        pv.push(p);
+        CCSlice es = pv.as_slice();
+        assert(es.len == 1);
+    }
+
+    printf("ok\n");
+    cc_arena_destroy(&arena);
+    return 0;
+}
