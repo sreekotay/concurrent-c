@@ -10144,11 +10144,14 @@ static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     return 0;
 }
 
+static void cc__family_members_reset(void);
+
 void cc_reset_included_cch_sources(void) {
     for (size_t i = 0; i < g_included_cch_source_count; i++)
         free(g_included_cch_sources[i]);
     g_included_cch_source_count = 0;
     cc_ufcs_reset_dest_trap_dedup();
+    cc__family_members_reset();
 }
 
 static int cc__register_included_cch_source(const char* source_path) {
@@ -10412,6 +10415,72 @@ typedef struct {
 } CCFamilyMemberCache;
 static _Thread_local CCFamilyMemberCache g_family_members[8];
 
+static void cc__family_members_reset(void) {
+    memset(g_family_members, 0, sizeof(g_family_members));
+}
+
+/* Open a family header for member-set / return-type scans. Tries the
+ * registered include walk, then paths derived from it, then the repo
+ * layout and CC_INCLUDE_PATH — so force-injected Result support
+ * (`#include <ccc/cc_result.cch>` with no user `.cch` include) still
+ * yields the derived member set. */
+static int cc__family_header_open(const char* header_suffix,
+                                  char** out_buf, size_t* out_len) {
+    size_t h, pl, sl;
+    char repo_root[PATH_MAX];
+    char cand[PATH_MAX];
+    const char* env_inc;
+    if (!header_suffix || !header_suffix[0] || !out_buf || !out_len) return -1;
+    *out_buf = NULL;
+    *out_len = 0;
+    sl = strlen(header_suffix);
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        const char* path = g_included_cch_sources[h];
+        if (!path) continue;
+        pl = strlen(path);
+        if (pl < sl || strcmp(path + pl - sl, header_suffix) != 0) continue;
+        if (cc__read_file_text(path, out_buf, out_len) == 0 && *out_buf) return 0;
+    }
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        const char* path = g_included_cch_sources[h];
+        const char* mark;
+        if (!path) continue;
+        mark = strstr(path, "/include/ccc/");
+        if (!mark) continue;
+        if ((size_t)snprintf(cand, sizeof(cand), "%.*s/include/ccc/%s",
+                             (int)(mark - path), path, header_suffix) >=
+            sizeof(cand))
+            continue;
+        if (cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) return 0;
+    }
+    repo_root[0] = '\0';
+    if (cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root)) && repo_root[0]) {
+        if ((size_t)snprintf(cand, sizeof(cand), "%s/cc/include/ccc/%s",
+                             repo_root, header_suffix) < sizeof(cand) &&
+            cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf)
+            return 0;
+    }
+    env_inc = getenv("CC_INCLUDE_PATH");
+    if (env_inc && env_inc[0]) {
+        char* paths = strdup(env_inc);
+        char* p = paths;
+        while (p && *p) {
+            char* sep = strchr(p, ':');
+            if (sep) *sep = '\0';
+            if (*p &&
+                (size_t)snprintf(cand, sizeof(cand), "%s/ccc/%s", p,
+                                 header_suffix) < sizeof(cand) &&
+                cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) {
+                free(paths);
+                return 0;
+            }
+            p = sep ? sep + 1 : NULL;
+        }
+        free(paths);
+    }
+    return -1;
+}
+
 static void cc__family_scan_members(const char* fsrc, size_t fn,
                                     CCFamilyMemberCache* slot) {
     size_t i;
@@ -10444,9 +10513,10 @@ static void cc__family_scan_members(const char* fsrc, size_t fn,
 }
 
 static const char* cc__family_members_csv(const char* header_suffix) {
-    size_t ci, h;
+    size_t ci;
     CCFamilyMemberCache* slot = NULL;
-    int found = 0;
+    char* fsrc = NULL;
+    size_t fn = 0;
     for (ci = 0; ci < sizeof(g_family_members) / sizeof(g_family_members[0]); ci++) {
         if (g_family_members[ci].loaded &&
             strcmp(g_family_members[ci].suffix, header_suffix) == 0)
@@ -10457,40 +10527,9 @@ static const char* cc__family_members_csv(const char* header_suffix) {
     snprintf(slot->suffix, sizeof(slot->suffix), "%s", header_suffix);
     slot->csv[0] = 0;
     slot->loaded = 1;
-    for (h = 0; h < g_included_cch_source_count && !found; h++) {
-        const char* path = g_included_cch_sources[h];
-        size_t pl, sl;
-        char* fsrc = NULL;
-        size_t fn = 0;
-        if (!path) continue;
-        pl = strlen(path);
-        sl = strlen(header_suffix);
-        if (pl < sl || strcmp(path + pl - sl, header_suffix) != 0) continue;
-        if (cc__read_file_text(path, &fsrc, &fn) != 0 || !fsrc) continue;
+    if (cc__family_header_open(header_suffix, &fsrc, &fn) == 0 && fsrc) {
         cc__family_scan_members(fsrc, fn, slot);
         free(fsrc);
-        found = 1;
-    }
-    /* The header may not be in this TU's registered include walk (vec
-     * members arrive via emitted macros): derive its path from any
-     * registered ccc header's root. */
-    for (h = 0; h < g_included_cch_source_count && !found; h++) {
-        const char* path = g_included_cch_sources[h];
-        const char* mark;
-        char cand[PATH_MAX];
-        char* fsrc = NULL;
-        size_t fn = 0;
-        if (!path) continue;
-        mark = strstr(path, "/include/ccc/");
-        if (!mark) continue;
-        if ((size_t)snprintf(cand, sizeof(cand), "%.*s/include/ccc/%s",
-                             (int)(mark - path), path, header_suffix) >=
-            sizeof(cand))
-            continue;
-        if (cc__read_file_text(cand, &fsrc, &fn) != 0 || !fsrc) continue;
-        cc__family_scan_members(fsrc, fn, slot);
-        free(fsrc);
-        found = 1;
     }
     return slot->csv;
 }
@@ -10615,34 +10654,11 @@ int cc_ufcs_family_accepts_in_tu(const char* base, const char* method,
     return cc__ufcs_fn_name_in_text(src, n, ext);
 }
 
-/* Read the family header's text (registered include walk, or path
- * derived from any registered ccc header's root — same fallbacks as
- * the member-set scan). Caller frees. */
+/* Read the family header's text (same roots as the member-set scan).
+ * Caller frees. */
 static int cc__family_header_read(const char* header_suffix,
                                   char** out_buf, size_t* out_len) {
-    size_t h, pl, sl;
-    for (h = 0; h < g_included_cch_source_count; h++) {
-        const char* path = g_included_cch_sources[h];
-        if (!path) continue;
-        pl = strlen(path);
-        sl = strlen(header_suffix);
-        if (pl < sl || strcmp(path + pl - sl, header_suffix) != 0) continue;
-        if (cc__read_file_text(path, out_buf, out_len) == 0 && *out_buf) return 0;
-    }
-    for (h = 0; h < g_included_cch_source_count; h++) {
-        const char* path = g_included_cch_sources[h];
-        const char* mark;
-        char cand[PATH_MAX];
-        if (!path) continue;
-        mark = strstr(path, "/include/ccc/");
-        if (!mark) continue;
-        if ((size_t)snprintf(cand, sizeof(cand), "%.*s/include/ccc/%s",
-                             (int)(mark - path), path, header_suffix) >=
-            sizeof(cand))
-            continue;
-        if (cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) return 0;
-    }
-    return -1;
+    return cc__family_header_open(header_suffix, out_buf, out_len);
 }
 
 /* Raw return-type spelling of a family member: the token span before

@@ -2338,6 +2338,7 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
         /* Generic-family instances compose members and extensions as
          * <Instance>_<method>; other receivers use the snake twin. */
         int is_instance = (cc_slice_spec_lookup(base, NULL, NULL) == 0 ||
+                           strncmp(base, "CCResult_", 9) == 0 ||
                            strncmp(base, "CCVec_", 6) == 0 ||
                            strncmp(base, "ArrayMap_", 9) == 0 ||
                            strncmp(base, "Map_", 4) == 0);
