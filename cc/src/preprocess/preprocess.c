@@ -2150,6 +2150,8 @@ int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
 static int cc__call_return_type(const char* fname, const char* src, size_t n,
                                 char* out, size_t out_sz);
 static int cc__free_call_name_is_keyword(const char* s, size_t n);
+static int cc__fn_return_type(const char* src, size_t n, const char* name,
+                              char* out, size_t out_sz);
 static void cc__enumerate_family_variants(const char* src, size_t n,
                                           const char* prefix,
                                           char* out, size_t out_sz);
@@ -5975,6 +5977,301 @@ static char* cc__rewrite_container_surface_aliases(const char* src, size_t n) {
     return out;
 }
 
+/* Ok-type spelling for a concrete Result name, from the spec table
+ * (fallback: the mangled middle, which equals the spelling for
+ * single-token ok types like CCPyObj). */
+static CCResultSpecTable cc__result_specs;
+static int cc__result_ok_type_for(const char* concrete, char* out, size_t sz) {
+    size_t i;
+    if (!concrete || !out || sz == 0) return 0;
+    for (i = 0; i < cc__result_specs.count; i++) {
+        const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+        if (spec && spec->concrete_name[0] &&
+            strcmp(spec->concrete_name, concrete) == 0 && spec->ok_type[0]) {
+            snprintf(out, sz, "%s", spec->ok_type);
+            return 1;
+        }
+    }
+    if (strncmp(concrete, "CCResult_", 9) == 0) {
+        /* No spec entry: split the mangled middle at the LAST `_CC` --
+         * error types are CC-prefixed by convention (CCError, CCPyError,
+         * CCIoError, ...). The recovered ok segment is its mangled
+         * spelling, which equals the type spelling for single-token
+         * types; multiword ok types need the spec entry. */
+        const char* mid = concrete + 9;
+        const char* t = mid;
+        const char* last = NULL;
+        while ((t = strstr(t, "_CC")) != NULL) {
+            last = t;
+            t++;
+        }
+        if (last && last > mid && !last[strlen(last)] ) {
+            size_t ml = (size_t)(last - mid);
+            if (ml + 1 < sz) {
+                memcpy(out, mid, ml);
+                out[ml] = 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Fallible chains: `!>` is the link. Each hop unwraps, then the next
+ * dispatches on the unwrapped value:
+ *
+ *   py.a() !> .b() !>;              every hop spells its unwrap
+ *   py.a() !>(e) { ... } .b() !>;   per-link recovery
+ *
+ * Lowered by hoisting each linked hop to its own statement binding a
+ * temporary of the hop's ok type, so every `!>` stays in statement
+ * position with its written meaning (bare targets the enclosing
+ * @errhandler; handlers keep their control flow), and the final hop
+ * stays attached to the original destination -- destination-typed
+ * extraction works unchanged. Chains therefore live where statements
+ * do: at statement position or as the whole right-hand side of a
+ * declaration or assignment. Fires once the producing call is in
+ * lowered form (`F(args)` with a readable CCResult_* return); the
+ * engine loop alternates with the UFCS pass until neither changes.
+ * `?>` never links -- parenthesize instead. */
+static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
+    static _Thread_local int g_rc_tmp_id;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    size_t cur_stmt = 0; /* code position after the last ;/{/} (comment-aware) */
+    while (i + 1 < n) {
+        size_t sep_end, q, estart, eend, fs, fe, link_dot, stmt_head;
+        char fname[128];
+        char rt[256];
+        char okty[128];
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == ';' || src[i] == '{' || src[i] == '}') {
+            cur_stmt = i + 1;
+            i++;
+            continue;
+        }
+        if (src[i] != '!' || src[i + 1] != '>') { i++; continue; }
+        if (i > 0 && src[i - 1] == '!') { i += 2; continue; }
+        /* Separator: `!>` alone, or with `(e)` binder and/or `{...}`. */
+        sep_end = i + 2;
+        q = cc_skip_ws_and_comments(src, n, sep_end);
+        if (q < n && src[q] == '(') {
+            size_t pe;
+            if (!cc_find_matching_paren(src, n, q, &pe)) { i += 2; continue; }
+            q = cc_skip_ws_and_comments(src, n, pe + 1);
+            if (q >= n || src[q] != '{') { i += 2; continue; }
+        }
+        if (q < n && src[q] == '{') {
+            size_t be;
+            if (!cc_find_matching_brace(src, n, q, &be)) { i += 2; continue; }
+            sep_end = be + 1;
+        }
+        /* A link only when a call follows the separator. */
+        link_dot = cc_skip_ws_and_comments(src, n, sep_end);
+        if (link_dot >= n || src[link_dot] != '.') { i += 2; continue; }
+        q = cc_skip_ws_and_comments(src, n, link_dot + 1);
+        if (q >= n || !cc_is_ident_start(src[q])) { i += 2; continue; }
+        while (q < n && cc_is_ident_char(src[q])) q++;
+        q = cc_skip_ws_and_comments(src, n, q);
+        if (q >= n || src[q] != '(') { i += 2; continue; }
+        /* Producer: one lowered call `F(args)` ending just before `!>`. */
+        eend = i;
+        while (eend > last_emit && (src[eend - 1] == ' ' || src[eend - 1] == '\t' ||
+                                    src[eend - 1] == '\n' || src[eend - 1] == '\r'))
+            eend--;
+        if (eend <= last_emit || src[eend - 1] != ')') { i += 2; continue; }
+        {
+            int depth = 0;
+            size_t p = eend;
+            while (p > last_emit) {
+                p--;
+                if (src[p] == ')') depth++;
+                else if (src[p] == '(') {
+                    depth--;
+                    if (depth == 0) break;
+                }
+            }
+            if (depth != 0) { i += 2; continue; }
+            fe = p;
+            while (fe > last_emit && (src[fe - 1] == ' ' || src[fe - 1] == '\t'))
+                fe--;
+            fs = fe;
+            while (fs > last_emit && cc_is_ident_char(src[fs - 1])) fs--;
+            if (fs == fe || !cc_is_ident_start(src[fs])) { i += 2; continue; }
+            if (fs > last_emit &&
+                (src[fs - 1] == '.' || src[fs - 1] == '>')) { i += 2; continue; }
+            estart = fs;
+        }
+        if (fe - fs >= sizeof(fname)) { i += 2; continue; }
+        memcpy(fname, src + fs, fe - fs);
+        fname[fe - fs] = 0;
+        if (!cc__fn_return_type(src, n, fname, rt, sizeof(rt))) {
+            if (getenv("CC_DEBUG_RCHAIN"))
+                fprintf(stderr, "[rchain] no return type for '%s'\n", fname);
+            i += 2; continue;
+        }
+        if (strncmp(rt, "CCResult_", 9) != 0) {
+            if (getenv("CC_DEBUG_RCHAIN"))
+                fprintf(stderr, "[rchain] '%s' returns '%s' (not Result)\n", fname, rt);
+            i += 2; continue;
+        }
+        if (!cc__result_ok_type_for(rt, okty, sizeof(okty))) {
+            if (getenv("CC_DEBUG_RCHAIN"))
+                fprintf(stderr, "[rchain] no ok type for '%s'\n", rt);
+            i += 2; continue;
+        }
+        if (getenv("CC_DEBUG_RCHAIN"))
+            fprintf(stderr, "[rchain] link: %s -> %s ok=%s\n", fname, rt, okty);
+        /* Hoist point: the chain must sit at statement position or be
+         * the whole RHS of a declaration/assignment -- the span from
+         * the statement head to the chain carries no open paren. */
+        {
+            /* The chain must be the statement, or the whole RHS of the
+             * statement's one `=`: from the (comment-aware) statement
+             * head, only declarator tokens may precede the producer. */
+            size_t b = estart;
+            int bad = 0;
+            int saw_eq = 0;
+            stmt_head = cc_skip_ws_and_comments(src, n, cur_stmt);
+            if (stmt_head > estart || stmt_head < last_emit) {
+                if (getenv("CC_DEBUG_RCHAIN"))
+                    fprintf(stderr, "[rchain] stmt head out of range\n");
+                i += 2; continue;
+            }
+            q = stmt_head;
+            while (q < estart) {
+                size_t q2 = cc_skip_ws_and_comments(src, estart, q);
+                if (q2 > q) { q = q2; continue; }
+                if (src[q] == '=') {
+                    if (saw_eq || (q + 1 < n && src[q + 1] == '=') ||
+                        (q > stmt_head && (src[q - 1] == '=' || src[q - 1] == '!' ||
+                                           src[q - 1] == '<' || src[q - 1] == '>'))) {
+                        bad = 1;
+                        break;
+                    }
+                    saw_eq = 1;
+                    b = q; /* RHS begins after this */
+                    q++;
+                    continue;
+                }
+                if (cc_is_ident_char(src[q]) || src[q] == '*' || src[q] == ' ' ||
+                    src[q] == '\t' || src[q] == '\n' || src[q] == '\r' ||
+                    src[q] == '[' || src[q] == ']' || src[q] == ':' ||
+                    src[q] == '.' || src[q] == '-' || src[q] == '>') {
+                    q++;
+                    continue;
+                }
+                bad = 1;
+                break;
+            }
+            if (bad || (!saw_eq && stmt_head != estart)) {
+                if (getenv("CC_DEBUG_RCHAIN"))
+                    fprintf(stderr, "[rchain] not statement-position: |%.*s|\n",
+                            (int)(estart - stmt_head), src + stmt_head);
+                i += 2;
+                continue;
+            }
+            (void)b;
+        }
+        /* Walk and hoist: every linked hop becomes its own statement;
+         * the final hop (with any trailing unwrap) keeps the original
+         * destination text. */
+        {
+            size_t pos = eend;
+            size_t prod_s = estart, prod_e = eend;
+            char tmp_prev[48];
+            int have_prev = 0;
+            int emitted = 0;
+            size_t out_mark = out_len;
+            size_t emitted_upto = last_emit;
+            tmp_prev[0] = 0;
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                         stmt_head - last_emit);
+            for (;;) {
+                size_t s2, se2, nd;
+                int linked = 0;
+                s2 = cc_skip_ws_and_comments(src, n, pos);
+                se2 = pos;
+                if (s2 + 1 < n && src[s2] == '!' && src[s2 + 1] == '>') {
+                    size_t r = cc_skip_ws_and_comments(src, n, s2 + 2);
+                    se2 = s2 + 2;
+                    if (r < n && src[r] == '(') {
+                        size_t pe2;
+                        if (cc_find_matching_paren(src, n, r, &pe2))
+                            r = cc_skip_ws_and_comments(src, n, pe2 + 1);
+                    }
+                    if (r < n && src[r] == '{') {
+                        size_t be2;
+                        if (cc_find_matching_brace(src, n, r, &be2))
+                            se2 = be2 + 1;
+                    }
+                    nd = cc_skip_ws_and_comments(src, n, se2);
+                    if (nd < n && src[nd] == '.') linked = 1;
+                }
+                if (!linked) {
+                    /* Final hop: original head text, previous temp (if
+                     * any) as receiver, source through any trailing
+                     * unwrap left in place. */
+                    if (!emitted) {
+                        /* Chain of one: nothing to rewrite. */
+                        out_len = out_mark;
+                        out[out_len] = 0;
+                        i = sep_end;
+                        (void)emitted_upto;
+                        break;
+                    }
+                    cc_sb_append(&out, &out_len, &out_cap, src + stmt_head,
+                                 estart - stmt_head);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_prev);
+                    cc_sb_append(&out, &out_len, &out_cap, src + prod_s,
+                                 prod_e - prod_s);
+                    last_emit = prod_e;
+                    i = prod_e;
+                    break;
+                }
+                /* Linked hop: hoist `OK __cc_rc_N = <recv><call><sep>;` */
+                {
+                    int id = ++g_rc_tmp_id;
+                    char head[192];
+                    size_t m, npe;
+                    snprintf(head, sizeof(head), "%s __cc_rc_%d = ", okty, id);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, head);
+                    if (have_prev)
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_prev);
+                    cc_sb_append(&out, &out_len, &out_cap, src + prod_s,
+                                 se2 - prod_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n    ");
+                    snprintf(tmp_prev, sizeof(tmp_prev), "__cc_rc_%d", id);
+                    have_prev = 1;
+                    emitted = 1;
+                    /* Next producer: the link span `.m(args)`. */
+                    m = cc_skip_ws_and_comments(src, n, se2);
+                    prod_s = m; /* at '.' */
+                    m = cc_skip_ws_and_comments(src, n, m + 1);
+                    while (m < n && cc_is_ident_char(src[m])) m++;
+                    m = cc_skip_ws_and_comments(src, n, m);
+                    if (m >= n || src[m] != '(' ||
+                        !cc_find_matching_paren(src, n, m, &npe)) {
+                        out_len = out_mark;
+                        out[out_len] = 0;
+                        i = sep_end;
+                        break;
+                    }
+                    prod_e = npe + 1;
+                    pos = prod_e;
+                }
+            }
+        }
+    }
+    if (!out) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     char* out = NULL;
     CCNameSet tu_decl = {0};
@@ -6122,14 +6419,28 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
      * every parser-safe entry was redundant and dominated large-TU cost. */
     for (int iter = 0; iter < 8; ++iter) {
         const char* in = cur ? cur : src;
+        int changed = 0;
         char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
-        if (!next) {
+        if (next) {
+            if (cur) free(cur);
+            cur = next;
+            cur_len = strlen(cur);
+            changed = 1;
+        }
+        /* Fallible chains lower once their producer is a plain call;
+         * alternate with the UFCS pass until neither changes. */
+        in = cur ? cur : src;
+        next = cc__rewrite_result_chain_links(in, cur_len);
+        if (next) {
+            if (cur) free(cur);
+            cur = next;
+            cur_len = strlen(cur);
+            changed = 1;
+        }
+        if (!changed) {
             hit_cap = 0;
             break;
         }
-        if (cur) free(cur);
-        cur = next;
-        cur_len = strlen(cur);
         hit_cap = (iter == 7);
     }
     if (hit_cap) {

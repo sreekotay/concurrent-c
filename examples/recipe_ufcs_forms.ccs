@@ -1,31 +1,31 @@
 /*
  * Recipe: every form of UFCS
  *
- * One file, one pipeline, exercises the whole surface so we can catch
- * regressions in any of it.
- *
- * The sections below are NOT nine things to learn. UFCS is ONE rule:
+ * The sections below are NOT ten things to learn. UFCS is ONE rule:
  *
  *     recv.method(args) calls the function the receiver's TYPE names,
  *     and DECLARING that function IS installing the method.
  *
- * Everything else is spelling: generic instances name members
- * <Instance>_<method>, runtime families name them cc_<type>_<method>,
+ * Everything else is spelling. Generic instances name members
+ * <Instance>_<method>; runtime families name them cc_<type>_<method>;
  * a bare declared function whose first parameter takes the receiver
- * needs no naming convention at all, and prefix/postfix are the same
- * call. There is no registration step anywhere in this file.
+ * needs no naming convention at all; prefix and postfix are the same
+ * call. And when a hop can fail, `!>` is the link: each hop spells its
+ * unwrap, then the next dispatches on the unwrapped value.
  *
- * Sections:
- *   1. Family members       v.push(x)        (derived from the decl form)
- *   2. Instance extension   v.median()       (declare CCVec_double_median)
- *   3. Scalar family        d.halve()        (declare cc_double_halve)
- *   4. Free-call symmetry   halve(d)         (same call, prefix spelling)
- *   5. Bare-name tier       u.mean(6.0)      (any fn whose 1st param fits)
- *   6. System headers       d.fabs()         (math.h via the parse's symbols)
- *   7. Chains               d.halve().twice() (each link, same one rule)
- *   8. Typed slices         ps.at(1).y       (auto-instantiated instance)
- *   9. The miss             fails loud: ladder + installed members
- *      (see tests/ufcs_*_miss_fail.ccs — a typo never reaches the host)
+ * There is no registration step anywhere in this file.
+ *
+ *    1. Family members       v.push(x)
+ *    2. Instance extension   v.median()          declare CCVec_double_median
+ *    3. Scalar family        d.halve()           declare cc_double_halve
+ *    4. Free-call symmetry   halve(d)            the same call, prefix
+ *    5. Bare-name tier       u.mean(6.0)         any fn whose 1st param fits
+ *    6. System headers       d.fabs()            math.h, nothing local
+ *    7. Chains               d.halve().twice()
+ *    8. Typed slices         ps.at(1).y
+ *    9. Fallible chains      get(21)!>.twice()    every hop spells its unwrap
+ *   10. The miss             fails loud: the ladder names the receiver's
+ *                            type and lists its installed methods
  */
 #include <ccc/cc_runtime.cch>
 #include <math.h>
@@ -42,24 +42,34 @@ static double CCVec_double_median(CCVec_double* v) {
 static double cc_double_halve(double v) { return v / 2.0; }
 static double cc_double_twice(double v) { return v * 2.0; }
 
-/* 5. Bare-name tier: no naming convention, first parameter takes the
+/* 5. Bare-name tier: any function whose first parameter takes the
  *    receiver (by value exactly, or by pointer via &recv). */
 typedef struct Stats { double sum; int n; } Stats;
 static double mean(Stats s, double bump) { return s.sum / s.n + bump; }
 
+/* 9. A fallible hop returns a Result; `!>` is the chain link. */
+static int cc_int_twice(int v) { return v * 2; }
+static CCResult_int_CCError get(int v) {
+    if (v < 0) return (CCResult_int_CCError){ .ok = false,
+        .u.error = { .message = "negative" } };
+    return (CCResult_int_CCError){ .ok = true, .u.value = v };
+}
+
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
     CCArena arena = cc_arena_heap(kilobytes(64));
     if (!arena.base) return 1;
 
-    /* 1. Family members: the macro's ##_ tokens ARE the method set. */
+    /* 1. Family members: the declaration form's ##_ tokens ARE the
+     *    method set. */
     Vec::[double] v = vec_new::[double](&arena);
     v.push(1.0);
     v.push(3.0);
     v.push(8.0);
     printf("len=%zu\n", v.len());
 
-    /* 2. Instance extension declared above — no header, no compiler
-     *    change, just the function. */
+    /* 2. Declared above — no header edit, no compiler edit. */
     printf("median=%g\n", v.median());
 
     /* 3. Scalar receiver, by value. */
@@ -69,12 +79,11 @@ int main(void) {
     /* 4. The same call, prefix spelling — U means universal both ways. */
     printf("halve2=%g\n", halve(d));
 
-    /* 5. Bare name: mean() is just a function; u.mean(6.0) == mean(u, 6.0). */
+    /* 5. mean() is just a function; u.mean(6.0) == mean(u, 6.0). */
     Stats u = { 12.0, 3 };
     printf("mean=%g\n", u.mean(6.0));
 
-    /* 6. System headers participate (the parse feeds every declared
-     *    signature): fabs comes from math.h, nothing local. */
+    /* 6. System headers participate: fabs comes from math.h. */
     double neg = -2.5;
     printf("fabs=%g\n", neg.fabs());
 
@@ -85,6 +94,15 @@ int main(void) {
     Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
     printf("slice=%zu y=%g\n", ps.sub(1, 3).len(), ps.at(1).y);
 
-    printf("done\n");
-    return 0;
+    /* 9. Fallible chains: a bare `!>` sends the error to @errhandler;
+     *    a handler recovers this hop alone. Dynamic objects chain the
+     *    same way — py.import("sys")!>.get("version")!>. */
+    int ok = get(21)!>.twice();
+    printf("ok=%d\n", ok);
+
+    int rec = get(-1)
+        !>(e) { printf("recovered: %s\n", e.message); return 0; }
+        .twice();
+    printf("unreachable %d\n", rec);
+    return 9;
 }

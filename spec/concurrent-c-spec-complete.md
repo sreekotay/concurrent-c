@@ -4750,6 +4750,8 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@as` retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
 
+**Rule (fallible chains, normative):** `!>` links hops whose calls return a Result: `py.a()!>.b()!>;` unwraps each hop and dispatches the next method on the unwrapped value, and `py.a()!>(e){ … }.b()` recovers that hop alone with the handler's written control flow. Each linked hop lowers to its own statement binding a temporary of the hop's ok type, so a bare `!>` targets the enclosing `@errhandler` and the final hop keeps the original destination, including destination-typed extraction. Fallible chains live where statements do: at statement position or as the whole right-hand side of a declaration or assignment. `?>` never links; parenthesize a fallback to continue from it.
+
 **UFCS Equivalence (Normative):**
 
 For named types that use ordinary fallback UFCS, method syntax lowers to the receiver-type method family for that type.
