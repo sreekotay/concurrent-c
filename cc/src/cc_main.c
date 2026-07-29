@@ -2322,6 +2322,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         strncat(link_inc_flags, src_dir, sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
     }
     cc__extract_link_directives(opt->c_out_path, link_inc_flags, extracted_ld, sizeof(extracted_ld));
+#ifndef _WIN32
+    /* libm is ISO C's own standard surface — the libc/libm split is a
+     * Unix packaging accident, not a dependency boundary. Link it by
+     * default so `x.sqrt()` with <math.h> works without @link("m");
+     * modern linkers default --as-needed, so an unreferenced -lm leaves
+     * no trace. @link remains the idiom for everything outside ISO C. */
+    cc__add_lib_to_flags("m", extracted_ld, sizeof(extracted_ld));
+#endif
     const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
 
     // Link to binary (with incremental cache)
