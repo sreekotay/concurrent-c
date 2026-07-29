@@ -1,0 +1,2 @@
+no UFCS method 'nosuch' for receiver type 'CCResult_int_CCError'
+installed methods of CCResult_int_CCError:

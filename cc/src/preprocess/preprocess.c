@@ -41,6 +41,25 @@
 
 extern long g_cc_pass_error_count;
 
+/* Dest-trap dedup: per-TU (reset via cc_ufcs_reset_dest_trap_dedup). */
+static char g_ufcs_dest_reported[64][256];
+static int g_ufcs_dest_reported_n;
+
+void cc_ufcs_reset_dest_trap_dedup(void) {
+    g_ufcs_dest_reported_n = 0;
+}
+
+/* Test-only: cache CC_UFCS_BASELINE once (additive harness). */
+static int cc__ufcs_baseline_cached(void) {
+    static int checked;
+    static int on;
+    if (!checked) {
+        on = getenv("CC_UFCS_BASELINE") != NULL;
+        checked = 1;
+    }
+    return on;
+}
+
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
 /* Format: file:line:col: error: category: message                            */
@@ -4393,7 +4412,7 @@ static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
                                         char** out, size_t* out_len,
                                         size_t* out_cap,
                                         size_t* last_emit, size_t* i_inout) {
-    static int g_chain_tmp_id = 0;
+    static _Thread_local int g_chain_tmp_id = 0;
     char fname[128];
     char t0[256];
     size_t fl = 0, p, chain_end;
@@ -4609,34 +4628,16 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 break;
             }
         }
-        if ((strncmp(recv_type_base, "Map_", 4) == 0 &&
-             !cc_family_header_has_member("std/map_impl.cch", method_name)) ||
-            (strncmp(recv_type_base, "ArrayMap_", 9) == 0 &&
-             !cc_family_header_has_member("std/array_map.cch", method_name))) {
-            char ext[512];
-            if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", recv_type_base,
-                                 method_name) >= sizeof(ext) ||
-                !(cc__ufcs_fn_name_in_text(src, n, ext) ||
-                  cc_included_cch_contains_fn(ext))) {
-                i++;
-                continue;
-            }
-        }
-        if (strncmp(recv_type_base, "CCVec_", 6) == 0 &&
-            !cc_family_header_has_member("std/vec.cch", method_name)) {
-            /* Not a derived member of the vec family: only a declared
-             * extension (`CCVec_double_median(…)` visible in the TU or
-             * a header) may compose; anything else leaves the call for
-             * the AST pass's strict ladder instead of leaking an
-             * undeclared spelling to the host. */
-            char ext[512];
-            if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", recv_type_base,
-                                 method_name) >= sizeof(ext) ||
-                !(cc__ufcs_fn_name_in_text(src, n, ext) ||
-                  cc_included_cch_contains_fn(ext))) {
-                i++;
-                continue;
-            }
+        /* Family gate (normalize/gate only): derived member or declared
+         * Instance_method extension. Misses stay for the AST strict ladder
+         * — do not invent an unverified composed spelling here. */
+        if ((strncmp(recv_type_base, "Map_", 4) == 0 ||
+             strncmp(recv_type_base, "ArrayMap_", 9) == 0 ||
+             strncmp(recv_type_base, "CCVec_", 6) == 0 ||
+             strncmp(recv_type_base, "CCResult_", 9) == 0) &&
+            !cc_ufcs_family_accepts_in_tu(recv_type_base, method_name, src, n)) {
+            i++;
+            continue;
         }
         parser_vec = cc__type_is_parser_vec(recv_type_base);
         parser_map = cc__type_is_parser_map(recv_type_base);
@@ -4668,7 +4669,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
          * `base` @as retry, declared extensions, the strict ladder)
          * stays with the AST pass. */
         slice_spec_like = (cc_slice_spec_lookup(recv_type_base, NULL, NULL) == 0);
-        if (slice_spec_like && !cc_family_header_has_member("cc_slice.cch", method_name)) {
+        if (slice_spec_like && !cc_ufcs_family_has_member(recv_type_base, method_name)) {
             i++;
             continue;
         }
@@ -4807,8 +4808,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                             if (!variant_ok && dest_mangled[0] &&
                                 cc_ufcs_scalar_recv_family(dest_ty) &&
                                 cc__sink_returns_result(src, n, sink_callee)) {
-                                static char reported[16][256];
-                                static int reported_n;
                                 char key[256];
                                 const char* lp = NULL;
                                 size_t lpl = 0;
@@ -4824,13 +4823,17 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                 }
                                 snprintf(key, sizeof(key), "%s:%d:%s:%s", shown,
                                          line, sink_callee, dest_mangled);
-                                for (ri = 0; ri < reported_n && !dup; ri++)
-                                    if (strcmp(reported[ri], key) == 0) dup = 1;
+                                for (ri = 0; ri < g_ufcs_dest_reported_n && !dup; ri++)
+                                    if (strcmp(g_ufcs_dest_reported[ri], key) == 0)
+                                        dup = 1;
                                 if (!dup) {
                                     char inst[512];
-                                    if (reported_n < 16)
-                                        snprintf(reported[reported_n++],
-                                                 sizeof(reported[0]), "%s", key);
+                                    if (g_ufcs_dest_reported_n <
+                                        (int)(sizeof(g_ufcs_dest_reported) /
+                                              sizeof(g_ufcs_dest_reported[0])))
+                                        snprintf(
+                                            g_ufcs_dest_reported[g_ufcs_dest_reported_n++],
+                                            sizeof(g_ufcs_dest_reported[0]), "%s", key);
                                     char fam_prefix[300];
                                     cc_pp_error_cat(shown, line, 1, "type",
                                                     "destination '%s' is not an installed "
@@ -5641,7 +5644,7 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     /* Test-only baseline: tools/diff_additive.sh proves the additive
      * tiers never change compiling code by diffing lowered output with
      * them disabled. */
-    if (getenv("CC_UFCS_BASELINE")) return NULL;
+    if (cc__ufcs_baseline_cached()) return NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0;
     CCScannerState scan;
     size_t i = 0;
@@ -5769,6 +5772,7 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     char* cur = NULL;
     size_t cur_len = n;
+    int hit_cap = 0;
     if (!src || n == 0) return NULL;
     {
         char* freeform = cc__rewrite_free_call_families(src, n);
@@ -5781,11 +5785,18 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
         const char* in = cur ? cur : src;
         char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
         if (!next) {
+            hit_cap = 0;
             break;
         }
         if (cur) free(cur);
         cur = next;
         cur_len = strlen(cur);
+        hit_cap = (iter == 7);
+    }
+    if (hit_cap) {
+        fprintf(stderr,
+                "<input>:1:1: warning: type: UFCS parser-safe rewrite hit "
+                "iteration cap (8); deeper method chains may be incomplete\n");
     }
     {
         const char* in = cur ? cur : src;
@@ -10137,6 +10148,7 @@ void cc_reset_included_cch_sources(void) {
     for (size_t i = 0; i < g_included_cch_source_count; i++)
         free(g_included_cch_sources[i]);
     g_included_cch_source_count = 0;
+    cc_ufcs_reset_dest_trap_dedup();
 }
 
 static int cc__register_included_cch_source(const char* source_path) {
@@ -10398,7 +10410,7 @@ typedef struct {
     char csv[1024];
     int loaded;
 } CCFamilyMemberCache;
-static _Thread_local CCFamilyMemberCache g_family_members[4];
+static _Thread_local CCFamilyMemberCache g_family_members[8];
 
 static void cc__family_scan_members(const char* fsrc, size_t fn,
                                     CCFamilyMemberCache* slot) {
@@ -10435,7 +10447,7 @@ static const char* cc__family_members_csv(const char* header_suffix) {
     size_t ci, h;
     CCFamilyMemberCache* slot = NULL;
     int found = 0;
-    for (ci = 0; ci < 4; ci++) {
+    for (ci = 0; ci < sizeof(g_family_members) / sizeof(g_family_members[0]); ci++) {
         if (g_family_members[ci].loaded &&
             strcmp(g_family_members[ci].suffix, header_suffix) == 0)
             return g_family_members[ci].csv;
@@ -10495,6 +10507,112 @@ int cc_family_header_has_member(const char* header_suffix, const char* method) {
 
 const char* cc_family_header_members(const char* header_suffix) {
     return cc__family_members_csv(header_suffix);
+}
+
+/* Builtin channel handle methods (not Name##_ in a family macro — they
+ * lower via cc_ufcs_channel_callee). Keep in sync with ufcs.h. */
+static int cc__ufcs_chan_handle_has_member(const char* base, const char* method) {
+    int tx = (strncmp(base, "CCChanTx", 8) == 0);
+    int rx = (strncmp(base, "CCChanRx", 8) == 0);
+    int raw = (strcmp(base, "CCChan") == 0);
+    if (!method || !method[0]) return 0;
+    if (tx) {
+        return strcmp(method, "send") == 0 || strcmp(method, "try_send") == 0 ||
+               strcmp(method, "send_take") == 0 || strcmp(method, "send_task") == 0 ||
+               strcmp(method, "send_task_hybrid") == 0 ||
+               strcmp(method, "close") == 0 || strcmp(method, "free") == 0;
+    }
+    if (rx || raw) {
+        return strcmp(method, "recv") == 0 || strcmp(method, "try_recv") == 0 ||
+               strcmp(method, "close") == 0 || strcmp(method, "free") == 0;
+    }
+    return 0;
+}
+
+static const char* cc__ufcs_chan_handle_members(const char* base) {
+    if (strncmp(base, "CCChanTx", 8) == 0)
+        return "send, try_send, send_take, send_task, send_task_hybrid, close, free";
+    if (strncmp(base, "CCChanRx", 8) == 0 || strcmp(base, "CCChan") == 0)
+        return "recv, try_recv, close, free";
+    return "";
+}
+
+const char* cc_ufcs_family_header_for(const char* base) {
+    CCTypeRegistry* reg;
+    size_t i, n;
+    if (!base || !base[0]) return NULL;
+    if (strncmp(base, "CCResult_", 9) == 0) return "cc_result.cch";
+    if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
+        strcmp(base, "CCChan") == 0)
+        return NULL; /* handle allowlist, not a ##_ header */
+    if (cc_slice_spec_lookup(base, NULL, NULL) == 0) return "cc_slice.cch";
+    if (strncmp(base, "CCVec_", 6) == 0) return "std/vec.cch";
+    if (strncmp(base, "ArrayMap_", 9) == 0) return "std/array_map.cch";
+    if (strncmp(base, "Map_", 4) == 0) return "std/map_impl.cch";
+    reg = cc_type_graph_active_registry(cc_type_graph_get_global());
+    if (!reg) reg = cc_type_registry_get_global();
+    if (!reg) return NULL;
+    n = cc_type_registry_vec_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_vec(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
+            return "std/vec.cch";
+    }
+    n = cc_type_registry_map_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
+            return strncmp(base, "ArrayMap_", 9) == 0 ? "std/array_map.cch"
+                                                      : "std/map_impl.cch";
+    }
+    n = cc_type_registry_channel_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_channel(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
+            return "cc_channel.cch";
+    }
+    return NULL;
+}
+
+int cc_ufcs_family_has_member(const char* base, const char* method) {
+    const char* hdr;
+    if (!base || !method || !method[0]) return 0;
+    if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
+        strcmp(base, "CCChan") == 0)
+        return cc__ufcs_chan_handle_has_member(base, method);
+    hdr = cc_ufcs_family_header_for(base);
+    if (!hdr) return 0;
+    return cc_family_header_has_member(hdr, method);
+}
+
+const char* cc_ufcs_family_members_for(const char* base) {
+    const char* hdr;
+    if (!base || !base[0]) return "";
+    if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
+        strcmp(base, "CCChan") == 0)
+        return cc__ufcs_chan_handle_members(base);
+    hdr = cc_ufcs_family_header_for(base);
+    if (!hdr) return "";
+    return cc_family_header_members(hdr);
+}
+
+int cc_ufcs_family_accepts(const char* base, const char* method) {
+    char ext[512];
+    if (cc_ufcs_family_has_member(base, method)) return 1;
+    if (!base || !method || !method[0]) return 0;
+    if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", base, method) >= sizeof(ext))
+        return 0;
+    return cc_included_cch_contains_fn(ext);
+}
+
+int cc_ufcs_family_accepts_in_tu(const char* base, const char* method,
+                                 const char* src, size_t n) {
+    char ext[512];
+    if (cc_ufcs_family_accepts(base, method)) return 1;
+    if (!base || !method || !src || n == 0) return 0;
+    if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", base, method) >= sizeof(ext))
+        return 0;
+    return cc__ufcs_fn_name_in_text(src, n, ext);
 }
 
 /* Read the family header's text (registered include walk, or path
@@ -10850,7 +10968,7 @@ static int cc__call_return_type(const char* fname, const char* src, size_t n,
         if (cc_slice_spec_get(i, &nm, NULL) != 0 || !nm) continue;
         il = strlen(nm);
         if (fl > il + 1 && strncmp(fname, nm, il) == 0 && fname[il] == '_' &&
-            cc_family_header_has_member("cc_slice.cch", fname + il + 1))
+            cc_ufcs_family_has_member(nm, fname + il + 1))
             return cc__ufcs_method_return_type(nm, fname + il + 1, src, n, out,
                                                out_sz);
     }
@@ -10865,7 +10983,7 @@ static int cc__call_return_type(const char* fname, const char* src, size_t n,
                 il = strlen(t->mangled_name);
                 if (fl > il + 1 && strncmp(fname, t->mangled_name, il) == 0 &&
                     fname[il] == '_' &&
-                    cc_family_header_has_member("std/vec.cch", fname + il + 1))
+                    cc_ufcs_family_has_member(t->mangled_name, fname + il + 1))
                     return cc__ufcs_method_return_type(t->mangled_name,
                                                        fname + il + 1, src, n,
                                                        out, out_sz);
@@ -10874,15 +10992,11 @@ static int cc__call_return_type(const char* fname, const char* src, size_t n,
             for (i = 0; i < c; i++) {
                 const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
                 size_t il;
-                const char* hdr;
                 if (!t || !t->mangled_name) continue;
                 il = strlen(t->mangled_name);
-                hdr = strncmp(t->mangled_name, "ArrayMap_", 9) == 0
-                          ? "std/array_map.cch"
-                          : "std/map_impl.cch";
                 if (fl > il + 1 && strncmp(fname, t->mangled_name, il) == 0 &&
                     fname[il] == '_' &&
-                    cc_family_header_has_member(hdr, fname + il + 1))
+                    cc_ufcs_family_has_member(t->mangled_name, fname + il + 1))
                     return cc__ufcs_method_return_type(t->mangled_name,
                                                        fname + il + 1, src, n,
                                                        out, out_sz);

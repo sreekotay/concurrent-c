@@ -1,0 +1,9 @@
+/* Non-member on a channel handle reaches the strict ladder with the
+ * handle allowlist — not a leaked composed spelling. */
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    (void)rx;
+    return (int)tx.nosuch();
+}

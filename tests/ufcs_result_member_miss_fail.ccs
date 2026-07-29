@@ -1,0 +1,7 @@
+/* Non-member on CCResult_* reaches the strict ladder with the derived
+ * member set from CC_DECL_RESULT_SPEC — not a leaked composed spelling. */
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    CCResult_int_CCError r = cc_ok_CCResult_int_CCError(1);
+    return (int)r.nosuch();
+}

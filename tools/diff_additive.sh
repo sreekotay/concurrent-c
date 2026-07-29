@@ -25,8 +25,9 @@ run_one() {
   fi
 }
 export -f run_one
+jobs="${CC_ADDITIVE_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 ls tests/*.ccs tests/*.shcc 2>/dev/null | grep -v "_fail\." | \
-  xargs -P "$(nproc)" -I{} bash -c 'run_one "$@"' _ {} "$S"
+  xargs -P "$jobs" -I{} bash -c 'run_one "$@"' _ {} "$S"
 pass=0; skip=0; fail=0
 for r in "$S"/res/*; do
   v=$(cat "$r")

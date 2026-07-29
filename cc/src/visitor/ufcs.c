@@ -1321,7 +1321,14 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
     char cand[288];
     int ris_const = 0;
     /* Test-only baseline for tools/diff_additive.sh. */
-    if (getenv("CC_UFCS_BASELINE")) return CC_UFCS_EMIT_UNRESOLVED;
+    {
+        static int checked, on;
+        if (!checked) {
+            on = getenv("CC_UFCS_BASELINE") != NULL;
+            checked = 1;
+        }
+        if (on) return CC_UFCS_EMIT_UNRESOLVED;
+    } /* kept local: ufcs.o must not depend on preprocess statics */
     int recv_ptr = 0;
     int by_ptr = 0;
     int matched = 0;
@@ -2270,42 +2277,12 @@ static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
  * handles. Composed spellings for these stay trusted; everything else
  * that composes an undeclared callee fails loud through the strict
  * unresolved diagnostic instead of reaching the host compiler. */
+/* Trust composed spellings only for DERIVED members (macro-generated,
+ * text-invisible). Declared extensions are already caught by
+ * fn_name_is_real before this path. */
 static int cc__ufcs_recv_is_known_family_method(const char* base,
                                                 const char* method) {
-    CCTypeRegistry* reg;
-    size_t i, n;
-    if (!base || !base[0]) return 0;
-    if (strncmp(base, "CCResult_", 9) == 0) return 1;
-    if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0)
-        return 1;
-    /* Slice/vec instances trust exactly their DERIVED member set (the
-     * `##_` tokens of the family macro's body) — a non-member composes
-     * nothing and falls to the strict ladder instead of leaking. */
-    if (cc_slice_spec_lookup(base, NULL, NULL) == 0)
-        return cc_family_header_has_member("cc_slice.cch", method);
-    reg = cc_type_graph_active_registry(cc_type_graph_get_global());
-    if (!reg) return 0;
-    n = cc_type_registry_vec_count(reg);
-    for (i = 0; i < n; i++) {
-        const CCTypeInstantiation* t = cc_type_registry_get_vec(reg, i);
-        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
-            return cc_family_header_has_member("std/vec.cch", method);
-    }
-    n = cc_type_registry_map_count(reg);
-    for (i = 0; i < n; i++) {
-        const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
-        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
-            return cc_family_header_has_member(
-                strncmp(base, "ArrayMap_", 9) == 0 ? "std/array_map.cch"
-                                                   : "std/map_impl.cch",
-                method);
-    }
-    n = cc_type_registry_channel_count(reg);
-    for (i = 0; i < n; i++) {
-        const CCTypeInstantiation* t = cc_type_registry_get_channel(reg, i);
-        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0) return 1;
-    }
-    return 0;
+    return cc_ufcs_family_has_member(base, method);
 }
 
 /* Receiver type of the most recent strict-unresolved return, keyed by
@@ -2386,24 +2363,12 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
             snprintf(lines[cnt++], 256,
                      "candidate %s (bare): no visible declaration", method);
     }
-    /* Family instances enumerate their derived member set. */
+    /* Family instances enumerate their derived member set (oracle). */
     if (cnt < max_lines) {
-        const char* hdr = NULL;
-        if (cc_slice_spec_lookup(base, NULL, NULL) == 0) {
-            hdr = "cc_slice.cch";
-        } else if (strncmp(base, "CCVec_", 6) == 0) {
-            hdr = "std/vec.cch";
-        } else if (strncmp(base, "ArrayMap_", 9) == 0) {
-            hdr = "std/array_map.cch";
-        } else if (strncmp(base, "Map_", 4) == 0) {
-            hdr = "std/map_impl.cch";
-        }
-        if (hdr) {
-            const char* mem = cc_family_header_members(hdr);
-            if (mem && mem[0])
-                snprintf(lines[cnt++], 256, "installed methods of %s: %s",
-                         base, mem);
-        }
+        const char* mem = cc_ufcs_family_members_for(base);
+        if (mem && mem[0])
+            snprintf(lines[cnt++], 256, "installed methods of %s: %s", base,
+                     mem);
     }
     return cnt;
 }
@@ -2444,7 +2409,7 @@ static int emit_desugared_call(char* out,
         const char* ts_prefix = NULL;
         if (cc_slice_spec_lookup(ctx.recv_type_name, &ts_prefix, NULL) == 0 &&
             ts_prefix &&
-            cc_family_header_has_member("cc_slice.cch", method)) {
+            cc_ufcs_family_has_member(ctx.recv_type_name, method)) {
             const char* amp = recv_is_ptr ? "" : "&";
             if (!has_args || !args_rewritten || !args_rewritten[0])
                 return snprintf(out, cap, "%s_%s(%s%s)", ts_prefix, method, amp, recv);
@@ -2819,9 +2784,12 @@ static int emit_desugared_call(char* out,
                                                  ctx.recv_type_name);
                 if (bn != CC_UFCS_EMIT_UNRESOLVED) return bn;
             }
-            return cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
-                                         args_rewritten, has_args,
-                                         ctx.recv_type_base);
+            /* Sink already probed above; bare miss → strict unresolved. */
+            snprintf(g_ufcs_unres_method, sizeof(g_ufcs_unres_method),
+                     "%s", method);
+            snprintf(g_ufcs_unres_recv_type, sizeof(g_ufcs_unres_recv_type),
+                     "%s", ctx.recv_type_name ? ctx.recv_type_name : "");
+            return CC_UFCS_EMIT_UNRESOLVED;
         }
     }
     if (dispatch_n >= 0) return dispatch_n;

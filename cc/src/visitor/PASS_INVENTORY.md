@@ -136,6 +136,23 @@ so it CAN, not to work around them in a single pass.
 - **Text-based passes in preprocess.c**: ~24 transforms (2026-06-01 audit — the numbered table below is the historical subset; the actual phase-1 canonical + phase-3 host-lowering buckets in `cc__apply_phase1_canonical_passes` / `cc__apply_phase3_host_lowering_passes` run more, e.g. `cc__resolve_comptime_if`, `cc__rewrite_string_templates`, `cc__rewrite_free_call_families`, `cc__rewrite_channel_pair_pass`, `cc__lower_type_of_constexpr`, `cc__rewrite_result_field_sugar_pass`, `cc__rewrite_async_void_ret`, `cc__rewrite_at_call_site_mode`, `cc__rewrite_at_await`)
 - **AST-based passes**: 8
 
+## UFCS ownership (normative)
+
+Resolution order for `recv.f(args)` / free-call `f(recv, …)`:
+
+members / family → declared extension → `@as` → dynamic sink → bare name → strict unresolved (ladder notes).
+
+| Concern | Owner | Must not |
+| -------- | ----- | -------- |
+| Free-call → method spelling | Text: `cc__rewrite_free_call_families` | Invent a second precedence |
+| Chain receivers → typed temps | Text: `cc__try_normalize_ufcs_chain` | Resolve methods itself |
+| Surface renames (`Vec::[T]`) | Text canonicalize micro-pass | Duplicate in AST |
+| Family membership / trust | Oracle: `cc_ufcs_family_*` in `preprocess.h` | Parallel allowlists in AST vs text |
+| Final callee / `@as` / sink / bare / strict | AST: `emit_desugared_call` (`ufcs.c`) | Re-emit unverified snake names from text on miss |
+| Additive tiers off | `CC_UFCS_BASELINE` (cached) + `tools/diff_additive.sh` | Change baseline-compiling lowering |
+
+Text **normalizes and gates**; AST **resolves**. On a family miss in text, leave the site for the AST strict ladder.
+
 ## Preprocessing (preprocess.c) — ~10,803 lines
 
 Text transforms applied BEFORE TCC parsing. Listed in execution order:

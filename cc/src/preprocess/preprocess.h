@@ -152,6 +152,21 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
  * `header_suffix`. Membership test and comma-separated enumeration. */
 int cc_family_header_has_member(const char* header_suffix, const char* method);
 const char* cc_family_header_members(const char* header_suffix);
+/* UFCS resolution package (member trust): single oracle for
+ * generic-family instances (slice/vec/map/result/channel). Text gates
+ * and AST composed-spelling trust both call these — do not add a second
+ * allowlist. header_for → family .cch suffix (NULL for handle allowlists);
+ * has_member → derived members only; accepts → member or declared
+ * Base_method extension (includes; use _in_tu when TU text is in hand);
+ * members_for → CSV for strict-ladder notes. */
+const char* cc_ufcs_family_header_for(const char* base);
+int cc_ufcs_family_has_member(const char* base, const char* method);
+const char* cc_ufcs_family_members_for(const char* base);
+int cc_ufcs_family_accepts(const char* base, const char* method);
+int cc_ufcs_family_accepts_in_tu(const char* base, const char* method,
+                                 const char* src, size_t n);
+/* Reset per-TU dest-trap dedup (also cleared with included-cch sources). */
+void cc_ufcs_reset_dest_trap_dedup(void);
 /* Map key hash/eq selection: declared convention
  * (cc_map_key_hash_<mangled K> / cc_map_key_eq_<mangled K>) outranks
  * the built-in table; unknown keys error articulately. Returns 0 on
