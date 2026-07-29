@@ -147,6 +147,11 @@ int cc_included_cch_contains_fn(const char* name);
 /* First parameter type of a decl-shaped `name(` occurrence in an
  * included cch header, whitespace-normalized. Returns 0/1. */
 int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
+/* Family member sets derived from a declaration-form macro's body: the
+ * `##_<member>` tokens in the included cch header whose path ends with
+ * `header_suffix`. Membership test and comma-separated enumeration. */
+int cc_family_header_has_member(const char* header_suffix, const char* method);
+const char* cc_family_header_members(const char* header_suffix);
 
 /* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU

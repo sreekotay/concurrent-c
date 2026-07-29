@@ -1,3 +1,4 @@
-# `cpp` is const Pair*; `get_x(Pair*)` must not capture it. The site
-# keeps its composed-spelling failure; only that name is pinned.
-pair_get_x
+# One-way qualifiers: get_x(Pair*) never captures a const Pair*
+# receiver; the ladder shows the near-miss.
+no UFCS method 'get_x'
+candidate get_x (bare): declared, but first parameter 'Pair* p1' does not take

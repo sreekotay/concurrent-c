@@ -1,3 +1,4 @@
-# Pointer receivers match pointer parameters only; the value-taking
-# by_val_only must not fire via a synthesized *pp.
-pair_by_val_only
+# A dereference is never synthesized: pointer receivers match pointer
+# parameters only.
+no UFCS method 'by_val_only'
+candidate by_val_only (bare): declared, but first parameter 'Pair p1' does not take

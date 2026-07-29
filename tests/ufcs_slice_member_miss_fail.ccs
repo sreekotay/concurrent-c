@@ -1,0 +1,5 @@
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    double xs[:] = {1.0, 2.0};
+    return (int)xs.nosuch();
+}

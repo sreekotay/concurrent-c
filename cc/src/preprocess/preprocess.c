@@ -39,6 +39,8 @@
 #include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_unwrap_destroy.h"
 
+extern long g_cc_pass_error_count;
+
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
 /* Format: file:line:col: error: category: message                            */
@@ -2122,6 +2124,10 @@ static void cc__mangle_container_type_param(const char* src, size_t len, char* o
 static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t elem_e,
                                        char* out, size_t out_sz,
                                        char* out_snake, size_t snake_sz);
+static void cc__enumerate_family_variants(const char* src, size_t n,
+                                          const char* prefix,
+                                          char* out, size_t out_sz);
+static int cc__sink_returns_result(const char* src, size_t n, const char* name);
 /* Cross-pass memo: container mangled-name -> real C type spellings of its
  * parameters (see definition below for why phase-3 reparses need it). */
 static void cc__ctype_memo_put(const char* mangled, const char* type1, const char* type2);
@@ -4486,6 +4492,22 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 break;
             }
         }
+        if (strncmp(recv_type_base, "CCVec_", 6) == 0 &&
+            !cc_family_header_has_member("std/vec.cch", method_name)) {
+            /* Not a derived member of the vec family: only a declared
+             * extension (`CCVec_double_median(…)` visible in the TU or
+             * a header) may compose; anything else leaves the call for
+             * the AST pass's strict ladder instead of leaking an
+             * undeclared spelling to the host. */
+            char ext[512];
+            if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", recv_type_base,
+                                 method_name) >= sizeof(ext) ||
+                !(cc__ufcs_fn_name_in_text(src, n, ext) ||
+                  cc_included_cch_contains_fn(ext))) {
+                i++;
+                continue;
+            }
+        }
         parser_vec = cc__type_is_parser_vec(recv_type_base);
         parser_map = cc__type_is_parser_map(recv_type_base);
         command_like = (strcmp(recv_type_base, "CCCommand") == 0 ||
@@ -4618,6 +4640,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                 dm = 0;
                         }
                         if (dm) {
+                            int variant_ok = 0;
                             cc__mangle_type_name(dest_ty, strlen(dest_ty),
                                                  dest_mangled, sizeof(dest_mangled));
                             if (dest_mangled[0] &&
@@ -4626,11 +4649,72 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                     sizeof(sink_dest_callee) &&
                                 (cc__ufcs_fn_name_in_text(src, n, sink_dest_callee) ||
                                  cc_included_cch_contains_fn(sink_dest_callee))) {
+                                variant_ok = 1;
                                 sink_callee = sink_dest_callee;
                                 /* A composed cast is absorbed: the variant
                                  * already returns the spelled type's rail. */
                                 if (dm == 3 && cast_a >= last_emit)
                                     sink_emit_from = cast_a;
+                            }
+                            /* Scalar destination with no installed variant:
+                             * the plain sink's return can never initialize a
+                             * scalar, so the site is provably ill-formed —
+                             * fail articulate now, enumerating what IS
+                             * installed, instead of leaking host noise.
+                             * Non-scalar destinations keep the plain-sink
+                             * fallback (it may be exactly right). */
+                            if (!variant_ok && dest_mangled[0] &&
+                                cc_ufcs_scalar_recv_family(dest_ty) &&
+                                cc__sink_returns_result(src, n, sink_callee)) {
+                                static char reported[16][256];
+                                static int reported_n;
+                                char key[256];
+                                const char* lp = NULL;
+                                size_t lpl = 0;
+                                int line = cc_user_line_for_offset(src, n, recv_start,
+                                                                   1, &lp, &lpl);
+                                char shown[256];
+                                int dup = 0, ri;
+                                if (lp && lpl > 0 && lpl < sizeof(shown)) {
+                                    memcpy(shown, lp, lpl);
+                                    shown[lpl] = 0;
+                                } else {
+                                    snprintf(shown, sizeof(shown), "<input>");
+                                }
+                                snprintf(key, sizeof(key), "%s:%d:%s:%s", shown,
+                                         line, sink_callee, dest_mangled);
+                                for (ri = 0; ri < reported_n && !dup; ri++)
+                                    if (strcmp(reported[ri], key) == 0) dup = 1;
+                                if (!dup) {
+                                    char inst[512];
+                                    if (reported_n < 16)
+                                        snprintf(reported[reported_n++],
+                                                 sizeof(reported[0]), "%s", key);
+                                    char fam_prefix[300];
+                                    cc_pp_error_cat(shown, line, 1, "type",
+                                                    "destination '%s' is not an installed "
+                                                    "destination of %s",
+                                                    dest_ty, sink_callee);
+                                    snprintf(fam_prefix, sizeof(fam_prefix), "%s_",
+                                             sink_callee);
+                                    cc__enumerate_family_variants(src, n, fam_prefix,
+                                                                  inst, sizeof(inst));
+                                    if (inst[0])
+                                        fprintf(stderr,
+                                                "%s:%d:1: note: installed destinations "
+                                                "(mangled): %s\n",
+                                                shown, line, inst);
+                                    else
+                                        fprintf(stderr,
+                                                "%s:%d:1: note: no destination variants "
+                                                "of %s are declared\n",
+                                                shown, line, sink_callee);
+                                    fprintf(stderr,
+                                            "%s:%d:1: note: the plain sink's return "
+                                            "cannot initialize a scalar destination\n",
+                                            shown, line);
+                                    g_cc_pass_error_count++;
+                                }
                             }
                         }
                     }
@@ -5373,6 +5457,10 @@ static int cc__free_call_family_callee(const char* src, size_t n,
 
 static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     char* out = NULL;
+    /* Test-only baseline: tools/diff_additive.sh proves the additive
+     * tiers never change compiling code by diffing lowered output with
+     * them disabled. */
+    if (getenv("CC_UFCS_BASELINE")) return NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0;
     CCScannerState scan;
     size_t i = 0;
@@ -10016,6 +10104,251 @@ int cc_included_cch_contains_fn(const char* name) {
     return 0;
 }
 
+/* Append (comma-separated, deduped) the suffixes of decl-shaped
+ * functions named `<prefix><suffix>` found in `text` — the installed
+ * variants of a family, for diagnostics. Cold path. */
+static void cc__append_family_suffixes(const char* text, size_t n,
+                                       const char* prefix,
+                                       char* out, size_t out_sz) {
+    size_t plen = strlen(prefix);
+    size_t i = 0;
+    CCScannerState scan;
+    if (!text || !plen) return;
+    cc_scanner_init(&scan);
+    while (i + plen < n) {
+        size_t e, q, b;
+        if (cc_scanner_skip_non_code(&scan, text, n, &i)) continue;
+        if (text[i] != prefix[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(text[i - 1])) { i++; continue; }
+        if (i + plen > n || memcmp(text + i, prefix, plen) != 0) { i++; continue; }
+        e = i + plen;
+        if (e >= n || !cc_is_ident_char(text[e])) { i = e; continue; }
+        while (e < n && cc_is_ident_char(text[e])) e++;
+        q = e;
+        while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
+        if (q >= n || text[q] != '(') { i = e; continue; }
+        b = i;
+        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
+            i = e;
+            continue;
+        }
+        {
+            char suf[96];
+            size_t sl = e - (i + plen);
+            size_t ol = strlen(out);
+            if (sl > 0 && sl < sizeof(suf)) {
+                char pat[100];
+                memcpy(suf, text + i + plen, sl);
+                suf[sl] = 0;
+                snprintf(pat, sizeof(pat), ", %s,", suf);
+                /* dedupe against ", suf," within the accumulated list */
+                {
+                    char hay[1024];
+                    snprintf(hay, sizeof(hay), ", %s,", out);
+                    if (!strstr(hay, pat)) {
+                        if (ol + sl + 3 < out_sz) {
+                            if (ol) {
+                                out[ol++] = ',';
+                                out[ol++] = ' ';
+                            }
+                            memcpy(out + ol, suf, sl);
+                            out[ol + sl] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        i = e;
+    }
+}
+
+/* Family member sets derive from the declaration form itself: the
+ * `##_<member>` tokens in a family macro's body ARE the member list
+ * (`Name##_push`, `SNAKE##_sub`). Scans the included cch header whose
+ * path ends with `header_suffix`, caches per header. Members are
+ * text-invisible post-expansion, so dispatch trusts composed spellings
+ * exactly for this derived set — and diagnostics can enumerate it. */
+typedef struct {
+    char suffix[64];
+    char csv[1024];
+    int loaded;
+} CCFamilyMemberCache;
+static _Thread_local CCFamilyMemberCache g_family_members[4];
+
+static void cc__family_scan_members(const char* fsrc, size_t fn,
+                                    CCFamilyMemberCache* slot) {
+    size_t i;
+    for (i = 0; i + 3 < fn; i++) {
+        if (fsrc[i] != '#' || fsrc[i + 1] != '#' || fsrc[i + 2] != '_')
+            continue;
+        {
+            size_t ms = i + 3, me = ms;
+            while (me < fn && cc_is_ident_char(fsrc[me])) me++;
+            if (me > ms && me - ms < 96) {
+                char mem[96];
+                char pat[100];
+                char hay[1060];
+                size_t ol = strlen(slot->csv);
+                memcpy(mem, fsrc + ms, me - ms);
+                mem[me - ms] = 0;
+                snprintf(pat, sizeof(pat), ", %s,", mem);
+                snprintf(hay, sizeof(hay), ", %s,", slot->csv);
+                if (!strstr(hay, pat) && ol + (me - ms) + 3 < sizeof(slot->csv)) {
+                    if (ol) {
+                        slot->csv[ol++] = ',';
+                        slot->csv[ol++] = ' ';
+                    }
+                    memcpy(slot->csv + ol, mem, me - ms + 1);
+                }
+            }
+            i = me;
+        }
+    }
+}
+
+static const char* cc__family_members_csv(const char* header_suffix) {
+    size_t ci, h;
+    CCFamilyMemberCache* slot = NULL;
+    int found = 0;
+    for (ci = 0; ci < 4; ci++) {
+        if (g_family_members[ci].loaded &&
+            strcmp(g_family_members[ci].suffix, header_suffix) == 0)
+            return g_family_members[ci].csv;
+        if (!slot && !g_family_members[ci].loaded) slot = &g_family_members[ci];
+    }
+    if (!slot) return "";
+    snprintf(slot->suffix, sizeof(slot->suffix), "%s", header_suffix);
+    slot->csv[0] = 0;
+    slot->loaded = 1;
+    for (h = 0; h < g_included_cch_source_count && !found; h++) {
+        const char* path = g_included_cch_sources[h];
+        size_t pl, sl;
+        char* fsrc = NULL;
+        size_t fn = 0;
+        if (!path) continue;
+        pl = strlen(path);
+        sl = strlen(header_suffix);
+        if (pl < sl || strcmp(path + pl - sl, header_suffix) != 0) continue;
+        if (cc__read_file_text(path, &fsrc, &fn) != 0 || !fsrc) continue;
+        cc__family_scan_members(fsrc, fn, slot);
+        free(fsrc);
+        found = 1;
+    }
+    /* The header may not be in this TU's registered include walk (vec
+     * members arrive via emitted macros): derive its path from any
+     * registered ccc header's root. */
+    for (h = 0; h < g_included_cch_source_count && !found; h++) {
+        const char* path = g_included_cch_sources[h];
+        const char* mark;
+        char cand[PATH_MAX];
+        char* fsrc = NULL;
+        size_t fn = 0;
+        if (!path) continue;
+        mark = strstr(path, "/include/ccc/");
+        if (!mark) continue;
+        if ((size_t)snprintf(cand, sizeof(cand), "%.*s/include/ccc/%s",
+                             (int)(mark - path), path, header_suffix) >=
+            sizeof(cand))
+            continue;
+        if (cc__read_file_text(cand, &fsrc, &fn) != 0 || !fsrc) continue;
+        cc__family_scan_members(fsrc, fn, slot);
+        free(fsrc);
+        found = 1;
+    }
+    return slot->csv;
+}
+
+int cc_family_header_has_member(const char* header_suffix, const char* method) {
+    const char* csv = cc__family_members_csv(header_suffix);
+    char pat[110];
+    char hay[1060];
+    if (!csv[0] || !method || !method[0]) return 0;
+    snprintf(pat, sizeof(pat), ", %s,", method);
+    snprintf(hay, sizeof(hay), ", %s,", csv);
+    return strstr(hay, pat) != NULL;
+}
+
+const char* cc_family_header_members(const char* header_suffix) {
+    return cc__family_members_csv(header_suffix);
+}
+
+/* Nonzero when the decl-shaped declaration of `name` (TU or included
+ * cch) spells a `CCResult_` return: only such sinks make a scalar
+ * destination provably ill-formed under plain lowering. */
+static int cc__fn_returns_result_text(const char* text, size_t n,
+                                      const char* name) {
+    size_t nlen = strlen(name);
+    size_t i = 0;
+    CCScannerState scan;
+    if (!text || !nlen) return 0;
+    cc_scanner_init(&scan);
+    while (i + nlen < n) {
+        size_t q, a, b;
+        if (cc_scanner_skip_non_code(&scan, text, n, &i)) continue;
+        if (text[i] != name[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(text[i - 1])) { i++; continue; }
+        if (i + nlen > n || memcmp(text + i, name, nlen) != 0) { i++; continue; }
+        if (cc_is_ident_char(text[i + nlen])) { i += nlen; continue; }
+        q = i + nlen;
+        while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
+        if (q >= n || text[q] != '(') { i += nlen; continue; }
+        b = i;
+        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
+            i += nlen;
+            continue;
+        }
+        a = b;
+        while (a > 0 && !strchr(";{}()", text[a - 1]) && text[a - 1] != '\n') a--;
+        while (a + 9 <= b) {
+            if (memcmp(text + a, "CCResult_", 9) == 0 &&
+                (a == 0 || !cc_is_ident_char(text[a - 1])))
+                return 1;
+            a++;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int cc__sink_returns_result(const char* src, size_t n, const char* name) {
+    size_t h;
+    if (src && cc__fn_returns_result_text(src, n, name)) return 1;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        int hit;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        hit = cc__fn_returns_result_text(fsrc, fn, name);
+        free(fsrc);
+        if (hit) return 1;
+    }
+    return 0;
+}
+
+/* Installed variants of `<prefix>` across the TU and included cch
+ * headers, comma-separated into out. */
+static void cc__enumerate_family_variants(const char* src, size_t n,
+                                          const char* prefix,
+                                          char* out, size_t out_sz) {
+    size_t h;
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    if (src) cc__append_family_suffixes(src, n, prefix, out, out_sz);
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        cc__append_family_suffixes(fsrc, fn, prefix, out, out_sz);
+        free(fsrc);
+    }
+}
+
 /* Decl-shaped twin of cc_included_cch_contains_fn: comment/string-aware,
  * and a hit requires the occurrence's previous code char to be an
  * identifier char or `*` (a type or declarator precedes). Doc-comment
@@ -10115,6 +10448,8 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
                             continue;
                         }
                         if (fsrc[ps] == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
+                        if (cc_is_ident_char(fsrc[ps]) && dn > 0 && out[dn - 1] == '*')
+                            out[dn++] = ' ';
                         out[dn++] = fsrc[ps++];
                     }
                     out[dn] = 0;

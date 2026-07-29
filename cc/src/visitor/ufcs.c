@@ -1197,6 +1197,8 @@ static int cc__ufcs_fn_first_param_in_source(const char* name,
                     continue;
                 }
                 if (*ps == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
+                if (cc_is_ident_char(*ps) && dn > 0 && out[dn - 1] == '*')
+                    out[dn++] = ' ';
                 out[dn++] = *ps++;
             }
             out[dn] = 0;
@@ -1208,7 +1210,9 @@ static int cc__ufcs_fn_first_param_in_source(const char* name,
 
 /* Advance past a comment or string/char literal starting at p; returns
  * p unchanged when not at one. Keeps decl-shaped text inside comments
- * and strings from inventing declarations or parameter types. */
+ * and strings from inventing declarations or parameter types. Plain
+ * `"…"`/`'…'` only — wide/u8/raw prefixes are out of the supported C
+ * subset here (weaker than CCScannerState, by design of scope). */
 static const char* cc__ufcs_skip_noncode(const char* p) {
     if (p[0] == '/' && p[1] == '/') {
         p += 2;
@@ -1234,7 +1238,10 @@ static const char* cc__ufcs_skip_noncode(const char* p) {
 /* Receiver type spellings from the registry/tcc arrive cv-stripped; the
  * one-way qualifier rule needs the receiver's own const. For a plain
  * identifier receiver, read it from the declaring statement (a
- * decl-shaped occurrence whose statement head spells `const`). */
+ * decl-shaped occurrence whose statement head spells `const`).
+ * Non-ident receivers (member chains, call results) do not recover
+ * const and are treated as non-const — a dropped qualifier there still
+ * surfaces as the host compiler's discarded-qualifier diagnostic. */
 static int cc__ufcs_recv_ident_decl_is_const(const char* recv) {
     const char* src = g_ufcs_source_text;
     size_t rlen;
@@ -1313,6 +1320,8 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
     char recvn[256];
     char cand[288];
     int ris_const = 0;
+    /* Test-only baseline for tools/diff_additive.sh. */
+    if (getenv("CC_UFCS_BASELINE")) return CC_UFCS_EMIT_UNRESOLVED;
     int recv_ptr = 0;
     int by_ptr = 0;
     int matched = 0;
@@ -2201,6 +2210,7 @@ static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
     {
         char argbuf[1024];
         size_t ao = 0;
+        argbuf[0] = '\0'; /* zero-arg calls print argbuf via %s below */
         if (has_args && args_rewritten && args_rewritten[0]) {
             const char* p = args_rewritten;
             const char* seg = p;
@@ -2254,6 +2264,131 @@ static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
     return (int)o;
 }
 
+/* Known generic-family instances whose members are macro-generated and
+ * therefore invisible to textual realness checks: container instances
+ * from the registry tables, slice/result spec instances, channel
+ * handles. Composed spellings for these stay trusted; everything else
+ * that composes an undeclared callee fails loud through the strict
+ * unresolved diagnostic instead of reaching the host compiler. */
+static int cc__ufcs_recv_is_known_family_method(const char* base,
+                                                const char* method) {
+    CCTypeRegistry* reg;
+    size_t i, n;
+    if (!base || !base[0]) return 0;
+    if (strncmp(base, "CCResult_", 9) == 0) return 1;
+    if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0)
+        return 1;
+    /* Slice/vec instances trust exactly their DERIVED member set (the
+     * `##_` tokens of the family macro's body) — a non-member composes
+     * nothing and falls to the strict ladder instead of leaking. */
+    if (cc_slice_spec_lookup(base, NULL, NULL) == 0)
+        return cc_family_header_has_member("cc_slice.cch", method);
+    reg = cc_type_graph_active_registry(cc_type_graph_get_global());
+    if (!reg) return 0;
+    n = cc_type_registry_vec_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_vec(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
+            return cc_family_header_has_member("std/vec.cch", method);
+    }
+    n = cc_type_registry_map_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0) return 1;
+    }
+    n = cc_type_registry_channel_count(reg);
+    for (i = 0; i < n; i++) {
+        const CCTypeInstantiation* t = cc_type_registry_get_channel(reg, i);
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Receiver type of the most recent strict-unresolved return, keyed by
+ * method name: the AST node's recv_type is often empty for scalar and
+ * value receivers even though dispatch resolved it, so the emit layer
+ * stashes what it knew for the diagnostic. Last-write-wins; consumed
+ * immediately by the pass that saw the failure. */
+static char g_ufcs_unres_method[128];
+static char g_ufcs_unres_recv_type[256];
+
+const char* cc_ufcs_last_unresolved_recv_type(const char* method) {
+    if (!method || !method[0] || !g_ufcs_unres_method[0]) return NULL;
+    if (strcmp(method, g_ufcs_unres_method) != 0) return NULL;
+    return g_ufcs_unres_recv_type[0] ? g_ufcs_unres_recv_type : NULL;
+}
+
+/* Describe the resolution ladder for an unresolved method — one line
+ * per candidate tried, for the strict diagnostic's notes. Cold path:
+ * runs only when compilation is already failing. Returns line count. */
+int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
+                                char lines[][256], int max_lines) {
+    char base[256];
+    char cand[320];
+    int cnt = 0;
+    const char* fam;
+    if (!recv_type || !recv_type[0] || !method || !method[0] || max_lines <= 0)
+        return 0;
+    {
+        const char* t = recv_type;
+        size_t bl = 0;
+        for (;;) {
+            while (*t == ' ' || *t == '\t') t++;
+            if (strncmp(t, "const ", 6) == 0) { t += 6; continue; }
+            if (strncmp(t, "volatile ", 9) == 0) { t += 9; continue; }
+            break;
+        }
+        while (*t && *t != '*' && bl + 1 < sizeof(base)) {
+            if ((*t == ' ' || *t == '\t') && (t[1] == '*' || t[1] == '\0')) { t++; continue; }
+            base[bl++] = *t++;
+        }
+        while (bl > 0 && base[bl - 1] == ' ') bl--;
+        base[bl] = 0;
+        if (!bl) return 0;
+    }
+    fam = cc_ufcs_scalar_recv_family(base);
+    if (fam && cnt < max_lines) {
+        snprintf(cand, sizeof(cand), "cc_%s_%s", fam, method);
+        snprintf(lines[cnt++], 256, "candidate %s (scalar family): %s", cand,
+                 cc__ufcs_fn_name_is_real(cand) ? "declared, rejected by dispatch"
+                                                : "not declared");
+    }
+    if (cnt < max_lines &&
+        cc_ufcs_compose_default_callee(cand, sizeof(cand), base, method)) {
+        snprintf(lines[cnt++], 256, "candidate %s (family spelling): %s", cand,
+                 cc__ufcs_fn_name_is_real(cand) ? "declared, rejected by dispatch"
+                                                : "not declared");
+    }
+    if (cnt < max_lines) {
+        char param[256];
+        if (cc__ufcs_fn_first_param_in_source(method, param, sizeof(param)) ||
+            cc_included_cch_fn_first_param(method, param, sizeof(param)))
+            snprintf(lines[cnt++], 256,
+                     "candidate %s (bare): declared, but first parameter '%s' "
+                     "does not take '%s'",
+                     method, param, recv_type);
+        else
+            snprintf(lines[cnt++], 256,
+                     "candidate %s (bare): no visible declaration", method);
+    }
+    /* Family instances enumerate their derived member set. */
+    if (cnt < max_lines) {
+        const char* hdr = NULL;
+        if (cc_slice_spec_lookup(base, NULL, NULL) == 0) {
+            hdr = "cc_slice.cch";
+        } else if (strncmp(base, "CCVec_", 6) == 0) {
+            hdr = "std/vec.cch";
+        }
+        if (hdr) {
+            const char* mem = cc_family_header_members(hdr);
+            if (mem && mem[0])
+                snprintf(lines[cnt++], 256, "installed methods of %s: %s",
+                         base, mem);
+        }
+    }
+    return cnt;
+}
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -2289,9 +2424,7 @@ static int emit_desugared_call(char* out,
         const char* ts_snake = NULL;
         if (cc_slice_spec_lookup(ctx.recv_type_name, &ts_snake, NULL) == 0 &&
             ts_snake &&
-            (strcmp(method, "len") == 0 || strcmp(method, "at") == 0 ||
-             strcmp(method, "sub") == 0 || strcmp(method, "bytes") == 0 ||
-             strcmp(method, "from_buffer") == 0)) {
+            cc_family_header_has_member("cc_slice.cch", method)) {
             const char* amp = recv_is_ptr ? "" : "&";
             if (!has_args || !args_rewritten || !args_rewritten[0])
                 return snprintf(out, cap, "%s_%s(%s%s)", ts_snake, method, amp, recv);
@@ -2544,12 +2677,21 @@ static int emit_desugared_call(char* out,
                                                  args_rewritten, has_args,
                                                  ctx.recv_type_name);
                 if (bn != CC_UFCS_EMIT_UNRESOLVED) return bn;
-                /* Re-emit the composed dispatch clobbered by the tier
-                 * probe. */
-                return cc__emit_type_driven_dispatch(out, cap, recv, method,
-                                                     recv_is_ptr,
-                                                     args_rewritten, has_args,
-                                                     &ctx);
+                /* Known generic-family instances keep the composed
+                 * spelling (their members are macro-generated and
+                 * text-invisible); everything else fails loud through
+                 * the strict unresolved diagnostic instead of handing
+                 * the host an undeclared callee. */
+                if (cc__ufcs_recv_is_known_family_method(ctx.recv_type_base, method))
+                    return cc__emit_type_driven_dispatch(out, cap, recv, method,
+                                                         recv_is_ptr,
+                                                         args_rewritten, has_args,
+                                                         &ctx);
+                snprintf(g_ufcs_unres_method, sizeof(g_ufcs_unres_method),
+                         "%s", method);
+                snprintf(g_ufcs_unres_recv_type, sizeof(g_ufcs_unres_recv_type),
+                         "%s", ctx.recv_type_name ? ctx.recv_type_name : "");
+                return CC_UFCS_EMIT_UNRESOLVED;
             }
             return dispatch_n;
         }
@@ -2639,9 +2781,16 @@ static int emit_desugared_call(char* out,
                 memcpy(out, best, (size_t)best_n + 1);
                 return best_n;
             }
-            /* Outer was synthetic and @as retry found nothing real — try the
-             * universal bare-name tier, then the registered dynamic sink
-             * before failing loud. */
+            /* Outer was synthetic and @as retry found nothing real — the
+             * registered dynamic sink outranks the bare name (a sink
+             * type's unresolved methods belong to its sink), then the
+             * universal bare-name tier before failing loud. */
+            {
+                int sn = cc__emit_dynamic_sink(out, cap, recv, method,
+                                               recv_is_ptr, args_rewritten,
+                                               has_args, ctx.recv_type_base);
+                if (sn >= 0) return sn;
+            }
             {
                 int bn = cc__emit_bare_name_tier(out, cap, recv, method,
                                                  recv_is_ptr,

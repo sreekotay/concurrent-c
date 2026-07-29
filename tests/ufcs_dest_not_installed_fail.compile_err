@@ -1,0 +1,5 @@
+# A scalar destination with no installed variant is provably ill-formed
+# under the plain sink; the trap names the family and enumerates what
+# is installed instead of leaking a struct-conversion error.
+destination 'short' is not an installed destination of cc_py_obj_callm
+installed destinations (mangled): double, int64_t, float, int, long_long

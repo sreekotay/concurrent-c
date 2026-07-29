@@ -1,1 +1,5 @@
-PairReader_nope
+# An unknown method on a grammar-generated type fails through the
+# strict UFCS diagnostic with the resolution ladder, not by leaking a
+# composed callee to the host compiler.
+no UFCS method 'nope' for receiver type 'PairReader'
+candidate pair_reader_nope (family spelling): not declared

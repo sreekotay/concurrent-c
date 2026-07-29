@@ -76,7 +76,10 @@ does). Declaration and assignment destinations apply only when the call
 is the whole right-hand side — an operand of a larger expression has no
 single expected type in C; a cast is its own destination anywhere.
 Destinations without a declared variant lower through the plain sink
-and keep the `CCPyObj` Result.
+and keep the `CCPyObj` Result. A scalar destination with no declared
+variant is ill-formed — the plain Result can never initialize it — and
+the diagnostic names the destination and enumerates the installed
+variants.
 
 Extraction semantics are the library's: `double`/`float` accept any
 Python number (`float` narrows); integer destinations extract Python

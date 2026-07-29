@@ -1,4 +1,4 @@
-# A declared `zap(void*)` must not capture a `double` receiver — void*
-# is not a dispatch key. The call keeps its composed-spelling failure;
-# host-compiler wording varies, so only the composed name is pinned.
-double_zap
+# void* is not a dispatch key for a value receiver; the ladder names
+# the declared function and why it does not take the receiver.
+no UFCS method 'zap' for receiver type 'double'
+candidate zap (bare): declared, but first parameter 'void* p1' does not take 'double'

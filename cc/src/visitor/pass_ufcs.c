@@ -874,15 +874,37 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                                       ? nodes[i].recv_type : "<unknown>");
                 cc_pass_note(file, user_line, col,
                              "each @as edge must form a DAG; break the cycle or drop one embed");
-            } else if (nodes[i].recv_type && nodes[i].recv_type[0]) {
-                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
-                                  "no UFCS method '%s' for receiver type '%s'",
-                                  nodes[i].method ? nodes[i].method : "<unknown>",
-                                  nodes[i].recv_type);
             } else {
-                cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
-                                  "cannot resolve UFCS method '%s' because the receiver type is unknown",
-                                  nodes[i].method ? nodes[i].method : "<unknown>");
+                /* The AST node's recv_type is often empty for scalar and
+                 * value receivers; the emit layer stashes what dispatch
+                 * knew. */
+                const char* known_rt =
+                    (nodes[i].recv_type && nodes[i].recv_type[0])
+                        ? nodes[i].recv_type
+                        : cc_ufcs_last_unresolved_recv_type(nodes[i].method);
+                if (known_rt && known_rt[0]) {
+                    cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
+                                      "no UFCS method '%s' for receiver type '%s'",
+                                      nodes[i].method ? nodes[i].method : "<unknown>",
+                                      known_rt);
+                    {
+                        char lad[5][256];
+                        int lc;
+                        int li;
+                        /* The bare-candidate probe reads the TU text. */
+                        cc_ufcs_set_source_context(in_src, sp.start);
+                        lc = cc_ufcs_describe_unresolved(known_rt,
+                                                         nodes[i].method,
+                                                         lad, 5);
+                        cc_ufcs_set_source_context(NULL, 0);
+                        for (li = 0; li < lc; li++)
+                            cc_pass_note(file, user_line, col, "  %s", lad[li]);
+                    }
+                } else {
+                    cc_pass_error_cat(file, user_line, col, CC_ERR_TYPE,
+                                      "cannot resolve UFCS method '%s' because the receiver type is unknown",
+                                      nodes[i].method ? nodes[i].method : "<unknown>");
+                }
             }
             if (recv_expr[0]) {
                 cc_pass_note(file, user_line, col, "receiver expression: %s", recv_expr);

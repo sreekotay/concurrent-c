@@ -435,7 +435,8 @@ static char* cc__write_failed_reparse_dump(const char* stage,
                                            const char* src,
                                            size_t src_len,
                                            const char* input_path) {
-    char tmpl[] = "/tmp/cc_reparse_fail_XXXXXX.c";
+    char tmpl[512];
+    const char* tmpdir = getenv("TMPDIR");
     char rel[1024];
     char header[2048];
     const char* shown = NULL;
@@ -444,11 +445,10 @@ static char* cc__write_failed_reparse_dump(const char* stage,
     size_t off = 0;
     if (!src || src_len == 0) return NULL;
     shown = cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel));
-#ifdef __APPLE__
+    if (snprintf(tmpl, sizeof(tmpl), "%s/cc_reparse_fail_XXXXXX.c",
+                 tmpdir && tmpdir[0] ? tmpdir : "/tmp") >= (int)sizeof(tmpl))
+        return NULL;
     fd = mkstemps(tmpl, 2);
-#else
-    fd = mkstemp(tmpl);
-#endif
     if (fd < 0) return NULL;
     header_len = snprintf(header, sizeof(header),
                           "/* cc internal reparse failure\n"

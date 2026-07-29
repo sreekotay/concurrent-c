@@ -1,0 +1,5 @@
+#include <ccc/script/py.cch>
+CCPy py = cc_py(&a) !> @destroy;
+CCPyObj math = py.import("math") !> @destroy;
+short s = math.sqrt(2.0) !>;
+cc_println(@string(`${s}`, &a)) !>;

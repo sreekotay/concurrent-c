@@ -1,0 +1,56 @@
+/* Precedence: a receiver type with both an @as embed and a registered
+ * dynamic sink routes unresolved methods to the SINK, never to a
+ * visible bare function — even after the @as retry misses. A
+ * later-declared ambient `poke(WrapT*)` must not capture a method the
+ * sink already owns. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Inner { int tag; } Inner;
+
+typedef struct WrapT {
+    Inner base @as;
+    int sink_hits;
+} WrapT;
+
+typedef struct WArg { int k; } WArg;
+static WArg w_arg(int v) { WArg a; a.k = v; return a; }
+#define W_ARG(x) w_arg((int)(x))
+
+static int wrap_sink(WrapT *t, const char *method, int argc, ...) {
+    (void)method;
+    (void)argc;
+    t->sink_hits++;
+    return 77;
+}
+
+/* The ambient function the sink must outrank. */
+static int g_bare_hits;
+static int poke(WrapT *t1) {
+    (void)t1;
+    g_bare_hits++;
+    return -1;
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("WrapT", (CCTypeHooks){
+        .ufcs_dynamic = cc_type_dynamic_call("wrap_sink", "W_ARG"),
+    });
+}
+#endif
+
+int main(void) {
+    WrapT w = {{1}, 0};
+    assert(w.poke() == 77);      /* sink, not the bare poke() */
+    assert(w.sink_hits == 1);
+    assert(g_bare_hits == 0);
+    /* The bare function still works as itself. */
+    assert(poke(&w) == -1);
+    assert(g_bare_hits == 1);
+    printf("ok\n");
+    return 0;
+}

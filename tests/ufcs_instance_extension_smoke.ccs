@@ -1,0 +1,24 @@
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+/* Extension by declaration: add methods to container/slice instances
+ * by declaring the composed name — no compiler or header edits. */
+static double CCVec_double_median3(CCVec_double *v) {
+    return (v->data[0] + v->data[1] + v->data[2]) / 3.0;
+}
+static double cc_slice_double_sum(CCSlice_double *s) {
+    double t = 0;
+    for (size_t i = 0; i < s->base.len; i++) t += ((double*)s->base.ptr)[i];
+    return t;
+}
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 14);
+    CCVec::[double] v = cc_vec_new::[double](&arena);
+    v.push(1.0); v.push(2.0); v.push(6.0);
+    assert(v.median3() == 3.0);
+    CCSlice_double s = v.as_slice();
+    assert(s.sum() == 9.0);
+    printf("ok\n");
+    cc_arena_destroy(&arena);
+    return 0;
+}

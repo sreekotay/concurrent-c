@@ -1,3 +1,5 @@
-# The commented prototype above is not a declaration; the site keeps
-# its composed-spelling failure.
-double_ghost
+# The commented prototype must not invent a declaration; the strict
+# diagnostic spells the whole resolution ladder.
+no UFCS method 'ghost' for receiver type 'double'
+candidate cc_double_ghost (scalar family): not declared
+candidate ghost (bare): no visible declaration

@@ -187,6 +187,18 @@ static inline const char* cc_ufcs_scalar_recv_family(const char* type_name) {
     return NULL;
 }
 
+/* Describe the resolution ladder for an unresolved method — one line
+ * per candidate tried (family spellings, bare name with first-param
+ * status). For the strict diagnostic's notes; cold path. Returns the
+ * number of lines written. Defined in ufcs.c. */
+int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
+                                char lines[][256], int max_lines);
+
+/* Receiver type the emit layer knew for the most recent
+ * strict-unresolved return of `method`, when the AST node carries
+ * none. NULL if unknown. Defined in ufcs.c. */
+const char* cc_ufcs_last_unresolved_recv_type(const char* method);
+
 /* Resolve builtin channel UFCS lowering from receiver type + method + mode. */
 static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
                                                  const char* method,

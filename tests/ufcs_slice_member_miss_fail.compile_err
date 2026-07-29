@@ -1,0 +1,4 @@
+# Same for slice instances: the five members come from the
+# CC_DECL_SLICE_SPEC body, not a hardcoded list.
+no UFCS method 'nosuch' for receiver type 'CCSlice_double'
+installed methods of CCSlice_double: from_buffer, len, at, sub, bytes
