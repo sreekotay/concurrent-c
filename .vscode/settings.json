@@ -1,3 +1,8 @@
 {
-    "cmake.sourceDirectory": "/Users/airm5/Documents/code/concurrent-c/third_party/xjb/test"
+    "cmake.sourceDirectory": "/Users/airm5/Documents/code/concurrent-c/third_party/xjb/test",
+    "files.associations": {
+        "*.ccs": "concurrent-c",
+        "*.cch": "concurrent-c",
+        "*.shcc": "concurrent-c"
+    }
 }

@@ -2,7 +2,7 @@
   "name": "concurrent-c-syntax",
   "displayName": "Concurrent-C Syntax",
   "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch, *.shcc), a C-preprocessor-based language.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -20,6 +20,7 @@
           "concurrent-c",
           "ccc",
           "ccs",
+          "cch",
           "shcc"
         ],
         "extensions": [
@@ -41,6 +42,13 @@
         "scopeName": "source.concurrent-c",
         "path": "./syntaxes/concurrent-c.tmLanguage.json"
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "files.associations": {
+        "*.ccs": "concurrent-c",
+        "*.cch": "concurrent-c",
+        "*.shcc": "concurrent-c"
+      }
+    }
   }
 }
