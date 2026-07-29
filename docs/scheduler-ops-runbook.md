@@ -48,6 +48,7 @@ Scheduler (see also the config table in the scheduler spec):
 - `CC_V2_SYSMON_DETACH=0` — disable unchanged-dispatch worker eviction
 - `CC_V2_STATS=1` / `CC_V2_SYSMON_STATS=1` — counters
 - `CC_DEADLOCK_ABORT=0` — deadlock banner without `_exit(124)`
+- `CC_DEADLOCK_PERSIST_MS=N` — override deadlock latch duration (default 1000)
 
 Optional diagnostics (when present in the linked runtime):
 

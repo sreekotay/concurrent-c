@@ -26,6 +26,8 @@ static int g_mode = MODE_UNSUPPRESSED;
 static void child_deadlock_case(void) {
     setenv("CC_WORKERS", "1", 1);
     setenv("CC_DEADLOCK_ABORT", "1", 1);
+    /* Short latch: same detector shape, less wall time in the harness. */
+    setenv("CC_DEADLOCK_PERSIST_MS", "200", 1);
 
     int[~ >] tx;
     int[~ <] rx;
@@ -71,8 +73,8 @@ static int run_child_expect_exit124(int mode, int timeout_ms) {
             return 11;
         }
         if (rc < 0) return 12;
-        usleep(100 * 1000);
-        waited_ms += 100;
+        usleep(20 * 1000);
+        waited_ms += 20;
     }
 
     kill(pid, SIGKILL);
@@ -94,8 +96,8 @@ static int run_child_expect_suppressed_hang(int mode, int timeout_ms) {
             return 21;
         }
         if (rc < 0) return 22;
-        usleep(100 * 1000);
-        waited_ms += 100;
+        usleep(20 * 1000);
+        waited_ms += 20;
     }
 
     kill(pid, SIGKILL);
@@ -104,13 +106,16 @@ static int run_child_expect_suppressed_hang(int mode, int timeout_ms) {
 }
 
 int main(void) {
-    int rc = run_child_expect_exit124(MODE_UNSUPPRESSED, 3000);
+    /* Children set CC_DEADLOCK_PERSIST_MS=200. Exit-124 budgets sit above
+     * that; the hang case must outlast the latch so a suppressed stall is
+     * distinguishable from "not fired yet". */
+    int rc = run_child_expect_exit124(MODE_UNSUPPRESSED, 800);
     if (rc != 0) return rc;
 
-    rc = run_child_expect_suppressed_hang(MODE_SUPPRESSED, 1800);
+    rc = run_child_expect_suppressed_hang(MODE_SUPPRESSED, 500);
     if (rc != 0) return rc;
 
-    rc = run_child_expect_exit124(MODE_LEAVE_RESTORES, 3000);
+    rc = run_child_expect_exit124(MODE_LEAVE_RESTORES, 800);
     if (rc != 0) return rc;
 
     return 0;

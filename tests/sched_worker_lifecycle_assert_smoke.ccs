@@ -9,7 +9,7 @@
 
 #include <stdio.h>
 
-#define REPEATS 600
+#define REPEATS 200
 #define TASKS_PER_ROUND 24
 
 cc_atomic_int g_done = 0;

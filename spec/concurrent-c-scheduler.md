@@ -402,6 +402,7 @@ correctness.
 | `CC_V2_STATS=1`                  | Enable hot-path stat counters and dump them at exit.                                           |
 | `CC_V2_SYSMON_STATS=1`           | Enable stat counters without atexit dump.                                                      |
 | `CC_DEADLOCK_ABORT=0`            | Print deadlock banner but do not `_exit(124)`.                                                 |
+| `CC_DEADLOCK_PERSIST_MS=N`       | Override the deadlock latch duration (default 1000).                                           |
 
 ### Compile-time constants (`sched_v2.c`)
 

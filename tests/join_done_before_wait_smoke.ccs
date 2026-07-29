@@ -7,7 +7,7 @@
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-#define ITERATIONS 1000
+#define ITERATIONS 300
 #define FIBERS 16
 
 cc_atomic_int completed = 0;

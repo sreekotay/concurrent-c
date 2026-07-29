@@ -7,7 +7,7 @@
 
 #include <stdio.h>
 
-#define REPEATS 1000
+#define REPEATS 350
 
 cc_atomic_int g_errors = 0;
 

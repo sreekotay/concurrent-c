@@ -2789,8 +2789,20 @@ static _Atomic uint64_t g_v2_deadlock_first_seen = 0;
 static _Atomic int g_v2_deadlock_reported = 0;
 
 /* Persist-time before declaring deadlock. 1 s matches V1; enough to ride
- * out cc_block_all startup transients without annoying tests. */
+ * out cc_block_all startup transients. Override with CC_DEADLOCK_PERSIST_MS
+ * (milliseconds) for scoped detector smokes that would otherwise spend
+ * most of their wall time waiting out the latch. */
 #define SCHED_V2_DEADLOCK_PERSIST_MS 1000u
+
+static uint64_t sched_v2_deadlock_persist_ms(void) {
+    const char* env = getenv("CC_DEADLOCK_PERSIST_MS");
+    if (!env || !env[0]) return SCHED_V2_DEADLOCK_PERSIST_MS;
+    char* end = NULL;
+    unsigned long v = strtoul(env, &end, 10);
+    if (end == env || (end && *end) || v == 0 || v > 60000ul)
+        return SCHED_V2_DEADLOCK_PERSIST_MS;
+    return (uint64_t)v;
+}
 
 static uint64_t sched_v2_monotonic_ms(void) {
     struct timespec ts;
@@ -2979,7 +2991,8 @@ void sched_v2_check_deadlock(void) {
         return;
     }
 
-    /* Latch timer: require the stall to persist >= SCHED_V2_DEADLOCK_PERSIST_MS. */
+    /* Latch timer: require the stall to persist >= persist_ms. */
+    uint64_t persist_ms = sched_v2_deadlock_persist_ms();
     uint64_t now = sched_v2_monotonic_ms();
     uint64_t first = atomic_load_explicit(&g_v2_deadlock_first_seen,
                                           memory_order_relaxed);
@@ -2989,7 +3002,7 @@ void sched_v2_check_deadlock(void) {
             memory_order_relaxed, memory_order_relaxed);
         return;
     }
-    if (now - first < SCHED_V2_DEADLOCK_PERSIST_MS) return;
+    if (now - first < persist_ms) return;
 
     /* Claim the report slot. */
     int expected = 0;

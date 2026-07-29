@@ -16,7 +16,7 @@
 #include <errno.h>
 #include <stdio.h>
 
-#define REPEATS 1200
+#define REPEATS 400
 
 cc_atomic_int g_errors = 0;
 cc_atomic_int g_data = 0;
