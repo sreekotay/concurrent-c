@@ -168,15 +168,6 @@ size_t ccj_map_cap();
 size_t ccj_map_bucket_index_from_itr();
 #endif /* CC_PARSER_MODE */
 
-/* Convenience: common key types (parser stub or map_impl macro). */
-#define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
-#define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
-#define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
-
-#define CC_MAP_DECL_INT_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
-#define CC_MAP_DECL_U64_FULL(V, Name, OptV_ignored)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
-#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV_ignored)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
-
 #define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
 
 /* Single real CC_MAP_DECL_ARENA body for both modes.  Under CC_PARSER_MODE the

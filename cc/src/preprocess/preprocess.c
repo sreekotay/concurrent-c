@@ -2123,7 +2123,13 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
 static void cc__mangle_container_type_param(const char* src, size_t len, char* out, size_t out_sz);
 static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t elem_e,
                                        char* out, size_t out_sz,
-                                       char* out_snake, size_t snake_sz);
+                                       char* out_prefix, size_t prefix_sz);
+int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
+                                const char* src, size_t n,
+                                char* out, size_t out_sz);
+static int cc__call_return_type(const char* fname, const char* src, size_t n,
+                                char* out, size_t out_sz);
+static int cc__free_call_name_is_keyword(const char* s, size_t n);
 static void cc__enumerate_family_variants(const char* src, size_t n,
                                           const char* prefix,
                                           char* out, size_t out_sz);
@@ -3377,13 +3383,17 @@ static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            int stmt_has_member_access = cc__stmt_head_has_member_access(src + stmt_start, src + i);
-            cc_parse_decl_name_and_type(src + stmt_start, src + i,
+            /* The raw span still carries any comment between the previous
+             * statement and this one; the decl parsers are comment-blind
+             * and would read comment words as the type. */
+            size_t stmt_eff = cc_skip_ws_and_comments(src, i, stmt_start);
+            int stmt_has_member_access = cc__stmt_head_has_member_access(src + stmt_eff, src + i);
+            cc_parse_decl_name_and_type(src + stmt_eff, src + i,
                                          decl_name, sizeof(decl_name),
                                          decl_type, sizeof(decl_type));
             if ((!decl_name[0] || strcmp(decl_name, var_name) != 0 || !decl_type[0]) &&
                 !stmt_has_member_access) {
-                (void)cc__parse_decl_name_and_type_fallback(src + stmt_start, src + i,
+                (void)cc__parse_decl_name_and_type_fallback(src + stmt_eff, src + i,
                                                             decl_name, sizeof(decl_name),
                                                             decl_type, sizeof(decl_type));
             }
@@ -4360,6 +4370,106 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
     return cc__ufcs_dest_span_type(s, ty_a, ty_b, out, out_sz) ? 1 : 0;
 }
 
+/* Method-call chains: a UFCS call whose RECEIVER is itself a call
+ * expression (`xs.sub(1,3).len()` after link 1 lowers, or
+ * `d.halve().twice()` on scalar families) cannot lower through the
+ * variable-rooted rails — the receiver has no declaration to read a
+ * type from, and an rvalue receiver cannot take `&`. Normalize: bind
+ * the leading call to a temporary of its (textually derived) return
+ * type inside a GNU statement expression and re-anchor the remaining
+ * chain on that variable:
+ *
+ *   ({ T0 __cc_chain_N = F(args); __cc_chain_N.m1(a1)...; })
+ *
+ * Every existing rail then applies to each remaining link on ordinary
+ * variables — members, extensions, @as retry, sinks, and the strict
+ * ladder — across the engine's iteration loop; a chain of depth d
+ * fully lowers in ~2d iterations. Result-returning bases are left for
+ * the result rails. Consumes through any trailing field suffix so
+ * `ps.at(2).y` shapes stay inside the statement expression. */
+static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
+                                        size_t recv_start, size_t sep_pos,
+                                        const char* recv_expr,
+                                        char** out, size_t* out_len,
+                                        size_t* out_cap,
+                                        size_t* last_emit, size_t* i_inout) {
+    static int g_chain_tmp_id = 0;
+    char fname[128];
+    char t0[256];
+    size_t fl = 0, p, chain_end;
+    size_t rn = strlen(recv_expr);
+    /* Receiver must be one whole call: ident '(' ... ')' with nothing
+     * after the matching paren. */
+    if (rn < 3 || recv_expr[rn - 1] != ')') return 0;
+    if (!cc_is_ident_start(recv_expr[0])) return 0;
+    while (fl < rn && cc_is_ident_char(recv_expr[fl])) fl++;
+    if (fl == 0 || fl >= sizeof(fname)) return 0;
+    memcpy(fname, recv_expr, fl);
+    fname[fl] = 0;
+    if (cc__free_call_name_is_keyword(recv_expr, fl)) return 0;
+    p = fl;
+    while (p < rn && (recv_expr[p] == ' ' || recv_expr[p] == '\t')) p++;
+    if (p >= rn || recv_expr[p] != '(') return 0;
+    {
+        /* The '(' must match the final ')'. */
+        int depth = 0;
+        size_t q = p;
+        for (; q < rn; q++) {
+            if (recv_expr[q] == '(') depth++;
+            else if (recv_expr[q] == ')') {
+                depth--;
+                if (depth == 0) break;
+            }
+        }
+        if (q != rn - 1) return 0;
+    }
+    if (!cc__call_return_type(fname, src, n, t0, sizeof(t0))) return 0;
+    if (!t0[0] || strcmp(t0, "void") == 0) return 0;
+    if (strncmp(t0, "CCResult_", 9) == 0) return 0; /* result rails own */
+    /* Consume the chain: (./->) ident [(...)] links, then any pure
+     * field tail; stop at anything else. */
+    chain_end = sep_pos;
+    p = sep_pos;
+    for (;;) {
+        size_t q = p;
+        if (q < n && src[q] == '.') q++;
+        else if (q + 1 < n && src[q] == '-' && src[q + 1] == '>') q += 2;
+        else break;
+        q = cc_skip_ws_and_comments(src, n, q);
+        if (q >= n || !cc_is_ident_start(src[q])) break;
+        while (q < n && cc_is_ident_char(src[q])) q++;
+        {
+            size_t r = cc_skip_ws_and_comments(src, n, q);
+            if (r < n && src[r] == '(') {
+                size_t pe;
+                if (!cc_find_matching_paren(src, n, r, &pe)) break;
+                q = pe + 1;
+            }
+        }
+        chain_end = q;
+        p = cc_skip_ws_and_comments(src, n, q);
+        if (p >= n) break;
+        if (src[p] != '.' && !(p + 1 < n && src[p] == '-' && src[p + 1] == '>'))
+            break;
+    }
+    if (chain_end <= sep_pos) return 0;
+    {
+        int id = ++g_chain_tmp_id;
+        char head[512];
+        int wrote = snprintf(head, sizeof(head), "({ %s __cc_chain_%d = %s; __cc_chain_%d",
+                             t0, id, recv_expr, id);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(head)) return 0;
+        cc_sb_append(out, out_len, out_cap, src + *last_emit,
+                     recv_start - *last_emit);
+        cc_sb_append_cstr(out, out_len, out_cap, head);
+        cc_sb_append(out, out_len, out_cap, src + sep_pos, chain_end - sep_pos);
+        cc_sb_append_cstr(out, out_len, out_cap, "; })");
+    }
+    *last_emit = chain_end;
+    *i_inout = chain_end;
+    return 1;
+}
+
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
     CCUfcsVarInfo vars[512];
     CCUfcsFieldInfo fields[256];
@@ -4402,6 +4512,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int wildcard_like = 0;
         int scalar_like = 0;
         int scalar_literal = 0;
+        int slice_spec_like = 0;
         int recv_addressable = 1;
         char wildcard_callee[256];
         const char* channel_callee = NULL;
@@ -4424,6 +4535,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             if (rs > 0 && src[rs - 1] == '.') { i++; continue; }
             if (rs >= 2 && src[rs - 2] == '-' && src[rs - 1] == '>') { i++; continue; }
         }
+        /* Call-expression receiver: normalize the chain onto a typed
+         * temporary and let later iterations lower each link. */
+        if (cc__try_normalize_ufcs_chain(src, n, recv_start, sep_pos, recv_expr,
+                                         &out, &out_len, &out_cap,
+                                         &last_emit, &i))
+            continue;
         if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
                                                     vars, var_count, fields, field_count,
                                                     recv_type, sizeof(recv_type), &recv_is_ptr)) {
@@ -4492,6 +4609,19 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 break;
             }
         }
+        if ((strncmp(recv_type_base, "Map_", 4) == 0 &&
+             !cc_family_header_has_member("std/map_impl.cch", method_name)) ||
+            (strncmp(recv_type_base, "ArrayMap_", 9) == 0 &&
+             !cc_family_header_has_member("std/array_map.cch", method_name))) {
+            char ext[512];
+            if ((size_t)snprintf(ext, sizeof(ext), "%s_%s", recv_type_base,
+                                 method_name) >= sizeof(ext) ||
+                !(cc__ufcs_fn_name_in_text(src, n, ext) ||
+                  cc_included_cch_contains_fn(ext))) {
+                i++;
+                continue;
+            }
+        }
         if (strncmp(recv_type_base, "CCVec_", 6) == 0 &&
             !cc_family_header_has_member("std/vec.cch", method_name)) {
             /* Not a derived member of the vec family: only a declared
@@ -4531,6 +4661,17 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             i++;
             continue;
         }
+        /* Typed slice instances (CC_DECL_SLICE_SPEC): derived members
+         * lower textually here — composed as NAME##_<member> by the
+         * default branch below — so postfix continuations after the
+         * call parse as plain C. Anything else (byte methods via the
+         * `base` @as retry, declared extensions, the strict ladder)
+         * stays with the AST pass. */
+        slice_spec_like = (cc_slice_spec_lookup(recv_type_base, NULL, NULL) == 0);
+        if (slice_spec_like && !cc_family_header_has_member("cc_slice.cch", method_name)) {
+            i++;
+            continue;
+        }
         nursery_like = (strcmp(recv_type_base, "CCNursery") == 0 ||
                         strcmp(recv_type_base, "CCNursery*") == 0);
         chan_tx = (strncmp(recv_type_base, "CCChanTx_", 9) == 0 ||
@@ -4556,7 +4697,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               strncmp(recv_type_base, "ArrayMap_", 9) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
-              chan_tx || chan_rx || map_decl_like ||
+              chan_tx || chan_rx || map_decl_like || slice_spec_like ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             /* CC*-prefixed stdlib types follow the snake_case twin convention
              * (`CCListener.accept` → `cc_listener_accept`) even when the
@@ -5455,6 +5596,46 @@ static int cc__free_call_family_callee(const char* src, size_t n,
     return 0;
 }
 
+/* Naming grid: the unprefixed container spellings `Vec::[T]` /
+ * `vec_new::[T]` are the canonical surface, matching `Map::[K, V]` /
+ * `map_new::[K, V]`; the CC-prefixed twins remain accepted as the
+ * instance/mangled layer (`Vec::[int]` and `CCVec::[int]` both name
+ * `CCVec_int`). Normalized here, before any recognizer, so every
+ * downstream pass sees one spelling. Comment/string-aware. */
+static char* cc__rewrite_container_surface_aliases(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        const char* rep = NULL;
+        size_t tok = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if ((src[i] != 'V' && src[i] != 'v') ||
+            (i > 0 && cc_is_ident_char(src[i - 1]))) {
+            i++;
+            continue;
+        }
+        if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
+            rep = "CCVec";
+            tok = 3;
+        } else if (i + 10 <= n && memcmp(src + i, "vec_new::[", 10) == 0) {
+            rep = "cc_vec_new";
+            tok = 7;
+        }
+        if (!rep) { i++; continue; }
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, rep);
+        i += tok;
+        last_emit = i;
+    }
+    if (!out) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     char* out = NULL;
     /* Test-only baseline: tools/diff_additive.sh proves the additive
@@ -5596,7 +5777,7 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
             cur_len = strlen(cur);
         }
     }
-    for (int iter = 0; iter < 4; ++iter) {
+    for (int iter = 0; iter < 8; ++iter) {
         const char* in = cur ? cur : src;
         char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
         if (!next) {
@@ -6304,8 +6485,6 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 is_vec_type = 1; kw_len = 5; use_bracket = 1;
             } else if (i + 6 <= n && memcmp(src + i, "CCVec<", 6) == 0) {
                 retired_vec_syntax = "CCVec<T>";
-            } else if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
-                retired_vec_syntax = "Vec::[T]";
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
                 retired_vec_syntax = "Vec<T>";
             } else if (i + 11 <= n && memcmp(src + i, "ArrayMap::[", 11) == 0) {
@@ -6318,8 +6497,6 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 is_vec_new = 1; kw_len = 10; use_bracket = 1;
             } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
                 retired_vec_syntax = "cc_vec_new<T>";
-            } else if (i + 10 <= n && memcmp(src + i, "vec_new::[", 10) == 0) {
-                retired_vec_syntax = "vec_new::[T]";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
                 retired_vec_syntax = "vec_new<T>";
             } else if (i + 22 <= n && memcmp(src + i, "array_map_new_count::[", 22) == 0) {
@@ -6339,7 +6516,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                     scanner.line, scanner.col, "type",
                     "retired generic spelling '%s'; use the '::[ ... ]' bracket form "
-                    "(e.g. 'CCVec::[int]', 'Map::[K, V]', 'cc_vec_new::[T](...)', 'map_new::[K, V](...)')",
+                    "(e.g. 'Vec::[int]', 'Map::[K, V]', 'vec_new::[T](...)', 'map_new::[K, V](...)')",
                     retired_vec_syntax);
             free(out);
             return NULL;
@@ -7092,10 +7269,11 @@ static int cc__slice_declarator_name(const char* s, size_t type_start, size_t lb
  * pointer/exotic spellings stay erased. Registers the instance in the
  * session slice-spec table and its `base` @as field so the AST UFCS
  * pass routes methods through as-retry. Outputs the type name and,
- * optionally, the snake method prefix (cc_slice_double). */
+ * optionally, the member prefix — the instance name itself
+ * (CCSlice_double_at), the same NAME##_ convention as Vec/Map. */
 static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t elem_e,
                                        char* out, size_t out_sz,
-                                       char* out_snake, size_t snake_sz) {
+                                       char* out_prefix, size_t prefix_sz) {
     char norm[128];
     char mangled[128];
     size_t nn = 0;
@@ -7127,23 +7305,13 @@ static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t el
         if (wrote <= 0 || (size_t)wrote >= out_sz) return 0;
     }
     {
-        char snake[160];
-        size_t si = 0;
-        const char* m = mangled;
-        int wrote = snprintf(snake, sizeof(snake), "cc_slice_");
-        if (wrote <= 0) return 0;
-        si = (size_t)wrote;
-        while (*m && si + 1 < sizeof(snake)) {
-            char c = *m++;
-            snake[si++] = (char)tolower((unsigned char)c);
-        }
-        snake[si] = '\0';
-        (void)cc_slice_spec_register(out, snake, norm);
+        size_t nl = strlen(out);
+        (void)cc_slice_spec_register(out, out, norm);
         (void)cc_type_registry_add_field_ex(cc_type_registry_get_global(), out,
                                             "base", "CCSlice", 1);
-        if (out_snake) {
-            if (si + 1 > snake_sz) return 0;
-            memcpy(out_snake, snake, si + 1);
+        if (out_prefix) {
+            if (nl + 1 > prefix_sz) return 0;
+            memcpy(out_prefix, out, nl + 1);
         }
     }
     return 1;
@@ -9141,8 +9309,9 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
         size_t n_vec = cc_type_graph_vec_count(graph);
         size_t n_map = cc_type_graph_map_count(graph);
         size_t n_chan = cc_type_graph_channel_count(graph);
-        
-        if (n_vec > 0 || n_map > 0 || n_chan > 0) {
+        size_t n_slice = cc_slice_spec_count();
+
+        if (n_vec > 0 || n_map > 0 || n_chan > 0 || n_slice > 0) {
             cc_emit_plan_fprint_container_prelude(out, 0,
                 n_vec > 0, n_map > 0, n_chan > 0);
             
@@ -9154,6 +9323,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             /* Emit Map declarations */
             for (size_t i = 0; i < n_map; i++) {
                 cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
+            }
+
+            /* Typed slice instances no declaration covers */
+            for (size_t i = 0; i < n_slice; i++) {
+                const char* nm = NULL;
+                const char* el = NULL;
+                if (cc_slice_spec_get(i, &nm, &el) != 0) continue;
+                if (!cc_slice_spec_tu_needs_decl(use, strlen(use), nm, el)) continue;
+                fprintf(out, "CC_DECL_SLICE_SPEC(%s, %s)\n", nm, el);
             }
 
             for (size_t i = 0; i < n_chan; i++) {
@@ -9434,7 +9612,16 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
             size_t container_pos = ctnr_sched.anchor_pos;
             size_t n_vec_ctnr = ctnr_sched.n_vec;
             size_t n_map_ctnr = ctnr_sched.n_map;
-            int have_container_decls = (n_vec_ctnr > 0 || n_map_ctnr > 0);
+            size_t n_slice_ctnr = ctnr_sched.n_slice;
+            int have_slice_anchor_decls = 0;
+            for (size_t i = 0; i < n_slice_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                if (ctnr_sched.slice_emit[i] && !ctnr_sched.slice_delayed[i]) {
+                    have_slice_anchor_decls = 1;
+                    break;
+                }
+            }
+            int have_container_decls =
+                (n_vec_ctnr > 0 || n_map_ctnr > 0 || have_slice_anchor_decls);
             cc_emit_plan_build_comptime_schedule(use, use_len, input_path,
                                                   insert_pos, container_pos,
                                                   &comptime_sched);
@@ -9453,6 +9640,20 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                     for (size_t i = 0; i < n_map_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
                         if (ctnr_sched.map_delayed[i]) continue;
                         cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
+                    }
+                    for (size_t i = 0; i < n_slice_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        const char* nm = NULL;
+                        const char* el = NULL;
+                        size_t fu;
+                        if (!ctnr_sched.slice_emit[i] || ctnr_sched.slice_delayed[i]) continue;
+                        if (cc_slice_spec_get(i, &nm, &el) != 0) continue;
+                        /* Attribute the expansion to the first use site so
+                         * an error inside it (e.g. undeclared element type)
+                         * points at the line that named the instance. */
+                        fu = cc_emit_plan_find_ident_any(use, use_len, nm);
+                        if (fu < use_len)
+                            cc_emit_plan_fprint_line_directive(out, use, fu, input_path);
+                        fprintf(out, "CC_DECL_SLICE_SPEC(%s, %s)\n", nm, el);
                     }
                     cc_emit_plan_fprint_container_epilogue(out);
                     cc_emit_plan_fprint_line_directive(out, use, container_pos, input_path);
@@ -9475,6 +9676,12 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         if (!ctnr_sched.map_delayed[i]) continue;
                         if (ctnr_sched.map_pos[i] > cursor && ctnr_sched.map_pos[i] < next_pos) {
                             next_pos = ctnr_sched.map_pos[i];
+                        }
+                    }
+                    for (size_t i = 0; i < n_slice_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                        if (!ctnr_sched.slice_emit[i] || !ctnr_sched.slice_delayed[i]) continue;
+                        if (ctnr_sched.slice_pos[i] > cursor && ctnr_sched.slice_pos[i] < next_pos) {
+                            next_pos = ctnr_sched.slice_pos[i];
                         }
                     }
                     for (size_t i = 0; i < cc__result_specs.count && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
@@ -9786,6 +9993,23 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                                 emitted_delayed_container = 1;
                             }
                             cc_emit_plan_fprint_map_decl(out, cc_type_graph_get_map(graph, i));
+                        }
+                        for (size_t i = 0; i < n_slice_ctnr && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                            const char* nm = NULL;
+                            const char* el = NULL;
+                            size_t fu;
+                            if (!ctnr_sched.slice_emit[i] || !ctnr_sched.slice_delayed[i] ||
+                                ctnr_sched.slice_pos[i] != next_pos)
+                                continue;
+                            if (cc_slice_spec_get(i, &nm, &el) != 0) continue;
+                            if (!emitted_delayed_container) {
+                                fprintf(out, "/* --- CC delayed container declarations --- */\n");
+                                emitted_delayed_container = 1;
+                            }
+                            fu = cc_emit_plan_find_ident_any(use, use_len, nm);
+                            if (fu < use_len)
+                                cc_emit_plan_fprint_line_directive(out, use, fu, input_path);
+                            fprintf(out, "CC_DECL_SLICE_SPEC(%s, %s)\n", nm, el);
                         }
                         if (emitted_delayed_container) {
                             fprintf(out, "/* --- end delayed container declarations --- */\n");
@@ -10185,7 +10409,7 @@ static void cc__family_scan_members(const char* fsrc, size_t fn,
         {
             size_t ms = i + 3, me = ms;
             while (me < fn && cc_is_ident_char(fsrc[me])) me++;
-            if (me > ms && me - ms < 96) {
+            if (me > ms && me - ms < 96 && fsrc[ms] != '_') {
                 char mem[96];
                 char pat[100];
                 char hay[1060];
@@ -10273,6 +10497,556 @@ const char* cc_family_header_members(const char* header_suffix) {
     return cc__family_members_csv(header_suffix);
 }
 
+/* Read the family header's text (registered include walk, or path
+ * derived from any registered ccc header's root — same fallbacks as
+ * the member-set scan). Caller frees. */
+static int cc__family_header_read(const char* header_suffix,
+                                  char** out_buf, size_t* out_len) {
+    size_t h, pl, sl;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        const char* path = g_included_cch_sources[h];
+        if (!path) continue;
+        pl = strlen(path);
+        sl = strlen(header_suffix);
+        if (pl < sl || strcmp(path + pl - sl, header_suffix) != 0) continue;
+        if (cc__read_file_text(path, out_buf, out_len) == 0 && *out_buf) return 0;
+    }
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        const char* path = g_included_cch_sources[h];
+        const char* mark;
+        char cand[PATH_MAX];
+        if (!path) continue;
+        mark = strstr(path, "/include/ccc/");
+        if (!mark) continue;
+        if ((size_t)snprintf(cand, sizeof(cand), "%.*s/include/ccc/%s",
+                             (int)(mark - path), path, header_suffix) >=
+            sizeof(cand))
+            continue;
+        if (cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) return 0;
+    }
+    return -1;
+}
+
+/* Raw return-type spelling of a family member: the token span before
+ * `<Formal>##_<member>(` on its macro-body line, minus decl-spec
+ * keywords. Still spells the macro's formals (T, Name, NAME, K, V,
+ * SliceName); the caller substitutes the instance's actuals. */
+static int cc_family_header_member_return(const char* header_suffix,
+                                          const char* member,
+                                          char* out, size_t out_sz) {
+    char* fsrc = NULL;
+    size_t fn = 0;
+    size_t i;
+    size_t mlen = strlen(member);
+    int hit = 0;
+    if (!member[0] || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    if (cc__family_header_read(header_suffix, &fsrc, &fn) != 0) return 0;
+    for (i = 0; i + 3 + mlen < fn && !hit; i++) {
+        size_t formal_e, formal_s, line_s, q, ol;
+        if (fsrc[i] != '#' || fsrc[i + 1] != '#' || fsrc[i + 2] != '_')
+            continue;
+        if (memcmp(fsrc + i + 3, member, mlen) != 0) continue;
+        if (cc_is_ident_char(fsrc[i + 3 + mlen])) continue;
+        q = i + 3 + mlen;
+        while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+        if (q >= fn || fsrc[q] != '(') continue;
+        /* Formal instance-name token immediately before `##`. */
+        formal_e = i;
+        formal_s = formal_e;
+        while (formal_s > 0 && cc_is_ident_char(fsrc[formal_s - 1])) formal_s--;
+        if (formal_s == formal_e) continue;
+        /* Return span: from this physical line's start to the formal. */
+        line_s = formal_s;
+        while (line_s > 0 && fsrc[line_s - 1] != '\n') line_s--;
+        /* Copy tokens, skipping decl-spec keywords, normalizing ws. */
+        ol = 0;
+        q = line_s;
+        while (q < formal_s && ol + 2 < out_sz) {
+            char tok[64];
+            size_t ts, tl;
+            while (q < formal_s && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+            if (q >= formal_s) break;
+            if (fsrc[q] == '*') {
+                out[ol++] = '*';
+                q++;
+                continue;
+            }
+            if (!cc_is_ident_start(fsrc[q])) { q++; continue; }
+            ts = q;
+            while (q < formal_s && cc_is_ident_char(fsrc[q])) q++;
+            tl = q - ts;
+            if (tl >= sizeof(tok)) { ol = 0; break; }
+            memcpy(tok, fsrc + ts, tl);
+            tok[tl] = 0;
+            if (strcmp(tok, "static") == 0 || strcmp(tok, "inline") == 0 ||
+                strcmp(tok, "extern") == 0 || strcmp(tok, "const") == 0 ||
+                strcmp(tok, "volatile") == 0)
+                continue;
+            if (ol && out[ol - 1] != '*' && ol + 1 < out_sz) out[ol++] = ' ';
+            if (ol + tl + 1 >= out_sz) { ol = 0; break; }
+            memcpy(out + ol, tok, tl);
+            ol += tl;
+        }
+        out[ol] = 0;
+        hit = ol > 0;
+    }
+    free(fsrc);
+    return hit;
+}
+
+/* Whole-word formal → actual substitution over a type spelling. */
+static void cc__subst_type_formals(char* buf, size_t sz,
+                                   const char* const* formals,
+                                   const char* const* actuals, int nf) {
+    char tmp[256];
+    size_t i = 0, o = 0;
+    size_t n = strlen(buf);
+    while (i < n && o + 1 < sizeof(tmp)) {
+        if (cc_is_ident_start(buf[i]) && (i == 0 || !cc_is_ident_char(buf[i - 1]))) {
+            size_t e = i;
+            int k, done = 0;
+            while (e < n && cc_is_ident_char(buf[e])) e++;
+            for (k = 0; k < nf; k++) {
+                size_t fl = strlen(formals[k]);
+                if (e - i == fl && memcmp(buf + i, formals[k], fl) == 0) {
+                    size_t al = strlen(actuals[k]);
+                    if (o + al + 1 >= sizeof(tmp)) return;
+                    memcpy(tmp + o, actuals[k], al);
+                    o += al;
+                    i = e;
+                    done = 1;
+                    break;
+                }
+            }
+            if (done) continue;
+            while (i < e && o + 1 < sizeof(tmp)) tmp[o++] = buf[i++];
+            continue;
+        }
+        tmp[o++] = buf[i++];
+    }
+    tmp[o] = 0;
+    snprintf(buf, sz, "%s", tmp);
+}
+
+/* Return-type spelling of the decl-shaped `name(` occurrence:
+ * statement-head..name span minus decl-spec keywords, ws-normalized.
+ * Same walk as cc__fn_returns_result_text. */
+static int cc__decl_fn_return_type_text(const char* text, size_t n,
+                                        const char* name,
+                                        char* out, size_t out_sz) {
+    size_t nlen = strlen(name);
+    size_t i = 0;
+    CCScannerState scan;
+    if (!text || !nlen || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    cc_scanner_init(&scan);
+    while (i + nlen < n) {
+        size_t q, a, b, ol;
+        if (cc_scanner_skip_non_code(&scan, text, n, &i)) continue;
+        if (text[i] != name[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(text[i - 1])) { i++; continue; }
+        if (i + nlen > n || memcmp(text + i, name, nlen) != 0) { i++; continue; }
+        if (cc_is_ident_char(text[i + nlen])) { i += nlen; continue; }
+        q = i + nlen;
+        while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
+        if (q >= n || text[q] != '(') { i += nlen; continue; }
+        b = i;
+        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
+            i += nlen;
+            continue;
+        }
+        a = b;
+        while (a > 0 && !strchr(";{}()", text[a - 1]) && text[a - 1] != '\n') a--;
+        ol = 0;
+        q = a;
+        while (q < b && ol + 2 < out_sz) {
+            char tok[64];
+            size_t ts, tl;
+            while (q < b && isspace((unsigned char)text[q])) q++;
+            if (q >= b) break;
+            if (text[q] == '*') {
+                out[ol++] = '*';
+                q++;
+                continue;
+            }
+            if (!cc_is_ident_start(text[q]) && text[q] != '@') { q++; continue; }
+            if (text[q] == '@') {
+                /* `@attr` decl attributes never join the type. */
+                q++;
+                while (q < b && cc_is_ident_char(text[q])) q++;
+                continue;
+            }
+            ts = q;
+            while (q < b && cc_is_ident_char(text[q])) q++;
+            tl = q - ts;
+            if (tl >= sizeof(tok)) { ol = 0; break; }
+            memcpy(tok, text + ts, tl);
+            tok[tl] = 0;
+            if (strcmp(tok, "static") == 0 || strcmp(tok, "inline") == 0 ||
+                strcmp(tok, "extern") == 0 || strcmp(tok, "const") == 0 ||
+                strcmp(tok, "volatile") == 0 || strcmp(tok, "register") == 0 ||
+                strcmp(tok, "_Thread_local") == 0)
+                continue;
+            if (ol && out[ol - 1] != '*' && ol + 1 < out_sz) out[ol++] = ' ';
+            if (ol + tl + 1 >= out_sz) { ol = 0; break; }
+            memcpy(out + ol, tok, tl);
+            ol += tl;
+        }
+        out[ol] = 0;
+        return ol > 0;
+    }
+    return 0;
+}
+
+/* TU + included cch declared-function return type. */
+static int cc__fn_return_type(const char* src, size_t n, const char* name,
+                              char* out, size_t out_sz) {
+    size_t h;
+    if (src && cc__decl_fn_return_type_text(src, n, name, out, out_sz)) return 1;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        int hit;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        hit = cc__decl_fn_return_type_text(fsrc, fn, name, out, out_sz);
+        free(fsrc);
+        if (hit) return 1;
+    }
+    return 0;
+}
+
+/* Family-instance bindings: header + formal/actual lists for a
+ * container or typed-slice instance type. Returns 1 and fills the
+ * arrays (capacity >= 3) on a known instance. */
+static int cc__family_instance_bindings(const char* recv_type_base,
+                                        const char** out_hdr,
+                                        const char* formals[3],
+                                        char actuals[3][160],
+                                        int* out_nf) {
+    const char* elem = NULL;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (cc_slice_spec_lookup(recv_type_base, NULL, &elem) == 0 && elem) {
+        *out_hdr = "cc_slice.cch";
+        formals[0] = "NAME";
+        snprintf(actuals[0], 160, "%s", recv_type_base);
+        formals[1] = "T";
+        snprintf(actuals[1], 160, "%s", elem);
+        *out_nf = 2;
+        return 1;
+    }
+    if (reg && strncmp(recv_type_base, "CCVec_", 6) == 0) {
+        size_t i, c = cc_type_registry_vec_count(reg);
+        for (i = 0; i < c; i++) {
+            const CCTypeInstantiation* t = cc_type_registry_get_vec(reg, i);
+            char sn[160];
+            if (!t || !t->mangled_name || !t->type1) continue;
+            if (strcmp(t->mangled_name, recv_type_base) != 0) continue;
+            *out_hdr = "std/vec.cch";
+            formals[0] = "Name";
+            snprintf(actuals[0], 160, "%s", recv_type_base);
+            formals[1] = "T";
+            snprintf(actuals[1], 160, "%s", t->type1);
+            formals[2] = "SliceName";
+            if (cc_slice_spec_instance_for_elem(t->type1, sn, sizeof(sn)) == 0)
+                snprintf(actuals[2], 160, "%s", sn);
+            else
+                snprintf(actuals[2], 160, "CCSlice");
+            *out_nf = 3;
+            return 1;
+        }
+    }
+    if (reg && (strncmp(recv_type_base, "ArrayMap_", 9) == 0 ||
+                strncmp(recv_type_base, "Map_", 4) == 0)) {
+        size_t i, c = cc_type_registry_map_count(reg);
+        for (i = 0; i < c; i++) {
+            const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
+            if (!t || !t->mangled_name || !t->type1 || !t->type2) continue;
+            if (strcmp(t->mangled_name, recv_type_base) != 0) continue;
+            *out_hdr = strncmp(recv_type_base, "ArrayMap_", 9) == 0
+                           ? "std/array_map.cch"
+                           : "std/map_impl.cch";
+            formals[0] = "Name";
+            snprintf(actuals[0], 160, "%s", recv_type_base);
+            formals[1] = "K";
+            snprintf(actuals[1], 160, "%s", t->type1);
+            formals[2] = "V";
+            snprintf(actuals[2], 160, "%s", t->type2);
+            *out_nf = 3;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Return type of `recv.method(...)`: family instances derive it from
+ * the family header's macro body (formals substituted); otherwise the
+ * composed callee's declaration is read textually from the TU or an
+ * included cch. 1 on success. */
+int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
+                                const char* src, size_t n,
+                                char* out, size_t out_sz) {
+    const char* hdr = NULL;
+    const char* formals[3];
+    char actuals[3][160];
+    int nf = 0;
+    char cand[512];
+    if (!recv_type_base || !recv_type_base[0] || !method || !method[0]) return 0;
+    if (cc__family_instance_bindings(recv_type_base, &hdr, formals, actuals, &nf)) {
+        const char* aptr[3];
+        int k;
+        if (!cc_family_header_has_member(hdr, method)) {
+            /* Declared instance extension: read its return directly. */
+            if ((size_t)snprintf(cand, sizeof(cand), "%s_%s", recv_type_base,
+                                 method) < sizeof(cand) &&
+                cc__fn_return_type(src, n, cand, out, out_sz))
+                return 1;
+            return 0;
+        }
+        /* Vec `as_slice` is declared by two variants (erased / typed);
+         * mirror the emitters' choice, which SliceName already encodes. */
+        if (strcmp(method, "as_slice") == 0 && nf == 3 &&
+            strcmp(formals[2], "SliceName") == 0) {
+            snprintf(out, out_sz, "%s", actuals[2]);
+            return 1;
+        }
+        if (!cc_family_header_member_return(hdr, method, out, out_sz)) return 0;
+        for (k = 0; k < nf; k++) aptr[k] = actuals[k];
+        cc__subst_type_formals(out, out_sz, formals, aptr, nf);
+        return out[0] != 0;
+    }
+    /* Declared extension spelling <Type>_<method>. */
+    if ((size_t)snprintf(cand, sizeof(cand), "%s_%s", recv_type_base, method) <
+            sizeof(cand) &&
+        cc__fn_return_type(src, n, cand, out, out_sz))
+        return 1;
+    /* Scalar value-receiver family (cc_<mangled type>_<method>). */
+    if (cc__compose_scalar_ufcs_callee(cand, sizeof(cand), recv_type_base,
+                                       method) &&
+        cc__fn_return_type(src, n, cand, out, out_sz))
+        return 1;
+    /* Default snake twin (CCListener.accept → cc_listener_accept). */
+    if (cc_ufcs_compose_default_callee(cand, sizeof(cand), recv_type_base,
+                                       method) &&
+        cc__fn_return_type(src, n, cand, out, out_sz))
+        return 1;
+    return 0;
+}
+
+/* Return type of a call expression's callee `fname`: a composed family
+ * member of a known instance (oracle above), or any declared function
+ * (textual reader). */
+static int cc__call_return_type(const char* fname, const char* src, size_t n,
+                                char* out, size_t out_sz) {
+    size_t fl = strlen(fname);
+    size_t i;
+    /* <instance>_<member> for a registered slice instance. */
+    for (i = 0; i < cc_slice_spec_count(); i++) {
+        const char* nm = NULL;
+        size_t il;
+        if (cc_slice_spec_get(i, &nm, NULL) != 0 || !nm) continue;
+        il = strlen(nm);
+        if (fl > il + 1 && strncmp(fname, nm, il) == 0 && fname[il] == '_' &&
+            cc_family_header_has_member("cc_slice.cch", fname + il + 1))
+            return cc__ufcs_method_return_type(nm, fname + il + 1, src, n, out,
+                                               out_sz);
+    }
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) {
+            size_t c = cc_type_registry_vec_count(reg);
+            for (i = 0; i < c; i++) {
+                const CCTypeInstantiation* t = cc_type_registry_get_vec(reg, i);
+                size_t il;
+                if (!t || !t->mangled_name) continue;
+                il = strlen(t->mangled_name);
+                if (fl > il + 1 && strncmp(fname, t->mangled_name, il) == 0 &&
+                    fname[il] == '_' &&
+                    cc_family_header_has_member("std/vec.cch", fname + il + 1))
+                    return cc__ufcs_method_return_type(t->mangled_name,
+                                                       fname + il + 1, src, n,
+                                                       out, out_sz);
+            }
+            c = cc_type_registry_map_count(reg);
+            for (i = 0; i < c; i++) {
+                const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
+                size_t il;
+                const char* hdr;
+                if (!t || !t->mangled_name) continue;
+                il = strlen(t->mangled_name);
+                hdr = strncmp(t->mangled_name, "ArrayMap_", 9) == 0
+                          ? "std/array_map.cch"
+                          : "std/map_impl.cch";
+                if (fl > il + 1 && strncmp(fname, t->mangled_name, il) == 0 &&
+                    fname[il] == '_' &&
+                    cc_family_header_has_member(hdr, fname + il + 1))
+                    return cc__ufcs_method_return_type(t->mangled_name,
+                                                       fname + il + 1, src, n,
+                                                       out, out_sz);
+            }
+        }
+    }
+    return cc__fn_return_type(src, n, fname, out, out_sz);
+}
+
+/* Map key hash/eq: the declared convention outranks the built-in
+ * table — a key type K is installed when cc_map_key_hash_<mangled K>
+ * and cc_map_key_eq_<mangled K> are both declared (noted from the TU
+ * at canonicalize, or visible in an included cch header). Unknown key
+ * types are an articulate error, never a silent i32 hash. */
+static _Thread_local char g_map_key_notes[16][96];
+static _Thread_local int g_map_key_note_static[16];
+static _Thread_local int g_map_key_note_count;
+static _Thread_local char g_map_key_errs[8][96];
+static _Thread_local int g_map_key_err_count;
+
+void cc_note_tu_map_key_pairs(const char* src, size_t n) {
+    static const char pre[] = "cc_map_key_hash_";
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src) return;
+    cc_scanner_init(&scan);
+    while (i + sizeof(pre) - 1 < n) {
+        size_t e, q, b;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != 'c') { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        if (memcmp(src + i, pre, sizeof(pre) - 1) != 0) { i++; continue; }
+        e = i + sizeof(pre) - 1;
+        while (e < n && cc_is_ident_char(src[e])) e++;
+        q = e;
+        while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+        if (q >= n || src[q] != '(') { i = e; continue; }
+        b = i;
+        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
+        if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*')) {
+            i = e;
+            continue;
+        }
+        {
+            size_t sl = e - (i + sizeof(pre) - 1);
+            char suf[96];
+            char eqn[128];
+            int k, dup = 0;
+            if (sl == 0 || sl >= sizeof(suf)) { i = e; continue; }
+            memcpy(suf, src + i + sizeof(pre) - 1, sl);
+            suf[sl] = 0;
+            snprintf(eqn, sizeof(eqn), "cc_map_key_eq_%s", suf);
+            if (!cc__tu_declares_fn(src, n, eqn)) { i = e; continue; }
+            for (k = 0; k < g_map_key_note_count && !dup; k++)
+                if (strcmp(g_map_key_notes[k], suf) == 0) dup = 1;
+            if (!dup && g_map_key_note_count < 16) {
+                /* Staticness of the definition decides the forward
+                 * prototype's linkage at the splice. */
+                size_t a = b;
+                int is_static = 0;
+                while (a > 0 && !strchr(";{}", src[a - 1]) && src[a - 1] != '\n')
+                    a--;
+                {
+                    size_t w = a;
+                    while (w + 6 <= b) {
+                        if (memcmp(src + w, "static", 6) == 0 &&
+                            (w == a || !cc_is_ident_char(src[w - 1])) &&
+                            !cc_is_ident_char(src[w + 6])) {
+                            is_static = 1;
+                            break;
+                        }
+                        w++;
+                    }
+                }
+                g_map_key_note_static[g_map_key_note_count] = is_static;
+                snprintf(g_map_key_notes[g_map_key_note_count++],
+                         sizeof(g_map_key_notes[0]), "%s", suf);
+            }
+        }
+        i = e;
+    }
+}
+
+int cc_map_key_hasheq_ex(const char* key_type,
+                         char* hash_out, size_t hs,
+                         char* eq_out, size_t es,
+                         int* out_tu_static) {
+    static const struct { const char* pat; int substr;
+                          const char* hash_fn; const char* eq_fn; } tbl[] = {
+        { "int",           0, "cc_map_hash_i32",          "cc_map_eq_i32"          },
+        { "CCSliceHdr",    0, "cc_map_hash_slice_hdr",    "cc_map_eq_slice_hdr"    },
+        { "CCSlicePacked", 0, "cc_map_hash_slice_packed", "cc_map_eq_slice_packed" },
+        { "charslice",     0, "cc_map_hash_slice",        "cc_map_eq_slice"        },
+        { "64",            1, "cc_map_hash_u64",          "cc_map_eq_u64"          },
+        { "slice",         1, "cc_map_hash_slice",        "cc_map_eq_slice"        },
+        { "Slice",         1, "cc_map_hash_slice",        "cc_map_eq_slice"        },
+    };
+    char mangled[128];
+    size_t t;
+    int k;
+    if (out_tu_static) *out_tu_static = -1;
+    if (!key_type || !key_type[0]) return -1;
+    cc__mangle_type_name(key_type, strlen(key_type), mangled, sizeof(mangled));
+    if (mangled[0]) {
+        char hname[160];
+        char ename[160];
+        int noted = 0;
+        snprintf(hname, sizeof(hname), "cc_map_key_hash_%s", mangled);
+        snprintf(ename, sizeof(ename), "cc_map_key_eq_%s", mangled);
+        for (k = 0; k < g_map_key_note_count && !noted; k++)
+            if (strcmp(g_map_key_notes[k], mangled) == 0) noted = k + 1;
+        if (noted || (cc_included_cch_declares_fn(hname) &&
+                      cc_included_cch_declares_fn(ename))) {
+            snprintf(hash_out, hs, "%s", hname);
+            snprintf(eq_out, es, "%s", ename);
+            if (out_tu_static)
+                *out_tu_static = noted ? g_map_key_note_static[noted - 1] : -1;
+            return 0;
+        }
+    }
+    for (t = 0; t < sizeof(tbl) / sizeof(tbl[0]); t++) {
+        int hit = tbl[t].substr ? (strstr(key_type, tbl[t].pat) != NULL)
+                                : (strcmp(key_type, tbl[t].pat) == 0);
+        if (hit) {
+            snprintf(hash_out, hs, "%s", tbl[t].hash_fn);
+            snprintf(eq_out, es, "%s", tbl[t].eq_fn);
+            return 0;
+        }
+    }
+    {
+        int dup = 0;
+        for (k = 0; k < g_map_key_err_count && !dup; k++)
+            if (strcmp(g_map_key_errs[k], key_type) == 0) dup = 1;
+        if (!dup) {
+            if (g_map_key_err_count < 8)
+                snprintf(g_map_key_errs[g_map_key_err_count++],
+                         sizeof(g_map_key_errs[0]), "%s", key_type);
+            fprintf(stderr,
+                    "cc: error: type: map key type '%s' has no installed "
+                    "hash/eq\n", key_type);
+            fprintf(stderr,
+                    "cc: note: declare cc_map_key_hash_%s and "
+                    "cc_map_key_eq_%s to install it\n",
+                    mangled[0] ? mangled : "<mangled>",
+                    mangled[0] ? mangled : "<mangled>");
+            fprintf(stderr,
+                    "cc: note: installed key kinds: int, int64/uint64, "
+                    "CCSliceHdr, CCSlicePacked, slice family%s%s\n",
+                    g_map_key_note_count ? "; declared: " : "",
+                    g_map_key_note_count ? g_map_key_notes[0] : "");
+            g_cc_pass_error_count++;
+        }
+    }
+    snprintf(hash_out, hs, "cc_map_hash_i32");
+    snprintf(eq_out, es, "cc_map_eq_i32");
+    return 1;
+}
+
+int cc_map_key_hasheq(const char* key_type,
+                      char* hash_out, size_t hs,
+                      char* eq_out, size_t es) {
+    return cc_map_key_hasheq_ex(key_type, hash_out, hs, eq_out, es, NULL);
+}
+
 /* Nonzero when the decl-shaped declaration of `name` (TU or included
  * cch) spells a `CCResult_` return: only such sinks make a scalar
  * destination provably ill-formed under plain lowering. */
@@ -10347,6 +11121,77 @@ static void cc__enumerate_family_variants(const char* src, size_t n,
         cc__append_family_suffixes(fsrc, fn, prefix, out, out_sz);
         free(fsrc);
     }
+}
+
+/* Nonzero when `text` invokes CC_DECL_SLICE_SPEC with `name` as its
+ * instance name, or CC_DECL_SLICE with the element token that pastes to
+ * `name` — a hand-written instance the TU splice must not duplicate.
+ * Comment/string-aware; the shared scanner treats directive lines as
+ * non-code, so the macros' own #define lines never match. */
+static int cc__text_has_slice_spec_decl(const char* text, size_t n,
+                                        const char* name) {
+    size_t i = 0;
+    size_t name_len = strlen(name);
+    CCScannerState scan;
+    if (!text || !name_len) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        int is_spec = 0;
+        size_t j, a, alen;
+        if (cc_scanner_skip_non_code(&scan, text, n, &i)) continue;
+        if (text[i] != 'C') { i++; continue; }
+        if (i > 0 && cc_is_ident_char(text[i - 1])) { i++; continue; }
+        if (i + 18 <= n && memcmp(text + i, "CC_DECL_SLICE_SPEC", 18) == 0 &&
+            (i + 18 == n || !cc_is_ident_char(text[i + 18]))) {
+            is_spec = 1;
+            j = i + 18;
+        } else if (i + 13 <= n && memcmp(text + i, "CC_DECL_SLICE", 13) == 0 &&
+                   (i + 13 == n || !cc_is_ident_char(text[i + 13]))) {
+            j = i + 13;
+        } else {
+            i++;
+            continue;
+        }
+        while (j < n && (text[j] == ' ' || text[j] == '\t')) j++;
+        if (j >= n || text[j] != '(') { i = j; continue; }
+        j = cc_skip_ws_and_comments(text, n, j + 1);
+        a = j;
+        while (j < n && cc_is_ident_char(text[j])) j++;
+        alen = j - a;
+        if (is_spec) {
+            if (alen == name_len && memcmp(text + a, name, alen) == 0) return 1;
+        } else {
+            if (name_len > 8 && strncmp(name, "CCSlice_", 8) == 0 &&
+                alen == name_len - 8 && memcmp(text + a, name + 8, alen) == 0)
+                return 1;
+        }
+        i = j;
+    }
+    return 0;
+}
+
+/* Nonzero when the TU must splice the declaration for slice instance
+ * `name` (element `elem`): non-prebaked element, and no hand-written
+ * CC_DECL_SLICE_SPEC/CC_DECL_SLICE for it in the TU or an included cch
+ * header. */
+int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
+                                const char* name, const char* elem) {
+    size_t h;
+    if (!name || !name[0]) return 0;
+    if (cc_slice_spec_elem_is_prebaked(elem)) return 0;
+    if (src && cc__text_has_slice_spec_decl(src, n, name)) return 0;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        int hit;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        hit = cc__text_has_slice_spec_decl(fsrc, fn, name);
+        free(fsrc);
+        if (hit) return 0;
+    }
+    return 1;
 }
 
 /* Decl-shaped twin of cc_included_cch_contains_fn: comment/string-aware,
@@ -14623,6 +15468,9 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (!chain) return -1;
     /* Shared phase-1 bucket: normalize CC surface syntax into more canonical
        CC, but do not introduce parser stubs or host-C survival/lowering. */
+    /* Container surface aliases first: `Vec::[T]` / `vec_new::[T]` become
+     * their CC-prefixed instance-layer spellings before any recognizer. */
+    CC__CANON_STEP("cc__rewrite_container_surface_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_container_surface_aliases(chain->src, chain->len)) < 0) return -1;
     /* @grammar declarations lower FIRST: the generated types (schemas,
      * Readers, tape Nodes) must be REAL in the canonical stream — the type
      * registry and comptime collectors are seeded from it, and UFCS receiver
@@ -14644,6 +15492,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
      * `@string(...)` argument is still spelled `@string` when arg1
      * classification sees it. */
     CC__CANON_STEP("cc__rewrite_free_call_families"); if (cc_pass_chain_apply(chain, cc__rewrite_free_call_families(chain->src, chain->len)) < 0) return -1;
+    cc_note_tu_map_key_pairs(chain->src, chain->len);
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     /* @variant + schema `one of` consumption dialect (spec/draft_variants.md,

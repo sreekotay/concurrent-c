@@ -1,0 +1,52 @@
+/* Typed slice instances auto-instantiate: `T[:]` with a struct element
+ * splices the CC_DECL_SLICE_SPEC declaration after the element's
+ * typedef — no macro line needed. Members are NAME##_<member>
+ * (CCSlice_Pt_at), the same instance-prefix convention as Vec/Map.
+ * CC_DECL_SLICE(T) is the single-token hand form; a hand-written
+ * instance suppresses the auto-splice (no duplicate). */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+/* Hand instance via the single-token convenience; `Rgb[:]` below must
+ * not splice a second declaration. */
+typedef struct Rgb { unsigned char r, g, b; } Rgb;
+CC_DECL_SLICE(Rgb)
+
+static size_t erased_len(CCSlice s) {
+    return s.len;
+}
+
+int main(void) {
+    /* Auto-instantiated struct element. */
+    Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
+    assert(ps.len() == 3);
+    {
+        Pt p2 = ps.at(2);
+        assert(p2.x == 5 && p2.y == 6);
+    }
+    {
+        CCSlice_Pt mid = ps.sub(1, 3);
+        assert(mid.base.len == 2);
+        Pt m0 = mid.at(0);
+        assert(m0.x == 3);
+    }
+    /* bytes() scales by sizeof(Pt); @as autocast erases SCALED. */
+    {
+        CCSlice bx = ps.bytes();
+        assert(bx.len == 3 * sizeof(Pt));
+    }
+    assert(erased_len(ps) == 3 * sizeof(Pt));
+
+    /* Hand-declared instance behaves identically. */
+    Rgb cs[:] = {{1, 2, 3}, {4, 5, 6}};
+    assert(cs.len() == 2);
+    {
+        Rgb c1 = cs.at(1);
+        assert(c1.g == 5);
+    }
+    printf("ok\n");
+    return 0;
+}

@@ -205,23 +205,26 @@ static void cc__seed_map_ufcs_from_type_graph(CCSymbolTable* symbols) {
 
 static void cc__format_map_container_decl(char** buf, size_t* len, size_t* cap,
                                           const CCTypeInstantiation* inst) {
-    const char* hash_fn = "cc_map_hash_i32";
-    const char* eq_fn = "cc_map_eq_i32";
+    char hash_buf[160];
+    char eq_buf[160];
+    const char* hash_fn;
+    const char* eq_fn;
     char line[512];
     if (!inst || !inst->type1 || !inst->type2 || !inst->mangled_name) return;
-    if (strcmp(inst->type1, "int") == 0) {
-        hash_fn = "cc_map_hash_i32"; eq_fn = "cc_map_eq_i32";
-    } else if (strcmp(inst->type1, "CCSliceHdr") == 0) {
-        hash_fn = "cc_map_hash_slice_hdr"; eq_fn = "cc_map_eq_slice_hdr";
-    } else if (strcmp(inst->type1, "CCSlicePacked") == 0) {
-        hash_fn = "cc_map_hash_slice_packed"; eq_fn = "cc_map_eq_slice_packed";
-    } else if (strstr(inst->type1, "64") != NULL) {
-        hash_fn = "cc_map_hash_u64"; eq_fn = "cc_map_eq_u64";
-    } else if (strstr(inst->type1, "slice") != NULL ||
-               strstr(inst->type1, "Slice") != NULL ||
-               strcmp(inst->type1, "charslice") == 0) {
-        hash_fn = "cc_map_hash_slice"; eq_fn = "cc_map_eq_slice";
+    {
+        int tu_static = -1;
+        (void)cc_map_key_hasheq_ex(inst->type1, hash_buf, sizeof(hash_buf),
+                                   eq_buf, sizeof(eq_buf), &tu_static);
+        if (tu_static >= 0) {
+            snprintf(line, sizeof(line), "%ssize_t %s(%s);\n%sint %s(%s, %s);\n",
+                     tu_static ? "static " : "", hash_buf, inst->type1,
+                     tu_static ? "static " : "", eq_buf, inst->type1,
+                     inst->type1);
+            cc__sb_append_cstr_local(buf, len, cap, line);
+        }
     }
+    hash_fn = hash_buf;
+    eq_fn = eq_buf;
     if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
         snprintf(line, sizeof(line), "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
                  inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
@@ -5363,10 +5366,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
         
-        /* Splice Vec/Map/ArrayMap monomorphs using the emit-plan schedule so
-         * decls whose payload types are declared after the early anchor (e.g.
-         * after a helper fn / closure protos) land after those typedefs. */
-        if (need_container_decls) {
+        /* Splice Vec/Map/ArrayMap monomorphs and typed-slice instances
+         * using the emit-plan schedule so decls whose payload types are
+         * declared after the early anchor (e.g. after a helper fn /
+         * closure protos) land after those typedefs. */
+        if (need_container_decls || cc_slice_spec_count() > 0) {
             CCEmitPlanContainerSchedule sched;
             CCTypeGraph* graph = cc_type_graph_get_global();
             CCCtnrInsert inserts[CC_EMIT_PLAN_MAX_DELAYED];
@@ -5400,6 +5404,39 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 cc__ctnr_insert_append(inserts, &n_ins, CC_EMIT_PLAN_MAX_DELAYED,
                                        pos, piece, piece_len);
                 free(piece);
+            }
+            /* Typed slice instances the source names but no declaration
+             * covers: `Pt[:]` auto-instantiates its CC_DECL_SLICE_SPEC
+             * exactly like a Vec/Map monomorph. The expansion carries a
+             * `#line` to its first use site so an error inside it (e.g.
+             * undeclared element type) points at the line that named the
+             * instance; the splice loop's resync restores mapping after. */
+            for (i = 0; i < sched.n_slice && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+                const char* nm = NULL;
+                const char* el = NULL;
+                char piece[1024];
+                int wrote;
+                size_t pos;
+                size_t fu;
+                int fu_line = 0;
+                char fu_file[512] = {0};
+                if (!sched.slice_emit[i]) continue;
+                if (cc_slice_spec_get(i, &nm, &el) != 0) continue;
+                fu = cc_emit_plan_find_ident_any(src_ufcs, src_ufcs_len, nm);
+                if (fu < src_ufcs_len)
+                    cc__ctnr_insert_resync(src_ufcs, fu, &fu_line, fu_file,
+                                           sizeof(fu_file));
+                if (fu_line > 0 && fu_file[0])
+                    wrote = snprintf(piece, sizeof(piece),
+                                     "#line %d \"%s\"\nCC_DECL_SLICE_SPEC(%s, %s)\n",
+                                     fu_line, fu_file, nm, el);
+                else
+                    wrote = snprintf(piece, sizeof(piece),
+                                     "CC_DECL_SLICE_SPEC(%s, %s)\n", nm, el);
+                if (wrote <= 0 || (size_t)wrote >= sizeof(piece)) continue;
+                pos = sched.slice_delayed[i] ? sched.slice_pos[i] : sched.anchor_pos;
+                cc__ctnr_insert_append(inserts, &n_ins, CC_EMIT_PLAN_MAX_DELAYED,
+                                       pos, piece, (size_t)wrote);
             }
             /* Highest offset first so earlier splice points stay stable. */
             for (i = 0; i + 1 < n_ins; i++) {

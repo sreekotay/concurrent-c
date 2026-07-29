@@ -36,6 +36,8 @@ typedef struct CCEmitPlanComptimeSchedule {
 size_t cc_emit_plan_line_start_before(const char* src, size_t pos);
 size_t cc_emit_plan_find_ident_top_level(const char* src, size_t start, size_t len,
                                          const char* ident);
+/* Any-scope identifier-boundary find (comment/string-aware); len when absent. */
+size_t cc_emit_plan_find_ident_any(const char* src, size_t len, const char* ident);
 size_t cc_emit_plan_type_decl_end_top_level(const char* src, size_t len,
                                             const char* type_name);
 
@@ -54,10 +56,17 @@ typedef struct CCEmitPlanContainerSchedule {
     size_t anchor_pos;
     size_t n_vec;
     size_t n_map;
+    /* Typed slice instances from the session spec table (indices align
+     * with cc_slice_spec_get). slice_emit marks instances the TU must
+     * declare (non-prebaked element, no hand-written declaration). */
+    size_t n_slice;
     unsigned char vec_delayed[CC_EMIT_PLAN_MAX_DELAYED];
     size_t vec_pos[CC_EMIT_PLAN_MAX_DELAYED];
     unsigned char map_delayed[CC_EMIT_PLAN_MAX_DELAYED];
     size_t map_pos[CC_EMIT_PLAN_MAX_DELAYED];
+    unsigned char slice_emit[CC_EMIT_PLAN_MAX_DELAYED];
+    unsigned char slice_delayed[CC_EMIT_PLAN_MAX_DELAYED];
+    size_t slice_pos[CC_EMIT_PLAN_MAX_DELAYED];
 } CCEmitPlanContainerSchedule;
 
 typedef struct CCEmitPlanResultDelay {

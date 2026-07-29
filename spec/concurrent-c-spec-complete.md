@@ -376,8 +376,8 @@ This section documents recommended style for Concurrent-C code.
 | Unique slice          | `char[:!]`               | `char[: !]`                                                 |
 | Sentinel slice        | `char[:0]`               | `char[: 0 ]`                                                |
 | Unique sentinel slice | `char[:0!]`              | `char[: 0 !]`                                               |
-| Generic type          | `CCVec::[int]`           | `CCVec :: [ int ]`                                          |
-| Nested generic        | `Map::[K, CCVec::[int]]` | `Map :: [ K, CCVec :: [ int ] ]` (standard bracket nesting) |
+| Generic type          | `Vec::[int]`             | `Vec :: [ int ]`                                            |
+| Nested generic        | `Map::[K, Vec::[int]]`   | `Map :: [ K, Vec :: [ int ] ]` (standard bracket nesting)   |
 
 
 **Examples:**
@@ -391,7 +391,7 @@ int!>(IoError) read_int(char[:] data) {
     return cc_ok(parse_int(trimmed));
 }
 
-CCVec::[int] numbers = cc_vec_new::[int](&arena);
+Vec::[int] numbers = vec_new::[int](&arena);
 Map::[char[:], int] registry = map_new::[char[:], int](&arena);
 
 // Incorrect (visual noise, harder to parse)
@@ -402,7 +402,7 @@ int ! IoError read_int (char [ : ] data) {
 
 **Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike.
 
-**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, snake_prefix, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand. `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len`/`alen` scale by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type declares its own instance with one `CC_DECL_SLICE_SPEC` line after the element type's definition. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
+**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len`/`alen` scale by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
 
 Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the `@as` retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
@@ -4746,7 +4746,9 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (universal bare-name tier, normative):** When every family composition for `recv.f(args)` fails to name a declared function, `f` itself is the final candidate: the call dispatches to a declared function `f` whose first parameter takes the receiver — `u.mean(6.0)` lowers to `mean(u, 6.0)`; `pp->get_x()` lowers to `get_x(pp)`. Compatibility is uniform where lossless and exact where lossy. A value receiver of type `T` matches a first parameter of type `T` exactly (no arithmetic conversions — dispatch never converts the receiver's value), or of type `T*` / `const T*` via `&recv` (addressable receivers only). A pointer receiver of type `T*` matches pointer parameters under C's pointer rules — exact `T*`, qualifier-adding `const T*`, and `void*` / `const void*` — one-way: a `const T*` receiver matches only const-qualified parameters. A dereference is never synthesized: pointer receivers match pointer parameters only. A first parameter of `void*` never matches a value receiver (the address synthesis and the type erasure are not combined implicitly). Zero-parameter functions never capture a receiver. Members, composed family spellings, and a receiver type's registered dynamic sink all outrank the bare name — a sink-registered type's unresolved methods belong to its sink, and a later-declared ambient function cannot capture them. Only declarations visible to the pipeline — the translation unit or an included header — participate. A composed callee that is not verifiably declared is never emitted while a bare-name match exists.
 
-**Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `SNAKE##_sub` declares `sub`). Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `cc_slice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
+**Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `NAME##_sub` declares `sub`). Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `CCSlice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
+
+**Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@as` retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
 
 **UFCS Equivalence (Normative):**
 
@@ -4781,7 +4783,7 @@ Functional composition becomes natural with direct library calls:
 int[] squared = vec_map(numbers, (int x) => x * x);
 
 // Chain via free functions
-CCVec::[int] result = vec_map(vec_filter(input, is_even), double);
+Vec::[int] result = vec_map(vec_filter(input, is_even), double);
 ```
 
 ---
@@ -5723,7 +5725,7 @@ if (e is IoError.Other(code)) { use(code); }
 **Built-in generic types:**
 
 - `CCTaskIntptr` — pollable async task handle
-- `CCVec::[T]` — dynamic array
+- `Vec::[T]` — dynamic array
 - `Map::[K, V]` — inline open-addressing hash map
 - `ArrayMap::[K, V]` — probe index + dense key/value rows
 - `T[~... >]` / `T[~... <]` — channel handles for element type T
@@ -5771,7 +5773,7 @@ spelling, duplicate-emission prevention, source attribution, splice placement,
 and use-site rewriting. The language does not infer generic parameters from
 ordinary calls.
 
-Shipped families include `CCVec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, result
+Shipped families include `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, result
 families, and registered user/library families. Their public C names and
 operations are defined by the owning headers. A family may emit specialized C
 for one instantiation and erased wrappers for another without changing the
@@ -5794,7 +5796,7 @@ registration exactly as other lowered C does.
 
 Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
-- `**CCVec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
+- `**Vec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
 - `**Map::[K,V]`** — arena-backed inline open-addressing map (`<std/map.cch>`)
 - `**ArrayMap::[K,V]`** — arena-backed index + dense rows (`<std/array_map.cch>`)
 
@@ -5804,8 +5806,8 @@ construction. See the stdlib spec for full API reference, rules, and examples.
 **Quick reference:**
 
 ```c
-// CCVec::[T]
-CCVec::[T] v = cc_vec_new::[T](&arena);
+// Vec::[T]
+Vec::[T] v = vec_new::[T](&arena);
 v.push(value);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
@@ -5824,9 +5826,11 @@ V* y = am.get_ptr(key);
 am.del(key);
 ```
 
-**Implementation note:** The `CCVec::[T]`, `Map::[K,V]`, and `ArrayMap::[K,V]`
+**Implementation note:** The `Vec::[T]`, `Map::[K,V]`, and `ArrayMap::[K,V]`
 syntax is compile-time sugar that lowers to concrete C family types (e.g.,
-`CCVec::[int]` → `CCVec_int`, `ArrayMap::[int,int]` → `ArrayMap_int_int`). UFCS
+`Vec::[int]` → `CCVec_int`, `ArrayMap::[int,int]` → `ArrayMap_int_int`). The
+CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same instances
+and remain accepted as the instance layer. UFCS
 method calls on containers lower through that family contract; implementations
 may use direct concrete symbols such as `CCVec_int_push(&v, x)` or thin family
 wrappers over shared erased-core helpers. See the stdlib spec for full lowering

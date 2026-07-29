@@ -2294,7 +2294,11 @@ static int cc__ufcs_recv_is_known_family_method(const char* base,
     n = cc_type_registry_map_count(reg);
     for (i = 0; i < n; i++) {
         const CCTypeInstantiation* t = cc_type_registry_get_map(reg, i);
-        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0) return 1;
+        if (t && t->mangled_name && strcmp(t->mangled_name, base) == 0)
+            return cc_family_header_has_member(
+                strncmp(base, "ArrayMap_", 9) == 0 ? "std/array_map.cch"
+                                                   : "std/map_impl.cch",
+                method);
     }
     n = cc_type_registry_channel_count(reg);
     for (i = 0; i < n; i++) {
@@ -2353,11 +2357,22 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
                  cc__ufcs_fn_name_is_real(cand) ? "declared, rejected by dispatch"
                                                 : "not declared");
     }
-    if (cnt < max_lines &&
-        cc_ufcs_compose_default_callee(cand, sizeof(cand), base, method)) {
-        snprintf(lines[cnt++], 256, "candidate %s (family spelling): %s", cand,
-                 cc__ufcs_fn_name_is_real(cand) ? "declared, rejected by dispatch"
-                                                : "not declared");
+    if (cnt < max_lines) {
+        /* Generic-family instances compose members and extensions as
+         * <Instance>_<method>; other receivers use the snake twin. */
+        int is_instance = (cc_slice_spec_lookup(base, NULL, NULL) == 0 ||
+                           strncmp(base, "CCVec_", 6) == 0 ||
+                           strncmp(base, "ArrayMap_", 9) == 0 ||
+                           strncmp(base, "Map_", 4) == 0);
+        int composed = is_instance
+                           ? ((size_t)snprintf(cand, sizeof(cand), "%s_%s", base,
+                                               method) < sizeof(cand))
+                           : cc_ufcs_compose_default_callee(cand, sizeof(cand),
+                                                            base, method);
+        if (composed)
+            snprintf(lines[cnt++], 256, "candidate %s (family spelling): %s", cand,
+                     cc__ufcs_fn_name_is_real(cand) ? "declared, rejected by dispatch"
+                                                    : "not declared");
     }
     if (cnt < max_lines) {
         char param[256];
@@ -2378,6 +2393,10 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
             hdr = "cc_slice.cch";
         } else if (strncmp(base, "CCVec_", 6) == 0) {
             hdr = "std/vec.cch";
+        } else if (strncmp(base, "ArrayMap_", 9) == 0) {
+            hdr = "std/array_map.cch";
+        } else if (strncmp(base, "Map_", 4) == 0) {
+            hdr = "std/map_impl.cch";
         }
         if (hdr) {
             const char* mem = cc_family_header_members(hdr);
@@ -2418,17 +2437,18 @@ static int emit_desugared_call(char* out,
     /* Typed slice instances (CC_DECL_SLICE_SPEC): the template method set
      * is fixed, and the definitions exist only after macro expansion, so
      * in-source name checks cannot see them. Dispatch directly by the
-     * registered snake prefix; anything outside the set falls through to
-     * normal resolution (and the @as retry into byte helpers). */
+     * registered member prefix (the instance name, NAME##_ like Vec/Map);
+     * anything outside the set falls through to normal resolution (and
+     * the @as retry into byte helpers). */
     if (ctx.recv_type_name && ctx.recv_type_name[0]) {
-        const char* ts_snake = NULL;
-        if (cc_slice_spec_lookup(ctx.recv_type_name, &ts_snake, NULL) == 0 &&
-            ts_snake &&
+        const char* ts_prefix = NULL;
+        if (cc_slice_spec_lookup(ctx.recv_type_name, &ts_prefix, NULL) == 0 &&
+            ts_prefix &&
             cc_family_header_has_member("cc_slice.cch", method)) {
             const char* amp = recv_is_ptr ? "" : "&";
             if (!has_args || !args_rewritten || !args_rewritten[0])
-                return snprintf(out, cap, "%s_%s(%s%s)", ts_snake, method, amp, recv);
-            return snprintf(out, cap, "%s_%s(%s%s, %s)", ts_snake, method, amp, recv,
+                return snprintf(out, cap, "%s_%s(%s%s)", ts_prefix, method, amp, recv);
+            return snprintf(out, cap, "%s_%s(%s%s, %s)", ts_prefix, method, amp, recv,
                             args_rewritten);
         }
     }

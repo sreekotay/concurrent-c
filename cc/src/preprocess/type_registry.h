@@ -79,12 +79,18 @@ int cc_type_registry_set_dynamic_sink2(CCTypeRegistry* reg, const char* type_nam
 int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
                                              const char* type_name);
 /* Typed slice instances (CC_DECL_SLICE_SPEC family). The rewriter
- * registers every instance it names; lookup recovers the snake prefix
- * (cc_slice_double) and element spelling. Session-global. Returns 0 on
- * hit, -1 otherwise; trailing `*` on type_name is ignored. */
-int cc_slice_spec_register(const char* name, const char* snake, const char* elem);
+ * registers every instance it names; lookup recovers the member prefix
+ * (the instance name itself: CCSlice_double_at, the same NAME##_
+ * convention as Vec/Map) and element spelling. Session-global. Returns
+ * 0 on hit, -1 otherwise; trailing `*` on type_name is ignored. */
+int cc_slice_spec_register(const char* name, const char* prefix, const char* elem);
 int cc_slice_spec_lookup(const char* type_name,
-                         const char** out_snake, const char** out_elem);
+                         const char** out_prefix, const char** out_elem);
+size_t cc_slice_spec_count(void);
+int cc_slice_spec_get(size_t i, const char** out_name, const char** out_elem);
+/* 1 when `elem` is one of the scalar pre-instances cc_slice.cch always
+ * declares (so no TU splice is needed). */
+int cc_slice_spec_elem_is_prebaked(const char* elem);
 /* Slice instance for a container element type: "double" ->
  * "CCSlice_double" when that instance is known declared (a scalar
  * pre-instance of cc_slice.cch, or a session-registered user spec).

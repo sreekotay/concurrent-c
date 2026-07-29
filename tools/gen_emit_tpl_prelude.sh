@@ -38,9 +38,9 @@ fi
     "#include <ccc/std/map.cch>\n" \
     "/* Typed maps are file-scope (CC_MAP_DECL_ARENA -> static-inline defs), so a\n" \
     "   comptime block can't declare its own; pre-declare common key types. */\n" \
-    "CC_MAP_DECL_INT(int, CCMapII)\n" \
-    "CC_MAP_DECL_U64(int, CCMapU64I)\n" \
-    "CC_MAP_DECL_SLICE(int, CCMapSI)\n" \
+    "CC_MAP_DECL_ARENA(int, int, CCMapII, cc_map_hash_i32, cc_map_eq_i32)\n" \
+    "CC_MAP_DECL_ARENA(uint64_t, int, CCMapU64I, cc_map_hash_u64, cc_map_eq_u64)\n" \
+    "CC_MAP_DECL_ARENA(CCSlice, int, CCMapSI, cc_map_hash_slice, cc_map_eq_slice)\n" \
 HDR
 
   while IFS= read -r line || [ -n "$line" ]; do

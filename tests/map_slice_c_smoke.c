@@ -1,8 +1,8 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-CC_MAP_DECL_SLICE(int, SliceIntMap);
-CC_MAP_DECL_SLICE(void*, SlicePtrMap);
+CC_MAP_DECL_ARENA(CCSlice, int, SliceIntMap, cc_map_hash_slice, cc_map_eq_slice);
+CC_MAP_DECL_ARENA(CCSlice, void*, SlicePtrMap, cc_map_hash_slice, cc_map_eq_slice);
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));

@@ -263,18 +263,19 @@ int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
  * CC_DECL_SLICE_SPEC (cc_slice.cch). Session-global registration
  * (survives per-stage registry rebuilds, like the dyn-sink list): the
  * rewriter records every instance it names so downstream passes can
- * recover the snake prefix and element spelling. */
+ * recover the member prefix (NAME##_, same convention as Vec/Map) and
+ * element spelling. */
 typedef struct {
-    char* name;  /* CCSlice_double */
-    char* snake; /* cc_slice_double */
-    char* elem;  /* double */
+    char* name;   /* CCSlice_double */
+    char* prefix; /* CCSlice_double — member fns are prefix##_<member> */
+    char* elem;   /* double */
 } CCSliceSpecEntry;
 static _Thread_local CCSliceSpecEntry* g_slice_specs = NULL;
 static _Thread_local size_t g_slice_spec_count = 0;
 static _Thread_local size_t g_slice_spec_capacity = 0;
 
-int cc_slice_spec_register(const char* name, const char* snake, const char* elem) {
-    if (!name || !name[0] || !snake || !snake[0] || !elem || !elem[0]) return -1;
+int cc_slice_spec_register(const char* name, const char* prefix, const char* elem) {
+    if (!name || !name[0] || !prefix || !prefix[0] || !elem || !elem[0]) return -1;
     for (size_t i = 0; i < g_slice_spec_count; ++i) {
         if (strcmp(g_slice_specs[i].name, name) == 0) return 0;
     }
@@ -287,10 +288,10 @@ int cc_slice_spec_register(const char* name, const char* snake, const char* elem
         g_slice_spec_capacity = ncap;
     }
     g_slice_specs[g_slice_spec_count].name = strdup(name);
-    g_slice_specs[g_slice_spec_count].snake = strdup(snake);
+    g_slice_specs[g_slice_spec_count].prefix = strdup(prefix);
     g_slice_specs[g_slice_spec_count].elem = strdup(elem);
     if (!g_slice_specs[g_slice_spec_count].name ||
-        !g_slice_specs[g_slice_spec_count].snake ||
+        !g_slice_specs[g_slice_spec_count].prefix ||
         !g_slice_specs[g_slice_spec_count].elem)
         return -1;
     g_slice_spec_count++;
@@ -298,13 +299,13 @@ int cc_slice_spec_register(const char* name, const char* snake, const char* elem
 }
 
 int cc_slice_spec_lookup(const char* type_name,
-                         const char** out_snake, const char** out_elem) {
+                         const char** out_prefix, const char** out_elem) {
     char stripped[256];
     if (!type_name || !type_name[0]) return -1;
     cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
     for (size_t i = 0; i < g_slice_spec_count; ++i) {
         if (strcmp(g_slice_specs[i].name, stripped) == 0) {
-            if (out_snake) *out_snake = g_slice_specs[i].snake;
+            if (out_prefix) *out_prefix = g_slice_specs[i].prefix;
             if (out_elem) *out_elem = g_slice_specs[i].elem;
             return 0;
         }
@@ -312,29 +313,49 @@ int cc_slice_spec_lookup(const char* type_name,
     return -1;
 }
 
-int cc_slice_spec_instance_for_elem(const char* elem,
-                                    char* name_out, size_t name_sz) {
-    /* Mirrors the scalar pre-instances cc_slice.cch always declares
-     * (mangled spellings). Anything else must have been registered by
-     * the rewriter — which only happens for instances the source names,
-     * whose declarations the user supplies via CC_DECL_SLICE_SPEC. */
+size_t cc_slice_spec_count(void) { return g_slice_spec_count; }
+
+int cc_slice_spec_get(size_t i, const char** out_name, const char** out_elem) {
+    if (i >= g_slice_spec_count) return -1;
+    if (out_name) *out_name = g_slice_specs[i].name;
+    if (out_elem) *out_elem = g_slice_specs[i].elem;
+    return 0;
+}
+
+int cc_slice_spec_elem_is_prebaked(const char* elem) {
+    /* The scalar pre-instances cc_slice.cch always declares (mangled
+     * spellings). */
     static const char* const builtins[] = {
         "short", "int", "long", "long_long",
         "int16_t", "int32_t", "int64_t", "float", "double", NULL,
     };
     char stripped[256];
     char mangled[256];
-    int known = 0;
+    if (!elem || !elem[0]) return 0;
+    cc__strip_type_spelling(elem, stripped, sizeof(stripped));
+    cc_result_spec_mangle_type(stripped, strlen(stripped), mangled, sizeof(mangled));
+    for (size_t i = 0; builtins[i]; ++i) {
+        if (strcmp(mangled, builtins[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+int cc_slice_spec_instance_for_elem(const char* elem,
+                                    char* name_out, size_t name_sz) {
+    /* Prebaked scalars always exist; anything else must have been
+     * registered by the rewriter, which happens for every instance the
+     * source names — the compiler splices the declaration. */
+    char stripped[256];
+    char mangled[256];
     if (!elem || !elem[0] || !name_out || name_sz == 0) return -1;
     cc__strip_type_spelling(elem, stripped, sizeof(stripped));
     cc_result_spec_mangle_type(stripped, strlen(stripped), mangled, sizeof(mangled));
     if (!mangled[0]) return -1;
     if ((size_t)snprintf(name_out, name_sz, "CCSlice_%s", mangled) >= name_sz)
         return -1;
-    for (size_t i = 0; builtins[i]; ++i) {
-        if (strcmp(mangled, builtins[i]) == 0) { known = 1; break; }
-    }
-    if (!known && cc_slice_spec_lookup(name_out, NULL, NULL) != 0) return -1;
+    if (!cc_slice_spec_elem_is_prebaked(elem) &&
+        cc_slice_spec_lookup(name_out, NULL, NULL) != 0)
+        return -1;
     return 0;
 }
 

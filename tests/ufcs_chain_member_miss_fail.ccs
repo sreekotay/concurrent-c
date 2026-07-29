@@ -1,0 +1,9 @@
+/* A bad method mid-chain fails through the strict ladder with the real
+ * receiver type and the instance's derived member set — not a parse
+ * error at the second '.'. */
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    double xs[:] = {1.0, 2.0};
+    size_t a = xs.sub(0, 1).ghost();
+    return (int)a;
+}

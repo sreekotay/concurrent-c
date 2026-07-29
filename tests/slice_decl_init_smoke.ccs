@@ -5,15 +5,16 @@
  * instantiate the CC_DECL_SLICE_SPEC generic: `double[:]` is
  * CCSlice_double, a distinct struct embedding `CCSlice base @as` with
  * element-wise len/at/sub and a scaled bytes() view. Scalar instances
- * are pre-declared in cc_slice.cch; any other element type declares
- * its own with one CC_DECL_SLICE_SPEC line. */
+ * are pre-declared in cc_slice.cch; other element types
+ * auto-instantiate at first use. */
 #include <ccc/cc_runtime.cch>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-/* Open generic: user-declared instance for a non-prebaked element. */
-CC_DECL_SLICE_SPEC(CCSlice_unsigned_long, cc_slice_unsigned_long, unsigned long)
+/* Hand-written instance: still legal, and the compiler must not splice
+ * a duplicate for `unsigned long[:]` below. */
+CC_DECL_SLICE_SPEC(CCSlice_unsigned_long, unsigned long)
 
 static double first(double v[:]) {
     return v.at(0);

@@ -121,15 +121,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 }
 
 /*
- * CC_VEC_DECLARE_GUARDED(T, Name)
- *
- * Helper that expands to CC_VEC_DECL_ARENA(T, Name). The former guard layer
- * existed only to thread the optional-type parameter through; with optionals
- * retired, the helper is a one-liner alias kept for source-compat.
- */
-#define CC_VEC_DECLARE_GUARDED(T, Name) CC_VEC_DECL_ARENA(T, Name)
-
-/*
  * CC_VEC_DECL_ARENA(T, Name)
  *
  * Arena-backed vector.
@@ -248,12 +239,6 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
         return s;                                                                 \
     }
 
-/* Backwards-compat alias: CC_VEC_DECL_ARENA_FULL used to take an extra OptT
-   parameter for the optional return type. Optionals are retired; the third
-   argument is ignored. Remove once callers migrate. */
-#define CC_VEC_DECL_ARENA_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
-#define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT_ignored) CC_VEC_DECL_ARENA(T, Name)
-
 #ifndef CC_VEC_CHAR_DEFINED
 #define CC_VEC_CHAR_DEFINED 1
 CC_VEC_DECL_ARENA(char, CCVec_char)
@@ -348,9 +333,7 @@ CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
 
-#define CC_VEC_DECL_HEAP_FULL(T, Name, OptT_ignored) CC_VEC_DECL_HEAP(T, Name)
-
-/* Legacy alias for compatibility */
+/* C-side alias mirroring the surface generic (`Vec::[T]`). */
 #define Vec(T, Name) CC_VEC_DECL_ARENA(T, Name)
 
 #endif /* CC_STD_VEC_H */

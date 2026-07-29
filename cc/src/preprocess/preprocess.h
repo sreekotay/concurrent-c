@@ -152,6 +152,26 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
  * `header_suffix`. Membership test and comma-separated enumeration. */
 int cc_family_header_has_member(const char* header_suffix, const char* method);
 const char* cc_family_header_members(const char* header_suffix);
+/* Map key hash/eq selection: declared convention
+ * (cc_map_key_hash_<mangled K> / cc_map_key_eq_<mangled K>) outranks
+ * the built-in table; unknown keys error articulately. Returns 0 on
+ * an installed pair, 1 on the error fallback. */
+int cc_map_key_hasheq(const char* key_type, char* hash_out, size_t hs,
+                      char* eq_out, size_t es);
+/* _ex: *out_tu_static = -1 when the pair is not TU-declared; else the
+ * definition's staticness, for the forward prototypes the container
+ * decl must emit above itself (convention: size_t hash(K), int
+ * eq(K, K)). */
+int cc_map_key_hasheq_ex(const char* key_type, char* hash_out, size_t hs,
+                         char* eq_out, size_t es, int* out_tu_static);
+/* Note TU-declared key pairs (decl-shaped hash+eq twins) so selection
+ * sees pairs declared in the translation unit itself. */
+void cc_note_tu_map_key_pairs(const char* src, size_t n);
+/* Nonzero when the TU must splice the declaration for slice instance
+ * `name` (element `elem`): non-prebaked element and no hand-written
+ * CC_DECL_SLICE_SPEC/CC_DECL_SLICE in the TU or an included cch. */
+int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
+                                const char* name, const char* elem);
 
 /* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU

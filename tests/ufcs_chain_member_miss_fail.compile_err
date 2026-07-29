@@ -1,0 +1,5 @@
+# A chained call's receiver resolves to the typed temporary, so the
+# strict ladder names the instance type and enumerates its members.
+no UFCS method 'ghost' for receiver type 'CCSlice_double'
+candidate CCSlice_double_ghost (family spelling): not declared
+installed methods of CCSlice_double: from_buffer, len, at, sub, bytes

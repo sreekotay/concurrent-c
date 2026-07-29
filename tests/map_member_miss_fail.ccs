@@ -1,0 +1,10 @@
+/* A non-member method on a map instance reaches the strict ladder with
+ * the derived member enumeration. */
+#include <ccc/std/prelude.cch>
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(16));
+    ArrayMap::[int, int] m;
+    if (!arena.base) return 1;
+    m = array_map_new::[int, int](&arena);
+    return (int)m.nosuch();
+}

@@ -12,7 +12,7 @@ typedef struct {
     uint64_t id;
 } CompactSlice;
 
-CC_MAP_DECL_SLICE(CompactSlice, SliceCompactMap);
+CC_MAP_DECL_ARENA(CCSlice, CompactSlice, SliceCompactMap, cc_map_hash_slice, cc_map_eq_slice);
 
 static inline CCSlice compact_as_slice(CompactSlice s) {
     return cc_slice_from_parts(s.ptr, (size_t)s.len, s.id, (size_t)s.alen);

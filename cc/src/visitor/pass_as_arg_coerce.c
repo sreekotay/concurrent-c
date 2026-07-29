@@ -566,12 +566,12 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                      * instances erase SCALED: the byte world must receive
                      * byte-measured len/alen, and the template's bytes()
                      * knows sizeof(T). */
-                    const char* ts_snake = NULL;
+                    const char* ts_prefix = NULL;
                     if (has_amp || outer_is_ptr) continue;
                     if (strcmp(bases[ai], "CCSlice") == 0 &&
-                        cc_slice_spec_lookup(outer_ty, &ts_snake, NULL) == 0 &&
-                        ts_snake) {
-                        snprintf(repl, sizeof(repl), "%s_bytes(&%s)", ts_snake, ident);
+                        cc_slice_spec_lookup(outer_ty, &ts_prefix, NULL) == 0 &&
+                        ts_prefix) {
+                        snprintf(repl, sizeof(repl), "%s_bytes(&%s)", ts_prefix, ident);
                     } else {
                         snprintf(repl, sizeof(repl), "%s.%s", ident, field_name);
                     }

@@ -44,14 +44,16 @@ storage.
 The generic collection factories are:
 
 ```c
-CCVec::[T] cc_vec_new::[T](CCArena *arena);
+Vec::[T] vec_new::[T](CCArena *arena);
 Map::[K, V] map_new::[K, V](CCArena *arena);
 ArrayMap::[K, V] array_map_new::[K, V](CCArena *arena);
 ArrayMap::[K, V] array_map_new_count::[K, V](CCArena *arena, size_t count);
 ```
 
-`CCVec::[T]` denotes the generated C family `CCVec_<T-mangling>`.
-`cc_vec_new::[T](arena)` calls:
+`Vec::[T]` denotes the generated C family `CCVec_<T-mangling>`; the
+CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same
+instances and remain accepted as the instance layer.
+`vec_new::[T](arena)` calls:
 
 ```c
 CCVec_<T-mangling>_init(arena, CC_VEC_INITIAL_CAP)
@@ -81,6 +83,21 @@ ArrayMap_<K-mangling>_<V-mangling>_init_count(arena, count)
 
 Prefer `ArrayMap` when values are wide (empty buckets stay small). Prefer `Map`
 when keys and values are tiny and probe locality matters.
+
+Key support is a declared convention. A key type `K` is installed when both
+
+```c
+size_t cc_map_key_hash_<K-mangling>(K key);
+int    cc_map_key_eq_<K-mangling>(K a, K b);
+```
+
+are visible — declared in the translation unit or an included header — and a
+declared pair outranks the built-in table (`int`, 64-bit integers,
+`CCSliceHdr`, `CCSlicePacked`, the slice family). Forward prototypes are
+emitted above the spliced container declaration with the definitions' own
+linkage, so the pair may be defined anywhere in the unit. A key type with no
+declared pair and no built-in entry is ill-formed; the diagnostic names the
+two functions to declare.
 
 For a generated vector or map value, UFCS selects the corresponding generated
 family function and passes the receiver by address. For public struct families
@@ -637,16 +654,10 @@ Map UFCS maps `insert`, `put`, `get`, `get_ptr`, `remove`, `del`, `len`, `cap`,
 `clear`, and `destroy` to the generated family. `CC_MAP_FOREACH` exposes each
 entry without defining a stable traversal order.
 
-The convenience declarations are:
-
-```c
-#define CC_MAP_DECL_INT(V, Name)   CC_MAP_DECL_ARENA(int, V, Name, cc_map_hash_i32, cc_map_eq_i32)
-#define CC_MAP_DECL_U64(V, Name)   CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_map_hash_u64, cc_map_eq_u64)
-#define CC_MAP_DECL_SLICE(V, Name) CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_map_hash_slice, cc_map_eq_slice)
-```
-
-Their `_FULL(V, Name, OptV_ignored)` forms expand to the same generated family
-and ignore the final argument.
+Plain-C consumers invoke `CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)`
+directly with a built-in hash/eq pair (`cc_map_hash_i32`/`cc_map_eq_i32`,
+`cc_map_hash_u64`/`cc_map_eq_u64`, `cc_map_hash_slice`/`cc_map_eq_slice`)
+or a user-declared pair.
 
 ### Array maps
 

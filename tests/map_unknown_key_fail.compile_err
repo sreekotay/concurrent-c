@@ -1,0 +1,2 @@
+map key type 'double' has no installed hash/eq
+declare cc_map_key_hash_double and cc_map_key_eq_double to install it

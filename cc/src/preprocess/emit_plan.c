@@ -19,6 +19,7 @@
 #include "preprocess/template_scan.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 
 static int cc__diag_line_for_pos(size_t pos);
 
@@ -1652,6 +1653,29 @@ size_t cc_emit_plan_find_ident_top_level(const char* src, size_t start, size_t l
     return len;
 }
 
+/* First identifier-boundary occurrence of `ident` at ANY scope,
+ * comment/string-aware. Returns len when absent. Used to attribute a
+ * spliced instance declaration to its first use site (`#line`), so an
+ * error inside the expansion (e.g. an undeclared element type) points
+ * at the line that named the instance. */
+size_t cc_emit_plan_find_ident_any(const char* src, size_t len, const char* ident) {
+    size_t ident_len = ident ? strlen(ident) : 0;
+    size_t i = 0;
+    CCInertScan scan;
+    if (!src || !ident_len) return len;
+    cc_inert_scan_init(&scan, NULL);
+    while (i + ident_len <= len) {
+        if (cc_inert_scan_step(&scan, src, len, &i)) continue;
+        if (src[i] != ident[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        if (memcmp(src + i, ident, ident_len) == 0 &&
+            (i + ident_len >= len || !cc_is_ident_char(src[i + ident_len])))
+            return i;
+        i++;
+    }
+    return len;
+}
+
 size_t cc_emit_plan_type_decl_end_top_level(const char* src, size_t len,
                                             const char* type_name) {
     size_t p = 0;
@@ -2031,10 +2055,9 @@ void cc_emit_plan_build_container_schedule(const char* src, size_t len, CCTypeGr
         out->vec_pos[i] = len + 1;
         out->map_pos[i] = len + 1;
     }
-    if (!graph) return;
     out->anchor_pos = cc_emit_plan_compute_container_anchor(src, len);
-    out->n_vec = cc_type_graph_vec_count(graph);
-    out->n_map = cc_type_graph_map_count(graph);
+    out->n_vec = graph ? cc_type_graph_vec_count(graph) : 0;
+    out->n_map = graph ? cc_type_graph_map_count(graph) : 0;
     for (size_t i = 0; i < out->n_vec && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
         const CCTypeInstantiation* inst = cc_type_graph_get_vec(graph, i);
         if (!inst || !inst->type1 || !inst->mangled_name) continue;
@@ -2061,6 +2084,27 @@ void cc_emit_plan_build_container_schedule(const char* src, size_t len, CCTypeGr
         if (pos2 > pos) pos = pos2;
         out->map_delayed[i] = 1;
         out->map_pos[i] = pos;
+    }
+    /* Typed slice instances auto-instantiate: any registered spec whose
+     * element is not a prebaked scalar and that no hand-written
+     * declaration covers gets a spliced CC_DECL_SLICE_SPEC, positioned
+     * after the element's typedef like the Vec/Map monomorphs. */
+    out->n_slice = cc_slice_spec_count();
+    for (size_t i = 0; i < out->n_slice && i < CC_EMIT_PLAN_MAX_DELAYED; i++) {
+        const char* nm = NULL;
+        const char* el = NULL;
+        if (cc_slice_spec_get(i, &nm, &el) != 0) continue;
+        out->slice_pos[i] = len + 1;
+        if (!cc_slice_spec_tu_needs_decl(src, len, nm, el)) continue;
+        out->slice_emit[i] = 1;
+        {
+            size_t pos = cc_emit_plan_compute_before_first_use(src, len, out->anchor_pos,
+                                                               el, nm);
+            if (pos > out->anchor_pos) {
+                out->slice_delayed[i] = 1;
+                out->slice_pos[i] = pos;
+            }
+        }
     }
 }
 
@@ -2161,39 +2205,27 @@ static void cc__builtin_vec_decl(FILE* out, const CCTypeInstantiation* inst) {
  * set of primitive/slice key kinds — keeping it as a table makes the set
  * explicit and is the natural place a future registrable seam would prepend
  * library-supplied key hashers (see COMPTIME_INSTANTIATION_SEAM.md). */
-typedef struct CCMapKeyHashEq {
-    const char* pat;
-    int         substr;   /* 1: strstr match; 0: exact strcmp */
-    const char* hash_fn;
-    const char* eq_fn;
-} CCMapKeyHashEq;
-
-static const CCMapKeyHashEq cc__map_key_hasheq[] = {
-    { "int",          0, "cc_map_hash_i32",         "cc_map_eq_i32"         },
-    { "CCSliceHdr",   0, "cc_map_hash_slice_hdr",   "cc_map_eq_slice_hdr"   },
-    { "CCSlicePacked",  0, "cc_map_hash_slice_packed",  "cc_map_eq_slice_packed"  },
-    { "64",           1, "cc_map_hash_u64",         "cc_map_eq_u64"         },
-    { "slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },
-    { "Slice",        1, "cc_map_hash_slice",       "cc_map_eq_slice"       },
-};
-
-static void cc__map_select_hasheq(const char* key_type,
-                                  const char** out_hash, const char** out_eq) {
-    *out_hash = "cc_map_hash_i32";
-    *out_eq   = "cc_map_eq_i32";
-    for (size_t i = 0; i < sizeof(cc__map_key_hasheq) / sizeof(cc__map_key_hasheq[0]); i++) {
-        const CCMapKeyHashEq* e = &cc__map_key_hasheq[i];
-        int hit = e->substr ? (strstr(key_type, e->pat) != NULL)
-                            : (strcmp(key_type, e->pat) == 0);
-        if (hit) { *out_hash = e->hash_fn; *out_eq = e->eq_fn; return; }
-    }
+static void cc__map_select_hasheq_fwd(FILE* out, const char* key_type,
+                                      const char** out_hash,
+                                      const char** out_eq) {
+    static _Thread_local char hbuf[160];
+    static _Thread_local char ebuf[160];
+    int tu_static = -1;
+    (void)cc_map_key_hasheq_ex(key_type, hbuf, sizeof(hbuf),
+                               ebuf, sizeof(ebuf), &tu_static);
+    if (out && tu_static >= 0)
+        fprintf(out, "%ssize_t %s(%s);\n%sint %s(%s, %s);\n",
+                tu_static ? "static " : "", hbuf, key_type,
+                tu_static ? "static " : "", ebuf, key_type, key_type);
+    *out_hash = hbuf;
+    *out_eq = ebuf;
 }
 
 static void cc__builtin_map_decl(FILE* out, const CCTypeInstantiation* inst) {
     const char* hash_fn;
     const char* eq_fn;
     if (!out || !inst || !inst->type1 || !inst->type2 || !inst->mangled_name) return;
-    cc__map_select_hasheq(inst->type1, &hash_fn, &eq_fn);
+    cc__map_select_hasheq_fwd(out, inst->type1, &hash_fn, &eq_fn);
     if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
         fprintf(out, "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);

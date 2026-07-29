@@ -1,0 +1,11 @@
+/* An uninstalled key type is an articulate error naming the convention
+ * — never a silent i32 hash of the first four bytes. */
+#include <ccc/std/prelude.cch>
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(16));
+    ArrayMap::[double, int] m;
+    if (!arena.base) return 1;
+    m = array_map_new::[double, int](&arena);
+    (void)m;
+    return 0;
+}

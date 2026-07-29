@@ -53,6 +53,20 @@ more complex than the underlying semantics warrant.
   pass: it detects stray `T?` sigils and reports a migration hint.
 - The TCC UFCS fallback that inferred `__CCOptionalGeneric` as the return type
   of `Vec.get` / `Vec.pop` has been disabled.
-- `CC_VEC_DECL_ARENA_FULL` is kept as a backward-compatible alias for
-  `CC_VEC_DECL_ARENA` that ignores its `OptT` slot. `CC_MAP_DECL_ARENA_FULL`
-  is similarly an alias for `CC_MAP_DECL_ARENA`.
+- The optionals-era `_FULL` aliases (`CC_VEC_DECL_ARENA_FULL`,
+  `CC_VEC_DECLARE_GUARDED[_FULL]`, `CC_VEC_DECL_HEAP_FULL`,
+  `CC_MAP_DECL_ARENA_FULL`, `CC_MAP_DECL_{INT,U64,SLICE}_FULL`) have been
+  removed; call `CC_VEC_DECL_ARENA` / `CC_VEC_DECL_HEAP` /
+  `CC_MAP_DECL_ARENA` directly.
+- The fixed-key map wrappers `CC_MAP_DECL_INT` / `CC_MAP_DECL_U64` /
+  `CC_MAP_DECL_SLICE` have been removed. In Concurrent-C source, spell the
+  key type (`Map::[int, V]`); a user key type installs by declaring
+  `cc_map_key_hash_<K>` / `cc_map_key_eq_<K>`. In plain C, invoke
+  `CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)` with the hash/eq pair
+  (`cc_map_hash_i32`/`cc_map_eq_i32`, `cc_map_hash_u64`/`cc_map_eq_u64`,
+  `cc_map_hash_slice`/`cc_map_eq_slice`).
+- `CC_DECL_SLICE_SPEC` takes two parameters (`NAME`, `T`); the former
+  middle `SNAKE` parameter is gone — members are `NAME##_<member>`
+  (`CCSlice_double_at`), the same instance-prefix convention as Vec/Map.
+  `CC_DECL_SLICE(T)` is the single-token convenience. Concurrent-C source
+  rarely needs either: `T[:]` auto-instantiates.
