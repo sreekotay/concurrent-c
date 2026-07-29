@@ -1142,6 +1142,8 @@ static int cc__ufcs_fn_name_is_real(const char* name) {
     return cc_included_cch_contains_fn(name);
 }
 
+static const char* cc__ufcs_skip_noncode(const char* p);
+
 /* First parameter's type for a decl-shaped `name(` occurrence in the
  * current TU text, whitespace-normalized (`const char* s` shape). */
 static int cc__ufcs_fn_first_param_in_source(const char* name,
@@ -1153,6 +1155,14 @@ static int cc__ufcs_fn_first_param_in_source(const char* name,
     nlen = strlen(name);
     for (const char* p = src; *p; ++p) {
         const char* q;
+        {
+            const char* s2 = cc__ufcs_skip_noncode(p);
+            if (s2 != p) {
+                p = (*s2) ? s2 - 1 : s2;
+                if (!*p) break;
+                continue;
+            }
+        }
         if (*p != name[0]) continue;
         if (strncmp(p, name, nlen) != 0) continue;
         if (p != src && (cc_is_ident_char(p[-1]))) continue;
@@ -1196,13 +1206,104 @@ static int cc__ufcs_fn_first_param_in_source(const char* name,
     return 0;
 }
 
+/* Advance past a comment or string/char literal starting at p; returns
+ * p unchanged when not at one. Keeps decl-shaped text inside comments
+ * and strings from inventing declarations or parameter types. */
+static const char* cc__ufcs_skip_noncode(const char* p) {
+    if (p[0] == '/' && p[1] == '/') {
+        p += 2;
+        while (*p && *p != '\n') p++;
+        return p;
+    }
+    if (p[0] == '/' && p[1] == '*') {
+        p += 2;
+        while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+        return *p ? p + 2 : p;
+    }
+    if (*p == '"' || *p == '\'') {
+        char q = *p++;
+        while (*p && *p != q) {
+            if (*p == '\\' && p[1]) p++;
+            p++;
+        }
+        return *p ? p + 1 : p;
+    }
+    return p;
+}
+
+/* Receiver type spellings from the registry/tcc arrive cv-stripped; the
+ * one-way qualifier rule needs the receiver's own const. For a plain
+ * identifier receiver, read it from the declaring statement (a
+ * decl-shaped occurrence whose statement head spells `const`). */
+static int cc__ufcs_recv_ident_decl_is_const(const char* recv) {
+    const char* src = g_ufcs_source_text;
+    size_t rlen;
+    const char* r = recv;
+    if (!src || !recv) return 0;
+    while (*r == ' ' || *r == '\t') r++;
+    {
+        const char* e = r;
+        while (cc_is_ident_char(*e)) e++;
+        if (e == r || *e) return 0; /* not a plain ident */
+        rlen = (size_t)(e - r);
+    }
+    for (const char* p = src; *p; ++p) {
+        const char* b;
+        const char* a;
+        {
+            const char* s2 = cc__ufcs_skip_noncode(p);
+            if (s2 != p) {
+                p = (*s2) ? s2 - 1 : s2;
+                if (!*p) break;
+                continue;
+            }
+        }
+        if (*p != r[0]) continue;
+        if (strncmp(p, r, rlen) != 0) continue;
+        if (p != src && cc_is_ident_char(p[-1])) continue;
+        if (cc_is_ident_char(p[rlen])) continue;
+        b = p;
+        while (b > src && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if (b == src || !(cc_is_ident_char(b[-1]) || b[-1] == '*')) continue;
+        a = b;
+        while (a > src && !strchr(";{}(),", a[-1]) && a[-1] != '\n') a--;
+        while (a < b) {
+            if (strncmp(a, "const", 5) == 0 &&
+                (a == src || !cc_is_ident_char(a[-1])) &&
+                !cc_is_ident_char(a[5]))
+                return 1;
+            a++;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* Does normalized `param` spell candidate type `cand`, optionally
+ * followed by a lone parameter name? (`const char*` matches
+ * `const char*` and `const char* s`.) */
+static int cc__bare_param_matches(const char* param, const char* cand) {
+    size_t cl = strlen(cand);
+    if (strncmp(param, cand, cl) != 0) return 0;
+    param += cl;
+    if (!*param) return 1;
+    if (*param == ' ') param++;
+    if (!cc_is_ident_char(*param)) return 0;
+    while (cc_is_ident_char(*param)) param++;
+    return *param == '\0';
+}
+
 /* Universal tier: on family miss, the method name itself as a declared
  * function whose first parameter takes the receiver — `u.mean(6.0)` →
- * `mean(u, 6.0)`. First-parameter match is exact (cv-stripped,
- * whitespace-normalized); a `T*` first parameter takes `&recv` when the
- * receiver is addressable. Only declarations visible to the pipeline
- * (TU text or included cch headers) participate — system-header
- * functions do not. Value receivers only. */
+ * `mean(u, 6.0)`; `pp->get_x()` → `get_x(pp)`. Value receivers match
+ * exactly (no arithmetic conversions); a `T*`/`const T*` first
+ * parameter takes `&recv` when the receiver is addressable. Pointer
+ * receivers follow C's pointer rules: exact `T*`, qualifier-adding
+ * `const T*`, and `void*`/`const void*` — one-way (a const receiver
+ * never matches a non-const parameter), and a dereference is never
+ * synthesized (pointer receivers match pointer parameters only). Only
+ * declarations visible to the pipeline (TU text or included cch
+ * headers) participate — system-header functions do not. */
 static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
                                    const char* method, bool recv_is_ptr,
                                    int recv_is_addressable,
@@ -1210,9 +1311,12 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
                                    const char* recv_type_name) {
     char param[256];
     char recvn[256];
-    size_t rl;
+    char cand[288];
+    int ris_const = 0;
+    int recv_ptr = 0;
     int by_ptr = 0;
-    if (recv_is_ptr || !recv_type_name || !recv_type_name[0])
+    int matched = 0;
+    if (!recv_type_name || !recv_type_name[0])
         return CC_UFCS_EMIT_UNRESOLVED;
     if (!cc__ufcs_fn_first_param_in_source(method, param, sizeof(param)) &&
         !cc_included_cch_fn_first_param(method, param, sizeof(param)))
@@ -1222,7 +1326,7 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
         size_t dn = 0;
         for (;;) {
             while (*t == ' ' || *t == '\t') t++;
-            if (strncmp(t, "const ", 6) == 0) { t += 6; continue; }
+            if (strncmp(t, "const ", 6) == 0) { ris_const = 1; t += 6; continue; }
             if (strncmp(t, "volatile ", 9) == 0) { t += 9; continue; }
             break;
         }
@@ -1238,31 +1342,55 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
         }
         while (dn > 0 && recvn[dn - 1] == ' ') dn--;
         recvn[dn] = 0;
-        if (!dn || strchr(recvn, '*')) return CC_UFCS_EMIT_UNRESOLVED;
+        while (dn > 0 && recvn[dn - 1] == '*') {
+            recv_ptr++;
+            recvn[--dn] = 0;
+        }
+        while (dn > 0 && recvn[dn - 1] == ' ') recvn[--dn] = 0;
+        if (!dn) return CC_UFCS_EMIT_UNRESOLVED;
+        /* `->` receiver syntax marks one pointer level when the type
+         * spelling carries none (single level supported either way). */
+        if (recv_ptr == 0 && recv_is_ptr) recv_ptr = 1;
+        if (recv_ptr > 1) return CC_UFCS_EMIT_UNRESOLVED;
     }
-    {
-        const char* pp = param;
-        for (;;) {
-            if (strncmp(pp, "const ", 6) == 0) { pp += 6; continue; }
-            if (strncmp(pp, "volatile ", 9) == 0) { pp += 9; continue; }
-            break;
+    /* Type spellings arrive cv-stripped: recover the receiver's own
+     * const from its declaration before applying the one-way rule. */
+    if (recv_ptr && !ris_const && cc__ufcs_recv_ident_decl_is_const(recv))
+        ris_const = 1;
+    if (recv_ptr == 0) {
+        /* Value receiver: exact value match (cv on a by-value param is
+         * meaningless — accept it), or `T*`/`const T*` via `&recv`. */
+        const char* pv = param;
+        if (strncmp(pv, "const ", 6) == 0) pv += 6;
+        if (cc__bare_param_matches(pv, recvn) && !strchr(pv, '*')) {
+            matched = 1;
+        } else {
+            snprintf(cand, sizeof(cand), "%s*", recvn);
+            if (cc__bare_param_matches(param, cand)) {
+                matched = 1;
+                by_ptr = 1;
+            } else {
+                snprintf(cand, sizeof(cand), "const %s*", recvn);
+                if (cc__bare_param_matches(param, cand)) {
+                    matched = 1;
+                    by_ptr = 1;
+                }
+            }
         }
-        rl = strlen(recvn);
-        if (strncmp(pp, recvn, rl) != 0) return CC_UFCS_EMIT_UNRESOLVED;
-        pp += rl;
-        if (*pp == '*') {
-            by_ptr = 1;
-            pp++;
-        }
-        /* Remainder must be empty or a lone parameter name. */
-        while (*pp == ' ') pp++;
-        if (*pp) {
-            const char* e = pp;
-            while (cc_is_ident_char(*e)) e++;
-            if (e == pp || *e) return CC_UFCS_EMIT_UNRESOLVED;
+        if (by_ptr && !recv_is_addressable) return CC_UFCS_EMIT_UNRESOLVED;
+    } else {
+        /* Pointer receiver: pointer parameters only. Qualifier flow is
+         * one-way; `void*` accepts any object pointer (C's rule). */
+        snprintf(cand, sizeof(cand), "const %s*", recvn);
+        if (cc__bare_param_matches(param, cand)) matched = 1;
+        if (!matched && cc__bare_param_matches(param, "const void*")) matched = 1;
+        if (!matched && !ris_const) {
+            snprintf(cand, sizeof(cand), "%s*", recvn);
+            if (cc__bare_param_matches(param, cand)) matched = 1;
+            if (!matched && cc__bare_param_matches(param, "void*")) matched = 1;
         }
     }
-    if (by_ptr && !recv_is_addressable) return CC_UFCS_EMIT_UNRESOLVED;
+    if (!matched) return CC_UFCS_EMIT_UNRESOLVED;
     {
         const char* amp = by_ptr ? "&" : "";
         if (!has_args || !args_rewritten || !args_rewritten[0])

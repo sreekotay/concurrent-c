@@ -1,0 +1,86 @@
+/* Adversarial shapes for free-call symmetry and the bare-name tier.
+ * Every case here is a way the resolution could go wrong; each asserts
+ * it doesn't: visible bindings (macros, function pointers, variables)
+ * always win, statement keywords precede calls without blinding the
+ * scan, decoys in comments and strings never count, and exact
+ * first-parameter matching holds under cv and variadics. */
+#include <ccc/script/stdio.cch>
+#include <assert.h>
+#include <stdio.h>
+
+/* A macro binding named like a composable verb: the macro must win
+ * even though cc_double_twist is declared and would verify. */
+#define twist(x) ((x) + 100.0)
+static double cc_double_twist(double x1) { return x1 * 2.0; }
+
+/* A function-pointer binding: `report("...")` is a legal C call
+ * through the pointer; composition must not hijack it even though
+ * cc_const_char_report exists. */
+static int g_sink_hits;
+static CCResult_size_t_CCError my_sink(const char* s1) {
+    (void)s1;
+    g_sink_hits++;
+    return cc_ok_CCResult_size_t_CCError(0);
+}
+static CCResult_size_t_CCError cc_const_char_report(const char* s1) {
+    (void)s1;
+    return cc_ok_CCResult_size_t_CCError(1);
+}
+
+/* Bare-name tier: exact first-param matching under cv and variadics. */
+static double mean2(double x1, double y1) { return (x1 + y1) / 2.0; }
+static double half2(const double x1) { return x1 / 2.0; }
+static double vsum(double x1, ...) { return x1 + 0.5; }
+
+/* Keyword-preceded free calls are calls, not declarations. */
+static CCResult_size_t_CCError say_ret(void) {
+    return println("ret line");
+}
+
+/* Decoys: these comment and string occurrences must never register as
+ * bindings or call sites.
+ *   int println(int);
+ *   double frob(double);
+ */
+static const char* g_decoy = "println(never) frob(never)";
+
+int main(void) {
+    /* Macro wins over a verifiable family composition. */
+    assert(twist(1.5) == 101.5);
+    /* ...while the method spelling still reaches the family (the macro
+     * binds the free name only). */
+    assert((1.5).twist() == 3.0);
+
+    /* Function-pointer binding wins over composition. */
+    {
+        CCResult_size_t_CCError (*report)(const char*) = my_sink;
+        CCResult_size_t_CCError r = report("through pointer");
+        assert(r.ok && g_sink_hits == 1);
+    }
+
+    /* Keyword positions: return / else / after a paren. */
+    {
+        CCResult_size_t_CCError r = say_ret();
+        assert(r.ok);
+        if (g_sink_hits == 0) assert(0);
+        else println("else line");
+        while (0) println("never");
+        if (1) println("cond line");
+    }
+
+    /* Adjacent string-literal concatenation is one const-char arg. */
+    println("conc" "at line");
+
+    /* Bare tier: cv on either side of an exact match. */
+    {
+        const double cu = 4.0;
+        double u = 4.0;
+        assert(cu.mean2(6.0) == 5.0);
+        assert(u.half2() == 2.0);
+        assert(u.vsum(9.0) == 4.5); /* variadic tail beyond param 1 */
+    }
+
+    (void)g_decoy;
+    printf("ok\n");
+    return 0;
+}

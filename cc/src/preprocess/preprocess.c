@@ -4282,14 +4282,14 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
         }
         break;
     }
-    /* Shape 3: a cast directly wrapping the call. */
+    /* Shape 3: a cast directly wrapping the call (may span lines). */
     if (p >= 3 && s[p - 1] == ')') {
         size_t rp = p - 1;
         size_t lp = rp;
         while (lp > 0) {
             char c = s[lp - 1];
             if (c == '(') break;
-            if (c == ')' || c == ';' || c == '{' || c == '}' || c == '\n')
+            if (c == ')' || c == ';' || c == '{' || c == '}')
                 return 0;
             lp--;
         }
@@ -5089,6 +5089,26 @@ static int cc__free_call_name_is_keyword(const char* s, size_t len) {
     return 0;
 }
 
+/* Statement keywords that legitimately precede a call expression:
+ * `return println(...)`, `else println(...)`, … — an identifier char
+ * before the name is a declaration shape ONLY when the preceding word
+ * is not one of these. */
+static int cc__free_call_prev_word_is_stmt_kw(const char* src, size_t b) {
+    size_t e = b, s;
+    static const char* const kws[] = {
+        "return", "else", "case", "do", "goto", NULL,
+    };
+    size_t k;
+    while (e > 0 && (src[e - 1] == ' ' || src[e - 1] == '\t')) e--;
+    s = e;
+    while (s > 0 && cc_is_ident_char(src[s - 1])) s--;
+    if (s == e) return 0;
+    for (k = 0; kws[k]; ++k)
+        if (strlen(kws[k]) == e - s && memcmp(src + s, kws[k], e - s) == 0)
+            return 1;
+    return 0;
+}
+
 /* Nonzero when a decl-shaped occurrence of `name(` exists: the
  * occurrence's previous code token ends in an identifier char or `*`
  * (a type or declarator precedes it). Call sites are preceded by
@@ -5121,7 +5141,9 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
                     }
                     break;
                 }
-                if (b > 0 && (cc_is_ident_char(src[b - 1]) || src[b - 1] == '*'))
+                if (b > 0 && src[b - 1] == '*') return 1;
+                if (b > 0 && cc_is_ident_char(src[b - 1]) &&
+                    !cc__free_call_prev_word_is_stmt_kw(src, b))
                     return 1;
             }
         }
@@ -5133,13 +5155,38 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
 static int cc__tu_defines_macro(const char* src, size_t n, const char* name) {
     size_t nlen = strlen(name);
     size_t i = 0;
-    static const char kw[] = "#define";
-    while (i + sizeof(kw) - 1 < n) {
-        const char* hit = (const char*)memmem(src + i, n - i, kw, sizeof(kw) - 1);
+    /* Manual comment/string skipping: the shared scanner treats whole
+     * preprocessor lines as non-code, which would hide the very
+     * `#define` this probe looks for. */
+    while (i + 7 < n) {
         size_t p;
-        if (!hit) return 0;
-        p = (size_t)(hit - src) + sizeof(kw) - 1;
-        i = p;
+        char c = src[i];
+        if (c == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            i = (i + 1 < n) ? i + 2 : n;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char q = c;
+            i++;
+            while (i < n && src[i] != q) {
+                if (src[i] == '\\' && i + 1 < n) i++;
+                i++;
+            }
+            if (i < n) i++;
+            continue;
+        }
+        if (c != '#') { i++; continue; }
+        p = i + 1;
+        i++;
+        while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p + 6 > n || memcmp(src + p, "define", 6) != 0) continue;
+        p += 6;
         while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
         if (p + nlen <= n && memcmp(src + p, name, nlen) == 0 &&
             (p + nlen == n || !cc_is_ident_char(src[p + nlen])))
@@ -5198,6 +5245,20 @@ static int cc__free_call_ident_decl_type(const char* src, size_t n,
             }
             out[dn] = 0;
             if (!toks || !dn) return 0;
+            /* `return name(...)` / `else name(...)` — a statement
+             * keyword heads a call, not a declaration; keep scanning. */
+            {
+                size_t we = 0;
+                while (out[we] && cc_is_ident_char(out[we])) we++;
+                if ((we == 6 && memcmp(out, "return", 6) == 0) ||
+                    (we == 4 && (memcmp(out, "else", 4) == 0 ||
+                                 memcmp(out, "case", 4) == 0 ||
+                                 memcmp(out, "goto", 4) == 0)) ||
+                    (we == 2 && memcmp(out, "do", 2) == 0)) {
+                    i += ilen;
+                    continue;
+                }
+            }
         }
         return 1;
     }
@@ -5338,13 +5399,18 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
         if (cc__free_call_name_is_keyword(src + ns, nlen)) continue;
         if (nlen >= sizeof(name)) continue;
         /* Method position, declaration shape, address-of, preprocessor,
-         * and @-forms are other rails. */
+         * and @-forms are other rails. A preceding identifier is a
+         * declaration shape unless it is a statement keyword
+         * (`return println(...)` is a call). */
         {
             size_t b = ns;
             while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t')) b--;
-            if (b > 0 && (src[b - 1] == '.' || cc_is_ident_char(src[b - 1]) ||
-                          src[b - 1] == '*' || src[b - 1] == '#' ||
-                          src[b - 1] == '&' || src[b - 1] == '@'))
+            if (b > 0 && (src[b - 1] == '.' || src[b - 1] == '*' ||
+                          src[b - 1] == '#' || src[b - 1] == '&' ||
+                          src[b - 1] == '@'))
+                continue;
+            if (b > 0 && cc_is_ident_char(src[b - 1]) &&
+                !cc__free_call_prev_word_is_stmt_kw(src, b))
                 continue;
             if (b > 1 && src[b - 1] == '>' && src[b - 2] == '-') continue;
         }
@@ -5355,6 +5421,14 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
         name[nlen] = 0;
         if (cc__tu_defines_macro(src, n, name)) continue;
         if (cc__tu_declares_fn(src, n, name)) continue;
+        {
+            /* Any visible variable binding of this name wins too — a
+             * function pointer `(*println)(...)` makes `println(x)` a
+             * legal C call through the pointer. */
+            char vty[256];
+            if (cc__free_call_ident_decl_type(src, n, name, vty, sizeof(vty)))
+                continue;
+        }
         if (cc_included_cch_declares_fn(name)) continue;
         {
             size_t close = 0;

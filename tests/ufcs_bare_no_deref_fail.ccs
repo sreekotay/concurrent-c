@@ -1,0 +1,11 @@
+/* A dereference is never synthesized: a pointer receiver matches
+ * pointer parameters only — `by_val_only(Pair)` must not capture
+ * `pp` as `*pp`. */
+#include <ccc/cc_runtime.cch>
+typedef struct Pair { int x, y; } Pair;
+static int by_val_only(Pair p1) { return p1.x; }
+int main(void) {
+    Pair pr = {3, 4};
+    Pair *pp = &pr;
+    return pp->by_val_only();
+}

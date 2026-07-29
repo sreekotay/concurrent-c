@@ -1,0 +1,4 @@
+# A declared `zap(void*)` must not capture a `double` receiver — void*
+# is not a dispatch key. The call keeps its composed-spelling failure;
+# host-compiler wording varies, so only the composed name is pinned.
+double_zap

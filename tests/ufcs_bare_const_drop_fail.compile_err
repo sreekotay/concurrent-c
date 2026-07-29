@@ -1,0 +1,3 @@
+# `cpp` is const Pair*; `get_x(Pair*)` must not capture it. The site
+# keeps its composed-spelling failure; only that name is pinned.
+pair_get_x

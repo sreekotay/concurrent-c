@@ -1,0 +1,3 @@
+# Pointer receivers match pointer parameters only; the value-taking
+# by_val_only must not fire via a synthesized *pp.
+pair_by_val_only

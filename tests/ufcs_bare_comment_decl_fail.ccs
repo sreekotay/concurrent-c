@@ -1,0 +1,9 @@
+/* Decl-shaped text inside a comment must not invent a function or a
+ * first-parameter type for the bare-name tier:
+ *   double ghost(double x1);
+ */
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    double u = 4.0;
+    return (int)u.ghost();
+}

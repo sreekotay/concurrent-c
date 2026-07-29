@@ -13,6 +13,11 @@ static double cc_double_pick(double x1) { (void)x1; return 1.0; }
 static double pick(double x1) { (void)x1; return 2.0; }
 typedef struct Pair { int x, y; } Pair;
 static int total(Pair p1) { return p1.x + p1.y; }
+static int get_px(Pair *p1) { return p1->x; }
+static int ro_ptotal(const Pair *p1) { return p1->x + p1->y; }
+static int g_ptags;
+static void tag_pany(void* p1) { (void)p1; g_ptags++; }
+static int peek_pany(const void* p1) { (void)p1; return 9; }
 int main(void) {
     double u = 4.0;
     assert(u.mean2(6.0) == 5.0);
@@ -21,6 +26,23 @@ int main(void) {
     assert(u.pick() == 1.0); /* family tier beats bare */
     Pair pr = {3, 4};
     assert(pr.total() == 7);
+
+    /* Pointer receivers: exact `T*`, qualifier-adding `const T*`, and
+     * the `void*` family under C's pointer rules — one-way qualifiers,
+     * no synthesized dereference. */
+    {
+        Pair *pp = &pr;
+        const Pair *cpp = &pr;
+        int *ip = &pr.x;
+        assert(pp->get_px() == 3);
+        assert(pp->ro_ptotal() == 7);
+        assert(cpp->ro_ptotal() == 7);
+        pp->tag_pany();
+        ip->tag_pany();
+        assert(g_ptags == 2);
+        assert(pp->peek_pany() == 9);
+        assert(cpp->peek_pany() == 9);
+    }
     printf("ok\n");
     return 0;
 }

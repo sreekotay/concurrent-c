@@ -1,0 +1,11 @@
+/* The universal bare-name tier never matches a `void*` first parameter
+ * against a typed receiver: `void*` carries no type information, so it
+ * cannot be a dispatch key. The site keeps its composed-spelling
+ * diagnostic. */
+#include <ccc/cc_runtime.cch>
+static void zap(void* p1) { (void)p1; }
+int main(void) {
+    double u = 4.0;
+    u.zap();
+    return 0;
+}

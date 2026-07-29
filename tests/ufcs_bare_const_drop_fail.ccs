@@ -1,0 +1,10 @@
+/* One-way qualifiers: a const pointer receiver never matches a
+ * non-const first parameter (C forbids dropping const implicitly). */
+#include <ccc/cc_runtime.cch>
+typedef struct Pair { int x, y; } Pair;
+static int get_x(Pair *p1) { return p1->x; }
+int main(void) {
+    Pair pr = {3, 4};
+    const Pair *cpp = &pr;
+    return cpp->get_x();
+}
