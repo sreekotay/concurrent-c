@@ -133,7 +133,7 @@ so it CAN, not to work around them in a single pass.
 
 - **Total lines**: ~21k across pass files
 - **TCC reparses**: ≤6 call sites in `visit_codegen.c` + 1 initial parse (down from ~9 pre-2026-05-28). Both Phase-3 stage reparses skip when their edit buffer is empty.
-- **Text-based passes in preprocess.c**: ~24 transforms (2026-06-01 audit — the numbered table below is the historical subset; the actual phase-1 canonical + phase-3 host-lowering buckets in `cc__apply_phase1_canonical_passes` / `cc__apply_phase3_host_lowering_passes` run more, e.g. `cc__resolve_comptime_if`, `cc__rewrite_string_templates`, `cc__rewrite_channel_pair_pass`, `cc__lower_type_of_constexpr`, `cc__rewrite_result_field_sugar_pass`, `cc__rewrite_async_void_ret`, `cc__rewrite_at_call_site_mode`, `cc__rewrite_at_await`)
+- **Text-based passes in preprocess.c**: ~24 transforms (2026-06-01 audit — the numbered table below is the historical subset; the actual phase-1 canonical + phase-3 host-lowering buckets in `cc__apply_phase1_canonical_passes` / `cc__apply_phase3_host_lowering_passes` run more, e.g. `cc__resolve_comptime_if`, `cc__rewrite_string_templates`, `cc__rewrite_free_call_families`, `cc__rewrite_channel_pair_pass`, `cc__lower_type_of_constexpr`, `cc__rewrite_result_field_sugar_pass`, `cc__rewrite_async_void_ret`, `cc__rewrite_at_call_site_mode`, `cc__rewrite_at_await`)
 - **AST-based passes**: 8
 
 ## Preprocessing (preprocess.c) — ~10,803 lines

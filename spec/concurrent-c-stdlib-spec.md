@@ -517,8 +517,7 @@ helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 
 `<ccc/script/stdio.cch>` (script prelude, not `<ccc/std/…>`) defines
 `CCStdio` for arena-backed stdin reads and line-oriented console writes.
-Preferred console output is UFCS on the data — no `CCStdio` argument and no
-free `println` macro:
+Console output is UFCS on the data — no `CCStdio` argument:
 
 ```c
 path.println() !>;                    /* CCSlice / char[:0] */
@@ -528,6 +527,11 @@ cstr_ptr.println() !>;                /* const char * / char * */
 @string(`n=${n}`, &a).println() !>;
 path.fprintln(STDERR_FILENO) !>;
 ```
+
+The prefix spelling is the same call: `println("literal") !>;` and
+`println(@string(`n=${n}`, &a)) !>;` resolve through free-call symmetry
+(core spec, UFCS rules) to the identical family callee. Which spelling
+to write is style.
 
 Guidelines:
 
@@ -545,7 +549,8 @@ Guidelines:
   byte-writer API for non-script library code.
 
 Returns are `CCResult_size_t_CCError`. Short names `println` / `eprintln` are
-not free macros.
+not macros: the prefix spelling resolves through free-call symmetry to the
+receiver-typed family function.
 
 ## Collections
 

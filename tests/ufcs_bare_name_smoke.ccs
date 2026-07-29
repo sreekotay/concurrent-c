@@ -1,0 +1,26 @@
+/* Universal bare-name tier: on family miss, `recv.f(args)` resolves to
+ * a declared function `f` whose first parameter takes the receiver —
+ * `u.mean2(6.0)` → `mean2(u, 6.0)`. First-parameter match is exact; a
+ * `T*` first parameter takes `&recv`; a declared family spelling
+ * (`cc_double_pick`) always beats the bare name. Only declarations
+ * visible to the pipeline participate. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+static double mean2(double x1, double y1) { return (x1 + y1) / 2.0; }
+static void bump(double *x1) { *x1 += 1.0; }
+static double cc_double_pick(double x1) { (void)x1; return 1.0; }
+static double pick(double x1) { (void)x1; return 2.0; }
+typedef struct Pair { int x, y; } Pair;
+static int total(Pair p1) { return p1.x + p1.y; }
+int main(void) {
+    double u = 4.0;
+    assert(u.mean2(6.0) == 5.0);
+    u.bump();
+    assert(u == 5.0);
+    assert(u.pick() == 1.0); /* family tier beats bare */
+    Pair pr = {3, 4};
+    assert(pr.total() == 7);
+    printf("ok\n");
+    return 0;
+}

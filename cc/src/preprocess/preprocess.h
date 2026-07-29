@@ -144,6 +144,9 @@ void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg);
 
 /* Nonzero if any registered included .cch contains callable `name(`. */
 int cc_included_cch_contains_fn(const char* name);
+/* First parameter type of a decl-shaped `name(` occurrence in an
+ * included cch header, whitespace-normalized. Returns 0/1. */
+int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
 
 /* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU

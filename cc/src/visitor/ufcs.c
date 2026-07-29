@@ -1142,6 +1142,136 @@ static int cc__ufcs_fn_name_is_real(const char* name) {
     return cc_included_cch_contains_fn(name);
 }
 
+/* First parameter's type for a decl-shaped `name(` occurrence in the
+ * current TU text, whitespace-normalized (`const char* s` shape). */
+static int cc__ufcs_fn_first_param_in_source(const char* name,
+                                             char* out, size_t out_sz) {
+    const char* src = g_ufcs_source_text;
+    size_t nlen;
+    if (!src || !name || !name[0] || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    nlen = strlen(name);
+    for (const char* p = src; *p; ++p) {
+        const char* q;
+        if (*p != name[0]) continue;
+        if (strncmp(p, name, nlen) != 0) continue;
+        if (p != src && (cc_is_ident_char(p[-1]))) continue;
+        if (cc_is_ident_char(p[nlen])) continue;
+        q = p + nlen;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '(') continue;
+        {
+            const char* b = p;
+            while (b > src && isspace((unsigned char)b[-1])) b--;
+            if (b == src || !(cc_is_ident_char(b[-1]) || b[-1] == '*')) continue;
+        }
+        {
+            const char* ps = q + 1;
+            const char* pe = ps;
+            int depth = 0;
+            size_t dn = 0;
+            while (*pe) {
+                char c = *pe;
+                if (c == '(') depth++;
+                else if (c == ')' && depth-- == 0) break;
+                else if (c == ',' && depth == 0) break;
+                pe++;
+            }
+            while (ps < pe && isspace((unsigned char)*ps)) ps++;
+            while (pe > ps && isspace((unsigned char)pe[-1])) pe--;
+            while (ps < pe && dn + 1 < out_sz) {
+                if (isspace((unsigned char)*ps)) {
+                    if (dn > 0 && out[dn - 1] != ' ' && out[dn - 1] != '*')
+                        out[dn++] = ' ';
+                    ps++;
+                    continue;
+                }
+                if (*ps == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
+                out[dn++] = *ps++;
+            }
+            out[dn] = 0;
+            return dn > 0;
+        }
+    }
+    return 0;
+}
+
+/* Universal tier: on family miss, the method name itself as a declared
+ * function whose first parameter takes the receiver — `u.mean(6.0)` →
+ * `mean(u, 6.0)`. First-parameter match is exact (cv-stripped,
+ * whitespace-normalized); a `T*` first parameter takes `&recv` when the
+ * receiver is addressable. Only declarations visible to the pipeline
+ * (TU text or included cch headers) participate — system-header
+ * functions do not. Value receivers only. */
+static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
+                                   const char* method, bool recv_is_ptr,
+                                   int recv_is_addressable,
+                                   const char* args_rewritten, bool has_args,
+                                   const char* recv_type_name) {
+    char param[256];
+    char recvn[256];
+    size_t rl;
+    int by_ptr = 0;
+    if (recv_is_ptr || !recv_type_name || !recv_type_name[0])
+        return CC_UFCS_EMIT_UNRESOLVED;
+    if (!cc__ufcs_fn_first_param_in_source(method, param, sizeof(param)) &&
+        !cc_included_cch_fn_first_param(method, param, sizeof(param)))
+        return CC_UFCS_EMIT_UNRESOLVED;
+    {
+        const char* t = recv_type_name;
+        size_t dn = 0;
+        for (;;) {
+            while (*t == ' ' || *t == '\t') t++;
+            if (strncmp(t, "const ", 6) == 0) { t += 6; continue; }
+            if (strncmp(t, "volatile ", 9) == 0) { t += 9; continue; }
+            break;
+        }
+        while (*t && dn + 1 < sizeof(recvn)) {
+            if (*t == ' ' || *t == '\t') {
+                if (dn > 0 && recvn[dn - 1] != ' ' && recvn[dn - 1] != '*')
+                    recvn[dn++] = ' ';
+                t++;
+                continue;
+            }
+            if (*t == '*' && dn > 0 && recvn[dn - 1] == ' ') dn--;
+            recvn[dn++] = *t++;
+        }
+        while (dn > 0 && recvn[dn - 1] == ' ') dn--;
+        recvn[dn] = 0;
+        if (!dn || strchr(recvn, '*')) return CC_UFCS_EMIT_UNRESOLVED;
+    }
+    {
+        const char* pp = param;
+        for (;;) {
+            if (strncmp(pp, "const ", 6) == 0) { pp += 6; continue; }
+            if (strncmp(pp, "volatile ", 9) == 0) { pp += 9; continue; }
+            break;
+        }
+        rl = strlen(recvn);
+        if (strncmp(pp, recvn, rl) != 0) return CC_UFCS_EMIT_UNRESOLVED;
+        pp += rl;
+        if (*pp == '*') {
+            by_ptr = 1;
+            pp++;
+        }
+        /* Remainder must be empty or a lone parameter name. */
+        while (*pp == ' ') pp++;
+        if (*pp) {
+            const char* e = pp;
+            while (cc_is_ident_char(*e)) e++;
+            if (e == pp || *e) return CC_UFCS_EMIT_UNRESOLVED;
+        }
+    }
+    if (by_ptr && !recv_is_addressable) return CC_UFCS_EMIT_UNRESOLVED;
+    {
+        const char* amp = by_ptr ? "&" : "";
+        if (!has_args || !args_rewritten || !args_rewritten[0])
+            return snprintf(out, cap, "%s(%s%s)", method, amp, recv);
+        return snprintf(out, cap, "%s(%s%s, %s)", method, amp, recv,
+                        args_rewritten);
+    }
+}
+
 static int cc__emit_registered_callable(char* out,
                                         size_t cap,
                                         const char* recv,
@@ -2265,8 +2395,36 @@ static int emit_desugared_call(char* out,
         int has_dyn = (ctx.recv_type_base[0] &&
                        cc_type_registry_has_dynamic_sink(reg, ctx.recv_type_base));
         int outer_real = 0;
-        /* Cheap @as gate before fn_name_is_real (O(TU) + header re-reads). */
-        if (dispatch_n >= 0 && !has_as && !has_dyn) return dispatch_n;
+        /* Cheap @as gate before fn_name_is_real (O(TU) + header re-reads).
+         * A composed callee that is not verifiably declared no longer
+         * returns fail-open: the universal bare-name tier gets a shot
+         * first, and only then the composed spelling (which carries the
+         * strict unresolved diagnostics downstream). */
+        if (dispatch_n >= 0 && !has_as && !has_dyn) {
+            char callee[256];
+            size_t ci = 0;
+            while ((size_t)dispatch_n > ci && out[ci] && out[ci] != '(' &&
+                   ci + 1 < sizeof(callee)) {
+                callee[ci] = out[ci];
+                ci++;
+            }
+            callee[ci] = '\0';
+            if (ci > 0 && !cc__ufcs_fn_name_is_real(callee)) {
+                int bn = cc__emit_bare_name_tier(out, cap, recv, method,
+                                                 recv_is_ptr,
+                                                 ctx.recv_is_addressable,
+                                                 args_rewritten, has_args,
+                                                 ctx.recv_type_name);
+                if (bn != CC_UFCS_EMIT_UNRESOLVED) return bn;
+                /* Re-emit the composed dispatch clobbered by the tier
+                 * probe. */
+                return cc__emit_type_driven_dispatch(out, cap, recv, method,
+                                                     recv_is_ptr,
+                                                     args_rewritten, has_args,
+                                                     &ctx);
+            }
+            return dispatch_n;
+        }
         if (dispatch_n >= 0) {
             char callee[256];
             size_t ci = 0;
@@ -2354,13 +2512,29 @@ static int emit_desugared_call(char* out,
                 return best_n;
             }
             /* Outer was synthetic and @as retry found nothing real — try the
-             * registered dynamic sink before failing loud. */
+             * universal bare-name tier, then the registered dynamic sink
+             * before failing loud. */
+            {
+                int bn = cc__emit_bare_name_tier(out, cap, recv, method,
+                                                 recv_is_ptr,
+                                                 ctx.recv_is_addressable,
+                                                 args_rewritten, has_args,
+                                                 ctx.recv_type_name);
+                if (bn != CC_UFCS_EMIT_UNRESOLVED) return bn;
+            }
             return cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
                                          args_rewritten, has_args,
                                          ctx.recv_type_base);
         }
     }
     if (dispatch_n >= 0) return dispatch_n;
+    {
+        int bn = cc__emit_bare_name_tier(out, cap, recv, method, recv_is_ptr,
+                                         ctx.recv_is_addressable,
+                                         args_rewritten, has_args,
+                                         ctx.recv_type_name);
+        if (bn != CC_UFCS_EMIT_UNRESOLVED) return bn;
+    }
     return cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
                                  args_rewritten, has_args, ctx.recv_type_base);
 }

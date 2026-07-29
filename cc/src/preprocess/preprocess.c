@@ -9990,6 +9990,71 @@ static int cc_included_cch_declares_fn(const char* name) {
     return 0;
 }
 
+/* First parameter's type span for a decl-shaped `name(` occurrence in
+ * an included cch header, whitespace-normalized (`const char* s` shape:
+ * idents space-separated, `*` attached). Returns 0/1. */
+int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
+    size_t h;
+    size_t nlen;
+    if (!name || !name[0] || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    nlen = strlen(name);
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        size_t i = 0;
+        CCScannerState scan;
+        if (!g_included_cch_sources[h]) continue;
+        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
+            continue;
+        cc_scanner_init(&scan);
+        while (i + nlen < fn) {
+            size_t q;
+            if (cc_scanner_skip_non_code(&scan, fsrc, fn, &i)) continue;
+            if (fsrc[i] != name[0]) { i++; continue; }
+            if (i > 0 && cc_is_ident_char(fsrc[i - 1])) { i++; continue; }
+            if (memcmp(fsrc + i, name, nlen) != 0) { i++; continue; }
+            if (cc_is_ident_char(fsrc[i + nlen])) { i += nlen; continue; }
+            q = i + nlen;
+            while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+            if (q < fn && fsrc[q] == '(') {
+                size_t b = i;
+                while (b > 0 && isspace((unsigned char)fsrc[b - 1])) b--;
+                if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*')) {
+                    size_t ps = q + 1, pe = ps;
+                    int depth = 0;
+                    size_t dn = 0;
+                    while (pe < fn) {
+                        char c = fsrc[pe];
+                        if (c == '(') depth++;
+                        else if (c == ')' && depth-- == 0) break;
+                        else if (c == ',' && depth == 0) break;
+                        pe++;
+                    }
+                    while (ps < pe && isspace((unsigned char)fsrc[ps])) ps++;
+                    while (pe > ps && isspace((unsigned char)fsrc[pe - 1])) pe--;
+                    while (ps < pe && dn + 1 < out_sz) {
+                        if (isspace((unsigned char)fsrc[ps])) {
+                            if (dn > 0 && out[dn - 1] != ' ' && out[dn - 1] != '*')
+                                out[dn++] = ' ';
+                            ps++;
+                            continue;
+                        }
+                        if (fsrc[ps] == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
+                        out[dn++] = fsrc[ps++];
+                    }
+                    out[dn] = 0;
+                    free(fsrc);
+                    return dn > 0;
+                }
+            }
+            i += nlen;
+        }
+        free(fsrc);
+    }
+    return 0;
+}
+
 static void cc__register_included_cch_tree(const char* source_path) {
     char abs_src[PATH_MAX];
     char source_dir[PATH_MAX];
