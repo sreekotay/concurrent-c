@@ -10143,6 +10143,20 @@ static char** g_included_cch_sources = NULL;
 static size_t g_included_cch_source_count = 0;
 static size_t g_included_cch_source_cap = 0;
 
+/* Path → file-text cache for the current TU. UFCS / family / sink probes
+ * re-query included .cch headers hundreds to thousands of times per compile;
+ * without this each probe re-opens and re-reads the same headers from disk. */
+typedef struct {
+    char* path;
+    char* text;
+    size_t len;
+    char** callables; /* sorted unique `ident(` names in text */
+    size_t n_callables;
+} CCPathTextCache;
+static CCPathTextCache* g_path_text_cache = NULL;
+static size_t g_path_text_cache_count = 0;
+static size_t g_path_text_cache_cap = 0;
+
 static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     if (g_lowered_local_header_cap >= needed) return 0;
     size_t new_cap = g_lowered_local_header_cap ? g_lowered_local_header_cap * 2 : 8;
@@ -10157,10 +10171,28 @@ static int cc__ensure_lowered_local_header_capacity(size_t needed) {
 
 static void cc__family_members_reset(void);
 
+static void cc__path_text_cache_reset(void) {
+    size_t i, j;
+    for (i = 0; i < g_path_text_cache_count; i++) {
+        free(g_path_text_cache[i].path);
+        free(g_path_text_cache[i].text);
+        for (j = 0; j < g_path_text_cache[i].n_callables; j++)
+            free(g_path_text_cache[i].callables[j]);
+        free(g_path_text_cache[i].callables);
+        g_path_text_cache[i].path = NULL;
+        g_path_text_cache[i].text = NULL;
+        g_path_text_cache[i].len = 0;
+        g_path_text_cache[i].callables = NULL;
+        g_path_text_cache[i].n_callables = 0;
+    }
+    g_path_text_cache_count = 0;
+}
+
 void cc_reset_included_cch_sources(void) {
     for (size_t i = 0; i < g_included_cch_source_count; i++)
         free(g_included_cch_sources[i]);
     g_included_cch_source_count = 0;
+    cc__path_text_cache_reset();
     cc_ufcs_reset_dest_trap_dedup();
     cc__family_members_reset();
 }
@@ -10227,7 +10259,91 @@ static int cc__dirname_local(const char* path, char* out, size_t out_sz) {
     return 0;
 }
 
-static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len) {
+static int cc__callable_name_cmp(const void* a, const void* b) {
+    const char* const* sa = (const char* const*)a;
+    const char* const* sb = (const char* const*)b;
+    return strcmp(*sa, *sb);
+}
+
+/* Index every `ident(` spelling in text (comment/string-blind — same
+ * contract as cc_included_cch_contains_fn). Sorted for bsearch. */
+static void cc__index_callables(CCPathTextCache* slot) {
+    size_t i = 0;
+    size_t cap = 0;
+    if (!slot || !slot->text) return;
+    slot->callables = NULL;
+    slot->n_callables = 0;
+    while (i < slot->len) {
+        size_t s, e, q;
+        if (!((slot->text[i] >= 'A' && slot->text[i] <= 'Z') ||
+              (slot->text[i] >= 'a' && slot->text[i] <= 'z') ||
+              slot->text[i] == '_')) {
+            i++;
+            continue;
+        }
+        if (i > 0 && cc_is_ident_char(slot->text[i - 1])) {
+            while (i < slot->len && cc_is_ident_char(slot->text[i])) i++;
+            continue;
+        }
+        s = i;
+        while (i < slot->len && cc_is_ident_char(slot->text[i])) i++;
+        e = i;
+        q = e;
+        while (q < slot->len && (slot->text[q] == ' ' || slot->text[q] == '\t'))
+            q++;
+        if (q >= slot->len || slot->text[q] != '(') continue;
+        if (e > s && e - s < 192) {
+            char* name = (char*)malloc(e - s + 1);
+            char** nv;
+            if (!name) continue;
+            memcpy(name, slot->text + s, e - s);
+            name[e - s] = 0;
+            if (slot->n_callables == cap) {
+                cap = cap ? cap * 2 : 64;
+                nv = (char**)realloc(slot->callables, cap * sizeof(*nv));
+                if (!nv) {
+                    free(name);
+                    continue;
+                }
+                slot->callables = nv;
+            }
+            slot->callables[slot->n_callables++] = name;
+        }
+    }
+    if (slot->n_callables > 1) {
+        size_t w = 0, r;
+        qsort(slot->callables, slot->n_callables, sizeof(char*),
+              cc__callable_name_cmp);
+        for (r = 0; r < slot->n_callables; r++) {
+            if (w > 0 && strcmp(slot->callables[w - 1], slot->callables[r]) == 0) {
+                free(slot->callables[r]);
+                continue;
+            }
+            slot->callables[w++] = slot->callables[r];
+        }
+        slot->n_callables = w;
+    }
+}
+
+static int cc__cache_has_callable(const CCPathTextCache* slot, const char* name) {
+    char* key = (char*)name;
+    if (!slot || !slot->callables || !name || !name[0]) return 0;
+    return bsearch(&key, slot->callables, slot->n_callables, sizeof(char*),
+                   cc__callable_name_cmp) != NULL;
+}
+
+static CCPathTextCache* cc__path_text_cache_find(const char* path) {
+    size_t i;
+    if (!path) return NULL;
+    for (i = 0; i < g_path_text_cache_count; i++) {
+        if (g_path_text_cache[i].path &&
+            strcmp(g_path_text_cache[i].path, path) == 0)
+            return &g_path_text_cache[i];
+    }
+    return NULL;
+}
+
+static int cc__read_file_text_uncached(const char* path, char** out_buf, size_t* out_len) {
     FILE* f = NULL;
     long flen = 0;
     char* buf = NULL;
@@ -10249,6 +10365,84 @@ static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len)
     *out_buf = buf;
     *out_len = got;
     return 0;
+}
+
+/* Borrowed text for `path` (valid until cc_reset_included_cch_sources).
+ * Exact-path hit first — registered includes are already realpath'd, and
+ * UFCS probes them thousands of times; paying realpath on every lookup
+ * dominated the win from avoiding fopen. */
+static const char* cc__path_text_cached(const char* path, size_t* out_len) {
+    char abs_key[PATH_MAX];
+    const char* key = path;
+    size_t i;
+    char* buf = NULL;
+    size_t n = 0;
+    CCPathTextCache* nv;
+    if (!path || !path[0]) return NULL;
+    for (i = 0; i < g_path_text_cache_count; i++) {
+        if (g_path_text_cache[i].path &&
+            strcmp(g_path_text_cache[i].path, path) == 0) {
+            if (out_len) *out_len = g_path_text_cache[i].len;
+            return g_path_text_cache[i].text;
+        }
+    }
+    if (realpath(path, abs_key) && strcmp(abs_key, path) != 0) {
+        key = abs_key;
+        for (i = 0; i < g_path_text_cache_count; i++) {
+            if (g_path_text_cache[i].path &&
+                strcmp(g_path_text_cache[i].path, key) == 0) {
+                if (out_len) *out_len = g_path_text_cache[i].len;
+                return g_path_text_cache[i].text;
+            }
+        }
+    }
+    if (cc__read_file_text_uncached(path, &buf, &n) != 0 || !buf) return NULL;
+    if (g_path_text_cache_count == g_path_text_cache_cap) {
+        size_t cap = g_path_text_cache_cap ? g_path_text_cache_cap * 2 : 32;
+        nv = (CCPathTextCache*)realloc(g_path_text_cache, cap * sizeof(*nv));
+        if (!nv) {
+            free(buf);
+            return NULL;
+        }
+        g_path_text_cache = nv;
+        g_path_text_cache_cap = cap;
+    }
+    g_path_text_cache[g_path_text_cache_count].path = strdup(key);
+    g_path_text_cache[g_path_text_cache_count].text = buf;
+    g_path_text_cache[g_path_text_cache_count].len = n;
+    g_path_text_cache[g_path_text_cache_count].callables = NULL;
+    g_path_text_cache[g_path_text_cache_count].n_callables = 0;
+    if (!g_path_text_cache[g_path_text_cache_count].path) {
+        free(buf);
+        return NULL;
+    }
+    cc__index_callables(&g_path_text_cache[g_path_text_cache_count]);
+    g_path_text_cache_count++;
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+static int cc__read_file_text(const char* path, char** out_buf, size_t* out_len) {
+    const char* cached;
+    size_t n = 0;
+    char* copy;
+    if (!path || !out_buf || !out_len) return -1;
+    *out_buf = NULL;
+    *out_len = 0;
+    cached = cc__path_text_cached(path, &n);
+    if (!cached) return -1;
+    copy = (char*)malloc(n + 1);
+    if (!copy) return -1;
+    memcpy(copy, cached, n + 1);
+    *out_buf = copy;
+    *out_len = n;
+    return 0;
+}
+
+/* Borrowed text for a registered included .cch (no free). */
+static const char* cc__included_cch_text(size_t h, size_t* out_len) {
+    if (h >= g_included_cch_source_count || !g_included_cch_sources[h]) return NULL;
+    return cc__path_text_cached(g_included_cch_sources[h], out_len);
 }
 
 static void cc__register_included_cch_tree(const char* source_path);
@@ -10314,42 +10508,22 @@ void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg) {
     size_t h;
     if (!reg) return;
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
         cc_type_registry_ingest_struct_fields(reg, fsrc, fn);
-        free(fsrc);
     }
 }
 
 int cc_included_cch_contains_fn(const char* name) {
     size_t h;
-    size_t nlen;
     if (!name || !name[0]) return 0;
-    nlen = strlen(name);
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        size_t i;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
-        for (i = 0; i + nlen < fn; i++) {
-            size_t q;
-            if (fsrc[i] != name[0]) continue;
-            if (memcmp(fsrc + i, name, nlen) != 0) continue;
-            if (i > 0 && cc_is_ident_char(fsrc[i - 1])) continue;
-            if (i + nlen < fn && cc_is_ident_char(fsrc[i + nlen])) continue;
-            q = i + nlen;
-            while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
-            if (q < fn && fsrc[q] == '(') {
-                free(fsrc);
-                return 1;
-            }
-        }
-        free(fsrc);
+        CCPathTextCache* slot;
+        if (!cc__included_cch_text(h, &fn)) continue;
+        slot = cc__path_text_cache_find(g_included_cch_sources[h]);
+        if (slot && cc__cache_has_callable(slot, name)) return 1;
     }
     return 0;
 }
@@ -10854,15 +11028,10 @@ static int cc__fn_return_type(const char* src, size_t n, const char* name,
     if (cc_symsig_fn_return(name, out, out_sz)) return 1;
     if (src && cc__decl_fn_return_type_text(src, n, name, out, out_sz)) return 1;
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        int hit;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
-        hit = cc__decl_fn_return_type_text(fsrc, fn, name, out, out_sz);
-        free(fsrc);
-        if (hit) return 1;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
+        if (cc__decl_fn_return_type_text(fsrc, fn, name, out, out_sz)) return 1;
     }
     return 0;
 }
@@ -11234,15 +11403,10 @@ static int cc__sink_returns_result(const char* src, size_t n, const char* name) 
     size_t h;
     if (src && cc__fn_returns_result_text(src, n, name)) return 1;
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        int hit;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
-        hit = cc__fn_returns_result_text(fsrc, fn, name);
-        free(fsrc);
-        if (hit) return 1;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
+        if (cc__fn_returns_result_text(fsrc, fn, name)) return 1;
     }
     return 0;
 }
@@ -11257,13 +11421,10 @@ static void cc__enumerate_family_variants(const char* src, size_t n,
     out[0] = 0;
     if (src) cc__append_family_suffixes(src, n, prefix, out, out_sz);
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
         cc__append_family_suffixes(fsrc, fn, prefix, out, out_sz);
-        free(fsrc);
     }
 }
 
@@ -11325,15 +11486,10 @@ int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
     if (cc_slice_spec_elem_is_prebaked(elem)) return 0;
     if (src && cc__text_has_slice_spec_decl(src, n, name)) return 0;
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        int hit;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
-        hit = cc__text_has_slice_spec_decl(fsrc, fn, name);
-        free(fsrc);
-        if (hit) return 0;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
+        if (cc__text_has_slice_spec_decl(fsrc, fn, name)) return 0;
     }
     return 1;
 }
@@ -11349,13 +11505,11 @@ static int cc_included_cch_declares_fn(const char* name) {
     if (!name || !name[0]) return 0;
     nlen = strlen(name);
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
         size_t i = 0;
         CCScannerState scan;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
         cc_scanner_init(&scan);
         while (i + nlen < fn) {
             size_t q;
@@ -11369,19 +11523,14 @@ static int cc_included_cch_declares_fn(const char* name) {
             if (q < fn && fsrc[q] == '(') {
                 size_t b = i;
                 while (b > 0 && isspace((unsigned char)fsrc[b - 1])) b--;
-                if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*')) {
-                    free(fsrc);
+                if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*'))
                     return 1;
-                }
                 /* `#define name(` — macro binding is real. */
-                if (b >= 7 && memcmp(fsrc + b - 7, "#define", 7) == 0) {
-                    free(fsrc);
+                if (b >= 7 && memcmp(fsrc + b - 7, "#define", 7) == 0)
                     return 1;
-                }
             }
             i += nlen;
         }
-        free(fsrc);
     }
     return 0;
 }
@@ -11396,13 +11545,11 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
     out[0] = 0;
     nlen = strlen(name);
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
         size_t i = 0;
         CCScannerState scan;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
         cc_scanner_init(&scan);
         while (i + nlen < fn) {
             size_t q;
@@ -11442,13 +11589,11 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
                         out[dn++] = fsrc[ps++];
                     }
                     out[dn] = 0;
-                    free(fsrc);
                     return dn > 0;
                 }
             }
             i += nlen;
         }
-        free(fsrc);
     }
     return 0;
 }
@@ -14425,13 +14570,10 @@ static char* cc__sm_find_typedef(const char* src, size_t n, const char* name) {
     size_t h;
     if (d) return d;
     for (h = 0; h < g_included_cch_source_count; h++) {
-        char* fsrc = NULL;
         size_t fn = 0;
-        if (!g_included_cch_sources[h]) continue;
-        if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-            continue;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
         d = cc__sm_extract_typedef_from(fsrc, fn, name);
-        free(fsrc);
         if (d) return d;
     }
     return NULL;
@@ -14874,17 +15016,14 @@ int cc_ct_reflect_type_kind(const char* src, size_t len, const char* type_name) 
         if (cc__ct_find_struct_body(src, len, nm, nl, &bo, &bc))
             return CC_REFLECT_KIND_STRUCT;
         for (h = 0; h < g_included_cch_source_count; h++) {
-            char* fsrc = NULL;
             size_t fn = 0;
             int kind = CC_REFLECT_KIND_UNKNOWN;
-            if (!g_included_cch_sources[h]) continue;
-            if (cc__read_file_text(g_included_cch_sources[h], &fsrc, &fn) != 0 || !fsrc)
-                continue;
+            const char* fsrc = cc__included_cch_text(h, &fn);
+            if (!fsrc) continue;
             if (cc__ct_find_enum_body(fsrc, fn, nm, nl, &bo, &bc))
                 kind = CC_REFLECT_KIND_ENUM;
             else if (cc__ct_find_struct_body(fsrc, fn, nm, nl, &bo, &bc))
                 kind = CC_REFLECT_KIND_STRUCT;
-            free(fsrc);
             if (kind != CC_REFLECT_KIND_UNKNOWN) return kind;
         }
     }
