@@ -184,6 +184,7 @@ static inline const char* cc_ufcs_scalar_recv_family(const char* type_name) {
     if (strcmp(t, "short") == 0 || strcmp(t, "short int") == 0) return "short";
     if (strcmp(t, "long") == 0 || strcmp(t, "long int") == 0) return "long";
     if (strcmp(t, "long long") == 0 || strcmp(t, "long long int") == 0) return "long_long";
+    if (strcmp(t, "size_t") == 0) return "size_t";
     return NULL;
 }
 

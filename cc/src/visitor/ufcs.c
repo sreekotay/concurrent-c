@@ -11,6 +11,7 @@
 #include <ccc/std/string.cch>
 
 #include "comptime/symbols.h"
+#include "parser/symsig.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_graph.h"
 #include "preprocess/type_registry.h"
@@ -1308,9 +1309,39 @@ static int cc__bare_param_matches(const char* param, const char* cand) {
  * receivers follow C's pointer rules: exact `T*`, qualifier-adding
  * `const T*`, and `void*`/`const void*` — one-way (a const receiver
  * never matches a non-const parameter), and a dereference is never
- * synthesized (pointer receivers match pointer parameters only). Only
- * declarations visible to the pipeline (TU text or included cch
- * headers) participate — system-header functions do not. */
+ * synthesized (pointer receivers match pointer parameters only).
+ * Declarations come from the TU text, included cch headers, or the
+ * tcc-fed signature table — which sees system headers, so `d.fabs()`
+ * with math.h included participates. */
+
+/* Normalize a tcc-reported type spelling to the matcher shape the
+ * textual probes produce: `struct `/`union `/`enum ` tags dropped
+ * (receivers spell typedef names), stars attached, single spaces. */
+static void cc__symsig_normalize_type(const char* in, char* out, size_t sz) {
+    size_t o = 0;
+    if (!out || sz == 0) return;
+    out[0] = 0;
+    if (!in) return;
+    while (*in && o + 1 < sz) {
+        if (*in == ' ' || *in == '\t') {
+            const char* q = in;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '*') { in = q; continue; }
+            if (o > 0 && out[o - 1] != ' ') out[o++] = ' ';
+            in = q;
+            continue;
+        }
+        if (cc_is_ident_start(*in) && (o == 0 || !cc_is_ident_char(out[o - 1]))) {
+            if (strncmp(in, "struct ", 7) == 0) { in += 7; continue; }
+            if (strncmp(in, "union ", 6) == 0) { in += 6; continue; }
+            if (strncmp(in, "enum ", 5) == 0) { in += 5; continue; }
+        }
+        out[o++] = *in++;
+    }
+    while (o > 0 && out[o - 1] == ' ') o--;
+    out[o] = 0;
+}
+
 static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
                                    const char* method, bool recv_is_ptr,
                                    int recv_is_addressable,
@@ -1335,8 +1366,18 @@ static int cc__emit_bare_name_tier(char* out, size_t cap, const char* recv,
     if (!recv_type_name || !recv_type_name[0])
         return CC_UFCS_EMIT_UNRESOLVED;
     if (!cc__ufcs_fn_first_param_in_source(method, param, sizeof(param)) &&
-        !cc_included_cch_fn_first_param(method, param, sizeof(param)))
-        return CC_UFCS_EMIT_UNRESOLVED;
+        !cc_included_cch_fn_first_param(method, param, sizeof(param))) {
+        /* tcc-fed signature table: system-header declarations the
+         * textual probes cannot see. Zero-parameter and old-style
+         * declarations cannot take a receiver. */
+        char raw[256];
+        int np = 0, va = 0;
+        if (!cc_symsig_fn_first_param(method, raw, sizeof(raw), &np, &va) ||
+            np <= 0 || !raw[0])
+            return CC_UFCS_EMIT_UNRESOLVED;
+        cc__symsig_normalize_type(raw, param, sizeof(param));
+        if (!param[0]) return CC_UFCS_EMIT_UNRESOLVED;
+    }
     {
         const char* t = recv_type_name;
         size_t dn = 0;
@@ -2354,11 +2395,19 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
     }
     if (cnt < max_lines) {
         char param[256];
+        int np = 0, va = 0;
         if (cc__ufcs_fn_first_param_in_source(method, param, sizeof(param)) ||
             cc_included_cch_fn_first_param(method, param, sizeof(param)))
             snprintf(lines[cnt++], 256,
                      "candidate %s (bare): declared, but first parameter '%s' "
                      "does not take '%s'",
+                     method, param, recv_type);
+        else if (cc_symsig_fn_first_param(method, param, sizeof(param), &np, &va))
+            snprintf(lines[cnt++], 256,
+                     np > 0 ? "candidate %s (bare): declared, but first parameter "
+                              "'%s' does not take '%s'"
+                            : "candidate %s (bare): declared, but takes no "
+                              "parameters%.0s%.0s",
                      method, param, recv_type);
         else
             snprintf(lines[cnt++], 256,

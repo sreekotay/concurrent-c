@@ -906,10 +906,14 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                                       nodes[i].method ? nodes[i].method : "<unknown>");
                 }
             }
-            if (recv_expr[0]) {
+            /* Compiler-introduced temporaries (chain normalization etc.)
+             * mean nothing to the user; the error line already names the
+             * real receiver type, so skip the expression notes. */
+            if (recv_expr[0] && strncmp(recv_expr, "__cc_", 5) != 0) {
                 cc_pass_note(file, user_line, col, "receiver expression: %s", recv_expr);
             }
-            cc_pass_note(file, user_line, col, "offending call: %s", expr);
+            if (strncmp(expr, "__cc_", 5) != 0)
+                cc_pass_note(file, user_line, col, "offending call: %s", expr);
             /* Ambiguity / cycle already name the @as graph problem; skip the
              * "retry also failed" field dump used for plain unresolved. */
             if (rewrite_rc != CC_UFCS_REWRITE_AS_AMBIGUOUS &&

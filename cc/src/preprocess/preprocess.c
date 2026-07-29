@@ -18,6 +18,7 @@
 #include "comptime/const_eval.h"
 #include "comptime/executor.h"
 #include "comptime/symbols.h"
+#include "parser/symsig.h"
 #include "preprocess/cpp_expand.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/script_entry.h"
@@ -5504,6 +5505,16 @@ static int cc__free_call_cstr_family(const char* ty, const char** out_fam) {
         t += 6;
         while (*t == ' ' || *t == '\t') t++;
     }
+    /* unsigned/signed char* join the same family — the method path
+     * (cc__is_cstr_recv_type) already admits them; prefix and postfix
+     * spellings must agree. */
+    if (strncmp(t, "unsigned ", 9) == 0) {
+        t += 9;
+        while (*t == ' ' || *t == '\t') t++;
+    } else if (strncmp(t, "signed ", 7) == 0) {
+        t += 7;
+        while (*t == ' ' || *t == '\t') t++;
+    }
     if (strncmp(t, "char", 4) != 0) return 0;
     t += 4;
     while (*t == ' ' || *t == '\t') t++;
@@ -10834,10 +10845,13 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
     return 0;
 }
 
-/* TU + included cch declared-function return type. */
+/* Declared-function return type: the tcc-fed signature table first
+ * (authoritative, sees system headers; populated once the parser-mode
+ * parse has run), then the textual TU + included cch readers. */
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz) {
     size_t h;
+    if (cc_symsig_fn_return(name, out, out_sz)) return 1;
     if (src && cc__decl_fn_return_type_text(src, n, name, out, out_sz)) return 1;
     for (h = 0; h < g_included_cch_source_count; h++) {
         char* fsrc = NULL;

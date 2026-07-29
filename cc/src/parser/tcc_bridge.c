@@ -1,6 +1,7 @@
 #include "tcc_bridge.h"
 
 #include "cc_macro_recognizer.h"
+#include "symsig.h"
 #include "../preprocess/preprocess.h"
 #include "../../../third_party/tcc-patches/tcc_ext_api.h"
 
@@ -44,6 +45,8 @@ __attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* prep
 __attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, CCSymbolTable* symbols);
 __attribute__((weak)) void cc_tcc_free_ast(struct CCASTStubRoot* r);
 __attribute__((weak)) void tcc_set_ext_parser(struct TCCExtParser const *p);
+__attribute__((weak)) void cc_tcc_set_symsig_sink(void (*fn)(const char*, const char*,
+                                                             const char*, int, int));
 extern const struct TCCExtParser cc_ext_parser;
 
 /* Capture TCC's stderr; on success discard it (benign warnings), on failure
@@ -171,11 +174,20 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
     if (tcc_set_ext_parser) {
         tcc_set_ext_parser(&cc_ext_parser);
     }
+    /* Fresh signature table per parse; the parser-mode compile reports
+     * every declared function (system headers included) into it. */
+    if (cc_tcc_set_symsig_sink) {
+        cc_symsig_reset();
+        cc_tcc_set_symsig_sink(cc_symsig_note);
+    }
     cc_macro_recognizer_register(NULL);
     int _saved_fd2 = -1; char _tmppath2[256];
     cc__tcc_stderr_capture_start(&_saved_fd2, _tmppath2, sizeof(_tmppath2));
     struct CCASTStubRoot* r = cc_tcc_parse_string_to_ast(source_code, virtual_filename, original_path, symbols);
     cc__tcc_stderr_capture_end(_saved_fd2, _tmppath2, r == NULL);
+    if (getenv("CC_DEBUG_SYMSIG"))
+        fprintf(stderr, "CC_DEBUG_SYMSIG: %zu function signatures from parse of %s\n",
+                cc_symsig_count(), original_path ? original_path : "<string>");
     if (!r) return NULL;
     CCASTRoot* root = (CCASTRoot*)malloc(sizeof(CCASTRoot));
     if (!root) {

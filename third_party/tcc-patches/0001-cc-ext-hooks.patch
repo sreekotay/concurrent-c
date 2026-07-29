@@ -998,7 +998,7 @@ index 171e3622..00bd204b 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..98cf25db 100644
+index e7a2f1e2..674c30b1 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,104 @@ typedef struct TokenSym {
@@ -1202,7 +1202,7 @@ index e7a2f1e2..98cf25db 100644
  #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
  #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
  
-@@ -1226,6 +1399,53 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1226,6 +1399,62 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -1211,6 +1211,15 @@ index e7a2f1e2..98cf25db 100644
 +PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, struct CCSymbolTable* symbols);
 +PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, struct CCSymbolTable* symbols);
 +PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root);
++/* Function-signature export: after a parser-mode compile, every named
++ * global function symbol (declarations included â system headers too)
++ * is reported to the registered sink before the symbol table is torn
++ * down. The CC frontend uses this for UFCS bare-name typing and
++ * diagnostics. */
++typedef void (*CCSymSigSink)(const char *name, const char *ret_type,
++                             const char *param0_type, int nparams,
++                             int is_variadic);
++PUB_FUNC void cc_tcc_set_symsig_sink(CCSymSigSink fn);
 +/* CC AST recording functions (used by external parsers and tccgen.c) */
 +void cc_ast_record_start(int kind);
 +void cc_ast_record_end(void);
@@ -1256,7 +1265,7 @@ index e7a2f1e2..98cf25db 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1554,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+@@ -1334,6 +1563,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
  
  ST_DATA struct BufferedFile *file;
  ST_DATA int tok;
@@ -1267,7 +1276,7 @@ index e7a2f1e2..98cf25db 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 50802edf..61c8c0d4 100644
+index 50802edf..5bfb8282 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,103 @@ ST_DATA SValue *vtop;
@@ -1405,7 +1414,83 @@ index 50802edf..61c8c0d4 100644
  
  /* ------------------------------------------------------------------------- */
  /* Automagical code suppression */
-@@ -912,6 +1013,10 @@ ST_FUNC void vswap(void)
+@@ -402,6 +503,65 @@ ST_FUNC void tccgen_init(TCCState *s1)
+     cstr_new(&initstr);
+ }
+ 
++#ifdef CONFIG_CC_EXT
++/* Function-signature export (see tcc.h CCSymSigSink): walk the global
++ * symbol stack before tccgen_finish pops it, reporting every named
++ * function symbol's return type and first-parameter type spelling to
++ * the registered sink. Parser-mode compiles only â the CC frontend
++ * consumes this for UFCS bare-name typing and diagnostics. */
++static void type_to_str(char *buf, int buf_size, CType *type, const char *varstr);
++
++static CCSymSigSink cc_symsig_sink_fn;
++
++PUB_FUNC void cc_tcc_set_symsig_sink(CCSymSigSink fn) {
++    cc_symsig_sink_fn = fn;
++}
++
++static void cc_export_fn_signatures(TCCState *s1)
++{
++    Sym *s;
++    char ret[256];
++    char p0[256];
++    if (!cc_symsig_sink_fn || !s1 || !s1->cc_parser_mode)
++        return;
++    for (s = global_stack; s; s = s->prev) {
++        int v = s->v;
++        const char *name;
++        Sym *proto, *pa;
++        int nparams = 0, variadic = 0;
++        if (v & (SYM_FIELD | SYM_STRUCT))
++            continue;
++        if (v >= SYM_FIRST_ANOM || v < TOK_IDENT)
++            continue;
++        if ((s->type.t & VT_BTYPE) != VT_FUNC)
++            continue;
++        if (s->type.t & VT_TYPEDEF)
++            continue;
++        name = get_tok_str(v, NULL);
++        if (!name || !name[0])
++            continue;
++        proto = s->type.ref;
++        if (!proto)
++            continue;
++        type_to_str(ret, sizeof(ret), &proto->type, NULL);
++        /* Old-style (unprototyped) declarations carry no parameter
++         * info â and the UFCS tolerance path injects exactly such
++         * synthetic symbols for unresolved methods, which must not
++         * masquerade as real declarations. Skip them. */
++        if (proto->f.func_type == FUNC_OLD)
++            continue;
++        p0[0] = '\0';
++        for (pa = proto->next; pa; pa = pa->next)
++            nparams++;
++        if (proto->next)
++            type_to_str(p0, sizeof(p0), &proto->next->type, NULL);
++        if (proto->f.func_type == FUNC_ELLIPSIS)
++            variadic = 1;
++        cc_symsig_sink_fn(name, ret, p0, nparams, variadic);
++    }
++}
++#endif
++
+ ST_FUNC int tccgen_compile(TCCState *s1)
+ {
+     funcname = "";
+@@ -424,6 +584,9 @@ ST_FUNC int tccgen_compile(TCCState *s1)
+     decl(VT_CONST);
+     gen_inline_functions(s1);
+     check_vstack();
++#ifdef CONFIG_CC_EXT
++    cc_export_fn_signatures(s1);
++#endif
+     /* end of translation unit info */
+ #if TCC_EH_FRAME
+     tcc_eh_frame_end(s1);
+@@ -912,6 +1075,10 @@ ST_FUNC void vswap(void)
  ST_FUNC void vpop(void)
  {
      int v;
@@ -1416,7 +1501,7 @@ index 50802edf..61c8c0d4 100644
      v = vtop->r & VT_VALMASK;
  #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
      /* for x86, we need to pop the FP stack */
-@@ -2727,8 +2832,18 @@ static void type_to_str(char *buf, int buf_size,
+@@ -2727,8 +2894,18 @@ static void type_to_str(char *buf, int buf_size,
      tstruct:
          pstrcat(buf, buf_size, tstr);
          v = type->ref->v & ~SYM_STRUCT;
@@ -1436,7 +1521,7 @@ index 50802edf..61c8c0d4 100644
          else
              pstrcat(buf, buf_size, get_tok_str(v, NULL));
          break;
-@@ -3036,6 +3151,10 @@ ST_FUNC void gen_op(int op)
+@@ -3036,6 +3213,10 @@ ST_FUNC void gen_op(int op)
      int t1, t2, bt1, bt2, t;
      CType type1, combtype;
      int op_class = op;
@@ -1447,7 +1532,7 @@ index 50802edf..61c8c0d4 100644
  
      if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
          op_class = SHIFT_OP;
-@@ -3389,6 +3508,10 @@ error:
+@@ -3389,6 +3570,10 @@ error:
          if (ds == ss && ds >= 4)
              goto done;
          if (dbt_bt == VT_PTR || sbt_bt == VT_PTR) {
@@ -1458,7 +1543,7 @@ index 50802edf..61c8c0d4 100644
              tcc_warning("cast between pointer and integer of different size");
              if (sbt_bt == VT_PTR) {
                  /* put integer type to allow logical operations below */
-@@ -3592,7 +3715,19 @@ static void cast_error(CType *st, CType *dt)
+@@ -3592,7 +3777,19 @@ static void cast_error(CType *st, CType *dt)
  static void verify_assign_cast(CType *dt)
  {
      CType *st, *type1, *type2;
@@ -1479,7 +1564,7 @@ index 50802edf..61c8c0d4 100644
  
      st = &vtop->type; /* source type */
      dbt = dt->t & VT_BTYPE;
-@@ -3611,6 +3746,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3611,6 +3808,10 @@ static void verify_assign_cast(CType *dt)
              break;
          /* accept implicit pointer to integer cast with warning */
          if (is_integer_btype(sbt)) {
@@ -1490,7 +1575,7 @@ index 50802edf..61c8c0d4 100644
              tcc_warning("assignment makes pointer from integer without a cast");
              break;
          }
-@@ -3646,8 +3785,29 @@ static void verify_assign_cast(CType *dt)
+@@ -3646,8 +3847,29 @@ static void verify_assign_cast(CType *dt)
  		   base types, though, in particular for unsigned enums
  		   and signed int targets.  */
              } else {
@@ -1522,7 +1607,7 @@ index 50802edf..61c8c0d4 100644
              }
          }
          if (qualwarn)
-@@ -3658,6 +3818,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3658,6 +3880,10 @@ static void verify_assign_cast(CType *dt)
      case VT_INT:
      case VT_LLONG:
          if (sbt == VT_PTR || sbt == VT_FUNC) {
@@ -1533,7 +1618,7 @@ index 50802edf..61c8c0d4 100644
              tcc_warning("assignment makes integer from pointer without a cast");
          } else if (sbt == VT_STRUCT) {
              goto case_VT_STRUCT;
-@@ -3667,6 +3831,33 @@ static void verify_assign_cast(CType *dt)
+@@ -3667,6 +3893,33 @@ static void verify_assign_cast(CType *dt)
      case VT_STRUCT:
      case_VT_STRUCT:
          if (!is_compatible_unqualified_types(dt, st)) {
@@ -1567,7 +1652,7 @@ index 50802edf..61c8c0d4 100644
      error:
              cast_error(st, dt);
          }
-@@ -3674,8 +3865,74 @@ static void verify_assign_cast(CType *dt)
+@@ -3674,8 +3927,74 @@ static void verify_assign_cast(CType *dt)
      }
  }
  
@@ -1642,7 +1727,7 @@ index 50802edf..61c8c0d4 100644
      verify_assign_cast(dt);
      gen_cast(dt);
  }
-@@ -4496,6 +4753,24 @@ do_decl:
+@@ -4496,6 +4815,24 @@ do_decl:
          if (s->c != -1
              && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
              tcc_error("struct/union/enum already defined");
@@ -1667,7 +1752,7 @@ index 50802edf..61c8c0d4 100644
          s->c = -2;
          /* cannot be empty */
          /* non empty enums are not allowed */
-@@ -4524,6 +4799,15 @@ do_decl:
+@@ -4524,6 +4861,15 @@ do_decl:
                  ss = sym_push(v, &t, VT_CONST, 0);
                  ss->enum_val = ll;
                  *ps = ss, ps = &ss->next;
@@ -1683,7 +1768,7 @@ index 50802edf..61c8c0d4 100644
                  if (ll < nl)
                      nl = ll;
                  if (ll > pl)
-@@ -4537,6 +4821,7 @@ do_decl:
+@@ -4537,6 +4883,7 @@ do_decl:
                      break;
              }
              skip('}');
@@ -1691,7 +1776,7 @@ index 50802edf..61c8c0d4 100644
  
              if (bt) {
                  t.t = bt;
-@@ -4671,6 +4956,19 @@ do_decl:
+@@ -4671,6 +5018,19 @@ do_decl:
                          ss->a = ad1.a;
                          *ps = ss;
                          ps = &ss->next;
@@ -1711,7 +1796,7 @@ index 50802edf..61c8c0d4 100644
                      }
                      if (tok == ';' || tok == TOK_EOF)
                          break;
-@@ -4679,6 +4977,12 @@ do_decl:
+@@ -4679,6 +5039,12 @@ do_decl:
                  skip(';');
              }
              skip('}');
@@ -1724,7 +1809,7 @@ index 50802edf..61c8c0d4 100644
  	    parse_attribute(&ad);
              if (ad.cleanup_func) {
                  tcc_warning("attribute '__cleanup__' ignored on type");
-@@ -4727,6 +5031,40 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+@@ -4727,6 +5093,40 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
  
      while(1) {
          switch(tok) {
@@ -1765,7 +1850,7 @@ index 50802edf..61c8c0d4 100644
          case TOK_EXTENSION:
              /* currently, we really ignore extension */
              next();
-@@ -5605,6 +5943,18 @@ ST_FUNC void unary(void)
+@@ -5605,6 +6005,18 @@ ST_FUNC void unary(void)
      case TOK_CCHAR: 
  	t = VT_INT;
   push_tokc:
@@ -1784,7 +1869,7 @@ index 50802edf..61c8c0d4 100644
  	type.t = t;
  	vsetc(&type, VT_CONST, &tokc);
          next();
-@@ -5660,6 +6010,25 @@ ST_FUNC void unary(void)
+@@ -5660,6 +6072,25 @@ ST_FUNC void unary(void)
          /* string parsing */
          t = char_type.t;
      str_init:
@@ -1810,7 +1895,7 @@ index 50802edf..61c8c0d4 100644
          if (tcc_state->warn_write_strings & WARN_ON)
              t |= VT_CONSTANT;
          type.t = t;
-@@ -5669,10 +6038,34 @@ ST_FUNC void unary(void)
+@@ -5669,10 +6100,34 @@ ST_FUNC void unary(void)
          ad.section = rodata_section;
          decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
          break;
@@ -1845,7 +1930,7 @@ index 50802edf..61c8c0d4 100644
          /* cast ? */
          if (parse_btype(&type, &ad, 0)) {
              type_decl(&type, &ad, &n, TYPE_ABSTRACT);
-@@ -5725,11 +6118,14 @@ ST_FUNC void unary(void)
+@@ -5725,11 +6180,14 @@ ST_FUNC void unary(void)
          }
          break;
      case '*':
@@ -1860,7 +1945,7 @@ index 50802edf..61c8c0d4 100644
          next();
          unary();
          /* functions names must be treated as function pointers,
-@@ -5744,17 +6140,22 @@ ST_FUNC void unary(void)
+@@ -5744,17 +6202,22 @@ ST_FUNC void unary(void)
            vtop->sym->a.addrtaken = 1;
          mk_pointer(&vtop->type);
          gaddrof();
@@ -1883,7 +1968,7 @@ index 50802edf..61c8c0d4 100644
          break;
      case '+':
          next();
-@@ -5774,13 +6175,30 @@ ST_FUNC void unary(void)
+@@ -5774,13 +6237,30 @@ ST_FUNC void unary(void)
      case TOK_ALIGNOF2:
      case TOK_ALIGNOF3:
          t = tok;
@@ -1914,7 +1999,7 @@ index 50802edf..61c8c0d4 100644
          } else {
              type_size(&type, &align);
              s = NULL;
-@@ -5975,10 +6393,13 @@ ST_FUNC void unary(void)
+@@ -5975,10 +6455,13 @@ ST_FUNC void unary(void)
      case TOK_DEC:
          t = tok;
          next();
@@ -1928,7 +2013,7 @@ index 50802edf..61c8c0d4 100644
          next();
          unary();
  	if (is_float(vtop->type.t)) {
-@@ -5988,6 +6409,7 @@ ST_FUNC void unary(void)
+@@ -5988,6 +6471,7 @@ ST_FUNC void unary(void)
              vswap();
              gen_op('-');
          }
@@ -1936,7 +2021,7 @@ index 50802edf..61c8c0d4 100644
          break;
      case TOK_LAND:
          if (!gnu_ext)
-@@ -6093,13 +6515,108 @@ special_math_val:
+@@ -6093,13 +6577,108 @@ special_math_val:
  
      default:
      tok_identifier:
@@ -2046,7 +2131,7 @@ index 50802edf..61c8c0d4 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6139,17 +6656,151 @@ special_math_val:
+@@ -6139,17 +6718,151 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -2202,7 +2287,7 @@ index 50802edf..61c8c0d4 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6168,20 +6819,84 @@ special_math_val:
+@@ -6168,20 +6881,84 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -2288,7 +2373,7 @@ index 50802edf..61c8c0d4 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6190,6 +6905,53 @@ special_math_val:
+@@ -6190,6 +6967,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -2342,7 +2427,7 @@ index 50802edf..61c8c0d4 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6264,8 +7026,13 @@ special_math_val:
+@@ -6264,8 +7088,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -2357,7 +2442,7 @@ index 50802edf..61c8c0d4 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6282,10 +7049,51 @@ special_math_val:
+@@ -6282,10 +7111,51 @@ special_math_val:
                  vrev(n);
              }
  
@@ -2409,7 +2494,7 @@ index 50802edf..61c8c0d4 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6366,9 +7174,11 @@ static void expr_prod(void)
+@@ -6366,9 +7236,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -2421,7 +2506,7 @@ index 50802edf..61c8c0d4 100644
      }
  }
  
-@@ -6378,9 +7188,11 @@ static void expr_sum(void)
+@@ -6378,9 +7250,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -2433,7 +2518,7 @@ index 50802edf..61c8c0d4 100644
      }
  }
  
-@@ -6509,11 +7321,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7383,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -2447,7 +2532,7 @@ index 50802edf..61c8c0d4 100644
          }
          t = tok;
      }
-@@ -6703,12 +7517,13 @@ static void expr_cond(void)
+@@ -6703,12 +7579,13 @@ static void expr_cond(void)
      }
  }
  
@@ -2462,7 +2547,7 @@ index 50802edf..61c8c0d4 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6719,6 +7534,7 @@ static void expr_eq(void)
+@@ -6719,6 +7596,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -2470,7 +2555,7 @@ index 50802edf..61c8c0d4 100644
      }
  }
  
-@@ -7119,7 +7935,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7997,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -2494,7 +2579,7 @@ index 50802edf..61c8c0d4 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7142,14 +7974,70 @@ static void gexpr_decl(void)
+@@ -7142,14 +8036,70 @@ static void gexpr_decl(void)
      }
  }
  
@@ -2566,7 +2651,7 @@ index 50802edf..61c8c0d4 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7160,24 +8048,40 @@ again:
+@@ -7160,24 +8110,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -2607,7 +2692,7 @@ index 50802edf..61c8c0d4 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7190,6 +8094,7 @@ again:
+@@ -7190,6 +8156,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -2615,7 +2700,7 @@ index 50802edf..61c8c0d4 100644
  
      } else if (t == '{') {
          if (debug_modes)
-@@ -7211,7 +8116,24 @@ again:
+@@ -7211,7 +8178,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -2640,7 +2725,7 @@ index 50802edf..61c8c0d4 100644
              }
          }
  
-@@ -7224,6 +8146,7 @@ again:
+@@ -7224,6 +8208,7 @@ again:
              check_func_return();
  
      } else if (t == TOK_RETURN) {
@@ -2648,7 +2733,7 @@ index 50802edf..61c8c0d4 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7242,6 +8165,7 @@ again:
+@@ -7242,6 +8227,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -2656,7 +2741,7 @@ index 50802edf..61c8c0d4 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7269,6 +8193,7 @@ again:
+@@ -7269,6 +8255,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -2664,7 +2749,7 @@ index 50802edf..61c8c0d4 100644
          new_scope(&o);
  
          skip('(');
-@@ -7302,6 +8227,7 @@ again:
+@@ -7302,6 +8289,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -2672,7 +2757,7 @@ index 50802edf..61c8c0d4 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7488,6 +8414,7 @@ again:
+@@ -7488,6 +8476,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -2680,7 +2765,7 @@ index 50802edf..61c8c0d4 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7818,6 +8745,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8807,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -2690,7 +2775,7 @@ index 50802edf..61c8c0d4 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8116,6 +9046,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+@@ -8116,6 +9108,19 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
              && is_compatible_unqualified_types(type, &vtop->type)) {
          goto one_elem;
  
@@ -2710,7 +2795,7 @@ index 50802edf..61c8c0d4 100644
      } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
          no_oblock = 1;
          if ((flags & DIF_FIRST) || tok == '{') {
-@@ -8672,12 +9615,23 @@ static int decl(int l)
+@@ -8672,12 +9677,23 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -2735,7 +2820,7 @@ index 50802edf..61c8c0d4 100644
              /* skip redundant ';' if not in old parameter decl scope */
              if (tok == ';' && l != VT_CMP) {
                  next();
-@@ -8687,6 +9641,44 @@ static int decl(int l)
+@@ -8687,6 +9703,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2780,7 +2865,7 @@ index 50802edf..61c8c0d4 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8714,8 +9706,10 @@ static int decl(int l)
+@@ -8714,8 +9768,10 @@ static int decl(int l)
                  ; /* enum decl */
              else
                  tcc_warning("useless type defines no instances");
@@ -2792,7 +2877,7 @@ index 50802edf..61c8c0d4 100644
              next();
              continue;
          }
-@@ -8723,8 +9717,68 @@ static int decl(int l)
+@@ -8723,8 +9779,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2862,7 +2947,7 @@ index 50802edf..61c8c0d4 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8810,6 +9864,10 @@ static int decl(int l)
+@@ -8810,6 +9926,10 @@ static int decl(int l)
                          cur_text_section->sh_flags = text_section->sh_flags;
                      gen_function(sym);
                  }
@@ -2873,7 +2958,7 @@ index 50802edf..61c8c0d4 100644
                  break;
              } else {
                  has_init = 0;
-@@ -8832,6 +9890,31 @@ static int decl(int l)
+@@ -8832,6 +9952,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2905,7 +2990,7 @@ index 50802edf..61c8c0d4 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8863,6 +9946,11 @@ static int decl(int l)
+@@ -8863,6 +10008,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2917,7 +3002,7 @@ index 50802edf..61c8c0d4 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8902,15 +9990,26 @@ static int decl(int l)
+@@ -8902,15 +10052,26 @@ static int decl(int l)
                      }
                  }
                  if (tok != ',') {

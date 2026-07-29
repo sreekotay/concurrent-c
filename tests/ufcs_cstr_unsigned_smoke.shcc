@@ -1,0 +1,11 @@
+// unsigned/signed char* join the cstr print family in both spellings:
+// the free-call prefix and the method form agree. Result bindings keep
+// the additive harness honest (baseline cannot type the free calls).
+unsigned char buf[6] = {104, 101, 108, 108, 111, 0};
+unsigned char* us = buf;
+CCResult_size_t_CCError r1 = println(us);
+if (r1.is_err()) return 1;
+us.println() !>;
+const unsigned char* cus = buf;
+CCResult_size_t_CCError r2 = println(cus);
+if (r2.is_err()) return 2;

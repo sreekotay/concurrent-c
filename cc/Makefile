@@ -142,6 +142,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/type_graph.c \
 	src/preprocess/variant_lower.c \
 	src/preprocess/emit_plan.c \
+	src/parser/symsig.c \
 	src/result_spec.c \
 	runtime/arena_state.c \
 	src/comptime/const_eval.c \

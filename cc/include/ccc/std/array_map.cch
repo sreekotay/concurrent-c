@@ -79,6 +79,287 @@ static inline void cc_array_map_prefetch(const void *p) {
 #endif
 }
 
+/* Erased core: the open-addressing implementation lives here once per
+ * TU; CC_ARRAY_MAP_DECL emits only the typed struct, hash/eq thunks,
+ * and delegating shims. A kind describes one instance's layout: the
+ * key sits at slot offset 0, the value at `val_off`. */
+typedef struct CCArrayMapKind {
+    size_t slot_size;
+    size_t slot_align;
+    size_t val_off;
+    size_t key_size;
+    size_t val_size;
+    size_t (*hash)(const void *key);
+    int (*eq)(const void *a, const void *b);
+} CCArrayMapKind;
+
+typedef struct CCArrayMapCore {
+    CCArena *arena;
+    uint32_t *buckets; /* 0 empty, UINT32_MAX tomb, else dense_index+1 */
+    void *dense;
+    size_t len;
+    size_t dense_cap;
+    size_t bucket_mask; /* buckets_cap - 1; 0 ⇒ no table */
+    size_t tomb_count;
+} CCArrayMapCore;
+
+static inline void *cc_array_map_core_slot(const CCArrayMapCore *m,
+                                           const CCArrayMapKind *k, size_t i) {
+    return (char *)m->dense + i * k->slot_size;
+}
+
+static inline size_t cc_array_map_core_buckets_cap(const CCArrayMapCore *m) {
+    return m && m->bucket_mask ? m->bucket_mask + 1u : 0u;
+}
+
+static inline int cc_array_map_core_reserve_dense(CCArrayMapCore *m,
+                                                  const CCArrayMapKind *k,
+                                                  size_t need) {
+    size_t new_cap;
+    void *p;
+    if (!m || !m->arena) return -1;
+    if (need <= m->dense_cap) return 0;
+    new_cap = m->dense_cap ? m->dense_cap : 8u;
+    while (new_cap < need) {
+        size_t next = (new_cap * 8u) / 5u;
+        if (next <= new_cap) next = new_cap + 1u;
+        new_cap = next;
+    }
+    if (m->dense) {
+        p = cc_arena_realloc(m->arena, m->arena, m->dense,
+                             m->dense_cap * k->slot_size, new_cap * k->slot_size,
+                             k->slot_align);
+    } else {
+        p = cc_arena_alloc(m->arena, new_cap * k->slot_size, k->slot_align);
+    }
+    if (!p) return -1;
+    m->dense = p;
+    m->dense_cap = new_cap;
+    return 0;
+}
+
+static inline int cc_array_map_core_rehash(CCArrayMapCore *m,
+                                           const CCArrayMapKind *k,
+                                           size_t new_bucket_cap) {
+    if (!m || !m->arena || new_bucket_cap < CC_ARRAY_MAP_MIN_BUCKETS) return -1;
+    if (new_bucket_cap & (new_bucket_cap - 1u)) return -1;
+    for (;;) {
+        uint32_t *nb;
+        size_t mask;
+        size_t i;
+        int failed = 0;
+        nb = (uint32_t *)cc_arena_alloc(m->arena, new_bucket_cap * sizeof(uint32_t),
+                                        _Alignof(uint32_t));
+        if (!nb) return -1;
+        memset(nb, 0, new_bucket_cap * sizeof(uint32_t));
+        mask = new_bucket_cap - 1u;
+        for (i = 0; i < m->len; i++) {
+            size_t h = k->hash(cc_array_map_core_slot(m, k, i));
+            uint32_t d;
+            for (d = 0; d < 2048u; d++) {
+                size_t b = (h + cc_array_map_quad(d)) & mask;
+                if (nb[b] == CC_ARRAY_MAP_EMPTY) {
+                    nb[b] = cc_array_map_pack_slot(i, h);
+                    break;
+                }
+            }
+            if (d >= 2048u) {
+                failed = 1;
+                break;
+            }
+        }
+        if (failed) {
+            (void)cc_arena_release(m->arena, nb);
+            if (new_bucket_cap > (SIZE_MAX / 2u)) return -1;
+            new_bucket_cap *= 2u;
+            continue;
+        }
+        if (m->buckets && cc_array_map_core_buckets_cap(m))
+            (void)cc_arena_release(m->arena, m->buckets);
+        m->buckets = nb;
+        m->bucket_mask = mask;
+        m->tomb_count = 0;
+        return 0;
+    }
+}
+
+static inline int cc_array_map_core_ensure_buckets(CCArrayMapCore *m,
+                                                   const CCArrayMapKind *k,
+                                                   size_t min_live) {
+    size_t need_cap;
+    size_t cur;
+    size_t occ;
+    if (!m) return -1;
+    need_cap = CC_ARRAY_MAP_MIN_BUCKETS;
+    while ((size_t)((double)need_cap * 0.9) < min_live) {
+        if (need_cap > (SIZE_MAX / 2u)) return -1;
+        need_cap *= 2u;
+    }
+    cur = cc_array_map_core_buckets_cap(m);
+    occ = m->len + m->tomb_count;
+    if (cur == 0u || need_cap > cur ||
+        (cur > 0u && occ > (size_t)((double)cur * 0.9))) {
+        if (need_cap < cur * 2u && occ > (size_t)((double)cur * 0.9))
+            need_cap = cur * 2u;
+        if (need_cap < CC_ARRAY_MAP_MIN_BUCKETS)
+            need_cap = CC_ARRAY_MAP_MIN_BUCKETS;
+        return cc_array_map_core_rehash(m, k, need_cap);
+    }
+    return 0;
+}
+
+static inline size_t cc_array_map_core_lookup(const CCArrayMapCore *m,
+                                              const CCArrayMapKind *k,
+                                              const void *key,
+                                              size_t *out_bucket) {
+    size_t h;
+    uint32_t want_frag;
+    uint32_t d;
+    size_t first_tomb = SIZE_MAX;
+    if (!m || !m->buckets || !m->bucket_mask) return SIZE_MAX;
+    h = k->hash(key);
+    want_frag = cc_array_map_hash_frag8(h);
+    for (d = 0; d < 2048u; d++) {
+        size_t b = (h + cc_array_map_quad(d)) & m->bucket_mask;
+        uint32_t slot = m->buckets[b];
+        if (slot == CC_ARRAY_MAP_EMPTY) {
+            if (out_bucket)
+                *out_bucket = (first_tomb != SIZE_MAX) ? first_tomb : b;
+            return SIZE_MAX;
+        }
+        if (slot == CC_ARRAY_MAP_TOMB) {
+            if (first_tomb == SIZE_MAX) first_tomb = b;
+            continue;
+        }
+        if (cc_array_map_slot_frag(slot) != want_frag) continue;
+        {
+            size_t di = cc_array_map_slot_dense(slot);
+            const void *sp;
+            if (di >= m->len) continue;
+            sp = cc_array_map_core_slot(m, k, di);
+            cc_array_map_prefetch(sp);
+            if (k->eq(sp, key)) {
+                if (out_bucket) *out_bucket = b;
+                return di;
+            }
+        }
+    }
+    if (out_bucket) *out_bucket = first_tomb;
+    return SIZE_MAX;
+}
+
+static inline int cc_array_map_core_insert(CCArrayMapCore *m,
+                                           const CCArrayMapKind *k,
+                                           const void *key, const void *val) {
+    size_t bucket = 0;
+    size_t di;
+    size_t h;
+    void *sp;
+    if (!m) return -1;
+    if (m->len >= (size_t)CC_ARRAY_MAP_MAX_LEN) return -1;
+    di = cc_array_map_core_lookup(m, k, key, &bucket);
+    if (di == SIZE_MAX) {
+        if (cc_array_map_core_ensure_buckets(m, k, m->len + 1u) != 0) return -1;
+        if (cc_array_map_core_reserve_dense(m, k, m->len + 1u) != 0) return -1;
+        di = cc_array_map_core_lookup(m, k, key, &bucket);
+    }
+    if (di != SIZE_MAX) {
+        memcpy((char *)cc_array_map_core_slot(m, k, di) + k->val_off, val,
+               k->val_size);
+        return 0;
+    }
+    if (bucket == SIZE_MAX || !m->buckets) return -1;
+    if (m->buckets[bucket] == CC_ARRAY_MAP_TOMB && m->tomb_count)
+        m->tomb_count--;
+    h = k->hash(key);
+    sp = cc_array_map_core_slot(m, k, m->len);
+    memcpy(sp, key, k->key_size);
+    memcpy((char *)sp + k->val_off, val, k->val_size);
+    m->buckets[bucket] = cc_array_map_pack_slot(m->len, h);
+    m->len++;
+    return 0;
+}
+
+static inline bool cc_array_map_core_del(CCArrayMapCore *m,
+                                         const CCArrayMapKind *k,
+                                         const void *key) {
+    size_t bucket = 0;
+    size_t di;
+    size_t last;
+    if (!m || !m->buckets) return false;
+    di = cc_array_map_core_lookup(m, k, key, &bucket);
+    if (di == SIZE_MAX) return false;
+    last = m->len - 1u;
+    m->buckets[bucket] = CC_ARRAY_MAP_TOMB;
+    m->tomb_count++;
+    if (di != last) {
+        void *lp = cc_array_map_core_slot(m, k, last);
+        size_t mb = 0;
+        size_t mdi = cc_array_map_core_lookup(m, k, lp, &mb);
+        size_t mh = k->hash(lp);
+        memcpy(cc_array_map_core_slot(m, k, di), lp, k->slot_size);
+        if (mdi != SIZE_MAX && mb != SIZE_MAX)
+            m->buckets[mb] = cc_array_map_pack_slot(di, mh);
+    }
+    m->len--;
+    return true;
+}
+
+static inline void cc_array_map_core_clear(CCArrayMapCore *m) {
+    size_t bcap;
+    if (!m) return;
+    m->len = 0;
+    m->tomb_count = 0;
+    bcap = cc_array_map_core_buckets_cap(m);
+    if (m->buckets && bcap) memset(m->buckets, 0, bcap * sizeof(uint32_t));
+}
+
+static inline void cc_array_map_core_destroy(CCArrayMapCore *m) {
+    if (!m || !m->arena) return;
+    if (m->buckets) (void)cc_arena_release(m->arena, m->buckets);
+    if (m->dense) (void)cc_arena_release(m->arena, m->dense);
+    (void)cc_arena_release(m->arena, m);
+}
+
+static inline CCArrayMapCore *cc_array_map_core_init(CCArena *arena,
+                                                     size_t self_size,
+                                                     size_t self_align) {
+    CCArrayMapCore *m;
+    if (!arena) return NULL;
+    m = (CCArrayMapCore *)cc_arena_alloc(arena, self_size, self_align);
+    if (!m) return NULL;
+    m->arena = arena;
+    m->buckets = NULL;
+    m->dense = NULL;
+    m->len = 0;
+    m->dense_cap = 0;
+    m->bucket_mask = 0;
+    m->tomb_count = 0;
+    return m;
+}
+
+static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
+                                                           size_t self_size,
+                                                           size_t self_align,
+                                                           const CCArrayMapKind *k,
+                                                           size_t count) {
+    CCArrayMapCore *m = cc_array_map_core_init(arena, self_size, self_align);
+    size_t bcap;
+    if (!m) return NULL;
+    if (count == 0) return m;
+    if (cc_array_map_core_reserve_dense(m, k, count) != 0) return NULL;
+    bcap = CC_ARRAY_MAP_MIN_BUCKETS;
+    while ((size_t)((double)bcap * 0.9) < count) {
+        if (bcap > (SIZE_MAX / 2u)) return NULL;
+        bcap *= 2u;
+    }
+    if (cc_array_map_core_rehash(m, k, bcap) != 0) return NULL;
+    return m;
+}
+
+/* Typed instance: struct + hash/eq thunks + delegating shims. The
+ * struct is layout-identical to CCArrayMapCore (dense retyped), so
+ * shims cast; HASH_FN/EQ_FN stay direct calls inside the thunks. */
 #define CC_ARRAY_MAP_DECL(K, V, Name, HASH_FN, EQ_FN)                                 \
     typedef struct Name##Slot {                                                       \
         K key;                                                                        \
@@ -95,149 +376,45 @@ static inline void cc_array_map_prefetch(const void *p) {
         size_t tomb_count;                                                            \
     } Name;                                                                           \
                                                                                       \
+    static inline size_t Name##__hashv(const void *k) {                               \
+        return (size_t)(HASH_FN(*(const K *)k));                                      \
+    }                                                                                 \
+                                                                                      \
+    static inline int Name##__eqv(const void *a, const void *b) {                     \
+        return (EQ_FN((*(const K *)a), (*(const K *)b))) ? 1 : 0;                     \
+    }                                                                                 \
+                                                                                      \
+    static inline const CCArrayMapKind *Name##__kind(void) {                          \
+        static const CCArrayMapKind k = {                                             \
+            sizeof(Name##Slot), _Alignof(Name##Slot), offsetof(Name##Slot, val),      \
+            sizeof(K),          sizeof(V),            Name##__hashv,                  \
+            Name##__eqv,                                                              \
+        };                                                                            \
+        return &k;                                                                    \
+    }                                                                                 \
+                                                                                      \
     static inline size_t Name##_buckets_cap(const Name *m) {                          \
-        return m && m->bucket_mask ? m->bucket_mask + 1u : 0u;                        \
+        return cc_array_map_core_buckets_cap((const CCArrayMapCore *)m);              \
     }                                                                                 \
                                                                                       \
     static inline size_t Name##_live_bytes(const Name *m) {                           \
-        size_t bcap;                                                                  \
         if (!m) return 0;                                                             \
-        bcap = Name##_buckets_cap(m);                                                 \
-        return sizeof(*m) + bcap * sizeof(uint32_t) +                                 \
+        return sizeof(*m) + Name##_buckets_cap(m) * sizeof(uint32_t) +                \
                m->dense_cap * sizeof(Name##Slot);                                     \
     }                                                                                 \
                                                                                       \
     static inline Name *Name##_init(CCArena *arena) {                                 \
-        Name *m;                                                                      \
-        if (!arena) return NULL;                                                      \
-        m = (Name *)cc_arena_alloc(arena, sizeof(Name), _Alignof(Name));              \
-        if (!m) return NULL;                                                          \
-        m->arena = arena;                                                             \
-        m->buckets = NULL;                                                            \
-        m->dense = NULL;                                                              \
-        m->len = 0;                                                                   \
-        m->dense_cap = 0;                                                             \
-        m->bucket_mask = 0;                                                           \
-        m->tomb_count = 0;                                                            \
-        return m;                                                                     \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##__reserve_dense(Name *m, size_t need) {                   \
-        size_t new_cap;                                                               \
-        size_t old_bytes;                                                             \
-        size_t new_bytes;                                                             \
-        void *p;                                                                      \
-        if (!m || !m->arena) return -1;                                               \
-        if (need <= m->dense_cap) return 0;                                           \
-        new_cap = m->dense_cap ? m->dense_cap : 8u;                                   \
-        while (new_cap < need) {                                                      \
-            size_t next = (new_cap * 8u) / 5u;                                        \
-            if (next <= new_cap) next = new_cap + 1u;                                 \
-            new_cap = next;                                                           \
-        }                                                                             \
-        old_bytes = m->dense_cap * sizeof(Name##Slot);                                \
-        new_bytes = new_cap * sizeof(Name##Slot);                                     \
-        if (m->dense) {                                                               \
-            p = cc_arena_realloc(m->arena, m->arena, m->dense, old_bytes, new_bytes,  \
-                                 _Alignof(Name##Slot));                               \
-        } else {                                                                      \
-            p = cc_arena_alloc(m->arena, new_bytes, _Alignof(Name##Slot));            \
-        }                                                                             \
-        if (!p) return -1;                                                            \
-        m->dense = (Name##Slot *)p;                                                   \
-        m->dense_cap = new_cap;                                                       \
-        return 0;                                                                     \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##__rehash(Name *m, size_t new_bucket_cap) {                \
-        if (!m || !m->arena || new_bucket_cap < CC_ARRAY_MAP_MIN_BUCKETS) return -1;  \
-        if (new_bucket_cap & (new_bucket_cap - 1u)) return -1;                        \
-        for (;;) {                                                                    \
-            uint32_t *nb;                                                             \
-            size_t mask;                                                              \
-            size_t i;                                                                 \
-            size_t old_bytes;                                                         \
-            int failed = 0;                                                           \
-            nb = (uint32_t *)cc_arena_alloc(m->arena,                                 \
-                                            new_bucket_cap * sizeof(uint32_t),        \
-                                            _Alignof(uint32_t));                      \
-            if (!nb) return -1;                                                       \
-            memset(nb, 0, new_bucket_cap * sizeof(uint32_t));                         \
-            mask = new_bucket_cap - 1u;                                               \
-            for (i = 0; i < m->len; i++) {                                            \
-                size_t h = (size_t)(HASH_FN(m->dense[i].key));                        \
-                uint32_t d;                                                           \
-                for (d = 0; d < 2048u; d++) {                                         \
-                    size_t b = (h + cc_array_map_quad(d)) & mask;                     \
-                    if (nb[b] == CC_ARRAY_MAP_EMPTY) {                                \
-                        nb[b] = cc_array_map_pack_slot(i, h);                         \
-                        break;                                                        \
-                    }                                                                 \
-                }                                                                     \
-                if (d >= 2048u) {                                                     \
-                    failed = 1;                                                       \
-                    break;                                                            \
-                }                                                                     \
-            }                                                                         \
-            if (failed) {                                                             \
-                (void)cc_arena_release(m->arena, nb);                                 \
-                if (new_bucket_cap > (SIZE_MAX / 2u)) return -1;                      \
-                new_bucket_cap *= 2u;                                                 \
-                continue;                                                             \
-            }                                                                         \
-            old_bytes = Name##_buckets_cap(m) * sizeof(uint32_t);                     \
-            if (m->buckets && old_bytes)                                              \
-                (void)cc_arena_release(m->arena, m->buckets);                         \
-            m->buckets = nb;                                                          \
-            m->bucket_mask = mask;                                                    \
-            m->tomb_count = 0;                                                        \
-            return 0;                                                                 \
-        }                                                                             \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##__ensure_buckets(Name *m, size_t min_live) {              \
-        size_t need_cap;                                                              \
-        size_t cur;                                                                   \
-        size_t occ;                                                                   \
-        if (!m) return -1;                                                            \
-        need_cap = CC_ARRAY_MAP_MIN_BUCKETS;                                          \
-        while ((size_t)((double)need_cap * 0.9) < min_live) {                         \
-            if (need_cap > (SIZE_MAX / 2u)) return -1;                                \
-            need_cap *= 2u;                                                           \
-        }                                                                             \
-        cur = Name##_buckets_cap(m);                                                  \
-        occ = m->len + m->tomb_count;                                                 \
-        if (cur == 0u || need_cap > cur ||                                            \
-            (cur > 0u && occ > (size_t)((double)cur * 0.9))) {                        \
-            if (need_cap < cur * 2u && occ > (size_t)((double)cur * 0.9))             \
-                need_cap = cur * 2u;                                                  \
-            if (need_cap < CC_ARRAY_MAP_MIN_BUCKETS)                                  \
-                need_cap = CC_ARRAY_MAP_MIN_BUCKETS;                                  \
-            return Name##__rehash(m, need_cap);                                       \
-        }                                                                             \
-        return 0;                                                                     \
+        return (Name *)cc_array_map_core_init(arena, sizeof(Name), _Alignof(Name));   \
     }                                                                                 \
                                                                                       \
     static inline Name *Name##_init_count(CCArena *arena, size_t count) {             \
-        Name *m = Name##_init(arena);                                                 \
-        size_t bcap;                                                                  \
-        if (!m) return NULL;                                                          \
-        if (count == 0) return m;                                                     \
-        if (Name##__reserve_dense(m, count) != 0) return NULL;                        \
-        bcap = CC_ARRAY_MAP_MIN_BUCKETS;                                              \
-        while ((size_t)((double)bcap * 0.9) < count) {                                \
-            if (bcap > (SIZE_MAX / 2u)) return NULL;                                  \
-            bcap *= 2u;                                                               \
-        }                                                                             \
-        if (Name##__rehash(m, bcap) != 0) return NULL;                                \
-        return m;                                                                     \
+        return (Name *)cc_array_map_core_init_count(arena, sizeof(Name),              \
+                                                    _Alignof(Name), Name##__kind(),   \
+                                                    count);                           \
     }                                                                                 \
                                                                                       \
     static inline void Name##_destroy(Name *m) {                                      \
-        if (!m || !m->arena) return;                                                  \
-        if (m->buckets) (void)cc_arena_release(m->arena, m->buckets);                 \
-        if (m->dense) (void)cc_arena_release(m->arena, m->dense);                     \
-        (void)cc_arena_release(m->arena, m);                                          \
+        cc_array_map_core_destroy((CCArrayMapCore *)m);                               \
     }                                                                                 \
                                                                                       \
     static inline size_t Name##_len(const Name *m) { return m ? m->len : 0; }         \
@@ -247,52 +424,12 @@ static inline void cc_array_map_prefetch(const void *p) {
     }                                                                                 \
                                                                                       \
     static inline void Name##_clear(Name *m) {                                        \
-        size_t bcap;                                                                  \
-        if (!m) return;                                                               \
-        m->len = 0;                                                                   \
-        m->tomb_count = 0;                                                            \
-        bcap = Name##_buckets_cap(m);                                                 \
-        if (m->buckets && bcap)                                                       \
-            memset(m->buckets, 0, bcap * sizeof(uint32_t));                           \
-    }                                                                                 \
-                                                                                      \
-    static inline size_t Name##__lookup(const Name *m, K key, size_t *out_bucket) {   \
-        size_t h;                                                                     \
-        uint32_t want_frag;                                                           \
-        uint32_t d;                                                                   \
-        size_t first_tomb = SIZE_MAX;                                                 \
-        if (!m || !m->buckets || !m->bucket_mask) return SIZE_MAX;                    \
-        h = (size_t)(HASH_FN(key));                                                   \
-        want_frag = cc_array_map_hash_frag8(h);                                       \
-        for (d = 0; d < 2048u; d++) {                                                 \
-            size_t b = (h + cc_array_map_quad(d)) & m->bucket_mask;                   \
-            uint32_t slot = m->buckets[b];                                            \
-            if (slot == CC_ARRAY_MAP_EMPTY) {                                         \
-                if (out_bucket)                                                       \
-                    *out_bucket = (first_tomb != SIZE_MAX) ? first_tomb : b;          \
-                return SIZE_MAX;                                                      \
-            }                                                                         \
-            if (slot == CC_ARRAY_MAP_TOMB) {                                          \
-                if (first_tomb == SIZE_MAX) first_tomb = b;                           \
-                continue;                                                             \
-            }                                                                         \
-            if (cc_array_map_slot_frag(slot) != want_frag) continue;                  \
-            {                                                                         \
-                size_t di = cc_array_map_slot_dense(slot);                            \
-                if (di >= m->len) continue;                                           \
-                cc_array_map_prefetch(&m->dense[di]);                                 \
-                if (EQ_FN(m->dense[di].key, key)) {                                   \
-                    if (out_bucket) *out_bucket = b;                                  \
-                    return di;                                                        \
-                }                                                                     \
-            }                                                                         \
-        }                                                                             \
-        if (out_bucket) *out_bucket = first_tomb;                                     \
-        return SIZE_MAX;                                                              \
+        cc_array_map_core_clear((CCArrayMapCore *)m);                                 \
     }                                                                                 \
                                                                                       \
     static inline V *Name##_get_ptr(Name *m, K key) {                                 \
-        size_t di = Name##__lookup(m, key, NULL);                                     \
+        size_t di = cc_array_map_core_lookup((const CCArrayMapCore *)m,               \
+                                             Name##__kind(), &key, NULL);             \
         if (di == SIZE_MAX) return NULL;                                              \
         return &m->dense[di].val;                                                     \
     }                                                                                 \
@@ -313,61 +450,19 @@ static inline void cc_array_map_prefetch(const void *p) {
                                                                                       \
     /* Pointer to the stored key equal to `key` (for owned-key reclaim). */         \
     static inline K *Name##_find_key_ptr(Name *m, K key) {                            \
-        size_t di = Name##__lookup(m, key, NULL);                                     \
+        size_t di = cc_array_map_core_lookup((const CCArrayMapCore *)m,               \
+                                             Name##__kind(), &key, NULL);             \
         if (di == SIZE_MAX) return NULL;                                              \
         return &m->dense[di].key;                                                     \
     }                                                                                 \
                                                                                       \
     static inline int Name##_insert(Name *m, K key, V val) {                          \
-        size_t bucket = 0;                                                            \
-        size_t di;                                                                    \
-        size_t h;                                                                     \
-        if (!m) return -1;                                                            \
-        if (m->len >= (size_t)CC_ARRAY_MAP_MAX_LEN) return -1;                        \
-        di = Name##__lookup(m, key, &bucket);                                         \
-        if (di != SIZE_MAX) {                                                         \
-            m->dense[di].val = val;                                                   \
-            return 0;                                                                 \
-        }                                                                             \
-        if (Name##__ensure_buckets(m, m->len + 1u) != 0) return -1;                   \
-        if (Name##__reserve_dense(m, m->len + 1u) != 0) return -1;                    \
-        di = Name##__lookup(m, key, &bucket);                                         \
-        if (di != SIZE_MAX) {                                                         \
-            m->dense[di].val = val;                                                   \
-            return 0;                                                                 \
-        }                                                                             \
-        if (bucket == SIZE_MAX || !m->buckets) return -1;                             \
-        if (m->buckets[bucket] == CC_ARRAY_MAP_TOMB && m->tomb_count)                 \
-            m->tomb_count--;                                                          \
-        h = (size_t)(HASH_FN(key));                                                   \
-        m->dense[m->len].key = key;                                                   \
-        m->dense[m->len].val = val;                                                   \
-        m->buckets[bucket] = cc_array_map_pack_slot(m->len, h);                       \
-        m->len++;                                                                     \
-        return 0;                                                                     \
+        return cc_array_map_core_insert((CCArrayMapCore *)m, Name##__kind(), &key,    \
+                                        &val);                                        \
     }                                                                                 \
                                                                                       \
     static inline bool Name##_del(Name *m, K key) {                                   \
-        size_t bucket = 0;                                                            \
-        size_t di;                                                                    \
-        size_t last;                                                                  \
-        if (!m || !m->buckets) return false;                                          \
-        di = Name##__lookup(m, key, &bucket);                                         \
-        if (di == SIZE_MAX) return false;                                             \
-        last = m->len - 1u;                                                           \
-        m->buckets[bucket] = CC_ARRAY_MAP_TOMB;                                       \
-        m->tomb_count++;                                                              \
-        if (di != last) {                                                             \
-            K moved_key = m->dense[last].key;                                         \
-            size_t mb = 0;                                                            \
-            size_t mdi = Name##__lookup(m, moved_key, &mb);                           \
-            size_t mh = (size_t)(HASH_FN(moved_key));                                 \
-            m->dense[di] = m->dense[last];                                            \
-            if (mdi != SIZE_MAX && mb != SIZE_MAX)                                    \
-                m->buckets[mb] = cc_array_map_pack_slot(di, mh);                      \
-        }                                                                             \
-        m->len--;                                                                     \
-        return true;                                                                  \
+        return cc_array_map_core_del((CCArrayMapCore *)m, Name##__kind(), &key);      \
     }                                                                                 \
                                                                                       \
     static inline bool Name##_remove(Name *m, K key) { return Name##_del(m, key); }
