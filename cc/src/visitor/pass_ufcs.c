@@ -199,6 +199,25 @@ static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, si
     while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
     if (r_end == range_start) return range_start;
 
+    /* String-literal receiver (`"hi".println()`): do not walk into
+     * `__typeof__(` / casts — stop at the opening quote. */
+    if (s[r_end - 1] == '"') {
+        size_t r = r_end - 1;
+        while (r > range_start) {
+            r--;
+            if (s[r] == '"') {
+                size_t bs = 0;
+                size_t k = r;
+                while (k > range_start && s[k - 1] == '\\') {
+                    bs++;
+                    k--;
+                }
+                if ((bs % 2) == 0) return r;
+            }
+        }
+        return range_start;
+    }
+
     int par = 0, br = 0, brc = 0;
     size_t r = r_end;
     while (r > range_start) {

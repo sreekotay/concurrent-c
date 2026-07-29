@@ -60,6 +60,17 @@ typedef struct CCExclusiveWaiter {
  * The discovery map grows under create_mu; old tables are retired and
  * arena_release'd on destroy so lock-free lookups never race a free.
  */
+#if defined(__TINYC__)
+/* TinyCC ignores aligned(N) for sizeof on some targets; pad to one line. */
+typedef struct {
+    _Atomic int locked;
+    _Atomic int wait_spin;
+    uint64_t name;
+    CCExclusiveWaiter* wait_head;
+    CCExclusiveWaiter* wait_tail;
+    char _cc_line_pad[64 - (2 * sizeof(int) + sizeof(uint64_t) + 2 * sizeof(void*))];
+} CCExclusiveEntry;
+#else
 typedef struct {
     _Atomic int locked;
     _Atomic int wait_spin;
@@ -67,6 +78,7 @@ typedef struct {
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
 } __attribute__((aligned(64))) CCExclusiveEntry;
+#endif
 
 _Static_assert(offsetof(CCExclusiveEntry, locked) == 0,
                "header casts entry to _Atomic int*");
@@ -771,3 +783,4 @@ CCShardMask cc_shard_mask_auto(size_t max) {
      * run at half the shard fan-out; clamp still floors explicit overrides. */
     return cc_shard_mask_ceil((size_t)ncpu, max);
 }
+

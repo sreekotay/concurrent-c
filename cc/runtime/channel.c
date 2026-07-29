@@ -167,7 +167,18 @@ typedef struct {
 } wake_batch;
 
 #if defined(__TINYC__)
-/* Layout matches cc_rt_tls_wake_batch (void* fibers[32], uint32_t attribs[32], size_t). */
+/* Overlay onto pthread-TLS wake_batch; keep layouts locked together. */
+#if WAKE_BATCH_SIZE != CC_TLS_WAKE_BATCH_SIZE
+#error "WAKE_BATCH_SIZE must equal CC_TLS_WAKE_BATCH_SIZE"
+#endif
+_Static_assert(sizeof(wake_batch) == sizeof(cc_rt_tls_wake_batch),
+               "wake_batch must match cc_rt_tls_wake_batch");
+_Static_assert(offsetof(wake_batch, fibers) == offsetof(cc_rt_tls_wake_batch, fibers),
+               "wake_batch.fibers offset mismatch");
+_Static_assert(offsetof(wake_batch, attribs) == offsetof(cc_rt_tls_wake_batch, attribs),
+               "wake_batch.attribs offset mismatch");
+_Static_assert(offsetof(wake_batch, count) == offsetof(cc_rt_tls_wake_batch, count),
+               "wake_batch.count offset mismatch");
 #define tls_wake_batch (*(wake_batch*)&(cc_rt_tls_get()->wake_batch))
 #else
 static __thread wake_batch tls_wake_batch = {{NULL}, {0}, 0};

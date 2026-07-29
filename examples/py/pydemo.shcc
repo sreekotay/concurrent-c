@@ -9,19 +9,19 @@ CCPy py = cc_py(&a) !> @destroy;
 CCPyObj math = py.import("math") !> @destroy;
 CCPyObj root = math.sqrt(2.0) !> @destroy;
 double v = root.as_f64() !>;
-cc_println(@string(`math.sqrt(2.0) = ${v}`, &a)) !>;
+@string(`math.sqrt(2.0) = ${v}`, &a).println() !>;
 
 CCPyObj p = math.pow(2.0, 10) !> @destroy;
 double pv = p.as_f64() !>;
-cc_println(@string(`math.pow(2,10) = ${pv}`, &a)) !>;
+@string(`math.pow(2,10) = ${pv}`, &a).println() !>;
 
 CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
 CCPyObj mean = stats.mean(xs) !> @destroy;
 double mv = mean.as_f64() !>;
-cc_println(@string(`statistics.mean = ${mv}`, &a)) !>;
+@string(`statistics.mean = ${mv}`, &a).println() !>;
 
 CCPyObj sys = py.import("sys") !> @destroy;
 CCPyObj ver = sys.get("version") !> @destroy;
 CCSlice vs = ver.as_slice(&a) !>;
-cc_println(@string(`sys.version    = ${vs}`, &a)) !>;
+@string(`sys.version    = ${vs}`, &a).println() !>;

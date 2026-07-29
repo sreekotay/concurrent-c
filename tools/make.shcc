@@ -15,13 +15,15 @@ static int run_all_flag(const char* flag) {
 
     /* Exact CCIoError keeps os_code; CCError covers other Results. */
     @errhandler(CCError e) {
-        (void)cc_eprintln(@string(
-            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a));
+        CCString em = @string(
+            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a);
+        (void)em.eprintln();
         return 1;
     }
     @errhandler(CCIoError e) {
-        (void)cc_eprintln(@string(
-            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a));
+        CCString em = @string(
+            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a);
+        (void)em.eprintln();
         return 1;
     }
 
@@ -41,19 +43,21 @@ static int examples_check() {
     CCArena a = @create(megabytes(1)) @destroy;
 
     @errhandler(CCError e) {
-        (void)cc_eprintln(@string(
-            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a));
+        CCString em = @string(
+            `  failed: ${cc_error_str(e)} (kind=${(int)e.kind})`, &a);
+        (void)em.eprintln();
         return 1;
     }
     @errhandler(CCIoError e) {
-        (void)cc_eprintln(@string(
-            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a));
+        CCString em = @string(
+            `  failed: ${cc_io_error_str(e)} (kind=${(int)e.base.kind} os=${(int)e.os_code})`, &a);
+        (void)em.eprintln();
         return 1;
     }
 
     int failed = 0;
 
-    cc_println("=== Checking examples compile ===") !>;
+    "=== Checking examples compile ===".println() !>;
     CCSliceArray files = cc_glob(@slice("examples/*.ccs"), &a) !>;
     for (size_t i = 0; i < files.len(); i++) {
         char[:0] path = files.get(i);
@@ -70,10 +74,10 @@ static int examples_check() {
     }
 
     if (failed > 0 || files.len() == 0) {
-        cc_println(@string(`${failed} example(s) failed`, &a)) !>;
+        @string(`${failed} example(s) failed`, &a).println() !>;
         return 1;
     }
-    cc_println("All examples OK") !>;
+    "All examples OK".println() !>;
     return 0;
 }
 
@@ -91,5 +95,5 @@ static int perf_check() {
     return run_all_flag("--perf");
 }
 
-cc_println("make: use @examples_check, @stress_check, @perf_check (or @ to list)") !>;
+"make: use @examples_check, @stress_check, @perf_check (or @ to list)".println() !>;
 return 2;

@@ -1112,17 +1112,34 @@ static void cc__apply_user_include_env(const char* cc_flags) {
  * as a sidecar next to the emitted C (<out>.c.diag).  A cache hit that
  * skips lowering replays the sidecar so warm builds print the same
  * diagnostics as cold ones. */
-static void cc__diag_sidecar_path(const char* c_out_path, char* out, size_t cap) {
-    snprintf(out, cap, "%s.diag", c_out_path);
+/* 0 on success; -1 if "%s.diag" would not fit in `out` (no silent clip). */
+static int cc__diag_sidecar_path(const char* c_out_path, char* out, size_t cap) {
+    int n;
+    if (!out || cap == 0) return -1;
+    out[0] = '\0';
+    if (!c_out_path) return -1;
+    n = snprintf(out, cap, "%s.diag", c_out_path);
+    if (n < 0 || (size_t)n >= cap) {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
 }
 
 static void cc__replay_diag_sidecar(const char* c_out_path) {
     char path[PATH_MAX];
-    cc__diag_sidecar_path(c_out_path, path, sizeof(path));
-    FILE* f = fopen(path, "rb");
-    if (!f) return;
+    FILE* f;
     char buf[4096];
     size_t n;
+    if (cc__diag_sidecar_path(c_out_path, path, sizeof(path)) != 0) {
+        fprintf(stderr,
+                "cc: error: diag sidecar path truncated for '%s' (PATH_MAX=%d); "
+                "refusing silent clip — warm rebuild will omit cached diagnostics\n",
+                c_out_path ? c_out_path : "", (int)PATH_MAX);
+        return;
+    }
+    f = fopen(path, "rb");
+    if (!f) return;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
         fwrite(buf, 1, n, stderr);
     }
@@ -1154,18 +1171,32 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
          * live stderr (no replay sidecar for this emit). */
         char diag_path[PATH_MAX];
         char diag_tmp[PATH_MAX];
-        cc__diag_sidecar_path(out_path, diag_path, sizeof(diag_path));
-        snprintf(diag_tmp, sizeof(diag_tmp), "%s.%d.tmp", diag_path, (int)getpid());
+        int sidecar_ok = (cc__diag_sidecar_path(out_path, diag_path, sizeof(diag_path)) == 0);
+        int tmp_n = sidecar_ok
+            ? snprintf(diag_tmp, sizeof(diag_tmp), "%s.%d.tmp", diag_path, (int)getpid())
+            : -1;
+        if (!sidecar_ok || tmp_n < 0 || (size_t)tmp_n >= sizeof(diag_tmp)) {
+            fprintf(stderr,
+                    "cc: error: diag sidecar path truncated for '%s' (PATH_MAX=%d); "
+                    "refusing silent clip — this emit will not write a replay sidecar\n",
+                    out_path ? out_path : "", (int)PATH_MAX);
+            sidecar_ok = 0;
+            diag_path[0] = '\0';
+            diag_tmp[0] = '\0';
+        }
         int saved_err = -1;
-        int cap_fd = open(diag_tmp, O_CREAT | O_TRUNC | O_RDWR, 0644);
-        if (cap_fd >= 0) {
-            fflush(stderr);
-            saved_err = dup(2);
-            if (saved_err < 0 || dup2(cap_fd, 2) < 0) {
-                if (saved_err >= 0) { close(saved_err); saved_err = -1; }
-                close(cap_fd);
-                cap_fd = -1;
-                unlink(diag_tmp);
+        int cap_fd = -1;
+        if (sidecar_ok) {
+            cap_fd = open(diag_tmp, O_CREAT | O_TRUNC | O_RDWR, 0644);
+            if (cap_fd >= 0) {
+                fflush(stderr);
+                saved_err = dup(2);
+                if (saved_err < 0 || dup2(cap_fd, 2) < 0) {
+                    if (saved_err >= 0) { close(saved_err); saved_err = -1; }
+                    close(cap_fd);
+                    cap_fd = -1;
+                    unlink(diag_tmp);
+                }
             }
         }
 
@@ -1196,7 +1227,10 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
         long de = (long)(cc_diag_error_count() - diag0);
         int diag_err = (rc == 0 && (pe > 0 || de > 0));
 
-        if (rc != 0 || diag_err || cap_len == 0) {
+        if (!sidecar_ok) {
+            /* Path truncated: leave no partial sidecar; live stderr already
+             * received diagnostics (no capture redirect was installed). */
+        } else if (rc != 0 || diag_err || cap_len == 0) {
             /* Failing emits are never cached, so they need no sidecar; a
              * quiet emit drops any stale one. */
             if (cap_fd >= 0) unlink(diag_tmp);

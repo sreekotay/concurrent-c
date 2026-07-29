@@ -109,19 +109,23 @@ default by type match.
 
 ### 1.4 Flipped console print
 
-Script prelude provides receiver print on `CCSlice` / `CCString` (no `io`):
+Script prelude provides console print as UFCS on the data (no `io`
+argument). Receivers include `CCSlice`, `CCString`, C strings, and string
+literals:
 
 ```c
 path.println() !>;
 line.eprintln() !>;
+"literal".println() !>;
+@string(`n=${n}`, &a).println() !>;
 path.fprint(STDERR_FILENO) !>;
 ```
 
-and free sugar `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` for
-cstr / slice / `CCString` values (temps: `cc_println(@string(\`…\`, &a))`).
-Short names `println` / `eprintln` are not macros — a function-like
+Short names `println` / `eprintln` are not free macros — a function-like
 `#define println(x)` would steal UFCS `x.println()`. Returns are
-`CCResult_size_t_CCError` (same as `CCStdio.println`).
+`CCResult_size_t_CCError` (same as `CCStdio.println`). The macros
+`cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` are lowered-C only
+(driver inject, `-E` desugar in §1); script source uses UFCS.
 
 ## 2. Toolbox
 

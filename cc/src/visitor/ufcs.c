@@ -495,6 +495,80 @@ static int cc__is_string_recv_type(const char* type_name) {
             strcmp(type_name, "__CCVecGeneric*") == 0);
 }
 
+/* char* / const char* / char[N] (string-literal decay) — script print family. */
+static int cc__is_cstr_recv_type(const char* type_name) {
+    const char* t;
+    if (!type_name || !type_name[0]) return 0;
+    t = type_name;
+    while (*t == ' ' || *t == '\t') t++;
+    if (strncmp(t, "const ", 6) == 0) t += 6;
+    while (*t == ' ' || *t == '\t') t++;
+    if (strncmp(t, "unsigned ", 9) == 0) {
+        t += 9;
+        while (*t == ' ' || *t == '\t') t++;
+    } else if (strncmp(t, "signed ", 7) == 0) {
+        t += 7;
+        while (*t == ' ' || *t == '\t') t++;
+    }
+    if (strncmp(t, "char", 4) != 0) return 0;
+    t += 4;
+    while (*t == ' ' || *t == '\t') t++;
+    /* east-const: `char const*` */
+    if (strncmp(t, "const", 5) == 0 &&
+        (t[5] == '\0' || t[5] == ' ' || t[5] == '\t' || t[5] == '*')) {
+        t += 5;
+        while (*t == ' ' || *t == '\t') t++;
+    }
+    return *t == '*' || *t == '[';
+}
+
+static int cc__is_cstr_literal_recv(const char* recv) {
+    const char* p;
+    const char* end;
+    if (!recv) return 0;
+    p = skip_ws(recv);
+    if (*p != '"') return 0;
+    end = p + strlen(p);
+    while (end > p && isspace((unsigned char)end[-1])) end--;
+    return end > p && end[-1] == '"';
+}
+
+/* UFCS lowered name for cstr print methods (`cc_const_char_println`, …). */
+static const char* cc__cstr_print_callee(const char* type_name, const char* method,
+                                         const char* recv) {
+    int is_const = 0;
+    if (!method) return NULL;
+    if (strcmp(method, "print") != 0 && strcmp(method, "println") != 0 &&
+        strcmp(method, "eprint") != 0 && strcmp(method, "eprintln") != 0 &&
+        strcmp(method, "fprint") != 0 && strcmp(method, "fprintln") != 0) {
+        return NULL;
+    }
+    if (cc__is_cstr_literal_recv(recv)) {
+        is_const = 1;
+    } else if (cc__is_cstr_recv_type(type_name)) {
+        const char* t = type_name;
+        while (*t == ' ' || *t == '\t') t++;
+        is_const = (strncmp(t, "const ", 6) == 0) ||
+                   (strstr(t, " const") != NULL);
+    } else {
+        return NULL;
+    }
+    if (is_const) {
+        if (strcmp(method, "print") == 0) return "cc_const_char_print";
+        if (strcmp(method, "println") == 0) return "cc_const_char_println";
+        if (strcmp(method, "eprint") == 0) return "cc_const_char_eprint";
+        if (strcmp(method, "eprintln") == 0) return "cc_const_char_eprintln";
+        if (strcmp(method, "fprint") == 0) return "cc_const_char_fprint";
+        return "cc_const_char_fprintln";
+    }
+    if (strcmp(method, "print") == 0) return "cc_char_print";
+    if (strcmp(method, "println") == 0) return "cc_char_println";
+    if (strcmp(method, "eprint") == 0) return "cc_char_eprint";
+    if (strcmp(method, "eprintln") == 0) return "cc_char_eprintln";
+    if (strcmp(method, "fprint") == 0) return "cc_char_fprint";
+    return "cc_char_fprintln";
+}
+
 static int cc__is_slice_recv_type(const char* type_name) {
     return type_name &&
            (strcmp(type_name, "CCSlice") == 0 ||
@@ -2001,6 +2075,15 @@ static int emit_desugared_call(char* out,
                                : snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
         }
     }
+    /* cstr / string-literal print: always pass char* by value (never &p). */
+    {
+        const char* callee = cc__cstr_print_callee(ctx.recv_type_name, method, recv);
+        if (callee) {
+            if (!has_args || !args_rewritten || !args_rewritten[0])
+                return snprintf(out, cap, "%s(%s)", callee, recv);
+            return snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
+        }
+    }
     if (ctx.recv_type_name &&
         (strcmp(ctx.recv_type_name, "CCNursery") == 0 || strcmp(ctx.recv_type_name, "CCNursery*") == 0) &&
         strcmp(method, "close_on") == 0) {
@@ -2435,12 +2518,14 @@ static int cc__parse_ufcs_chain(const char* in,
     trim_ws_in_place(recv);
     if (!cc__recv_is_postfix_expr(recv)) return 0;
     /* Statement-expr materialization exists for call-expression receivers
-     * (`@string(...).println()`). Lvalue receivers (idents, member chains)
+     * (`@string(...).println()`). String-literal receivers (`"hi".println()`)
+     * use the same temp path. Lvalue receivers (idents, member chains)
      * stay on the segment-wise path: copying them into a temp would break
      * mutation, and relocating closure args breaks their lowering. */
     {
         size_t rl = strlen(recv);
-        if (rl == 0 || recv[rl - 1] != ')') return 0;
+        if (rl == 0) return 0;
+        if (recv[rl - 1] != ')' && !cc__is_cstr_literal_recv(recv)) return 0;
     }
 
     const char* p = sep + (sep_is_ptr ? 2 : 1);
@@ -2537,6 +2622,26 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
     if (!cc__parse_ufcs_chain(in, recv, sizeof(recv), segs, &seg_count)) return 1;
     if (seg_count <= 0) return 1;
     const char* recv_expr = recv;
+    /* String literals: emit by value with a const-char* hint. A temp would
+     * rename the receiver to `__cc_ufcs_recv` and lose literal detection. */
+    if (seg_count == 1 && cc__is_cstr_literal_recv(recv)) {
+        char* rewritten_args = cc__rewrite_nested_ufcs_args(segs[0].args ? segs[0].args : "");
+        size_t args_len = rewritten_args ? strlen(rewritten_args) : 0;
+        bool has_args = args_len > 0;
+        const char* saved_type = g_ufcs_recv_type;
+        int n;
+        g_ufcs_recv_type = "const char*";
+        n = emit_full_call(out, out_cap, recv, segs[0].method, segs[0].recv_is_ptr,
+                           rewritten_args ? rewritten_args : "", has_args);
+        g_ufcs_recv_type = saved_type;
+        free(rewritten_args);
+        cc__free_ufcs_segments(segs, seg_count);
+        if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_REWRITE_UNRESOLVED;
+        if (n == CC_UFCS_EMIT_AS_AMBIGUOUS) return CC_UFCS_REWRITE_AS_AMBIGUOUS;
+        if (n == CC_UFCS_EMIT_AS_CYCLE) return CC_UFCS_REWRITE_AS_CYCLE;
+        if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_REWRITE_NO_MATCH;
+        return (n < 0 || (size_t)n >= out_cap) ? CC_UFCS_REWRITE_ERROR : CC_UFCS_REWRITE_OK;
+    }
     const int recv_needs_tmp = (!segs[0].recv_is_ptr && !is_ident_only(recv) && !is_addr_of_ident(recv));
     const int needs_temps = (seg_count > 1) || recv_needs_tmp;
 

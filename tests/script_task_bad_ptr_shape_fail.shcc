@@ -12,4 +12,5 @@ static int bad(int *count, char *name) {
     return 0;
 }
 
-printf("unreachable\n");
+/* Unreachable: compile must fail on @task shape above. */
+return 0;

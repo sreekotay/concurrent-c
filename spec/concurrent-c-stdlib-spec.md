@@ -447,6 +447,8 @@ CCResult_size_t_CCIoError cc_std_err_write_auto(value);
 ```
 
 The automatic forms accept a slice, C string, or `CCString` value or pointer.
+These are byte writers for library code. Do not treat them as the script
+console print surface (see Script console print below).
 
 Buffered I/O uses:
 
@@ -510,6 +512,40 @@ Path arguments are NUL-terminated borrows (`char[:0]`). The returned `join`,
 `dirname`, and `basename` slices are NUL-terminated and arena-backed. These
 helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 `cc_path_is_abs` recognizes only a leading `/`.
+
+## Script console print
+
+`<ccc/script/stdio.cch>` (script prelude, not `<ccc/std/…>`) defines
+`CCStdio` for arena-backed stdin reads and line-oriented console writes.
+Preferred console output is UFCS on the data — no `CCStdio` argument and no
+free `println` macro:
+
+```c
+path.println() !>;                    /* CCSlice / char[:0] */
+line.eprintln() !>;                   /* CCString */
+"literal".println() !>;               /* string literal / cstr */
+cstr_ptr.println() !>;                /* const char * / char * */
+@string(`n=${n}`, &a).println() !>;
+path.fprintln(STDERR_FILENO) !>;
+```
+
+Guidelines:
+
+- Put the payload in the receiver; choose `println` / `eprintln` / `fprintln`
+  for the sink.
+- Prefer `@string(…).println()` for formatted temps; do not wrap temps in
+  `cc_println`.
+- `cc_println` / `cc_eprintln` are lowered-C sugar only (driver-injected
+  default `@errhandler`, `-E` desugar). New script source uses UFCS.
+- Inside a custom `@errhandler` body, discard with a bound receiver
+  (`CCString msg = …; (void)msg.eprintln();`). Do not use `!>` there.
+- `CCStdio.println` / `eprintln` remain available for sink-first writes when
+  an `io` value is already in hand; flipped form is the default style.
+- `<ccc/std/io.cch>` `cc_std_out_write` / `cc_std_err_write` remain the
+  byte-writer API for non-script library code.
+
+Returns are `CCResult_size_t_CCError`. Short names `println` / `eprintln` are
+not free macros.
 
 ## Collections
 

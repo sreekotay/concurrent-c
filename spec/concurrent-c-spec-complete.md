@@ -5283,7 +5283,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 
 | Header | Role |
 | ------ | ---- |
-| `<ccc/script/stdio.cch>` | `CCStdio` reads/writes; flipped `CCSlice`/`CCString` print |
+| `<ccc/script/stdio.cch>` | `CCStdio` reads; flipped console print on data receivers |
 | `<ccc/std/cli.cch>` | `@grammar(cli)` runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`) |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
@@ -5305,22 +5305,27 @@ io.write_all(out.as_slice()) !>;
 ```
 
 `CCStdio` binds an arena for growing reads (`read_all` / `read_line`) and
-offers `write_all` / `println` / `eprintln` that take a `CCSlice`. Preferred
-console output is **flipped** onto the data (no `io` argument):
+offers `write_all` / `println` / `eprintln` that take a `CCSlice` or
+`CCString`. Console output in scripts is **flipped onto the data** (no `io`
+argument). A string, slice, C string, or string literal is a UFCS receiver:
 
 ```c
 path.println() !>;                 /* CCSlice / char[:0] */
 line.eprintln() !>;                /* CCString */
+"literal".println() !>;            /* string literal / cstr */
+@string(`n=${n}`, &a).println() !>;
 path.fprintln(STDERR_FILENO) !>;
-
-cc_println("literal") !>;          /* free sugar: cstr / slice / CCString */
-cc_println(@string(`n=${n}`, &a)) !>;
 ```
 
-Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Free sugar
-uses the `cc_*` names so a `#define println(x)` cannot steal UFCS
-`x.println()`. The injected default `@errhandler(CCError)` prints with
-`(void)cc_eprintln(cc_error_str(e))`. Template formatting uses language `@string`.
+Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Short names
+`println` / `eprintln` are not free macros — a function-like
+`#define println(x)` would steal UFCS `x.println()`. The macros
+`cc_println` / `cc_eprintln` exist only as lowered-C sugar (driver inject,
+`-E` desugar); script source uses UFCS. The injected default
+`@errhandler(CCError)` prints with `(void)cc_eprintln(cc_error_str(e))`.
+Inside a custom `@errhandler` body, discard with a bound receiver
+(`CCString msg = …; (void)msg.eprintln();`) — do not use `!>` there.
+Template formatting uses language `@string`.
 
 #### 9.5.5 Path, file, process, and temp helpers
 

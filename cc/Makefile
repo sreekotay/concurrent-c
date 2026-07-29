@@ -9,6 +9,24 @@ CC_ENABLE_TLS ?= 0
 CC_RUNTIME_V3 ?= 1
 CC_V3_DIAGNOSTICS ?= 0
 BEARSSL_DIR ?= ../third_party/bearssl
+
+# Host TinyCC self-build of ccc (Linux). Darwin cannot: host tcc emits ELF
+# while the in-tree libtcc.a is Mach-O. Detect by basename or */tcc path.
+CC_IS_TCC := 0
+ifneq ($(filter tcc,$(notdir $(CC))),)
+  CC_IS_TCC := 1
+endif
+ifeq ($(CC_IS_TCC),0)
+  ifneq ($(filter %/tcc,$(CC)),)
+    CC_IS_TCC := 1
+  endif
+endif
+ifeq ($(CC_IS_TCC),1)
+  ifeq ($(shell uname -s),Darwin)
+    $(error Host CC=tcc cannot self-build ccc on Darwin (TCC emits ELF; libtcc.a is Mach-O). Use Linux ILP32: CCC_HOST_CC=tcc ./scripts/smoke_i386.sh)
+  endif
+endif
+
 CFLAGS_COMMON := -Wall -Wextra -I../out/include -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS)
 # Comptime hook dylibs are built with unresolved references into the ccc
 # binary's embedded runtime (macOS: -undefined dynamic_lookup). On ELF
@@ -67,16 +85,41 @@ ifeq ($(TCC_EXT),1)
   endif
 endif
 
+# TinyCC host: C11 mode, -B for libtcc1.a, neutralize unimplemented
+# _Thread_local (ccc frontend TLS is process-scoped under TINYC — ccc is not
+# multi-threaded across those sites). Skip C++ XJB float merge below.
+ifeq ($(CC_IS_TCC),1)
+  CFLAGS += -std=c11 -D_Thread_local= -D__thread=
+  # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
+  CFLAGS += -DCC_NO_LIBLFDS
+  ifneq ($(TCC_INC_ABS),)
+    CFLAGS += -B$(TCC_INC_ABS)
+  else
+    CFLAGS += -B$(TCC_INC)
+  endif
+  # Match typical gcc/clang link sets for pthread/dl users in the runtime TU.
+  LDLIBS += -lm -ldl -lpthread
+endif
+
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
 # Note: src/tools/ is excluded - those are standalone utilities with their own main()
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/% src/preprocess/grammar_stub.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
-OBJDIR ?= ../out/cc/obj
-OUT_BINDIR ?= ../out/cc/bin
+ifeq ($(CC_IS_TCC),1)
+  OBJDIR ?= ../out/cc-tcc/obj
+  OUT_BINDIR ?= ../out/cc-tcc/bin
+else
+  OBJDIR ?= ../out/cc/obj
+  OUT_BINDIR ?= ../out/cc/bin
+endif
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
 RUNTIME_XJB_OBJ := $(OBJDIR)/runtime/float_format_xjb.o
-DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
+ifeq ($(CC_IS_TCC),1)
+  DEPS := $(OBJS:.o=.d)
+else
+  DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
+endif
 REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
@@ -252,9 +295,14 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
+ifeq ($(CC_IS_TCC),1)
+	# No C++ XJB under host TCC — same fallback path as user programs with CC=tcc.
+	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=0 -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
+else
 	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
 	$(CXX) $(CXXFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
 	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
+endif
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)

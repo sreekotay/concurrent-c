@@ -37,5 +37,5 @@ static int check_submodules(int argc, char **argv) {
     return cc_script_task_exe(argc, argv, "scripts/check_submodule_reachability.sh");
 }
 
-printf("dev: use @fmt, @lint, @lint_scanners, or @check_submodules (or @ to list)\n");
+"dev: use @fmt, @lint, @lint_scanners, or @check_submodules (or @ to list)".println() !>;
 return 2;

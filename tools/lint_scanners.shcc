@@ -109,8 +109,9 @@ CCArena a = @create(megabytes(8)) @destroy;
 
 /* File/glob Results are CCIoError; handler matches via @as → CCError. */
 @errhandler(CCError e) {
-    (void)cc_eprintln(@string(
-        `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a));
+    CCString em = @string(
+        `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);
+    (void)em.eprintln();
     return 1;
 }
 
@@ -146,8 +147,8 @@ for (size_t pass = 0; pass < 2; pass++) {
 }
 
 if (fail != 0) {
-    cc_eprintln(@slice("lint_scanners: FAILED (see PASS_CLEANUP_PLAN.md phase 4)")) !>;
+    "lint_scanners: FAILED (see PASS_CLEANUP_PLAN.md phase 4)".eprintln() !>;
     return 1;
 }
-cc_println(@slice("lint_scanners: OK")) !>;
+"lint_scanners: OK".println() !>;
 return 0;

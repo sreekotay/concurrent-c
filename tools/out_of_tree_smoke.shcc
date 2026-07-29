@@ -16,20 +16,20 @@
 char tmpl[] = "/tmp/cc_oot.XXXXXX";
 char* dir = mkdtemp(tmpl);
 if (!dir) {
-    fprintf(stderr, "FAIL out-of-tree-smoke: mkdtemp\n");
+    "FAIL out-of-tree-smoke: mkdtemp".eprintln() !>;
     return 1;
 }
 
 CCArena a = @create(megabytes(2)) @destroy;
-CCStdio io = @create(&a) @destroy;
 
 char dst_path[512];
 snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
 
 /* File ops + cmd.output (CCIoError) share one CCError handler via @as. */
 @errhandler(CCError e) {
-    fprintf(stderr, "FAIL out-of-tree-smoke: %s (kind=%d)\n",
-            cc_io_error_str(cc_io_error(e)), (int)e.kind);
+    CCString em = @string(
+        `FAIL out-of-tree-smoke: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);
+    (void)em.eprintln();
     unlink(dst_path);
     rmdir(dir);
     return 1;
@@ -55,7 +55,8 @@ unlink(dst_path);
 rmdir(dir);
 
 if (rc != 0) {
-    fprintf(stderr, "FAIL out-of-tree-smoke: ccc run exited %d\n", rc);
+    CCString em = @string(`FAIL out-of-tree-smoke: ccc run exited ${rc}`, &a);
+    em.eprintln() !>;
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);
     return 1;
@@ -63,15 +64,15 @@ if (rc != 0) {
 
 if (actual.len != expected.len ||
     (actual.len && memcmp(actual.ptr, expected.ptr, actual.len) != 0)) {
-    fprintf(stderr, "FAIL out-of-tree-smoke: stdout mismatch\n");
-    fprintf(stderr, "--- expected ---\n");
+    "FAIL out-of-tree-smoke: stdout mismatch".eprintln() !>;
+    "--- expected ---".eprintln() !>;
     if (expected.ptr && expected.len)
         fwrite(expected.ptr, 1, expected.len, stderr);
-    fprintf(stderr, "--- actual ---\n");
+    "--- actual ---".eprintln() !>;
     if (actual.ptr && actual.len)
         fwrite(actual.ptr, 1, actual.len, stderr);
     return 1;
 }
 
-io.println(@slice("OK out-of-tree-smoke")) !>;
+"OK out-of-tree-smoke".println() !>;
 return 0;

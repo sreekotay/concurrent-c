@@ -32,5 +32,5 @@ static int perf_oracle(int argc, char **argv) {
     return cc_script_task_exe(argc, argv, "tools/cc_perf_check.sh");
 }
 
-printf("perf: use @perf_baseline, @perf_regress, or @perf_oracle (or @ to list)\n");
+"perf: use @perf_baseline, @perf_regress, or @perf_oracle (or @ to list)".println() !>;
 return 2;

@@ -10,5 +10,5 @@ static int nest(int argc, char **argv) {
     return cc_script_task_shcc(argc, argv, "tests/script_task_dispatch_smoke.shcc");
 }
 
-printf("nested: use @nest @nosuch_task_xyz\n");
+"nested: use @nest @nosuch_task_xyz".println() !>;
 return 2;

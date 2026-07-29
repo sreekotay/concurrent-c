@@ -8,6 +8,8 @@
 #
 # Env:
 #   CCC_ILP32_ARCH   i386 | arm
+#   CCC_HOST_CC      Host C compiler for building ccc (default: cc).
+#                    `tcc` self-builds ccc with TinyCC (no XJB merge).
 #   BUILD            debug|release (default: debug)
 #   CCC_ILP32_JOBS   parallel make jobs (default: nproc or 4)
 #

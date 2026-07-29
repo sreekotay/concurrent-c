@@ -8,9 +8,9 @@
  */
 static int greet(int argc, char *argv[]) {
     const char *msg = (argc >= 2 && argv[1]) ? argv[1] : "hi";
-    printf("%s\n", msg);
+    msg.println() !>;
     return 0;
 }
 
-printf("script_task_argv_bracket_smoke: use @greet\n");
+"script_task_argv_bracket_smoke: use @greet".println() !>;
 return 2;

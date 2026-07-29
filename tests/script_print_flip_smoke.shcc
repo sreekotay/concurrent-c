@@ -1,7 +1,7 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * Flipped print DX: slice/string.println(), free cc_println/cc_eprintln sugar.
- * (Bare println() macros are intentionally not provided — they would steal UFCS.)
+ * Flipped print DX: slice/string/cstr/literal.println().
+ * Prefer UFCS on the data; cc_println/cc_eprintln are lowered-C only.
  */
 
 CCArena a = @create(kilobytes(4)) @destroy;
@@ -12,11 +12,10 @@ hi.println() !>;
 CCString world = @string(`world`, &a);
 world.println() !>;
 
-cc_println("plain") !>;
-CCString tpl = @string(`tpl=${42}`, &a);
-tpl.println() !>;
+"plain".println() !>;
+@string(`tpl=${42}`, &a).println() !>;
 
-cc_eprintln("err-line") !>;
+"err-line".eprintln() !>;
 hi.fprintln(STDERR_FILENO) !>;
 
 return 0;

@@ -3,8 +3,12 @@
  *
  *   CCStdio io = @create(&a) @destroy;
  *   char[:] in = io.read_all() !>;
- *   msg.println() !>;                 // CCSlice / CCString receivers
- *   cc_println(@string(`n=${n}`, &a)) !>;
+ *   msg.println() !>;                 // CCSlice / CCString / cstr receivers
+ *   "literal".println() !>;
+ *   @string(`n=${n}`, &a).println() !>;
+ *
+ * `cc_println` / `cc_eprintln` are lowered-C sugar (driver inject / oneliners).
+ * Prefer UFCS on the data; do not use the free macros in new script code.
  */
 #ifndef CC_SCRIPT_STDIO_H
 #define CC_SCRIPT_STDIO_H
@@ -205,7 +209,7 @@ static inline CCResult_bool_CCError cc_stdio_read_line(CCStdio *io, CCSlice *out
  * / stderr / fd are the sink.
  *
  * UFCS: `path.println()` → `cc_slice_println(&path)`.
- * Temps: `cc_println(@string(`…`, &a))` (by-value free sugar). */
+ * Temps: `@string(`…`, &a).println()`. */
 
 static inline CCResult_size_t_CCError cc__script_io_from_ioerr(CCResult_size_t_CCIoError r) {
     if (cc_is_err(r)) {
@@ -296,23 +300,63 @@ static inline CCResult_size_t_CCError cc_string_fprintln(CCString *s, int fd) {
     return cc_slice_fprintln(&view, fd);
 }
 
-/* Free sugar for cstr / slice / CCString values (temps: cc_println(@string(...))).
- * Named cc_* so a `#define println(x)` cannot steal UFCS `x.println()`. */
-static inline CCResult_size_t_CCError cc__print_cstr(const char *s) {
+/* UFCS lowered callees for char* / const char* / string-literal receivers.
+ * Emit shape: `cc_const_char_println(p)` / `"hi".println()` → same (by value). */
+static inline CCResult_size_t_CCError cc_const_char_print(const char *s) {
     CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
     return cc_slice_print(&view);
 }
-static inline CCResult_size_t_CCError cc__println_cstr(const char *s) {
+static inline CCResult_size_t_CCError cc_const_char_println(const char *s) {
     CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
     return cc_slice_println(&view);
 }
-static inline CCResult_size_t_CCError cc__eprint_cstr(const char *s) {
+static inline CCResult_size_t_CCError cc_const_char_eprint(const char *s) {
     CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
     return cc_slice_eprint(&view);
 }
-static inline CCResult_size_t_CCError cc__eprintln_cstr(const char *s) {
+static inline CCResult_size_t_CCError cc_const_char_eprintln(const char *s) {
     CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
     return cc_slice_eprintln(&view);
+}
+static inline CCResult_size_t_CCError cc_const_char_fprint(const char *s, int fd) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_fprint(&view, fd);
+}
+static inline CCResult_size_t_CCError cc_const_char_fprintln(const char *s, int fd) {
+    CCSlice view = s ? char_to_slice(s) : cc_slice_empty();
+    return cc_slice_fprintln(&view, fd);
+}
+static inline CCResult_size_t_CCError cc_char_print(char *s) {
+    return cc_const_char_print(s);
+}
+static inline CCResult_size_t_CCError cc_char_println(char *s) {
+    return cc_const_char_println(s);
+}
+static inline CCResult_size_t_CCError cc_char_eprint(char *s) {
+    return cc_const_char_eprint(s);
+}
+static inline CCResult_size_t_CCError cc_char_eprintln(char *s) {
+    return cc_const_char_eprintln(s);
+}
+static inline CCResult_size_t_CCError cc_char_fprint(char *s, int fd) {
+    return cc_const_char_fprint(s, fd);
+}
+static inline CCResult_size_t_CCError cc_char_fprintln(char *s, int fd) {
+    return cc_const_char_fprintln(s, fd);
+}
+
+/* Lowered-C free sugar only (driver @errhandler / oneliners). Not the script surface. */
+static inline CCResult_size_t_CCError cc__print_cstr(const char *s) {
+    return cc_const_char_print(s);
+}
+static inline CCResult_size_t_CCError cc__println_cstr(const char *s) {
+    return cc_const_char_println(s);
+}
+static inline CCResult_size_t_CCError cc__eprint_cstr(const char *s) {
+    return cc_const_char_eprint(s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_cstr(const char *s) {
+    return cc_const_char_eprintln(s);
 }
 static inline CCResult_size_t_CCError cc__print_slice_val(CCSlice s) {
     return cc_slice_print(&s);

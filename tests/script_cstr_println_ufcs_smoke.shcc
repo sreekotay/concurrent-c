@@ -1,0 +1,22 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * UFCS println/eprintln on string literals and char* / const char*.
+ * Lowered callees: cc_const_char_println / cc_char_println (not free cc_println).
+ */
+
+CCArena a = @create(kilobytes(4)) @destroy;
+
+"literal".println() !>;
+
+const char *p = "cstr";
+p->println() !>;
+p.println() !>;
+
+char *mut = (char *)"mut";
+mut->println() !>;
+
+@string(`tpl=${1}`, &a).println() !>;
+
+"err".eprintln() !>;
+
+return 0;
