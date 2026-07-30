@@ -9,16 +9,18 @@
  * Everything else is spelling. Generic instances name members
  * <Instance>_<method>; runtime families name them cc_<type>_<method>;
  * a bare declared function whose first parameter takes the receiver
- * needs no naming convention at all; prefix and postfix are the same
- * call. And when a hop can fail, `!>` is the link: each hop spells its
- * unwrap, then the next dispatches on the unwrapped value.
+ * needs no naming convention at all — declare the natural name and
+ * prefix is plain C while postfix is the method. Handles you import
+ * carry whole families (io.println). And when a hop can fail, `!>` is
+ * the link: each hop spells its unwrap, then the next dispatches on
+ * the unwrapped value.
  *
  * There is no registration step anywhere in this file.
  *
  *    1. Family members       v.push(x)
  *    2. Instance extension   v.median()          declare CCVec_double_median
  *    3. Scalar family        d.halve()           declare cc_double_halve
- *    4. Free-call symmetry   halve(d)            the same call, prefix
+ *    4. Print names, handles println("hi")      four aliased names; io.println
  *    5. Bare-name tier       u.mean(6.0)         any fn whose 1st param fits
  *    6. System headers       d.fabs()            math.h, nothing local
  *    7. Chains               d.halve().twice()
@@ -28,6 +30,7 @@
  *                            type and lists its installed methods
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
 #include <math.h>
 #include <stdio.h>
 
@@ -76,10 +79,14 @@ int main(void) {
     double d = 10.0;
     printf("halve=%g\n", d.halve());
 
-    /* 4. The same call, prefix spelling — U means universal both ways. */
-    printf("halve2=%g\n", halve(d));
+    /* 4. The naked print names alias the declared cc_println family;
+     *    a handle you import carries the family as methods. */
+    println("printed naked") !>;
+    CCStdio io = cc_stdio_create(&arena);
+    io.println("printed via a handle") !>;
 
-    /* 5. mean() is just a function; u.mean(6.0) == mean(u, 6.0). */
+    /* 5. mean() is just a function — prefix is plain C, postfix is
+     *    the method; one declaration, both spellings. */
     Stats u = { 12.0, 3 };
     printf("mean=%g\n", u.mean(6.0));
 

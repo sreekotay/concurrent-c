@@ -140,18 +140,37 @@ static inline CCResult_size_t_CCError cc__stdio_eprintln_string(CCStdio *io, CCS
 
 /* UFCS lowers `io.println(x)` → `cc_stdio_println(&io, x)`. Accept both
  * CCSlice and CCString so call sites need not write `.as_slice()`. */
+static inline CCResult_size_t_CCError cc__stdio_println_cstr(CCStdio *io,
+                                                             const char *sp) {
+    return cc__stdio_println_slice(io, char_to_slice((char *)sp));
+}
+static inline CCResult_size_t_CCError cc__stdio_eprintln_cstr(CCStdio *io,
+                                                              const char *sp) {
+    return cc__stdio_eprintln_slice(io, char_to_slice((char *)sp));
+}
+static inline CCResult_size_t_CCError cc__stdio_write_all_cstr(CCStdio *io,
+                                                               const char *sp) {
+    return cc__stdio_write_all_slice(io, char_to_slice((char *)sp));
+}
+
 #define cc_stdio_write_all(io, data) _Generic((data), \
     CCString: cc__stdio_write_all_string, \
+    char *: cc__stdio_write_all_cstr, \
+    const char *: cc__stdio_write_all_cstr, \
     default: cc__stdio_write_all_slice \
 )(io, data)
 
 #define cc_stdio_println(io, data) _Generic((data), \
     CCString: cc__stdio_println_string, \
+    char *: cc__stdio_println_cstr, \
+    const char *: cc__stdio_println_cstr, \
     default: cc__stdio_println_slice \
 )(io, data)
 
 #define cc_stdio_eprintln(io, data) _Generic((data), \
     CCString: cc__stdio_eprintln_string, \
+    char *: cc__stdio_eprintln_cstr, \
+    const char *: cc__stdio_eprintln_cstr, \
     default: cc__stdio_eprintln_slice \
 )(io, data)
 
@@ -395,10 +414,40 @@ static inline CCResult_size_t_CCError cc__eprintln_string_ptr(const CCString *s)
     return cc_string_eprintln((CCString *)s);
 }
 
+/* unsigned/signed char* join the cstr arms (byte text, same family). */
+static inline CCResult_size_t_CCError cc__print_ucstr(const unsigned char *s) {
+    return cc__print_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__print_scstr(const signed char *s) {
+    return cc__print_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__println_ucstr(const unsigned char *s) {
+    return cc__println_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__println_scstr(const signed char *s) {
+    return cc__println_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__eprint_ucstr(const unsigned char *s) {
+    return cc__eprint_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__eprint_scstr(const signed char *s) {
+    return cc__eprint_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_ucstr(const unsigned char *s) {
+    return cc__eprintln_cstr((const char *)s);
+}
+static inline CCResult_size_t_CCError cc__eprintln_scstr(const signed char *s) {
+    return cc__eprintln_cstr((const char *)s);
+}
+
 #define cc_print(x) _Generic((x), \
     CCSlice: cc__print_slice_val, \
     char *: cc__print_cstr, \
     const char *: cc__print_cstr, \
+    unsigned char *: cc__print_ucstr, \
+    const unsigned char *: cc__print_ucstr, \
+    signed char *: cc__print_scstr, \
+    const signed char *: cc__print_scstr, \
     CCString: cc__print_string_val, \
     CCString *: cc__print_string_ptr, \
     const CCString *: cc__print_string_ptr \
@@ -407,6 +456,10 @@ static inline CCResult_size_t_CCError cc__eprintln_string_ptr(const CCString *s)
     CCSlice: cc__println_slice_val, \
     char *: cc__println_cstr, \
     const char *: cc__println_cstr, \
+    unsigned char *: cc__println_ucstr, \
+    const unsigned char *: cc__println_ucstr, \
+    signed char *: cc__println_scstr, \
+    const signed char *: cc__println_scstr, \
     CCString: cc__println_string_val, \
     CCString *: cc__println_string_ptr, \
     const CCString *: cc__println_string_ptr \
@@ -415,6 +468,10 @@ static inline CCResult_size_t_CCError cc__eprintln_string_ptr(const CCString *s)
     CCSlice: cc__eprint_slice_val, \
     char *: cc__eprint_cstr, \
     const char *: cc__eprint_cstr, \
+    unsigned char *: cc__eprint_ucstr, \
+    const unsigned char *: cc__eprint_ucstr, \
+    signed char *: cc__eprint_scstr, \
+    const signed char *: cc__eprint_scstr, \
     CCString: cc__eprint_string_val, \
     CCString *: cc__eprint_string_ptr, \
     const CCString *: cc__eprint_string_ptr \
@@ -423,6 +480,10 @@ static inline CCResult_size_t_CCError cc__eprintln_string_ptr(const CCString *s)
     CCSlice: cc__eprintln_slice_val, \
     char *: cc__eprintln_cstr, \
     const char *: cc__eprintln_cstr, \
+    unsigned char *: cc__eprintln_ucstr, \
+    const unsigned char *: cc__eprintln_ucstr, \
+    signed char *: cc__eprintln_scstr, \
+    const signed char *: cc__eprintln_scstr, \
     CCString: cc__eprintln_string_val, \
     CCString *: cc__eprintln_string_ptr, \
     const CCString *: cc__eprintln_string_ptr \

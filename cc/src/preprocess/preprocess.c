@@ -5597,137 +5597,8 @@ static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos
     return 0;
 }
 
-/* One-pass collect of every decl-shaped `ident(` in the TU. */
-static void cc__collect_tu_declared_fns(const char* src, size_t n, CCNameSet* out) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (!src || !out) return;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t ns, ne, nlen, q;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (!cc_is_ident_start(src[i])) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) {
-            while (i < n && cc_is_ident_char(src[i])) i++;
-            continue;
-        }
-        ns = i;
-        while (i < n && cc_is_ident_char(src[i])) i++;
-        ne = i;
-        nlen = ne - ns;
-        q = ne;
-        while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-        if (q >= n || src[q] != '(') continue;
-        if (cc__tu_ident_paren_is_decl(src, n, ns, nlen))
-            (void)cc__name_set_push(out, src + ns, nlen);
-    }
-    cc__name_set_finalize(out);
-}
 
-/* One-pass collect of `#define name` bindings (comment/string-aware). */
-static void cc__collect_tu_macros(const char* src, size_t n, CCNameSet* out) {
-    size_t i = 0;
-    if (!src || !out) return;
-    while (i + 7 < n) {
-        size_t p, ns, ne;
-        char c = src[i];
-        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
-            while (i < n && src[i] != '\n') i++;
-            continue;
-        }
-        if (c == '/' && i + 1 < n && src[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
-            i = (i + 1 < n) ? i + 2 : n;
-            continue;
-        }
-        if (c == '"' || c == '\'') {
-            char q = c;
-            i++;
-            while (i < n && src[i] != q) {
-                if (src[i] == '\\' && i + 1 < n) i++;
-                i++;
-            }
-            if (i < n) i++;
-            continue;
-        }
-        if (c != '#') { i++; continue; }
-        p = i + 1;
-        i++;
-        while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p + 6 > n || memcmp(src + p, "define", 6) != 0) continue;
-        p += 6;
-        while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p >= n || !cc_is_ident_start(src[p])) continue;
-        ns = p;
-        while (p < n && cc_is_ident_char(src[p])) p++;
-        ne = p;
-        (void)cc__name_set_push(out, src + ns, ne - ns);
-    }
-    cc__name_set_finalize(out);
-}
 
-/* One-pass collect of names with a variable-like decl binding (same shape
- * as cc__free_call_ident_decl_type existence). */
-static void cc__collect_tu_var_binds(const char* src, size_t n, CCNameSet* out) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (!src || !out) return;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t ns, ne, nlen, a, b, q, we;
-        char head[256];
-        size_t dn = 0;
-        int toks = 0;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (!cc_is_ident_start(src[i])) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) {
-            while (i < n && cc_is_ident_char(src[i])) i++;
-            continue;
-        }
-        ns = i;
-        while (i < n && cc_is_ident_char(src[i])) i++;
-        ne = i;
-        nlen = ne - ns;
-        b = ns;
-        while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t')) b--;
-        if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*'))
-            continue;
-        a = b;
-        while (a > 0 && !strchr(";{}(),", src[a - 1]) && src[a - 1] != '\n') a--;
-        q = a;
-        while (q < b) {
-            while (q < b && isspace((unsigned char)src[q])) q++;
-            if (q >= b) break;
-            if (src[q] == '*') {
-                if (dn + 1 < sizeof(head)) head[dn++] = '*';
-                q++;
-                toks++;
-                continue;
-            }
-            if (!cc_is_ident_char(src[q])) { toks = 0; dn = 0; break; }
-            if (dn > 0 && head[dn - 1] != '*' && dn + 1 < sizeof(head))
-                head[dn++] = ' ';
-            while (q < b && cc_is_ident_char(src[q])) {
-                if (dn + 1 < sizeof(head)) head[dn++] = src[q];
-                q++;
-            }
-            toks++;
-        }
-        if (!toks || !dn) continue;
-        head[dn] = 0;
-        we = 0;
-        while (head[we] && cc_is_ident_char(head[we])) we++;
-        if ((we == 6 && memcmp(head, "return", 6) == 0) ||
-            (we == 4 && (memcmp(head, "else", 4) == 0 ||
-                         memcmp(head, "case", 4) == 0 ||
-                         memcmp(head, "goto", 4) == 0)) ||
-            (we == 2 && memcmp(head, "do", 2) == 0))
-            continue;
-        (void)cc__name_set_push(out, src + ns, nlen);
-    }
-    cc__name_set_finalize(out);
-}
 
 /* Nonzero when a decl-shaped occurrence of `name(` exists: the
  * occurrence's previous code token ends in an identifier char or `*`
@@ -5751,191 +5622,8 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
     return 0;
 }
 
-/* Declared type of an identifier, read from its declaring statement:
- * a decl-shaped occurrence (previous code char is an identifier char
- * or `*`) whose statement head spells a pure type — identifier tokens
- * and `*` only, cv-qualifiers kept. Whitespace-normalized into out.
- * Purely textual: no registry access, no side effects. */
-static int cc__free_call_ident_decl_type(const char* src, size_t n,
-                                         const char* ident,
-                                         char* out, size_t out_sz) {
-    size_t ilen = strlen(ident);
-    size_t i = 0;
-    CCScannerState scan;
-    cc_scanner_init(&scan);
-    while (i + ilen <= n) {
-        size_t a, b;
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] != ident[0]) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
-        if (i + ilen > n || memcmp(src + i, ident, ilen) != 0) { i++; continue; }
-        if (i + ilen < n && cc_is_ident_char(src[i + ilen])) { i += ilen; continue; }
-        b = i;
-        while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t')) b--;
-        if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*')) {
-            i += ilen;
-            continue;
-        }
-        a = b;
-        while (a > 0 && !strchr(";{}(),", src[a - 1]) && src[a - 1] != '\n') a--;
-        {
-            size_t q = a, dn = 0;
-            int toks = 0;
-            while (q < b) {
-                while (q < b && isspace((unsigned char)src[q])) q++;
-                if (q >= b) break;
-                if (src[q] == '*') {
-                    if (dn + 1 < out_sz) out[dn++] = '*';
-                    q++;
-                    toks++;
-                    continue;
-                }
-                if (!cc_is_ident_char(src[q])) return 0;
-                if (dn > 0 && out[dn - 1] != '*' && dn + 1 < out_sz)
-                    out[dn++] = ' ';
-                while (q < b && cc_is_ident_char(src[q])) {
-                    if (dn + 1 < out_sz) out[dn++] = src[q];
-                    q++;
-                }
-                toks++;
-            }
-            out[dn] = 0;
-            if (!toks || !dn) return 0;
-            /* `return name(...)` / `else name(...)` — a statement
-             * keyword heads a call, not a declaration; keep scanning. */
-            {
-                size_t we = 0;
-                while (out[we] && cc_is_ident_char(out[we])) we++;
-                if ((we == 6 && memcmp(out, "return", 6) == 0) ||
-                    (we == 4 && (memcmp(out, "else", 4) == 0 ||
-                                 memcmp(out, "case", 4) == 0 ||
-                                 memcmp(out, "goto", 4) == 0)) ||
-                    (we == 2 && memcmp(out, "do", 2) == 0)) {
-                    i += ilen;
-                    continue;
-                }
-            }
-        }
-        return 1;
-    }
-    return 0;
-}
 
-/* char* / const char* (string-literal decay) — cv picks the family. */
-static int cc__free_call_cstr_family(const char* ty, const char** out_fam) {
-    const char* t = ty;
-    int is_const = 0;
-    if (!t) return 0;
-    while (*t == ' ' || *t == '\t') t++;
-    if (strncmp(t, "const ", 6) == 0) {
-        is_const = 1;
-        t += 6;
-        while (*t == ' ' || *t == '\t') t++;
-    }
-    /* unsigned/signed char* join the same family — the method path
-     * (cc__is_cstr_recv_type) already admits them; prefix and postfix
-     * spellings must agree. */
-    if (strncmp(t, "unsigned ", 9) == 0) {
-        t += 9;
-        while (*t == ' ' || *t == '\t') t++;
-    } else if (strncmp(t, "signed ", 7) == 0) {
-        t += 7;
-        while (*t == ' ' || *t == '\t') t++;
-    }
-    if (strncmp(t, "char", 4) != 0) return 0;
-    t += 4;
-    while (*t == ' ' || *t == '\t') t++;
-    if (strncmp(t, "const", 5) == 0 &&
-        (t[5] == '\0' || t[5] == ' ' || t[5] == '\t' || t[5] == '*')) {
-        is_const = 1;
-        t += 5;
-        while (*t == ' ' || *t == '\t') t++;
-    }
-    if (*t != '*' && *t != '[') return 0;
-    *out_fam = is_const ? "const_char" : "char";
-    return 1;
-}
 
-/* Family callee for a free-call site from arg1's shape/type. Returns 1
- * with the composed spelling (existence NOT yet verified). *out_mode:
- * 0 — direct substitution (the family takes arg1 exactly as spelled:
- * cstr pointers and scalars by value); 1 — rewrite to the postfix
- * method form so the method rails own the receiver convention
- * (&recv, temp materialization for call-expression receivers). */
-static int cc__free_call_family_callee(const char* src, size_t n,
-                                       size_t a1s, size_t a1e,
-                                       const char* name,
-                                       char* out, size_t out_sz,
-                                       int* out_mode) {
-    (void)n;
-    *out_mode = 0;
-    while (a1s < a1e && isspace((unsigned char)src[a1s])) a1s++;
-    while (a1e > a1s && isspace((unsigned char)src[a1e - 1])) a1e--;
-    if (a1e <= a1s) return 0;
-    /* String literal → const-char family. */
-    if (src[a1s] == '"' && src[a1e - 1] == '"')
-        return (size_t)snprintf(out, out_sz, "cc_const_char_%s", name) < out_sz;
-    /* @string(...) → CCString family; postfix (temp materialization).
-     * The template pass may have run first on some chains — its lowered
-     * spellings (a `__cc_tpl` statement-expr, or the cc_string_from
-     * builder) classify the same way. */
-    if ((a1e - a1s > 7 && memcmp(src + a1s, "@string", 7) == 0) ||
-        (a1e - a1s > 14 && memcmp(src + a1s, "cc_string_from", 14) == 0) ||
-        (a1e - a1s > 2 && src[a1s] == '(' && src[a1s + 1] == '{' &&
-         memmem(src + a1s, a1e - a1s, "__cc_tpl", 8) != NULL)) {
-        *out_mode = 1;
-        return (size_t)snprintf(out, out_sz, "cc_string_%s", name) < out_sz;
-    }
-    /* Numeric literal (bare in arg position; classifier wants parens). */
-    if (isdigit((unsigned char)src[a1s]) || src[a1s] == '-') {
-        char buf[96];
-        char ty[32];
-        size_t len = a1e - a1s;
-        if (len + 3 < sizeof(buf)) {
-            snprintf(buf, sizeof(buf), "(%.*s)", (int)len, src + a1s);
-            if (cc__ufcs_scalar_literal_recv_type(buf, ty, sizeof(ty))) {
-                const char* fam = cc_ufcs_scalar_recv_family(ty);
-                if (fam)
-                    return (size_t)snprintf(out, out_sz, "cc_%s_%s", fam, name) < out_sz;
-            }
-        }
-        return 0;
-    }
-    /* Plain identifier → declared type from its declaring statement
-     * (side-effect-free; keeps cv-qualifiers so cstr families split). */
-    {
-        char vn[128];
-        char dty[256];
-        size_t q = a1s;
-        size_t len = a1e - a1s;
-        const char* fam;
-        while (q < a1e && cc_is_ident_char(src[q])) q++;
-        if (q != a1e || len == 0 || len >= sizeof(vn)) return 0;
-        memcpy(vn, src + a1s, len);
-        vn[len] = 0;
-        if (!cc__free_call_ident_decl_type(src, n, vn, dty, sizeof(dty)))
-            return 0;
-        if (cc__free_call_cstr_family(dty, &fam))
-            return (size_t)snprintf(out, out_sz, "cc_%s_%s", fam, name) < out_sz;
-        {
-            char base[256];
-            cc__copy_type_base(base, sizeof(base), dty);
-            if (strcmp(base, "CCString") == 0) {
-                *out_mode = 1;
-                return (size_t)snprintf(out, out_sz, "cc_string_%s", name) < out_sz;
-            }
-            fam = cc_ufcs_scalar_recv_family(base);
-            if (fam)
-                return (size_t)snprintf(out, out_sz, "cc_%s_%s", fam, name) < out_sz;
-            if (base[0] == 'C' && base[1] == 'C' && base[2] >= 'A' && base[2] <= 'Z' &&
-                !strchr(dty, '*')) {
-                *out_mode = 1;
-                return cc_ufcs_compose_default_callee(out, out_sz, base, name) != 0;
-            }
-        }
-    }
-    return 0;
-}
 
 /* Naming grid: the unprefixed container spellings `Vec::[T]` /
  * `vec_new::[T]` are the canonical surface, matching `Map::[K, V]` /
@@ -5943,6 +5631,102 @@ static int cc__free_call_family_callee(const char* src, size_t n,
  * instance/mangled layer (`Vec::[int]` and `CCVec::[int]` both name
  * `CCVec_int`). Normalized here, before any recognizer, so every
  * downstream pass sees one spelling. Comment/string-aware. */
+/* Naked print names: `println(x)` / `print` / `eprintln` / `eprint` at
+ * call position alias the declared `cc_println` family (`_Generic` over
+ * the argument, script/stdio.cch). A fixed four-name alias, not a
+ * general tier: a TU-declared function or macro of the same name wins
+ * (real binding always wins), and member position (`s.println()`) is
+ * untouched -- the method rails own it. A C preprocessor macro cannot
+ * provide these names: a function-like macro expands in member
+ * position too and would destroy every postfix spelling. */
+static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* name) {
+    size_t nlen = strlen(name);
+    size_t i = 0;
+    while (i + 8 + nlen < n) {
+        if (src[i] != '#') { i++; continue; }
+        {
+            size_t q = i + 1;
+            while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q + 6 < n && memcmp(src + q, "define", 6) == 0) {
+                q += 6;
+                while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+                if (q + nlen < n && memcmp(src + q, name, nlen) == 0 &&
+                    src[q + nlen] == '(')
+                    return 1;
+            }
+        }
+        while (i < n && src[i] != '\n') i++;
+    }
+    return 0;
+}
+
+static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
+    static const char* const names[] = {"eprintln", "println", "eprint", "print"};
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    int usable[4];
+    int checked = 0;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        int k;
+        size_t nl, e;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != 'p' && src[i] != 'e') { i++; continue; }
+        if (i > 0 && (cc_is_ident_char(src[i - 1]) || src[i - 1] == '.' ||
+                      (i > 1 && src[i - 1] == '>' && src[i - 2] == '-'))) {
+            i++;
+            continue;
+        }
+        for (k = 0; k < 4; k++) {
+            nl = strlen(names[k]);
+            if (i + nl < n && memcmp(src + i, names[k], nl) == 0 &&
+                !cc_is_ident_char(src[i + nl]))
+                break;
+        }
+        if (k == 4) { i++; continue; }
+        nl = strlen(names[k]);
+        e = i + nl;
+        while (e < n && (src[e] == ' ' || src[e] == '\t')) e++;
+        if (e >= n || src[e] != '(') { i += nl; continue; }
+        {
+            /* Skip back over whitespace: `.  println(` is member position. */
+            size_t b = i;
+            while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                             src[b - 1] == '\n' || src[b - 1] == '\r'))
+                b--;
+            if (b > 0 && (src[b - 1] == '.' ||
+                          (b > 1 && src[b - 1] == '>' && src[b - 2] == '-') ||
+                          src[b - 1] == '#' || src[b - 1] == '&' || src[b - 1] == '*')) {
+                i += nl;
+                continue;
+            }
+            if (b > 0 && cc_is_ident_char(src[b - 1]) &&
+                !cc__free_call_prev_word_is_stmt_kw(src, b)) {
+                i += nl; /* declaration shape: `T println(...)` */
+                continue;
+            }
+        }
+        if (!checked) {
+            for (int j = 0; j < 4; j++)
+                usable[j] = !cc__tu_declares_fn(src, n, names[j]) &&
+                            !cc__tu_defines_fnlike_macro(src, n, names[j]);
+            checked = 1;
+        }
+        if (!usable[k]) { i += nl; continue; }
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_");
+        cc_sb_append(&out, &out_len, &out_cap, src + i, nl);
+        last_emit = i + nl;
+        i += nl;
+    }
+    if (!out) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static char* cc__rewrite_container_surface_aliases(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0;
@@ -6272,142 +6056,6 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
     return out;
 }
 
-static char* cc__rewrite_free_call_families(const char* src, size_t n) {
-    char* out = NULL;
-    CCNameSet tu_decl = {0};
-    CCNameSet tu_mac = {0};
-    CCNameSet tu_var = {0};
-    /* Test-only baseline: tools/diff_additive.sh proves the additive
-     * tiers never change compiling code by diffing lowered output with
-     * them disabled. */
-    if (cc__ufcs_baseline_cached()) return NULL;
-    size_t out_len = 0, out_cap = 0, last_emit = 0;
-    CCScannerState scan;
-    size_t i = 0;
-    if (!src || n == 0) return NULL;
-    /* One scan each for TU bindings — free-call used to rescan the whole
-     * buffer per candidate name (dominant on large TUs like redis). */
-    cc__collect_tu_declared_fns(src, n, &tu_decl);
-    cc__collect_tu_macros(src, n, &tu_mac);
-    cc__collect_tu_var_binds(src, n, &tu_var);
-    cc_scanner_init(&scan);
-    while (i < n) {
-        size_t ns, ne, nlen, p;
-        char name[128];
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (!cc_is_ident_start(src[i])) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) {
-            while (i < n && cc_is_ident_char(src[i])) i++;
-            continue;
-        }
-        ns = i;
-        ne = i;
-        while (ne < n && cc_is_ident_char(src[ne])) ne++;
-        nlen = ne - ns;
-        i = ne;
-        /* Namespaced / internal / keyword names never compose. */
-        if (nlen >= 3 && memcmp(src + ns, "cc_", 3) == 0) continue;
-        if (nlen >= 2 && src[ns] == 'C' && src[ns + 1] == 'C') continue;
-        if (nlen >= 2 && src[ns] == '_' && src[ns + 1] == '_') continue;
-        if (cc__free_call_name_is_keyword(src + ns, nlen)) continue;
-        if (nlen >= sizeof(name)) continue;
-        /* Method position, declaration shape, address-of, preprocessor,
-         * and @-forms are other rails. A preceding identifier is a
-         * declaration shape unless it is a statement keyword
-         * (`return println(...)` is a call). */
-        {
-            size_t b = ns;
-            while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t')) b--;
-            if (b > 0 && (src[b - 1] == '.' || src[b - 1] == '*' ||
-                          src[b - 1] == '#' || src[b - 1] == '&' ||
-                          src[b - 1] == '@'))
-                continue;
-            if (b > 0 && cc_is_ident_char(src[b - 1]) &&
-                !cc__free_call_prev_word_is_stmt_kw(src, b))
-                continue;
-            if (b > 1 && src[b - 1] == '>' && src[b - 2] == '-') continue;
-        }
-        p = ne;
-        while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p >= n || src[p] != '(') continue;
-        memcpy(name, src + ns, nlen);
-        name[nlen] = 0;
-        if (cc__name_set_has(&tu_mac, name)) continue;
-        if (cc__name_set_has(&tu_decl, name)) continue;
-        /* Any visible variable binding of this name wins too — a
-         * function pointer `(*println)(...)` makes `println(x)` a
-         * legal C call through the pointer. */
-        if (cc__name_set_has(&tu_var, name)) continue;
-        if (cc_included_cch_declares_fn(name)) continue;
-        {
-            size_t close = 0;
-            size_t a1s, a1e, q;
-            int depth = 0, in_s = 0, in_c = 0;
-            char callee[320];
-            if (!cc_find_matching_paren(src, n, p, &close)) continue;
-            a1s = p + 1;
-            a1e = close;
-            for (q = a1s; q < close; q++) {
-                char c = src[q];
-                if (in_s) {
-                    if (c == '\\' && q + 1 < close) q++;
-                    else if (c == '"') in_s = 0;
-                    continue;
-                }
-                if (in_c) {
-                    if (c == '\\' && q + 1 < close) q++;
-                    else if (c == '\'') in_c = 0;
-                    continue;
-                }
-                if (c == '"') { in_s = 1; continue; }
-                if (c == '\'') { in_c = 1; continue; }
-                if (c == '(' || c == '[' || c == '{') { depth++; continue; }
-                if (c == ')' || c == ']' || c == '}') { depth--; continue; }
-                if (c == ',' && depth == 0) { a1e = q; break; }
-            }
-            {
-                int mode = 0;
-                if (!cc__free_call_family_callee(src, n, a1s, a1e, name,
-                                                 callee, sizeof(callee), &mode))
-                    continue;
-                if (!(cc__ufcs_fn_name_in_text(src, n, callee) ||
-                      cc_included_cch_contains_fn(callee)))
-                    continue;
-                cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
-                             ns - last_emit);
-                if (mode == 0) {
-                    /* Direct: family takes arg1 as spelled. */
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, callee);
-                    last_emit = ne;
-                } else {
-                    /* Postfix: `name(arg1, rest)` → `arg1.name(rest)` —
-                     * the method rails own the receiver convention. */
-                    size_t rs = a1e;
-                    cc_sb_append(&out, &out_len, &out_cap, src + a1s, a1e - a1s);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, ".");
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                    if (rs < close && src[rs] == ',') {
-                        rs++;
-                        while (rs < close &&
-                               (src[rs] == ' ' || src[rs] == '\t')) rs++;
-                    }
-                    if (rs < close)
-                        cc_sb_append(&out, &out_len, &out_cap, src + rs, close - rs);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-                    last_emit = close + 1;
-                    i = close + 1;
-                }
-            }
-        }
-    }
-    cc__name_set_free(&tu_decl);
-    cc__name_set_free(&tu_mac);
-    cc__name_set_free(&tu_var);
-    if (!out) return NULL;
-    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
 
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     char* cur = NULL;
@@ -16459,10 +16107,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__resolve_comptime_if(chain->src, chain->len, input_path)) < 0) return -1;
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
-    /* Free-call family symmetry runs before template lowering so an
-     * `@string(...)` argument is still spelled `@string` when arg1
-     * classification sees it. */
-    CC__CANON_STEP("cc__rewrite_free_call_families"); if (cc_pass_chain_apply(chain, cc__rewrite_free_call_families(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc__rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
     cc_note_tu_map_key_pairs(chain->src, chain->len);
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;

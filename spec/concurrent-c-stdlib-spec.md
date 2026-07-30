@@ -546,9 +546,10 @@ path.fprintln(STDERR_FILENO) !>;
 ```
 
 The prefix spelling is the same call: `println("literal") !>;` and
-`println(@string(`n=${n}`, &a)) !>;` resolve through free-call symmetry
-(core spec, UFCS rules) to the identical family callee. Which spelling
-to write is style.
+`println(@string(`n=${n}`, &a)) !>;` alias the declared `cc_println`
+family (core spec, naked-calls rule) — four aliased names, with any
+translation-unit binding of the name taking the call unchanged. Which
+spelling to write is style.
 
 Guidelines:
 
@@ -566,8 +567,9 @@ Guidelines:
   byte-writer API for non-script library code.
 
 Returns are `CCResult_size_t_CCError`. Short names `println` / `eprintln` are
-not macros: the prefix spelling resolves through free-call symmetry to the
-receiver-typed family function.
+not macros (a function-like macro would expand in member position and destroy
+the postfix spelling): the prefix spelling aliases the declared `cc_println`
+family at call position only.
 
 ## Collections
 
