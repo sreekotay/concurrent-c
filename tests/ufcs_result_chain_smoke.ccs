@@ -11,8 +11,18 @@ static CCResult_int_CCError mk(int v) {
         .u.error = { .message = "negative" } };
     return (CCResult_int_CCError){ .ok = true, .u.value = v };
 }
+static CCResult_size_t_CCError mks(size_t v) {
+    if (v > 1000) return (CCResult_size_t_CCError){ .ok = false,
+        .u.error = { .message = "too big" } };
+    return (CCResult_size_t_CCError){ .ok = true, .u.value = v };
+}
 static int cc_int_twice(int v) { return v * 2; }
 static CCResult_int_CCError cc_int_step(int v) { return mk(v + 1); }
+/* Heterogeneous hop: size_t Result → int Result; each hoist must use
+ * that hop's own ok type (size_t, then int). */
+static CCResult_int_CCError cc_size_t_as_int(size_t v) {
+    return mk((int)v);
+}
 
 int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
@@ -24,6 +34,10 @@ int main(void) {
     /* two fallible hops, then a plain one */
     int b = mk(4)!>.step()!>.twice();
     printf("b=%d\n", b);
+
+    /* ok-type changes across hops: size_t → int → twice */
+    int h = mks(21)!>.as_int()!>.twice();
+    printf("h=%d\n", h);
 
     /* per-link recovery: the handler diverges for this hop alone */
     int c = mk(-1)

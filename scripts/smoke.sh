@@ -31,6 +31,8 @@ if [ ! -f third_party/tcc/configure ]; then
 fi
 
 step "TinyCC (patched, --config-cc_ext)"
+# Fresh submodule checkouts are pristine; hooks ride the patch files.
+./scripts/apply_tcc_patches.sh
 # NB: grep -q would exit early and SIGPIPE nm, which pipefail turns into
 # a failure — use full-consuming grep >/dev/null instead.
 if ! nm third_party/tcc/libtcc.a 2>/dev/null | grep cc_ast_record >/dev/null; then

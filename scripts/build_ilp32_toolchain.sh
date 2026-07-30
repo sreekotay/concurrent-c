@@ -47,6 +47,7 @@ make -C cc clean >/dev/null 2>&1 || true
 rm -rf out/cc out/cc-tcc out/bin 2>/dev/null || true
 
 printf '== TinyCC (patched, --config-cc_ext)\n'
+./scripts/apply_tcc_patches.sh
 (cd third_party/tcc && ./configure --config-cc_ext && make libtcc.a tcc libtcc1.a -j"$JOBS")
 nm third_party/tcc/libtcc.a | grep cc_ast_record >/dev/null \
   || die "libtcc.a missing CC hooks (cc_ast_record_*)"

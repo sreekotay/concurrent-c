@@ -5764,7 +5764,7 @@ static char* cc__rewrite_container_surface_aliases(const char* src, size_t n) {
 /* Ok-type spelling for a concrete Result name, from the spec table
  * (fallback: the mangled middle, which equals the spelling for
  * single-token ok types like CCPyObj). */
-static CCResultSpecTable cc__result_specs;
+static CCResultSpecTable cc__result_specs = {0};
 static int cc__result_ok_type_for(const char* concrete, char* out, size_t sz) {
     size_t i;
     if (!concrete || !out || sz == 0) return 0;
@@ -5789,7 +5789,7 @@ static int cc__result_ok_type_for(const char* concrete, char* out, size_t sz) {
             last = t;
             t++;
         }
-        if (last && last > mid && !last[strlen(last)] ) {
+        if (last && last > mid) {
             size_t ml = (size_t)(last - mid);
             if (ml + 1 < sz) {
                 memcpy(out, mid, ml);
@@ -5961,94 +5961,42 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
             }
             (void)b;
         }
-        /* Walk and hoist: every linked hop becomes its own statement;
-         * the final hop (with any trailing unwrap) keeps the original
-         * destination text. */
+        /* Hoist one linked hop per pass: `OK __cc_rc_N = <call><sep>;`
+         * then reattach the next `.m(...)` (and any further `!>` links)
+         * to the original destination. Further Result hops wait until
+         * UFCS lowers them to plain calls so each temp gets that hop's
+         * own ok type — not the first producer's. */
         {
-            size_t pos = eend;
-            size_t prod_s = estart, prod_e = eend;
-            char tmp_prev[48];
-            int have_prev = 0;
-            int emitted = 0;
-            size_t out_mark = out_len;
-            size_t emitted_upto = last_emit;
-            tmp_prev[0] = 0;
+            int id = ++g_rc_tmp_id;
+            char head[192];
+            char tmp[48];
+            size_t m, npe, next_s, next_e;
+            m = cc_skip_ws_and_comments(src, n, sep_end);
+            next_s = m; /* at '.' */
+            m = cc_skip_ws_and_comments(src, n, m + 1);
+            while (m < n && cc_is_ident_char(src[m])) m++;
+            m = cc_skip_ws_and_comments(src, n, m);
+            if (m >= n || src[m] != '(' ||
+                !cc_find_matching_paren(src, n, m, &npe)) {
+                i = sep_end;
+                continue;
+            }
+            next_e = npe + 1;
+            snprintf(head, sizeof(head), "%s __cc_rc_%d = ", okty, id);
+            snprintf(tmp, sizeof(tmp), "__cc_rc_%d", id);
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
                          stmt_head - last_emit);
-            for (;;) {
-                size_t s2, se2, nd;
-                int linked = 0;
-                s2 = cc_skip_ws_and_comments(src, n, pos);
-                se2 = pos;
-                if (s2 + 1 < n && src[s2] == '!' && src[s2 + 1] == '>') {
-                    size_t r = cc_skip_ws_and_comments(src, n, s2 + 2);
-                    se2 = s2 + 2;
-                    if (r < n && src[r] == '(') {
-                        size_t pe2;
-                        if (cc_find_matching_paren(src, n, r, &pe2))
-                            r = cc_skip_ws_and_comments(src, n, pe2 + 1);
-                    }
-                    if (r < n && src[r] == '{') {
-                        size_t be2;
-                        if (cc_find_matching_brace(src, n, r, &be2))
-                            se2 = be2 + 1;
-                    }
-                    nd = cc_skip_ws_and_comments(src, n, se2);
-                    if (nd < n && src[nd] == '.') linked = 1;
-                }
-                if (!linked) {
-                    /* Final hop: original head text, previous temp (if
-                     * any) as receiver, source through any trailing
-                     * unwrap left in place. */
-                    if (!emitted) {
-                        /* Chain of one: nothing to rewrite. */
-                        out_len = out_mark;
-                        out[out_len] = 0;
-                        i = sep_end;
-                        (void)emitted_upto;
-                        break;
-                    }
-                    cc_sb_append(&out, &out_len, &out_cap, src + stmt_head,
-                                 estart - stmt_head);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_prev);
-                    cc_sb_append(&out, &out_len, &out_cap, src + prod_s,
-                                 prod_e - prod_s);
-                    last_emit = prod_e;
-                    i = prod_e;
-                    break;
-                }
-                /* Linked hop: hoist `OK __cc_rc_N = <recv><call><sep>;` */
-                {
-                    int id = ++g_rc_tmp_id;
-                    char head[192];
-                    size_t m, npe;
-                    snprintf(head, sizeof(head), "%s __cc_rc_%d = ", okty, id);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, head);
-                    if (have_prev)
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, tmp_prev);
-                    cc_sb_append(&out, &out_len, &out_cap, src + prod_s,
-                                 se2 - prod_s);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n    ");
-                    snprintf(tmp_prev, sizeof(tmp_prev), "__cc_rc_%d", id);
-                    have_prev = 1;
-                    emitted = 1;
-                    /* Next producer: the link span `.m(args)`. */
-                    m = cc_skip_ws_and_comments(src, n, se2);
-                    prod_s = m; /* at '.' */
-                    m = cc_skip_ws_and_comments(src, n, m + 1);
-                    while (m < n && cc_is_ident_char(src[m])) m++;
-                    m = cc_skip_ws_and_comments(src, n, m);
-                    if (m >= n || src[m] != '(' ||
-                        !cc_find_matching_paren(src, n, m, &npe)) {
-                        out_len = out_mark;
-                        out[out_len] = 0;
-                        i = sep_end;
-                        break;
-                    }
-                    prod_e = npe + 1;
-                    pos = prod_e;
-                }
-            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, head);
+            cc_sb_append(&out, &out_len, &out_cap, src + estart,
+                         sep_end - estart);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n    ");
+            cc_sb_append(&out, &out_len, &out_cap, src + stmt_head,
+                         estart - stmt_head);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, tmp);
+            cc_sb_append(&out, &out_len, &out_cap, src + next_s,
+                         next_e - next_s);
+            last_emit = next_e;
+            i = next_e;
         }
     }
     if (!out) return NULL;
@@ -7258,8 +7206,6 @@ static void cc__register_lowered_map_macros(const char* src) {
     cc__register_lowered_kv_macros(src, "__CC_MAP(", "Map_");
     cc__register_lowered_kv_macros(src, "__CC_ARRAY_MAP(", "ArrayMap_");
 }
-
-static CCResultSpecTable cc__result_specs = {0};
 
 static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
                                 const char* mangled_ok, const char* mangled_err) {
