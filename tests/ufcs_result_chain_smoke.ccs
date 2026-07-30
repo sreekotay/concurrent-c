@@ -1,0 +1,34 @@
+/* Fallible chains: `!>` links hops — each unwraps, then the next
+ * dispatches on the unwrapped value. Hops hoist to statement-position
+ * temporaries, so a bare `!>` targets the enclosing @errhandler, a
+ * handler keeps its written control flow, and the final hop keeps the
+ * original destination. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+static CCResult_int_CCError mk(int v) {
+    if (v < 0) return (CCResult_int_CCError){ .ok = false,
+        .u.error = { .message = "negative" } };
+    return (CCResult_int_CCError){ .ok = true, .u.value = v };
+}
+static int cc_int_twice(int v) { return v * 2; }
+static CCResult_int_CCError cc_int_step(int v) { return mk(v + 1); }
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    /* bare link: unwrap, then an ordinary method on the value */
+    int a = mk(21)!>.twice();
+    printf("a=%d\n", a);
+
+    /* two fallible hops, then a plain one */
+    int b = mk(4)!>.step()!>.twice();
+    printf("b=%d\n", b);
+
+    /* per-link recovery: the handler diverges for this hop alone */
+    int c = mk(-1)
+        !>(e) { printf("recovered: %s\n", e.message); return 0; }
+        .step()!>.twice();
+    printf("unreachable c=%d\n", c);
+    return 9;
+}

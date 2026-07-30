@@ -1,16 +1,17 @@
-/* Free-call family symmetry: `name(arg1, …)` where `name` has no
- * visible declaration is the prefix spelling of `arg1.name(…)` — one
- * resolution, two spellings. The family callee composes from arg1's
- * type (string literal, cv-split cstr pointers, @string / CCString,
- * scalars) and fires only when that function is declared; a real
- * declaration named `name` always wins, and unknown names keep their
- * implicit-declaration error. */
+/* Naked print names: `println(x)` / `print` / `eprintln` / `eprint`
+ * alias the declared cc_println family (`_Generic` over the argument)
+ * when script/stdio.cch is included — a fixed four-name alias, not a
+ * general tier. A TU-declared binding of the same name always wins,
+ * member position is untouched, and every other undeclared name keeps
+ * its honest implicit-declaration error. For scalar helpers, declare
+ * the natural name: prefix is plain C and postfix arrives via the
+ * bare-name tier. */
 #include <ccc/script/stdio.cch>
 #include <assert.h>
 #include <stdio.h>
 
-static double cc_double_frob(double x) { return x * 2.0 + 0.25; }
-static long long cc_long_long_frob(long long x) { return x + 1; }
+/* The natural-name pattern: both spellings from one declaration. */
+static double frob(double x) { return x * 2.0 + 0.25; }
 
 int main(void) {
     CCArena a = cc_arena_create(1 << 12);
@@ -18,7 +19,7 @@ int main(void) {
     char mbuf[32] = "mut ptr line";
     char *mp = mbuf;
 
-    /* String-literal and cv-split cstr pointer receivers, prefix form. */
+    /* String-literal and cv-split cstr pointer arguments. */
     CCResult_size_t_CCError r1 = println("literal line");
     assert(r1.ok);
     CCResult_size_t_CCError r2 = println(cp);
@@ -26,27 +27,24 @@ int main(void) {
     CCResult_size_t_CCError r3 = println(mp);
     assert(r3.ok);
 
-    /* @string template and CCString value arguments route through the
-     * method rail (receiver conventions owned there). */
+    /* @string template and CCString value arguments (`_Generic` arms). */
     CCResult_size_t_CCError r4 = println(@string(`templated ${40 + 2}`, &a));
     assert(r4.ok);
     CCString cs = cc_string_from("built line", &a);
     CCResult_size_t_CCError r5 = println(cs);
     assert(r5.ok);
 
-    /* eprintln composes the const-char family too (stderr, not part of
-     * this test's stdout expectations). */
+    /* eprintln targets stderr (not part of stdout expectations). */
     CCResult_size_t_CCError r6 = eprintln("err line");
     assert(r6.ok);
 
-    /* Scalar arguments: literal and identifier, suffix-typed. */
+    /* Declared natural name: prefix is plain C, postfix is the bare
+     * tier — one declaration, both spellings. */
     double d = frob(1.5);
     assert(d == 3.25);
     double dv = 2.0;
-    double d2 = frob(dv);
+    double d2 = dv.frob();
     assert(d2 == 4.25);
-    long long g = frob(7LL);
-    assert(g == 8);
 
     printf("ok\n");
     cc_arena_destroy(&a);
