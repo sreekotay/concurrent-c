@@ -34,7 +34,7 @@ int main(void) {
             int v;
             while (cc_io_avail(rx.recv(&v))) {
                 printf("recv: %d\n", v);
-                cc_atomic_fetch_add(&sum, v);
+                sum.fetch_add(v);
             }
         });
 
@@ -53,7 +53,7 @@ int main(void) {
     }
     /* outer @destroy: wait consumer (saw close, drained, exited) */
 
-    int total = cc_atomic_load(&sum);
+    int total = sum.load();
     printf("sum = %d (expected 6)\n", total);
     return (total == 6) ? 0 : 1;
 }

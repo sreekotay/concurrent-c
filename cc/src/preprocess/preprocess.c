@@ -2150,6 +2150,7 @@ int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
 static int cc__call_return_type(const char* fname, const char* src, size_t n,
                                 char* out, size_t out_sz);
 static int cc__free_call_name_is_keyword(const char* s, size_t n);
+static int cc_included_cch_declares_fn(const char* name);
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz);
 static void cc__enumerate_family_variants(const char* src, size_t n,
@@ -4692,6 +4693,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int scalar_like = 0;
         int scalar_literal = 0;
         int slice_spec_like = 0;
+        int atomic_like = 0;
         int recv_addressable = 1;
         char wildcard_callee[256];
         const char* channel_callee = NULL;
@@ -4828,6 +4830,21 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
          * call parse as plain C. Anything else (byte methods via the
          * `base` @as retry, declared extensions, the strict ladder)
          * stays with the AST pass. */
+        /* Atomic receivers: the cc_atomic_* typedefs dispatch to the
+         * type-generic cc_atomic_<op> macros with the receiver's
+         * address — `counter.fetch_add(1)` is cc_atomic_fetch_add(
+         * &counter, 1). Compose-then-verify against the header's
+         * function-like defines; a non-member falls to the ladder. */
+        atomic_like = (strncmp(recv_type_base, "cc_atomic_", 10) == 0);
+        if (atomic_like) {
+            char acand[128];
+            if ((size_t)snprintf(acand, sizeof(acand), "cc_atomic_%s",
+                                 method_name) >= sizeof(acand) ||
+                !cc_included_cch_declares_fn(acand)) {
+                i++;
+                continue;
+            }
+        }
         slice_spec_like = (cc_slice_spec_lookup(recv_type_base, NULL, NULL) == 0);
         if (slice_spec_like && !cc_ufcs_family_has_member(recv_type_base, method_name)) {
             i++;
@@ -4859,6 +4876,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx || map_decl_like || slice_spec_like ||
+              atomic_like ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             /* CC*-prefixed stdlib types follow the snake_case twin convention
              * (`CCListener.accept` → `cc_listener_accept`) even when the
@@ -5302,6 +5320,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
                 }
+            } else if (atomic_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_atomic_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (map_decl_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
@@ -10583,6 +10604,24 @@ static void cc__index_declares(CCPathTextCache* slot) {
     cc_scanner_init(&scan);
     while (i < slot->len) {
         size_t s, e, q, b;
+        /* Function-like macros are real bindings, but the shared scanner
+         * consumes directive lines whole — harvest `#define name(` here,
+         * then let the scanner skip the line as usual. */
+        if (slot->text[i] == '#' && (i == 0 || slot->text[i - 1] == '\n')) {
+            size_t d = i + 1;
+            while (d < slot->len && (slot->text[d] == ' ' || slot->text[d] == '\t'))
+                d++;
+            if (d + 6 < slot->len && memcmp(slot->text + d, "define", 6) == 0) {
+                d += 6;
+                while (d < slot->len &&
+                       (slot->text[d] == ' ' || slot->text[d] == '\t'))
+                    d++;
+                s = d;
+                while (d < slot->len && cc_is_ident_char(slot->text[d])) d++;
+                if (d > s && d < slot->len && slot->text[d] == '(')
+                    (void)cc__name_set_push(&set, slot->text + s, d - s);
+            }
+        }
         if (cc_scanner_skip_non_code(&scan, slot->text, slot->len, &i)) continue;
         if (!cc_is_ident_start(slot->text[i])) { i++; continue; }
         if (i > 0 && cc_is_ident_char(slot->text[i - 1])) {

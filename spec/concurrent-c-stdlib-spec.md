@@ -1416,6 +1416,19 @@ On a failed compare-and-swap, the C11 and fallback implementations update
 `*expected_ptr` with the observed value. The GCC/Clang `__sync` implementation
 returns false without updating `*expected_ptr`.
 
+Atomic operations are also methods on the atomic value: for a receiver whose
+type is a `cc_atomic_*` typedef, `recv.method(args)` composes
+`cc_atomic_<method>(&recv, args)` when the header declares that operation.
+
+```c
+cc_atomic_int n;
+n.store(40);
+int old = n.fetch_add(2);     // cc_atomic_fetch_add(&n, 2)
+int cur = n.load();
+int want = 42;
+bool ok = n.cas(&want, 100);  // cc_atomic_cas(&n, &want, 100)
+```
+
 `CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics or
 GCC/Clang atomic builtins. It is `0` for TinyCC and unknown-compiler fallback
 implementations. Operations in a `0` configuration are not thread-safe.

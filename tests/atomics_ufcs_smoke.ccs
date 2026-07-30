@@ -1,0 +1,26 @@
+/* Atomic receivers dispatch to the type-generic cc_atomic_<op> macros
+ * with the receiver's address: counter.fetch_add(1), counter.load(),
+ * counter.store(v), counter.cas(&expected, desired). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+int main(void) {
+    cc_atomic_int counter = 0;
+    cc_atomic_u64 big = 0;
+
+    counter.store(40);
+    int before = counter.fetch_add(2);
+    int now = counter.load();
+
+    big.fetch_add(5);
+    uint64_t bnow = big.load();
+
+    int expected = 42;
+    int swapped = counter.cas(&expected, 100);
+    int final_v = counter.load();
+
+    printf("%d %d %llu %d %d\n", before, now,
+           (unsigned long long)bnow, swapped, final_v);
+    return 0;
+}
