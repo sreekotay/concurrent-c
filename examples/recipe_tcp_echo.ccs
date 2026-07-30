@@ -38,29 +38,29 @@
 /* Echo every received chunk until the peer closes. */
 static void handle_client(CCSocket sock) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    if (!a.base) { cc_socket_close(&sock); return; }
+    if (!a.base) { sock.close(); return; }
 
     CCNetError peer_err = CC_NET_OK;
-    CCSlice peer = cc_socket_peer_addr(&sock, &a, &peer_err);
+    CCSlice peer = sock.peer_addr(&a, &peer_err);
     if (peer_err == CC_NET_OK) {
         printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
     }
 
     for (;;) {
-        cc_arena_reset(&a);
+        a.reset();
         CCSlice data;
-        if (!cc_io_avail(cc_socket_read(&sock, &a, 1024, &data))) {
+        if (!cc_io_avail(sock.read(&a, 1024, &data))) {
             printf("client disconnected\n");
             break;
         }
         printf("echo %zu bytes\n", data.len);
-        size_t written = cc_socket_write(&sock, data.ptr, data.len) !>(e) {
+        size_t written = sock.write(data.ptr, data.len) !>(e) {
             (void)e;
             break;
         };
         (void)written;
     }
-    cc_socket_close(&sock);
+    sock.close();
 }
 
 /* In-process client: connect, send, read echo, close. */
@@ -71,23 +71,23 @@ static void run_test_client(void) {
     };
 
     const char msg[] = "hello from test\n";
-    size_t nw = cc_socket_write(&sock, msg, sizeof(msg) - 1) !>(e) {
+    size_t nw = sock.write(msg, sizeof(msg) - 1) !>(e) {
         fprintf(stderr, "write error: %s\n", cc_io_error_str(e));
-        cc_socket_close(&sock);
+        sock.close();
         return;
     };
     (void)nw;
 
     char buf[64] = {0};
     size_t got = 0;
-    bool ok = cc_socket_read_into(&sock, buf, sizeof(buf) - 1, &got) !>(e) {
+    bool ok = sock.read_into(buf, sizeof(buf) - 1, &got) !>(e) {
         fprintf(stderr, "read error: %s\n", cc_io_error_str(e));
-        cc_socket_close(&sock);
+        sock.close();
         return;
     };
     if (!ok) got = 0;
     printf("test client got %zu bytes: %.*s", got, (int)got, buf);
-    cc_socket_close(&sock);
+    sock.close();
 }
 
 @grammar(cli) TcpEchoOpts {~~~~
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     /* nursery @destroy: accept loop exited, every handler (and the test
      * client, if any) have drained. */
 
-    cc_listener_close(&ln);
+    ln.close();
     printf("server done\n");
     return 0;
 }

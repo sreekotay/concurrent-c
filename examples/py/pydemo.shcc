@@ -3,26 +3,25 @@
 
 CCPy py = cc_py(&a) !> @destroy;
 
-/* Unresolved methods on CCPyObj dispatch dynamically (.ufcs_dynamic2):
- * the method identifier becomes the Python attribute; arguments marshal
- * by static type. The declared destination joins resolution — at
- * `double v = …` the call lowers to the library's destination-typed
- * variant (cc_py_obj_callm_double), which extracts the scalar and
- * releases the intermediate object, so no CCPyObj binding or @destroy
- * appears. */
+/* Unresolved methods on CCPyObj dispatch dynamically: the method
+ * identifier becomes the Python attribute; arguments marshal by static
+ * type. The declared destination joins resolution — at `double v = …`
+ * the call lowers to the destination-typed variant, which extracts the
+ * scalar and releases the intermediate object, so no CCPyObj binding
+ * or @destroy appears. */
 CCPyObj math = py.import("math") !> @destroy;
 double v = math.sqrt(2.0) !>;
-@string(`math.sqrt(2.0) = ${v}`, &a).println() !>;
+println(@string(`math.sqrt(2.0) = ${v}`, &a)) !>;
 
 double pv = math.pow(2.0, 10) !>;
-@string(`math.pow(2,10) = ${pv}`, &a).println() !>;
+println(@string(`math.pow(2,10) = ${pv}`, &a)) !>;
 
 CCPyObj stats = py.import("statistics") !> @destroy;
 double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
 double mv = stats.mean(xs) !>;
-@string(`statistics.mean = ${mv}`, &a).println() !>;
+println(@string(`statistics.mean = ${mv}`, &a)) !>;
 
-CCPyObj sys = py.import("sys") !> @destroy;
-CCPyObj ver = sys.get("version") !> @destroy;
-CCSlice vs = ver.as_slice() !>;
-@string(`sys.version    = ${vs}`, &a).println() !>;
+/* `!>` links hops: each unwraps, then the next dispatches on the
+ * unwrapped value; as_slice defaults to the handle's scratch arena. */
+CCSlice vs = py.import("sys")!>.get("version")!>.as_slice()!>;
+println(@string(`sys.version    = ${vs}`, &a)) !>;

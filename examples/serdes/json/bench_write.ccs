@@ -122,6 +122,6 @@ int main(int argc, char** argv) {
     printf("json write hand %6.0f MB/s  (unchecked single-pass)\n",
            (double)w * K / best / 1e6);
     free(buf); free(out); free(hout);
-    cc_arena_free(&arena);
+    arena.destroy();
     return 0;
 }

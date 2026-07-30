@@ -2790,6 +2790,9 @@ static int cc__is_slice_ufcs_method(const char* method_name) {
             strcmp(method_name, "is_empty") == 0 ||
             strcmp(method_name, "at") == 0 ||
             strcmp(method_name, "sub") == 0 ||
+            strcmp(method_name, "has") == 0 ||
+            strcmp(method_name, "index_of") == 0 ||
+            strcmp(method_name, "last_index_of") == 0 ||
             strcmp(method_name, "starts_with") == 0 ||
             strcmp(method_name, "ends_with") == 0 ||
             strcmp(method_name, "eq") == 0 ||
@@ -4948,6 +4951,18 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             }
         }
         family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0) || scalar_like;
+        /* Mixed-convention runtime families (cc_slice_*): receiver
+         * passing follows the declared first parameter — by value when
+         * the family fn takes the receiver type by value, &recv when it
+         * takes a pointer. Same rule as the bare tier. */
+        if (slice_like && !family_by_value) {
+            char scand[128], fparam[256];
+            if ((size_t)snprintf(scand, sizeof(scand), "cc_slice_%s",
+                                 method_name) < sizeof(scand) &&
+                cc_included_cch_fn_first_param(scand, fparam, sizeof(fparam)) &&
+                !strchr(fparam, '*'))
+                family_by_value = 1;
+        }
         family_pass_direct = parser_map || map_decl_like ||
                              (strncmp(recv_type_base, "ArrayMap_", 9) == 0) ||
                              (strncmp(recv_type_base, "Map_", 4) == 0);

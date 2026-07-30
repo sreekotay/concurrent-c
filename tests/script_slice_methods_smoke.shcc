@@ -1,0 +1,9 @@
+/* CCSlice methods follow the declared first parameter: cc_slice_sub /
+ * cc_slice_index_of take the receiver by value, cc_slice_has takes it
+ * by pointer — one method surface, both conventions. */
+CCSlice s = @slice("hello world");
+CCSlice t = s.sub(6, s.len);
+bool found = false;
+size_t pos = s.index_of(@slice("world"), &found);
+int h = s.has(@slice("world"));
+println(@string(`sub=${t} pos=${pos} found=${(int)found} has=${h}`, &a)) !>;

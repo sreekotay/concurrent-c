@@ -53,14 +53,14 @@ int main(int argc, char** argv) {
 
     best = 1e18;
     for (int t = 0; t < T; t++) { double t0 = now_s();
-        for (int i = 0; i < K; i++) { g_keeps = 0; g_bytes = 0; cc_arena_reset(&ar);
+        for (int i = 0; i < K; i++) { g_keeps = 0; g_bytes = 0; ar.reset();
             if (!Json_collect(b, rd, &ar, cb, 0)) { printf("collect FAIL\n"); return 1; } }
         double dt = now_s() - t0; if (dt < best) best = dt; }
     printf("%-14s gen collect  %6.0f MB/s  %8.1f us/parse  (keeps=%ld bytes=%ld)\n",
            fn, n*(double)K/best/1e6, best/K*1e6, g_keeps, g_bytes);
     best = 1e18;
     for (int t = 0; t < T; t++) { double t0 = now_s();
-        for (int i = 0; i < K; i++) { cc_arena_reset(&ar);
+        for (int i = 0; i < K; i++) { ar.reset();
             if (!Json_parse(b, rd, &ar)) { printf("dom FAIL\n"); return 1; } }
         double dt = now_s() - t0; if (dt < best) best = dt; }
     printf("%-14s gen DOM      %6.0f MB/s  %8.1f us/parse\n",
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
 
     /* the schema tier is twitter-shaped ({"statuses":[...]}); skip corpora
      * it doesn't model rather than failing the whole run */
-    { Feed probe; cc_arena_reset(&ar);
+    { Feed probe; ar.reset();
       if (!Feed_parse(b, rd, &ar, &probe)) {
           printf("%-14s gen schema     (skipped: corpus is not Feed-shaped)\n", fn);
           return 0;
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
     best = 1e18;
     { size_t sn = 0; unsigned long long tl = 0;
     for (int t = 0; t < T; t++) { double t0 = now_s();
-        for (int i = 0; i < K; i++) { cc_arena_reset(&ar);
+        for (int i = 0; i < K; i++) { ar.reset();
             Feed fd;
             if (!Feed_parse(b, rd, &ar, &fd)) { printf("schema FAIL\n"); return 1; }
             sn = fd.statuses_n; tl = 0;
