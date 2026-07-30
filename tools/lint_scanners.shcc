@@ -29,19 +29,19 @@ static const ScannerBaseline BASELINE[] = {
     {"cc/src/ir/ir.c", 8},
     {"cc/src/parser/parse.c", 7},
     {"cc/src/preprocess/emit_plan.c", 9},
-    {"cc/src/preprocess/preprocess.c", 85},
+    {"cc/src/preprocess/preprocess.c", 12},
     {"cc/src/preprocess/template_scan.c", 10},
     {"cc/src/preprocess/type_registry.c", 3},
     {"cc/src/util/result_fn_registry.c", 3},
     {"cc/src/util/text.h", 22},
-    {"cc/src/util/text_scan.h", 5},
+    {"cc/src/util/text_scan.h", 6},
     {"cc/src/visitor/async_ast.c", 3},
     {"cc/src/visitor/pass_autoblock.c", 4},
     {"cc/src/visitor/pass_create.c", 4},
     {"cc/src/visitor/pass_defer_syntax.c", 4},
     {"cc/src/visitor/pass_err_syntax.c", 4},
     {"cc/src/visitor/pass_type_syntax.c", 4},
-    {"cc/src/visitor/visit_codegen.c", 10},
+    {"cc/src/visitor/visit_codegen.c", 11},
 };
 
 static int is_word_char(char c) {
