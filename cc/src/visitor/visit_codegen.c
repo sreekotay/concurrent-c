@@ -4689,6 +4689,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        parser-safe UFCS families. */
     if (src_ufcs && ctx) {
         char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+        if (rew == (char*)-1) rew = NULL; /* site error already reported */
         if (rew) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rew;
@@ -5022,6 +5023,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         if (src_ufcs && ctx) {
             char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+            if (rew == (char*)-1) rew = NULL; /* site error already reported */
             if (rew) {
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rew;

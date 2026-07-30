@@ -253,6 +253,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                                                  const char* input_path);
 char* cc__rewrite_at_await(const char* src, size_t n); /* defined later */
 static char* cc__normalize_template_recv_chains(const char* src, size_t n);
+static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, size_t* out_rbracket);
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
 static inline void cc_pass_chain_init(CCPassChain* c, const char* src, size_t len) {
@@ -628,6 +629,103 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
 /* Legacy compatibility wrapper. Builtin arena/nursery declaration lowering has
    moved to registered type-owned `@create` hooks; keep only the expression-form
    ownership annotation rewrite here (`Type x = expr @destroy/@detach;`). */
+/* `T* p = cc_arena_alloc_T[_count](TY, ARENA, ...) @destroy [{ body }];`
+ * → `T* p = ...; @defer { body (void)cc_arena_release(ARENA, p); };`
+ * Runs after UFCS lowering so ARENA is spelled with the correct
+ * reference form. Where the slab cannot reclaim, the release is a
+ * semantic no-op; the declaration still states the allocation's scope. */
+static char* cc__rewrite_alloct_destroy_annotations(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    size_t cur_stmt = 0;
+    int changed = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t stmt_s, eq, p, name_s, name_e, rhs_s, r, cs, cl, lp, rp;
+        size_t a1, a2s, a2e, semi, body_s = 0, body_e = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == ';' || src[i] == '{' || src[i] == '}') {
+            cur_stmt = i + 1;
+            i++;
+            continue;
+        }
+        if (src[i] != '@' || i + 8 > n || memcmp(src + i, "@destroy", 8) != 0 ||
+            (i + 8 < n && cc__pp_is_ident_char(src[i + 8]))) {
+            i++;
+            continue;
+        }
+        stmt_s = cc_skip_ws_and_comments(src, n, cur_stmt);
+        if (stmt_s >= i || stmt_s < last_emit) { i++; continue; }
+        if (!cc__pp_find_top_level_equal(src, stmt_s, i, &eq)) { i++; continue; }
+        p = eq;
+        while (p > stmt_s && isspace((unsigned char)src[p - 1])) p--;
+        name_e = p;
+        while (p > stmt_s && cc__pp_is_ident_char(src[p - 1])) p--;
+        name_s = p;
+        if (name_s >= name_e ||
+            !(isalpha((unsigned char)src[name_s]) || src[name_s] == '_')) {
+            i++;
+            continue;
+        }
+        rhs_s = cc_skip_ws_and_comments(src, n, eq + 1);
+        cs = rhs_s;
+        r = rhs_s;
+        while (r < i && cc__pp_is_ident_char(src[r])) r++;
+        cl = r - cs;
+        if (!((cl == 16 && !memcmp(src + cs, "cc_arena_alloc_T", 16)) ||
+              (cl == 22 && !memcmp(src + cs, "cc_arena_alloc_T_count", 22)))) {
+            i++;
+            continue;
+        }
+        lp = cc_skip_ws_and_comments(src, i, r);
+        if (lp >= i || src[lp] != '(' || !cc_find_matching_paren(src, i, lp, &rp)) {
+            i++;
+            continue;
+        }
+        a1 = cc_find_char_top_level(src, lp + 1, rp, ',');
+        if (a1 >= rp) { i++; continue; }
+        a2s = cc_skip_ws_and_comments(src, rp, a1 + 1);
+        a2e = cc_find_char_top_level(src, a2s, rp, ',');
+        if (a2e > rp) a2e = rp;
+        while (a2e > a2s && isspace((unsigned char)src[a2e - 1])) a2e--;
+        if (a2e <= a2s) { i++; continue; }
+        /* Optional `{ body }` then the statement `;`. */
+        semi = cc_skip_ws_and_comments(src, n, i + 8);
+        if (semi < n && src[semi] == '{') {
+            body_s = semi;
+            if (!cc_find_matching_brace(src, n, body_s, &body_e)) { i++; continue; }
+            semi = cc_skip_ws_and_comments(src, n, body_e + 1);
+        }
+        if (semi >= n || src[semi] != ';') { i++; continue; }
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "; @defer { ");
+        if (body_e > body_s) {
+            for (size_t bi = body_s + 1; bi < body_e; bi++) {
+                char bc = src[bi];
+                char oc2 = (bc == '\n' || bc == '\r' || bc == '\t') ? ' ' : bc;
+                cc_sb_append(&out, &out_len, &out_cap, &oc2, 1);
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(void)cc_arena_release(");
+        cc_sb_append(&out, &out_len, &out_cap, src + a2s, a2e - a2s);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "); };");
+        last_emit = semi + 1;
+        i = semi + 1;
+        changed = 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src, size_t n, const char* input_path, CCSymbolTable* symbols) {
     (void)symbols;
     return cc__rewrite_builtin_owned_decl_annotations(src, n, input_path);
@@ -3893,13 +3991,17 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
                                            char* out_method_name,
                                            size_t out_method_name_sz,
                                            char* out_recv_expr,
-                                           size_t out_recv_expr_sz) {
+                                           size_t out_recv_expr_sz,
+                                           size_t* out_targ_a,
+                                           size_t* out_targ_b) {
     size_t sep_pos;
     size_t method_start;
     size_t method_end;
     size_t recv_start;
     size_t paren_pos;
     size_t paren_end = 0;
+    if (out_targ_a) *out_targ_a = 0;
+    if (out_targ_b) *out_targ_b = 0;
     if (!src || pos >= n || !out_method_name || out_method_name_sz == 0 ||
         !out_recv_expr || out_recv_expr_sz == 0) {
         return 0;
@@ -3920,6 +4022,19 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
     memcpy(out_method_name, src + method_start, method_end - method_start);
     out_method_name[method_end - method_start] = '\0';
     paren_pos = cc_skip_ws_and_comments(src, n, method_end);
+    /* `::[...]` specializes the name it follows — member position:
+     * `recv.method::[T](args)`. The bracket span is reported to the
+     * caller; resolution decides whether the member has a type formal. */
+    if (paren_pos + 1 < n && src[paren_pos] == ':' && src[paren_pos + 1] == ':') {
+        size_t br = cc_skip_ws_and_comments(src, n, paren_pos + 2);
+        size_t rb = 0;
+        if (br >= n || src[br] != '[' ||
+            !cc__find_matching_bracket(src, n, br, &rb))
+            return 0;
+        if (out_targ_a) *out_targ_a = br + 1;
+        if (out_targ_b) *out_targ_b = rb;
+        paren_pos = cc_skip_ws_and_comments(src, n, rb + 1);
+    }
     if (paren_pos >= n || src[paren_pos] != '(') return 0;
     if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) return 0;
     recv_start = cc_scan_back_for_member_access(src, method_start, 0);
@@ -4507,6 +4622,9 @@ static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
 }
 
 static int g_ufcs_scope_idx_locked = 0;
+/* Set when a type-formal member site errored (missing/invalid type
+ * source); the parser-safe wrapper turns it into the error sentinel. */
+static _Thread_local int g_ufcs_typeformal_err = 0;
 
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
     CCUfcsVarInfo vars[512];
@@ -4561,6 +4679,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int slice_spec_like = 0;
         int atomic_like = 0;
         int recv_addressable = 1;
+        size_t targ_a = 0, targ_b = 0;
         char wildcard_callee[256];
         const char* channel_callee = NULL;
         wildcard_callee[0] = '\0';
@@ -4568,7 +4687,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &method_start, &method_end,
                                              &recv_start, &paren_pos, &paren_end,
                                              method_name, sizeof(method_name),
-                                             recv_expr, sizeof(recv_expr))) {
+                                             recv_expr, sizeof(recv_expr),
+                                             &targ_a, &targ_b)) {
             i++;
             continue;
         }
@@ -4686,6 +4806,105 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                       strcmp(recv_type_base, "CCSliceUnique*") == 0 ||
                       strcmp(recv_type_base, "CCSliceShared") == 0 ||
                       strcmp(recv_type_base, "CCSliceShared*") == 0);
+        /* Type-formal members: `::[...]` specializes the member name it
+         * follows.  arena.allocT() / arena.allocT(n) lower to
+         * cc_arena_alloc_T / cc_arena_alloc_T_count; task.block_on()
+         * lowers to cc_block_on(T, task).  The type comes from the
+         * explicit `::[T]` or from the declared destination. */
+        {
+            int is_allocT = arena_like && strcmp(method_name, "allocT") == 0;
+            int is_block_on = (strncmp(recv_type_base, "CCTask", 6) == 0 ||
+                               strcmp(recv_type_base, "CCAsyncVoidRet") == 0) &&
+                              strcmp(method_name, "block_on") == 0;
+            if (is_allocT || is_block_on) {
+                char ty[128];
+                ty[0] = 0;
+                if (targ_b > targ_a) {
+                    const char* ta = src + targ_a;
+                    const char* tb = src + targ_b;
+                    cc__trim_span_ws(&ta, &tb);
+                    if (tb > ta && (size_t)(tb - ta) < sizeof(ty)) {
+                        memcpy(ty, ta, (size_t)(tb - ta));
+                        ty[tb - ta] = 0;
+                    }
+                } else {
+                    char dest[256];
+                    size_t cast_a = 0;
+                    if (cc__ufcs_sink_dest_type(src, recv_start, dest,
+                                                sizeof(dest), &cast_a) == 1) {
+                        size_t dl = strlen(dest);
+                        if (is_allocT) {
+                            /* Destination must be a pointer; the element
+                             * type is the destination minus one star. */
+                            if (dl > 1 && dest[dl - 1] == '*') {
+                                dest[--dl] = 0;
+                                while (dl > 0 && dest[dl - 1] == ' ') dest[--dl] = 0;
+                                snprintf(ty, sizeof(ty), "%s", dest);
+                            }
+                        } else {
+                            snprintf(ty, sizeof(ty), "%s", dest);
+                        }
+                    }
+                }
+                if (!ty[0]) {
+                    cc_pp_error_cat("<input>", scan.line, 1, "type",
+                                    is_allocT
+                                        ? "arena.allocT needs its element type: "
+                                          "declare a typed pointer destination "
+                                          "(T* p = arena.allocT(n)) or spell it "
+                                          "explicitly (arena.allocT::[T](n))"
+                                        : "task.block_on needs its result type: "
+                                          "declare a typed destination "
+                                          "(T v = task.block_on()) or spell it "
+                                          "explicitly (task.block_on::[T]())");
+                    g_ufcs_typeformal_err = 1;
+                    i = paren_end + 1;
+                    continue;
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                             recv_start - last_emit);
+                if (is_allocT) {
+                    size_t args_s = cc_skip_ws_and_comments(src, paren_end, paren_pos + 1);
+                    int has_count = args_s < paren_end;
+                    cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                      has_count ? "cc_arena_alloc_T_count("
+                                                : "cc_arena_alloc_T(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ty);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    if (!recv_is_ptr)
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    if (has_count) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + paren_pos + 1,
+                                     paren_end - (paren_pos + 1));
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_block_on(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ty);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    if (recv_is_ptr)
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "*");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                }
+                last_emit = paren_end + 1;
+                i = paren_end + 1;
+                continue;
+            }
+            /* `::[...]` on any other member: no type formal to bind. */
+            if (targ_b > targ_a) {
+                cc_pp_error_cat("<input>", scan.line, 1, "type",
+                                "no type-formal member '%s' for receiver type "
+                                "'%s' — `::[...]` binds only members that "
+                                "declare a type formal (allocT, block_on)",
+                                method_name, recv_type_base);
+                g_ufcs_typeformal_err = 1;
+                i = paren_end + 1;
+                continue;
+            }
+        }
         if (slice_like && !cc__is_slice_ufcs_method(method_name)) {
             i++;
             continue;
@@ -5953,6 +6172,11 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
             cur = chan;
             cur_len = strlen(cur);
         }
+    }
+    if (g_ufcs_typeformal_err) {
+        g_ufcs_typeformal_err = 0;
+        free(cur);
+        return (char*)-1;
     }
     return cur;
 }
@@ -15948,6 +16172,10 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
         return -1;
     }
+    /* After UFCS lowering: `T* p = cc_arena_alloc_T[_count](...) @destroy;`
+     * releases through the owning arena (the lowered call's second
+     * argument spells the correct arena reference). */
+    if (cc_pass_chain_apply(chain, cc__rewrite_alloct_destroy_annotations(chain->src, chain->len)) < 0) return -1;
     /* Result-unwrap operators `?>` (expression) and `!>` (statement) run
      * before the legacy err-syntax rewrite. The `!>` statement form lowers
      * to the existing `@err` shorthands which the legacy pass then

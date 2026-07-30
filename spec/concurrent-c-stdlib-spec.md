@@ -185,6 +185,18 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
 `CCSlice_*` or `cc_slice_*` function. Checked index UFCS (`at`, `get_checked`,
 `set`) is documented under arena-backed slice operations below.
 
+### Arena typed allocation
+
+`allocT` is a type-formal member on arenas: `arena.allocT()` allocates
+one `T`, `arena.allocT(n)` allocates `n` — the element type comes from
+the declared pointer destination (`T* p = arena.allocT(n)`) or
+explicitly via `arena.allocT::[T](n)`. Both lower to
+`cc_arena_alloc_T` / `cc_arena_alloc_T_count`. An optional `@destroy`
+on the declaration releases the allocation through its owning arena at
+scope exit (`cc_arena_release`); where the slab cannot reclaim
+individually, the release is a semantic no-op and the declaration
+still states the allocation's scope.
+
 ### Arena-backed slice operations
 
 `<ccc/std/slice.cch>` provides:
@@ -1039,6 +1051,11 @@ int cc_blocking_pool_stats(CCExecStats *out_exec, uint64_t *out_submit_failures)
 `cc_block_all` waits for every task. `cc_block_race` reports the first
 completion. `cc_block_any` reports the first successful completion and returns
 `ECANCELED` when every task fails.
+
+`block_on` is also a type-formal member on task values: `T v =
+task.block_on();` takes `T` from the destination, and
+`task.block_on::[T]()` spells it explicitly where no destination is
+visible.
 
 ## Command-line parsing
 

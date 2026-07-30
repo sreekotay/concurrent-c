@@ -393,6 +393,19 @@ int!>(IoError) read_int(char[:] data) {
 
 Vec::[int] numbers = vec_new::[int](&arena);
 Map::[char[:], int] registry = map_new::[char[:], int](&arena);
+```
+
+**Rule (type arguments, normative).** `::[...]` specializes the name it
+follows — free or member. On a member, the type argument binds the
+member's type formal: `arena.allocT::[double](16)`,
+`task.block_on::[double]()`. When the member has a typed destination,
+the destination supplies the type and the argument may be omitted
+(`double* xs = arena.allocT(16)`); with neither a destination nor an
+explicit argument the call is ill-formed. `::[...]` on a member with no
+type formal is ill-formed. A trailing capital `T` in a member name
+marks a type-formal member.
+
+```c
 
 // Incorrect (visual noise, harder to parse)
 int ! IoError read_int (char [ : ] data) {
