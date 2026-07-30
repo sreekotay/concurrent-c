@@ -68,11 +68,16 @@ a diagnostic.
 
 When heap overflow is enabled, a pointer outside the arena's slab chain takes
 the permissive overflow path: `free(ptr)` is performed and the available size
-information is removed from overflow accounting. This path has no
+information is removed from overflow accounting. By default this path has no
 per-allocation ownership table and cannot verify ownership. The caller must
 pass a live overflow allocation obtained through the same arena. Passing a
 foreign, stale, or already released pointer, including a double release, is
 undefined behavior even if `cc_arena_release` returns `true`.
+
+Define `CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP` to a non-zero value to record each
+overflow allocation against its arena and refuse overflow-path
+`cc_arena_release` / `cc_arena_realloc` for pointers not so recorded (returns
+`false` / `NULL` with a diagnostic instead of calling `free`/`realloc`).
 
 Any successful individual release makes the current arena epoch
 non-rewindable. Whole-arena `cc_arena_reset`, `cc_arena_free`, and

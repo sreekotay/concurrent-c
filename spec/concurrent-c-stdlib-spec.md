@@ -367,7 +367,9 @@ and `bool`. These append decimal integers, one character for `char`, `true` or
 `CCSlice`, C strings, and `CCString` values and pointers.
 
 The builder stores short values inline and stores larger values in arena-owned
-storage. Heap growth multiplies capacity by 1.6 (`(cap * 8) / 5`). A growth
+storage. Heap growth multiplies capacity by 1.6 (`(cap * 8) / 5`). When growth
+uses a different arena than the string's current heap owner, that is an arena
+swap: the buffer moves to the new arena and the header owner updates. A growth
 failure poisons the string. On a poisoned string,
 `cc_string_failed` is true, push operations return null,
 `cc_string_as_slice` is empty, and `cc_string_cstr` returns null.

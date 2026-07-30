@@ -336,6 +336,9 @@ static inline CCArena *cc_string_arena(const CCString *str) {
     return header ? header->arena : NULL;
 }
 
+/* Grow heap storage to at least `need` bytes. When the string already owns
+ * heap storage in a different arena, this is an arena swap: realloc moves
+ * the buffer to `arena` and updates the header owner/provenance. */
 static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena) {
     size_t new_cap;
     char saved[CC_STRING_INLINE_CAP];

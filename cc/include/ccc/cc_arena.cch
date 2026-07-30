@@ -137,6 +137,106 @@ static inline size_t cc__arena_malloc_usable_bytes(void* ptr) {
 #endif
 }
 
+/* Optional debug ownership table for heap-overflow pointers.
+ * When CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP is non-zero, the permissive
+ * overflow release/realloc paths refuse pointers not previously recorded
+ * for that arena (foreign / stale / wrong-arena). No-op when unset. */
+#if defined(CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP) && CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP
+typedef struct CCArenaOvfOwnNode {
+    struct CCArenaOvfOwnNode *next;
+    CCArena *arena;
+    void *ptr;
+} CCArenaOvfOwnNode;
+
+static CCArenaOvfOwnNode *cc__arena_ovf_own_head;
+
+static inline void cc__arena_ovf_own_add(CCArena *arena, void *ptr) {
+    CCArenaOvfOwnNode *n;
+    if (!arena || !ptr) return;
+    n = (CCArenaOvfOwnNode *)malloc(sizeof(*n));
+    if (!n) {
+        fprintf(stderr, "cc_arena: overflow ownership table OOM\n");
+        abort();
+    }
+    n->arena = arena;
+    n->ptr = ptr;
+    n->next = cc__arena_ovf_own_head;
+    cc__arena_ovf_own_head = n;
+}
+
+static inline bool cc__arena_ovf_own_take(CCArena *arena, void *ptr) {
+    CCArenaOvfOwnNode **pp;
+    if (!arena || !ptr) return false;
+    for (pp = &cc__arena_ovf_own_head; *pp; pp = &(*pp)->next) {
+        if ((*pp)->arena == arena && (*pp)->ptr == ptr) {
+            CCArenaOvfOwnNode *n = *pp;
+            *pp = n->next;
+            free(n);
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool cc__arena_ovf_own_has(CCArena *arena, void *ptr) {
+    CCArenaOvfOwnNode *n;
+    if (!arena || !ptr) return false;
+    for (n = cc__arena_ovf_own_head; n; n = n->next) {
+        if (n->arena == arena && n->ptr == ptr) return true;
+    }
+    return false;
+}
+
+static inline void cc__arena_ovf_own_replace(CCArena *arena, void *oldp, void *newp) {
+    CCArenaOvfOwnNode *n;
+    if (!arena || !oldp || !newp) return;
+    for (n = cc__arena_ovf_own_head; n; n = n->next) {
+        if (n->arena == arena && n->ptr == oldp) {
+            n->ptr = newp;
+            return;
+        }
+    }
+}
+
+static inline void cc__arena_ovf_own_clear_arena(CCArena *arena) {
+    CCArenaOvfOwnNode **pp;
+    if (!arena) return;
+    pp = &cc__arena_ovf_own_head;
+    while (*pp) {
+        if ((*pp)->arena == arena) {
+            CCArenaOvfOwnNode *n = *pp;
+            *pp = n->next;
+            free(n);
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+}
+#else
+static inline void cc__arena_ovf_own_add(CCArena *arena, void *ptr) {
+    (void)arena;
+    (void)ptr;
+}
+static inline bool cc__arena_ovf_own_take(CCArena *arena, void *ptr) {
+    (void)arena;
+    (void)ptr;
+    return true;
+}
+static inline bool cc__arena_ovf_own_has(CCArena *arena, void *ptr) {
+    (void)arena;
+    (void)ptr;
+    return true;
+}
+static inline void cc__arena_ovf_own_replace(CCArena *arena, void *oldp, void *newp) {
+    (void)arena;
+    (void)oldp;
+    (void)newp;
+}
+static inline void cc__arena_ovf_own_clear_arena(CCArena *arena) {
+    (void)arena;
+}
+#endif
+
 static inline void* cc__arena_alloc_heap_overflow(CCArena* arena, size_t size, size_t align) {
     if (!arena || !(arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) || size == 0) return NULL;
     (void)align;
@@ -144,6 +244,7 @@ static inline void* cc__arena_alloc_heap_overflow(CCArena* arena, size_t size, s
     if (!ptr) return NULL;
     CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, cc__arena_malloc_usable_bytes(ptr));
     arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+    cc__arena_ovf_own_add(arena, ptr);
     return ptr;
 }
 
@@ -342,6 +443,11 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
     }
 
     if (old_arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
+        if (!cc__arena_ovf_own_has(old_arena, ptr)) {
+            cc__arena_report_release_error(
+                "overflow realloc: pointer is not owned by this arena", ptr);
+            return NULL;
+        }
         size_t old_bytes = cc__arena_malloc_usable_bytes(ptr);
         void* out = realloc(ptr, new_size);
         if (!out) return NULL;
@@ -352,6 +458,7 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
         }
         CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
         old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+        if (out != ptr) cc__arena_ovf_own_replace(old_arena, ptr, out);
         return out;
     }
 
@@ -759,6 +866,11 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
     }
 
     if (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
+        if (!cc__arena_ovf_own_take(arena, ptr)) {
+            cc__arena_report_release_error(
+                "overflow release: pointer is not owned by this arena", ptr);
+            return false;
+        }
         size_t bytes = cc__arena_malloc_usable_bytes(ptr);
         size_t cur = CC_ATOMIC_LOAD(&arena->overflow_bytes);
         if (bytes > 0 && cur >= bytes) {
@@ -789,6 +901,10 @@ static inline void cc_arena_free(CCArena* a) {
         cur = next;
     }
     a->prev = NULL;
+
+    /* Drop debug overflow registrations for this root. Outstanding overflow
+     * pointers remain caller-owned (must have been released already). */
+    cc__arena_ovf_own_clear_arena(a);
 
     // Clear the root before freeing its buffer in case the arena object lives inside it.
     uint8_t* base = a->base;

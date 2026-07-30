@@ -1,0 +1,42 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Arena swap: CCString heap growth with a different arena than the one that
+ * first promoted the string moves ownership via cross-arena realloc. */
+int main(void) {
+    CCArena first = cc_arena_heap(kilobytes(1)) @destroy;
+    CCArena second = cc_arena_heap(kilobytes(1)) @destroy;
+    CCArena other = cc_arena_heap(kilobytes(1)) @destroy;
+    if (!first.valid() || !second.valid() || !other.valid()) return 1;
+
+    CCString s = cc_string_new();
+    /* Promote off the inline buffer into `first`. */
+    if (!cc_string_push_cstr(&s, "hello-arena-swap-seed", &first)) return 2;
+    if (cc_string_is_inline(&s)) return 3;
+    if (cc_string_arena(&s) != &first) return 4;
+
+    /* Grow again with `second` — arena swap: ownership moves. */
+    if (!cc_string_push_cstr(&s, "-and-more-bytes-for-growth", &second)) return 5;
+    if (cc_string_arena(&s) != &second) return 6;
+    if (cc_string_provenance(&s) != second.provenance) return 7;
+
+    CCSlice view = s.as_slice();
+    if (view.len != strlen("hello-arena-swap-seed-and-more-bytes-for-growth")) return 8;
+    if (memcmp(view.ptr, "hello-arena-swap-seed-and-more-bytes-for-growth", view.len) != 0)
+        return 9;
+
+    /* Release through stored owner; passed arena is ignored when header owns. */
+    cc_string_release(&s, &other);
+
+    /* Wrong-arena release with overflow off: refuse, do not free. */
+    {
+        void *p = cc_arena_alloc(&first, 32, 8);
+        if (!p) return 10;
+        if (cc_arena_release(&other, p)) return 11; /* must fail */
+        if (!cc_arena_release(&first, p)) return 12;
+    }
+
+    puts("string_arena_swap_smoke: PASS");
+    return 0;
+}

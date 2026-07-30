@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Error messages are copied into the handle scratch arena, so a prior
+ * failure's message survives a later failure. Skips without libpython. */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    if (!a.valid()) return 1;
+
+    CCResult_CCPy_CCPyError pr = cc_py(&a);
+    if (pr.is_err()) {
+        puts("py_err_arena_smoke: SKIP (no libpython)");
+        return 0;
+    }
+    CCPy py = CCResult_CCPy_CCPyError_value(pr);
+
+    CCResult_CCPyObj_CCPyError r1 = py.import("cc_py_missing_module_aaa");
+    if (!r1.is_err()) return 2;
+    CCPyError e1 = CCResult_CCPyObj_CCPyError_error(r1);
+    if (!e1.base.message || !e1.base.message[0]) return 3;
+    /* Message must live in the scratch arena, not only the static buf. */
+    if (!cc__arena_find_block(&a, e1.base.message)) return 4;
+    char first[256];
+    size_t n1 = strlen(e1.base.message);
+    if (n1 >= sizeof(first)) n1 = sizeof(first) - 1;
+    memcpy(first, e1.base.message, n1);
+    first[n1] = '\0';
+
+    CCResult_CCPyObj_CCPyError r2 = py.import("cc_py_missing_module_bbb");
+    if (!r2.is_err()) return 5;
+    CCPyError e2 = CCResult_CCPyObj_CCPyError_error(r2);
+    if (!e2.base.message || !e2.base.message[0]) return 6;
+    if (!cc__arena_find_block(&a, e2.base.message)) return 7;
+    /* Prior message still intact after the second failure. */
+    if (strcmp(first, e1.base.message) != 0) return 8;
+    if (strcmp(e1.base.message, e2.base.message) == 0) return 9;
+
+    cc_py_close(&py);
+    puts("py_err_arena_smoke: PASS");
+    return 0;
+}

@@ -13,7 +13,7 @@ an explicit, costed operation (§7).
 
 | Type | Role |
 | ---- | ---- |
-| `CCPy` | one interpreter — the arena |
+| `CCPy` | one interpreter handle; `arena` is its scratch |
 | `CCPyObj` | an object reference, anchored to its home `CCPy` |
 | `CCPyPool` | sharded interpreters, one GIL each (§6) |
 | `CCPyError` | Python exception with a `CCError base @as` face (§4) |
@@ -87,9 +87,15 @@ ints exactly and truncate Python floats toward zero (C cast and Python
 `int()` agree); a result outside the destination's range is a
 `CCPyError`, not a truncation.
 
-Explicit extraction remains for held objects and arena-backed forms:
-`.as_i64() !>`, `.as_f64() !>`, `.as_slice(&arena) !>` (`str`/`bytes`
-copied into the arena). Anything else stays a `CCPyObj`.
+Explicit extraction remains for held objects:
+`.as_i64() !>`, `.as_f64() !>`, `.as_slice() !>` (`str`/`bytes` copied into
+the home handle's scratch arena from `cc_py(&arena)`). Override the
+destination with `.as_slice_into(&dst) !>`. The result slice is minted with
+that arena's provenance epoch. Anything else stays a `CCPyObj`.
+
+`cc_py(&arena)` stores `arena` on the handle. Error text and default
+`.as_slice()` allocate from it. Every `CCPyObj` carries `home` pointing at
+that handle so obj methods can reach the scratch arena.
 
 Reference lifetime rides the destroy machinery: `CCPyObj`'s registered
 destroy hook releases the reference under its home's lock, so `@destroy`
@@ -101,15 +107,16 @@ interpreter is destroyed is a no-op (hook idempotence).
 ```c
 typedef struct {
     CCError base @as;   /* kind + message: str(exception), arena-copied */
-    CCPyObj exc;        /* the exception object, home-anchored */
 } CCPyError;
 ```
 
 A Python exception surfaces as `CCPyError`: `base.message` is the
-exception's `str()` captured at raise time, so the script register's
-default `@errhandler(CCError)` prints it through the face. An exact
-`@errhandler(CCPyError)` claims the exception object (traceback,
-re-inspection) when it matters.
+exception's `str()` captured at raise time and copied into the handle's
+scratch arena. The message remains valid until that arena is reset or
+freed. Bootstrap failures before a handle exists (missing libpython, null
+arena) use a process-static buffer. The script register's default
+`@errhandler(CCError)` prints the face. An exact `@errhandler(CCPyError)`
+claims the same face when a typed handler is preferred.
 
 ## 5. Blocking
 
